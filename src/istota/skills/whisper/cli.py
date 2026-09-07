@@ -45,6 +45,19 @@ def _save_beside(audio_path: str, suffix: str, text: str) -> str:
     derived from the caller's own argument rather than minted to be unique, so
     two runs over one file are a re-run rather than a collision.
 
+    **The recorded residual: `audio_path` is `READ`, so it may be under
+    `{mount}/Talk`, and the derived destination is then under `{mount}/Talk`
+    too.** That is a directory the sandbox binds read-only, so `--save` on a
+    Talk voice message writes where the task's own tools cannot. It is not a
+    regression — the `write_text` this replaced did the same from an entirely
+    unscoped path — and Layer 3 of the ISSUE-447 spec states the derived-write
+    rule as `write_resolved` with no second resolution, which is what this is.
+    Narrowing it means resolving the derived path against the *writable* roots
+    and refusing `--save` for a Talk source, which is a spec question rather
+    than a change to make here.
+    `tests/test_skills_whisper.py` asserts the current answer so that
+    changing it is visible.
+
     UTF-8 explicitly, where `write_text` took the locale's encoding — a
     transcript is model output in whatever language was spoken, and a daemon
     running under a C locale would otherwise raise on the first accent.

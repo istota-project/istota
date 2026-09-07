@@ -429,6 +429,56 @@ class TestHeldAttachments:
         assert run.envelope["reason"] == "host_path_refused"
         assert _pending(skill_env) == []
 
+    def test_a_temp_dir_attachment_sends_directly_but_cannot_be_held(
+        self, skill_env, monkeypatch, tmp_path,
+    ):
+        """The one root the direct and held paths differ by, both directions.
+
+        `EGRESS` admits `$ISTOTA_DEFERRED_DIR` because what it excludes is
+        material other people put there, and that directory is the user's
+        own. A *held* draft is a different question: it is released after the
+        task is over, by which time the scheduler has swept that directory, so
+        `outbound_drafts._confined_attachment` confines a release to the
+        workspace alone. Without the hold-time check the model would be told
+        "held, ok", and the user would approve a draft that fails at release,
+        returns to `pending`, and is nagged about for as long as it sits
+        there.
+
+        Driven in both directions in one test on purpose: the refusal alone
+        passes against a stamp that stopped admitting the directory at all,
+        which is the change this pair exists to tell apart.
+        """
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
+        scratch = deferred / "chart.png"
+        scratch.write_bytes(b"pixels")
+
+        with patch("istota.skills.email._send_smtp") as smtp:
+            direct = self._send(to=TRUSTED, attach=scratch)
+        assert direct.envelope["status"] == "ok", direct.stdout
+        smtp.assert_called_once()
+
+        with patch("istota.skills.email._send_smtp") as smtp:
+            held = self._send(to=STRANGER, attach=scratch)
+
+        smtp.assert_not_called()
+        assert held.envelope["status"] == "error", held.stdout
+        assert "workspace" in held.envelope["error"], held.envelope
+        assert "chart.png" in held.envelope["error"], held.envelope
+        assert _pending(skill_env) == []
+
+    def test_a_workspace_attachment_is_still_held(self, skill_env, workspace):
+        """The control for the check above: it must refuse the temp dir and
+        nothing else."""
+        f = workspace / "report.txt"
+        f.write_text("data")
+        with patch("istota.skills.email._send_smtp"):
+            run = self._send(attach=f)
+
+        assert run.envelope["status"] == "held", run.stdout
+        assert len(_pending(skill_env)) == 1
+
     def test_an_unscoped_attachment_is_refused_on_an_ungated_send_too(
         self, skill_env, tmp_path,
     ):

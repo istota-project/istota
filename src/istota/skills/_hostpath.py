@@ -243,14 +243,17 @@ def stamp_conflicts(
 
 
 def _own_roots(*, writable: bool) -> list[Path]:
-    """`{mount}/Users/{ISTOTA_USER_ID}` and the task's own deferred dir.
+    """`{mount}/Users/{ISTOTA_USER_ID}` and the caller's own deferred dir.
 
     The `TASK` set with both *shared* roots dropped, which is what `OWN`
     means: `{mount}/Channels/{token}` and `{mount}/Talk` hold material other
     people put there, and a verb sending bytes out of the task must not be
-    able to name it directly. The deferred directory is the opposite of
-    shared — one task's own directory, per user, writable by nothing else —
-    so excluding it bought no boundary and cost two things.
+    able to name it directly. The deferred directory is not that. It is per
+    *user* rather than per task — `task_env` sets `ISTOTA_DEFERRED_DIR` to
+    `user_temp_dir`, so this user's concurrent tasks share one — but each of
+    them is the same person's model acting on their behalf, which is the
+    question `EGRESS` asks, and nobody else can write there at all. So
+    excluding it bought no boundary and cost two things.
 
     **An earlier reading of `OWN` as the workspace alone was over-narrow, and
     both costs are the kind a stamp hides.** `NEXTCLOUD_MOUNT_PATH` is `""` on

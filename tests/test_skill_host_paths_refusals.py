@@ -616,8 +616,9 @@ class TestTheModeDecidesTheRoots:
         to exclude is *shared* material — `{mount}/Channels/{token}` and
         `{mount}/Talk`, which other people put there — so that a verb sending
         bytes out of the task cannot name something the model did not author.
-        The deferred dir is the opposite of shared: one task's own directory,
-        per user, writable by nothing else. Excluding it bought no boundary
+        The deferred dir is not that: it is per *user* rather than per task,
+        so this user's concurrent tasks share one, and each is the same
+        person's model acting for them. Excluding it bought no boundary
         and cost two things — every `EGRESS` argument refused unconditionally
         on a deployment with no mount (`NEXTCLOUD_MOUNT_PATH` is `""` there,
         so `OWN` came back empty), and a CLI whose accepted set disagreed with
@@ -734,18 +735,47 @@ class TestTheVerbsTheDaemonReplays:
     """
 
     @pytest.mark.parametrize("key", _params(DEFERRED_TO_THE_DAEMON))
-    def test_the_stamp_gives_exactly_the_replay_roots(self, key, mount):
-        from istota.skill_host_paths import workspace_roots
+    def test_the_stamp_admits_exactly_what_the_replay_admits(self, key, mount):
+        """Asked of `_source_path_allowed` itself, not of a copy of its roots.
+
+        Rebuilding the replay's own `workspace_roots` call here would be the
+        drift this class exists to catch, wearing the costume of a guard: an
+        ingredient added or dropped over there would leave the comparison
+        running against the test's copy and staying green.
+        """
+        from types import SimpleNamespace
+
+        from istota.scheduler_deferred import _source_path_allowed
+        from istota.skill_host_paths import path_under_roots
         from istota.skills._hostpath import _roots_for
 
-        # `scheduler_deferred._source_path_allowed`'s own call, ingredient for
-        # ingredient: the mount and the user id it holds, the task's temp dir,
-        # no conversation token and no Talk.
-        replay = workspace_roots(
-            mount=mount.link, user_id="alice", deferred_dir=mount.deferred,
-        )
+        config = SimpleNamespace(nextcloud_mount_path=str(mount.link))
+        roots = _roots_for(resolving_stamps()[key], writable=False)
+        candidates = {
+            "own workspace": mount.own("labs.csv"),
+            "deferred dir": mount.deferred / "labs.csv",
+            "channel dir": mount.channel("labs.csv"),
+            "talk": mount.talk("labs.csv"),
+            "another user": mount.link / "Users" / "bob" / "labs.csv",
+        }
+        for path in candidates.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
 
-        assert set(_roots_for(resolving_stamps()[key], writable=False)) == set(replay)
+        stamp_says = {
+            name: path_under_roots(path.resolve(), roots)
+            for name, path in candidates.items()
+        }
+        replay_says = {
+            name: _source_path_allowed(path, mount.deferred, config, "alice")
+            for name, path in candidates.items()
+        }
+
+        assert stamp_says == replay_says, (stamp_says, replay_says)
+        # Two sets that both reach nothing satisfy the equality above and say
+        # nothing at all.
+        assert stamp_says["own workspace"] and stamp_says["deferred dir"]
+        assert not stamp_says["another user"]
 
     @pytest.mark.parametrize("key", _params(DEFERRED_TO_THE_DAEMON))
     def test_a_talk_attachment_is_refused_here_rather_than_at_replay(

@@ -24,7 +24,12 @@ from email.message import EmailMessage
 from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
-from istota.skill_host_paths import resolve_in_roots, write_resolved
+from istota.skill_host_paths import (
+    path_under_roots,
+    resolve_in_roots,
+    user_workspace_root,
+    write_resolved,
+)
 from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, WRITE, host_path
 
@@ -549,7 +554,16 @@ def download_attachments(
             fetch, which this client does not do.
 
     Returns:
-        List of paths to downloaded attachment files
+        The paths actually written, which is **not** one per declared
+        attachment. A name is skipped — logged, and absent from this list —
+        when it would climb out of ``target_dir``, names an absolute path,
+        carries a NUL, has a symlink standing at it, is refused by the byte
+        budget, or fails to open. A name carrying a directory component that
+        stays inside ``target_dir`` is kept, so a returned path is not
+        necessarily a direct child of it. A caller that has to tell the user
+        what did not arrive diffs these names against what the message
+        declared; ``transport/email/inbound.py`` and ``cmd_attachments`` both
+        do.
     """
     if config is None:
         raise ValueError("config is required")
@@ -565,7 +579,7 @@ def download_attachments(
 
         for msg in mailbox.fetch(AND(uid=email_id), mark_seen=False):
             for att in msg.attachments:
-                if not att.filename:
+                if not isinstance(att.filename, str) or not att.filename:
                     continue
                 file_path = _attachment_destination(dest_root, att.filename, email_id)
                 if file_path is None:
@@ -573,12 +587,31 @@ def download_attachments(
                 payload = att.payload or b""
                 if max_total_bytes is not None and written + len(payload) > max_total_bytes:
                     logger.warning(
-                        "Skipping attachment on email %s: it would take "
+                        "Skipping attachment %s on email %s: it would take "
                         "the download past its %d byte budget",
-                        email_id, max_total_bytes,
+                        file_path.name, email_id, max_total_bytes,
                     )
                     continue
-                write_resolved(file_path, payload)
+                try:
+                    write_resolved(file_path, payload)
+                except OSError as e:
+                    # One attachment, not the message. The names are the
+                    # sender's and they are no longer flattened to a basename,
+                    # so a *pair* of them decides what `mkdir(parents=True)`
+                    # and `os.open` are handed: `x` then `x/y.pdf` makes the
+                    # second call raise `FileExistsError`, and the reverse
+                    # order makes it `IsADirectoryError`. Both are `OSError`,
+                    # neither is a symlink or a traversal, and both were
+                    # unreachable while every name was a basename. Uncaught,
+                    # `transport/email/inbound.py`'s per-message handler files
+                    # the message with no task ever built — deterministically,
+                    # so the retry ladder never clears it, which hands a
+                    # sender a way to suppress ingest of their own message.
+                    logger.warning(
+                        "Skipping attachment %s on email %s: %s",
+                        file_path.name, email_id, e,
+                    )
+                    continue
                 written += len(payload)
                 downloaded.append(file_path)
 
@@ -1814,7 +1847,20 @@ def cmd_thread(args):
 
 
 def cmd_attachments(args):
-    """Download an email's attachments to --dest, scoped."""
+    """Download an email's attachments to --dest, scoped.
+
+    `--dest` is stamped `WRITE`, so it arrives resolved and inside a root the
+    task may write to, and each attachment's own name is re-resolved under it
+    (`_attachment_destination`).
+
+    **`skipped` is reported because a refusal is otherwise invisible here.**
+    `count` and `saved` are two readings of one list, so nothing in the answer
+    used to say that a name was refused — and since the refusal replaced
+    silently renaming a hostile name, a model comparing the two would have
+    seen agreement either way. The daemon's poll path builds the same diff for
+    the same reason (`transport/email/inbound.py`); this is that fact made
+    available to the model in the turn that asked.
+    """
     app_config, user_id = _scope_context()
     email_config = _config_from_env()
     email, err = _read_scoped(app_config, user_id, args.scope, email_config, args.id)
@@ -1825,12 +1871,21 @@ def cmd_attachments(args):
     saved = download_attachments(
         args.id, target_dir=dest, folder=_DEFAULT_FOLDER, config=email_config,
     )
+    # Matched on the leaf, since a kept name may carry a directory component
+    # and the manifest carries the name as the sender spelled it.
+    landed = {p.name for p in saved}
+    skipped = [
+        name for name in (entry.get("filename") for entry in email.attachment_manifest)
+        if name and Path(name).name not in landed
+    ]
     return {
         "status": "ok",
         "id": args.id,
         "dest": str(dest),
         "count": len(saved),
         "saved": [str(p) for p in saved],
+        "declared": len(email.attachment_manifest),
+        "skipped": skipped,
     }
 
 
@@ -2187,6 +2242,37 @@ def _held_message(reason: str, held: list[str]) -> str:
     )
 
 
+def _unholdable_attachments(paths: list[str]) -> list[str]:
+    """Which of `paths` a released draft would refuse. Usually none.
+
+    `outbound_drafts._confined_attachment` confines a released attachment to
+    `{mount}/Users/{uid}` and nothing else, on a durability argument rather
+    than a sharing one: a pending draft is designed to sit indefinitely and
+    the task's temp directory does not survive that long. The `EGRESS` stamp
+    on `--attach` admits that directory, so the two sets differ by exactly
+    one root and this is where the difference is caught.
+
+    It is deliberately *not* a second copy of the release-time check. That one
+    re-resolves at release because the workspace stays writable in between and
+    a path validated hours ago can be swapped; this one only asks whether the
+    path is somewhere that will still exist, so that the refusal arrives in
+    the turn that asked instead of landing on the user who approved the draft.
+
+    Returns `[]` when no workspace root resolves at all, which is the same
+    posture `_confined_attachment` takes from the other direction: it raises
+    there rather than being second-guessed here, and refusing every hold on a
+    deployment this CLI cannot introspect would be worse than letting the
+    release be the judge.
+    """
+    root = user_workspace_root()
+    if root is None:
+        return []
+    return [
+        path for path in paths
+        if not path_under_roots(Path(path).resolve(), [root])
+    ]
+
+
 def _outbound_gate(
     *,
     to: list[str],
@@ -2263,22 +2349,31 @@ def _outbound_gate(
                 if isinstance(e, str)
                 and recipients_require_hold(app_config, conn, user_id, [e])
             ]
-            # The same list a direct send would attach. `EGRESS` is what
-            # brought the two paths together — the narrowing used to be
-            # applied on this branch alone, by `_holdable_attachments`, and it
-            # is the whole verb's rule now.
+            # `EGRESS` scoped the list at parse, under every policy and
+            # before this gate could be switched off — that is what brought
+            # the held and direct paths together, and what `_holdable_
+            # attachments` used to do on this branch alone.
             #
-            # **They still differ by one root, and it is a different rule
-            # rather than a leftover.** `EGRESS` admits the task's own
-            # deferred dir, because what it excludes is material *other
-            # people* put there; `outbound_drafts._confined_attachment`
-            # re-checks a held path against `{mount}/Users/{uid}` alone hours
-            # later, because a pending draft outlives the temp dir the
-            # scheduler sweeps. So an attachment from `$ISTOTA_DEFERRED_DIR`
-            # goes out on a direct send and cannot be *held*: the release
-            # refuses it, visibly, to the user who approved it. Copy such a
-            # file into the workspace before attaching it to anything a policy
-            # might hold.
+            # **A hold asks one more question, and it is a different rule
+            # rather than a leftover of that one.** `EGRESS` admits the
+            # task's own temp directory, because what it excludes is material
+            # *other people* put there. A draft is released hours later, by
+            # which time the scheduler has swept that directory — so
+            # `outbound_drafts._confined_attachment` re-checks against
+            # `{mount}/Users/{uid}` alone, and a path this branch let through
+            # would be a draft the user approves and that then fails at
+            # release, returns to `pending`, and is nagged about for as long
+            # as it sits there. Refused here instead, in the turn that asked,
+            # where the model can copy the file into the workspace and retry.
+            unholdable = _unholdable_attachments(send_paths)
+            if unholdable:
+                return _gate_error(
+                    "a held message is sent after this task is over, when its "
+                    "temp directory is gone, so an attachment has to be in the "
+                    "user's own workspace: "
+                    + ", ".join(Path(p).name for p in unholdable)
+                    + ". Copy it into the workspace and attach the copy."
+                ), []
             paths = send_paths
             task_id, room_token, origin_target = _task_context(conn, user_id)
             draft_id = drafts.hold(

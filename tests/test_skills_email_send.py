@@ -243,8 +243,9 @@ class TestSend:
         """The root `EGRESS` keeps, and the one it is easy to drop by accident.
 
         What `EGRESS` excludes is *shared* material — `{mount}/Talk` and the
-        channel directory, asserted above. The task's own deferred dir is
-        neither: nothing else writes into it, and on a deployment with no
+        channel directory, asserted above. The deferred dir is neither: it is
+        the user's own temp directory, shared with that user's other
+        concurrent tasks and with nobody else, and on a deployment with no
         mount it is the only root a task has, so excluding it refused every
         attachment on that shape. The held-draft path is narrower still and
         stays so — `outbound_drafts._confined_attachment` re-checks against

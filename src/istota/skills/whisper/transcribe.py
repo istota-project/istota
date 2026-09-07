@@ -19,6 +19,17 @@ def transcribe_audio(
     audio_path = Path(path)
     if not audio_path.exists():
         return {"status": "error", "error": f"Audio file not found: {path}"}
+    # Regular-ness, not just existence. Since ISSUE-447 `audio_path` arrives
+    # resolved and inside a root, which establishes that it *is* there and
+    # nothing more: `exists()` is true of a directory and of a fifo, and the
+    # workspace is bound read-write into the sandbox, so a model-made fifo
+    # would block a host-side proxy worker for the whole skill-proxy timeout.
+    # A directory also makes `--save` derive `{dir}.txt`, a sibling of the
+    # directory rather than a child — outside the roots when the directory is
+    # a root itself. The same guard `health attach-document` and
+    # `memory_search index file` carry, for the first reason.
+    if not audio_path.is_file():
+        return {"status": "error", "error": f"Not a regular file: {path}"}
 
     try:
         from faster_whisper import WhisperModel

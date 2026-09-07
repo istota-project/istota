@@ -323,8 +323,9 @@ class TestCmdIndexFile:
         failure the spec exists to prevent. The `EGRESS` stamp is what
         narrows it, and this is the test that says so: indexing puts the
         content in a store `search` reads back after the task is over, so the
-        *shared* roots go. The deferred dir stays — it is this one task's own
-        directory, the case beside this one asserts it, and dropping it made
+        *shared* roots go. The deferred dir stays — it is the user's own temp
+        directory, shared with that user's other concurrent tasks and with
+        nobody else, the case beside this one asserts it, and dropping it made
         the verb refuse everything on a deployment with no mount.
         """
         db_path = tmp_path / "test.db"

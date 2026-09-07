@@ -971,9 +971,13 @@ class TestDownloadAttachmentsSecurity:
     def test_a_symlink_at_the_attachment_name_is_refused(self, tmp_path, email_config):
         """The destination directory is model-writable, so the leaf is too.
 
-        A link standing at the name the message chose is refused before the
-        write, and `write_resolved`'s `O_NOFOLLOW` is what covers the window
-        after the check.
+        Refused by `resolve_in_roots`'s own leaf check, which is what this
+        drives — the link is planted before the call, so `write_resolved`'s
+        `O_NOFOLLOW` is never reached and this says nothing about it. The
+        test that does exercise `O_NOFOLLOW` is
+        `tests/test_nextcloud_dav.py::TestDownload::
+        test_a_symlink_at_the_destination_is_not_followed`, where the write
+        has no check in front of it.
         """
         from istota.skills.email import download_attachments
 
@@ -1000,6 +1004,95 @@ class TestDownloadAttachmentsSecurity:
 
         assert result == []
         assert victim.read_text() == "not yours"
+
+    def test_a_name_pair_that_collides_on_disk_skips_one_rather_than_raising(
+        self, tmp_path, email_config,
+    ):
+        """The failure a basename could not produce and re-resolution can.
+
+        Names are no longer flattened, so `write_resolved` is handed a parent
+        the sender influenced: `x` then `x/y.pdf` makes the second call's
+        `mkdir(parents=True)` raise `FileExistsError`, and the reverse order
+        makes `os.open` raise `IsADirectoryError`. Neither is a symlink or a
+        traversal, so `_attachment_destination` admits both. Uncaught, the
+        daemon's per-message handler files the message with no task ever
+        built — deterministically, so the retry ladder never clears it, which
+        would hand a sender a way to suppress ingest of their own message.
+        """
+        from istota.skills.email import download_attachments
+
+        first = MagicMock()
+        first.filename = "x"
+        first.payload = b"one"
+        second = MagicMock()
+        second.filename = "x/y.pdf"
+        second.payload = b"two"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [first, second]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        assert result == [tmp_path / "x"]
+        assert (tmp_path / "x").read_bytes() == b"one"
+
+    def test_the_reverse_order_of_that_pair_is_also_survived(
+        self, tmp_path, email_config,
+    ):
+        """`x/y.pdf` first makes `x` a directory, so the plain `x` fails at
+        the open rather than at the mkdir. A different `OSError` subclass on a
+        different line, so it is driven rather than assumed."""
+        from istota.skills.email import download_attachments
+
+        first = MagicMock()
+        first.filename = "x/y.pdf"
+        first.payload = b"two"
+        second = MagicMock()
+        second.filename = "x"
+        second.payload = b"one"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [first, second]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        assert result == [tmp_path / "x" / "y.pdf"]
+
+    def test_a_non_string_filename_is_skipped(self, tmp_path, email_config):
+        """`"\x00" in filename` raises `TypeError` on bytes, which is outside
+        every guard below it. Defensive rather than observed — `imap_tools`
+        yields `str | None` today — but the cost of being wrong is a message
+        that never becomes a task."""
+        from istota.skills.email import download_attachments
+
+        mock_att = MagicMock()
+        mock_att.filename = b"invoice.pdf"
+        mock_att.payload = b"bytes"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [mock_att]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        assert result == []
 
     def test_an_unusable_filename_is_skipped_rather_than_raising(
         self, tmp_path, email_config,
