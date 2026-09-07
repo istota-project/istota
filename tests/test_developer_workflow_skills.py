@@ -541,11 +541,11 @@ class TestBodiesDoNotContradict:
         exactly as before and nothing says so. Asserted against the installed
         xdist rather than against the string, so a rename upstream fails here
         instead of on a shared host under load."""
-        import inspect
-
         from xdist import plugin
 
-        source = inspect.getsource(plugin)
+        from tests.support.drift import source_of
+
+        source = source_of(plugin)
         assert "PYTEST_XDIST_AUTO_NUM_WORKERS" in source, (
             "xdist no longer reads this variable; the skill's worker cap is inert"
         )

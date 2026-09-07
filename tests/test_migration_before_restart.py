@@ -27,8 +27,9 @@ absence of an assertion reads as a decision instead of an oversight.
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
+
+from tests.support.drift import source_of
 
 REPO = Path(__file__).resolve().parent.parent
 UPDATE_SCRIPT = REPO / "deploy" / "ansible" / "templates" / "istota-update.sh.j2"
@@ -74,7 +75,7 @@ def test_the_standalone_updater_migrates_from_the_new_code():
     """
     from istota import updater
 
-    source = inspect.getsource(updater._run_fresh_migrations)
+    source = source_of(updater._run_fresh_migrations)
     # Defensive, not load-bearing today: that docstring names `db.init_db`
     # without a paren, so neither needle matches it as written. The strip is so
     # that a future docstring spelling `init_db(...)` cannot satisfy the check

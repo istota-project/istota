@@ -14,7 +14,6 @@ against the literal it replaces live in `tests/test_surface_model_equivalence.py
 """
 
 import dataclasses
-import inspect
 import re
 
 import pytest
@@ -23,6 +22,7 @@ from istota import surfaces
 from istota.config import Config
 from istota.transport import make_registry, registry as registry_module
 from istota.transport.registry import _surface_for_source_type
+from tests.support.drift import source_of
 
 # The source types the spec enumerates, and the set the readers are checked
 # total over. Explicit rather than derived, because the point of the
@@ -275,7 +275,7 @@ class TestTheTableCoversTheRegistry:
         # site. `.claude/rules/transport.md` names Matrix as the designed-for
         # next one. So read the assignments out of `make_registry`'s own source,
         # the shape `tests/test_lint_scope.py` uses to keep a hand list honest.
-        source = inspect.getsource(registry_module.make_registry)
+        source = source_of(registry_module.make_registry)
         assigned = set(re.findall(r'transports\[["\'](\w+)["\']\]\s*=', source))
         assert assigned, "found no transport assignments — the regex has rotted"
         missing = assigned - set(surfaces.SURFACES)

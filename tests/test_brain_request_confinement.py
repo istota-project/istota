@@ -659,11 +659,12 @@ class TestTheOtherDirectBuildersNarrowToo:
         substring search matches the explanation as readily as the code.
         """
         import importlib
-        import inspect
         import textwrap
 
+        from tests.support.drift import source_of
+
         module = importlib.import_module(module_path)
-        source = textwrap.dedent(inspect.getsource(getattr(module, func_name)))
+        source = textwrap.dedent(source_of(getattr(module, func_name)))
 
         env_values = [
             _keyword(node, "env")

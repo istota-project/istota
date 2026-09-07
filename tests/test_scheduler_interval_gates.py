@@ -779,10 +779,11 @@ class TestNeitherLoopRestatesAGate:
         string literal; the AST round trip drops comments and nothing else.
         """
         import ast
-        import inspect
         import textwrap
 
-        return ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(fn))))
+        from tests.support.drift import source_of
+
+        return ast.unparse(ast.parse(textwrap.dedent(source_of(fn))))
 
     def test_the_daemon_loop_holds_no_named_clock_variables(self):
         import re

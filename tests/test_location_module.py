@@ -125,8 +125,10 @@ class TestInitDb:
         journal_mode in the body of :func:`connect`.
         """
         import ast
-        import inspect
-        src = inspect.getsource(location_db.connect)
+
+        from tests.support.drift import source_of
+
+        src = source_of(location_db.connect)
         tree = ast.parse(src)
         func = tree.body[0]
         assert isinstance(func, ast.FunctionDef)

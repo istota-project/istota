@@ -546,13 +546,12 @@ class TestTheHeartbeatSweepIsOffTheLoop:
         The gate table (F33) is where the loop now says what runs when, so the
         second half of this reads the row instead of the loop body.
         """
-        import inspect
-
         from istota import scheduler
         from istota.config import Config
+        from tests.support.drift import source_of
 
         for fn in (scheduler.run_daemon, scheduler.build_interval_gates):
-            source = inspect.getsource(fn)
+            source = source_of(fn)
             assert "check_heartbeats(" not in source, (
                 f"{fn.__name__} calls check_heartbeats directly again — it "
                 "belongs on a background thread via _spawn_background_check"

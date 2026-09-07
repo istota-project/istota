@@ -507,14 +507,14 @@ class TestGarminRouteMove:
         on the health module) — a health-opted-out user still needs Garmin
         auth for the location importer. Inspect each route endpoint's own
         source (not the module docstring)."""
-        import inspect
-
         from istota import garmin_routes
+        from tests.support.drift import source_of
+
         for route in garmin_routes.router.routes:
             endpoint = getattr(route, "endpoint", None)
             if endpoint is None:
                 continue
-            src = inspect.getsource(endpoint)
+            src = source_of(endpoint)
             assert "get_user_context" not in src, route.path
             assert "HealthContext" not in src, route.path
 

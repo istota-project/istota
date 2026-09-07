@@ -189,12 +189,13 @@ class TestOnlyOneDriverRuns:
         the prose and says nothing about the code.
         """
         import ast
-        import inspect
         import textwrap
 
         import istota.scheduler as sched
 
-        tree = ast.parse(textwrap.dedent(inspect.getsource(sched.run_daemon)))
+        from tests.support.drift import source_of
+
+        tree = ast.parse(textwrap.dedent(source_of(sched.run_daemon)))
 
         def mentions(node, name):
             return any(
