@@ -52,6 +52,14 @@ istota-skill google_workspace chat spaces list
 istota-skill google_workspace chat spaces.messages create --parent "spaces/SPACE_ID" --body '{"text": "Hello"}'
 ```
 
+### Host paths
+
+Any argument naming a file **on this machine** — `drive +upload /path/to/file.pdf` is the one the commands above use — must be inside the user's own workspace, their channel directory, the task's deferred directory, or `Talk`. Anything else is refused before the command runs, with `"reason": "host_path_refused"`. Copy the file into the workspace first if it is somewhere else.
+
+Google's own identifiers are untouched: `--fileId`, `--parents FOLDER_ID`, spreadsheet ids and a `--query` containing a slash are not host paths and are passed through as written.
+
+Relative paths resolve against the user's workspace, so `+upload notes.pdf` means the file of that name in it.
+
 ### Helper commands (prefixed with +)
 
 | Service | Command | Description |

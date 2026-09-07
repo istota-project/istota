@@ -1,4 +1,36 @@
-"""Google Workspace skill — setup_env hook and CLI passthrough."""
+"""Google Workspace skill — setup_env hook and CLI passthrough.
+
+**The passthrough is the one skill CLI whose arguments nothing can enumerate,
+so its boundary is on argv.** `main` execs `gws`, a program that is not in
+this tree and is not installed on the development machine, and its own
+`skill.md` documents `drive +upload /path/to/file.pdf` — a host read that
+lands in Google Drive. Every other skill declares its path arguments and
+`tests/test_skill_host_paths_coverage.py` walks them; here there is no parser
+to walk, so `scan_argv` classifies each token instead and a path-shaped one is
+resolved through the shared allowlist before the exec (ISSUE-447 Layer 4).
+
+Coarser than a declaration, and chosen over the alternative deliberately: a
+per-verb policy table for gws would be a hand-maintained description of a
+program we do not ship, which is the staleness the rest of that work removes.
+The costs are stated rather than hidden.
+
+- **A path this scan cannot see passes through unscoped.** A token that is
+  neither absolute, nor `~`-prefixed, nor holding a `..` component, nor naming
+  something that exists relative to the cwd is not path-shaped — which is
+  exactly a *relative destination that does not exist yet*. That residual is
+  carried by the cwd rather than by another layer: `main` stands in the user's
+  own workspace before the exec, so such a path lands in-roots by
+  construction rather than beside the daemon's working directory.
+- **One rule for reads and uploads alike.** A token is resolved with
+  `writable=False`, so it must exist and it is admitted from the task's whole
+  working context — `{mount}/Talk` included. An upload is egress and the
+  narrower `OWN` set would fit it better, but telling an upload from a read
+  means knowing gws's verbs, which is the table above. The scan applies the
+  read rule and says so here.
+- **False positives are refusals, not silent passes.** A `~`-prefixed token
+  and a destination that does not exist yet are both refused where they are
+  path-shaped, which is the direction to be wrong in.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +38,10 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+from istota.skill_host_paths import resolve_host_path, user_workspace_root
+from istota.skills._cli import fail
 
 logger = logging.getLogger("istota.skills.google_workspace")
 
@@ -100,6 +136,116 @@ def setup_env(ctx) -> dict[str, str]:
     return env
 
 
+def _is_path_shaped(token: str) -> bool:
+    """Whether this token could be naming a host path.
+
+    Four signals, and the last is the only one that touches the filesystem:
+    an absolute path, a `~` prefix, a `..` component, or a name that exists
+    relative to the process cwd. Deliberately wide in the first three — a
+    `..` token is scanned whether or not anything is there today, since it
+    names something above the cwd either way.
+
+    Never raises: `token` comes off the model's command line, and a value
+    `Path` refuses (an embedded null byte) is not a path this program can be
+    handed either.
+    """
+    if not token:
+        return False
+    if token.startswith(("/", "~")):
+        return True
+    try:
+        if ".." in Path(token).parts:
+            return True
+        return Path(token).exists()
+    except (OSError, ValueError):
+        return False
+
+
+def _scoped(token: str, operation: str) -> tuple[str | None, str | None]:
+    """The token's resolution, or the refusal. Never the token unchanged."""
+    resolved, error = resolve_host_path(
+        Path(token), writable=False, operation=f"gws {operation}",
+    )
+    if error is not None:
+        return None, error
+    return str(resolved), None
+
+
+def scan_argv(argv: list[str]) -> tuple[list[str], str | None]:
+    """The argv to exec, or `([], refusal)`.
+
+    Each token is passed through untouched or replaced by its resolution.
+    Untouched is the common case and has to be: Google Workspace addresses
+    its own objects by opaque id — `--fileId`, `--parents FOLDER_ID`,
+    spreadsheet ids — and a query may legitimately contain a slash
+    (`--query "name contains 'a/b'"`), none of which is path-shaped.
+
+    **A token beginning with `-` is split on its first `=`.**
+    `--file=/srv/app/istota/data/istota.db` is one token that starts with a
+    dash, holds no `..` component and names nothing relative to the cwd, so a
+    per-token rule passes it straight through and gws splits it itself. The
+    right-hand side is scanned and rewritten in place.
+
+    **`--` is honoured and everything after it is still scanned.** gws takes
+    no positional passthrough today, so treating the tail as opaque would be
+    a bypass by one character. What honouring it means here is that nothing
+    after it is read as a flag, so the whole token is scanned rather than its
+    right-hand side — the wider of the two readings, which is the direction
+    to be wrong in.
+    """
+    out: list[str] = []
+    positional_only = False
+    for token in argv:
+        if not positional_only and token == "--":
+            positional_only = True
+            out.append(token)
+            continue
+        if not positional_only and token.startswith("-") and len(token) > 1:
+            flag, sep, value = token.partition("=")
+            if sep and _is_path_shaped(value):
+                resolved, error = _scoped(value, flag)
+                if error is not None:
+                    return [], error
+                out.append(f"{flag}={resolved}")
+            else:
+                out.append(token)
+            continue
+        if _is_path_shaped(token):
+            resolved, error = _scoped(token, "argument")
+            if error is not None:
+                return [], error
+            out.append(resolved)
+        else:
+            out.append(token)
+    return out, None
+
+
+def _enter_workspace() -> None:
+    """Stand in the user's own workspace before handing over to gws.
+
+    This is what carries the residual `scan_argv` cannot classify: a relative
+    token naming something that does not exist yet is not path-shaped, passes
+    through, and is resolved by gws against *this* process's cwd — which for a
+    proxied skill is the daemon's working directory. Standing in the
+    workspace puts it in-roots by construction.
+
+    A deployment where no workspace resolves is left where it is rather than
+    refused: there is nothing to scope an opaque-id verb against, and every
+    path-shaped token is already refused by the empty allowlist.
+    """
+    root = user_workspace_root()
+    if root is None:
+        return
+    try:
+        os.chdir(root)
+    except OSError as e:
+        logger.warning("Could not enter the workspace before gws: %s", e)
+
+
 def main() -> None:
-    """Pass through to gws binary with all arguments."""
-    os.execvp("gws", ["gws"] + sys.argv[1:])
+    """Scan the argv for host paths, then pass through to the gws binary."""
+    _enter_workspace()
+    argv, refusal = scan_argv(sys.argv[1:])
+    if refusal is not None:
+        fail(refusal, reason="host_path_refused")
+    os.execvp("gws", ["gws"] + argv)
