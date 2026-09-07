@@ -7,23 +7,23 @@ request/response per connection, newline-terminated.
 
 import json
 import logging
-import os
-import selectors
 import socket
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 
 from istota import skill_client
+from istota.unix_server import UnixSocketServer
 
 logger = logging.getLogger("istota.skill_proxy")
 
-# A failing accept() is retried rather than treated as shutdown, but a
-# listener that fails forever must not spin. Give up after this many in a row.
-MAX_ACCEPT_FAILURES = 20
-ACCEPT_RETRY_DELAY_S = 0.05
+# Owner-only, so no other local user can ask this proxy for a credential. This
+# proxy's own decision, stated here rather than inherited from the server
+# lifecycle it is handed to.
+SOCKET_MODE = 0o600
+
+# Listen backlog. Connections are skill calls from one sandboxed task.
+LISTEN_BACKLOG = 8
 
 # How much longer than the subprocess budget a connection stays armed, so the
 # handler outlives the command it is waiting on and can report the timeout
@@ -209,71 +209,25 @@ class SkillProxy:
         # informative-rejection list returned to the client.
         self.authorized_skills = authorized_skills
         self.task_id = task_id
-        self._server_sock: socket.socket | None = None
-        self._thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
-        self._wake_r: socket.socket | None = None
-        self._wake_w: socket.socket | None = None
-        self._accept_failures = 0
+        self._server = UnixSocketServer(
+            socket_path,
+            # Resolved per connection, not captured here: the accept loop
+            # used to call `self._handle_connection` at accept time, and a
+            # test substitutes it on the instance.
+            lambda conn: self._handle_connection(conn),
+            name="skill-proxy",
+            label="Skill proxy",
+            socket_mode=SOCKET_MODE,
+            backlog=LISTEN_BACKLOG,
+            logger=logger,
+        )
 
     def start(self) -> None:
-        # Clean up stale socket file
-        if self.socket_path.exists():
-            self.socket_path.unlink()
-
-        self._stop_event.clear()
-        self._accept_failures = 0
-        self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._server_sock.bind(str(self.socket_path))
-        os.chmod(str(self.socket_path), 0o600)
-        self._server_sock.listen(8)
-        self._server_sock.setblocking(False)
-        # Closing a socket does not reliably wake a thread blocked in accept(),
-        # so stop() nudges this pair instead of the loop polling on a timeout.
-        self._wake_r, self._wake_w = socket.socketpair()
-        self._wake_r.setblocking(False)
-
-        self._thread = threading.Thread(
-            target=self._accept_loop, daemon=True, name="skill-proxy",
-        )
-        self._thread.start()
+        self._server.start()
         logger.debug("Skill proxy started on %s", self.socket_path)
 
     def stop(self) -> None:
-        self._stop_event.set()
-        if self._wake_w:
-            try:
-                self._wake_w.sendall(b"\x00")
-            except OSError:
-                pass
-        stuck = False
-        if self._thread:
-            self._thread.join(timeout=5)
-            stuck = self._thread.is_alive()
-        self._thread = None
-
-        if stuck:
-            # Never close a socket the accept loop may still be selecting on:
-            # epoll and kqueue drop a closed fd from the interest set silently,
-            # so the thread would block forever on numbers the OS is free to
-            # hand to unrelated code. Leak them, and say so.
-            logger.warning(
-                "Skill proxy accept loop did not exit within 5s; leaving its "
-                "sockets open rather than closing them underneath it",
-            )
-        else:
-            for sock in (self._server_sock, self._wake_r, self._wake_w):
-                if sock:
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
-        self._server_sock = self._wake_r = self._wake_w = None
-        # Clean up socket file
-        try:
-            self.socket_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        self._server.stop()
         logger.debug("Skill proxy stopped")
 
     def __enter__(self):
@@ -282,58 +236,6 @@ class SkillProxy:
 
     def __exit__(self, *exc):
         self.stop()
-
-    def _accept_loop(self) -> None:
-        with selectors.DefaultSelector() as sel:
-            sel.register(self._server_sock, selectors.EVENT_READ)
-            sel.register(self._wake_r, selectors.EVENT_READ)
-            while not self._stop_event.is_set():
-                if not self._accept_once(sel):
-                    break
-
-    def _accept_once(self, sel: selectors.BaseSelector) -> bool:
-        """Wait for one readiness event. False means the loop should stop."""
-        events = sel.select()
-        # Shutdown wins over a connection that became ready in the same call.
-        # Accepting it here would give a handler thread — and the credentials
-        # it injects — a lifetime past the stop() meant to end them.
-        if any(key.fileobj is self._wake_r for key, _ in events):
-            return False
-
-        try:
-            conn, _ = self._server_sock.accept()
-        except BlockingIOError:
-            return True
-        except OSError as exc:
-            # One failed accept must not end the proxy. The listening socket
-            # stays bound either way, so a dead loop turns every later skill
-            # call into a hang in the backlog instead of a clean refusal —
-            # skill_client waits out its full timeout on that socket.
-            self._accept_failures += 1
-            if self._accept_failures > MAX_ACCEPT_FAILURES:
-                logger.error("Skill proxy accept failed %d times, stopping: %s",
-                             self._accept_failures, exc)
-                return False
-            logger.warning("Skill proxy accept failed: %s", exc)
-            time.sleep(ACCEPT_RETRY_DELAY_S)
-            return True
-
-        self._accept_failures = 0
-        # accept() on a non-blocking listener yields a non-blocking socket on
-        # BSD/macOS and a blocking one on Linux. Normalize, so a handler never
-        # depends on which platform it woke up on.
-        conn.setblocking(True)
-        # Handle each connection in a new thread so multiple skill
-        # calls can run concurrently (e.g. Claude runs two Bash calls).
-        try:
-            threading.Thread(
-                target=self._handle_connection, args=(conn,),
-                daemon=True, name="skill-proxy-handler",
-            ).start()
-        except RuntimeError as exc:
-            logger.error("Skill proxy could not start a handler thread: %s", exc)
-            conn.close()
-        return True
 
     def _handle_connection(self, conn: socket.socket) -> None:
         try:
