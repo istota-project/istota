@@ -2021,8 +2021,21 @@ def cleanup_old_playbooks(
                 path.unlink()
                 if conn is not None:
                     try:
-                        from .search import _delete_source_chunks
-                        _delete_source_chunks(conn, user_id, "playbook", str(path))
+                        from .search import _delete_source_chunks, source_path
+                        # Both spellings, because the file is already unlinked
+                        # above and `index_file`'s own heal needs a next index
+                        # that will never come. `playbook` is outside
+                        # EPHEMERAL_SOURCE_TYPES, so a row this misses is
+                        # served by recall forever. The two differ on a
+                        # symlinked mount: this walk builds the configured
+                        # spelling, `index_file` recorded the resolved one, and
+                        # a deployment upgraded across ISSUE-452 has rows under
+                        # each.
+                        keys = {source_path(path)}
+                        if path.is_absolute():
+                            keys.add(str(path))
+                        for key in keys:
+                            _delete_source_chunks(conn, user_id, "playbook", key)
                     except Exception as e:
                         logger.debug("Playbook chunk cleanup failed for %s: %s", path.name, e)
                 deleted += 1

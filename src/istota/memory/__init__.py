@@ -17,6 +17,7 @@ from .search import (
     index_conversation,
     index_file,
     reindex_all,
+    source_path,
 )
 # NOTE: the `search` function is intentionally NOT re-exported here — it
 # would shadow the submodule and break `from istota.memory import search as ...`
@@ -46,6 +47,7 @@ __all__ = [
     "index_conversation",
     "index_file",
     "reindex_all",
+    "source_path",
     "KnowledgeFact",
     "add_fact",
     "delete_fact",

@@ -111,6 +111,30 @@ class TestTheIndexingPass:
         assert "second version" in rows[0][1]
         assert "first version" not in rows[0][1]
 
+    def test_a_symlinked_mount_keeps_what_the_pass_just_indexed(self, tmp_path):
+        # A guard, not coverage of ISSUE-452: this pass already keyed on the
+        # realpath before that fix — `contained_overlay_dir` returns it — and
+        # its stale reap compares the indexed spelling against the set it just
+        # walked, so the two have to keep agreeing. If they part, the reap
+        # deletes the rows written moments earlier and every overlay silently
+        # drops out of `!search` on any deployment whose mount is a symlink.
+        (tmp_path / "real").mkdir()
+        (tmp_path / "mount").symlink_to(tmp_path / "real")
+        config = _config(tmp_path)
+        overlay = _overlays(config) / "developer.md"
+        assert str(overlay) != str(overlay.resolve())
+        overlay.write_text("- The full suite takes about an hour on this host.\n")
+
+        assert _run(config) == ["alice"]
+        rows = _rows(config)
+        assert len(rows) == 1
+        assert rows[0][0] == str(overlay.resolve())
+        assert "about an hour" in rows[0][1]
+
+        # A second pass over the same file must still replace rather than reap.
+        _run(config)
+        assert len(_rows(config)) == 1
+
     def test_an_overlay_that_does_not_bind_is_not_indexed(self, tmp_path):
         # Indexing a file that reaches no prompt would have `!search` return a
         # rule that is not in force anywhere.

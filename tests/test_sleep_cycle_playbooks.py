@@ -455,6 +455,80 @@ class TestCleanupPlaybooks:
         assert not stale.exists()
         assert after == 0
 
+    def test_prune_deletes_orphaned_chunks_under_a_symlinked_mount(self, tmp_path):
+        """ISSUE-452: the prune's delete key has to be the spelling `index_file`
+        stored. It resolves now, and this reap walks the configured mount, so a
+        deployment reaching its mount through a symlink would otherwise unlink
+        the file and leave recall serving the guidance forever — `playbook` is
+        outside EPHEMERAL_SOURCE_TYPES, so nothing else reclaims the rows."""
+        from istota.memory.search import index_file
+
+        (tmp_path / "real").mkdir()
+        (tmp_path / "mount").symlink_to(tmp_path / "real")
+        db.init_db(tmp_path / "test.db")
+        config = Config(
+            db_path=tmp_path / "test.db",
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=tmp_path / "mount",
+            sleep_cycle=SleepCycleConfig(enabled=True, lookback_hours=24),
+            playbooks=PlaybooksConfig(enabled=True, min_tool_calls=4),
+            memory_search=MemorySearchConfig(enabled=True, auto_index_memory_files=True),
+        )
+        pb_dir = _pb_dir(config)
+        _seed_sentinel(pb_dir)
+        stale = pb_dir / "stale.md"
+        stale.write_text("# Stale\n\nORPHAN_MARKER content")
+        assert str(stale) != str(stale.resolve())
+        _backdate(stale, 400)
+
+        with db.get_db(config.db_path) as conn:
+            index_file(conn, "alice", str(stale.resolve()), "ORPHAN_MARKER content", "playbook")
+            assert cleanup_old_playbooks(config, "alice", 30, conn=conn) == 1
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM memory_chunks WHERE user_id=? AND source_type='playbook'",
+                ("alice",),
+            ).fetchone()[0]
+        assert not stale.exists()
+        assert remaining == 0
+
+    def test_prune_deletes_chunks_written_under_the_pre_452_spelling(self, tmp_path):
+        """A playbook indexed before ISSUE-452 has rows under the configured
+        mount spelling. `index_file`'s own heal cannot reach them here — the
+        prune unlinks the file, so there is no next index — and `playbook` is
+        outside EPHEMERAL_SOURCE_TYPES, so the prune has to clear both."""
+        from istota.memory.search import _insert_chunks, chunk_text
+
+        (tmp_path / "real").mkdir()
+        (tmp_path / "mount").symlink_to(tmp_path / "real")
+        db.init_db(tmp_path / "test.db")
+        config = Config(
+            db_path=tmp_path / "test.db",
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=tmp_path / "mount",
+            sleep_cycle=SleepCycleConfig(enabled=True, lookback_hours=24),
+            playbooks=PlaybooksConfig(enabled=True, min_tool_calls=4),
+            memory_search=MemorySearchConfig(enabled=True, auto_index_memory_files=True),
+        )
+        pb_dir = _pb_dir(config)
+        _seed_sentinel(pb_dir)
+        stale = pb_dir / "stale.md"
+        stale.write_text("# Stale\n\nORPHAN_MARKER content")
+        assert str(stale) != str(stale.resolve())
+        _backdate(stale, 400)
+
+        with db.get_db(config.db_path) as conn:
+            _insert_chunks(
+                conn, "alice", "playbook", str(stale),
+                chunk_text("ORPHAN_MARKER content"), {"file_path": str(stale)},
+            )
+            assert cleanup_old_playbooks(config, "alice", 30, conn=conn) == 1
+            remaining = conn.execute(
+                "SELECT COUNT(*) FROM memory_chunks WHERE user_id=? AND source_type='playbook'",
+                ("alice",),
+            ).fetchone()[0]
+        assert not stale.exists()
+        assert remaining == 0
+
 
 class TestThePruneFailsClosed:
     """ISSUE-430: turning retention on for Docker made two paths reachable.
