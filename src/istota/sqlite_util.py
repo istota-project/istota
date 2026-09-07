@@ -23,16 +23,19 @@ not the thing that supplies it — which is why passing ``None`` is not the same
 as "no busy timeout", and why a test asserting ``busy_timeout == 30000`` on a
 ``timeout=30.0`` connection proves nothing about whether the pragma ran.
 
-Stdlib-only leaf: ``sqlite3``, ``pathlib`` and ``contextlib``. Imports nothing
-from the package, so a module DB helper or a skill subprocess can reach it.
+Stdlib-only leaf: ``sqlite3``, ``pathlib``, ``contextlib``, ``os`` and
+``urllib.parse``. Imports nothing from the package, so a module DB helper or a
+skill subprocess can reach it.
 """
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import quote
 
 __all__ = ["add_columns", "connect", "connect_read_only", "open_db"]
 
@@ -95,14 +98,25 @@ def connect_read_only(path: Path | str) -> sqlite3.Connection:
     of a running daemon, and this function is a move. Pinned by
     ``tests/test_sqlite_util.py::TestConnectReadOnly``.
 
-    The path is interpolated into the URI unencoded, which is what all five
-    call sites did and is preserved rather than fixed here: a ``db_path``
-    containing ``?`` or ``#`` would be misparsed. Every shipped ``db_path``
-    comes from a config file an operator wrote, so this is a latent sharp edge
-    rather than a live one, and correcting it is a behaviour change with its
-    own argument to make.
+    **The path is percent-encoded into the URI, and it has to be** (ISSUE-461).
+    All five call sites interpolated it raw, so `?` or `#` ended the path early
+    and `%41` decoded to `A`. The reported symptom was reading the wrong file;
+    the worse one is that the truncated remainder is not a ``mode`` parameter
+    SQLite recognises, so ``mode=ro`` was dropped with it and the open landed
+    **read-write** on a path the caller never named — measured, and it
+    materialized that file. Under ``sudo istota doctor`` that is the root-owned
+    stray these call sites say the URI form exists to avoid.
+
+    ``os.fsencode`` rather than ``str``: the encode goes through the
+    filesystem encoding, so a name carrying undecodable bytes round-trips
+    instead of raising. ``safe="/"`` keeps the separators and encodes the rest,
+    which is inert for a path of ordinary characters — a space or a non-ASCII
+    name worked before and still does, since SQLite decodes ``%HH`` back.
     """
-    return sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+    return sqlite3.connect(
+        "file:" + quote(os.fsencode(Path(path)), safe="/") + "?mode=ro",
+        uri=True,
+    )
 
 
 @contextmanager
@@ -212,10 +226,13 @@ def add_columns(
     contract for a migration that wants one.
 
     ``table`` and the column names and clauses are interpolated into DDL, which
-    SQLite gives no way to parameterize. Every caller passes a code literal;
-    this is the same latent sharp edge :func:`connect_read_only` records for its
-    URI, not a live one, and narrowing it is a change with its own argument to
-    make. ``PRAGMA table_info`` is read positionally because both connection
+    SQLite gives no way to parameterize. Every caller passes a code literal, so
+    this is a latent sharp edge rather than a live one — the one
+    :func:`connect_read_only` used to carry for its URI, which ISSUE-461 closed
+    — and narrowing it is a change with its own argument to make. The two are
+    not the same problem: a URI has an encoding, and SQLite DDL has none, so
+    the answer here is a caller rule rather than a quote function. ``PRAGMA
+    table_info`` is read positionally because both connection
     shapes reach here: ``feeds`` migrates under a ``sqlite3.Row`` connection
     and ``health``, ``location`` and ``db.init_db``'s own pass do not.
     """

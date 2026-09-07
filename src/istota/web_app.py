@@ -2623,7 +2623,7 @@ def _admin_module_feeds() -> dict | None:
     users_resolved = 0
     resolve_errors = 0
     try:
-        from istota.feeds._loader import UserNotFoundError, resolve_for_user
+        _, resolve_for_user, connect, UserNotFoundError = _module_loader("feeds")
     except Exception:  # pragma: no cover
         return {
             "users_configured": configured,
@@ -2640,9 +2640,13 @@ def _admin_module_feeds() -> dict | None:
             resolve_errors += 1
             continue
         users_resolved += 1
+        # Opening creates the file, so without this a read-only dashboard load
+        # mints an empty DB for a user who has never polled a feed. The sibling
+        # driver `_aggregate_module_db` skips the same case.
+        if not ctx.db_path.exists():
+            continue
         try:
-            with sqlite3.connect(str(ctx.db_path)) as conn:
-                conn.row_factory = sqlite3.Row
+            with connect(ctx.db_path) as conn:
                 feeds_total += conn.execute("SELECT COUNT(*) AS n FROM feeds").fetchone()["n"]
                 entries_total += conn.execute("SELECT COUNT(*) AS n FROM feed_entries").fetchone()["n"]
                 entries_unread += conn.execute(
