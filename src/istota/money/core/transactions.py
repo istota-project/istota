@@ -682,7 +682,7 @@ def _append_entries_unlocked(ledger_path: Path, entries: list[str]) -> None:
     if not entries:
         return
     backup_ledger(ledger_path)
-    with open(ledger_path, "a") as f:
+    with open(ledger_path, "a", encoding="utf-8") as f:
         for entry in entries:
             f.write(f"\n{entry}\n")
 
@@ -831,9 +831,12 @@ def _ledger_has_posting(ledger_path: Path, synced_txn, expected_account: str) ->
     expected account — preferring a false positive (emit the change) over
     a false negative (silently swallow a legitimate change).
 
-    Conservative fallback: if the ledger file is missing or the synced
-    record is missing date/merchant, return True so the original behavior
-    holds and we don't suppress legitimate changes.
+    Conservative fallback: if the ledger file is missing, unreadable or not
+    decodable, or the synced record is missing date/merchant, return True so
+    the original behavior holds and we don't suppress legitimate changes. The
+    decode case is caught explicitly because ``UnicodeDecodeError`` is a
+    ``ValueError`` rather than an ``OSError``, and the only caller runs inside
+    the sync loop with no handler of its own.
     """
     if not ledger_path.exists():
         return True
@@ -841,8 +844,8 @@ def _ledger_has_posting(ledger_path: Path, synced_txn, expected_account: str) ->
         return True
 
     try:
-        text = ledger_path.read_text()
-    except OSError:
+        text = ledger_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
         return True
 
     target_date = synced_txn.txn_date
@@ -1283,7 +1286,7 @@ def sync_monarch(
         if content_skipped_count > 0:
             header += f"; Skipped (already in ledger): {content_skipped_count}\n"
         header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
-        staging_file.write_text(header + "\n\n".join(entries) + "\n")
+        staging_file.write_text(header + "\n\n".join(entries) + "\n", encoding="utf-8")
         result["staging_file"] = str(staging_file)
 
     # Write recategorizations to separate staging file
@@ -1294,7 +1297,9 @@ def sync_monarch(
         header += f"; Recategorization count: {len(recategorized_entries)}\n"
         header += f"; Target account: {config.sync.recategorize_account}\n"
         header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
-        recat_file.write_text(header + "\n\n".join(recategorized_entries) + "\n")
+        recat_file.write_text(
+            header + "\n\n".join(recategorized_entries) + "\n", encoding="utf-8"
+        )
         result["recategorize_file"] = str(recat_file)
 
     # Write category changes to separate staging file
@@ -1304,7 +1309,9 @@ def sync_monarch(
         header += "; These transactions were recategorized in Monarch\n"
         header += f"; Category change count: {len(category_change_entries)}\n"
         header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
-        cat_change_file.write_text(header + "\n\n".join(category_change_entries) + "\n")
+        cat_change_file.write_text(
+            header + "\n\n".join(category_change_entries) + "\n", encoding="utf-8"
+        )
         result["category_change_file"] = str(cat_change_file)
 
     # Append to main ledger

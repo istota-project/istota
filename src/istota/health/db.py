@@ -39,6 +39,7 @@ from istota.health.models import (
     Panel,
     Stat,
 )
+from istota.timestamps import iso_now as _now
 
 
 logger = logging.getLogger(__name__)
@@ -405,10 +406,6 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     """
     with sqlite_util.open_db(db_path) as conn:
         yield conn
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 # -- stats -------------------------------------------------------------------

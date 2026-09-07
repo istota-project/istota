@@ -47,7 +47,7 @@ def load_user_secrets(user_id: str, istota_config) -> dict:
     if explicit:
         path = Path(explicit)
         if path.exists():
-            return tomli.loads(path.read_text())
+            return tomli.loads(path.read_text(encoding="utf-8"))
         return {}
 
     if istota_config is None:

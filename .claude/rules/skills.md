@@ -475,7 +475,7 @@ Keys are immutable — they are referenced by plain string from four places with
 
 ### Module-skill facade exit-code contract
 
-The feeds and money skill facades (`src/istota/skills/feeds/__init__.py`, `src/istota/skills/money/__init__.py`) emit `{"status":"error","error":"…"}` envelopes from `_output()` whenever `_run()` catches an error (`UserNotFoundError`, missing env, exception, non-zero CliRunner exit, JSON decode failure). `_output()` calls `sys.exit(1)` when it sees an error envelope, so the subprocess returncode reflects reality. The scheduler's `_execute_command_task()` also detects the envelope shape on stdout as a defense-in-depth fallback (see `.claude/rules/scheduler.md`). New module-skill facades must follow this convention.
+The feeds and money skill facades (`src/istota/skills/feeds/__init__.py`, `src/istota/skills/money/__init__.py`) emit `{"status":"error","error":"…"}` envelopes from `_output()` whenever `_run()` catches an error (`UserNotFoundError`, missing env, exception, non-zero CliRunner exit, JSON decode failure). `_output()` is `skills/_cli.py`'s `emit` in both, and it calls `sys.exit(1)` when it sees an error envelope, so the subprocess returncode reflects reality. The scheduler's `_execute_command_task()` also detects the envelope shape on stdout as a defense-in-depth fallback (see `.claude/rules/scheduler.md`). A new module-skill facade gets this by dispatching through `run_skill_cli` rather than by writing the convention out again; `tests/test_skill_cli_facade.py` is the pin, and its `EPILOGUE_EXEMPT` names the six `main` bodies that cannot dispatch that way and why.
 
 ### Library-Only Modules (no CLI)
 - `files/` - Nextcloud file ops (mount-aware, rclone fallback)

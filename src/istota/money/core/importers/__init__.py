@@ -262,7 +262,7 @@ def import_transactions(
         header += f"; Skipped (already in ledger): {content_skipped_count}\n"
     header += "; Auto-appended to main ledger. Staging file kept for audit trail.\n\n"
 
-    staging_file.write_text(header + "\n\n".join(entries) + "\n")
+    staging_file.write_text(header + "\n\n".join(entries) + "\n", encoding="utf-8")
 
     append_to_ledger(ledger_path, entries)
 

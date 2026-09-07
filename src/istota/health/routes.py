@@ -52,6 +52,7 @@ from istota.health.units import (
     widest_canonical_range,
 )
 from istota.notification_resolvers import health_panel as notification_health_panel
+from istota.timestamps import iso_now as _now
 from istota.web_router_stubs import (  # noqa: F401
     make_get_user_context,
     require_auth,  # re-exported: `web_app.py` keys `dependency_overrides` on it
@@ -78,10 +79,6 @@ get_user_context = make_get_user_context(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _stat_to_dict(s) -> dict:

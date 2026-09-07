@@ -31,6 +31,10 @@ def run_bean_check(ledger_path: Path) -> tuple[bool, list[str]]:
             [_bean_cmd("bean-check"), str(ledger_path)],
             capture_output=True,
             text=True,
+            # stderr echoes the offending ledger line, so it carries whatever
+            # the payee holds; `replace` keeps a diagnostic from raising.
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         if result.returncode == 0:
@@ -51,6 +55,7 @@ def run_bean_query(ledger_path: Path, query: str) -> list[dict]:
             [_bean_cmd("bean-query"), str(ledger_path), query, "-f", "csv"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=120,
         )
         if result.returncode != 0:
