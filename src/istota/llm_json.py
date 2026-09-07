@@ -46,10 +46,12 @@ because its two callers take its answer or fall through and a wrongly opened
 block would *be* the answer. ``candidate_json_blocks`` tries its candidates in
 order and discards one that will not parse, so it can afford the relaxed arm
 and it needs it: measured, an opener sharing its line with prose that carries
-a ``{`` made it fall through to the widest-``[...]`` arm and hand a bloodwork
-panel's *inner* biomarker array back as the whole payload, silently losing
-``drawn_at`` and ``lab_name``. A lost parse is visible in the logs; that one
-is not. See :func:`iter_fenced_blocks`.
+a ``{`` made it fall through to the widest-``[...]`` arm, which matches a
+bloodwork panel's *inner* biomarker array. That fragment used to come back as
+the whole payload, silently losing ``drawn_at`` and ``lab_name``; ISSUE-455
+marks it and the OCR modules now refuse it, so the cost of falling through is
+an empty panel and a warning rather than a wrong one. Either way the relaxed
+arm is what stops the fall-through. See :func:`iter_fenced_blocks`.
 
 ``session/result._CODE_FENCE_PATTERN`` is the fourth and is **not converted
 at all**: it *removes* every fenced block rather than unwrapping one, and it
@@ -74,6 +76,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from typing import NamedTuple
 
 # Whitespace that is not a line break, which is what carries a CRLF's `\r`
 # and a pasted non-breaking space.
@@ -170,9 +173,10 @@ def iter_fenced_blocks(
     early at a stray backtick run inside the JSON it was carrying, which is
     a fact about the closer. Anchoring the opener buys nothing against it
     and costs a shape models emit — one measured to make
-    ``candidate_json_blocks`` fall through to its widest-``[...]`` arm and
-    hand a bloodwork panel's inner biomarker array back as the whole
-    payload, losing ``drawn_at`` and ``lab_name`` in silence.
+    ``candidate_json_blocks`` fall through to its widest-``[...]`` arm,
+    which matches a bloodwork panel's inner biomarker array and used to
+    hand it back as the whole payload, losing ``drawn_at`` and ``lab_name``
+    in silence (ISSUE-455; that fragment is now marked and refused).
     """
     opener_re = _opener_for(lang, relaxed)
     pos = 0
@@ -236,7 +240,46 @@ def strip_fences(text: str) -> str:
     return trimmed.strip()
 
 
-def candidate_json_blocks(text: str) -> list[str]:
+class JsonCandidate(NamedTuple):
+    """One candidate, and whether anything outside it could enclose it.
+
+    ``whole`` is true for every arm the response itself delimits — a fenced
+    block, the span between two openers, the whole text — since nothing
+    outside those is part of the same structure. A bracket scan is a
+    substring, so it is whole only when no opener of the *other* kind sits
+    outside its span: see :func:`_scanned`.
+
+    A caller that identifies its payload by a key can take a candidate
+    either way, the key being what says the match is the answer. One that
+    accepts a bare list has no such mark and cannot tell an inner array from
+    the whole answer, so it takes a list from a whole candidate only
+    (ISSUE-455).
+    """
+
+    text: str
+    whole: bool
+
+
+def _scanned(text: str, match: re.Match[str], enclosing: str) -> JsonCandidate:
+    """A bracket-scan candidate, whole unless something could enclose it.
+
+    ``enclosing`` is the opener of the other kind. One outside the span is
+    the signature of a structure the scan could not parse and this match may
+    be a fragment of — the object around the array it matched, whether the
+    object failed on prose carrying a brace or on the model stopping
+    mid-response. With none outside it there is nothing the match could be
+    an inner part of, and a bare payload the model wrapped in prose is a
+    shape all three OCR callers have always read.
+
+    Cheap and deliberately not a parser. Where prose *around* a genuine bare
+    array carries a brace of its own the answer is the conservative one, and
+    that is the residual :func:`candidate_json_blocks` states.
+    """
+    outside = text[:match.start()] + text[match.end():]
+    return JsonCandidate(match.group(0), enclosing not in outside)
+
+
+def candidate_json_blocks(text: str) -> list[JsonCandidate]:
     """JSON candidates to try in order, de-duplicated, order preserved.
 
     Every well-formed fenced block first, then every block whose opener
@@ -268,31 +311,58 @@ def candidate_json_blocks(text: str) -> list[str]:
     them, and "wrap it in ``` when you paste it back" is what that looks
     like in prose a model would write.
 
-    The **residual is worth stating rather than implying**, and it has two
-    halves. Where the trailing prose after a decorated closer carries a ``{``
-    or a ``[`` of its own, both widest-substring arms span past the fence and
-    there is no parseable candidate at all — not a fragment, nothing, and the
-    OCR modules then return their empty payload. And where an arm does yield
-    something, the widest pair can still answer with a fragment of a larger
-    structure. The second half predates this module, being reachable with no
-    fence in the text at all; narrowing either one means changing what the
-    OCR modules accept rather than where the fence is.
+    **The widest pair carries a ``whole`` flag rather than being dropped or
+    trusted** (ISSUE-455). A bracket scan can match a fragment of a larger
+    structure — most often the inner array of an object whose own span did
+    not parse — and the OCR modules used to take that through their
+    bare-list branch, returning a panel with ``drawn_at``, ``lab_name`` and
+    ``panel_type`` silently gone. Dropping the arms would cost the shape
+    they were added for, a bare payload sitting in prose, which is why the
+    flag is positional rather than per-arm: see :func:`_scanned`.
+
+    The **residual is worth stating rather than implying**, and there are
+    two. Where the trailing prose after a decorated closer carries a ``{`` or
+    a ``[`` of its own, both widest-substring arms span past the fence and
+    there is no parseable candidate at all — not a fragment, nothing.
+    Reaching that one means changing the fence rule rather than the
+    fallbacks. And a genuine bare array whose surrounding prose carries a
+    brace is refused by the flag, since it is indistinguishable from the
+    ISSUE-455 shape by anything short of a parser. Both end at the OCR
+    modules' empty payload, which reaches the user as a warning — that
+    visibility is what makes them accepted losses rather than the silent one
+    above.
+
+    A candidate the response delimits is trusted by arm, so a *fenced* bare
+    array followed by the real envelope would still be taken as the answer.
+    Contrived, and unmeasured; the arms are ordered on the assumption that a
+    model's first well-formed block is its answer.
     """
-    candidates: list[str] = list(iter_fenced_blocks(text))
-    candidates.extend(iter_fenced_blocks(text, relaxed=True))
-    candidates.extend(iter_opener_delimited_blocks(text))
-    candidates.append(text.strip())
+    candidates: list[JsonCandidate] = [
+        JsonCandidate(block, True) for block in iter_fenced_blocks(text)
+    ]
+    candidates.extend(
+        JsonCandidate(block, True)
+        for block in iter_fenced_blocks(text, relaxed=True)
+    )
+    candidates.extend(
+        JsonCandidate(block, True)
+        for block in iter_opener_delimited_blocks(text)
+    )
+    candidates.append(JsonCandidate(text.strip(), True))
     obj = _WIDEST_OBJECT_RE.search(text)
     if obj:
-        candidates.append(obj.group(0))
+        candidates.append(_scanned(text, obj, "["))
     arr = _WIDEST_ARRAY_RE.search(text)
     if arr:
-        candidates.append(arr.group(0))
+        candidates.append(_scanned(text, arr, "{"))
 
+    # First arm wins on a tie, so a candidate two arms both reach keeps the
+    # earlier arm's `whole` — the bare payload that is its own widest span
+    # stays whole.
     seen: set[str] = set()
-    unique: list[str] = []
+    unique: list[JsonCandidate] = []
     for candidate in candidates:
-        if candidate and candidate not in seen:
-            seen.add(candidate)
+        if candidate.text and candidate.text not in seen:
+            seen.add(candidate.text)
             unique.append(candidate)
     return unique

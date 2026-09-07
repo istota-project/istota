@@ -349,6 +349,24 @@ class TestExtractParser:
         rows, _ = _parse_llm_response(raw)
         assert rows[0]["date_given"] is None
 
+    def test_an_inner_array_is_not_taken_as_the_whole_payload(self):
+        """ISSUE-455, in the module the entry did not name.
+
+        The prose carries a ``{``, so the widest-``{...}`` span does not
+        parse and the widest-``[...]`` arm matches the inner array. This
+        envelope has no metadata worth losing today, but the bare-list
+        branch is the same one, and a fragment that parses is not evidence
+        that the model answered with a list.
+        """
+        from istota.health.immunization_ocr import _parse_llm_response
+
+        raw = (
+            "Row {2} was smudged. "
+            '{"source": "card", "immunizations": '
+            '[{"name": "Tdap", "date_given": "2016-12-01"}]}'
+        )
+        assert _parse_llm_response(raw) == ([], 0)
+
 
 class TestParseAndBulkRoutes:
     def test_parse_endpoint(self, client):

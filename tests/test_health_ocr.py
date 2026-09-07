@@ -142,6 +142,66 @@ class TestParseLlmJson:
     def test_garbage_returns_empty(self):
         assert health_ocr._parse_llm_json("not json at all") == []
 
+    def test_an_inner_array_is_not_taken_as_the_whole_payload(self):
+        """ISSUE-455. The prose in front carries a ``{`` of its own.
+
+        The widest-``{...}`` span reaches from that brace into the JSON and
+        does not parse, and the widest-``[...]`` arm then matches the panel's
+        *inner* biomarker array. Taking that through the bare-list branch
+        returned the biomarkers with ``drawn_at``, ``lab_name`` and
+        ``panel_type`` dropped and nothing said about it. The empty payload
+        is the better answer: the extract path turns it into a warning the
+        user reads, and a panel silently missing its date is not recoverable
+        by anyone downstream.
+        """
+        raw = (
+            "The row {x} was unclear. "
+            '{"drawn_at": "2026-05-08", "lab_name": "Acme Labs", '
+            '"panel_type": "CBC", '
+            '"biomarkers": [{"name": "HGB", "value": 14.6}]}'
+        )
+        assert health_ocr._parse_llm_response(raw) == {
+            "biomarkers": [],
+            "drawn_at": None,
+            "lab_name": None,
+            "panel_type": None,
+        }
+
+    def test_a_truncated_object_does_not_come_back_as_its_inner_array(self):
+        """The same loss with no prose at all — the model stopped early.
+
+        Worth its own case because the two widest spans *overlap* here
+        rather than nest: the object span runs from the first ``{`` to the
+        last ``}``, which sits inside the array. A rule that only dropped a
+        bracket span nested inside the other would still hand this one back
+        as a complete panel.
+        """
+        raw = (
+            '{"drawn_at": "2026-05-08", "lab_name": "Acme Labs", '
+            '"biomarkers": [{"name": "HGB", "value": 14.6}]'
+        )
+        assert health_ocr._parse_llm_response(raw)["biomarkers"] == []
+
+    def test_a_bare_array_in_prose_still_extracts(self):
+        """The other side of ISSUE-455's guard, and the reason it is
+        positional rather than per-arm.
+
+        Nothing outside the array could have enclosed it, so this is the
+        whole answer with a sentence in front of it — the mirror of
+        ``test_object_in_prose``, which has always worked. Refusing every
+        bracket-scan candidate would have taken this shape with it, and no
+        test in the tree would have failed.
+        """
+        raw = 'Here are the biomarkers:\n[{"name": "WBC", "value": 7}]'
+        out = health_ocr._parse_llm_json(raw)
+        assert out[0]["name"] == "WBC"
+
+    def test_a_fenced_bare_array_still_extracts(self):
+        """A fenced block is whole by arm, prose around it or not."""
+        raw = 'The row {x} was unclear:\n```json\n[{"name": "WBC"}]\n```'
+        out = health_ocr._parse_llm_json(raw)
+        assert out[0]["name"] == "WBC"
+
 
 class TestSanityCheck:
     def test_obviously_wrong_value_warns(self):
