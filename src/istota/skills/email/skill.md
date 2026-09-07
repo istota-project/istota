@@ -59,7 +59,7 @@ Options:
 - `--html` — send as HTML instead of plain text
 - `--body-file /path/to/file` — read body from a file (useful for long HTML content)
 - `--cc a@x,b@y` / `--bcc a@x` — carbon-copy / blind-carbon-copy recipients (comma-separated). Bcc addresses receive the mail but never appear in any transmitted header.
-- `--attach /path/to/file` — attach a file (repeatable).
+- `--attach /path/to/file` — attach a file (repeatable). The file must be inside the user's own workspace; see the attachment rule under "When a send is held".
 - `--reply-to addr` — set the Reply-To header.
 
 The command prints JSON on success: `{"status": "ok", "message_id": "<...>", "to": "...", "subject": "..."}`. The `message_id` is your evidence the send happened — see "Confirm the send actually happened" below.
@@ -107,7 +107,9 @@ This is a **successful outcome**, not a failure. What to do with it:
 
 There is no flag that skips this. If you believe the hold is wrong, say so to the user and let them decide.
 
-A `{"status": "error"}` from these verbs means nothing was sent and nothing was held. Causes: the check could not run (no user identity, no database); an `--attach` path outside the places you may read (your workspace, the conversation's folder, the task's working directory — this applies to every send, held or not); or, for a held message, an attachment outside the user's workspace specifically, since a draft can only carry files from there. Report the error. For the attachment cases, retry without the attachment or with a copy inside the user's workspace.
+A `{"status": "error"}` from these verbs means nothing was sent and nothing was held. Causes: the check could not run (no user identity, no database); or an `--attach` path outside the user's own workspace.
+
+**An attachment must be inside the user's own workspace, on every send.** Not the conversation's folder, not `/Talk`, and not the task's working directory — those are places you may *read*, and an attachment leaves the task rather than staying in it. The rule is the same whether the send goes straight out or is held for approval, because a held draft is re-checked against that one directory when the user approves it, hours later. Report the error, then either send without the attachment or copy the file into the user's workspace first and attach the copy.
 
 ## Confirm the send actually happened before reporting it
 

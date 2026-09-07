@@ -409,6 +409,30 @@ class TestEveryStampedArgument:
         assert target.read_bytes() == b"not yours"
 
     @pytest.mark.parametrize("key", _params(KEYS))
+    def test_an_explicitly_empty_value_is_refused(self, key, mount, drive):
+        """The second, smaller narrowing this work carries, named here.
+
+        `resolve_parsed` skips a value of `None` — the argument was not passed
+        — and refuses one that is present and empty, because `Path("")` is
+        `Path(".")`, the process cwd, which for a proxied skill is the
+        daemon's and for a task's own shell may well be inside the workspace.
+
+        Three of these verbs used to branch on falsiness themselves and reach
+        their own "not given" path: `browse screenshot --output ""` derived a
+        name under the bot dir, `health export-csv --output ""` printed the CSV
+        to stdout, `feeds export-opml --output ""` did the same. Those branches
+        are unreachable through an explicit empty string now. It is a refusal
+        rather than a widening, and it is the one the spec's Edge cases list
+        does not name, so it is asserted here rather than left to be
+        rediscovered from a bug report.
+        """
+        run, recorder = drive(key, "")
+
+        assert not recorder.called, f"{key} dispatched an empty path"
+        assert run.exit_code == 1, run.stdout
+        assert "empty" in run.envelope.get("error", "").lower(), run.envelope
+
+    @pytest.mark.parametrize("key", _params(KEYS))
     def test_a_refusal_does_not_name_the_other_roots(self, key, mount, drive):
         """The message goes back to the model; the roots are other people's
         directory names."""

@@ -67,7 +67,7 @@ from pathlib import Path
 
 import pytest
 
-from istota.skills._hostpath import stamped
+from istota.skills._hostpath import REPO as HOSTPATH_REPO, stamped
 
 REPO = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO / "src" / "istota" / "skills"
@@ -364,6 +364,34 @@ def test_the_stamps_reach_the_arguments_they_are_meant_to_cover():
         ("email", "send", "attach"),
     ]:
         assert key in found, f"{key} carries no stamp"
+
+
+@pytest.mark.parametrize(
+    "key", sorted(k for k, mode in stamps().items() if mode == HOSTPATH_REPO),
+)
+def test_a_repo_stamp_names_a_handler_that_still_scopes(key):
+    """`REPO` is the one resolving-shaped disposition nothing else can check.
+
+    `resolve_parsed` skips it and the refusals file never parametrizes over
+    it, so the stamp alone is a `note` — and a note survives the deletion of
+    the call it describes. That is exactly the stale claim `SCOPED`'s helper
+    assertion exists to catch, and converting `code_review --worktree` from a
+    registry entry to a stamp would otherwise have traded a checked claim for
+    an unchecked one. So the source assertion moves onto the stamp: a skill
+    declaring a `REPO` argument has to call `resolve_under_repos` somewhere.
+
+    Module-wide rather than function-wide, since the stamp names the argument
+    and not the handler; `tests/test_code_review_cli.py` is what drives the
+    refusal itself.
+    """
+    skill = key[0]
+    module = importlib.import_module(_module_for(SKILLS_DIR / skill))
+    source = Path(module.__file__).read_text()
+    assert "resolve_under_repos(" in source, (
+        f"{key} is stamped REPO, which records that the handler scopes it "
+        f"against DEVELOPER_REPOS_DIR, and {skill} calls resolve_under_repos "
+        f"nowhere."
+    )
 
 
 def test_the_walk_finds_the_arguments_it_is_meant_to_guard():

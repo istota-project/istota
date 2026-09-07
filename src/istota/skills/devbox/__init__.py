@@ -619,6 +619,14 @@ def _reports_refusals(fn):
     verb does not. This is here so a verb *is* its envelope: a caller — a test,
     or anything importing the module — gets the same answer as the CLI prints,
     rather than a dict on one path and an exception on the other.
+
+    **A host-path refusal is not among them, and is the one place that
+    equivalence does not hold.** Since ISSUE-447 the host-side arguments are
+    resolved by ``parse_and_resolve``, which prints its own envelope and exits
+    before dispatch — so a caller invoking a verb in-process with a namespace
+    it built itself never reaches that check at all, and gets whatever the
+    handler does with an unresolved path. Which is why every test about a host
+    path goes through ``main``.
     """
     @functools.wraps(fn)
     def wrapper(args):

@@ -82,7 +82,7 @@ log = logging.getLogger(__name__)
 
 READ = "read"              # resolved against the task's whole working context
 EGRESS = "egress"          # a read whose bytes leave the task: own workspace only
-WRITE = "write"            # a destination: own workspace only
+WRITE = "write"            # a destination: the task's roots, less the read-only ones
 REPO = "repo"              # the other allowlist: resolve_under_repos
 REMOTE = "remote"          # a path on another machine; the far side scopes it
 NOT_A_PATH = "not_a_path"  # the coverage walk's help-text heuristic matched

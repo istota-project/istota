@@ -147,6 +147,15 @@ def parse_and_resolve(
     refusal = resolve_parsed(parser, args)
     if refusal is not None:
         fail(refusal, reason="host_path_refused")
+        # `fail` exits. The raise is what makes that independent of it, and it
+        # is the property `health.cmd_export_csv` used to keep for itself with
+        # a bare `return` after its own `_fail`: a `fail` that ever stopped
+        # exiting would return a namespace `resolve_parsed` left *partially*
+        # rewritten — the dests before the refusing one absolute, the rest as
+        # parsed, and nothing on it saying which is which — and every handler
+        # would then run on the mixture. There is one refusal site now, so
+        # there is one place to keep this true.
+        raise SystemExit(1)  # pragma: no cover — `fail` is NoReturn
     return args
 
 

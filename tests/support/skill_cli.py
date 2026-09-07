@@ -66,6 +66,13 @@ def _json_candidates(text: str) -> list[str]:
     ]
 
 
+def _exit_code(code: object) -> int:
+    """What the OS would have seen. `None` is 0; a string is 1."""
+    if code is None:
+        return 0
+    return code if isinstance(code, int) else 1
+
+
 def run_skill_main(
     main: Callable, argv: Sequence[str], *, prog: str = "istota-skill",
 ) -> CliRun:
@@ -80,7 +87,11 @@ def run_skill_main(
                 takes_argv = bool(inspect.signature(main).parameters)
                 result = main(list(argv)) if takes_argv else main()
             except SystemExit as exit_:
-                code = exit_.code if isinstance(exit_.code, int) else 1
+                # `None` is a *successful* exit, and calling it 1 would let
+                # `assert run.exit_code == 1` pass against a verb that
+                # succeeded and printed nothing — which is the shape of
+                # refusal assertion this helper exists to make honest.
+                code = _exit_code(exit_.code)
             else:
                 # `memory` and `ntfy` return an exit code rather than raising.
                 if isinstance(result, int):

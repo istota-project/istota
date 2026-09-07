@@ -2293,8 +2293,10 @@ def cmd_send(args):
         content_type=content_type,
         cc=cc or None,
         bcc=bcc or None,
-        # The scoped, resolved paths — not `attachments`. Re-opening the strings
-        # the model passed would re-walk the symlinks the scoping settled.
+        # The gate's copy of the list rather than `attachments` directly, so
+        # the held and direct branches attach the same thing. Both are already
+        # resolved — the `EGRESS` stamp rewrote the value on the namespace —
+        # so there is no unresolved original left to re-open.
         attachments=send_paths or None,
         reply_to=getattr(args, "reply_to", None),
     )
