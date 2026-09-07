@@ -24,8 +24,9 @@ from email.message import EmailMessage
 from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
+from istota.skill_host_paths import resolve_in_roots, write_resolved
 from istota.skills._cli import parse_and_resolve, run_skill_cli
-from istota.skills._hostpath import EGRESS, host_path
+from istota.skills._hostpath import EGRESS, WRITE, host_path
 
 logger = logging.getLogger("istota.skills.email")
 
@@ -554,6 +555,7 @@ def download_attachments(
         raise ValueError("config is required")
 
     target_dir.mkdir(parents=True, exist_ok=True)
+    dest_root = target_dir.resolve()
 
     downloaded = []
     written = 0
@@ -563,27 +565,80 @@ def download_attachments(
 
         for msg in mailbox.fetch(AND(uid=email_id), mark_seen=False):
             for att in msg.attachments:
-                if att.filename:
-                    # Strip directory components to prevent path traversal
-                    safe_name = Path(att.filename).name
-                    if not safe_name or safe_name in ("..", "."):
-                        continue
-                    file_path = target_dir / safe_name
-                    if not file_path.resolve().is_relative_to(target_dir.resolve()):
-                        continue
-                    payload = att.payload or b""
-                    if max_total_bytes is not None and written + len(payload) > max_total_bytes:
-                        logger.warning(
-                            "Skipping attachment %s on email %s: it would take "
-                            "the download past its %d byte budget",
-                            safe_name, email_id, max_total_bytes,
-                        )
-                        continue
-                    file_path.write_bytes(payload)
-                    written += len(payload)
-                    downloaded.append(file_path)
+                if not att.filename:
+                    continue
+                file_path = _attachment_destination(dest_root, att.filename, email_id)
+                if file_path is None:
+                    continue
+                payload = att.payload or b""
+                if max_total_bytes is not None and written + len(payload) > max_total_bytes:
+                    logger.warning(
+                        "Skipping attachment on email %s: it would take "
+                        "the download past its %d byte budget",
+                        email_id, max_total_bytes,
+                    )
+                    continue
+                write_resolved(file_path, payload)
+                written += len(payload)
+                downloaded.append(file_path)
 
     return downloaded
+
+
+def _attachment_destination(
+    dest_root: Path, filename: str, email_id: str,
+) -> Path | None:
+    """Where one attachment may be written, or None if nowhere.
+
+    The filename comes out of a MIME header, so the sender chose it — which
+    makes `dest_root / filename` the second case in ISSUE-447's derived-path
+    rule: a component the code did not author, joined onto a path that was
+    resolved. It goes back through the containment rule, with the resolved
+    destination as the **only** root.
+
+    That root rather than the task's allowlist, for two reasons. A traversing
+    name that lands inside the workspace is still outside the directory the
+    caller asked for, and the caller has to be able to say where its own
+    attachments go. And this function has a *daemon-side* caller — the inbound
+    email poll writes into `config.temp_dir`, which is in no task's roots and
+    would be refused by an environment-derived allowlist that the daemon does
+    not have set anyway.
+
+    **Refused rather than sanitised to a basename**, which is the choice the
+    spec left open here. Reducing `../../etc/passwd` to `passwd` writes the
+    sender's bytes under a name they did not send and reports success; a
+    refusal says what happened, and the model is told which attachments did
+    not come back. It also keeps a legitimately nested name, which a basename
+    would flatten.
+
+    A NUL is refused by name rather than left to the write. `Path.is_symlink`
+    swallows the `ValueError` an embedded NUL raises and answers False, and
+    `path_under_roots` is lexical — so containment *passes* and the failure
+    surfaces from `os.open` several lines later, as a `ValueError` no consumer
+    of `write_resolved` expects and the daemon's poll path would take a whole
+    message on. `ValueError` is caught below as well, for whatever else a
+    header can spell.
+    """
+    if "\x00" in filename:
+        logger.warning(
+            "Skipping attachment on email %s: the name contains a NUL byte",
+            email_id,
+        )
+        return None
+    try:
+        resolved, error = resolve_in_roots(
+            dest_root / filename, [dest_root],
+            writable=True, operation=f"attachment on email {email_id}",
+        )
+    except (OSError, ValueError) as e:
+        logger.warning("Skipping unusable attachment name on email %s: %s", email_id, e)
+        return None
+    if error is not None:
+        # The name, never the payload, and never the resolved path of anything
+        # else: this line goes to the daemon log on the poll path.
+        logger.warning("Skipping attachment on email %s: %s", email_id, error)
+        return None
+    return resolved
 
 
 def _attach_files(msg: EmailMessage, attachments: list[str]) -> None:
@@ -2505,7 +2560,13 @@ def build_parser():
     # attachments
     p_att = sub.add_parser("attachments", help="Download an email's attachments (scoped)")
     p_att.add_argument("id", help="Email UID")
-    p_att.add_argument("--dest", required=True, help="Directory to save attachments into")
+    # `WRITE`: what lands here stays in the task's own working context — the
+    # user reads it back and `/chat/files` serves it — so this is the task's
+    # roots less the read-only ones, not the narrower `EGRESS` pair.
+    host_path(
+        p_att, "--dest", mode=WRITE, required=True,
+        help="Directory to save attachments into",
+    )
     _add_scope(p_att)
 
     # from-senders

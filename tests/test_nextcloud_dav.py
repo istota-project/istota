@@ -358,6 +358,28 @@ class TestDownload:
         assert result["bytes"] == 7
         assert mock_req.call_args[0][0] == "GET"
 
+    @patch("istota.nextcloud._http.httpx.request")
+    def test_a_symlink_at_the_destination_is_not_followed(
+        self, mock_req, nc_config, tmp_path,
+    ):
+        """The one caller is a skill CLI, so the destination is model-named.
+
+        `files download --local` is stamped `WRITE`, which refuses a link
+        standing at the leaf as of its own check — this is the half that
+        covers the window after it, and it is why the write goes through
+        `write_resolved` rather than `Path.write_bytes`.
+        """
+        mock_req.return_value = _dav_response(status=200, content=b"payload")
+        victim = tmp_path / "elsewhere.bin"
+        victim.write_bytes(b"not yours")
+        dest = tmp_path / "out.bin"
+        dest.symlink_to(victim)
+
+        with pytest.raises(OSError):
+            dav.download(nc_config, "/Users/alice/a.bin", dest)
+
+        assert victim.read_bytes() == b"not yours"
+
 
 # --- versions and trash ---
 
@@ -568,7 +590,6 @@ class TestFilesPathScoping:
             ["files", "stat", "/Users/bob/secret.pdf"],
             ["files", "list", "/Users/bob"],
             ["files", "search", "--scope", "/Users/bob"],
-            ["files", "download", "/Users/bob/x", "/tmp/x"],
             ["files", "versions", "/Users/bob/x"],
             ["files", "restore-version", "/Users/bob/x", "1"],
             ["files", "favorite", "/Users/bob/x"],
@@ -578,6 +599,20 @@ class TestFilesPathScoping:
         out, code = _run(capsys, argv)
         assert code == 1
         assert "/Users/alice" in out["error"]
+
+    @patch("istota.nextcloud.dav.download")
+    def test_download_remote_is_scoped(self, mock_download, capsys, workspace):
+        """Out of the parametrized list above, and for the same reason
+        `upload` is: since ISSUE-447 `--local` is scoped too, so a `/tmp`
+        destination is refused before the remote path is looked at and the
+        error names the wrong thing."""
+        out, code = _run(
+            capsys,
+            ["files", "download", "/Users/bob/x", str(workspace / "x")],
+        )
+        assert code == 1
+        assert "/Users/alice" in out["error"]
+        mock_download.assert_not_called()
 
     @patch("istota.nextcloud.dav.upload")
     def test_upload_destination_is_scoped(self, mock_upload, capsys, workspace):

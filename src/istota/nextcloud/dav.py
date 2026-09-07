@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 from ..config import Config
+from ..skill_host_paths import write_resolved
 from ._http import (
     DAV_TIMEOUT,
     OcsError,
@@ -488,9 +489,14 @@ def download(
         config, "GET", dav_files_url(config, remote_path), timeout=timeout
     )
     local = Path(local_path)
-    local.parent.mkdir(parents=True, exist_ok=True)
     content = resp.content if isinstance(resp.content, bytes) else str(resp.text).encode()
-    local.write_bytes(content)
+    # `write_resolved` rather than `write_bytes`, and it ensures the parent
+    # itself. The one caller is `nextcloud files download`, whose `--local` the
+    # model names: the argument is stamped `WRITE` and refused if a symlink
+    # stands at it, and this is what covers the window after that check, since
+    # the workspace is bound read-write into the sandbox and `write_bytes`
+    # would follow a link planted in between (ISSUE-447).
+    write_resolved(local, content)
     return {"status": "ok", "path": remote_path, "local": str(local), "bytes": len(content)}
 
 

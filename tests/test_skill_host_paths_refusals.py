@@ -250,12 +250,24 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.whisper.cli",
         patch=("istota.skills.whisper.cli", "cmd_transcribe"),
     ),
+
+    # -- Stage 6: the writes ------------------------------------------------ #
+    ("email", "attachments", "dest"): Case(
+        argv=lambda p: ["attachments", "17", "--dest", p],
+        main="istota.skills.email",
+        patch=("istota.skills.email", "cmd_attachments"),
+    ),
+    ("nextcloud", "files.download", "local"): Case(
+        argv=lambda p: ["files", "download", "/Users/alice/remote.bin", p],
+        main="istota.skills.nextcloud",
+        patch=("istota.skills.nextcloud._COMMANDS", ("files", "download")),
+    ),
 }
 
 #: How many resolving stamps this file expects to find at the very least.
 #: A parametrization that shrinks is a green run, so the count is asserted
 #: rather than trusted — the same reason the coverage walk asserts a floor.
-STAMP_FLOOR = 25
+STAMP_FLOOR = 27
 
 
 def _skill_parser_modules() -> dict[str, str]:

@@ -42,14 +42,15 @@ entry asserting a boundary that is gone. The other three dispositions are
   to be added here too. Reading a green run of this file as "every host path is
   scoped" is a misreading; read it as "every host path is enumerated".
 
-The unscoped list is the deliverable this file exists to produce. Six of the
-entries below came out of the first run and were not in the issue that
-motivated the work: ``nextcloud files upload --local`` reads any host file and
-puts it in Nextcloud, ``nextcloud files download --local`` writes anywhere on
-the host, ``email --body-file`` reads any host file into an outgoing message,
-``email attachments --dest`` writes into any directory (and its docstring says
-"scoped", which is where a stale claim ends up), and the ``health`` file verbs
-read any host file on a deployment where the deferred path does not apply.
+The unscoped list was the deliverable this file existed to produce, and it is
+now empty. Six of its entries came out of the first run and were in no issue:
+``nextcloud files upload --local`` read any host file and put it in Nextcloud,
+``nextcloud files download --local`` wrote anywhere on the host, ``email
+--body-file`` read any host file into an outgoing message, ``email attachments
+--dest`` wrote into any directory (and its docstring said "scoped", which is
+where a stale claim ends up), and the ``health`` file verbs read any host file
+on a deployment where the deferred path does not apply. Every one of them is a
+stamp on its own declaration now.
 
 Being *stamped* is not enough on its own either, and the difference matters
 when reading a green run here: this file says an argument has a disposition,
@@ -146,21 +147,20 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
         NOT_A_PATH, note="an activity filter name; the help names 'files'",
     ),
 
-    # -- Unscoped: open gaps, listed so they are countable -------------------
-    ("email", "attachments", "dest"): Entry(
-        UNSCOPED,
-        note="host write: attachments are saved into any directory named. The "
-             "docstring on cmd_attachments says 'scoped' and nothing scopes it.",
-    ),
     ("health", "import-immunizations", "paste"): Entry(
         NOT_A_PATH,
         note="literal text. `@PATH` used to make it a path and no longer "
              "does: a leading @ is refused with a message naming "
              "--paste-file, which is the stamped read.",
     ),
-    ("nextcloud", "files.download", "local"): Entry(
-        UNSCOPED, note="host write: the download lands wherever this names",
-    ),
+
+    # -- Unscoped: open gaps, listed so they are countable -------------------
+    #
+    # Empty. `email attachments --dest` and `nextcloud files download --local`
+    # were the last two and are stamped `WRITE` now. The disposition survives
+    # only until stage 7 of ISSUE-447 deletes it: an available way to record a
+    # gap is an invitation to record one, and an unstamped argument already
+    # fails this walk by name.
 }
 
 #: A `cli: true` skill whose CLI this walk cannot reach, and why. Held to the

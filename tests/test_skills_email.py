@@ -858,10 +858,27 @@ from istota.skills.email import AND as _AND
     reason="imap_tools not installed (install with: uv sync --extra email)",
 )
 class TestDownloadAttachmentsSecurity:
-    """Verify that attachment filenames are sanitized against path traversal."""
+    """Every attachment name is re-resolved under the destination directory.
 
-    def test_path_traversal_stripped(self, tmp_path, email_config):
-        """Filenames with ../ components should have directory parts stripped."""
+    The name comes out of a MIME header, so it is chosen by the sender —
+    which makes `target_dir / filename` the second case in Layer 3's
+    derived-path rule: a component the code did not author, joined onto a
+    path that was resolved. It goes back through the containment rule with
+    the resolved destination as the only root.
+
+    **Re-resolution rather than a basename**, which is the choice ISSUE-447
+    left to this stage. Stripping `../../etc/passwd` down to `passwd` writes
+    the sender's bytes under a name they did not send and reports success;
+    refusing says what happened. It also keeps a legitimately nested name,
+    which a basename would flatten. The root is the destination rather than
+    the task's allowlist, because a traversing name that stays inside the
+    workspace is still outside the directory the caller asked for — and
+    because the daemon's own inbound poll calls this with a temp directory
+    that is in no task's roots at all.
+    """
+
+    def test_path_traversal_refused(self, tmp_path, email_config):
+        """A name that climbs out of the destination is skipped, not rewritten."""
         from istota.skills.email import download_attachments
 
         mock_att = MagicMock()
@@ -879,13 +896,11 @@ class TestDownloadAttachmentsSecurity:
         with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
             result = download_attachments("1", target_dir=tmp_path, config=email_config)
 
-        # Should write as "passwd" in target_dir, not traverse
-        assert len(result) == 1
-        assert result[0].parent == tmp_path
-        assert result[0].name == "passwd"
+        assert result == []
+        assert not (tmp_path / "passwd").exists()
         assert not (tmp_path / ".." / ".." / "etc" / "passwd").exists()
 
-    def test_absolute_path_stripped(self, tmp_path, email_config):
+    def test_absolute_path_refused(self, tmp_path, email_config):
         from istota.skills.email import download_attachments
 
         mock_att = MagicMock()
@@ -903,11 +918,10 @@ class TestDownloadAttachmentsSecurity:
         with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
             result = download_attachments("1", target_dir=tmp_path, config=email_config)
 
-        assert len(result) == 1
-        assert result[0].name == "shadow"
-        assert result[0].parent == tmp_path
+        assert result == []
+        assert not (tmp_path / "shadow").exists()
 
-    def test_empty_filename_after_strip_skipped(self, tmp_path, email_config):
+    def test_a_filename_that_names_no_file_is_skipped(self, tmp_path, email_config):
         from istota.skills.email import download_attachments
 
         mock_att = MagicMock()
@@ -926,3 +940,92 @@ class TestDownloadAttachmentsSecurity:
             result = download_attachments("1", target_dir=tmp_path, config=email_config)
 
         assert len(result) == 0
+
+    def test_a_nested_name_lands_under_the_destination(self, tmp_path, email_config):
+        """The other half of the refusals above.
+
+        Re-resolution was chosen over sanitising to a basename, so a name a
+        mail client legitimately nests is kept rather than flattened — and
+        the refusals mean something only beside a case that is admitted.
+        """
+        from istota.skills.email import download_attachments
+
+        mock_att = MagicMock()
+        mock_att.filename = "scans/page1.png"
+        mock_att.payload = b"pixels"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [mock_att]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        assert result == [tmp_path / "scans" / "page1.png"]
+        assert result[0].read_bytes() == b"pixels"
+
+    def test_a_symlink_at_the_attachment_name_is_refused(self, tmp_path, email_config):
+        """The destination directory is model-writable, so the leaf is too.
+
+        A link standing at the name the message chose is refused before the
+        write, and `write_resolved`'s `O_NOFOLLOW` is what covers the window
+        after the check.
+        """
+        from istota.skills.email import download_attachments
+
+        target = tmp_path / "dest"
+        target.mkdir()
+        victim = tmp_path / "elsewhere.txt"
+        victim.write_text("not yours")
+        (target / "invoice.pdf").symlink_to(victim)
+
+        mock_att = MagicMock()
+        mock_att.filename = "invoice.pdf"
+        mock_att.payload = b"evil"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [mock_att]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=target, config=email_config)
+
+        assert result == []
+        assert victim.read_text() == "not yours"
+
+    def test_an_unusable_filename_is_skipped_rather_than_raising(
+        self, tmp_path, email_config,
+    ):
+        """A NUL byte in a MIME filename must not reach the daemon's poller.
+
+        `download_attachments` has a daemon-side caller — the inbound email
+        poll — so an exception here fails a whole message rather than one
+        attachment, and `os.lstat` raises `ValueError` rather than `OSError`
+        on an embedded NUL.
+        """
+        from istota.skills.email import download_attachments
+
+        mock_att = MagicMock()
+        mock_att.filename = "in\x00voice.pdf"
+        mock_att.payload = b"evil"
+
+        mock_msg = MagicMock()
+        mock_msg.attachments = [mock_att]
+
+        mock_mailbox = MagicMock()
+        mock_mailbox.__enter__ = MagicMock(return_value=mock_mailbox)
+        mock_mailbox.__exit__ = MagicMock(return_value=False)
+        mock_mailbox.fetch.return_value = [mock_msg]
+
+        with patch("istota.skills.email._get_mailbox", return_value=mock_mailbox):
+            result = download_attachments("1", target_dir=tmp_path, config=email_config)
+
+        assert result == []
