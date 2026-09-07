@@ -36,12 +36,12 @@ describes the wrong failure is worse than a generic one.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from typing import TYPE_CHECKING
 
 from . import _common
 
 if TYPE_CHECKING:
-    import sqlite3
     from pathlib import Path
 
     from ..config import Config
@@ -121,6 +121,47 @@ _DEFAULT_REMEDY = "Reconnect under Settings → Connected services."
 # `notification_store._STALE_SWEEP_BUSY_TIMEOUT_MS`, for the same reason: see
 # :func:`close_for_service`.
 _CLOSE_BUSY_TIMEOUT_MS = 2000
+
+# What the never-raises guards below exist to absorb: the framework DB was locked,
+# gone or full at the moment the row went to be written. Anything else reaching
+# one of them is a defect in *this* frame rather than a service that stopped
+# working, and the two must not be the same journal line (ISSUE-460).
+#
+# Narrowing the catch itself is not an option — a dead credential must not become
+# a traceback out of the sync engine or out of a token refresh, which is the whole
+# reason these helpers exist. So the catch stays blanket and the *level* carries
+# the distinction.
+#
+# `OperationalError` rather than `sqlite3.Error`: the siblings under that base are
+# `ProgrammingError` ("Cannot operate on a closed database"), `IntegrityError` and
+# `DataError`, which are the same class of defect as the `TypeError` this issue was
+# filed about and must not be filed under "the database was busy". The residual
+# ambiguity is priced in rather than missed — SQLite reports `no such column` as an
+# `OperationalError` too, so a migration that renames one out from under this
+# module still reads as operational here. There is no finer split in the DBAPI, and
+# the alternative is losing the busy case, which is the one that actually happens.
+#
+# Live on the `write` and `close` legs only. `raise_notification` absorbs its own
+# DB failures (`notification_store.raise_notification`), so nothing sqlite-shaped
+# survives the call to reach :func:`raise_for_service` — everything arriving there
+# is a defect by construction, and this tuple is why that stays true if someone
+# widens it later.
+_EXPECTED_FAILURES = (sqlite3.OperationalError, OSError)
+
+
+def _log_swallowed(action: str, service: str, user_id: str, exc: Exception) -> None:
+    """One spelling of 'this failed and the caller will never find out'."""
+    if isinstance(exc, _EXPECTED_FAILURES):
+        logger.warning(
+            "could not %s the %s notification for %r", action, service, user_id,
+            exc_info=True,
+        )
+        return
+    logger.error(
+        "could not %s the %s notification for %r: unexpected %s, so the alert was "
+        "dropped by a bug here rather than by the failure this guard is for",
+        action, service, user_id, type(exc).__name__, exc_info=True,
+    )
 
 
 def dedup_key(service: str) -> str:
@@ -205,17 +246,18 @@ def raise_for_service(
     Never raises: the whole point of this source is a sync that failed, and the
     failure must not turn into a traceback out of the sync engine. The guard is
     here rather than only in the store because `_row_kwargs` is evaluated in
-    *this* frame, outside the store's own.
+    *this* frame, outside the store's own — and so is the splat into
+    `raise_notification`, which is why a signature change there would surface as
+    a `TypeError` this handler catches and the store's never sees. Swallowing it
+    at the same level as a locked database is what ISSUE-460 was: see
+    :func:`_log_swallowed` for the split.
     """
     try:
         from ..notification_store import raise_notification
 
         return raise_notification(config, user_id, **_row_kwargs(service, reason))
-    except Exception:
-        logger.warning(
-            "could not raise the %s notification for %r", service, user_id,
-            exc_info=True,
-        )
+    except Exception as exc:
+        _log_swallowed("raise", service, user_id, exc)
         return None
 
 
@@ -232,7 +274,8 @@ def write_for_service(
     failure saying nothing at all. Same split the email skill CLI takes for a
     held outbound draft.
 
-    Never raises, for the reason above.
+    Never raises, for the reason above, and distinguishes a defect from a
+    locked database the same way.
     """
     try:
         from .. import db
@@ -240,11 +283,8 @@ def write_for_service(
 
         with db.get_db(db_path) as conn:
             write_notification(conn, user_id, **_row_kwargs(service, reason))
-    except Exception:
-        logger.warning(
-            "could not write the %s notification for %r", service, user_id,
-            exc_info=True,
-        )
+    except Exception as exc:
+        _log_swallowed("write", service, user_id, exc)
 
 
 def resolve_for_service(
@@ -262,7 +302,9 @@ def close_for_service(db_path: "Path", user_id: str, service: str, *, by: str) -
     The two close sites are `garmin.store_tokens` and `garmin.clear_tokens`,
     which reach the framework DB only through `secrets_store` — see
     :func:`raise_for_service` for why opening a connection there is safe. Never
-    raises: closing an inbox row must not be able to fail a reconnect.
+    raises: closing an inbox row must not be able to fail a reconnect. Losing the
+    short lock budget below is the expected half of that and stays a warning;
+    anything else is logged as the defect it is.
     """
     try:
         from .. import db
@@ -275,11 +317,8 @@ def close_for_service(db_path: "Path", user_id: str, service: str, *, by: str) -
         # panel read instead of `resolved` now.
         with db.get_db(db_path, busy_timeout_ms=_CLOSE_BUSY_TIMEOUT_MS) as conn:
             resolve_for_service(conn, user_id, service, by=by)
-    except Exception:
-        logger.warning(
-            "could not close the %s notification for %r",
-            service, user_id, exc_info=True,
-        )
+    except Exception as exc:
+        _log_swallowed("close", service, user_id, exc)
 
 
 class ConnectedServiceResolver:
