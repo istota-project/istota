@@ -532,6 +532,103 @@ def _is_shutdown_collateral(result: str) -> bool:
     return _shutdown_requested and is_signal_termination(result)
 
 
+@dataclass(frozen=True)
+class RetryDecision:
+    """What `process_one_task` does with a finished attempt.
+
+    `reason` names the winning arm, so the branch that writes the row and the
+    block that emits the terminal event select on the same value instead of
+    each re-deriving it. `delay_minutes` is 0 unless `will_retry`.
+    """
+
+    will_retry: bool
+    delay_minutes: int
+    reason: str
+
+
+def retry_flags(task, result: str, *, success: bool) -> dict[str, bool]:
+    """The six non-retryable classes a failed attempt can fall into.
+
+    Returned as a dict keyed by `decide_retry`'s keyword names, so the only
+    correct way to use it is to splat it — a site cannot compute five of the
+    six and quietly disagree with the other site about the sixth. That is
+    exactly how a command task killed by SIGPIPE came to be marked failed by
+    the row-writing branch while the event block still told a watching web
+    client it was retrying.
+
+    A successful attempt has no failure class, so every flag is False. That is
+    deliberate rather than defensive: `result` on the success path is the
+    model's answer, and classifying it would let an answer that happens to read
+    like a cancellation change what the client is sent.
+    """
+    if success:
+        return {
+            "is_cancelled": False, "is_policy": False, "is_oom": False,
+            "is_requeued": False, "is_permanent": False, "is_sigpipe": False,
+        }
+    return {
+        "is_cancelled": result == "Cancelled by user",
+        "is_policy": _is_policy_refusal(result),
+        "is_oom": "killed (likely out of memory)" in result,
+        "is_requeued": _is_shutdown_collateral(result),
+        # A request-shaped provider failure (bad model id, expired key,
+        # oversized prompt) fails identically on every attempt, so the
+        # 1/4/16-minute ladder buys nothing but delay (ISSUE-212). The brain
+        # already skips its own in-brain retry for these; this is the task
+        # level. Banner-gated so a normal answer discussing a 400 can't
+        # suppress a legitimate retry.
+        "is_permanent": is_api_error_banner(result) and is_permanent_api_error(result),
+        # A command task killed by SIGPIPE is the second non-retryable class,
+        # and the reason is stronger than "the retry cannot help". `pipefail`
+        # turned `<producer> | head -N` from exit 0 into exit 141, and the
+        # ladder re-runs the *whole* command string — so a producer that sends
+        # mail or writes a file does it again at 1, 4 and 16 minutes, having
+        # already succeeded. 141 will recur anyway. Gated on `task.command`
+        # because `_execute_command_task` is the only thing that composes this
+        # text; an LLM answer quoting it is not a reason to skip a retry the
+        # task earned.
+        "is_sigpipe": bool(task.command) and is_sigpipe_failure(result),
+    }
+
+
+def decide_retry(
+    task, result: str, *,
+    is_cancelled: bool, is_policy: bool, is_oom: bool,
+    is_requeued: bool, is_permanent: bool, is_sigpipe: bool,
+    success: bool = False,
+) -> RetryDecision:
+    """Whether a finished attempt is retried, and after how long.
+
+    `result` is unused and kept because the two call sites read as a pair with
+    `retry_flags`; every decision this makes is already in the flags and the
+    task's attempt counters.
+
+    Arm order matters only for `reason`: cancellation, a policy refusal and a
+    shutdown requeue each take a distinct branch at the call site and so are
+    tested first, in that order. `is_oom`, `is_permanent`, `is_sigpipe` and an
+    exhausted attempt budget all land on the same "failed permanently" arm, so
+    which of them wins names the log line and nothing else.
+    """
+    if success:
+        return RetryDecision(False, 0, "success")
+    if is_cancelled:
+        return RetryDecision(False, 0, "cancelled")
+    if is_policy:
+        return RetryDecision(False, 0, "policy")
+    if is_requeued:
+        return RetryDecision(False, 0, "requeued")
+    if is_oom:
+        return RetryDecision(False, 0, "oom")
+    if is_permanent:
+        return RetryDecision(False, 0, "permanent")
+    if is_sigpipe:
+        return RetryDecision(False, 0, "sigpipe")
+    if task.attempt_count < task.max_attempts - 1:
+        # Exponential backoff: 1, 4, 16 minutes.
+        return RetryDecision(True, 1 << (task.attempt_count * 2), "retry")
+    return RetryDecision(False, 0, "attempts_exhausted")
+
+
 def _strip_action_prefix(result: str) -> tuple[bool, str]:
     """Parse ACTION:/NO_ACTION: prefixes from a silent task result.
 
@@ -3123,40 +3220,24 @@ def process_one_task(
                         once_job_to_remove = (job.user_id, job.name)
 
         else:
-            # Check if we should retry (skip for OOM, cancellation, and policy refusals)
-            is_oom = "killed (likely out of memory)" in result
-            is_cancelled = result == "Cancelled by user"
-            is_policy = _is_policy_refusal(result)
-            is_shutdown_collateral = _is_shutdown_collateral(result)
-            # A request-shaped provider failure (bad model id, expired key,
-            # oversized prompt) fails identically on every attempt, so the
-            # 1/4/16-minute ladder buys nothing but delay (ISSUE-212). The brain
-            # already skips its own in-brain retry for these; this is the task
-            # level. Banner-gated so a normal answer discussing a 400 can't
-            # suppress a legitimate retry.
-            is_permanent = is_api_error_banner(result) and is_permanent_api_error(result)
-            if is_permanent:
+            # Check if we should retry (skip for OOM, cancellation, and policy
+            # refusals). Both this branch and the terminal-event block below
+            # classify the same failure; they share one classifier and one
+            # decision so they cannot disagree about it.
+            flags = retry_flags(task, result, success=False)
+            decision = decide_retry(task, result, **flags)
+            if flags["is_permanent"]:
                 logger.warning(
                     "Task %d: permanent provider error, not retrying: %s",
                     task_id, result[:200],
                 )
-            # A command task killed by SIGPIPE is the second non-retryable
-            # class, and the reason is stronger than "the retry cannot help".
-            # `pipefail` turned `<producer> | head -N` from exit 0 into exit
-            # 141, and the ladder re-runs the *whole* command string — so a
-            # producer that sends mail or writes a file does it again at 1, 4
-            # and 16 minutes, having already succeeded. 141 will recur anyway.
-            # Gated on `task.command` because `_execute_command_task` is the
-            # only thing that composes this text; an LLM answer quoting it is
-            # not a reason to skip a retry the task earned.
-            is_sigpipe = bool(task.command) and is_sigpipe_failure(result)
-            if is_sigpipe:
+            if flags["is_sigpipe"]:
                 logger.warning(
                     "Task %d: command killed by SIGPIPE, not retrying (the "
                     "pipeline's producer already ran): %s",
                     task_id, result[:200],
                 )
-            if is_cancelled:
+            if flags["is_cancelled"]:
                 # `result` here is the partial answer, not the error: the brain
                 # kept what the model had written when the cancel landed and the
                 # row is where it survives (ISSUE-372). Nothing is posted — the
@@ -3170,7 +3251,7 @@ def process_one_task(
                 )
                 db.log_task(conn, task_id, "info", "Task cancelled by user via !stop")
                 # No Talk notification needed — !stop already acknowledged
-            elif is_policy:
+            elif flags["is_policy"]:
                 # Policy refusals are non-retryable: same content will be rejected again.
                 # Mark failed and post an alert so the user sees what was blocked.
                 db.update_task_status(conn, task_id, "failed", error=result, actions_taken=actions_taken, execution_trace=execution_trace)
@@ -3201,7 +3282,7 @@ def process_one_task(
                         notification_results.append(_note_job_auto_disabled(
                             conn, task.scheduled_job_id, fail_count,
                         ))
-            elif is_shutdown_collateral:
+            elif flags["is_requeued"]:
                 # Not a task failure — the daemon is going away and took the
                 # subprocess with it. Requeue without charging an attempt or
                 # setting a backoff; the next daemon claims it immediately.
@@ -3221,10 +3302,8 @@ def process_one_task(
                 _purge_deferred_files_for_retry(
                     task, get_user_temp_dir(config, task.user_id),
                 )
-            elif task.attempt_count < task.max_attempts - 1 and not is_oom \
-                    and not is_permanent and not is_sigpipe:
-                # Exponential backoff: 1, 4, 16 minutes
-                delay = 1 << (task.attempt_count * 2)
+            elif decision.will_retry:
+                delay = decision.delay_minutes
                 db.set_task_pending_retry(conn, task_id, result, delay)
                 db.log_task(conn, task_id, "warn", f"Task failed, will retry in {delay} minutes: {result[:200]}")
                 # ISSUE-074: clear any deferred-op files this attempt accumulated
@@ -3349,50 +3428,48 @@ def process_one_task(
         _remove_once_job_from_cron_md(config, *once_job_to_remove)
 
     # Emit terminal task events + notify subscribers (brain path only). On a
-    # retry-eligible failure the task isn't done — emit nothing terminal; the
-    # On a retry-eligible failure the task isn't done — emit a "retrying" notice
-    # (not a terminal frame) instead, so a watching web client sees why it's
-    # still working rather than a silent spinner. The log is no longer wiped, so
-    # this notice and the next attempt's events (seq resumed) reach the client.
+    # retry-eligible failure the task isn't done — emit a "retrying" notice (not
+    # a terminal frame) instead, so a watching web client sees why it's still
+    # working rather than a silent spinner. The log is no longer wiped, so this
+    # notice and the next attempt's events (seq resumed) reach the client.
     if event_writer is not None:
-        is_cancelled = (not success) and result == "Cancelled by user"
-        is_policy = (not success) and _is_policy_refusal(result)
-        is_oom = (not success) and "killed (likely out of memory)" in result
-        is_requeued = (not success) and _is_shutdown_collateral(result)
-        is_permanent_api = (not success) and is_api_error_banner(result) \
-            and is_permanent_api_error(result)
-        will_retry = (
-            (not success)
-            and not is_cancelled
-            and not is_policy
-            and not is_oom
-            and not is_requeued
-            and not is_permanent_api
-            and task.attempt_count < task.max_attempts - 1
-        )
-        if is_requeued:
+        # The same two calls the row-writing branch above makes, recomputed
+        # rather than carried across: that branch runs inside a DB transaction
+        # that has since closed, is skipped entirely on the success path, and
+        # `_is_shutdown_collateral` reads a flag another thread can set in
+        # between. What must not be recomputed is the *rule*, and this block
+        # used to hold a second copy of it that derived five of the six classes
+        # and omitted `is_sigpipe` — so a command task killed by SIGPIPE was
+        # failed permanently by the branch while this block told the client it
+        # would be retried and skipped the terminal frame. Latent rather than
+        # live: `is_sigpipe` needs `task.command`, and a command task never
+        # reaches the `else` arm that builds an `event_writer`. Sharing the
+        # classifier is what keeps it latent if either of those facts changes.
+        flags = retry_flags(task, result, success=success)
+        decision = decide_retry(task, result, success=success, **flags)
+        if flags["is_requeued"]:
             # Same reasoning as the retry notice below: the task isn't done, so
             # no terminal frame — tell the watching client why it stalled.
             event_writer.emit("progress_text", {
                 "text": "⏳ Scheduler restarting — this task will resume shortly…",
             })
-        elif will_retry:
-            # Mirror the backoff the retry branch set (1, 4, 16 min). Reuses the
+        elif decision.will_retry:
+            # The backoff the retry branch set (1, 4, 16 min), taken off the
+            # same decision instead of a second copy of the shift. Reuses the
             # progress_text kind — the frontend already renders it as the live
             # progress line; it shows during the backoff gap, then the next
             # attempt's task_started replaces it with the fresh ack verb.
-            delay = 1 << (task.attempt_count * 2)
             event_writer.emit("progress_text", {
-                "text": f"⏳ Attempt failed — retrying in {delay} min…",
+                "text": f"⏳ Attempt failed — retrying in {decision.delay_minutes} min…",
             })
-        if not will_retry and not is_requeued:
+        if not decision.will_retry and not flags["is_requeued"]:
             if is_confirmation_request:
                 event_writer.emit("confirmation", {"prompt": result})
             elif success:
                 # Full answer — see ISSUE-178. The canonical body is stored
                 # untruncated in `messages`; the live `result` event must match.
                 event_writer.emit("result", {"text": result, "truncated": False})
-            elif is_cancelled:
+            elif flags["is_cancelled"]:
                 event_writer.emit("cancelled")
             else:
                 event_writer.emit("error", {
