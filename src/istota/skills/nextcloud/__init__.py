@@ -41,7 +41,7 @@ from istota.nextcloud_client import (
     ocs_list_shares,
     ocs_search_sharees,
 )
-from istota.skills._cli import error_envelope, run_skill_cli
+from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 
 _SHARE_TYPE_MAP = shares_mod.SHARE_TYPES
 _DEFAULT_EXPIRE_DAYS = 14
@@ -1074,7 +1074,7 @@ _COMMANDS = {
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     group = getattr(args, "group", None)
     command = getattr(args, "command", None)

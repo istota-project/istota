@@ -20,7 +20,7 @@ import json
 import os
 import sys
 
-from istota.skills._cli import emit, error_envelope
+from istota.skills._cli import emit, error_envelope, parse_and_resolve
 
 
 def _output_error(msg: str, **extra) -> None:
@@ -517,7 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parse_and_resolve(parser)
     if args.command == "show":
         cmd_show(args)
     elif args.command == "list":

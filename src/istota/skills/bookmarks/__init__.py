@@ -24,7 +24,7 @@ import os
 
 import httpx
 
-from istota.skills._cli import run_skill_cli
+from istota.skills._cli import parse_and_resolve, run_skill_cli
 
 
 REQUEST_TIMEOUT = 30.0
@@ -463,7 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "search": cmd_search,

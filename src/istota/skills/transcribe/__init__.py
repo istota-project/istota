@@ -16,7 +16,7 @@ import argparse
 
 from istota.ocr_leaf import ocr_image, preprocess_image, text_from_data
 
-from istota.skills._cli import run_skill_cli
+from istota.skills._cli import parse_and_resolve, run_skill_cli
 
 __all__ = [
     "preprocess_image",
@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "ocr": cmd_ocr,

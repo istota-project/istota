@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-from istota.skills._cli import emit, error_envelope, run_skill_cli
+from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
 
 
 def _run(args: list[str]) -> dict:
@@ -274,7 +274,7 @@ def build_parser():
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "list": cmd_list,

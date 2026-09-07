@@ -24,7 +24,7 @@ from email.message import EmailMessage
 from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
-from istota.skills._cli import run_skill_cli
+from istota.skills._cli import parse_and_resolve, run_skill_cli
 
 logger = logging.getLogger("istota.skills.email")
 
@@ -2620,7 +2620,7 @@ def build_parser():
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "list": cmd_list,

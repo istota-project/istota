@@ -29,7 +29,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from istota.skills._cli import fail as _fail, run_skill_cli
+from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 
 
 def setup_env(ctx) -> dict[str, str]:
@@ -728,7 +728,7 @@ def build_parser():
 
 def main():
     parser = build_parser()
-    args = parser.parse_args()
+    args = parse_and_resolve(parser)
 
     commands = {
         "current": cmd_current,

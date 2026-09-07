@@ -36,7 +36,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from istota.skills._cli import emit, error_envelope, run_skill_cli
+from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
 
 
 _DEFER_FILENAME = "task_{task_id}_health_ops.json"
@@ -2106,7 +2106,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parse_and_resolve(parser)
 
     commands = {
         "log": cmd_log,

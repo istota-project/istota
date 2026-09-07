@@ -26,7 +26,7 @@ from pathlib import Path
 
 from istota.kv_namespaces import is_reserved_namespace
 from istota.skill_host_paths import resolve_host_path
-from istota.skills._cli import fail as _fail, run_skill_cli
+from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 
 # `list` decodes and prints every value in a namespace. The natural command for
 # orienting in a namespace should not be the one that dumps a 153 KB array into
@@ -689,7 +689,7 @@ _SET_OPS = frozenset({
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
     namespace = getattr(args, "namespace", None)
     if is_reserved_namespace(namespace):
         _fail(

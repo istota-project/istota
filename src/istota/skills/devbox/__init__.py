@@ -70,7 +70,7 @@ from pathlib import Path
 from istota import devbox_exec_client as _client
 from istota import devbox_exec_protocol as proto
 from istota.skill_host_paths import resolve_host_path, write_resolved
-from istota.skills._cli import error_envelope, run_skill_cli
+from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 
 DEFAULT_MAX_OUTPUT_BYTES = 102_400
 MAX_COMMAND_BYTES = 32 * 1024  # `bash -o pipefail -c` argv length cap
@@ -1015,7 +1015,7 @@ _DISPATCH = {
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     def describe(exc: BaseException) -> dict:
         if isinstance(exc, _Refused):

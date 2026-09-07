@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 from istota.skill_host_paths import env_host_roots, resolve_in_roots
-from istota.skills._cli import run_skill_cli
+from istota.skills._cli import parse_and_resolve, run_skill_cli
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -544,7 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "search": cmd_search,

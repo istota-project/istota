@@ -26,7 +26,7 @@ from istota.skill_host_paths import (
     user_workspace_root,
     write_resolved,
 )
-from istota.skills._cli import error_envelope, run_skill_cli
+from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.user_scope import scoped_user_dir
 
 DEFAULT_API_URL = "http://localhost:9223"
@@ -690,7 +690,7 @@ def build_parser():
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "get": cmd_get,

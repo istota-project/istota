@@ -11,7 +11,7 @@ import argparse
 import json
 from pathlib import Path
 
-from istota.skills._cli import run_skill_cli
+from istota.skills._cli import parse_and_resolve, run_skill_cli
 from istota.skills.whisper.models import (
     download_model,
     get_available_memory_gb,
@@ -144,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "transcribe": cmd_transcribe,

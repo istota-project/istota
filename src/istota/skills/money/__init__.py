@@ -18,6 +18,8 @@ import json
 import os
 import sys
 
+from istota.skills._cli import parse_and_resolve
+
 
 def _unwrap_inner_error(raw: str) -> str:
     """If ``raw`` is itself an ``{"status":"error","error":"..."}``
@@ -1079,7 +1081,7 @@ def build_parser():
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "list": cmd_list,
