@@ -117,6 +117,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Fixed
 
+- One malformed health record no longer takes the rest of a task's health writes with it. A task that files several results at once writes them as a batch the scheduler replays afterwards, and one entry carrying the wrong kind of value — a number where a file path belongs, a list where a measurement belongs — aborted the replay where every other malformed entry was logged, kept for recovery and skipped. Everything after it in that batch was silently never written, along with the task's Garmin import, its alerts and its email reply, since all of those are replayed after the health records. Three neighbouring cases had the same shape and are fixed with it: a stray value in the batch behind `kv`, the one behind outbound email, and a batch file nested deeply enough that reading it failed outright.
+
 - Pressing Enter to pick an account while editing a transaction no longer saves the transaction along with it. The edit form committed on Enter from anywhere on the page, so confirming an option in the account dropdown selected it and closed the form in one keystroke, with whatever was in the other fields at the time. Every other money form already withheld Enter from anything that is not a text field.
 
 - A portfolio page that fails to load now says so in the failure colour. Overview and History under Money → Portfolio rendered their error message in the same dim grey as the "Loading…" placeholder it stands in for, so a page that had given up looked like one still working. Every other page in the app already had this right; the check that holds them to it was only looking for the right box and not for the colour on it, which is why these two went unnoticed.

@@ -1,4 +1,7 @@
-"""Deferred subtask creation: what a child inherits from its parent.
+"""Deferred-op handlers: subtask inheritance, the health source-path guard,
+and one bad op not costing the rest of the drain.
+
+Deferred subtask creation: what a child inherits from its parent.
 
 A subtask's `source_type` is `"subtask"`, so without an explicit inheritance it
 would take `[brain.source_type_overrides]["subtask"]` and could silently run a
@@ -265,15 +268,8 @@ CSV = (
 )
 
 
-class TestDeferredImportCsvSourcePath:
-    """`import_csv` replays a path written from inside the sandbox.
-
-    The daemon doing the replay is never sandboxed, so an unscoped
-    `source_path` files any host file the daemon can read into the user's
-    health database — from where it comes back through the health UI and the
-    health skill. Its two neighbours (`register_upload`, `attach_document`)
-    already resolve through `_resolved_source_path`; this arm did not.
-    """
+class _HealthOpsReplay:
+    """Replay a deferred health op file the way the daemon does."""
 
     def _ctx(self, tmp_path):
         """Production's shape: the bot workspace sits inside the user's dir."""
@@ -290,9 +286,12 @@ class TestDeferredImportCsvSourcePath:
         from istota import db as core_db
         from istota.scheduler_deferred import _process_deferred_health_ops
 
-        (deferred / f"task_{task_id}_health_ops.json").write_text(
-            json.dumps(ops), encoding="utf-8",
-        )
+        # `ops=None` means the caller wrote the file itself — the way to get
+        # JSON that `json.dumps` cannot produce, such as a bare `Infinity`.
+        if ops is not None:
+            (deferred / f"task_{task_id}_health_ops.json").write_text(
+                json.dumps(ops), encoding="utf-8",
+            )
 
         import istota.health as _health
 
@@ -324,6 +323,17 @@ class TestDeferredImportCsvSourcePath:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         return path
+
+
+class TestDeferredImportCsvSourcePath(_HealthOpsReplay):
+    """`import_csv` replays a path written from inside the sandbox.
+
+    The daemon doing the replay is never sandboxed, so an unscoped
+    `source_path` files any host file the daemon can read into the user's
+    health database — from where it comes back through the health UI and the
+    health skill. Its two neighbours (`register_upload`, `attach_document`)
+    already resolve through `_resolved_source_path`; this arm did not.
+    """
 
     def test_a_workspace_source_is_imported(self, tmp_path):
         """The acceptance half: without it, every refusal below is vacuous."""
@@ -463,3 +473,250 @@ class TestDeferredImportCsvSourcePath:
                     candidate, deferred, config, user_id,
                 )
                 assert via_config == via_guard, (user_id, candidate)
+
+
+class TestDeferredHealthOpBatchIsolation(_HealthOpsReplay):
+    """One malformed op must not take the rest of the batch with it.
+
+    Every field in a deferred op file is model-authored JSON written from
+    inside the sandbox, so any of the loop's coercions can be handed the
+    wrong type: `Path(123)`, `float([1])` and `int({})` all raise
+    `TypeError`. That was outside the per-op `except` tuple, so instead of
+    the intended "log it, record it, carry on" the exception unwound the
+    whole drain and every later op in the file was silently never applied —
+    on records that are not idempotent and cannot be replayed by hand
+    (ISSUE-451).
+    """
+
+    def _stats(self, ctx):
+        from istota.health import db as health_db
+
+        with health_db.connect(ctx.db_path) as conn:
+            return health_db.list_stats(conn)
+
+    def test_a_non_string_source_path_leaves_the_batch_running(
+        self, tmp_path, caplog,
+    ):
+        """The reported shape: a bad path arm ahead of a good op."""
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = self._write(ctx.workspace_root.parent / "inbox" / "labs.csv")
+
+        with caplog.at_level(logging.ERROR, logger="istota.scheduler"):
+            count = self._replay(ctx, deferred, [
+                {"op": "import_csv", "source_path": 123},
+                {"op": "import_csv", "source_path": str(src)},
+            ], task_id=7)
+
+        assert count == 1
+        assert len(self._panel_ids(ctx)) == 1
+        assert any(
+            "Failed to process health op" in r.getMessage()
+            for r in caplog.records
+        )
+
+        # The failing op has to be recoverable, not merely survived: without
+        # the sidecar the user has a health record that never arrived and no
+        # way to tell which one.
+        sidecar = deferred / "task_7_health_op_failures.json"
+        recorded = json.loads(sidecar.read_text(encoding="utf-8"))
+        assert len(recorded) == 1
+        assert recorded[0]["op"]["source_path"] == 123
+        assert recorded[0]["error"].startswith("TypeError:")
+
+    def test_a_non_numeric_value_leaves_the_batch_running(self, tmp_path):
+        """The same failure class away from the path arms.
+
+        `float(entry["value"])` is one of twenty-odd coercions over the same
+        untrusted JSON, so a fix confined to `_resolved_source_path` would
+        leave this one aborting the drain.
+        """
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+
+        count = self._replay(ctx, deferred, [
+            {"op": "insert_stat", "metric": "weight", "value": [72], "unit": "kg"},
+            {"op": "insert_stat", "metric": "weight", "value": 72.5, "unit": "kg"},
+        ], task_id=8)
+
+        assert count == 1
+        assert [s.value for s in self._stats(ctx)] == [72.5]
+
+    def test_an_infinite_id_leaves_the_batch_running(self, tmp_path):
+        """Why the guard stopped enumerating types.
+
+        `json.loads` accepts a bare `Infinity`, and `int(float("inf"))` raises
+        `OverflowError` — neither the original tuple nor the same tuple plus
+        `TypeError` would have caught it, and the drain would still have been
+        one model-written token away from aborting.
+        """
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        (deferred / "task_10_health_ops.json").write_text(
+            '[{"op": "delete_diagnosis", "diagnosis_id": Infinity},'
+            ' {"op": "insert_stat", "metric": "weight", "value": 71.0,'
+            ' "unit": "kg"}]',
+            encoding="utf-8",
+        )
+
+        count = self._replay(ctx, deferred, None, task_id=10)
+
+        assert count == 1
+        assert [s.value for s in self._stats(ctx)] == [71.0]
+
+
+class TestDeferredDrainSurvivesANonDictEntry:
+    """The same failure class in the drain's other two loops.
+
+    `_load_deferred_json` type-checks the outer list only. The health and KG
+    loops skip a non-dict entry; the KV and sent-email loops read `.get` off
+    it before their own `try`, so one bare string in a model-written file
+    raised an AttributeError that escaped the handler — and
+    `_drain_deferred_ops` calls its handlers in a bare sequence, so that also
+    skipped every handler after it.
+    """
+
+    def _task(self, db_path, user_id="alice"):
+        with db.get_db(db_path) as conn:
+            task_id = db.create_task(conn, prompt="t", user_id=user_id)
+            return db.get_task(conn, task_id)
+
+    def _user_temp(self, tmp_path):
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        return user_temp
+
+    def test_kv_ops_skips_it_and_applies_the_rest(self, db_path, tmp_path):
+        from istota.scheduler_deferred import _process_deferred_kv_ops
+
+        config = Config(db_path=db_path, temp_dir=tmp_path / "temp")
+        task = self._task(db_path)
+        user_temp = self._user_temp(tmp_path)
+        (user_temp / f"task_{task.id}_kv_ops.json").write_text(
+            json.dumps([
+                "not an op",
+                {"op": "set", "namespace": "notes", "key": "k", "value": "v"},
+            ]),
+            encoding="utf-8",
+        )
+
+        assert _process_deferred_kv_ops(config, task, user_temp) == 1
+        with db.get_db(db_path) as conn:
+            row = db.kv_get(conn, "alice", "notes", "k")
+        assert row is not None
+        assert row["value"] == "v"
+
+    def test_sent_emails_skips_it_and_applies_the_rest(self, db_path, tmp_path):
+        from istota.scheduler_deferred import _process_deferred_sent_emails
+
+        config = Config(db_path=db_path, temp_dir=tmp_path / "temp")
+        task = self._task(db_path)
+        user_temp = self._user_temp(tmp_path)
+        (user_temp / f"task_{task.id}_sent_emails.json").write_text(
+            json.dumps([
+                ["not", "an", "entry"],
+                {"message_id": "<m1@example.com>", "to_addr": "her@example.com"},
+            ]),
+            encoding="utf-8",
+        )
+
+        assert _process_deferred_sent_emails(config, task, user_temp) == 1
+
+
+class TestDrainSurvivesOneHandlersBadOp(_HealthOpsReplay):
+    """The seam, not the handler: what a bad health op used to cost.
+
+    `_drain_deferred_ops` calls its handlers in a bare sequence with no guard
+    between them, so an exception escaping the health loop did not stop at
+    the end of that file — the Garmin import, the user alerts and the
+    deferred email output for that task were all skipped behind it. The
+    handler-level tests above cannot see that; this one runs the real drain.
+    """
+
+    def test_a_bad_health_op_no_longer_costs_the_later_handlers(
+        self, db_path, tmp_path,
+    ):
+        import istota.health as _health
+        from istota.scheduler import _drain_deferred_ops
+
+        ctx = self._ctx(tmp_path)
+        config = Config(
+            db_path=db_path,
+            temp_dir=tmp_path / "temp",
+            nextcloud_mount_path=ctx.workspace_root.parent.parent.parent,
+        )
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        with db.get_db(db_path) as conn:
+            task = db.get_task(
+                conn, db.create_task(conn, prompt="t", user_id="alice"),
+            )
+
+        (user_temp / f"task_{task.id}_health_ops.json").write_text(
+            json.dumps([
+                {"op": "insert_stat", "metric": "weight",
+                 "value": [72], "unit": "kg"},
+                {"op": "insert_stat", "metric": "weight",
+                 "value": 72.5, "unit": "kg"},
+            ]),
+            encoding="utf-8",
+        )
+        (user_temp / f"task_{task.id}_user_alerts.json").write_text(
+            json.dumps([{"type": "note", "message": "something looked odd"}]),
+            encoding="utf-8",
+        )
+
+        original = _health.resolve_for_user
+        try:
+            _health.resolve_for_user = lambda uid, cfg: ctx
+            _drain_deferred_ops(config, task, "done")
+        finally:
+            _health.resolve_for_user = original
+
+        from istota.health import db as health_db
+
+        with health_db.connect(ctx.db_path) as conn:
+            assert [s.value for s in health_db.list_stats(conn)] == [72.5]
+
+        # The handler that runs *after* the health one still ran.
+        with db.get_db(db_path) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM notifications WHERE user_id = ?",
+                ("alice",),
+            ).fetchone()
+        assert rows[0] == 1
+
+
+class TestLoaderSurvivesUnparseableJson:
+    """`_load_deferred_json` is the other place one file kills the drain.
+
+    Its catch covers the file the model wrote, so it has to cover what
+    parsing that file can raise — a decode error, and deeply nested JSON,
+    which raises `RecursionError` rather than a `JSONDecodeError`.
+    """
+
+    def test_a_recursion_error_is_contained(self, tmp_path, monkeypatch, caplog):
+        from istota.scheduler_deferred import _load_deferred_json
+
+        path = tmp_path / "task_3_health_ops.json"
+        path.write_text("[]", encoding="utf-8")
+
+        # The depth at which the parser gives up is the interpreter's, not
+        # ours; raising it here keeps the test about containment rather than
+        # about a stack size that could change under it.
+        def _raise(*a, **kw):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(json, "loads", _raise)
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            assert _load_deferred_json(tmp_path, 3, "health_ops") is None
+
+        assert not path.exists()
+        assert any(
+            "Bad deferred health_ops file" in r.getMessage()
+            for r in caplog.records
+        )
