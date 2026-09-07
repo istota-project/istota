@@ -22,6 +22,7 @@ from istota.config_mapper import (
     coerce_bool,
     coerce_float,
     coerce_int,
+    coerce_path,
     coerce_str_list,
 )
 
@@ -404,6 +405,40 @@ class TestCoercion:
 
     def test_a_non_list_keeps_the_default(self):
         assert coerce_str_list("a,b", "k") is _KEEP
+
+    def test_an_empty_path_keeps_the_default(self):
+        """`Path("")` is `Path(".")`, the working directory (ISSUE-462).
+
+        The three fields declared `Path` rather than `Path | None` are
+        `db_path`, `skills_dir` and `temp_dir`, and each has a real default; an
+        operator who blanks one has unset it, not asked for the directory the
+        daemon happens to be started from. `coerce_optional_path` states the
+        same trap one function over, where the answer is `None` because the
+        field can hold one.
+        """
+        assert coerce_path("", "k") is _KEEP
+        assert coerce_path("   ", "k") is _KEEP
+        assert coerce_path("/srv/app/data", "k") == Path("/srv/app/data")
+        assert coerce_path(".", "k") == Path("."), (
+            "a deliberately relative path is not the empty-string case; "
+            "config.py handles a relative temp_dir on its own terms"
+        )
+
+    def test_a_blank_temp_dir_does_not_load_as_the_working_directory(
+        self, tmp_path, caplog,
+    ):
+        """The seam, through the real loader.
+
+        `temp_dir` is the root `build_mount_plan` scopes the workspace bind
+        against, so a blank one used to build every task's namespace around
+        the daemon's own working directory. It now keeps `/tmp/istota` and
+        says which key it ignored.
+        """
+        p = write(tmp_path, 'temp_dir = ""\n')
+        with caplog.at_level(logging.WARNING):
+            cfg = load_config(p)
+        assert cfg.temp_dir == Path("/tmp/istota")
+        assert "temp_dir" in caplog.text
 
 
 class TestApplySection:
