@@ -359,7 +359,7 @@ class TestDeferredImportCsvSourcePath:
             '2026-08-01,"Other Lab",7.7,13.3\n',
         )
 
-        with caplog.at_level(logging.WARNING, logger="istota.scheduler_deferred"):
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
             count = self._replay(ctx, deferred, [
                 {"op": "import_csv", "source_path": str(outside)},
             ], task_id=2)
@@ -368,7 +368,27 @@ class TestDeferredImportCsvSourcePath:
         assert self._panel_ids(ctx) == mark
         assert any("import_csv skipped" in r.getMessage() for r in caplog.records)
 
-    def test_a_symlink_out_of_the_workspace_is_skipped(self, tmp_path):
+    def test_a_deferred_dir_source_is_imported(self, tmp_path):
+        """The route a sandboxed task actually takes.
+
+        The workspace case above is the email-attachment shape. A task with
+        no mount write of its own writes into `$ISTOTA_DEFERRED_DIR`, which
+        is the guard's other root, and a narrowing that dropped it would
+        leave the case above green while breaking the sandbox's own path.
+        """
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = self._write(deferred / "labs.csv")
+
+        count = self._replay(ctx, deferred, [
+            {"op": "import_csv", "source_path": str(src)},
+        ])
+
+        assert count == 1
+        assert len(self._panel_ids(ctx)) == 1
+
+    def test_a_symlink_out_of_the_workspace_is_skipped(self, tmp_path, caplog):
         """Resolution comes first, so a link inside the roots is caught too."""
         ctx = self._ctx(tmp_path)
         deferred = tmp_path / "deferred"
@@ -379,9 +399,38 @@ class TestDeferredImportCsvSourcePath:
         link.parent.mkdir(parents=True, exist_ok=True)
         link.symlink_to(outside)
 
-        count = self._replay(ctx, deferred, [
-            {"op": "import_csv", "source_path": str(link)},
-        ])
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            count = self._replay(ctx, deferred, [
+                {"op": "import_csv", "source_path": str(link)},
+            ])
 
         assert count == 0
         assert self._panel_ids(ctx) == set()
+        # Pin the *reason*: count == 0 alone is equally true of a parse
+        # failure or an op that raised and was recorded in `failures`.
+        assert any("import_csv skipped" in r.getMessage() for r in caplog.records)
+
+    def test_the_roots_come_from_a_real_config(self, tmp_path):
+        """Bind the guard to `Config.workspace_root`, not to the fake.
+
+        Every case above hands the replayer a hand-written config. If the
+        real method were renamed or its signature changed, `_source_path_allowed`
+        would fall through to its fallback arm and silently start refusing
+        every workspace import, with a WARNING as the only signal.
+        """
+        from istota.scheduler_deferred import _source_path_allowed
+
+        config = Config()
+        config.nextcloud_mount_path = tmp_path / "mount"
+        user_root = config.workspace_root("alice")
+        assert user_root == tmp_path / "mount" / "Users" / "alice"
+
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        mine = self._write(user_root / "inbox" / "labs.csv")
+        theirs = self._write(
+            tmp_path / "mount" / "Users" / "bob" / "inbox" / "labs.csv",
+        )
+
+        assert _source_path_allowed(mine, deferred, config, "alice", None)
+        assert not _source_path_allowed(theirs, deferred, config, "alice", None)
