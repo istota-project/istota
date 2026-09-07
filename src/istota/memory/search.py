@@ -467,6 +467,43 @@ def index_conversation(
                           topic=topic, entities=entities, valid_until=valid_until)
 
 
+def source_path(file_path: str | os.PathLike[str]) -> str:
+    """The one spelling a file gets as a ``source_id``.
+
+    ``index_file`` keys both its insert and the delete that makes the insert a
+    *replacement* on this string, so two callers naming one file two ways
+    record two keys for it and neither pass can replace what the other wrote
+    (ISSUE-452). They did: the ``memory_search`` CLI resolves its argument
+    before dispatch, while ``reindex_all`` and the sleep cycle build paths from
+    the configured mount, and a mount reached through a symlink — a supported
+    shape — makes those different strings for the same bytes. Resolving here
+    rather than at the call sites is what keeps the next caller honest.
+
+    A symlink at the *leaf* collapses onto its target's key, so two names for
+    one file are one source and the last pass to index either wins. That is the
+    same rule one level down and is intended; nothing here reads through a link
+    it would not already have read, since the content arrives as an argument.
+
+    ``os.path.realpath`` rather than ``Path.resolve``, for
+    ``repos_relocate._real``'s reasons: it resolves the components that exist
+    and keeps the rest, so a file the caller is about to write indexes under
+    the same spelling as one already on disk. Both of its failures return the
+    path as given rather than raising — ``OSError``, and ``ValueError`` on an
+    embedded NUL — because a raise here would take out a whole reindex pass
+    over one bad name, and ``resolve`` additionally raises ``RuntimeError`` on
+    a symlink loop, which is two commands to make inside a workspace that is
+    bound read-write into the user's own sandbox.
+    """
+    if not str(file_path):
+        # `realpath("")` is the process cwd, which is nobody's memory file and
+        # which `executor`'s last-use stamp would later `os.utime`.
+        return ""
+    try:
+        return os.path.realpath(file_path)
+    except (OSError, ValueError):
+        return str(file_path)
+
+
 def index_file(
     conn: sqlite3.Connection,
     user_id: str,
@@ -492,9 +529,35 @@ def index_file(
     window (ISSUE-109 #2) so a chunk whose episode has closed self-suppresses
     from recall. Used by the sleep cycle to propagate episodic facts' close
     dates to the bullets they were extracted from.
+
+    ``file_path`` is recorded as its :func:`source_path`, whatever spelling the
+    caller passed. Two deletes follow rather than one: the first clears this
+    file's rows under that key, and the second — conditional, see the comment
+    on it — clears rows an older version wrote under the caller's own spelling.
     """
+    given = str(file_path)
+    file_path = source_path(file_path)
     # Delete existing chunks for this source
     _delete_source_chunks(conn, user_id, source_type, file_path)
+    if given != file_path and os.path.isabs(given):
+        # Any rows under the caller's own spelling — which on a deployment that
+        # predates ISSUE-452 is where this file's rows are. Nothing writes that
+        # key now, so the delete above misses them and no later pass can reach
+        # them: the next edit inserts the new version beside a superseded one
+        # that is searchable for good. Clearing it here heals each file as it is
+        # reindexed, which is what makes a one-off pass over the table
+        # unnecessary. Measured on an upgrade: without this, one stale row
+        # survives every subsequent reindex.
+        #
+        # "Any rows" is the literal behaviour and it is wider than the upgrade
+        # case: where a directory holds both a link and its target, the link's
+        # own rows go when either is indexed. That follows from one file having
+        # one key, which is the whole point above.
+        #
+        # Only for an absolute `given`, where `realpath` makes the two spellings
+        # the same file as a fact about the filesystem. A relative one resolves
+        # against the process cwd, so rows under it may name something else.
+        _delete_source_chunks(conn, user_id, source_type, given)
 
     chunks = chunk_text(content)
     meta = {"file_path": file_path}

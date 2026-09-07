@@ -427,6 +427,154 @@ class TestIndexFile:
         conn.close()
 
 
+class TestOneSpellingPerFile:
+    """ISSUE-452: a file's chunks are keyed on its resolved path, whoever indexes it.
+
+    The callers disagreed. `memory_search index file` hands `index_file` a
+    fully resolved path (ISSUE-447 resolves the argument before dispatch);
+    `reindex_all` hands it the path as constructed from the configured mount.
+    Where any ancestor of the mount is a symlink — a supported shape — the two
+    spellings name one file, and the delete that makes an index pass a
+    *replacement* only cleared rows under the spelling it was given. A
+    superseded version stayed searchable under the other one with no pass able
+    to reach it.
+
+    The entry's first symptom is wrong and the second is the real one. Two
+    passes over identical content do not duplicate rows: `memory_chunks` is
+    `UNIQUE(user_id, content_hash)`, so the second insert is dropped. What the
+    disagreement produces is a stale version living beside the current one.
+    """
+
+    def _symlinked_mount(self, tmp_path):
+        real = tmp_path / "real"
+        (real / "Users" / "alice" / "memories").mkdir(parents=True)
+        link = tmp_path / "mount"
+        link.symlink_to(real)
+        return link
+
+    def _config(self, mount):
+        config = MagicMock()
+        config.nextcloud_mount_path = mount
+        # Overlays have their own pass, their own path rule and their own
+        # tests; this is about the two callers that disagreed.
+        config.use_mount = False
+        return config
+
+    def _sources(self, conn, source_type="memory_file"):
+        rows = conn.execute(
+            "SELECT DISTINCT source_id FROM memory_chunks "
+            "WHERE user_id = 'alice' AND source_type = ?",
+            (source_type,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def test_a_reindex_replaces_what_the_skill_cli_indexed(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        mount = self._symlinked_mount(tmp_path)
+        note = mount / "Users" / "alice" / "memories" / "2026-09-07.md"
+
+        # The control the entry asks for: on a host with no symlink in the
+        # path the two spellings are equal and everything below passes against
+        # any implementation, so assert they differ before relying on it.
+        note.write_text("ferrets were the topic of version one")
+        assert str(note) != str(note.resolve())
+
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
+            index_file(conn, "alice", str(note.resolve()), note.read_text(), "memory_file")
+            note.write_text("badgers are the topic of version two")
+            reindex_all(conn, self._config(mount), "alice", lookback_days=1)
+
+            assert _search_bm25(conn, "alice", "ferrets", 10) == []
+            assert len(_search_bm25(conn, "alice", "badgers", 10)) == 1
+
+        assert self._sources(conn) == [str(note.resolve())]
+        conn.close()
+
+    def test_the_skill_cli_replaces_what_a_reindex_indexed(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        mount = self._symlinked_mount(tmp_path)
+        note = mount / "Users" / "alice" / "memories" / "2026-09-07.md"
+        note.write_text("ferrets were the topic of version one")
+        assert str(note) != str(note.resolve())
+
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
+            reindex_all(conn, self._config(mount), "alice", lookback_days=1)
+            note.write_text("badgers are the topic of version two")
+            index_file(conn, "alice", str(note.resolve()), note.read_text(), "memory_file")
+
+            assert _search_bm25(conn, "alice", "ferrets", 10) == []
+            assert len(_search_bm25(conn, "alice", "badgers", 10)) == 1
+
+        assert self._sources(conn) == [str(note.resolve())]
+        conn.close()
+
+    def test_rows_from_before_the_fix_are_cleared_by_the_next_index(self, tmp_path):
+        # An upgrade finds rows under the spelling the old code wrote. Nothing
+        # writes that key now, so leaving them makes them unreachable rather
+        # than merely stale — measured on this fixture before `index_file`
+        # cleared them: the unchanged reindex inserted nothing (the content
+        # hash was already taken, `UNIQUE(user_id, content_hash)`), and the
+        # first edit afterwards left the superseded version searchable beside
+        # the current one with no pass able to delete either.
+        #
+        # `user_memory` rather than `memory_file` on purpose: it is outside
+        # EPHEMERAL_SOURCE_TYPES, so `cleanup_old_chunks` never reclaims it.
+        conn = _init_db(tmp_path / "test.db")
+        mount = self._symlinked_mount(tmp_path)
+        note = mount / "Users" / "alice" / "USER.md"
+        note.write_text("ferrets were the topic of version one")
+        assert str(note) != str(note.resolve())
+
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
+            _insert_chunks(
+                conn, "alice", "user_memory", str(note),
+                chunk_text(note.read_text()), {"file_path": str(note)},
+            )
+            note.write_text("badgers are the topic of version two")
+            index_file(conn, "alice", str(note), note.read_text(), "user_memory")
+
+            assert _search_bm25(conn, "alice", "ferrets", 10) == []
+            assert len(_search_bm25(conn, "alice", "badgers", 10)) == 1
+
+        assert self._sources(conn, "user_memory") == [str(note.resolve())]
+        conn.close()
+
+    def test_a_relative_spelling_does_not_take_rows_with_it(self, tmp_path):
+        # The false branch of the guard on that second delete. A relative path
+        # resolves against whatever the process cwd was at the time, so rows
+        # under it are not established to name the file being indexed and are
+        # left alone — only the resolved key is written and cleared.
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
+            _insert_chunks(
+                conn, "alice", "memory_file", "notes.md",
+                chunk_text("ferrets from some other working directory"),
+                {"file_path": "notes.md"},
+            )
+            index_file(conn, "alice", "notes.md", "badgers here", "memory_file")
+
+        assert "notes.md" in self._sources(conn)
+        assert os.path.join(os.getcwd(), "notes.md") in self._sources(conn)
+        conn.close()
+
+    def test_a_path_that_does_not_exist_keeps_its_own_spelling(self, tmp_path):
+        # Most callers index a file they just read, but the sleep cycle writes
+        # and indexes inside one transaction and the tests index paths that
+        # were never created. Resolution must not depend on the file being
+        # there, and must not invent a parent that is not in the path.
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False), \
+             patch("istota.memory.search.enable_vec_extension", return_value=False):
+            index_file(conn, "alice", "/gone/mem.md", "content about otters", "memory_file")
+
+        assert self._sources(conn) == ["/gone/mem.md"]
+        conn.close()
+
+
 class TestRRFFusion:
     def test_fusion_basic(self):
         bm25 = [
