@@ -94,7 +94,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
-from .user_scope import scoped_user_dir
+from .user_scope import is_within, scoped_user_dir
 
 
 def workspace_roots(
@@ -590,14 +590,13 @@ def path_under_roots(resolved: Path, roots: Sequence[Path]) -> bool:
 
     An empty `roots` is False, never True. Refusing is this module's posture
     for an allowlist it could not build.
+
+    The per-root test is `user_scope.is_within` and the *root set* stays a
+    parameter, which is the whole shape of ISSUE-447: the deferred replay's
+    roots carry no conversation token and no Talk root while a skill CLI's do,
+    and one predicate over two root sets is not the same thing as one root set.
     """
-    for root in roots:
-        try:
-            resolved.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
+    return any(is_within(resolved, root) for root in roots)
 
 
 def _outside(resolved: Path) -> str:

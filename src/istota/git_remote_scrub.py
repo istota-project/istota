@@ -76,6 +76,7 @@ from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
 from istota.git_hardening import GIT_SUBPROCESS_ENV
+from istota.user_scope import is_within
 
 logger = logging.getLogger("istota.git_remote_scrub")
 
@@ -316,15 +317,6 @@ def is_git_dir(path: Path) -> bool:
     return head.startswith(b"ref:") or bool(re.match(rb"^[0-9a-fA-F]{40,64}\s*$", head))
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    """Whether ``path`` is strictly inside ``root``. Both already resolved."""
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return path != root
-
-
 def _is_worktree_pointer(path: Path) -> bool:
     """Whether ``path`` is a linked worktree's ``.git`` file rather than any
     old file that happens to be called that."""
@@ -382,13 +374,17 @@ def find_git_dirs(
     # reaper are silently switched off by a config typo. `build_bwrap_cmd`
     # refuses such a value, but neither caller here consults that predicate —
     # they read the key straight from config, so the check belongs here.
+    #
+    # `is_within` is inclusive of the root, so the `resolved == root` term below
+    # is what makes this strict. Both sides are already resolved, which is what
+    # that lexical predicate requires.
     pruned: set[Path] = set()
     for entry in skip:
         try:
             resolved = Path(entry).resolve()
         except OSError:
             continue
-        if resolved == root or not _is_under(resolved, root):
+        if resolved == root or not is_within(resolved, root):
             logger.warning(
                 "git_remote_scrub: refusing to prune %s from the sweep of %s — "
                 "it is not strictly inside it, and pruning it would skip "
@@ -593,12 +589,17 @@ def _writable(origin: Path, root: Path) -> bool:
     model a daemon-privileged write at a path of its choosing. Detection may
     range that far; correction may not. Anything outside the resolved root is
     reported with ``removed=False`` instead.
+
+    The resolution is here rather than inside
+    :func:`~istota.user_scope.is_within`, which is lexical: an origin naming
+    ``{root}/../etc/gitconfig`` is under the root by spelling and outside it on
+    disk, and that is the whole input class this predicate exists for.
     """
     try:
-        origin.resolve().relative_to(root)
-        return True
-    except (OSError, ValueError):
+        resolved = origin.resolve()
+    except OSError:
         return False
+    return is_within(resolved, root)
 
 
 def _host_of(url: str) -> str:

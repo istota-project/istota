@@ -153,6 +153,7 @@ from pathlib import Path
 
 from .git_hardening import run_git
 from .git_remote_scrub import is_git_dir
+from .user_scope import is_within, scoped_user_dir
 
 logger = logging.getLogger(__name__)
 
@@ -303,30 +304,29 @@ def _real(path: Path) -> Path:
 def _contained(root: Path, name: str) -> bool:
     """``{root}/{name}`` really is a child of ``root``, symlinks included.
 
-    The same equality rule ``executor.get_user_repos_dir`` and
-    ``sandbox_cache_sweeper`` use, and for the same reason: truthiness alone
-    lets through ``.`` (which collapses to the root), ``..`` (its parent) and
-    an absolute component (which replaces the root outright), and the entries
-    here were model-writable on every deployment running the old shared bind.
+    :func:`~istota.user_scope.scoped_user_dir`, which is the same equality rule
+    ``executor.get_user_repos_dir`` and ``sandbox_cache_sweeper`` apply and for
+    the same reason: truthiness alone lets through ``.`` (which collapses to
+    the root), ``..`` (its parent) and an absolute component (which replaces
+    the root outright), and the entries here were model-writable on every
+    deployment running the old shared bind.
+
+    Kept as a named predicate rather than inlined at its four call sites: this
+    module asks the question about a *clone directory name* read back from the
+    tree, not about a user id, and the name is what its callers read.
     """
-    if not name or name in (".", "..") or os.sep in name or "/" in name:
-        return False
-    candidate = root / name
-    try:
-        return (
-            candidate.parent == root
-            and candidate.resolve() == root.resolve() / name
-        )
-    except OSError:
-        return False
+    return scoped_user_dir(root, name) is not None
 
 
 def _under(child: Path, parent: Path) -> bool:
-    """``child`` is at or below ``parent``, compared on realpaths."""
-    try:
-        return _real(child).is_relative_to(_real(parent))
-    except (OSError, ValueError):  # pragma: no cover - both are pure paths
-        return False
+    """``child`` is at or below ``parent``, compared on realpaths.
+
+    :func:`~istota.user_scope.is_within` is lexical; the resolution is
+    :func:`_real`'s, and it is ``realpath`` rather than ``Path.resolve`` for
+    this module's reason — it is asked about paths git recorded before a
+    rename, which no longer exist.
+    """
+    return is_within(_real(child), _real(parent))
 
 
 def _translate(path: Path, src_root: Path, dst_root: Path) -> Path | None:

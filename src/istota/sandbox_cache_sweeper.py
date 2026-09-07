@@ -173,6 +173,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from istota import du
+from istota.user_scope import is_scopable_user_id, scoped_user_dir
 
 logger = logging.getLogger("istota.sandbox_cache_sweeper")
 
@@ -293,37 +294,18 @@ def _largest_child(path: Path) -> tuple[str, int]:
 # Containment
 # --------------------------------------------------------------------------
 
-def _is_one_component(user_id: str) -> bool:
-    """Whether *user_id* is a single, ordinary path component.
-
-    Everything a join would treat as navigation rather than as a name: empty,
-    ``.``, ``..``, anything holding a separator, anything absolute. Written out
-    rather than inferred from a parent comparison because ``PurePath`` keeps
-    ``..`` literal, so ``(root / "..").parent == root`` and the comparison says
-    yes to the one value that matters most.
-
-    ``os.altsep`` is checked as well as ``os.sep``: it is ``None`` on Linux and
-    ``\\`` on Windows, and a rule about what is safe to join should not be
-    quietly narrower on the platform nobody tests on.
-    """
-    if not user_id or user_id in (".", ".."):
-        return False
-    if os.sep in user_id or (os.altsep and os.altsep in user_id):
-        return False
-    return not Path(user_id).is_absolute()
-
-
 def _candidates_in_root(root: Path) -> Iterator[tuple[str, Path, bool]]:
     """One-level layout: each entry in ``root`` is a user's cache.
 
     The shape ``security.sandbox_cache_dir`` produces —
     ``resolve_sandbox_cache_dir`` creates ``{root}/{user_id}`` and nothing
     deeper on that branch — so a candidate is a directory that **resolves to
-    its own name inside the root**: ``entry.resolve() == root.resolve() /
-    entry.name``. A directory that fails that yields ``False`` and is reported
-    rather than silently skipped: a planted symlink is the interesting case,
-    and a sweep that quietly ignored one would look identical to a sweep that
-    found nothing.
+    its own name inside the root**, which is
+    :func:`~istota.user_scope.scoped_user_dir` and is asked against the root
+    resolved once, at the top, rather than per entry. A directory that fails
+    that yields ``False`` and is reported rather than silently skipped: a
+    planted symlink is the interesting case, and a sweep that quietly ignored
+    one would look identical to a sweep that found nothing.
 
     **Equality, not "the resolved parent is the root".** The weaker test reads
     as though it excludes every symlink and does not: ``{root}/zzz`` pointing at
@@ -363,10 +345,10 @@ def _candidates_in_root(root: Path) -> Iterator[tuple[str, Path, bool]]:
             # remove one; it needs no outcome row.
             if not entry.is_dir():
                 continue
-            resolved = entry.resolve()
-            if resolved != resolved_root / entry.name:
+            if scoped_user_dir(resolved_root, entry.name) is None:
                 yield entry.name, entry, False
                 continue
+            resolved = entry.resolve()
         except OSError:
             continue
         # The *resolved* path is what goes on, never the entry as read. The
@@ -415,12 +397,30 @@ def _candidates_for_users(
     — a parent comparison alone lets a bare ``..`` through to ``resolve()``,
     which answers perfectly happily for a path outside the root. The equality
     would still refuse the result, but only after a traversal outside the root
-    had been stat'd. So the id is checked against a small explicit rule
-    instead: not empty, not ``.`` or ``..``, no separator, not absolute. What
-    the *resolved* equality is for is symlinks, which are children by name and
-    somewhere else on disk. Same two-check pair as
-    ``executor.get_user_repos_dir``, with the labour divided the way that
-    function's docstring divides it.
+    had been stat'd. So the id is checked against
+    :func:`~istota.user_scope.is_scopable_user_id` instead — the lexical half
+    of the shared rule, without a root. What the *resolved* equality is for is
+    symlinks, which are children by name and somewhere else on disk.
+
+    **The equality is the shared rule applied twice, once per level**, and the
+    composition is exactly the single comparison it replaces:
+    ``scoped_user_dir(root, user_id)`` refuses a link at
+    ``{root}/{user_id}``, and ``scoped_user_dir(that, CACHE_ROOT_NAME)``
+    refuses one at ``.package-caches``. Both are model-plantable and either
+    alone leaves the other open. The two calls run *after* the ``is_dir``
+    check, in the position the single equality held, so a user with no cache
+    directory is still skipped in silence rather than reported.
+
+    One tightening came with the shared lexical half: an id with surrounding
+    whitespace, or an embedded NUL, is now refused where the old
+    one-component rule admitted it. Both directions of that refusal are safe
+    here — the id comes from the daemon's user list, the outcome is a reported
+    row rather than a swept directory, and ``skill_host_paths`` reads
+    ``ISTOTA_USER_ID`` through ``.strip()``, so a padded id names one
+    directory to this module and another to the host-side allowlist.
+    ``os.altsep`` is no longer checked: it is ``None`` on Linux, and the
+    shared rule deliberately admits a backslash because ``DOMAIN\\user`` is
+    what an LDAP-backed Nextcloud hands out.
 
     A user with no cache directory yet is skipped silently rather than reported:
     on this layout that is every user who has not run a task, and an outcome row
@@ -452,12 +452,13 @@ def _candidates_for_users(
             # parent comparison — `PurePath` keeps `..` as a literal component,
             # so `(root / "..").parent` *is* the root and a bare `..` would
             # otherwise reach `resolve()` and stat a path outside the tree.
-            if not _is_one_component(user_id) or candidate.parent != subtree:
+            if not is_scopable_user_id(user_id) or candidate.parent != subtree:
                 yield user_id, candidate, False
                 continue
             if not candidate.is_dir():
                 continue
-            if candidate.resolve() != resolved_root / user_id / CACHE_ROOT_NAME:
+            scoped = scoped_user_dir(resolved_root, user_id)
+            if scoped is None or scoped_user_dir(scoped, CACHE_ROOT_NAME) is None:
                 yield user_id, candidate, False
                 continue
         except (OSError, ValueError, TypeError):

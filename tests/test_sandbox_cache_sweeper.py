@@ -54,6 +54,7 @@ from istota.sandbox_cache_sweeper import (
     sweep_and_report,
     sweep_caches,
 )
+from istota.user_scope import is_scopable_user_id
 
 MB = 1024 * 1024
 
@@ -1399,8 +1400,8 @@ class TestTheIdentityPin:
 
 
 class TestTheUserIdRule:
-    """`_is_one_component`, and the reason it is written out rather than
-    inferred from a parent comparison."""
+    """`user_scope.is_scopable_user_id`, and the reason the lexical half runs
+    at all rather than being inferred from a parent comparison."""
 
     def test_a_bare_dotdot_never_reaches_the_filesystem(
         self, tmp_path, toolbox, monkeypatch,
@@ -1412,8 +1413,9 @@ class TestTheUserIdRule:
         the whole point of the test: the resolved equality refuses `..` either
         way, so a test that only checked the action stayed green with the
         lexical rule reverted. What changes is whether a path outside the root
-        gets stat'd first. Verified by control — reverting `_is_one_component`
-        to the parent comparison turns this red and the action assertion green.
+        gets stat'd first. Verified by control — replacing the lexical check
+        with the parent comparison turns this red and the action assertion
+        green.
         """
         toolbox("uv")
         repos = tmp_path / "repos"
@@ -1453,10 +1455,28 @@ class TestTheUserIdRule:
         assert toolbox.calls() == []
 
     def test_the_predicate_itself(self):
+        """The shared lexical rule, which replaced this module's own.
+
+        The two lists are unchanged from the local `_is_one_component` they
+        were written against. What the shared rule adds is the padded and
+        NUL-bearing cases below, which that one admitted.
+        """
         for bad in ("", ".", "..", "a/b", "/etc", "/", "a/"):
-            assert not sweeper._is_one_component(bad), bad
+            assert not is_scopable_user_id(bad), bad
         for good in ("alice", "bob-1", ".hidden", "a.b", "..."):
-            assert sweeper._is_one_component(good), good
+            assert is_scopable_user_id(good), good
+
+    @pytest.mark.parametrize("user_id", [" alice", "alice ", "ali\0ce", 7, None])
+    def test_the_shared_rule_refuses_what_the_local_one_admitted(self, user_id):
+        """A tightening, recorded rather than absorbed.
+
+        `_is_one_component` checked for a separator and for absoluteness and
+        stopped there, so `" alice"` was a valid user id to this module while
+        `skill_host_paths` — which strips before scoping — read it as `alice`.
+        One of the two spellings has to lose and this is the one nothing
+        legitimately produces.
+        """
+        assert not is_scopable_user_id(user_id)
 
     def test_a_non_string_user_id_does_not_escape_the_generator(
         self, tmp_path, toolbox,

@@ -54,6 +54,7 @@ from istota.forge_bin import IMAGE_BIN as _IMAGE_BIN  # noqa: F401 - re-export
 from istota.forge_bin import resolve_real_bin as _resolve_real_bin
 from istota.forge_cli import FORGE_GITHUB, FORGE_GITLAB, build_policy
 from istota.git_remote_scrub import scrub_and_report
+from istota.user_scope import scoped_user_dir
 
 logger = logging.getLogger("istota.skills.developer")
 
@@ -719,12 +720,22 @@ def setup_env(ctx) -> dict[str, str]:
 def _user_repos_dir(dev, ctx) -> Path | None:
     """``{repos_dir}/{user_id}``, created if it is not there, or None.
 
-    The layout rule is ``executor.get_user_repos_dir``, including its
-    containment check; this is the same rule written a second time because a
-    skill module cannot import the executor that imports it (``istota.skills``
-    star-imports every skill, so the executor's import graph would ride along
-    on every path that touches one). ``tests/test_sandbox.py::TestPerUserReposDir``
-    holds the two equal, so a change to either without the other goes red.
+    The layout rule is ``executor.get_user_repos_dir``: the same configured
+    root joined with the same id, written a second time because a skill module
+    cannot import the executor that imports it (``istota.skills`` star-imports
+    every skill, so the executor's import graph would ride along on every path
+    that touches one). ``tests/test_sandbox.py::TestPerUserReposDir`` holds the
+    two equal, so a change to either without the other goes red.
+
+    The *containment* check is not written twice any more. Both sides call
+    ``user_scope.scoped_user_dir``, which is the stdlib-only leaf that exists
+    for exactly this — a skill subprocess reaches it without pulling in the
+    executor. It is also stricter than the two-term equality that used to sit
+    here: a user id with surrounding whitespace or an embedded NUL, or one that
+    is not a string, is refused rather than joined. All three fail closed, and
+    the first matters because ``skill_host_paths`` reads ``ISTOTA_USER_ID``
+    through ``.strip()``, so ``" alice"`` would have had this hook create and
+    chmod one directory while the host-side allowlist admitted another.
 
     Created here, at 0700, because ``build_bwrap_cmd``'s ``_bind`` skips a path
     that does not exist. Without it a user's first developer task binds nothing
@@ -770,14 +781,7 @@ def _user_repos_dir(dev, ctx) -> Path | None:
 
     root = Path(dev.repos_dir)
     repos_root = root / user_id
-    try:
-        contained = (
-            repos_root.parent == root
-            and repos_root.resolve() == root.resolve() / user_id
-        )
-    except OSError:
-        contained = False
-    if not contained:
+    if scoped_user_dir(root, user_id) is None:
         # A symlink left in the root by a task from the shared-tree era, or a
         # user id that is not one path component. Either way this is not that
         # user's subtree, and `mkdir`, `chmod` and the scrub's rewrites would

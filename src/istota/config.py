@@ -19,7 +19,7 @@ from .config_mapper import (
     coerce_int,
     report_unknown,
 )
-from .user_scope import scoped_user_dir
+from .user_scope import paths_overlap, scoped_user_dir
 
 if TYPE_CHECKING:
     import sqlite3
@@ -2837,12 +2837,7 @@ def _warn_ro_paths_over_control_tree(config: "Config") -> None:
         # it binds one user's, or one task's, which is smaller and no more
         # acceptable — and is the shape a well-meaning "let the model read its
         # own control dir" edit takes.
-        overlaps = (
-            resolved == control_root
-            or control_root.is_relative_to(resolved)
-            or resolved.is_relative_to(control_root)
-        )
-        if overlaps:
+        if paths_overlap(resolved, control_root):
             if entry in _RO_PATH_CONTROL_TREE_WARNED:
                 continue
             _RO_PATH_CONTROL_TREE_WARNED.add(entry)

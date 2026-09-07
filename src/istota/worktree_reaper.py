@@ -116,6 +116,7 @@ from typing import NamedTuple
 
 from istota.git_hardening import run_git
 from istota.git_remote_scrub import find_git_dirs
+from istota.user_scope import is_within
 
 logger = logging.getLogger("istota.worktree_reaper")
 
@@ -649,13 +650,19 @@ def _is_within(path: Path, root: Path) -> bool:
     ``worktree add`` takes any path and the records live in a directory the
     model can write, so a record naming somewhere outside the sweep's own root
     is out of scope — acting on it would let a chosen path steer a delete.
+
+    The resolution is here and the comparison is
+    :func:`~istota.user_scope.is_within`, which is lexical: a record naming
+    ``{root}/..`` is a child by spelling and the root's parent on disk, so
+    asking the shared predicate about the unresolved path would answer about
+    the wrong directory.
     """
     try:
         resolved = path.resolve()
         base = root.resolve()
     except OSError:
         return False
-    return resolved == base or base in resolved.parents
+    return is_within(resolved, base)
 
 
 # --------------------------------------------------------------------------
