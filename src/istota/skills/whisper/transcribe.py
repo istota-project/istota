@@ -26,7 +26,10 @@ def transcribe_audio(
     # would block a host-side proxy worker for the whole skill-proxy timeout.
     # A directory also makes `--save` derive `{dir}.txt`, a sibling of the
     # directory rather than a child — outside the roots when the directory is
-    # a root itself. The same guard `health attach-document` and
+    # a root itself. That half is no longer this guard's to catch: since
+    # ISSUE-453 the derived destination is resolved before the transcription
+    # runs, so a directory passed with `--save` is refused there and reaches
+    # here only without it. The same guard `health attach-document` and
     # `memory_search index file` carry, for the first reason.
     if not audio_path.is_file():
         return {"status": "error", "error": f"Not a regular file: {path}"}

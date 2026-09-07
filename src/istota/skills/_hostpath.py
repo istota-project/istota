@@ -520,6 +520,21 @@ def _roots_for(mode: str, *, writable: bool) -> list[Path]:
     return env_host_roots(writable=writable)
 
 
+def write_roots() -> list[Path]:
+    """The roots a destination may be under, for a path a *handler* derives.
+
+    `WRITE`'s set, reached through the same mapping a stamped argument takes.
+    A derived destination has no argument to stamp — `whisper transcribe
+    --save` swaps the suffix on its `READ` source and never sees the value as
+    an argument at all — so without this it would spell `env_host_roots(
+    writable=True)` for itself, which is what that mapping is today and is a
+    second copy of it (ISSUE-453). The next narrowing of `WRITE` would leave
+    the derived write on the old, wider set, and no test would name it,
+    because every test of the mapping goes through the stamp.
+    """
+    return _roots_for(WRITE, writable=True)
+
+
 def _operation(dotted: str, action: argparse.Action) -> str:
     """How the refusal names what was refused: the verb and the flag.
 
@@ -671,4 +686,5 @@ __all__: Sequence[str] = (
     "stamp_conflicts",
     "stamped",
     "subparsers_without_dest",
+    "write_roots",
 )

@@ -160,8 +160,17 @@ def coerce_str(raw: Any, key: str) -> Any:
 def coerce_path(raw: Any, key: str) -> Any:
     if isinstance(raw, Path):
         return raw
-    if isinstance(raw, str):
+    if isinstance(raw, str) and raw.strip():
         return Path(raw)
+    # An empty or whitespace-only string keeps the declared default along with
+    # every wrong-typed value, rather than becoming ``Path("")`` -- which is
+    # ``Path(".")``, the daemon's working directory, and is what no operator
+    # writing ``temp_dir = ""`` meant. ``coerce_optional_path`` documents the
+    # same trap one function over, where the answer is ``None`` because the
+    # field can hold one. Left unguarded here, ``temp_dir = ""`` reached
+    # ``build_mount_plan`` as a root, where ``user_scope.scoped_user_dir``
+    # now refuses it -- one raise per task, naming the user id rather than the
+    # setting (ISSUE-462).
     return _warn(key, raw, "a path")
 
 

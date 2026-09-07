@@ -1,5 +1,8 @@
 # Skills Changelog
 
+## 2026-09-07
+- `whisper transcribe --save` writes beside the audio file, so it now needs a directory you could write to yourself. A recording in the user's workspace, in this room's directory or in the task's deferred directory saves as before; one in `Talk` is refused with `"reason": "host_path_refused"`, before the transcription runs, since `Talk` is shared and read-only. Copy the recording into the workspace and transcribe that, or take the transcript out of the output and write it where it belongs
+
 ## 2026-09-06
 - Every CLI argument naming a file **on this machine** is now checked before the command runs. It has to be inside the user's workspace, the task's deferred directory, this task's channel directory, or `Talk` (reads only). Anything else is refused with `"reason": "host_path_refused"` and nothing happens
 - A file that leaves the task is narrower still: `email --attach` and `--body-file`, `memory_search index file`, `nextcloud files upload --local` and the `health` upload/import verbs take the user's own workspace and the deferred directory, so a `Talk` attachment or a channel file has to be copied into the workspace before it can be mailed, indexed or uploaded

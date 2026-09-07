@@ -21,6 +21,7 @@ is not bound" while being the exposure itself — the same reason
 rather than whether it is named by one.
 """
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -149,6 +150,42 @@ class TestTheRule:
         assert scoped_user_dir(tmp_path, None) is None
         assert scoped_user_dir(tmp_path, 7) is None
 
+    @pytest.mark.parametrize(
+        "root", [None, "", ".", "./", Path(""), Path("."), Path("./")]
+    )
+    def test_a_root_that_names_no_configured_directory_is_refused(self, root):
+        """The absent root, in every spelling of it (ISSUE-462).
+
+        `Path` defines neither `__bool__` nor `__len__`, so `bool(Path(""))` is
+        `True` while `Path("")` *is* `Path(".")`. Under the `if not root:`
+        guard this replaces, only `None` and `""` answered `None`; the other
+        five returned `Path("alice")` — a path relative to whatever the
+        daemon's working directory happens to be, handed back as though the
+        scoping had happened. So the first two entries are controls and the
+        rest are the regression.
+        """
+        assert scoped_user_dir(root, "alice") is None
+
+    def test_a_root_of_the_wrong_type_is_refused_rather_than_raising(self):
+        """The property the truthiness guard also had, and that the one-liner
+        ISSUE-462 proposed would have lost: `Path(root) == Path(".")` written
+        *before* the `try` raises `TypeError` on `Path(7)`, out of a function
+        fourteen call sites treat as never-raising. Inside it, the comparison
+        is reached only once `Path(root)` has succeeded."""
+        assert scoped_user_dir(7, "alice") is None
+        assert scoped_user_dir(object(), "alice") is None
+        assert scoped_user_dir(0, "alice") is None
+
+    def test_an_ordinary_relative_root_still_scopes(self, tmp_path, monkeypatch):
+        """The guard is about the *absent* root, not about relative ones.
+
+        `Path("workspace")/"alice"` is a genuine child of `Path("workspace")`,
+        so refusing every relative root would be a second, wider rule — and one
+        the callers that pass a configured path do not ask for.
+        """
+        monkeypatch.chdir(tmp_path)
+        assert scoped_user_dir(Path("workspace"), "alice") == Path("workspace/alice")
+
     @pytest.mark.parametrize("user_id", [" alice", "alice ", "\talice"])
     def test_surrounding_whitespace_is_refused(self, tmp_path, user_id):
         """Not about containment — `" alice"` names a real child. It is about
@@ -236,6 +273,24 @@ class TestTheSandboxRefusal:
         sources = _bind_sources(_argv(config, _task("alice"), user_temp=own))
         assert own.resolve() in sources
         assert config.temp_dir.resolve() not in sources
+
+    def test_a_temp_dir_that_is_the_working_directory_refuses(self, config, tmp_path):
+        """The same refusal through the seam, driven from the *root* side.
+
+        A `temp_dir` of `Path("")` is `Path(".")`, so the plan's containment
+        call used to answer `Path("alice")` — the daemon's own working
+        directory, which is the source tree on a systemd unit with
+        `WorkingDirectory=` set, bound read-write into the namespace and used
+        as the `--chdir` target. `config.py` already treats a relative
+        `temp_dir` as its own case when it plans the control-tree mask; the
+        plan did not (ISSUE-462).
+        """
+        cwd_rooted = replace(config, temp_dir=Path(""))
+        with pytest.raises(ValueError, match="does not name a directory under"):
+            build_mount_plan(
+                cwd_rooted, _task("alice"), False, [], tmp_path / "alice",
+                profile=SandboxProfile.NATIVE,
+            )
 
 
 class TestTheMountJoinIsGuardedSeparately:

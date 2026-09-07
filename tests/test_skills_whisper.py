@@ -536,12 +536,17 @@ class TestCmdTranscribe:
         assert "segments" not in result
 
     @patch("istota.skills.whisper.cli.transcribe_audio")
-    def test_save_text_output(self, mock_transcribe, tmp_path):
+    def test_save_text_output(self, mock_transcribe, tmp_path, monkeypatch):
         mock_transcribe.return_value = {
             "status": "ok",
             "text": "Hello world",
             "segments": [],
         }
+        # The task's deferred directory is a write root on its own, so this
+        # names one without needing a mount (ISSUE-453). Before the derived
+        # destination was resolved, this call wrote to any path at all.
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
+        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
         audio_path = tmp_path / "test.wav"
         audio_path.write_bytes(b"fake")
         args = MagicMock()
@@ -554,6 +559,51 @@ class TestCmdTranscribe:
         result = cmd_transcribe(args)
         assert result["saved_to"] == str(tmp_path / "test.txt")
         assert (tmp_path / "test.txt").read_text() == "Hello world"
+
+    @patch("istota.skills.whisper.cli.transcribe_audio")
+    def test_save_with_no_task_identity_is_refused(
+        self, mock_transcribe, tmp_path, monkeypatch,
+    ):
+        """A caller with no task environment has an empty allowlist.
+
+        `env_host_roots` reads the four variables the proxy exports per task,
+        and the daemon carries none of them — so a daemon-side spawn that
+        forgets to pass the task identity gets no roots, and an empty
+        allowlist means refuse everything rather than permit everything. That
+        rule is `resolve_in_roots`'; asserted here because `--save` is the one
+        whisper path that writes.
+        """
+        mock_transcribe.return_value = {"status": "ok", "text": "hi", "segments": []}
+        for name in (
+            "ISTOTA_DEFERRED_DIR",
+            "NEXTCLOUD_MOUNT_PATH",
+            "ISTOTA_USER_ID",
+            "ISTOTA_CONVERSATION_TOKEN",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        audio_path = tmp_path / "test.wav"
+        audio_path.write_bytes(b"fake")
+        args = MagicMock()
+        args.audio_path = str(audio_path)
+        args.model = "auto"
+        args.language = None
+        args.output = "text"
+        args.save = True
+        args.no_segments = False
+
+        result = cmd_transcribe(args)
+
+        assert result["status"] == "error"
+        assert result["reason"] == "host_path_refused"
+        assert not (tmp_path / "test.txt").exists()
+        mock_transcribe.assert_not_called()
+        # The resolver's own message, not the read-versus-write one: there is
+        # no workspace here to copy anything into, so that remedy would send
+        # the model round a loop it cannot leave. Nothing else asserts on the
+        # text of a refusal, and this is the branch where a wrong one is
+        # actively misleading.
+        assert "No allowed host roots configured" in result["error"]
+        assert "Copy the audio" not in result["error"]
 
     @patch("istota.skills.whisper.cli.transcribe_audio")
     def test_error_passthrough(self, mock_transcribe):
@@ -600,14 +650,25 @@ class TestTheDerivedSaveDestinations:
     The four destinations are `Path(args.audio_path).with_suffix(...)`, and
     `audio_path` is stamped `READ` — so by the time the handler runs it is
     resolved and inside a root, and a suffix swap cannot leave its parent.
-    That is Layer 3's rule: a derived path whose only added component is
-    code-owned needs no second resolution.
+    That much is Layer 3's rule and still holds.
 
-    What it does need is `write_resolved`. A plain `open(..., "wb")` follows a
+    What it does not settle is *writability*, which is the correction
+    ISSUE-453 makes: the read roots are a wider set than the write roots, so
+    "inside the root the source came from" is not "inside a root this may
+    write to". The derived destination goes back through the resolver against
+    `env_host_roots(writable=True)`, and the one root that costs it is
+    `{mount}/Talk`.
+
+    It also still needs `write_resolved`. A plain `open(..., "wb")` follows a
     symlink standing at the derived name, and the workspace is bound
     read-write into the sandbox, so such a link is model-plantable — the file
     would land wherever it points, written by the daemon user, with
-    containment already reported as passed.
+    containment already reported as passed. The resolver refuses one as of
+    its own check; `write_resolved` is what closes the window after it.
+
+    The workspace-sourced acceptance is
+    `test_each_format_writes_beside_the_resolved_audio`, which is the ordinary
+    case and is where a refusal that over-reached would show up.
     """
 
     @pytest.fixture
@@ -669,11 +730,13 @@ class TestTheDerivedSaveDestinations:
     def test_a_symlink_at_the_derived_name_is_refused(
         self, output, suffix, mount, audio, tmp_path,
     ):
-        """The whole reason the write goes through `write_resolved`.
+        """A link standing at the derived name when the destination resolves.
 
-        The link is planted at the name the handler will derive, pointing at a
-        file outside every root. `O_NOFOLLOW` makes the open fail rather than
-        truncating the target.
+        Caught by the resolver rather than by the open, as of ISSUE-453:
+        `resolve_in_roots` refuses a symlink at the destination, and the
+        destination is now resolved before the transcription runs. The
+        `write_resolved` half — the link planted *after* that answer — is the
+        test below.
         """
         from istota.skills.whisper.cli import main
 
@@ -689,17 +752,48 @@ class TestTheDerivedSaveDestinations:
         assert run.exit_code == 1, run.stdout
         assert run.envelope.get("status") == "error", run.stdout
 
-    def test_a_talk_sourced_save_writes_into_the_shared_directory(self, mount):
-        """A recorded residual rather than an endorsement.
+    def test_a_symlink_planted_during_the_transcription_is_refused(
+        self, mount, audio, tmp_path, monkeypatch,
+    ):
+        """The window the resolution cannot close, and why `write_resolved`.
+
+        Resolving the destination up front answers as of the moment it looks,
+        and the answer is now minutes old by the time the transcript is
+        written — the workspace is bound read-write into the sandbox, so a
+        link appearing in that window is model-plantable. `O_NOFOLLOW` makes
+        the open fail rather than truncating whatever it points at. Without
+        it this test writes `hello there` over the victim file while every
+        containment check has already reported a pass.
+        """
+        from istota.skills.whisper import cli
+
+        victim = tmp_path / "elsewhere.txt"
+        victim.write_text("not yours")
+
+        def _plant_then_transcribe(*args, **kwargs):
+            audio.resolve().with_suffix(".txt").symlink_to(victim)
+            return {"status": "ok", "text": "hello there", "segments": []}
+
+        monkeypatch.setattr(cli, "transcribe_audio", _plant_then_transcribe)
+
+        run = run_skill_main(
+            cli.main, ["transcribe", str(audio), "--output", "text", "--save"],
+        )
+
+        assert victim.read_text() == "not yours"
+        assert run.exit_code == 1, run.stdout
+        assert run.envelope.get("status") == "error", run.stdout
+
+    def test_a_talk_sourced_save_is_refused(self, mount):
+        """The derived write is resolved against the *writable* roots.
 
         `audio_path` is `READ`, which admits `{mount}/Talk` — that is where a
         Talk voice message lands, and reading it is the point of the verb. The
         derived `--save` destination is then inside `{mount}/Talk` too, a
-        directory the sandbox binds read-only, so `--save` writes somewhere
-        the task's own tools cannot. Layer 3 states the derived-write rule as
-        `write_resolved` and no second resolution, so this is the spec's own
-        answer; it is asserted here so that narrowing it later is a visible
-        change rather than a silent one.
+        directory the sandbox binds read-only, so the save wrote host-side
+        where the task's own tools could not (ISSUE-453). A derivation is
+        contained by construction only with respect to the root its source
+        came from, and a read root is not a write root.
         """
         from istota.skills.whisper.cli import main
 
@@ -710,5 +804,63 @@ class TestTheDerivedSaveDestinations:
             main, ["transcribe", str(source), "--output", "text", "--save"],
         )
 
+        assert run.exit_code == 1, run.stdout
+        assert run.envelope.get("status") == "error", run.stdout
+        assert run.envelope.get("reason") == "host_path_refused", run.stdout
+        assert not source.resolve().with_suffix(".txt").exists(), (
+            "refused and wrote anyway"
+        )
+        # The remedy is the useful half of a refusal the model reads, and it
+        # is only true of this branch — hence the assertion here and the one
+        # in `test_save_with_no_task_identity_is_refused` that it is absent.
+        assert "Copy the audio into your workspace" in run.envelope["error"]
+
+    def test_a_refused_save_costs_no_transcription(self, mount, monkeypatch):
+        """The destination is resolved before the model is run, not after.
+
+        Transcription is minutes of CPU on a long recording, and the refusal
+        is a property of the arguments alone — it cannot become permitted by
+        anything the transcription returns. Resolving after would charge the
+        task the whole run and then throw the transcript away with it.
+        """
+        from istota.skills.whisper import cli
+
+        calls = []
+        monkeypatch.setattr(
+            cli, "transcribe_audio", lambda *a, **k: calls.append(a) or {},
+        )
+        source = mount / "Talk" / "voicemail.wav"
+        source.write_bytes(b"RIFF")
+
+        run = run_skill_main(
+            cli.main, ["transcribe", str(source), "--output", "text", "--save"],
+        )
+
+        assert run.envelope.get("reason") == "host_path_refused", run.stdout
+        assert calls == [], "transcribed before finding out it could not save"
+
+    def test_a_channel_sourced_save_still_writes(self, mount, monkeypatch):
+        """The control against over-refusal.
+
+        `{mount}/Channels/{token}` is a shared directory too, and it stays in
+        the write roots — the sandbox binds it read-write, so a save there is
+        one the task could have made itself. What `--save` loses is the roots
+        that are read-only, which is `{mount}/Talk` alone.
+        """
+        from istota.skills.whisper.cli import main
+
+        token = "room123"
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", token)
+        channel = mount / "Channels" / token
+        channel.mkdir(parents=True)
+        source = channel / "standup.wav"
+        source.write_bytes(b"RIFF")
+
+        run = run_skill_main(
+            main, ["transcribe", str(source), "--output", "text", "--save"],
+        )
+
         assert run.exit_code == 0, run.stdout
-        assert source.resolve().with_suffix(".txt").exists()
+        written = source.resolve().with_suffix(".txt")
+        assert written.exists()
+        assert run.envelope["saved_to"] == str(written)

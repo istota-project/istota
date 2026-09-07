@@ -42,8 +42,9 @@ root pointing anywhere on disk, holding every task's assembled prompt. Read
 both docstrings before folding that one in.
 
 **Two checks, because neither catches the other's cases**, and the pair is the
-whole content of the function. The lexical one refuses a component that never
-became a child — ``.`` is dropped, an absolute one replaces the root, a nested
+whole containment test — ahead of it sits the absent-root comparison
+:func:`scoped_user_dir`'s own docstring covers (ISSUE-462). The lexical one
+refuses a component that never became a child — ``.`` is dropped, an absolute one replaces the root, a nested
 one goes deeper. The resolved one refuses ``..`` and every symlink *that
 leads somewhere else*, both of which are children by name and elsewhere on
 disk. ``"."`` is the case that shows why both are needed: it *passes* the
@@ -118,11 +119,51 @@ def is_scopable_user_id(user_id: object) -> bool:
 
 
 def scoped_user_dir(root: Path | str | None, user_id: object) -> Path | None:
-    """``{root}/{user_id}`` when that names a child of ``root``, else ``None``."""
-    if not root or not is_scopable_user_id(user_id):
+    """``{root}/{user_id}`` when that names a child of ``root``, else ``None``.
+
+    **The absent root is a comparison, not a truthiness test** (ISSUE-462).
+    ``Path`` defines neither ``__bool__`` nor ``__len__``, so ``bool(Path(""))``
+    is ``True`` while ``Path("")`` *is* ``Path(".")``. Under an ``if not root:``
+    guard only ``None`` and ``""`` returned ``None``; ``"."``, ``"./"`` and
+    every ``Path`` spelling of the three returned ``Path(user_id)`` — a path
+    relative to the daemon's working directory, which passes both containment
+    terms and so came back as a scoped answer. A caller that gets one where
+    the rule says there is none is a caller whose scoping silently did not
+    happen.
+
+    ``Path(root) == Path(".")`` is the whole test, and it covers all five of
+    those spellings at once. It is placed *after* ``Path(root)`` rather than
+    beside the ``None`` check, because it needs that value and building it is
+    what raises on a root of the wrong type — ``Path(7)`` is a ``TypeError``,
+    which the truthiness guard happened to swallow for ``0`` and ``False``,
+    and which the annotation does not stop arriving since ``root`` comes from
+    config and from the environment. The surrounding ``try`` already catches
+    it. Refusing rather than raising on a wrong-typed root is defence behind
+    the type rather than a widening of it, so the annotation stays
+    ``Path | str | None``.
+
+    **Lexical, like the rest of the module**, which means a caller that
+    resolves its root before calling has opted out of this test:
+    ``Path(".").resolve()`` is an absolute path and scopes normally.
+    ``_daemon_dirs``, ``skill_host_paths.workspace_roots`` and both
+    ``sandbox_cache_sweeper`` scans resolve first and are in that position.
+    That is not a hole left open — the working-directory root is stopped at
+    the source, where ``config_mapper.coerce_path`` keeps the declared default
+    for a blank setting — but a reader must not take the refusal below as
+    covering a root some caller already turned into an absolute path.
+
+    A relative root that is not the working directory keeps working:
+    ``Path("workspace")/"alice"`` is a genuine child of ``Path("workspace")``,
+    and refusing every relative root would be a second, wider rule than the
+    one the callers ask for. ``".."`` and ``"a/.."`` are in that group and are
+    answered as written for the same reason.
+    """
+    if root is None or not is_scopable_user_id(user_id):
         return None
     try:
         root_path = Path(root)
+        if root_path == Path("."):
+            return None
         candidate = root_path / user_id  # type: ignore[operator]
         contained = (
             candidate.parent == root_path
