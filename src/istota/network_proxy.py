@@ -99,7 +99,6 @@ class NetworkProxy:
         socket_path: Path,
         allowed_hosts: set[str],  # {"api.anthropic.com:443", ...}
     ):
-        self.socket_path = socket_path
         self.allowed_hosts = allowed_hosts
         self._server = UnixSocketServer(
             socket_path,
@@ -113,6 +112,11 @@ class NetworkProxy:
             backlog=LISTEN_BACKLOG,
             logger=logger,
         )
+
+    @property
+    def socket_path(self) -> Path:
+        """The path the server is bound to. One copy, held by the server."""
+        return self._server.socket_path
 
     def start(self) -> None:
         self._server.start()

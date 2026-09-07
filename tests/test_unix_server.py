@@ -74,7 +74,12 @@ class TestLifecycle:
             assert _roundtrip(sock_path) == b"ok:hi"
 
     def test_stop_without_start_is_a_noop(self, sock_path):
-        UnixSocketServer(sock_path, _echo, name="t", socket_mode=0o600).stop()
+        server = UnixSocketServer(sock_path, _echo, name="t", socket_mode=0o600)
+        server.stop()
+        # `not sock_path.exists()` alone would hold against any stop() that
+        # returns, since nothing here creates the file.
+        assert server._thread is None
+        assert server._server_sock is None
         assert not sock_path.exists()
 
     def test_double_stop_is_safe(self, sock_path):
@@ -88,6 +93,39 @@ class TestLifecycle:
         server = UnixSocketServer(sock_path, _echo, name="t", socket_mode=0o600)
         server.start()
         server.stop()
+        server.start()
+        try:
+            assert _roundtrip(sock_path) == b"ok:hi"
+        finally:
+            server.stop()
+
+    def test_start_on_a_live_server_raises(self, sock_path):
+        """Silently rebinding would orphan the first listener and its thread:
+        stop() only knows the newest, so the old one runs on forever."""
+        server = UnixSocketServer(sock_path, _echo, name="t", socket_mode=0o600)
+        server.start()
+        try:
+            with pytest.raises(RuntimeError, match="already running"):
+                server.start()
+            assert _roundtrip(sock_path) == b"ok:hi"
+        finally:
+            server.stop()
+
+    def test_a_failed_start_releases_the_bound_socket(self, sock_path):
+        """bind() takes the path before chmod or listen can fail. A half-built
+        server that drops its listener without closing it holds the fd until a
+        gc pass and leaves the path behind."""
+        server = UnixSocketServer(sock_path, _echo, name="t", socket_mode=0o600)
+        boom = OSError("simulated chmod failure")
+        with patch.object(os, "chmod", side_effect=boom):
+            with pytest.raises(OSError, match="simulated chmod failure"):
+                server.start()
+
+        assert server._server_sock is None
+        assert server._thread is None
+        assert not sock_path.exists(), "the bound path was left behind"
+        # The proof the fd was released rather than merely dropped: a fresh
+        # start on the same path succeeds.
         server.start()
         try:
             assert _roundtrip(sock_path) == b"ok:hi"
@@ -133,7 +171,14 @@ class TestSocketMode:
             return real_chmod(path, mode, *a, **kw)
 
         def spy_listen(self, *a, **kw):
-            if self.family == socket.AF_UNIX:
+            # By this socket's own bound name, not by address family: the
+            # patch is process-global and any other AF_UNIX listen in the
+            # window would otherwise land in `calls` ahead of ours.
+            try:
+                bound = self.getsockname()
+            except OSError:
+                bound = None
+            if bound == str(sock_path):
                 calls.append("listen")
             return real_listen(self, *a, **kw)
 
@@ -262,14 +307,32 @@ class TestStopWake:
         in_select = threading.Event()
         gate = threading.Event()
         real_select = selectors.DefaultSelector.select
+        thread_exceptions = []
+        real_excepthook = threading.excepthook
+
+        def record(args):
+            thread_exceptions.append(f"{args.exc_type.__name__}: {args.exc_value}")
+            real_excepthook(args)
+
+        # Only this server's accept thread. `patch.object` on the class is
+        # process-wide, and DefaultSelector is what an asyncio event loop runs
+        # on; wedging it unconditionally would stall any loop live in the same
+        # xdist worker. It also makes `in_select` mean what it says, rather
+        # than "some selector somewhere called select()".
+        loop_name = "stuck-loop-probe"
 
         def wedged_select(self, timeout=None):
+            if threading.current_thread().name != loop_name:
+                return real_select(self, timeout)
             in_select.set()
-            gate.wait(20)
+            gate.wait(5)
             return real_select(self, timeout)
 
-        server = UnixSocketServer(sock_path, _echo, name="t", socket_mode=0o600)
-        with patch.object(selectors.DefaultSelector, "select", wedged_select):
+        server = UnixSocketServer(
+            sock_path, _echo, name=loop_name, socket_mode=0o600,
+        )
+        with patch.object(selectors.DefaultSelector, "select", wedged_select), \
+                patch.object(threading, "excepthook", record):
             server.start()
             thread = server._thread
             listener_fd = server._server_sock.fileno()
@@ -291,6 +354,10 @@ class TestStopWake:
             gate.set()
             thread.join(timeout=5)
             assert not thread.is_alive()
+        # `not is_alive()` alone is satisfied by the loop dying on an
+        # exception, which is what it did while stop() cleared the sockets out
+        # from under it. The loop must reach its own `return False`.
+        assert not thread_exceptions, thread_exceptions
 
     def test_shutdown_wins_over_a_pending_connection(self, sock_path):
         """A connection that becomes ready in the same select() as the stop must
@@ -306,13 +373,21 @@ class TestStopWake:
             except OSError:
                 pass
 
+        # Narrowed to this server's accept thread for the reason given in
+        # test_a_stuck_loop_keeps_its_sockets_open.
+        loop_name = "shutdown-race-probe"
+        _real_select = selectors.DefaultSelector.select
+
         def slow_select(self, timeout=None):
+            if threading.current_thread().name != loop_name:
+                return _real_select(self, timeout)
             started.set()
-            gate.wait(10)
+            gate.wait(5)
             return _real_select(self, timeout)
 
-        _real_select = selectors.DefaultSelector.select
-        server = UnixSocketServer(sock_path, handler, name="t", socket_mode=0o600)
+        server = UnixSocketServer(
+            sock_path, handler, name=loop_name, socket_mode=0o600,
+        )
         with patch.object(selectors.DefaultSelector, "select", slow_select):
             server.start()
             assert started.wait(5)
@@ -372,6 +447,8 @@ class TestNoSecondCopy:
     """Pin: the accept-loop-with-socketpair-wake shape lives in one module."""
 
     def test_only_unix_server_carries_the_accept_loop(self):
+        if not SRC.is_dir():
+            pytest.skip(f"no source tree at {SRC}; nothing to scan")
         offenders = []
         for path in sorted(SRC.rglob("*.py")):
             text = path.read_text(encoding="utf-8")
@@ -380,6 +457,8 @@ class TestNoSecondCopy:
         assert offenders == ["unix_server.py"], offenders
 
     def test_the_proxies_no_longer_declare_one(self):
+        if not SRC.is_dir():
+            pytest.skip(f"no source tree at {SRC}; nothing to scan")
         for name in ("network_proxy.py", "skill_proxy.py"):
             text = (SRC / name).read_text(encoding="utf-8")
             assert "socketpair" not in text, name

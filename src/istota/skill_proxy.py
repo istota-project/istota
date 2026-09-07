@@ -190,7 +190,6 @@ class SkillProxy:
         authorized_skills: frozenset[str] | None = None,
         task_id: int | None = None,
     ):
-        self.socket_path = socket_path
         self.credential_env = credential_env
         self.base_env = base_env
         self.timeout = timeout
@@ -221,6 +220,11 @@ class SkillProxy:
             backlog=LISTEN_BACKLOG,
             logger=logger,
         )
+
+    @property
+    def socket_path(self) -> Path:
+        """The path the server is bound to. One copy, held by the server."""
+        return self._server.socket_path
 
     def start(self) -> None:
         self._server.start()

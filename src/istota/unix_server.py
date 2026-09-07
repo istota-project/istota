@@ -80,6 +80,14 @@ class UnixSocketServer:
         self._accept_failures = 0
 
     def start(self) -> None:
+        # A second start() over a live one would orphan the first listener and
+        # its thread: stop() only knows about the newest, so the old thread
+        # runs forever on a path that has since been rebound, holding both fds.
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError(
+                f"{self.label} is already running on {self.socket_path}"
+            )
+
         # Clean up a stale socket file left by a process that did not stop.
         if self.socket_path.exists():
             self.socket_path.unlink()
@@ -87,19 +95,37 @@ class UnixSocketServer:
         self._stop_event.clear()
         self._accept_failures = 0
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._server_sock.bind(str(self.socket_path))
-        os.chmod(str(self.socket_path), self.socket_mode)
-        self._server_sock.listen(self.backlog)
-        self._server_sock.setblocking(False)
-        # Closing a socket does not reliably wake a thread blocked in accept(),
-        # so stop() nudges this pair instead of the loop polling on a timeout.
-        self._wake_r, self._wake_w = socket.socketpair()
-        self._wake_r.setblocking(False)
+        try:
+            self._server_sock.bind(str(self.socket_path))
+            # Between bind() and listen(): the path exists after the bind, but
+            # a connect() is refused until the listen, so there is no moment
+            # when the socket is both reachable and at mkstemp-style defaults.
+            os.chmod(str(self.socket_path), self.socket_mode)
+            self._server_sock.listen(self.backlog)
+            self._server_sock.setblocking(False)
+            # Closing a socket does not reliably wake a thread blocked in
+            # accept(), so stop() nudges this pair instead of the loop polling
+            # on a timeout.
+            self._wake_r, self._wake_w = socket.socketpair()
+            self._wake_r.setblocking(False)
 
-        self._thread = threading.Thread(
-            target=self._accept_loop, daemon=True, name=self.name,
-        )
-        self._thread.start()
+            self._thread = threading.Thread(
+                target=self._accept_loop, daemon=True, name=self.name,
+            )
+            self._thread.start()
+        except BaseException:
+            # chmod, listen and Thread.start can all fail after the bind has
+            # already taken the path. Nothing has entered the loop yet, so the
+            # fds are ours to close; dropping them instead would hold a bound
+            # listener until a gc pass and leave the path behind.
+            self._close_sockets()
+            self._server_sock = self._wake_r = self._wake_w = None
+            self._thread = None
+            try:
+                self.socket_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -118,19 +144,17 @@ class UnixSocketServer:
             # Never close a socket the accept loop may still be selecting on:
             # epoll and kqueue drop a closed fd from the interest set silently,
             # so the thread would block forever on numbers the OS is free to
-            # hand to unrelated code. Leak them, and say so.
+            # hand to unrelated code. The listener and the wake-read end are
+            # held by the loop's own selector and survive the clearing below;
+            # the wake-write end is not, and its close is what leaves the loop
+            # a permanent EOF to wake on. Say so rather than closing anything.
             self.logger.warning(
                 "%s accept loop did not exit within %ds; leaving its "
                 "sockets open rather than closing them underneath it",
                 self.label, JOIN_TIMEOUT_S,
             )
         else:
-            for sock in (self._server_sock, self._wake_r, self._wake_w):
-                if sock:
-                    try:
-                        sock.close()
-                    except OSError:
-                        pass
+            self._close_sockets()
         self._server_sock = self._wake_r = self._wake_w = None
         try:
             self.socket_path.unlink(missing_ok=True)
@@ -144,26 +168,47 @@ class UnixSocketServer:
     def __exit__(self, *exc):
         self.stop()
 
+    def _close_sockets(self) -> None:
+        for sock in (self._server_sock, self._wake_r, self._wake_w):
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
     def _accept_loop(self) -> None:
+        # Bound once and used in place of the attributes for the life of the
+        # loop. stop() clears those the moment it gives up on the join, and a
+        # loop still inside select() would then fail to recognize its own wake
+        # socket and dereference None where the listener used to be — an
+        # AttributeError that ends the thread by crashing it rather than by
+        # the clean exit the wake is there to produce.
+        server_sock = self._server_sock
+        wake_r = self._wake_r
         with selectors.DefaultSelector() as sel:
-            sel.register(self._server_sock, selectors.EVENT_READ)
-            sel.register(self._wake_r, selectors.EVENT_READ)
+            sel.register(server_sock, selectors.EVENT_READ)
+            sel.register(wake_r, selectors.EVENT_READ)
             while not self._stop_event.is_set():
-                if not self._accept_once(sel):
+                if not self._accept_once(sel, server_sock, wake_r):
                     break
 
-    def _accept_once(self, sel: selectors.BaseSelector) -> bool:
+    def _accept_once(
+        self,
+        sel: selectors.BaseSelector,
+        server_sock: socket.socket,
+        wake_r: socket.socket,
+    ) -> bool:
         """Wait for one readiness event. False means the loop should stop."""
         events = sel.select()
         # Shutdown wins over a connection that became ready in the same call.
         # Accepting it here would give a handler thread — and whatever the
         # handler is authorized to reach — a lifetime past the stop() meant to
         # end that authority.
-        if any(key.fileobj is self._wake_r for key, _ in events):
+        if any(key.fileobj is wake_r for key, _ in events):
             return False
 
         try:
-            conn, _ = self._server_sock.accept()
+            conn, _ = server_sock.accept()
         except BlockingIOError:
             return True
         except OSError as exc:
