@@ -26,6 +26,19 @@ MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-use
 TalkResponseError = OcsError
 
 
+def _write_data(response, what: str) -> dict:
+    """``ocs.data`` from a Talk write, as a dict the caller can read an id off.
+
+    ``ocs_data``'s ``default`` substitutes for a JSON ``null`` only, and PHP
+    encodes an empty ``data`` as ``[]`` rather than ``{}`` — so folding a
+    non-dict onto the same empty default is what stops an `AttributeError` on
+    a write that Nextcloud accepted. The three writes share it because all
+    three of their id-reading callers would otherwise carry the check.
+    """
+    data = ocs_data(response, what, default={})
+    return data if isinstance(data, dict) else {}
+
+
 def _resolve_param(key: str, param: dict, bot_username: str | None) -> str | None:
     """Render a single Nextcloud Talk rich-object param to its display form.
 
@@ -190,7 +203,13 @@ class TalkClient:
         reply_to: int | None = None,
         reference_id: str | None = None,
     ) -> dict:
-        """Send a message to a Talk conversation using user API."""
+        """Send a message to a Talk conversation using user API.
+
+        Returns the posted message's ``ocs.data`` dict — its ``id`` is what
+        every caller wants — like every other read on this client. It answered
+        the whole response body until ISSUE-463, which is why three callers
+        unwrapped the envelope themselves.
+        """
         url = f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat/{conversation_token}"
 
         data = {"message": message}
@@ -208,7 +227,7 @@ class TalkClient:
             json=data,
         )
         response.raise_for_status()
-        return response.json()
+        return _write_data(response, f"send message to {conversation_token}")
 
     async def edit_message(
         self,
@@ -216,7 +235,9 @@ class TalkClient:
         message_id: int,
         message: str,
     ) -> dict:
-        """Edit an existing message in a Talk conversation."""
+        """Edit an existing message in a Talk conversation.
+
+        Returns the edited message's ``ocs.data`` dict."""
         url = (
             f"{self.base_url}/ocs/v2.php/apps/spreed/api/v1/chat"
             f"/{conversation_token}/{message_id}"
@@ -234,12 +255,16 @@ class TalkClient:
             json={"message": message},
         )
         response.raise_for_status()
-        return response.json()
+        return _write_data(
+            response, f"edit message {message_id} in {conversation_token}",
+        )
 
     async def delete_message(
         self, conversation_token: str, message_id: int,
     ) -> dict:
         """Delete a message from a Talk conversation.
+
+        Returns the placeholder message's ``ocs.data`` dict.
 
         Talk replaces the message with a "Message deleted by …" placeholder
         rather than removing the row, and only the author (or a moderator) may
@@ -260,7 +285,9 @@ class TalkClient:
             url, auth=self.auth, headers=self._headers(),
         )
         response.raise_for_status()
-        return response.json()
+        return _write_data(
+            response, f"delete message {message_id} in {conversation_token}",
+        )
 
     async def create_conversation(
         self, name: str, room_type: int = 2,

@@ -227,16 +227,17 @@ class TestTheErrorMessage:
 
 
 class TestReturnShapes:
-    async def test_send_message_returns_the_ocs_id_shape(self, fake_talk, rooms):
+    async def test_send_message_returns_the_ocs_data_shape(self, fake_talk, rooms):
+        """`ocs.data`, unwrapped — what the real client answers (ISSUE-463)."""
         response = await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
-        assert isinstance(response["ocs"]["data"]["id"], int)
+        assert isinstance(response["id"], int)
 
     async def test_message_ids_increment(self, fake_talk, rooms):
         token = rooms["plain"].talk_ref
         first = await fake_talk.send_message(token, "one")
         second = await fake_talk.send_message(token, "two")
         assert (
-            second["ocs"]["data"]["id"] > first["ocs"]["data"]["id"]
+            second["id"] > first["id"]
         )
 
     async def test_a_refused_send_mints_no_id(self, fake_talk, rooms):
@@ -246,14 +247,14 @@ class TestReturnShapes:
         with pytest.raises(UnknownTalkRoom):
             await fake_talk.send_message(rooms["promoted"].canonical, "two")
         after = await fake_talk.send_message(rooms["plain"].talk_ref, "three")
-        assert after["ocs"]["data"]["id"] == before["ocs"]["data"]["id"] + 1
+        assert after["id"] == before["id"] + 1
 
     async def test_sent_ids_records_what_came_back(self, fake_talk, rooms):
         token = rooms["plain"].talk_ref
         first = await fake_talk.send_message(token, "one")
         second = await fake_talk.send_message(token, "two")
         assert fake_talk.sent_ids == [
-            first["ocs"]["data"]["id"], second["ocs"]["data"]["id"],
+            first["id"], second["id"],
         ]
 
     async def test_a_refused_send_records_no_id_either(self, fake_talk, rooms):
@@ -278,10 +279,10 @@ class TestReturnShapes:
             token, "answer", reference_id="istota:task:7:result",
         )
         assert fake_talk.sent_id_for("istota:task:7:result") == (
-            result["ocs"]["data"]["id"]
+            result["id"]
         )
         assert fake_talk.sent_id_for("istota:task:7:ack") != (
-            result["ocs"]["data"]["id"]
+            result["id"]
         )
         assert fake_talk.sent_id_for("istota:task:7:prompt") is None
 
@@ -299,9 +300,9 @@ class TestReturnShapes:
         last = await fake_talk.send_message(
             token, "Part 2", reference_id="istota:task:7:result",
         )
-        assert first["ocs"]["data"]["id"] != last["ocs"]["data"]["id"]
+        assert first["id"] != last["id"]
         assert fake_talk.sent_id_for("istota:task:7:result") == (
-            last["ocs"]["data"]["id"]
+            last["id"]
         )
 
     async def test_sent_id_for_refuses_a_falsy_reference_id(
@@ -325,7 +326,7 @@ class TestReturnShapes:
         )
         assert fake_talk.sent_id_for("istota:task:7:result") is None
         assert fake_talk.sent_id_for("istota:task:8:result") == (
-            after["ocs"]["data"]["id"]
+            after["id"]
         )
 
     async def test_get_conversation_info_returns_the_rooms_display_name(
@@ -393,10 +394,10 @@ class TestTheDeliverPath:
     """`TalkTransport.deliver` is the path most of the eleven files to be
     converted will drive, and the second of the three swallowing handlers.
 
-    Also the only test that exercises the OCS envelope through the code that
-    unwraps it. Asserting the literal `{"ocs": {"data": {"id": n}}}` in
-    `TestReturnShapes` cannot catch a wrong envelope: `deliver` would return
-    None, its documented failure value, with every test here green.
+    Also the only test that drives a minted id through the code that reads it.
+    Asserting the returned `{"id": n}` in `TestReturnShapes` cannot catch a
+    wrong shape on its own: `deliver` would return None, its documented failure
+    value, with every test here green.
     """
 
     async def test_it_returns_the_minted_id_for_the_talk_ref(
@@ -623,7 +624,7 @@ class TestABearerTokenTheServerRejects:
         fake_talk.bearer_rejections["stale-at"] = 401
         talk_client_factory(fake_talk)(None, bearer_token="fresh-at", timeout=5)
         resp = await fake_talk.send_message(rooms["plain"].talk_ref, "hi")
-        assert resp["ocs"]["data"]["id"] == fake_talk.sent_ids[-1]
+        assert resp["id"] == fake_talk.sent_ids[-1]
 
     async def test_sent_id_for_survives_a_rejected_send(self, fake_talk, rooms):
         """The 401 retry's own regression test, and it was a live defect.

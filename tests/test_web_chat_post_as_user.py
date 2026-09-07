@@ -76,9 +76,7 @@ def _mock_talk_client(monkeypatch, posted_id=777, send_error=None):
     if send_error is not None:
         instance.send_message = AsyncMock(side_effect=send_error)
     else:
-        instance.send_message = AsyncMock(
-            return_value={"ocs": {"data": {"id": posted_id}}},
-        )
+        instance.send_message = AsyncMock(return_value={"id": posted_id})
     instance.aclose = AsyncMock()
 
     def factory(config, bearer_token=None, timeout=None):

@@ -97,7 +97,7 @@ class TestSendTalk:
         )
         with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
-            mock_client.send_message.return_value = {"ocs": {"data": {"id": 10}}}
+            mock_client.send_message.return_value = {"id": 10}
             MockClient.return_value = mock_client
             result = await _send_talk(config, "alice", "hello", conversation_token="room1")
         assert result == 10
@@ -118,7 +118,7 @@ class TestSendTalk:
         )
         with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
-            mock_client.send_message.return_value = {"ocs": {"data": {"id": 11}}}
+            mock_client.send_message.return_value = {"id": 11}
             MockClient.return_value = mock_client
             result = await _send_talk(config, "alice", "hello")
         assert result == 11
@@ -152,7 +152,7 @@ class TestSendTalk:
         )
         with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
-            mock_client.send_message.return_value = {"ocs": {"data": {"id": 42}}}
+            mock_client.send_message.return_value = {"id": 42}
             MockClient.return_value = mock_client
             result = await _send_talk(config, "alice", "hello", conversation_token="room1")
         assert result == 42
@@ -187,7 +187,7 @@ class TestSendConfirmationPrompt:
         )
         with patch("istota.transport.talk.get_talk_client") as MockClient:
             mock_client = AsyncMock()
-            mock_client.send_message.return_value = {"ocs": {"data": {"id": 99}}}
+            mock_client.send_message.return_value = {"id": 99}
             MockClient.return_value = mock_client
             from istota.notifications import send_confirmation_prompt
             delivered, msg_id = send_confirmation_prompt(

@@ -1373,9 +1373,7 @@ class TestPollerInterception:
             # Command delivery goes through TalkTransport.deliver, which pulls
             # the persistent client from istota.transport.talk.
             mock_deliver = MockDeliverClient.return_value
-            mock_deliver.send_message = AsyncMock(
-                return_value={"ocs": {"data": {"id": 1}}}
-            )
+            mock_deliver.send_message = AsyncMock(return_value={"id": 1})
 
             with db.get_db(config.db_path) as conn:
                 db.set_talk_poll_state(conn, "room1", 50)

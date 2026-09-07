@@ -22,7 +22,12 @@ def _response(status=200, json_body=None):
     resp = MagicMock()
     resp.status_code = status
     resp.raise_for_status = MagicMock()
-    resp.json.return_value = json_body if json_body is not None else {}
+    # An envelope by default: every read on this client unwraps one, so a bare
+    # `{}` is the "JSON without an ocs envelope" fault rather than a blank
+    # answer, and the tests here are about headers, not about that.
+    resp.json.return_value = (
+        json_body if json_body is not None else {"ocs": {"data": {}}}
+    )
     return resp
 
 

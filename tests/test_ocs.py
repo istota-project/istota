@@ -55,6 +55,7 @@ def _client(resp):
     http.get.return_value = resp
     http.post.return_value = resp
     http.put.return_value = resp
+    http.delete.return_value = resp
     client._client = http
     return client
 
@@ -210,6 +211,9 @@ class TestTheExceptionFamily:
 #: (name, callable taking a wired TalkClient). One row per OCS read in
 #: `talk.py`; a read added without a row here is a read with no failure case.
 TALK_READS = [
+    ("send_message", lambda c: c.send_message("tok", "hello")),
+    ("edit_message", lambda c: c.edit_message("tok", 7, "edited")),
+    ("delete_message", lambda c: c.delete_message("tok", 7)),
     ("create_conversation", lambda c: c.create_conversation("room")),
     ("add_participant", lambda c: c.add_participant("tok", "alice")),
     ("search_mentions", lambda c: c.search_mentions("tok", "al")),
@@ -262,6 +266,42 @@ def test_a_talk_read_still_returns_its_data_on_a_real_envelope():
     assert asyncio.run(_client(resp).list_conversations()) == [{"id": 3}, {"id": 2}]
 
 
+@pytest.mark.parametrize("name,call", [
+    ("send_message", lambda c: c.send_message("tok", "hello")),
+    ("edit_message", lambda c: c.edit_message("tok", 7, "edited")),
+    ("delete_message", lambda c: c.delete_message("tok", 7)),
+], ids=["send_message", "edit_message", "delete_message"])
+def test_the_three_writes_return_ocs_data_not_the_whole_body(name, call):
+    """ISSUE-463: these three answered the raw body, so every caller that
+    wanted the posted id unwrapped the envelope itself and `skills/nextcloud`
+    carried a tolerant unwrap to cope with both shapes."""
+    resp = _response(json_body={"ocs": {"meta": {"status": "ok"},
+                                        "data": {"id": 4242}}})
+    assert asyncio.run(call(_client(resp))) == {"id": 4242}
+
+
+@pytest.mark.parametrize("empty", [None, [], "", 0], ids=["null", "list", "str", "zero"])
+def test_a_write_with_no_data_answers_an_empty_dict(empty):
+    """The caller reads an `id` straight off these, so a non-dict `ocs.data`
+    has to fold onto the same empty default rather than raise.
+
+    `ocs_data`'s own `default` covers JSON `null` only, and PHP encodes an
+    empty `data` as `[]` — which is the shape the tree's own fixtures use.
+    Without the fold, `talk send` answered an AttributeError for a post
+    Nextcloud had accepted.
+    """
+    resp = _response(json_body={"ocs": {"data": empty}})
+    assert asyncio.run(_client(resp).delete_message("tok", 7)) == {}
+
+
+def test_a_write_keeps_a_real_dict_whole():
+    """The fold is for non-dicts only — it must not flatten a real answer."""
+    resp = _response(json_body={"ocs": {"data": {"id": 7, "parent": {"id": 3}}}})
+    assert asyncio.run(_client(resp).send_message("tok", "hi")) == {
+        "id": 7, "parent": {"id": 3},
+    }
+
+
 def test_poll_messages_still_returns_empty_on_304():
     """304 is answered before the body is read, so it never reaches the unwrap."""
     resp = _response(json_body=None, status=304)
@@ -278,13 +318,23 @@ class TestBestEffortCallersKeepTheirOldAnswer:
     so the failure is visible in the log without moving what the caller sees.
     The Talk transport's post is the one that deliberately does not: it already
     owns a mechanism for this exact failure, and catching would disable it.
+
+    Since ISSUE-463 the `OcsError` comes out of `send_message` itself rather
+    than out of an unwrap the caller ran on the body it returned, so these stub
+    the client as raising it. What each caller does with it is unchanged.
     """
+
+    #: What `TalkClient.send_message` raises on a 2xx whose body is not an
+    #: envelope — after `raise_for_status`, so the post may well have landed.
+    UNREADABLE = OcsError(
+        "send message to tok: JSON without an ocs envelope (HTTP 200)"
+    )
 
     def test_talk_transport_post_part_reads_the_room_back(self):
         """This one is deliberately *not* caught at the unwrap.
 
-        `_may_have_been_stored` names this exact case — "a 2xx whose body does
-        not parse raises after Nextcloud has written the message" — and the
+        `_may_have_been_stored` names this exact case — a 2xx whose body does
+        not unwrap raises after Nextcloud has written the message — and the
         readback is what turns it into the real id. Swallowing it into a `None`
         return would report a post the user can see as undelivered, which is
         the ambiguity ISSUE-404 removed.
@@ -296,7 +346,7 @@ class TestBestEffortCallersKeepTheirOldAnswer:
         ))
         config.talk.bot_username = "bot"
         client = MagicMock()
-        client.send_message = AsyncMock(return_value={"message": "no envelope"})
+        client.send_message = AsyncMock(side_effect=self.UNREADABLE)
         client.fetch_chat_history = AsyncMock(return_value=[
             {"id": 4242, "referenceId": "ref-1", "actorType": "users",
              "actorId": "bot"},
@@ -324,7 +374,7 @@ class TestBestEffortCallersKeepTheirOldAnswer:
         ))
         config.talk.bot_username = "bot"
         client = MagicMock()
-        client.send_message = AsyncMock(return_value={"message": "no envelope"})
+        client.send_message = AsyncMock(side_effect=self.UNREADABLE)
         client.fetch_chat_history = AsyncMock(return_value=[])
         transport = TalkTransport(config)
 
@@ -348,7 +398,7 @@ class TestBestEffortCallersKeepTheirOldAnswer:
         ))
         config.talk.bot_username = "bot"
         client = MagicMock()
-        client.send_message = AsyncMock(return_value={"message": "no envelope"})
+        client.send_message = AsyncMock(side_effect=self.UNREADABLE)
         client.fetch_chat_history = AsyncMock(
             side_effect=OcsError("chat history tok: JSON without an ocs envelope"),
         )
@@ -362,6 +412,33 @@ class TestBestEffortCallersKeepTheirOldAnswer:
             ))
         assert client.send_message.await_count == 1
 
+    def test_transport_edit_lets_an_unreadable_answer_out(self):
+        """`edit_message` unwraps its answer too, so it gains the same raise.
+
+        `TalkTransport.edit` discards the returned dict, and its docstring says
+        it raises on an API error for `scheduler.edit_talk_message` to catch —
+        so the new `OcsError` has to reach that shim rather than be swallowed
+        into a silent success on an edit that may not have landed.
+        """
+        from istota.transport.talk import TalkTransport
+
+        config = Config(nextcloud=NextcloudConfig(
+            url=NC_URL, username="bot", app_password="secret",
+        ))
+        client = MagicMock()
+        client.edit_message = AsyncMock(side_effect=OcsError(
+            "edit message 42 in tok: JSON without an ocs envelope (HTTP 200)",
+        ))
+        transport = TalkTransport(config)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "istota.transport.talk.get_talk_client", lambda _c: client,
+            )
+            with pytest.raises(OcsError):
+                asyncio.run(transport.edit("tok", 42, "Updated"))
+        assert client.edit_message.await_count == 1
+
     def test_post_as_user_returns_none_and_logs(self, caplog, monkeypatch):
         from istota import web_app
 
@@ -373,7 +450,7 @@ class TestBestEffortCallersKeepTheirOldAnswer:
         class FakeTalkClient:
             def __init__(self, *args, **kwargs):
                 self.send_message = AsyncMock(
-                    return_value={"message": "no envelope"},
+                    side_effect=TestBestEffortCallersKeepTheirOldAnswer.UNREADABLE,
                 )
                 self.aclose = AsyncMock()
 
@@ -388,7 +465,8 @@ class TestBestEffortCallersKeepTheirOldAnswer:
             ))
 
         assert posted is None
-        assert "id could not be read" in caplog.text
+        assert "its id is unknown" in caplog.text
+        assert "may be in the room" in caplog.text
 
     def test_promote_answers_failed_rather_than_raising(self, tmp_path, monkeypatch):
         """An unreadable create answer has always produced the route's 502
@@ -536,23 +614,77 @@ class TestOauthUserinfo:
 
 
 class TestSkillTalkSend:
-    """`send_message` is the one method returning the raw body, so the skill
-    tolerates a payload that is already unwrapped. That tolerance stays."""
+    """`talk send` reads the posted id straight off what the client answers.
 
-    def test_an_envelope_is_unwrapped(self):
-        from istota.skills.nextcloud import _ocs_data
+    It used to run a tolerant unwrap that had to decide whether the payload was
+    an envelope first, because `send_message` was the one method returning the
+    raw body (ISSUE-463). Now there is one shape and the guess is gone.
+    """
 
-        assert _ocs_data({"ocs": {"data": {"id": 9}}}) == {"id": 9}
+    @staticmethod
+    def _run(sent, monkeypatch):
+        import argparse
 
-    def test_an_already_unwrapped_payload_is_passed_through(self):
-        from istota.skills.nextcloud import _ocs_data
+        from istota.skills import nextcloud as skill
 
-        assert _ocs_data({"id": 9}) == {"id": 9}
+        class _Client:
+            async def send_message(self, token, message, reply_to=None):
+                sent["token"] = token
+                sent["message"] = message
+                if isinstance(sent["answer"], Exception):
+                    raise sent["answer"]
+                return sent["answer"]
 
-    def test_a_non_dict_is_empty(self):
-        from istota.skills.nextcloud import _ocs_data
+        def _fake_run(fn):
+            return asyncio.run(fn(_Client()))
 
-        assert _ocs_data(["nope"]) == {}
+        monkeypatch.setattr(skill, "_talk_run", _fake_run)
+        return skill.cmd_talk_send(
+            argparse.Namespace(token="tok", message="hi", reply_to=None),
+        )
+
+    def test_the_posted_id_comes_off_ocs_data(self, monkeypatch):
+        sent = {"answer": {"id": 9, "actorId": "bot"}}
+        answer = self._run(sent, monkeypatch)
+        assert answer == {"status": "ok", "token": "tok", "message_id": 9}
+        assert sent["message"] == "hi"
+
+    def test_the_envelope_is_no_longer_unwrapped_a_second_time(self, monkeypatch):
+        """The one case that separates this from the deleted `_ocs_data`.
+
+        That helper guessed: handed an envelope it unwrapped, handed a payload
+        it passed through. With the client answering `ocs.data` there is one
+        shape, so an envelope arriving here is a client that broke its
+        contract — and reading `id` off it must not quietly find one. Against
+        the pre-change code this answered 9.
+        """
+        answer = self._run({"answer": {"ocs": {"data": {"id": 9}}}}, monkeypatch)
+        assert answer["message_id"] is None
+
+    def test_an_answer_without_an_id_reports_none(self, monkeypatch):
+        """An empty `ocs.data` reaches here as `{}`, not as a crash."""
+        answer = self._run({"answer": {}}, monkeypatch)
+        assert answer["message_id"] is None
+
+    def test_an_unreadable_answer_is_a_failure_not_a_send_with_no_id(
+        self, monkeypatch,
+    ):
+        """Deleting the tolerance means an unreadable body ends the command.
+
+        `send_message` raises only after `raise_for_status`, so a 2xx body with
+        no `ocs` key did not come from Talk's chat endpoint — Talk always wraps
+        — but from something interposed, which most likely never passed the
+        post on. Answering "ok, message_id null" there is the silent success
+        `istota.ocs` exists to end, so `cmd_talk_send` lets it out and
+        `run_skill_cli` turns it into the error envelope. Pre-change this
+        answered `{"status": "ok", ..., "message_id": None}`.
+        """
+        sent = {"answer": OcsError(
+            "send message to tok: JSON without an ocs envelope (HTTP 200)",
+        )}
+        with pytest.raises(OcsError):
+            self._run(sent, monkeypatch)
+        assert sent["message"] == "hi", "the post was attempted"
 
 
 # --- the guard -------------------------------------------------------------

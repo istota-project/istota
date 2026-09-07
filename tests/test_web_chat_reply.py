@@ -466,7 +466,16 @@ class TestTalkMirror:
 
 async def _post_reply_as_user(client, cookies, room, parent_msg_id):
     """Send (optionally citing `parent_msg_id`) with the post-as-user mirror
-    armed, and return the arguments it handed to Talk."""
+    armed, and return the arguments it handed to Talk.
+
+    The returned id is asserted to have been stamped on the user row before
+    this answers, so the double's return shape decides whether these tests
+    pass. Without that, a double left on the pre-ISSUE-463 envelope makes
+    `_post_as_user` read no id and answer None, and every test here still
+    passes while the stamping path stops running.
+    """
+    import json
+
     import istota.web_app as mod
 
     captured: dict = {}
@@ -477,7 +486,7 @@ async def _post_reply_as_user(client, cookies, room, parent_msg_id):
 
         async def send_message(self, token, text, reply_to=None, reference_id=None):
             captured["reply_to"] = reply_to
-            return {"ocs": {"data": {"id": 4242}}}
+            return {"id": 4242}  # `ocs.data`, as the real client answers
 
         async def aclose(self):
             pass
@@ -491,6 +500,17 @@ async def _post_reply_as_user(client, cookies, room, parent_msg_id):
             patch("istota.talk.TalkClient", _FakeTalkClient):
         resp = await _send(client, cookies, room["id"], body)
     assert resp.status_code == 200
+    with db.get_db(_db_path()) as conn:
+        stamped = conn.execute(
+            "SELECT external_ids FROM messages "
+            "WHERE room_token = ? AND role = 'user' "
+            "ORDER BY id DESC LIMIT 1",
+            (room["token"],),
+        ).fetchone()
+    assert json.loads(stamped["external_ids"] or "{}") == {"talk": "4242"}, (
+        "the posted Talk id must reach the user row — a double still "
+        "answering the OCS envelope makes this None and hides the mirror"
+    )
     return captured
 
 
