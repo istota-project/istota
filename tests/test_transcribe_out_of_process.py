@@ -203,22 +203,24 @@ class TestFailureModes:
 
     def test_a_hung_child_is_killed_by_group_and_reaped(self):
         with patch(_POPEN) as popen, patch(
-            "istota.skills.transcribe.out_of_process.kill_process_group"
+            "istota.skills.transcribe.out_of_process.kill_group_if_live"
         ) as kill:
-            proc = _fake_proc(stdout="", timeout_first=True)
+            proc = _fake_proc(stdout="", returncode=None, timeout_first=True)
             popen.return_value = proc
             result = ocr_image_out_of_process("/tmp/shot.png", timeout=3)
 
-        kill.assert_called_once_with(5151)
+        kill.assert_called_once_with(proc)
         assert proc.communicate.call_count == 2
         assert result["status"] == "error"
         assert "timed out" in result["error"]
 
     def test_a_result_the_reap_recovers_is_used_not_discarded(self):
         with patch(_POPEN) as popen, patch(
-            "istota.skills.transcribe.out_of_process.kill_process_group"
+            "istota.skills.transcribe.out_of_process.kill_group_if_live"
         ):
-            popen.return_value = _fake_proc(stdout=_ok_payload("Recovered"), timeout_first=True)
+            popen.return_value = _fake_proc(
+                stdout=_ok_payload("Recovered"), returncode=None, timeout_first=True
+            )
             result = ocr_image_out_of_process("/tmp/shot.png", timeout=3)
 
         assert result["status"] == "ok"
@@ -226,10 +228,11 @@ class TestFailureModes:
 
     def test_a_reap_that_also_fails_still_returns_the_timeout_error(self):
         with patch(_POPEN) as popen, patch(
-            "istota.skills.transcribe.out_of_process.kill_process_group"
+            "istota.skills.transcribe.out_of_process.kill_group_if_live"
         ):
             proc = MagicMock()
             proc.pid = 5151
+            proc.returncode = None
             proc.communicate.side_effect = [
                 subprocess.TimeoutExpired(cmd="ocr", timeout=1),
                 OSError("no child"),
@@ -242,15 +245,16 @@ class TestFailureModes:
 
     def test_a_child_that_dies_mid_stream_is_killed_and_reported(self):
         with patch(_POPEN) as popen, patch(
-            "istota.skills.transcribe.out_of_process.kill_process_group"
+            "istota.skills.transcribe.out_of_process.kill_group_if_live"
         ) as kill:
             proc = MagicMock()
             proc.pid = 5151
+            proc.returncode = None
             proc.communicate.side_effect = ValueError("broken pipe")
             popen.return_value = proc
             result = ocr_image_out_of_process("/tmp/shot.png")
 
-        kill.assert_called_once_with(5151)
+        kill.assert_called_once_with(proc)
         assert result["status"] == "error"
 
     @pytest.mark.parametrize(
@@ -262,6 +266,45 @@ class TestFailureModes:
             result = ocr_image_out_of_process("/tmp/shot.png")
 
         assert result["status"] == "error"
+
+
+class TestAReapedChildIsNeverSignalled:
+    """ISSUE-456: `_kill_and_reap` signalled `proc.pid` whatever state it was in.
+
+    Both kill paths run after `communicate()` went wrong, and one of the ways
+    it goes wrong is a failure raised once the child has already exited and
+    been reaped. A pid is not a handle: by then the number may belong to an
+    unrelated process, and `kill_process_group` would take its whole group.
+    Asserted through `process_group._signal`, the one place every route to the
+    OS passes.
+    """
+
+    def test_a_child_that_has_already_been_reaped_is_not_signalled(self):
+        signalled = []
+        with patch(_POPEN) as popen, patch(
+            "istota.process_group._signal",
+            side_effect=lambda pid, sig: signalled.append(pid) or "gone",
+        ):
+            proc = _fake_proc(returncode=0)
+            proc.communicate.side_effect = [ValueError("broken pipe"), ("", "")]
+            popen.return_value = proc
+            result = ocr_image_out_of_process("/tmp/shot.png")
+
+        assert signalled == [], "signalled a pid the OS may have handed to somebody else"
+        assert result["status"] == "error"
+
+    def test_a_child_still_running_is_still_signalled(self):
+        # The control: a guard that refused everything would pass the test
+        # above and lose the kill this module exists to make.
+        signalled = []
+        with patch(_POPEN) as popen, patch(
+            "istota.process_group._signal",
+            side_effect=lambda pid, sig: signalled.append(pid) or "group",
+        ):
+            popen.return_value = _fake_proc(returncode=None, timeout_first=True)
+            ocr_image_out_of_process("/tmp/shot.png", timeout=3)
+
+        assert signalled == [5151]
 
 
 class TestParseCliJson:

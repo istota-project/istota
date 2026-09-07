@@ -75,7 +75,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
-from istota.git_hardening import GIT_SUBPROCESS_ENV
+from istota.git_hardening import git_env
 from istota.user_scope import is_within
 
 logger = logging.getLogger("istota.git_remote_scrub")
@@ -496,18 +496,21 @@ def _git_config(*args: str) -> tuple[int, str]:
     call here that names no repository at all: ``--file`` is the whole input, so
     there is no ``-C``, nothing is discovered, and the ``-c`` overrides would
     have nothing to override — ``git config --file`` does not report them and
-    runs no program. It does share the environment overlay, which is the part
-    that was duplicated. And it must keep *raising*: both callers tell an
-    unreadable config apart from a git that could not be run, and each logs a
-    different line, so a wrapper that swallowed the exception would report a
-    file that was never opened as a file that was read and rejected.
+    runs no program. It does share the environment policy ``git_env`` builds,
+    which is the part that was duplicated; the removals in it are inert here,
+    for the reason just given, and it takes the whole policy anyway so that no
+    call site has to be read to learn which half it got. And it must keep
+    *raising*: both callers tell an unreadable config apart from a git that
+    could not be run, and each logs a different line, so a wrapper that
+    swallowed the exception would report a file that was never opened as a file
+    that was read and rejected.
     """
     proc = subprocess.run(
         ["git", "config", *args],
         capture_output=True, timeout=_GIT_TIMEOUT,
         # The named file is the whole input; no repository is discovered and no
         # user or system config can redirect what this reads or writes.
-        env={**os.environ, **GIT_SUBPROCESS_ENV},
+        env=git_env(),
     )
     return proc.returncode, proc.stdout.decode("utf-8", "surrogateescape")
 

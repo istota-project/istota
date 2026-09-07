@@ -20,9 +20,11 @@ import signal
 import socket
 import subprocess
 import sys
+from unittest.mock import patch
 
 import pytest
 
+from istota import process_group
 from istota.session.tools import ToolEnv, hello_payload, start_tool_server
 from istota.session.tools import remote as remote_mod
 from istota import tool_server_protocol as tsp
@@ -400,6 +402,159 @@ class TestFailure:
                 await server.aclose()
         assert detail, "a dead server must produce some detail"
         assert "exit" in detail, detail
+
+
+class TestAReapedServerIsNeverSignalled:
+    """ISSUE-456: the three teardown paths signalled `proc.pid` unconditionally.
+
+    An `asyncio.subprocess` child is reaped by the loop's own watcher as soon
+    as it exits — nobody has to call `wait()` — so on `_abandon` and on the
+    failed-spawn path, both of which run *because* the server did not come up,
+    the process is routinely gone before the signal is sent. `aclose` is the
+    other shape: its kill branch is normally reached by the graceful window
+    expiring on a live process, and the reaped case arrives there with a
+    cancellation, which is what that test manufactures. A pid is not a handle:
+    the number may already belong to an unrelated process, whose whole group
+    `kill_process_group` would take.
+
+    Asserted through `process_group._signal`, the single point every route to
+    the OS passes, so these do not depend on which helper the module calls.
+    """
+
+    def _recorder(self, signalled, deliver=False):
+        real = process_group._signal
+        if deliver:
+            return patch.object(
+                process_group,
+                "_signal",
+                side_effect=lambda pid, sig: signalled.append(pid) or real(pid, sig),
+            )
+        return patch.object(
+            process_group,
+            "_signal",
+            side_effect=lambda pid, sig: signalled.append(pid) or "gone",
+        )
+
+    async def test_abandon_does_not_signal_a_server_the_watcher_already_reaped(
+        self, tmp_path
+    ):
+        signalled = []
+        server = await start_tool_server(_hello(tmp_path))
+        try:
+            server._proc.kill()
+            await asyncio.wait_for(server._proc.wait(), timeout=5)
+            with self._recorder(signalled):
+                await remote_mod._abandon(server)
+        finally:
+            with contextlib.suppress(Exception):
+                await server.aclose()
+
+        assert signalled == [], "signalled a pid the OS may have handed to somebody else"
+
+    async def test_abandon_still_kills_a_server_that_is_still_running(self, tmp_path):
+        # The control, and it delivers the signal for real: a guard that
+        # refused everything would pass the test above while leaving a
+        # half-started server alive for the life of the daemon.
+        signalled = []
+        server = await start_tool_server(_hello(tmp_path))
+        pid = server.pid
+        try:
+            with self._recorder(signalled, deliver=True):
+                await remote_mod._abandon(server)
+        finally:
+            with contextlib.suppress(Exception):
+                await server.aclose()
+
+        assert signalled == [pid]
+        assert server._proc.returncode is not None, "the server survived _abandon"
+
+    async def test_aclose_does_not_signal_a_server_that_died_in_the_graceful_window(
+        self, tmp_path
+    ):
+        """The `except BaseException` branch, reached with the child already
+        reaped — a `CancelledError` delivered to a `finally` that was waiting
+        out the graceful window on a server that had meanwhile exited."""
+        signalled = []
+        server = await start_tool_server(_hello(tmp_path))
+        server._proc.kill()
+        await asyncio.wait_for(server._proc.wait(), timeout=5)
+
+        async def cancelled_wait():
+            raise asyncio.CancelledError
+
+        server._proc.wait = cancelled_wait
+        with self._recorder(signalled):
+            await server.aclose()
+
+        assert signalled == []
+
+    async def test_a_failed_connection_does_not_signal_a_child_that_already_exited(
+        self, tmp_path
+    ):
+        """The spawn path's own teardown: `open_connection` failing after the
+        server has died and been reaped."""
+        signalled = []
+        spawned = []
+        real_spawn = asyncio.create_subprocess_exec
+
+        async def recording_spawn(*args, **kwargs):
+            proc = await real_spawn(*args, **kwargs)
+            spawned.append(proc)
+            return proc
+
+        async def refuse(*args, **kwargs):
+            # Waited on rather than polled: `create_subprocess_exec` is awaited
+            # before this, so the child exists, and waiting holds the two
+            # process-wide patches below for milliseconds instead of seconds.
+            await spawned[0].wait()
+            raise ConnectionResetError("the server end went away")
+
+        with patch.object(remote_mod.asyncio, "create_subprocess_exec", recording_spawn), \
+                patch.object(remote_mod.asyncio, "open_connection", refuse), \
+                self._recorder(signalled):
+            with pytest.raises(ConnectionResetError):
+                await start_tool_server(
+                    _hello(tmp_path),
+                    sandbox_wrap=lambda cmd: [sys.executable, "-c", "raise SystemExit(3)"],
+                )
+
+        assert signalled == []
+
+
+class TestACancelledShutdownStillKillsTheServer:
+    """A cancellation delivered to `aclose`'s first await used to skip the kill.
+
+    Found reviewing the change above, in the function it changed. The
+    `shutdown` send is awaited under `suppress(Exception)`, and a
+    `CancelledError` is not one — so it left `aclose` through the `finally`
+    alone, with `_closed` set, the kill never reached and every later call a
+    no-op. `aclose` runs from a `finally` on the cancellation path by design
+    (`brain/native.py`), which is exactly where this arrives, and the process
+    it strands is bwrap holding the task's whole Bash tree.
+    """
+
+    async def test_a_cancel_in_the_shutdown_send_does_not_strand_the_process(
+        self, tmp_path
+    ):
+        server = await start_tool_server(_hello(tmp_path))
+
+        async def cancelled_send(_message):
+            raise asyncio.CancelledError
+
+        server._send = cancelled_send
+        escaped = False
+        try:
+            await server.aclose()
+        except asyncio.CancelledError:
+            escaped = True
+        # Read before the cleanup below, or the cleanup is what makes it true.
+        died = server._proc.returncode is not None
+        if not died:  # pragma: no cover - cleanup for the pre-fix shape
+            server._proc.kill()
+            await asyncio.wait_for(server._proc.wait(), timeout=5)
+
+        assert not escaped, "the cancellation left aclose, which runs from a finally"
+        assert died, "the tool server outlived the aclose that was cancelled"
 
 
 class TestAnOversizedResultCostsTheCallOnly:

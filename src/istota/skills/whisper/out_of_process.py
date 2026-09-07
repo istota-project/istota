@@ -35,7 +35,7 @@ import os
 import subprocess
 import sys
 
-from istota.process_group import kill_process_group
+from istota.process_group import kill_group_if_live
 
 __all__ = ["transcribe_audio_out_of_process", "DEFAULT_TIMEOUT_SECONDS"]
 
@@ -248,10 +248,11 @@ def transcribe_audio_out_of_process(
         return {"status": "error", "error": f"transcription timed out after {timeout:.0f}s"}
     except Exception as e:
         # A broken pipe, or a decode that failed despite the pinned encoding.
-        # The child is still running and still holding the memory this module
-        # exists to bound, and `start_new_session` means nothing else will ever
-        # signal it — so kill it here rather than leaving it to finish
-        # unsupervised.
+        # If the child is still running it is still holding the memory this
+        # module exists to bound, and `start_new_session` means nothing else
+        # will ever signal it — so kill it here rather than leaving it to
+        # finish unsupervised. Whether it is still running is `_kill_and_reap`'s
+        # to decide: `communicate()` can also fail after the reap.
         logger.warning("Transcription process for %s failed: %s", path, e, exc_info=True)
         _kill_and_reap(proc, path)
         return {"status": "error", "error": f"transcription process failed: {e}"}
@@ -278,10 +279,16 @@ def transcribe_audio_out_of_process(
 def _kill_and_reap(proc, path: str) -> tuple[str, str]:
     """SIGKILL the child's group and collect whatever it had already written.
 
+    The kill is skipped when the child has already been reaped: both callers
+    reach this after something went wrong with `communicate()`, and one of the
+    ways that goes wrong is a failure raised once the child is gone. The pid
+    would then be the OS's to reuse, and the group signalled somebody else's
+    (ISSUE-456).
+
     Returns `(stdout, stderr)`, empty strings if nothing could be collected.
     Never raises: both callers are already handling a failure.
     """
-    kill_process_group(proc.pid)
+    kill_group_if_live(proc)
     try:
         return proc.communicate(timeout=_REAP_TIMEOUT_SECONDS)
     except Exception as e:
