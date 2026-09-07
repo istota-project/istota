@@ -11,9 +11,9 @@ before this module existed: five copies checked the status inside the ``try``,
 sites that printed an error envelope and exited 0. (``skills/kv`` checked no
 status in ``main`` either, but every one of its error paths already exited 1.)
 
-Imports ``json``, ``sys`` and ``._hostpath`` — itself a leaf over
-``istota.skill_host_paths``, which is stdlib-only — so a skill subprocess pays
-nothing for it beyond what ``istota.skills.__init__`` already costs.
+Nothing from the package beyond ``._hostpath``, itself a leaf over
+``istota.skill_host_paths`` — so a skill subprocess pays nothing for it beyond
+what ``istota.skills.__init__`` already costs.
 
 ``parse_and_resolve`` is the other half of the facade's contract and is here
 rather than in ``_hostpath`` for that reason: the refusal has to come back as

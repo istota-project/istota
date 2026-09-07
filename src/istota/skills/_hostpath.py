@@ -58,8 +58,8 @@ be converted in one behaviour-preserving step. It also retires "callers must
 use the returned resolved path" as a rule each handler has to remember:
 `args.file_path` already *is* the resolved path.
 
-Imports `argparse`, `logging`, `pathlib` and `istota.skill_host_paths`, which
-is itself a stdlib-only leaf — so a skill subprocess pays nothing beyond what
+Nothing from the package beyond `istota.skill_host_paths`, itself a leaf over
+`istota.user_scope` — so a skill subprocess pays nothing beyond what
 `istota.skills.__init__` already costs.
 """
 
@@ -121,6 +121,8 @@ def host_path(
 
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction | None:
+    # The first is the only one: argparse raises on a second `add_subparsers`
+    # against one parser, so there is no second to descend.
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             return action
@@ -147,6 +149,13 @@ def stamped(parser: argparse.ArgumentParser) -> list[tuple[str, str, str]]:
     walk: under-reporting the tree is how the coverage check downstream reads
     as green with arguments it never saw. `subparsers_without_dest` is what
     names that fault.
+
+    **An `add_parser` alias yields one key per name, deliberately.**
+    `calendar list|agenda` and `location current|last` each come back twice,
+    because `action.choices` maps both names to the same parser and
+    `test_skill_host_paths_coverage.py`'s walk iterates it the same way. That
+    is what "compared key for key" above means; de-duplicating by parser
+    identity here would make the two enumerations disagree.
     """
     out: list[tuple[str, str, str]] = []
 
@@ -195,6 +204,11 @@ def stamp_conflicts(
     one path — on the top-level parser and again on the verb, say — is: the
     resolution would apply both, in declaration order, and picking one silently
     would resolve a read as a write or the other way round.
+
+    A dest that is stamped on the parent and left *unstamped* on the verb is
+    reported with `""` as the second mode. That case is quieter and no less
+    wrong: the verb's value is what the namespace carries, so it would be
+    resolved under a mode declared for a different argument.
     """
     out: list[tuple[str, str, tuple[str, ...]]] = []
 
@@ -206,9 +220,19 @@ def stamp_conflicts(
         seen = dict(inherited)
         for action in current._actions:
             mode = getattr(action, STAMP, None)
-            if mode is None:
-                continue
             previous = seen.get(action.dest)
+            if mode is None:
+                # An *unstamped* dest shadowing a stamped one on the same path
+                # is the quieter half of the same fault and is reported too.
+                # `resolve_parsed` reads `getattr(args, dest)`, which after the
+                # child parse holds the child's value — so a stamped
+                # `--file` on the parent plus a plain `--file` on the verb
+                # resolves the verb's value under the parent's mode, with a
+                # conflict walk that only looked at stamped pairs staying green.
+                if previous is not None:
+                    out.append((".".join(trail), action.dest, (previous, "")))
+                    seen.pop(action.dest, None)
+                continue
             if previous is not None and previous != mode:
                 out.append((".".join(trail), action.dest, (previous, mode)))
             seen[action.dest] = mode
@@ -232,6 +256,29 @@ def _own_roots(*, writable: bool) -> list[Path]:
 
 
 def _roots_for(mode: str, *, writable: bool) -> list[Path]:
+    """`TASK` for a `READ`, `OWN` for an `EGRESS` or a `WRITE`.
+
+    **`OWN` is narrower than what every shipped host-path consumer uses
+    today, and stamping an existing argument is therefore a behaviour
+    change.** The six scoped call sites all go through
+    `resolve_host_path(writable=True)`, whose roots are
+    `env_host_roots(writable=True)` — the deferred dir and
+    `{mount}/Channels/{token}` as well as the workspace. A `WRITE` stamp
+    drops both. `browse screenshot --output`, `devbox cp-out --dest`,
+    `feeds export-opml --output` and `health export-csv --output` are the
+    four that will feel it, and each is declared in the stage that also
+    carries its own control over the behaviour that is already known.
+
+    `EGRESS` has the same shape against a different incumbent:
+    `memory_search index file` states this idea today as
+    `env_host_roots(talk=False)`, which drops `{mount}/Talk` and keeps the
+    deferred and channel roots. That is a second spelling of egress and it
+    is deliberately left standing until the stage that restamps that verb,
+    since narrowing it is a boundary change that wants its own control
+    rather than arriving as a side effect of the machinery landing.
+
+    Nothing is stamped yet, so neither narrowing is live in this commit.
+    """
     if mode == READ:
         return env_host_roots(writable=writable)
     return _own_roots(writable=writable)
@@ -251,6 +298,22 @@ def _operation(dotted: str, action: argparse.Action) -> str:
 def _resolve_one(
     value: object, mode: str, operation: str,
 ) -> tuple[str | None, str | None]:
+    """Resolve one value under one mode. `(resolved str, None)` or `(None, error)`.
+
+    **An empty or whitespace-only value is refused before a `Path` is built**,
+    because `Path("")` is `Path(".")` — the process cwd, which for a proxied
+    skill is the daemon's and for a task's own shell may well be inside the
+    workspace. Measured: `--file ""` under a cwd in the workspace resolved
+    clean and wrote the workspace *directory* back onto the namespace, turning
+    an argument a handler would have failed to open into a valid path to
+    somewhere it never named.
+
+    A relative value is resolved against that same cwd and so is almost always
+    refused, which is the documented behaviour rather than an oversight; the
+    refusal names the resolved absolute path, so the cause is visible.
+    """
+    if value is None or not str(value).strip():
+        return None, f"Empty path argument: {operation} refused."
     writable = mode == WRITE
     resolved, error = resolve_in_roots(
         Path(str(value)),
@@ -303,7 +366,11 @@ def resolve_parsed(
 
     Returns the message rather than raising, matching `resolve_host_path`'s own
     convention. `_cli.parse_and_resolve` is what turns it into the facade's
-    envelope; a caller that wants to do something else with it can.
+    envelope; a caller that wants to do something else with it can — and such a
+    caller should know that **`args` is left partially rewritten on a
+    refusal**: the dests resolved before the refusing one are already absolute
+    strings and the rest are as parsed, with nothing on the namespace saying
+    which is which. `parse_and_resolve` exits, so no handler ever sees that.
     """
     for dotted, action in _actions_on_path(parser, args):
         mode = getattr(action, STAMP, None)
@@ -313,15 +380,20 @@ def resolve_parsed(
         if value is None:
             continue
         operation = _operation(dotted, action)
+        skill = parser.prog
 
         if isinstance(value, (list, tuple)):
             resolved_all: list[str] = []
             for element in value:
-                if element is None:
-                    continue
+                # Refused rather than skipped. Dropping it shortens the list
+                # silently, and a handler pairing a stamped list positionally
+                # against another argument then reads the wrong element with
+                # nothing having failed. Argparse's own `nargs` never produces
+                # one, so reaching here means a `type=` callable or a
+                # `set_defaults` put it there and the declaration is the bug.
                 resolved, error = _resolve_one(element, mode, operation)
                 if error is not None:
-                    log.warning("host path refused: %s", operation)
+                    log.warning("host path refused: %s %s", skill, operation)
                     return error
                 resolved_all.append(resolved)
             setattr(args, action.dest, type(value)(resolved_all))
@@ -329,7 +401,7 @@ def resolve_parsed(
 
         resolved, error = _resolve_one(value, mode, operation)
         if error is not None:
-            log.warning("host path refused: %s", operation)
+            log.warning("host path refused: %s %s", skill, operation)
             return error
         setattr(args, action.dest, resolved)
     return None

@@ -207,6 +207,19 @@ class TestStampConflicts:
         host_path(sub.add_parser("put"), "--file", mode=WRITE)
         assert stamp_conflicts(parser) == []
 
+    def test_an_unstamped_verb_argument_shadowing_a_stamped_one_is_reported(self):
+        """The quieter half, and the one a stamped-pairs-only walk misses.
+
+        `resolve_parsed` reads `getattr(args, dest)`, which after the child
+        parse holds the *verb's* value — so the verb's unstamped `--file` would
+        be resolved under the parent's mode, with nothing having declared it.
+        """
+        parser = argparse.ArgumentParser()
+        host_path(parser, "--file", mode=WRITE)
+        sub = parser.add_subparsers(dest="command")
+        sub.add_parser("go").add_argument("--file")
+        assert stamp_conflicts(parser) == [("go", "file", (WRITE, ""))]
+
 
 class TestResolveParsed:
     def test_it_writes_back_the_resolved_path_as_a_string(self, mount):
@@ -377,16 +390,54 @@ class TestResolveParsed:
         assert error and "not found" in error.lower()
 
     def test_a_stamp_on_a_command_that_was_not_taken_is_not_resolved(self, mount):
+        """The default has to come from the *top-level* parser to discriminate.
+
+        A subparser's `set_defaults` applies only when that subparser is
+        selected, so under `put` the namespace carries no `file` attribute at
+        all — and a dest-keyed implementation would `getattr(..., None)`, skip,
+        and pass this test identically. A top-level `set_defaults` does leak
+        onto the namespace under `put`, which is the case
+        `_actions_on_path`'s docstring cites as its reason for existing: only a
+        walk that never reaches `get` leaves the value alone.
+        """
         parser = argparse.ArgumentParser()
+        parser.set_defaults(file="/etc/hosts")
         sub = parser.add_subparsers(dest="command", required=True)
-        get = sub.add_parser("get")
-        host_path(get, "--file", mode=READ)
-        get.set_defaults(file=None)
-        put = sub.add_parser("put")
-        put.add_argument("--plain")
-        args = parser.parse_args(["put", "--plain", "/etc/hosts"])
+        host_path(sub.add_parser("get"), "--file", mode=READ)
+        sub.add_parser("put").add_argument("--plain")
+        args = parser.parse_args(["put", "--plain", "x"])
+        assert args.file == "/etc/hosts"  # the default did reach the namespace
         assert resolve_parsed(parser, args) is None
-        assert args.plain == "/etc/hosts"
+        assert args.file == "/etc/hosts"  # and was not resolved under `get`'s stamp
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_an_empty_value_is_refused_rather_than_read_as_the_cwd(
+        self, mount, monkeypatch, value,
+    ):
+        """`Path("")` is `Path(".")`, and `.` resolves to wherever we happen to be.
+
+        With the cwd inside the workspace that resolves clean and writes the
+        workspace *directory* back onto the namespace, turning an argument a
+        handler would have failed to open into a valid path to somewhere the
+        caller never named. Run with the cwd in-roots on purpose: under the
+        daemon's own cwd it would be refused for the ordinary reason and the
+        test would pass against the unfixed code.
+        """
+        monkeypatch.chdir(mount / "Users" / "alice")
+        parser = _one_verb_parser(READ)
+        args = parser.parse_args(["go", "--file", value])
+        error = resolve_parsed(parser, args)
+        assert error and "empty" in error.lower()
+        assert args.file == value
+
+    def test_a_none_inside_a_list_is_refused_not_dropped(self, mount):
+        """Dropping it shortens the list silently and misaligns a positional pair."""
+        good = mount / "Users" / "alice" / "one.txt"
+        good.write_text("1")
+        parser = _one_verb_parser(READ, nargs="+")
+        args = parser.parse_args(["go", "--file", str(good)])
+        args.file = [str(good), None]
+        assert resolve_parsed(parser, args) is not None
 
     def test_no_roots_refuses_rather_than_widening(self, monkeypatch, tmp_path):
         for name in (
@@ -479,6 +530,20 @@ class TestEverySkillMainGoesThroughIt:
         assert "parse_and_resolve(" in main_source, (
             f"{skill}.main does not parse through parse_and_resolve; a stamped "
             f"argument in this skill would be declared and never enforced."
+        )
+        # Presence alone passes a half-converted `main` that kept its real
+        # `parse_args` beside the new call, so the absence is asserted too.
+        # Narrowed to the two argv-taking spellings rather than `parse_args(`
+        # outright: `money.main` legitimately calls
+        # `parser.parse_args(["portfolio", "--help"])` in five branches, which
+        # prints and exits inside argparse and resolves nothing.
+        residual = [
+            form for form in ("parse_args(argv)", "parse_args()")
+            if form in main_source
+        ]
+        assert residual == [], (
+            f"{skill}.main still calls {residual} as well as parse_and_resolve; "
+            f"one of the two parses is unenforced."
         )
 
     @pytest.mark.parametrize("skill", sorted(_skill_parser_modules()))
