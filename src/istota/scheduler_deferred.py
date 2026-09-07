@@ -23,7 +23,6 @@ an op count, and its lifecycle is owned by the result-delivery code.
 
 import json
 import logging
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +107,12 @@ def _load_deferred_json(
     undecodable file must land here as a warning, not as an exception escaping
     into ``_drain_deferred_ops``, which runs its handlers in sequence with no
     guard between them and would silently skip every one after this.
+
+    ``RecursionError`` is caught for that same reason: the file is
+    model-authored, and deeply nested JSON makes ``json.loads`` raise it
+    (ISSUE-451). The catch stays enumerated here, unlike the health op loop's,
+    because this reads one file and parses it — a small stated set — while
+    that loop coerces model-authored values twenty times over.
     """
     path = user_temp_dir / f"task_{task_id}_{suffix}.json"
     if not path.exists():
@@ -115,7 +120,7 @@ def _load_deferred_json(
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, RecursionError) as e:
         logger.warning("Bad deferred %s file for task %d: %s", suffix, task_id, e)
         path.unlink(missing_ok=True)
         return None
@@ -446,6 +451,14 @@ def _process_deferred_sent_emails(
     count = 0
     with db.get_db(config.db_path) as conn:
         for entry in data:
+            # Same reason as the KV loop's guard: a non-dict entry would raise
+            # outside the try below and lose the rest of the drain (ISSUE-451).
+            if not isinstance(entry, dict):
+                logger.warning(
+                    "Skipping non-dict sent-email entry (%s) for task %d",
+                    type(entry).__name__, task.id,
+                )
+                continue
             message_id = entry.get("message_id", "")
             to_addr = entry.get("to_addr", "")
             if not message_id or not to_addr:
@@ -495,6 +508,21 @@ def _process_deferred_kv_ops(
     count = 0
     with db.get_db(config.db_path) as conn:
         for entry in data:
+            # `_load_deferred_json` checks the outer list only, and the file is
+            # model-authored, so a bare string in it reaches `.get` and raises
+            # an AttributeError from *outside* the per-op guard below — taking
+            # the rest of the batch and every later drain handler with it. The
+            # health and KG loops already skip a non-dict entry (ISSUE-451).
+            # Logged rather than dropped in silence, the rule the subtasks
+            # loop states for itself: a KV write the model believes it made
+            # and that vanished with no journal line is the sharp version of
+            # this failure.
+            if not isinstance(entry, dict):
+                logger.warning(
+                    "Skipping non-dict KV op entry (%s) for task %d",
+                    type(entry).__name__, task.id,
+                )
+                continue
             op = entry.get("op")
             namespace = entry.get("namespace", "")
             key = entry.get("key", "")
@@ -1029,7 +1057,12 @@ def _process_deferred_health_ops(
     try:
         from . import health as _health
         from .health import db as health_db
-        from .health.documents import DocumentError
+        # Unused since the op loop stopped enumerating exception types, and
+        # kept because importing it is the probe that `health.documents` is
+        # available at all — `attach_document` imports the module from inside
+        # the loop, where a missing optional dependency would land as one
+        # failed op rather than as this handler's "health module unavailable".
+        from .health.documents import DocumentError  # noqa: F401
     except ImportError as e:
         logger.warning(
             "Health module unavailable for deferred ops on task %d: %s",
@@ -1450,12 +1483,25 @@ def _process_deferred_health_ops(
                     )
                     continue
                 conn.commit()
-            except (
-                KeyError, ValueError, OSError, sqlite3.Error, DocumentError,
-            ) as e:
-                # OSError + DocumentError cover the document ops, which touch
-                # the filesystem and can refuse a type / size — one bad
-                # attachment must not abort the rest of the batch.
+            except Exception as e:  # noqa: BLE001
+                # Every field of every op is model-authored JSON and the body
+                # above coerces it about twenty times — `Path(...)`,
+                # `float(...)`, `int(...)` across twenty-five op arms — so the
+                # set of types those coercions can raise is not a set worth
+                # enumerating. The tuple this replaces named `KeyError`,
+                # `ValueError`, `OSError`, `sqlite3.Error` and `DocumentError`
+                # (the last two for the document ops, which touch the
+                # filesystem and can refuse a type or a size). It was missing
+                # `TypeError` for `Path(123)` and `float([1])`, and adding it
+                # still left `OverflowError` for `int(Infinity)`, which
+                # `json.loads` accepts by default (ISSUE-451). Anything
+                # escaping here aborts the whole drain — not just the rest of
+                # this file, but every later handler in
+                # `_drain_deferred_ops`, which calls them in a bare sequence.
+                # The two neighbouring loops, `_process_deferred_kv_ops` and
+                # `_process_deferred_kg_ops`, are `except Exception` for the
+                # same reason; this one journals a failure far better than
+                # either, so nothing is lost by joining them.
                 #
                 # Discard whatever the failing op wrote before it raised.
                 # Without this its partial work is still open on the
