@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
 from . import du, sqlite_util
+from .user_scope import is_within, paths_overlap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only; a runtime import is a cycle
     from .config import Config
@@ -1053,7 +1054,7 @@ def _session_log_mask_shape_reason(config: "Config", log_dir: Path) -> str:
                     refused.append(name)
                     continue
                 for probe in (log_dir, log_dir.resolve()):
-                    if probe == name or probe.is_relative_to(name):
+                    if is_within(probe, name):
                         return ""
     except Exception as exc:  # noqa: BLE001 - a diagnostic must not raise
         # Not `OSError` alone. The sandbox-off shape now reaches this code,
@@ -1064,7 +1065,7 @@ def _session_log_mask_shape_reason(config: "Config", log_dir: Path) -> str:
         return f"the mask could not be evaluated ({exc})"
 
     if any(
-        probe == r or probe.is_relative_to(r)
+        is_within(probe, r)
         for r in refused
         for probe in (log_dir, log_dir.resolve())
     ):
@@ -1308,9 +1309,14 @@ def _overlaps(a: Path, b: Path) -> bool:
     only in case reaches the same directory and this returns False. Left as
     written rather than case-folded: the comparison would then be wrong on
     every case-*sensitive* filesystem, which is where bubblewrap runs and
-    therefore where a bind exists at all.
+    therefore where a bind exists at all — which is also why the shared
+    :func:`~istota.user_scope.paths_overlap` it delegates to is lexical.
+
+    Kept as a named local rather than replaced by that import at its call
+    sites, because the case-folding caveat above is about *this* comparison
+    and belongs where the reader of it looks.
     """
-    return a == b or a.is_relative_to(b) or b.is_relative_to(a)
+    return paths_overlap(a, b)
 
 
 # Every path this module resolves is a config value or a join of one, and

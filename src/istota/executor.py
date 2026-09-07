@@ -86,7 +86,7 @@ from .image_attachments import (
 )
 from .shell_exec import pipefail_env
 from .skill_host_paths import path_under_roots, workspace_roots
-from .user_scope import scoped_user_dir
+from .user_scope import is_within, paths_overlap, scoped_user_dir
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 from .skills.whisper.out_of_process import transcribe_audio_out_of_process
 
@@ -556,6 +556,16 @@ def get_task_control_dir(
     parent of, not a bad user id, and a message blaming the user id sends an
     operator looking in the wrong place.
 
+    **That unresolved root is why this is not a call to
+    :func:`~istota.user_scope.scoped_user_dir`**, and the difference is a
+    widening rather than a nicety. That function compares
+    ``candidate.resolve()`` against ``root.resolve() / user_id``, so a symlink
+    at ``.control`` moves *both* sides and the equality holds: a control root
+    pointing anywhere on disk would be accepted, and every task's assembled
+    prompt would be written through it. The check below compares against
+    ``root / user_id`` with ``root`` as spelled, which is the whole point of
+    the fault split above. Read the two together before folding this one in.
+
     ``task_id`` is coerced with ``int()`` before it is interpolated, and that
     is a containment check rather than tidiness: the equality above covers the
     ``user_id`` component and stops there, ``PurePath`` does not collapse
@@ -846,8 +856,9 @@ def _daemon_dirs(config: Config | None, user_id: str) -> tuple[Path, Path]:
     from the returned path alone is the kind of second copy that goes quietly
     wrong.
 
-    The containment test is :func:`get_user_repos_dir`'s, both halves of it,
-    because neither half catches the other's cases: the lexical one refuses a
+    The containment test is :func:`~istota.user_scope.scoped_user_dir`, the
+    same call :func:`get_user_repos_dir` makes, and both halves of it matter
+    because neither catches the other's cases: the lexical one refuses a
     component that never became a child (``.`` is dropped by ``PurePath``, an
     absolute one replaces the root, a nested one goes deeper), and the resolved
     one refuses ``..`` and every symlink, which are children by name and
@@ -856,23 +867,24 @@ def _daemon_dirs(config: Config | None, user_id: str) -> tuple[Path, Path]:
     resolves to another child of the root, passes, and would put bob's scratch
     directory in alice's namespace read-write.
 
+    Delegating tightened the lexical half by exactly one class of id: one with
+    surrounding whitespace, or an embedded NUL, or of a type that is not
+    ``str``. Each used to reach ``root / user_id`` — the last of the three
+    raising ``TypeError`` out of a function whose callers treat it as
+    never-raising — and each now falls back to the shared root, which
+    :func:`build_daemon_sandbox` reads as ``refused`` and declines to grant a
+    file tool on. Fail-closed in every case, and it is the direction
+    ``skill_host_paths`` already scopes in: it reads ``ISTOTA_USER_ID`` through
+    ``.strip()``, so ``" alice"`` would have bound one directory and
+    allowlisted another.
+
     The resolved path is what is returned, since it is what goes on to bwrap
     and into the prompt, and those two must name one directory.
     """
     root = Path(getattr(config, "temp_dir", None) or tempfile.gettempdir())
     with contextlib.suppress(OSError):
         root = root.resolve()
-    work_dir = root
-    if user_id:
-        candidate = root / user_id
-        try:
-            contained = (
-                candidate.parent == root and candidate.resolve() == root / user_id
-            )
-        except (OSError, ValueError):
-            contained = False
-        if contained:
-            work_dir = root / user_id
+    work_dir = scoped_user_dir(root, user_id) or root
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -1021,9 +1033,12 @@ def get_user_repos_dir(config: Config, user_id: str) -> Path | None:
     The three places that need this path — the bwrap bind, the native brain's
     write roots, and the developer skill's ``setup_env`` — must not disagree
     about it, and the last of those cannot import this module (it is a skill
-    module; ``executor`` imports the skill package). So the rule is stated here
-    and repeated there against this docstring, with
-    ``tests/test_sandbox.py::TestPerUserReposDir`` holding the two equal.
+    module; ``executor`` imports the skill package). The *containment* half is
+    no longer restated there: both sides call
+    :func:`~istota.user_scope.scoped_user_dir`, which is a stdlib-only leaf a
+    skill subprocess can reach. What is still stated twice is the *layout* —
+    which configured root, joined with which id — and
+    ``tests/test_sandbox.py::TestPerUserReposDir`` holds the two equal.
 
     ``user_id`` is joined plainly, exactly as :func:`get_user_temp_dir` joins
     it. Deliberately one rule and not two: user ids already reach the
@@ -3630,16 +3645,12 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
     if secret_key_path:
         forbidden.append(Path(secret_key_path).resolve().parent)
 
-    def _overlaps(a: Path, b: Path) -> bool:
-        # True if a == b, a is under b, or b is under a.
-        return a == b or _is_relative_to(a, b) or _is_relative_to(b, a)
-
     for bad in forbidden:
         try:
             bad_resolved = bad.resolve()
         except OSError:
             continue
-        if _overlaps(resolved, bad_resolved):
+        if paths_overlap(resolved, bad_resolved):
             raise ValueError(
                 f"workspace {resolved} overlaps a protected path ({bad_resolved})"
             )
@@ -4025,7 +4036,7 @@ def mask_shadowed_by(candidate: Path, protected: Iterable[Path]) -> list[Path]:
     directory sat outside every mask, which is the ``map_basemap`` two-consumers
     failure exactly.
     """
-    return [p for p in protected if p == candidate or p.is_relative_to(candidate)]
+    return [p for p in protected if is_within(p, candidate)]
 
 
 def sandbox_cache_is_derived(config: Config, user_id: str) -> bool:
@@ -4245,7 +4256,7 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
                 resolved_target = target.resolve()
             except OSError:
                 continue
-            if resolved_target == resolved_root or _is_relative_to(resolved_target, resolved_root):
+            if is_within(resolved_target, resolved_root):
                 _refuse(
                     f"sandbox cache root {resolved_root} is at or above "
                     f"{resolved_target}, which the sandbox mounts; not binding a "
@@ -4270,7 +4281,7 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
         except ValueError:
             pass
         for db_dir in db_dirs:
-            if resolved_root == db_dir or _is_relative_to(resolved_root, db_dir):
+            if is_within(resolved_root, db_dir):
                 _refuse(
                     f"sandbox cache root {resolved_root} is under the database "
                     f"directory {db_dir}, which the sandbox masks read-only; not "
@@ -4283,21 +4294,29 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
         # workspace already uses. Same posture: an operator-named RW bind.
         _validate_workspace_dir(config, resolved_root)
 
-        # The containment assertion. Two checks, because neither catches the
-        # other's cases — the same pair `get_user_repos_dir` runs, for the same
-        # reason. The lexical one refuses a leaf that never became a child (an
-        # empty `user_id` collapses `root / ""` to the root itself, which is
-        # the shared cache the per-user split exists to prevent, and which the
-        # old code produced silently); the resolved one refuses a symlink,
-        # which is a child by name and somewhere else on disk.
+        # The containment assertion, which is `scoped_user_dir` — the same call
+        # `get_user_repos_dir` makes, and the comment here used to say so while
+        # writing the pair out again. Two checks, because neither catches the
+        # other's cases: the lexical one refuses a leaf that never became a
+        # child (an empty `user_id` collapses `root / ""` to the root itself,
+        # which is the shared cache the per-user split exists to prevent, and
+        # which the old code produced silently); the resolved one refuses a
+        # symlink, which is a child by name and somewhere else on disk.
         #
         # This is the invariant the whole layout rests on. On the derived
         # branch the parent is bound read-write into this very task's sandbox,
         # so a task can plant `.package-caches` as a symlink into another
         # user's subtree — and without this the daemon would `mkdir` through
         # it, `chmod 0700` its target and bind that target RW on the next task.
+        #
+        # `resolved_root` is `root.resolve()`, so delegating compares against
+        # the same two values this wrote out. The one thing it adds is the
+        # shared lexical rule, which on the configured branch (`leaf` is the
+        # user id) refuses a padded or NUL-bearing id that used to name a
+        # cache. That costs a disk-backed cache and nothing else — the refusal
+        # keeps package caches on the sandbox's root tmpfs.
         cache_dir = root / leaf
-        if cache_dir.parent != root or cache_dir.resolve() != resolved_root / leaf:
+        if scoped_user_dir(root, leaf) is None:
             _refuse(
                 f"sandbox cache {cache_dir} does not resolve to the directory named "
                 f"by {leaf!r} inside {resolved_root}; not binding it. A symlink there "
@@ -4409,14 +4428,6 @@ def custom_system_prompt_path(config: Config) -> Path | None:
     if path.is_absolute():
         return path
     return Path(os.path.abspath(path))
-
-
-def _is_relative_to(path: Path, other: Path) -> bool:
-    try:
-        path.relative_to(other)
-        return True
-    except ValueError:
-        return False
 
 
 def build_bwrap_cmd(

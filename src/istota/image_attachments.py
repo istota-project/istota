@@ -62,6 +62,7 @@ from pathlib import Path
 
 from .brain._types import ImageInput
 from .skills.transcribe.out_of_process import ocr_image_out_of_process
+from .user_scope import is_within
 
 logger = logging.getLogger("istota.image_attachments")
 
@@ -907,7 +908,7 @@ def _within_binds(source: Path, bind_roots: list[Path] | None) -> bool:
         return False
     for root in bind_roots:
         try:
-            if resolved == root.resolve() or resolved.is_relative_to(root.resolve()):
+            if is_within(resolved, root.resolve()):
                 return True
         except OSError:
             continue

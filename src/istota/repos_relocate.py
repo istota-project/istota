@@ -153,6 +153,7 @@ from pathlib import Path
 
 from .git_hardening import run_git
 from .git_remote_scrub import is_git_dir
+from .user_scope import is_within, scoped_user_dir
 
 logger = logging.getLogger(__name__)
 
@@ -293,40 +294,51 @@ def _real(path: Path) -> Path:
     the two disagree about paths that are in fact the same. ``realpath``
     resolves the components that exist and keeps the rest, which is what lets
     it be asked about a clone that has already been renamed away.
+
+    **Both failures return the path as given rather than raising.** ``realpath``
+    does stat — an earlier version of this comment said it does not — so it
+    raises ``OSError``, and it raises ``ValueError`` on an embedded NUL. The
+    second one is reachable: ``_links_back`` builds its argument out of a
+    ``.git`` file's bytes, under a root bound read-write into the developer
+    sandbox, and neither ``splitlines`` nor ``strip`` removes a NUL. Answering
+    "not under" for such a record costs one skipped worktree and a note;
+    raising costs the whole relocation, which ``main`` would then report as a
+    failure the operator cannot act on.
     """
     try:
         return Path(os.path.realpath(path))
-    except OSError:  # pragma: no cover - realpath does not stat
+    except (OSError, ValueError):
         return path
 
 
 def _contained(root: Path, name: str) -> bool:
     """``{root}/{name}`` really is a child of ``root``, symlinks included.
 
-    The same equality rule ``executor.get_user_repos_dir`` and
-    ``sandbox_cache_sweeper`` use, and for the same reason: truthiness alone
-    lets through ``.`` (which collapses to the root), ``..`` (its parent) and
-    an absolute component (which replaces the root outright), and the entries
-    here were model-writable on every deployment running the old shared bind.
+    :func:`~istota.user_scope.scoped_user_dir`, which is the same equality rule
+    ``executor.get_user_repos_dir`` and ``sandbox_cache_sweeper`` apply and for
+    the same reason: truthiness alone lets through ``.`` (which collapses to
+    the root), ``..`` (its parent) and an absolute component (which replaces
+    the root outright), and the entries here were model-writable on every
+    deployment running the old shared bind.
+
+    Kept as a named predicate rather than inlined at its five call sites, which
+    ask it about two different kinds of name: a clone directory read back from
+    the tree, and a user id from the profile list. Both are one component under
+    one root and the rule is the same for each; the wrapper is what lets the
+    call sites read as the question they are asking.
     """
-    if not name or name in (".", "..") or os.sep in name or "/" in name:
-        return False
-    candidate = root / name
-    try:
-        return (
-            candidate.parent == root
-            and candidate.resolve() == root.resolve() / name
-        )
-    except OSError:
-        return False
+    return scoped_user_dir(root, name) is not None
 
 
 def _under(child: Path, parent: Path) -> bool:
-    """``child`` is at or below ``parent``, compared on realpaths."""
-    try:
-        return _real(child).is_relative_to(_real(parent))
-    except (OSError, ValueError):  # pragma: no cover - both are pure paths
-        return False
+    """``child`` is at or below ``parent``, compared on realpaths.
+
+    :func:`~istota.user_scope.is_within` is lexical; the resolution is
+    :func:`_real`'s, and it is ``realpath`` rather than ``Path.resolve`` for
+    this module's reason — it is asked about paths git recorded before a
+    rename, which no longer exist.
+    """
+    return is_within(_real(child), _real(parent))
 
 
 def _translate(path: Path, src_root: Path, dst_root: Path) -> Path | None:
