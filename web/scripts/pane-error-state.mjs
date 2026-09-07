@@ -15,12 +15,35 @@
 // the centered box. All three render on the same trigger — the module's data
 // did not load — so a user moving between tabs saw the same failure three
 // different sizes, colors and positions.
+//
+// The `error` modifier is checked as well as the box, and that half was missed
+// on the first pass: `.center-msg` alone is the loading placeholder's dim body
+// text, so the two portfolio pages that carried it rendered a load failure in
+// the same grey as "Loading…" and read as a fourth drift the checker passed.
 
 /** Block tags that open a nesting level. Only `if` starts a branch chain. */
 const OPENERS = new Set(['if', 'each', 'await', 'key', 'snippet']);
-const CENTER_MSG = /class="[^"]*\bcenter-msg\b/;
 const ANY_CLASS = /class="/;
 const MENTIONS_ERROR = /\berror\b/;
+// `{:else if rows.length === 0 && !error}` is the empty state, not the failure:
+// it renders on the load having *succeeded*. Drop negated mentions before
+// asking whether a branch is the error one, or the checker demands the failure
+// colour on "No entries yet".
+const NEGATED_ERROR = /![\s(!]*\berror\b/g;
+
+/** Is this branch condition the chain's load-failure branch? */
+function isErrorBranch(cond) {
+  return MENTIONS_ERROR.test(cond.replace(NEGATED_ERROR, ''));
+}
+
+/** Does any single `class="…"` in this markup carry all of these names? */
+function hasClasses(markup, ...names) {
+  for (const match of markup.matchAll(/class="([^"]*)"/g)) {
+    const tokens = new Set(match[1].split(/\s+/));
+    if (names.every((name) => tokens.has(name))) return true;
+  }
+  return false;
+}
 
 /**
  * Split Svelte markup into its `{#…}` / `{:…}` / `{/…}` markers.
@@ -117,17 +140,19 @@ export function ifChains(source) {
  *
  * A chain qualifies only if some branch renders a `.center-msg` — that is what
  * establishes the slot as a whole-pane state. The error branch of that same
- * chain then has to render one too. A branch rendering no element at all is
- * left alone: it is a snippet call or nothing, not a status box.
+ * chain then has to render `.center-msg error`, the box *and* the modifier that
+ * colours it. A branch rendering no element at all is left alone: it is a
+ * snippet call or nothing, not a status box.
  */
 export function findPaneErrorViolations(source) {
   const found = [];
   for (const chain of ifChains(source)) {
-    const hasCentered = chain.branches.some((b) => CENTER_MSG.test(b.content));
+    const hasCentered = chain.branches.some((b) => hasClasses(b.content, 'center-msg'));
     if (!hasCentered) continue;
     for (const branch of chain.branches) {
-      if (!MENTIONS_ERROR.test(branch.cond)) continue;
-      if (CENTER_MSG.test(branch.content) || !ANY_CLASS.test(branch.content)) continue;
+      if (!isErrorBranch(branch.cond)) continue;
+      if (hasClasses(branch.content, 'center-msg', 'error') || !ANY_CLASS.test(branch.content))
+        continue;
       found.push({
         line: branch.line,
         cond: branch.cond,
@@ -162,8 +187,8 @@ export function findHeldChromeViolations(source) {
   const chains = ifChains(source);
   const hasWholePaneFailure = chains.some(
     (chain) =>
-      chain.branches.some((b) => CENTER_MSG.test(b.content)) &&
-      chain.branches.some((b) => MENTIONS_ERROR.test(b.cond)),
+      chain.branches.some((b) => hasClasses(b.content, 'center-msg')) &&
+      chain.branches.some((b) => isErrorBranch(b.cond)),
   );
   if (!hasWholePaneFailure) return [];
 

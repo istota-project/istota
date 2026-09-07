@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import httpx
 
 from .config import Config
+from .ocs import OcsError, ocs_data
 
 logger = logging.getLogger("istota.talk")
 
@@ -18,56 +19,11 @@ FILE_PLACEHOLDER_PATTERN = re.compile(r'\{file\d*\}')
 MENTION_PLACEHOLDER_PATTERN = re.compile(r'\{(mention-(?:user|call|federated-user)\d+)\}')
 
 
-class TalkResponseError(Exception):
-    """Nextcloud answered a Talk read with something that is not an OCS
-    envelope.
-
-    A bare ``json.JSONDecodeError`` says only "Expecting value: line 1 column 1
-    (char 0)", which is what an empty body, an HTML error page and an XML
-    envelope all decode to — three different faults with one message, and the
-    poll handler logs the message alone, so a production deployment ran a
-    hundred of these a day for weeks with nothing in the log to tell them
-    apart (ISSUE-399). Carry the status, the declared type and a bounded
-    prefix of what actually came back, so the next occurrence names its own
-    cause.
-    """
-
-
-def _ocs_data(response: httpx.Response, what: str, default=None):
-    """Pull ``ocs.data`` out of an OCS response, or raise TalkResponseError.
-
-    The body prefix is capped and flattened to one line. It is only ever read
-    on the failure path, where by construction the payload is not a Talk
-    message list but an error page, an empty body or a proxy's own answer.
-    """
-    try:
-        body = response.json()
-    except Exception as e:
-        status = getattr(response, "status_code", None)
-        headers = getattr(response, "headers", {}) or {}
-        ctype = headers.get("content-type", "?")
-        # `.text` raises on a response whose body was never read. These calls
-        # are all non-streaming, so it is available — but a diagnostic must not
-        # be the thing that raises.
-        try:
-            text = getattr(response, "text", "") or ""
-        except Exception:
-            text = ""
-        snippet = " ".join(text.split())[:200]
-        raise TalkResponseError(
-            f"{what}: non-JSON response (HTTP {status}, content-type {ctype}, "
-            f"{len(text)} chars): {snippet!r} [{type(e).__name__}: {e}]"
-        ) from e
-
-    if not isinstance(body, dict) or "ocs" not in body:
-        status = getattr(response, "status_code", None)
-        raise TalkResponseError(
-            f"{what}: JSON without an ocs envelope (HTTP {status}): "
-            f"{str(body)[:200]!r}"
-        )
-
-    data = (body.get("ocs") or {}).get("data")
-    return default if data is None else data
+# Nextcloud answering a Talk read with something that is not an OCS envelope.
+# An alias, not a subclass: `istota.ocs.ocs_data` raises the shared type, and
+# every `except TalkResponseError` / `pytest.raises(TalkResponseError)` in the
+# tree has to keep catching what this file's reads actually raise.
+TalkResponseError = OcsError
 
 
 def _resolve_param(key: str, param: dict, bot_username: str | None) -> str | None:
@@ -321,7 +277,7 @@ class TalkClient:
             json={"roomType": room_type, "roomName": name[:200]},
         )
         response.raise_for_status()
-        return response.json().get("ocs", {}).get("data", {})
+        return ocs_data(response, f"create conversation {name!r}", default={})
 
     async def add_participant(
         self, conversation_token: str, participant: str, source: str = "users",
@@ -340,7 +296,9 @@ class TalkClient:
             json={"newParticipant": participant, "source": source},
         )
         response.raise_for_status()
-        return response.json().get("ocs", {}).get("data", {})
+        return ocs_data(
+            response, f"add participant to {conversation_token}", default={},
+        )
 
     async def rename_conversation(
         self, conversation_token: str, name: str,
@@ -413,7 +371,9 @@ class TalkClient:
             params={"search": search, "limit": limit},
         )
         response.raise_for_status()
-        return response.json().get("ocs", {}).get("data", [])
+        return ocs_data(
+            response, f"search mentions in {conversation_token}", default=[],
+        )
 
     async def share_file(self, conversation_token: str, path: str) -> dict:
         """Post a file into a conversation.
@@ -435,7 +395,9 @@ class TalkClient:
             },
         )
         response.raise_for_status()
-        return response.json().get("ocs", {}).get("data", {})
+        return ocs_data(
+            response, f"share file into {conversation_token}", default={},
+        )
 
     async def search_messages(
         self, query: str, conversation_token: str | None = None, limit: int = 20,
@@ -464,7 +426,7 @@ class TalkClient:
             url, auth=self.auth, headers=self._headers(), params=params,
         )
         response.raise_for_status()
-        data = response.json().get("ocs", {}).get("data", {})
+        data = ocs_data(response, f"search messages for {query!r}", default={})
 
         if conversation_token and isinstance(data, dict):
             entries = [
@@ -530,7 +492,7 @@ class TalkClient:
             headers=self._headers(),
         )
         response.raise_for_status()
-        return response.json().get("ocs", {}).get("data", [])
+        return ocs_data(response, "list conversations", default=[])
 
     async def poll_messages(
         self,
@@ -584,7 +546,7 @@ class TalkClient:
             return []
         response.raise_for_status()
 
-        messages = _ocs_data(
+        messages = ocs_data(
             response, f"poll {conversation_token}", default=[],
         )
 
@@ -610,7 +572,7 @@ class TalkClient:
             params={"lookIntoFuture": 0, "limit": 1},
         )
         response.raise_for_status()
-        messages = _ocs_data(
+        messages = ocs_data(
             response, f"latest message id {conversation_token}", default=[],
         )
         if messages:
@@ -644,7 +606,9 @@ class TalkClient:
             timeout=timeout,
         )
         response.raise_for_status()
-        messages = response.json().get("ocs", {}).get("data", [])
+        messages = ocs_data(
+            response, f"chat history {conversation_token}", default=[],
+        )
         # History fetch returns newest-first, reverse for oldest-first
         if messages:
             messages = list(reversed(messages))
@@ -680,7 +644,7 @@ class TalkClient:
             headers=self._headers(),
         )
         response.raise_for_status()
-        return _ocs_data(response, "signaling settings", default={})
+        return ocs_data(response, "signaling settings", default={})
 
     async def join_room_session(self, conversation_token: str) -> str:
         """Create a Talk session for this account in a room, and return its id.
@@ -713,7 +677,7 @@ class TalkClient:
             json={"force": True},
         )
         response.raise_for_status()
-        data = _ocs_data(
+        data = ocs_data(
             response, f"join room session {conversation_token}", default={},
         )
         raw = data.get("sessionId") if isinstance(data, dict) else None
@@ -736,7 +700,9 @@ class TalkClient:
             headers=self._headers(),
         )
         response.raise_for_status()
-        return response.json().get("ocs", {}).get("data", [])
+        return ocs_data(
+            response, f"participants of {conversation_token}", default=[],
+        )
 
     async def get_conversation_info(self, conversation_token: str) -> dict:
         """Get conversation metadata (displayName, type, etc.)."""
@@ -749,7 +715,9 @@ class TalkClient:
             headers=self._headers(),
         )
         response.raise_for_status()
-        return response.json().get("ocs", {}).get("data", {})
+        return ocs_data(
+            response, f"conversation info {conversation_token}", default={},
+        )
 
     async def fetch_full_history(
         self, conversation_token: str, batch_size: int = 200,
@@ -779,7 +747,9 @@ class TalkClient:
                 break
             response.raise_for_status()
 
-            messages = response.json().get("ocs", {}).get("data", [])
+            messages = ocs_data(
+                response, f"full history {conversation_token}", default=[],
+            )
             if not messages:
                 break
 
@@ -826,7 +796,10 @@ class TalkClient:
                 break
             response.raise_for_status()
 
-            messages = response.json().get("ocs", {}).get("data", [])
+            messages = ocs_data(
+                response, f"messages since {since_id} in {conversation_token}",
+                default=[],
+            )
             if not messages:
                 break
 

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from ...async_runtime import get_talk_client
+from ...ocs import ocs_body_data
 from ...talk import split_message
 from .._types import IncomingMessage, TransportCapabilities
 from .inbound import get_dm_token, poll_talk_conversations
@@ -399,7 +400,19 @@ class TalkTransport:
                 response = await client.send_message(
                     token, part, reply_to=reply_to, reference_id=reference_id,
                 )
-                return response.get("ocs", {}).get("data", {}).get("id")
+                # Deliberately *not* caught here, unlike the other
+                # best-effort Talk paths. `_may_have_been_stored` names this
+                # exact case — "a 2xx whose body does not parse raises after
+                # Nextcloud has written the message" — and letting it reach the
+                # loop's own handler is what runs the readback and recovers the
+                # real id. Swallowing it into a `None` return would reinstate
+                # the ambiguity this file was written to remove: a post the
+                # user can see, reported as undelivered. `_is_transient` is
+                # False for it, so nothing is re-posted and nothing is doubled.
+                data = ocs_body_data(
+                    response, f"Talk post to {token}", default={},
+                )
+                return data.get("id")
             except Exception as e:
                 last_exc = e
                 if attempt == _POST_ATTEMPTS - 1 or not _is_transient(e):

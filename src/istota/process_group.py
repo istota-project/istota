@@ -32,7 +32,7 @@ import logging
 import os
 import signal
 
-__all__ = ["kill_process_group"]
+__all__ = ["kill_group_if_live", "kill_process_group"]
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,29 @@ def kill_process_group(pid: int, sig: int = signal.SIGKILL) -> str:
     # to stop anything is otherwise indistinguishable from one that worked.
     logger.debug("kill_process_group pid=%s sig=%s outcome=%s", pid, sig, outcome)
     return outcome
+
+
+def kill_group_if_live(process, sig: int = signal.SIGKILL) -> None:
+    """Signal `process`'s group, unless it has already been reaped.
+
+    `process` is anything carrying `.returncode` and `.pid` — a
+    `subprocess.Popen` or an `asyncio.subprocess.Process`.
+
+    The guard is the whole point. `Popen.kill()` goes through
+    `Popen.send_signal`, which no-ops once the child is reaped; a raw pid
+    carries no such check. Every caller here signals from somewhere that can
+    still fire after the reap — a `threading.Timer` that outlives
+    `process.wait()`, a `finally` unwinding a cancelled coroutine, a timeout
+    handler running after `communicate()` returned. By then the OS may have
+    handed that number to an unrelated process, whose *group* we would kill.
+
+    `sig` defaults to SIGKILL, matching `kill_process_group` above and what all
+    of today's callers pass. Never raises: `kill_process_group` swallows, and
+    reading `.returncode` off a live process object cannot fail.
+    """
+    if process.returncode is not None:
+        return
+    kill_process_group(process.pid, sig)
 
 
 def _signal(pid: int, sig: int) -> str:

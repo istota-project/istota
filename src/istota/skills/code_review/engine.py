@@ -189,7 +189,10 @@ class Finding:
 # too: it runs `git status` inside the same model-writable checkouts, and it
 # cannot import from `istota.skills` (whose __init__ star-imports every skill).
 # Re-exported here because this module's call sites and tests use the name.
-from istota.git_hardening import GIT_HARDENING  # noqa: E402,F401 - re-export
+from istota.git_hardening import (  # noqa: E402,F401 - GIT_HARDENING is re-exported
+    GIT_HARDENING,
+    GIT_SUBPROCESS_ENV,
+)
 
 # Flags, because a flag is the only thing that covers the per-attribute route.
 # `-c diff.external=` clears the global external driver but does nothing about
@@ -265,18 +268,20 @@ def _git_env(root: Path) -> dict[str, str]:
     stops a repository running a command at all, an environment that carries no
     credentials means the failure of any one of those measures is not
     immediately a credential disclosure.
+
+    `GIT_SUBPROCESS_ENV` is the four settings every daemon-side git run shares.
+    Everywhere else it is an overlay on `os.environ`; here it is a *base* for a
+    built-from-nothing environment, which is the whole difference between this
+    function and `git_hardening.run_git`, and why this is not a call to it.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/nonexistent"),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": os.devnull,
+        **GIT_SUBPROCESS_ENV,
         # No upward discovery past the root. This is what stops a plain
         # directory inside the root from operating on a repository above it.
         "GIT_CEILING_DIRECTORIES": str(root),
         "GIT_DISCOVERY_ACROSS_FILESYSTEM": "0",
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_OPTIONAL_LOCKS": "0",
     }
     for name in ("LANG", "LC_ALL", "TZ"):
         value = os.environ.get(name)

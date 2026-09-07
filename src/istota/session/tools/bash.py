@@ -23,7 +23,7 @@ from pathlib import Path
 
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import TextContent, ToolParameter, ToolSchema
-from istota.process_group import kill_process_group
+from istota.process_group import kill_group_if_live
 from istota.shell_exec import SIGPIPE_EXIT, SIGPIPE_NOTE, shell_argv
 
 from .env import ToolEnv
@@ -169,7 +169,12 @@ def make_bash_tool(env: ToolEnv) -> AgentTool:
         finally:
             if spill is not None:
                 spill.close()
-            _kill_process_group(proc)
+            # ``start_new_session=True`` gave the child its own group, so
+            # killing the group takes down any backgrounded grandchildren (and
+            # a bwrap wrapper) that a bare ``proc.kill()`` would leave running
+            # (NB-7). Synchronous (no await) so it still fires while a
+            # CancelledError is unwinding the coroutine.
+            kill_group_if_live(proc)
             await _reap(proc)
 
         text = out.decode("utf-8", "replace")
@@ -265,19 +270,6 @@ class _SpillWriter:
             with contextlib.suppress(OSError):
                 self._fh.close()
             self._fh = None
-
-
-def _kill_process_group(proc) -> None:
-    """SIGKILL the subprocess's whole process group.
-
-    ``start_new_session=True`` gave the child its own group, so killing the
-    group takes down any backgrounded grandchildren (and a bwrap wrapper) that
-    a bare ``proc.kill()`` would leave running (NB-7). Falls back to killing the
-    direct child if the group can't be resolved. Synchronous (no await) so it
-    still fires while a CancelledError is unwinding the coroutine."""
-    if proc.returncode is not None:
-        return
-    kill_process_group(proc.pid)
 
 
 async def _reap(proc) -> None:

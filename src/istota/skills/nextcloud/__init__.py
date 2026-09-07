@@ -41,6 +41,7 @@ from istota.nextcloud_client import (
     ocs_list_shares,
     ocs_search_sharees,
 )
+from istota.ocs import is_ocs_envelope, ocs_body_data
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, WRITE, host_path
 
@@ -606,10 +607,12 @@ def _ocs_data(result):
     web_app) unwrap it themselves. Reading ``id`` off the envelope silently
     yields None, which is how ``talk send`` came to report no message id at all.
     """
-    if isinstance(result, dict) and "ocs" in result:
-        inner = (result.get("ocs") or {}).get("data")
-        return inner if isinstance(inner, dict) else {}
-    return result if isinstance(result, dict) else {}
+    if not isinstance(result, dict):
+        return {}
+    if not is_ocs_envelope(result):
+        return result
+    inner = ocs_body_data(result, "talk send", default={})
+    return inner if isinstance(inner, dict) else {}
 
 
 def cmd_talk_send(args):
@@ -1103,9 +1106,13 @@ def main(argv=None):
         sys.exit(1)
 
     def describe(exc: BaseException) -> dict:
-        # An OcsError carries the status, content-type and body snippet a bare
-        # message does not. `PathScopeError` and everything else name themselves,
-        # which is why the two branches this replaced had identical bodies.
+        # The *package* OcsError carries the HTTP status, the OCS status and
+        # the endpoint a bare message does not, and `to_envelope` is defined on
+        # it alone. `PathScopeError` and everything else name themselves, which
+        # is why the two branches this replaced had identical bodies. A leaf
+        # `istota.ocs.OcsError` — what the `talk *` commands now raise on an
+        # unreadable answer — is not an instance of it and takes the second
+        # branch, where its own message already names the status and the body.
         if isinstance(exc, OcsError):
             return exc.to_envelope()
         return error_envelope(str(exc))

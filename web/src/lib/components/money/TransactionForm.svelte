@@ -65,7 +65,12 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter') handleSave();
+    if (e.key !== 'Enter') return;
+    // Only a single-line text input commits. Enter anywhere else is that
+    // control's own business — notably confirming an account in the dropdown,
+    // which would otherwise select *and* save in one keystroke.
+    if (!(e.target instanceof HTMLInputElement)) return;
+    handleSave();
   }
 </script>
 
