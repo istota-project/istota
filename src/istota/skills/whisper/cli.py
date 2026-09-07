@@ -11,7 +11,9 @@ import argparse
 import json
 from pathlib import Path
 
-from istota.skills._cli import run_skill_cli
+from istota.skill_host_paths import write_resolved
+from istota.skills._cli import parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import READ, host_path
 from istota.skills.whisper.models import (
     download_model,
     get_available_memory_gb,
@@ -22,6 +24,47 @@ from istota.skills.whisper.transcribe import (
     format_vtt,
     transcribe_audio,
 )
+
+
+def _save_beside(audio_path: str, suffix: str, text: str) -> str:
+    """Write `text` next to the transcribed audio, under a code-owned name.
+
+    The destination is derived rather than named: `audio_path` is stamped
+    `READ`, so it arrives resolved and inside a root, and swapping its suffix
+    cannot leave its parent. That is Layer 3 of ISSUE-447 — a derived path
+    whose only added component is code-owned is already contained and needs no
+    second resolution.
+
+    It still needs `write_resolved`. `Path.write_text` follows a symlink
+    standing at the derived name, and the workspace is bound read-write into
+    the sandbox, so such a link is model-plantable: the transcript would land
+    wherever it points, written by the daemon user, with containment already
+    reported as passed. `O_NOFOLLOW` makes the open fail instead.
+
+    `exclusive=False`, matching the overwrite this replaced: the name is
+    derived from the caller's own argument rather than minted to be unique, so
+    two runs over one file are a re-run rather than a collision.
+
+    **The recorded residual: `audio_path` is `READ`, so it may be under
+    `{mount}/Talk`, and the derived destination is then under `{mount}/Talk`
+    too.** That is a directory the sandbox binds read-only, so `--save` on a
+    Talk voice message writes where the task's own tools cannot. It is not a
+    regression — the `write_text` this replaced did the same from an entirely
+    unscoped path — and Layer 3 of the ISSUE-447 spec states the derived-write
+    rule as `write_resolved` with no second resolution, which is what this is.
+    Narrowing it means resolving the derived path against the *writable* roots
+    and refusing `--save` for a Talk source, which is a spec question rather
+    than a change to make here.
+    `tests/test_skills_whisper.py` asserts the current answer so that
+    changing it is visible.
+
+    UTF-8 explicitly, where `write_text` took the locale's encoding — a
+    transcript is model output in whatever language was spoken, and a daemon
+    running under a C locale would otherwise raise on the first accent.
+    """
+    out_path = Path(audio_path).with_suffix(suffix)
+    write_resolved(out_path, text.encode("utf-8"))
+    return str(out_path)
 
 
 def cmd_transcribe(args) -> dict:
@@ -40,9 +83,7 @@ def cmd_transcribe(args) -> dict:
     if output_format == "text":
         text = result["text"]
         if args.save:
-            out_path = Path(args.audio_path).with_suffix(".txt")
-            out_path.write_text(text)
-            result["saved_to"] = str(out_path)
+            result["saved_to"] = _save_beside(args.audio_path, ".txt", text)
         if args.no_segments:
             result.pop("segments", None)
         return result
@@ -50,9 +91,7 @@ def cmd_transcribe(args) -> dict:
     if output_format == "srt":
         formatted = format_srt(result["segments"])
         if args.save:
-            out_path = Path(args.audio_path).with_suffix(".srt")
-            out_path.write_text(formatted)
-            result["saved_to"] = str(out_path)
+            result["saved_to"] = _save_beside(args.audio_path, ".srt", formatted)
         result["formatted_output"] = formatted
         del result["segments"]
         return result
@@ -60,18 +99,16 @@ def cmd_transcribe(args) -> dict:
     if output_format == "vtt":
         formatted = format_vtt(result["segments"])
         if args.save:
-            out_path = Path(args.audio_path).with_suffix(".vtt")
-            out_path.write_text(formatted)
-            result["saved_to"] = str(out_path)
+            result["saved_to"] = _save_beside(args.audio_path, ".vtt", formatted)
         result["formatted_output"] = formatted
         del result["segments"]
         return result
 
     # json (default) — return full result with segments
     if args.save:
-        out_path = Path(args.audio_path).with_suffix(".json")
-        out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
-        result["saved_to"] = str(out_path)
+        result["saved_to"] = _save_beside(
+            args.audio_path, ".json", json.dumps(result, indent=2, ensure_ascii=False),
+        )
 
     # After the save, so `--save` still writes the whole thing. `segments` is
     # one entry per *word*, which is megabytes on a long recording; a caller
@@ -108,7 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # transcribe command
     tr = sub.add_parser("transcribe", help="Transcribe an audio file")
-    tr.add_argument("audio_path", help="Path to audio file")
+    # The transcript comes back to whoever called, inside the task, so this is
+    # the task's whole working context — including `{mount}/Talk`, which is
+    # where a Talk voice message lands. `out_of_process.py` is the daemon-side
+    # caller and has to pass the task identity for any of it to resolve.
+    host_path(tr, "audio_path", mode=READ, help="Path to audio file")
     tr.add_argument(
         "--model",
         default="auto",
@@ -144,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "transcribe": cmd_transcribe,

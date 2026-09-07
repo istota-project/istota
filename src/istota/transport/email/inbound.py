@@ -2127,8 +2127,14 @@ def poll_emails(config: Config) -> list[int]:
                         )
                     if skipped_attachments:
                         attachments_text += (
-                            "\nAttachments not retrieved (over the size budget; "
-                            "still in the mailbox):\n"
+                            # Not only the budget since ISSUE-447: a name that
+                            # would climb out of the destination, one carrying
+                            # a NUL, one with a link standing at it and one
+                            # whose open fails are all skipped here too, and
+                            # naming a single cause would be telling the model
+                            # something false about a message it is acting on.
+                            "\nAttachments not retrieved (over the size budget, "
+                            "or the name was refused; still in the mailbox):\n"
                             + "\n".join(
                                 f"  - {flatten_prompt_header(n)}"
                                 for n in skipped_attachments

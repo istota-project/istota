@@ -29,6 +29,7 @@ from istota.skills.whisper.transcribe import (
     format_vtt,
     transcribe_audio,
 )
+from tests.support.skill_cli import run_skill_main
 
 
 # --- Model selection tests ---
@@ -591,3 +592,123 @@ class TestMain:
         captured = capsys.readouterr()
         output = json.loads(captured.out)
         assert output["status"] == "ok"
+
+
+class TestTheDerivedSaveDestinations:
+    """`--save` writes a name the handler derives, not one the caller passed.
+
+    The four destinations are `Path(args.audio_path).with_suffix(...)`, and
+    `audio_path` is stamped `READ` — so by the time the handler runs it is
+    resolved and inside a root, and a suffix swap cannot leave its parent.
+    That is Layer 3's rule: a derived path whose only added component is
+    code-owned needs no second resolution.
+
+    What it does need is `write_resolved`. A plain `open(..., "wb")` follows a
+    symlink standing at the derived name, and the workspace is bound
+    read-write into the sandbox, so such a link is model-plantable — the file
+    would land wherever it points, written by the daemon user, with
+    containment already reported as passed.
+    """
+
+    @pytest.fixture
+    def mount(self, tmp_path, monkeypatch):
+        real = tmp_path / "srv" / "shared"
+        (real / "Users" / "alice").mkdir(parents=True)
+        (real / "Talk").mkdir(parents=True)
+        link = tmp_path / "mount"
+        link.symlink_to(real, target_is_directory=True)
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(link))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
+        monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
+        return link
+
+    @pytest.fixture
+    def audio(self, mount):
+        path = mount / "Users" / "alice" / "voice.wav"
+        path.write_bytes(b"RIFF")
+        return path
+
+    @pytest.fixture(autouse=True)
+    def _transcription(self, monkeypatch):
+        monkeypatch.setattr(
+            "istota.skills.whisper.cli.transcribe_audio",
+            lambda *a, **k: {
+                "status": "ok",
+                "text": "hello there",
+                "segments": [{"start": 0.0, "end": 1.0, "text": "hello there"}],
+            },
+        )
+
+    @pytest.mark.parametrize(
+        ("output", "suffix"),
+        [("text", ".txt"), ("srt", ".srt"), ("vtt", ".vtt"), ("json", ".json")],
+    )
+    def test_each_format_writes_beside_the_resolved_audio(
+        self, output, suffix, mount, audio,
+    ):
+        from istota.skills.whisper.cli import main
+
+        run = run_skill_main(
+            main, ["transcribe", str(audio), "--output", output, "--save"],
+        )
+
+        assert run.exit_code == 0, run.stdout
+        # Beside the *resolved* audio path: `mount` is a symlink, so the two
+        # differ and an assertion against the argument would pass against a
+        # handler that never resolved anything.
+        written = audio.resolve().with_suffix(suffix)
+        assert written.exists(), run.stdout
+        assert written.read_bytes(), "wrote an empty file"
+        assert run.envelope["saved_to"] == str(written)
+
+    @pytest.mark.parametrize(
+        ("output", "suffix"),
+        [("text", ".txt"), ("srt", ".srt"), ("vtt", ".vtt"), ("json", ".json")],
+    )
+    def test_a_symlink_at_the_derived_name_is_refused(
+        self, output, suffix, mount, audio, tmp_path,
+    ):
+        """The whole reason the write goes through `write_resolved`.
+
+        The link is planted at the name the handler will derive, pointing at a
+        file outside every root. `O_NOFOLLOW` makes the open fail rather than
+        truncating the target.
+        """
+        from istota.skills.whisper.cli import main
+
+        victim = tmp_path / "elsewhere.txt"
+        victim.write_text("not yours")
+        audio.resolve().with_suffix(suffix).symlink_to(victim)
+
+        run = run_skill_main(
+            main, ["transcribe", str(audio), "--output", output, "--save"],
+        )
+
+        assert victim.read_text() == "not yours"
+        assert run.exit_code == 1, run.stdout
+        assert run.envelope.get("status") == "error", run.stdout
+
+    def test_a_talk_sourced_save_writes_into_the_shared_directory(self, mount):
+        """A recorded residual rather than an endorsement.
+
+        `audio_path` is `READ`, which admits `{mount}/Talk` — that is where a
+        Talk voice message lands, and reading it is the point of the verb. The
+        derived `--save` destination is then inside `{mount}/Talk` too, a
+        directory the sandbox binds read-only, so `--save` writes somewhere
+        the task's own tools cannot. Layer 3 states the derived-write rule as
+        `write_resolved` and no second resolution, so this is the spec's own
+        answer; it is asserted here so that narrowing it later is a visible
+        change rather than a silent one.
+        """
+        from istota.skills.whisper.cli import main
+
+        source = mount / "Talk" / "voicemail.wav"
+        source.write_bytes(b"RIFF")
+
+        run = run_skill_main(
+            main, ["transcribe", str(source), "--output", "text", "--save"],
+        )
+
+        assert run.exit_code == 0, run.stdout
+        assert source.resolve().with_suffix(".txt").exists()

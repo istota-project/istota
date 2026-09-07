@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from istota.config import Config
 from istota.health import csv_io
 from istota.health import db as health_db
 from istota.health._migrate import ensure_initialised
@@ -262,7 +263,12 @@ class TestExportCsv:
         from istota import health as health_pkg
         from istota import scheduler_deferred
 
-        src = tmp_path / "bw.csv"
+        # In the user's own workspace: the shape an email attachment arrives
+        # in, and one of the two the replay's source-path guard admits. The
+        # guard derives `{mount}/Users/{uid}` from the config, so the file has
+        # to be under that rather than merely beside the bot dir.
+        src = tmp_path / "Users" / "alice" / "bw.csv"
+        src.parent.mkdir(parents=True, exist_ok=True)
         src.write_text(SAMPLE_CSV)
 
         # Per-task deferred-ops file as the CLI would have written it.
@@ -280,9 +286,13 @@ class TestExportCsv:
         health_pkg.resolve_for_user = fake_resolve
         try:
             fake_task = MagicMock(id=task_id, user_id="alice")
-            fake_config = MagicMock()
+
+            # A real Config. A MagicMock here answers `nextcloud_mount_path`
+            # with a mock whose `__fspath__` is "", which resolves to the cwd
+            # and puts every real path out of roots — reported as a refusal
+            # that looks exactly like the guard working.
             count = scheduler_deferred._process_deferred_health_ops(
-                fake_config, fake_task, user_temp,
+                Config(nextcloud_mount_path=tmp_path), fake_task, user_temp,
             )
         finally:
             health_pkg.resolve_for_user = original_resolve

@@ -29,7 +29,7 @@ import sys
 import httpx
 
 from ... import ntfy_headers
-from .._cli import emit, status_exit_code
+from .._cli import emit, parse_and_resolve, status_exit_code
 
 DEFAULT_SERVER = "https://ntfy.sh"
 REQUEST_TIMEOUT = 10.0
@@ -169,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parse_and_resolve(parser)
     if args.command == "send":
         return cmd_send(args)
     parser.print_help()

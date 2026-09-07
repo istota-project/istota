@@ -12,7 +12,8 @@ import os
 import sys
 from pathlib import Path
 
-from istota.skills._cli import emit, error_envelope, run_skill_cli
+from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import READ, WRITE, host_path
 
 
 def _run(args: list[str]) -> dict:
@@ -152,43 +153,43 @@ def cmd_prune(args):
     _output(_run(cli_args))
 
 
-def _scoped(raw: str, *, writable: bool, operation: str) -> str:
-    """The resolved host path for an OPML argument, or an error envelope out.
+def _ensure_parent(resolved: str) -> str:
+    """Make the destination's parent, and hand the path straight back.
 
-    Both OPML verbs take a *host* path and this facade runs host-side — the
-    proxy spawns it outside the sandbox with the daemon's filesystem view — so
-    the read was an arbitrary-file read whose parse errors quote the file back,
-    and the write an arbitrary write as the daemon user. Scoped to the roots
-    the sandbox binds for this caller.
+    **This is the one host-path consumer that does not write through
+    `write_resolved`**, because the Click CLI opens the destination itself —
+    so the parent has to exist at the moment the path is handed over rather
+    than at a write this module performs. `resolve_in_roots` deliberately
+    creates nothing: resolution answers "may this path be used" and must not
+    mutate the filesystem answering it, which since ISSUE-447 matters more
+    than it did, since resolution now runs at parse time on every invocation
+    and would otherwise leave a tree behind on a verb that then refused for an
+    unrelated reason.
 
-    The resolved path is what goes down to the Click CLI. Handing it the
-    original would re-walk every symlink the check just settled, in a process
-    that opens the path itself.
+    Safe to run on the value off the namespace, and only there: the `WRITE`
+    stamp on the declaration has already resolved it and established that it
+    is inside the roots, so nothing is created outside them.
     """
-    from istota.skill_host_paths import resolve_host_path
-
-    resolved, err = resolve_host_path(
-        Path(raw), writable=writable, operation=operation,
-    )
-    if err:
+    parent = Path(resolved).parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
         # `emit` exits 1 on an error envelope, so this does not return.
-        _output(error_envelope(err))
-    return str(resolved)
+        _output(error_envelope(f"could not create {parent}: {e}"))
+    return resolved
 
 
 def cmd_import_opml(args):
-    cli_args = ["import-opml", _scoped(
-        args.path, writable=False, operation="feeds import-opml",
-    )]
-    _output(_run(cli_args))
+    # `args.path` is the resolved path — the `READ` stamp on the declaration
+    # settled it. Handing the Click CLI the original would re-walk every
+    # symlink the resolution just settled, in a process that opens it itself.
+    _output(_run(["import-opml", args.path]))
 
 
 def cmd_export_opml(args):
     cli_args = ["export-opml"]
     if args.output:
-        cli_args += ["--output", _scoped(
-            args.output, writable=True, operation="feeds export-opml --output",
-        )]
+        cli_args += ["--output", _ensure_parent(args.output)]
     _output(_run(cli_args))
 
 
@@ -246,13 +247,14 @@ def build_parser():
     )
 
     p_imp = sub.add_parser("import-opml", help="Import an OPML file")
-    p_imp.add_argument(
-        "path", help="Path to OPML file, inside your own workspace",
+    host_path(
+        p_imp, "path", mode=READ,
+        help="Path to OPML file, inside your own workspace",
     )
 
     p_exp = sub.add_parser("export-opml", help="Export subscriptions as OPML")
-    p_exp.add_argument(
-        "--output", "-o",
+    host_path(
+        p_exp, "--output", "-o", mode=WRITE,
         help="Write to this file inside your own workspace instead of stdout",
     )
 
@@ -261,7 +263,7 @@ def build_parser():
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     commands = {
         "list": cmd_list,

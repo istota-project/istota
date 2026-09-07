@@ -25,8 +25,8 @@ import sys
 from pathlib import Path
 
 from istota.kv_namespaces import is_reserved_namespace
-from istota.skill_host_paths import resolve_host_path
-from istota.skills._cli import fail as _fail, run_skill_cli
+from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import READ, host_path
 
 # `list` decodes and prints every value in a namespace. The natural command for
 # orienting in a namespace should not be the one that dumps a 153 KB array into
@@ -177,8 +177,9 @@ def _resolve_set_value(args) -> str:
     `MAX_ARG_STRLEN` — the write dies in `execve` before any Python runs, at a
     size nothing in the store or the docs names. The file is read *host-side*,
     where this CLI runs, so it is scoped to the roots the sandboxed caller can
-    itself write to. Without that scoping the flag would be an arbitrary
-    host-file read whose result `kv get` hands straight back.
+    itself write to — declared `READ` on the argument and enforced at parse.
+    Without that scoping the flag would be an arbitrary host-file read whose
+    result `kv get` hands straight back.
     """
     value = getattr(args, "value", None)
     value_file = getattr(args, "value_file", None)
@@ -189,13 +190,10 @@ def _resolve_set_value(args) -> str:
         _fail("no value given: pass a JSON value or --value-file <path>")
 
     if value_file:
-        resolved, err = resolve_host_path(
-            Path(value_file), writable=False, operation="kv set --value-file",
-        )
-        if err:
-            _fail(err)
-        # Read the *resolved* path: reopening the original re-walks every
-        # symlink in it, which is the window the check just closed.
+        # The resolved path, and the only one there is: the `READ` stamp on
+        # the declaration resolved it at parse time and wrote it back, so
+        # there is no original left to re-open and re-walk.
+        resolved = Path(value_file)
         if not resolved.is_file():
             _fail(f"--value-file is not a regular file: {resolved}")
         # O_NOFOLLOW on the leaf: resolving stripped the symlinks that existed
@@ -582,8 +580,8 @@ def build_parser():
     p_set.add_argument("namespace")
     p_set.add_argument("key")
     p_set.add_argument("value", nargs="?", help="JSON value (max 128 KiB as an argument)")
-    p_set.add_argument(
-        "--value-file",
+    host_path(
+        p_set, "--value-file", mode=READ,
         help="Read the JSON value from this file instead of the argument, for "
              "values above the 128 KiB argv cap. Must live under "
              "$ISTOTA_DEFERRED_DIR or your workspace",
@@ -689,7 +687,7 @@ _SET_OPS = frozenset({
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
     namespace = getattr(args, "namespace", None)
     if is_reserved_namespace(namespace):
         _fail(

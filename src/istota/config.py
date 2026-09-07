@@ -19,6 +19,7 @@ from .config_mapper import (
     coerce_int,
     report_unknown,
 )
+from .user_scope import scoped_user_dir
 
 if TYPE_CHECKING:
     import sqlite3
@@ -1887,12 +1888,27 @@ class Config:
         Scoped to the user's ``/Users/{user_id}`` subtree when ``user_id`` is
         given, else the bare mount root. A de-duplication of the
         ``mount / "Users" / uid`` idiom inlined across the codebase — not a
-        storage abstraction (no I/O, no backend switch).
+        storage abstraction (no backend switch).
+
+        **Scoped through :func:`~istota.user_scope.scoped_user_dir`, not
+        joined.** The join is not the check it reads as: ``.`` is discarded,
+        an absolute component replaces the root and ``..`` is a child by name
+        and the parent on disk, so ``{mount}/Users`` — every user's directory
+        at once — was one bad ``user_id`` away (ISSUE-402). That matters here
+        rather than only cosmetically because this is the root
+        ``outbound_drafts._confined_attachment`` confines a held draft's
+        attachments to and the root ``scheduler_deferred`` scopes a deferred
+        health op's source path against, both of them in the unsandboxed
+        daemon. ``None`` for a ``user_id`` that does not name a plain child,
+        which every caller already handles as "no local workspace" — refusing
+        rather than falling back, since the fallback is the exposure.
         """
         if self.nextcloud_mount_path is None:
             return None
         root = self.nextcloud_mount_path
-        return root / "Users" / user_id if user_id else root
+        if not user_id:
+            return root
+        return scoped_user_dir(root / "Users", user_id)
 
     def module_db_root(self) -> Path:
         """Local-disk root holding every user's per-module SQLite DBs.

@@ -16,7 +16,7 @@ The bot has one shared mailbox. You can read it with these verbs (all print a JS
 - `read <id>` — one email: headers, plain **and** html body, attachment manifest.
 - `search "<IMAP SEARCH>"` — a raw IMAP SEARCH string, passed to the server verbatim (e.g. `FROM "alice@x.com" SUBJECT "invoice"`, `UNSEEN`, `SINCE 1-Jan-2026`). A malformed string errors — it does not silently narrow to a subject match.
 - `thread <id>` — the message's reply chain, in order (a real References/In-Reply-To walk).
-- `attachments <id> --dest PATH` — download an email's attachments to a directory.
+- `attachments <id> --dest PATH` — download an email's attachments to a directory. `--dest` has to be a directory *inside* somewhere you may write — `{workspace}/attachments`, not `{workspace}` itself, which is refused. Each attachment is written under the name the sender gave it, and a name that would climb out of `--dest` is skipped rather than renamed; the reply lists those in `skipped`.
 - `from-senders --senders a@x.com,b@y.com [--since …]` — batch-fetch mail from named senders via server-side search. Use this for digests: one read over N messages instead of many. This is the read-back path for *quiet senders* (see below): a briefing or scheduled job runs `from-senders --senders <quiet list> --since <last-run>` and composes one summary, instead of every newsletter spawning its own session.
 - `newsletters --sources a@x.com,example.com [--since …]` — like `from-senders`, `--sources` required (domains match by substring).
 
@@ -57,9 +57,9 @@ istota-skill email send --to "recipient@example.com" --subject "Subject line" --
 
 Options:
 - `--html` — send as HTML instead of plain text
-- `--body-file /path/to/file` — read body from a file (useful for long HTML content)
+- `--body-file {workspace}/file` — read body from a file in your own workspace (useful for long HTML content)
 - `--cc a@x,b@y` / `--bcc a@x` — carbon-copy / blind-carbon-copy recipients (comma-separated). Bcc addresses receive the mail but never appear in any transmitted header.
-- `--attach /path/to/file` — attach a file (repeatable).
+- `--attach /path/to/file` — attach a file (repeatable). The file must be inside the user's own workspace or your task's own temp directory; see the attachment rule under "When a send is held".
 - `--reply-to addr` — set the Reply-To header.
 
 The command prints JSON on success: `{"status": "ok", "message_id": "<...>", "to": "...", "subject": "..."}`. The `message_id` is your evidence the send happened — see "Confirm the send actually happened" below.
@@ -107,7 +107,9 @@ This is a **successful outcome**, not a failure. What to do with it:
 
 There is no flag that skips this. If you believe the hold is wrong, say so to the user and let them decide.
 
-A `{"status": "error"}` from these verbs means nothing was sent and nothing was held. Causes: the check could not run (no user identity, no database); an `--attach` path outside the places you may read (your workspace, the conversation's folder, the task's working directory — this applies to every send, held or not); or, for a held message, an attachment outside the user's workspace specifically, since a draft can only carry files from there. Report the error. For the attachment cases, retry without the attachment or with a copy inside the user's workspace.
+A `{"status": "error"}` from these verbs means nothing was sent and nothing was held. Causes: the check could not run (no user identity, no database); or an `--attach` path outside the user's own workspace.
+
+**An attachment must be inside the user's own workspace or your task's own temp directory, on every send.** Not the conversation's folder and not `/Talk` — those hold material other people put there, which you may *read*, and an attachment leaves the task rather than staying in it. **A message that gets held is stricter still: it must be in the workspace.** A held draft is sent after your task is over, by which time your temp directory is gone, so a send that would be held is refused outright when its attachment is there — copy the file into the workspace and attach the copy. A held draft is re-checked against the workspace when the user approves it, hours later, which is why the hold is the stricter of the two. Report the error, then either send without the attachment or copy the file into the user's workspace first and attach the copy.
 
 ## Confirm the send actually happened before reporting it
 
@@ -119,7 +121,7 @@ Sending email is subject to the same "verify, don't assume" discipline as writin
 
 Then tell the user the email was sent (do NOT output raw JSON to the user).
 
-For HTML emails with complex formatting, write the body to a temp file first and use `--body-file`.
+For HTML emails with complex formatting, write the body to a file under `{workspace}` first and use `--body-file` (it is scoped to your own workspace).
 
 ## Replying to incoming emails (`output`)
 
@@ -132,20 +134,20 @@ istota-skill email output --subject "Subject line" --body "The email content"
 Options:
 - `--subject` — email subject (optional for replies; the original subject with "Re:" prefix is used if omitted)
 - `--body` — the email body text (required, or use `--body-file`)
-- `--body-file /path/to/file` — read body from a file (useful for long content)
+- `--body-file {workspace}/file` — read body from a file in your own workspace (useful for long content)
 - `--html` — format body as HTML instead of plain text
 
 This writes a structured file that the scheduler picks up for delivery. The scheduler adds proper threading headers so the reply appears in the same email thread.
 
-For long email bodies, write the body to a temp file first and use `--body-file`:
+For long email bodies, write the body to a file in your own workspace and use `--body-file`. It has to be yours: the bytes leave as an outgoing message, so `--body-file` is scoped to `{workspace}` and your task's own temp directory, and will refuse a Talk attachment or a file in the channel directory.
 
 ```bash
-# Write body to temp file, then use --body-file
-cat > /tmp/email_body.txt << 'BODY'
+# Write the body to a file under your workspace, then use --body-file
+cat > {workspace}/email_body.txt << 'BODY'
 The full email content goes here.
 Multiple paragraphs, quotes, etc.
 BODY
-istota-skill email output --subject "Subject" --body-file /tmp/email_body.txt
+istota-skill email output --subject "Subject" --body-file {workspace}/email_body.txt
 ```
 
 **When to use HTML:** Use `--html` when the content benefits from rich formatting (tables, styled sections, links). For simple text responses, use plain text (the default).

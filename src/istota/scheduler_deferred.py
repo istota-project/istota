@@ -32,6 +32,7 @@ from .config import Config
 from .brain import model_namespace_for_kind, resolve_brain_kind
 from .kv_namespaces import is_reserved_namespace
 from .notification_store import deliver_pending
+from .skill_host_paths import path_under_roots, workspace_roots
 from .user_scope import is_scopable_user_id
 
 # Use the parent scheduler's logger name so log lines remain identical to
@@ -951,7 +952,7 @@ def _health_max_document_bytes(config: Config) -> int:
 
 
 def _resolved_source_path(
-    src: Path, user_temp_dir: Path, config: Config, user_id: str, ctx,
+    src: Path, user_temp_dir: Path, config: Config, user_id: str,
 ) -> Path | None:
     """The symlink-resolved path, or ``None`` if it isn't ours to read.
 
@@ -965,13 +966,13 @@ def _resolved_source_path(
         return None
     if not resolved.is_file():
         return None
-    if not _source_path_allowed(resolved, user_temp_dir, config, user_id, ctx):
+    if not _source_path_allowed(resolved, user_temp_dir, config, user_id):
         return None
     return resolved
 
 
 def _source_path_allowed(
-    src: Path, user_temp_dir: Path, config: Config, user_id: str, ctx,
+    src: Path, user_temp_dir: Path, config: Config, user_id: str,
 ) -> bool:
     """Is ``src`` somewhere a sandboxed task legitimately produced a file?
 
@@ -982,44 +983,33 @@ def _source_path_allowed(
 
     Two roots: the task's own deferred dir, and the user's base workspace
     (``{mount}/Users/{uid}``) — not merely the *bot* subdir, because the
-    driving case is an email attachment the executor dropped in
-    ``inbox/``. Symlinks are resolved first, so a link inside the workspace
-    pointing out of it is caught too.
-    """
-    user_root = None
-    resolver = getattr(config, "workspace_root", None)
-    if callable(resolver):
-        try:
-            user_root = resolver(user_id)
-        except (TypeError, ValueError):
-            user_root = None
-    if user_root is None:
-        # Fall back to the bot workspace's parent — the same directory
-        # `workspace_root(user_id)` would have named.
-        bot_workspace = getattr(ctx, "workspace_root", None)
-        user_root = Path(bot_workspace).parent if bot_workspace else None
+    driving case is an email attachment the executor dropped in ``inbox/``.
+    Symlinks are resolved here as well as in `_resolved_source_path`, so a
+    link inside the workspace pointing out of it is caught either way — this
+    predicate is also called directly, and a containment test that assumed a
+    resolved argument would be a boundary resting on its caller.
 
-    roots: list[Path] = []
-    for candidate in (user_temp_dir, user_root):
-        if not candidate:
-            continue
-        try:
-            roots.append(Path(candidate).resolve())
-        except OSError:
-            continue
+    **No conversation token and no Talk root, and that is the point of
+    deriving them here rather than reusing the skill CLIs' set.** The task
+    whose environment named a channel is over by the time this runs, and
+    these bytes are being filed into a record the user reads later — so the
+    roots are the narrow pair, stated at this call site rather than inherited
+    from a shared default that would widen them if the default ever moved.
+    ``skill_host_paths.workspace_roots`` is the one derivation; the
+    ingredients are this caller's.
+    """
+    roots = workspace_roots(
+        mount=getattr(config, "nextcloud_mount_path", None),
+        user_id=user_id,
+        deferred_dir=user_temp_dir,
+    )
     if not roots:
         return False
     try:
         resolved = src.resolve()
     except OSError:
         return False
-    for root in roots:
-        try:
-            resolved.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
+    return path_under_roots(resolved, roots)
 
 
 def _process_deferred_health_ops(
@@ -1141,7 +1131,7 @@ def _process_deferred_health_ops(
                     # replaying it is not.
                     src = _resolved_source_path(
                         Path(entry["source_path"]), user_temp_dir, config,
-                        task.user_id, ctx,
+                        task.user_id,
                     )
                     if src is None:
                         logger.warning(
@@ -1211,7 +1201,7 @@ def _process_deferred_health_ops(
                     # reopen the symlink-swap window the check just closed.
                     src = _resolved_source_path(
                         Path(entry["source_path"]), user_temp_dir, config,
-                        task.user_id, ctx,
+                        task.user_id,
                     )
                     if src is None:
                         logger.warning(
@@ -1243,11 +1233,20 @@ def _process_deferred_health_ops(
                 elif op == "import_csv":
                     from .health import csv_io as _csv_io
 
-                    src = Path(entry["source_path"])
-                    if not src.is_file():
+                    # Same untrusted-path rule as its two neighbours: the op
+                    # file is written inside the sandbox and the daemon
+                    # replaying it is not, so an unscoped path files any host
+                    # file the daemon can read into the user's health records.
+                    # Read the *resolved* path the guard approved.
+                    src = _resolved_source_path(
+                        Path(entry["source_path"]), user_temp_dir, config,
+                        task.user_id,
+                    )
+                    if src is None:
                         logger.warning(
-                            "import_csv skipped for task %d: source missing %s",
-                            task.id, src,
+                            "import_csv skipped for task %d: source missing "
+                            "or outside the user's workspace: %s",
+                            task.id, entry.get("source_path"),
                         )
                         continue
                     csv_text = src.read_text(encoding="utf-8-sig", errors="replace")

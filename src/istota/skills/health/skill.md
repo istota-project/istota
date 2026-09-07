@@ -51,6 +51,12 @@ istota-skill health add-biomarker @cbc WBC 12.5 10^3/uL --flag H
 istota-skill health trend Cholesterol_Total --since 2026-01-01
 istota-skill health upload /path/to/lab.pdf --drawn-at 2026-05-08 --lab Kaiser
 
+# `upload`, `import-csv` and `attach-document` all hand a *path* to the
+# scheduler, which reads the file after your task is over — so the file has to
+# be one that outlives the task and is yours: `{workspace}` or your task's
+# deferred directory. A Talk attachment or a file in a channel directory is
+# refused; copy it into `{workspace}` first and name the copy.
+
 # Bulk CSV (Date,Lab,Marker (unit) layout)
 istota-skill health import-csv /path/to/bloodwork.csv             # skip duplicate (date, lab) panels
 istota-skill health import-csv /path/to/bloodwork.csv --on-collision replace
@@ -108,8 +114,9 @@ istota-skill health coverage                              # status per ref
 istota-skill health coverage --due-soon                   # filter
 istota-skill health coverage --overdue
 
-istota-skill health import-immunizations --paste @clipboard.txt --dry-run
-istota-skill health import-immunizations --paste @clipboard.txt --confirm
+istota-skill health import-immunizations --paste-file /Users/{user_id}/inbox/vaccines.txt --dry-run
+istota-skill health import-immunizations --paste-file /Users/{user_id}/inbox/vaccines.txt --confirm
+istota-skill health import-immunizations --paste "Influenza (Given 11/28/2025)" --dry-run
 
 istota-skill health explain-immunization Influenza        # educational primer
 
@@ -190,7 +197,7 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 | "Give me a summary for my new doctor" | `history-summary` |
 | "Got my flu shot today" | `add-immunization --name Influenza --date 2026-05-16` |
 | "Tdap booster 2 weeks ago at the pharmacy" | `add-immunization --name Tdap --date 2026-05-02 --facility "pharmacy"` |
-| "Here's my MyChart vaccine list: …" | `import-immunizations --paste @inline --dry-run` then `--confirm` after the user reviews the parsed rows |
+| "Here's my MyChart vaccine list: …" | `import-immunizations --paste "…" --dry-run` then `--confirm` after the user reviews the parsed rows |
 | "Am I due for anything?" | `coverage --due-soon` and `coverage --overdue` |
 | "When was my last tetanus?" | `immunizations --name Tdap --limit 1` |
 | "What's the deal with Shingrix?" | `explain-immunization Shingles` |

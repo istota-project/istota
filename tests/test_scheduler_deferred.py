@@ -15,6 +15,8 @@ wherever the two lanes route to different kinds.
 """
 
 import json
+import logging
+from pathlib import Path
 
 import pytest
 
@@ -253,3 +255,211 @@ class TestSubtaskModelInheritanceAcrossNamespaces:
             entries=[{"prompt": "follow up", "model": "z-ai/glm-5"}],
         )
         assert child.model == "z-ai/glm-5"
+
+
+CSV = (
+    ",,MORPHOLOGY,,\n"
+    "Date,Lab,WBC (th/mm3),Hgb (g/dL)\n"
+    ",,4.8-10.5,12.7-16.7\n"
+    '2026-07-27,"Example Lab",6.4,14.5\n'
+)
+
+
+class TestDeferredImportCsvSourcePath:
+    """`import_csv` replays a path written from inside the sandbox.
+
+    The daemon doing the replay is never sandboxed, so an unscoped
+    `source_path` files any host file the daemon can read into the user's
+    health database — from where it comes back through the health UI and the
+    health skill. Its two neighbours (`register_upload`, `attach_document`)
+    already resolve through `_resolved_source_path`; this arm did not.
+    """
+
+    def _ctx(self, tmp_path):
+        """Production's shape: the bot workspace sits inside the user's dir."""
+        from istota.health._migrate import ensure_initialised
+        from istota.health.workspace import synthesize_health_context
+
+        ctx = synthesize_health_context(
+            "alice", tmp_path / "Users" / "alice" / "istota",
+        )
+        ensure_initialised(ctx)
+        return ctx
+
+    def _replay(self, ctx, deferred, ops, *, task_id=99):
+        from istota import db as core_db
+        from istota.scheduler_deferred import _process_deferred_health_ops
+
+        (deferred / f"task_{task_id}_health_ops.json").write_text(
+            json.dumps(ops), encoding="utf-8",
+        )
+
+        import istota.health as _health
+
+        # A real Config, not a stand-in: the guard derives its roots from
+        # `nextcloud_mount_path` and the task's user id, so a fake answering
+        # one hand-written question would not exercise the derivation the
+        # deployment runs.
+        config = Config(nextcloud_mount_path=ctx.workspace_root.parent.parent.parent)
+
+        original = _health.resolve_for_user
+        try:
+            _health.resolve_for_user = lambda uid, cfg: ctx
+            task = core_db.Task(
+                id=task_id, status="completed", source_type="cli",
+                user_id="alice", prompt="",
+            )
+            return _process_deferred_health_ops(config, task, deferred)
+        finally:
+            _health.resolve_for_user = original
+
+    def _panel_ids(self, ctx):
+        from istota.health import db as health_db
+
+        with health_db.connect(ctx.db_path) as conn:
+            panels = health_db.list_panels(conn, include_drafts=True)
+        return {p.id for p in panels}
+
+    def _write(self, path, text=CSV):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_a_workspace_source_is_imported(self, tmp_path):
+        """The acceptance half: without it, every refusal below is vacuous."""
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = self._write(ctx.workspace_root.parent / "inbox" / "labs.csv")
+
+        count = self._replay(ctx, deferred, [
+            {"op": "import_csv", "source_path": str(src)},
+        ])
+
+        assert count == 1
+        assert len(self._panel_ids(ctx)) == 1
+
+    def test_a_source_outside_the_workspace_is_skipped(self, tmp_path, caplog):
+        """Watermark plus a discriminating column: no *new* panel appears."""
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+
+        inside = self._write(ctx.workspace_root.parent / "inbox" / "labs.csv")
+        assert self._replay(ctx, deferred, [
+            {"op": "import_csv", "source_path": str(inside)},
+        ], task_id=1) == 1
+        mark = self._panel_ids(ctx)
+        assert mark
+
+        outside = self._write(
+            tmp_path / "elsewhere" / "stolen.csv",
+            ",,MORPHOLOGY,,\n"
+            "Date,Lab,WBC (th/mm3),Hgb (g/dL)\n"
+            ",,4.8-10.5,12.7-16.7\n"
+            '2026-08-01,"Other Lab",7.7,13.3\n',
+        )
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            count = self._replay(ctx, deferred, [
+                {"op": "import_csv", "source_path": str(outside)},
+            ], task_id=2)
+
+        assert count == 0
+        assert self._panel_ids(ctx) == mark
+        assert any("import_csv skipped" in r.getMessage() for r in caplog.records)
+
+    def test_a_deferred_dir_source_is_imported(self, tmp_path):
+        """The route a sandboxed task actually takes.
+
+        The workspace case above is the email-attachment shape. A task with
+        no mount write of its own writes into `$ISTOTA_DEFERRED_DIR`, which
+        is the guard's other root, and a narrowing that dropped it would
+        leave the case above green while breaking the sandbox's own path.
+        """
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        src = self._write(deferred / "labs.csv")
+
+        count = self._replay(ctx, deferred, [
+            {"op": "import_csv", "source_path": str(src)},
+        ])
+
+        assert count == 1
+        assert len(self._panel_ids(ctx)) == 1
+
+    def test_a_symlink_out_of_the_workspace_is_skipped(self, tmp_path, caplog):
+        """Resolution comes first, so a link inside the roots is caught too."""
+        ctx = self._ctx(tmp_path)
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+
+        outside = self._write(tmp_path / "elsewhere" / "stolen.csv")
+        link = ctx.workspace_root.parent / "inbox" / "labs.csv"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside)
+
+        with caplog.at_level(logging.WARNING, logger="istota.scheduler"):
+            count = self._replay(ctx, deferred, [
+                {"op": "import_csv", "source_path": str(link)},
+            ])
+
+        assert count == 0
+        assert self._panel_ids(ctx) == set()
+        # Pin the *reason*: count == 0 alone is equally true of a parse
+        # failure or an op that raised and was recorded in `failures`.
+        assert any("import_csv skipped" in r.getMessage() for r in caplog.records)
+
+    def test_the_roots_come_from_a_real_config(self, tmp_path):
+        """The two derivations of one root have to agree, id by id.
+
+        `_source_path_allowed` no longer *calls* `Config.workspace_root` — it
+        re-derives `{mount}/Users/{uid}` through `workspace_roots`. Two
+        derivations of one boundary is exactly how the four copies this
+        replaced drifted apart, so what holds them together has to be an
+        equality over a table rather than one shared happy case: asserting
+        each separately on `"alice"` stays green through any divergence that
+        does not happen to involve `"alice"`, which is the shape of every
+        real one.
+        """
+        from istota.skill_host_paths import path_under_roots
+        from istota.scheduler_deferred import _source_path_allowed
+
+        config = Config(nextcloud_mount_path=tmp_path / "mount")
+        assert config.workspace_root("alice") == tmp_path / "mount" / "Users" / "alice"
+
+        deferred = tmp_path / "deferred"
+        deferred.mkdir()
+        mine = self._write(tmp_path / "mount" / "Users" / "alice" / "inbox" / "labs.csv")
+        theirs = self._write(
+            tmp_path / "mount" / "Users" / "bob" / "inbox" / "labs.csv",
+        )
+
+        assert _source_path_allowed(mine, deferred, config, "alice")
+        assert not _source_path_allowed(theirs, deferred, config, "alice")
+
+        # An empty user id is the one case where the two must *not* agree, and
+        # it is excluded from the table below rather than passed: on
+        # `Config.workspace_root` a falsy id means "no user given, hand back
+        # the bare mount root", which is a different question from "this user
+        # id does not scope". The guard must never adopt that answer — the
+        # mount root is every user's directory at once.
+        assert config.workspace_root("") == tmp_path / "mount"
+        assert not _source_path_allowed(mine, deferred, config, "")
+
+        # The equality, over ids that do name a user. Neither file is under
+        # the deferred dir, so the guard's answer is entirely the own root's,
+        # which is what makes it comparable to the config's answer at all.
+        for user_id in (
+            "alice", " alice", "alice ", ".", "..", "/etc", "../bob", "a/b",
+        ):
+            root = config.workspace_root(user_id)
+            for candidate in (mine, theirs):
+                via_config = root is not None and path_under_roots(
+                    candidate.resolve(), [Path(root).resolve()],
+                )
+                via_guard = _source_path_allowed(
+                    candidate, deferred, config, user_id,
+                )
+                assert via_config == via_guard, (user_id, candidate)

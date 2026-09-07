@@ -57,17 +57,94 @@ _REAP_TIMEOUT_SECONDS = 10.0
 _ERROR_DETAIL_MAX_CHARS = 500
 
 
+#: The three the child's allowlist is derived from. Cleared before the
+#: identity is applied, so an unsupplied one is absent rather than inherited.
+_IDENTITY_VARS = ("ISTOTA_USER_ID", "NEXTCLOUD_MOUNT_PATH", "ISTOTA_DEFERRED_DIR")
+
+
+def _identity_env(
+    user_id: str | None,
+    mount_path: str | os.PathLike[str] | None,
+    deferred_dir: str | os.PathLike[str] | None,
+) -> dict[str, str]:
+    """The task identity the child derives its allowlist from.
+
+    Three of the four variables `build_task_runtime` exports;
+    `ISTOTA_CONVERSATION_TOKEN` is deliberately not among them, so the child
+    gets no `{mount}/Channels/{token}` root. Nothing writes an audio
+    attachment there — Talk shares land in `{mount}/Talk`, web-chat uploads
+    in the workspace inbox or the per-user temp dir — and the caller stages
+    anything out of reach into the temp dir anyway
+    (`executor._audio_in_reach`), so the root would widen what the child may
+    name without making any shipped attachment reachable.
+
+    `whisper transcribe`'s path argument is scoped against the allowlist the
+    *child's* environment names (ISSUE-447), and the daemon's own environment
+    carries none of these variables — so a spawn that passed `os.environ`
+    alone would hand the child an empty allowlist, which refuses everything.
+    `executor._pre_transcribe_attachments` logs a failed transcription at
+    **debug** and carries on, so that would have stopped voice messages being
+    transcribed with nothing above debug saying why.
+
+    The general rule, which applies to any future daemon-side spawn of a
+    skill CLI: **pass the task identity, or the CLI refuses every path.** A
+    `--trusted-caller` flag was rejected — it is a flag the model can pass
+    too — and so was detecting the daemon, which is a special case wearing a
+    predicate.
+
+    A value that was not given is left out rather than exported blank: an
+    empty string reads to `env_host_roots` exactly as an unset variable does,
+    and inventing one would only obscure which caller failed to say.
+
+    **The caller has to clear the three names first**, which `_child_env`
+    does, and that is not tidiness. The child inherits `os.environ`, so a
+    name omitted here would otherwise fall through to whatever the daemon's
+    own environment holds — and the daemon has no task, so any value it
+    carries belongs to something else. That also makes the negative case
+    honest rather than dependent on the machine the tests run on.
+    """
+    out: dict[str, str] = {}
+    if user_id:
+        out["ISTOTA_USER_ID"] = str(user_id)
+    if mount_path:
+        out["NEXTCLOUD_MOUNT_PATH"] = str(mount_path)
+    if deferred_dir:
+        out["ISTOTA_DEFERRED_DIR"] = str(deferred_dir)
+    return out
+
+
+def _child_env(
+    user_id: str | None,
+    mount_path: str | os.PathLike[str] | None,
+    deferred_dir: str | os.PathLike[str] | None,
+) -> dict[str, str]:
+    """The daemon's environment, with the identity replaced rather than merged."""
+    env = {k: v for k, v in os.environ.items() if k not in _IDENTITY_VARS}
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.update(_identity_env(user_id, mount_path, deferred_dir))
+    return env
+
+
 def transcribe_audio_out_of_process(
     path: str,
     model: str = "auto",
     language: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    user_id: str | None = None,
+    mount_path: str | os.PathLike[str] | None = None,
+    deferred_dir: str | os.PathLike[str] | None = None,
 ) -> dict:
     """Transcribe `path` in a child process and return the CLI's result dict.
 
     Same contract as the in-process `transcribe.transcribe_audio`: a dict
     carrying `status` of `"ok"` or `"error"`, and on success the transcript
     under `text`.
+
+    The three identity arguments are what let the child resolve `path` at all;
+    see `_identity_env`. They are keyword-only and default to absent, so a
+    caller that has no task — a script, a test — gets the honest answer that
+    nothing is allowed rather than a widened allowlist.
 
     Never raises. Every failure — a child that cannot be spawned, one that
     times out, one that writes nothing parseable — comes back as an error dict,
@@ -131,7 +208,7 @@ def transcribe_audio_out_of_process(
             # worth more than no transcript.
             encoding="utf-8",
             errors="replace",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            env=_child_env(user_id, mount_path, deferred_dir),
             # Never the daemon's stdin. Under systemd that is /dev/null and
             # this changes nothing, but `istota serve` in a terminal would hand
             # the child the operator's tty — and a child that reads from it (an

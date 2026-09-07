@@ -41,8 +41,22 @@ def ready(tmp_path) -> tuple[Path, dict]:
         # Direct mode — no deferred dir.
         "ISTOTA_DEFERRED_DIR": "",
         "ISTOTA_TASK_ID": "",
+        # Every file argument this CLI takes is a host path, and the CLI runs
+        # host-side, so each is scoped to the caller's own roots (ISSUE-447).
+        # This is what the executor would have put in the environment; the
+        # `workspace` fixture is the one directory a source file may sit in.
+        "NEXTCLOUD_MOUNT_PATH": str(tmp_path / "mount"),
+        "ISTOTA_USER_ID": "alice",
     }
     return ctx.db_path, env
+
+
+@pytest.fixture
+def workspace(tmp_path) -> Path:
+    """`{mount}/Users/alice`, the root every scoped path here resolves under."""
+    path = tmp_path / "mount" / "Users" / "alice"
+    path.mkdir(parents=True)
+    return path
 
 
 class TestStatsCli:
@@ -140,33 +154,23 @@ class TestCsvCli:
         "2025-11-28,Kaiser,14.6,6.1,148,55\n"
     )
 
-    def test_import_then_export_roundtrip(self, ready, tmp_path):
+    def test_import_then_export_roundtrip(self, ready, workspace):
         db_path, env = ready
-        src = tmp_path / "bw.csv"
+        src = workspace / "bw.csv"
         src.write_text(self.SAMPLE)
         out = _run(["import-csv", str(src)], env)
         assert out["status"] == "ok"
         assert out["panels_created"] == 2
         assert out["biomarkers_created"] == 8
 
-        # `--output` is a host path and this CLI runs host-side, so it is
-        # scoped to the caller's own workspace. The mount below is what the
-        # executor would have put in the environment.
-        mount = tmp_path / "mount"
-        (mount / "Users" / "alice").mkdir(parents=True)
-        env = {
-            **env,
-            "NEXTCLOUD_MOUNT_PATH": str(mount),
-            "ISTOTA_USER_ID": "alice",
-        }
-        export_path = mount / "Users" / "alice" / "out.csv"
+        export_path = workspace / "out.csv"
         result = _run(["export-csv", "-o", str(export_path)], env)
         assert result["status"] == "ok"
         assert export_path.exists()
         # 3 header rows + 2 data rows
         assert len(export_path.read_text().strip().splitlines()) == 5
 
-    def test_import_deferred(self, ready, tmp_path):
+    def test_import_deferred(self, ready, workspace, tmp_path):
         db_path, env = ready
         deferred = tmp_path / "deferred"
         deferred.mkdir()
@@ -175,7 +179,7 @@ class TestCsvCli:
             "ISTOTA_DEFERRED_DIR": str(deferred),
             "ISTOTA_TASK_ID": "7",
         }
-        src = tmp_path / "bw.csv"
+        src = workspace / "bw.csv"
         src.write_text(self.SAMPLE)
         out = _run(["import-csv", str(src)], env)
         assert out["deferred"] is True
@@ -624,12 +628,12 @@ class TestGarminSyncDelegated:
 
 
 class TestDocumentsCli:
-    def _paperwork(self, tmp_path, name="discharge.pdf") -> Path:
-        p = tmp_path / name
+    def _paperwork(self, workspace, name="discharge.pdf") -> Path:
+        p = workspace / name
         p.write_bytes(b"%PDF-1.4 discharge summary")
         return p
 
-    def test_attach_and_list_direct(self, ready, tmp_path):
+    def test_attach_and_list_direct(self, ready, workspace):
         db_path, env = ready
         from istota.health import db as health_db
 
@@ -639,7 +643,7 @@ class TestDocumentsCli:
             )
             conn.commit()
 
-        src = self._paperwork(tmp_path)
+        src = self._paperwork(workspace)
         out = _run(
             ["attach-document", "--path", str(src), "--to", f"encounter:{eid}"],
             env,
@@ -661,7 +665,7 @@ class TestDocumentsCli:
             {"entity_type": "encounter", "entity_id": eid},
         ]
 
-    def test_detach_direct(self, ready, tmp_path):
+    def test_detach_direct(self, ready, workspace):
         db_path, env = ready
         from istota.health import db as health_db
 
@@ -670,7 +674,7 @@ class TestDocumentsCli:
                 conn, encounter_date="2026-06-29", encounter_type="visit",
             )
             conn.commit()
-        src = self._paperwork(tmp_path)
+        src = self._paperwork(workspace)
         did = _run(
             ["attach-document", "--path", str(src), "--to", f"encounter:{eid}"],
             env,
@@ -682,13 +686,13 @@ class TestDocumentsCli:
         with health_db.connect(db_path) as conn:
             assert health_db.documents_for_entity(conn, "encounter", eid) == []
 
-    def test_attach_defers_under_sandbox(self, ready, tmp_path):
+    def test_attach_defers_under_sandbox(self, ready, workspace, tmp_path):
         """Sandboxed, the health DB is read-only — the write must defer."""
         db_path, env = ready
         deferred = tmp_path / "deferred"
         deferred.mkdir()
         env = {**env, "ISTOTA_DEFERRED_DIR": str(deferred), "ISTOTA_TASK_ID": "77"}
-        src = self._paperwork(tmp_path)
+        src = self._paperwork(workspace)
 
         out = _run(
             ["attach-document", "--path", str(src), "--to", "immunization:5",
@@ -706,12 +710,12 @@ class TestDocumentsCli:
             "entity_id": 5,
         }]
 
-    def test_encounter_ref_defers_as_a_ref(self, ready, tmp_path):
+    def test_encounter_ref_defers_as_a_ref(self, ready, workspace, tmp_path):
         db_path, env = ready
         deferred = tmp_path / "deferred"
         deferred.mkdir()
         env = {**env, "ISTOTA_DEFERRED_DIR": str(deferred), "ISTOTA_TASK_ID": "78"}
-        src = self._paperwork(tmp_path)
+        src = self._paperwork(workspace)
 
         _run(
             ["add-encounter", "--date", "2026-06-29", "--type", "visit",
@@ -742,15 +746,34 @@ class TestDocumentsCli:
             "entity_id": 8,
         }]
 
-    def test_missing_file_is_an_error(self, ready, tmp_path):
+    def test_missing_file_is_an_error(self, ready, workspace):
+        """The refusal is the allowlist's now, not this handler's own probe.
+
+        `--path` is stamped `READ`, so resolution establishes existence
+        before dispatch and the pre-deferral `exists()` check is gone — it
+        was an existence oracle over the whole filesystem for a verb that
+        never reads the bytes (ISSUE-447).
+        """
         db_path, env = ready
         out = _run(
-            ["attach-document", "--path", str(tmp_path / "nope.pdf"),
+            ["attach-document", "--path", str(workspace / "nope.pdf"),
              "--to", "encounter:1"],
             env, expect_success=False,
         )
         assert out["status"] == "error"
-        assert "file not found" in out["error"]
+        assert out["reason"] == "host_path_refused"
+        assert "not found" in out["error"].lower()
+
+    def test_a_path_outside_the_workspace_is_refused(self, ready, tmp_path):
+        """And the oracle itself: a file that is there, out of roots."""
+        db_path, env = ready
+        outside = tmp_path / "elsewhere.pdf"
+        outside.write_bytes(b"%PDF-1.4 not yours")
+        out = _run(
+            ["attach-document", "--path", str(outside), "--to", "encounter:1"],
+            env, expect_success=False,
+        )
+        assert out["reason"] == "host_path_refused"
 
     @pytest.mark.parametrize("ref,fragment", [
         ("panel:1", "unknown entity type"),
@@ -759,9 +782,9 @@ class TestDocumentsCli:
         ("", "expected TYPE:ID"),
         ("diagnosis:@x", "only supported for encounter"),
     ])
-    def test_bad_entity_ref_is_an_error(self, ready, tmp_path, ref, fragment):
+    def test_bad_entity_ref_is_an_error(self, ready, workspace, ref, fragment):
         db_path, env = ready
-        src = self._paperwork(tmp_path)
+        src = self._paperwork(workspace)
         out = _run(
             ["attach-document", "--path", str(src), "--to", ref],
             env, expect_success=False,

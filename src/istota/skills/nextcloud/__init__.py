@@ -42,7 +42,8 @@ from istota.nextcloud_client import (
     ocs_search_sharees,
 )
 from istota.ocs import is_ocs_envelope, ocs_body_data
-from istota.skills._cli import error_envelope, run_skill_cli
+from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import EGRESS, WRITE, host_path
 
 _SHARE_TYPE_MAP = shares_mod.SHARE_TYPES
 _DEFAULT_EXPIRE_DAYS = 14
@@ -903,13 +904,31 @@ def build_parser():
     p_fsearch.add_argument("--limit", type=int, default=100, help="Max results (default: 100)")
 
     p_upload = files_sub.add_parser("upload", help="Upload a local file")
-    p_upload.add_argument("local", help="Local file path")
+    # `EGRESS`, not `READ`: the bytes leave the task. What this verb does is
+    # put a host file into Nextcloud, where the web UI serves it, a share can
+    # publish it and nothing about the task bounds who reads it afterwards —
+    # the same question `email --attach` answers, so it gets the same root.
+    host_path(
+        p_upload, "local", mode=EGRESS,
+        help="Local file path, in your own workspace",
+    )
     p_upload.add_argument("remote", help="Destination Nextcloud path")
     p_upload.add_argument("--chunked", action="store_true", help="Force chunked upload")
 
     p_download = files_sub.add_parser("download", help="Download to a local path")
+    # `remote` stays a registry entry rather than a stamp, matching its
+    # sibling on `upload`: `_scoped` is what confines a Nextcloud path, and
+    # stamping one of the pair and not the other would read as a difference.
     p_download.add_argument("remote", help="Nextcloud path")
-    p_download.add_argument("local", help="Local destination path")
+    # `WRITE`, which is the task's roots less the read-only ones: the bytes
+    # land where the same task reads them back and `/chat/files` serves them,
+    # so this is not an egress the way `upload` is — it is the reverse
+    # direction, bringing the user's own Nextcloud file down into the
+    # workspace they are working in.
+    host_path(
+        p_download, "local", mode=WRITE,
+        help="Local destination path, in your own workspace",
+    )
 
     p_versions = files_sub.add_parser("versions", help="List stored versions of a file")
     p_versions.add_argument("path", help="Nextcloud path")
@@ -1077,7 +1096,7 @@ _COMMANDS = {
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
 
     group = getattr(args, "group", None)
     command = getattr(args, "command", None)

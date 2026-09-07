@@ -157,6 +157,96 @@ class TestArgv:
         assert popen.call_args.kwargs["env"]["WHISPER_MAX_MODEL"] == "tiny"
 
 
+class TestTheTaskIdentityReachesTheChild:
+    """A process that spawns a skill CLI passes the task identity, or the CLI
+    refuses every path.
+
+    `whisper transcribe`'s path argument is scoped since ISSUE-447 and the
+    scoping reads `ISTOTA_USER_ID` and `NEXTCLOUD_MOUNT_PATH` out of the
+    *child's* environment, which is how the skill proxy hands a task its
+    allowlist. The daemon carries neither, so a runner spawning with
+    `os.environ` alone would give the child an empty allowlist — every path
+    refused — and `executor._pre_transcribe_attachments` logs a failed
+    transcription at **debug** and carries on, so voice messages would stop
+    being transcribed with nothing above debug saying why.
+
+    The alternatives were considered and rejected in the spec: a
+    `--trusted-caller` flag is a flag the model can pass too, and a
+    daemon-detection heuristic is a special case wearing a predicate.
+    """
+
+    def test_the_identity_is_exported_to_the_child(self, tmp_path):
+        with patch(_POPEN) as popen:
+            popen.return_value = _fake_proc(stdout=_ok_payload())
+            transcribe_audio_out_of_process(
+                str(tmp_path / "voice.mp3"),
+                user_id="alice",
+                mount_path=tmp_path / "mount",
+                deferred_dir=tmp_path / "deferred",
+            )
+
+        env = popen.call_args.kwargs["env"]
+        assert env["ISTOTA_USER_ID"] == "alice"
+        assert env["NEXTCLOUD_MOUNT_PATH"] == str(tmp_path / "mount")
+        assert env["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "deferred")
+
+    def test_an_identity_it_was_not_given_is_not_inherited(self, tmp_path):
+        """Absent, not blank, and above all not the daemon's own.
+
+        The child inherits `os.environ`, so omitting a name is not the same
+        as clearing it: whatever the daemon carries falls straight through,
+        and the daemon has no task, so any value it holds belongs to
+        something else. The three names are removed from the copied
+        environment before the identity is applied, which is what makes
+        "absent" mean absent.
+
+        The ambient values here are the whole test. Popping them first —
+        which is what an earlier version of this did — asserts only that a
+        dict this function never wrote to has no key in it.
+        """
+        ambient = {
+            "ISTOTA_USER_ID": "someone-else",
+            "NEXTCLOUD_MOUNT_PATH": "/mnt/shared",
+            "ISTOTA_DEFERRED_DIR": "/tmp/another-task",
+        }
+        with patch.dict(os.environ, ambient), patch(_POPEN) as popen:
+            popen.return_value = _fake_proc(stdout=_ok_payload())
+            transcribe_audio_out_of_process(str(tmp_path / "voice.mp3"))
+
+        env = popen.call_args.kwargs["env"]
+        assert "ISTOTA_USER_ID" not in env
+        assert "NEXTCLOUD_MOUNT_PATH" not in env
+        assert "ISTOTA_DEFERRED_DIR" not in env
+
+    def test_a_supplied_identity_overrides_the_daemons_own(self, tmp_path):
+        """The other direction, which a merge gets right and a leak does not."""
+        ambient = {"ISTOTA_USER_ID": "someone-else"}
+        with patch.dict(os.environ, ambient), patch(_POPEN) as popen:
+            popen.return_value = _fake_proc(stdout=_ok_payload())
+            transcribe_audio_out_of_process(
+                str(tmp_path / "voice.mp3"), user_id="alice",
+            )
+
+        assert popen.call_args.kwargs["env"]["ISTOTA_USER_ID"] == "alice"
+
+    def test_a_partial_identity_still_exports_what_it_has(self, tmp_path):
+        """The standalone shape: a deferred dir and no mount at all.
+
+        A web-chat upload falls back to `{temp_dir}/{user}/web-chat-uploads`
+        on a deployment with no mount, which is inside the per-user temp dir
+        the proxy exports as `ISTOTA_DEFERRED_DIR`. Dropping it because the
+        mount is absent would refuse every voice message on that shape.
+        """
+        with patch(_POPEN) as popen:
+            popen.return_value = _fake_proc(stdout=_ok_payload())
+            transcribe_audio_out_of_process(
+                str(tmp_path / "voice.mp3"), deferred_dir=tmp_path / "deferred",
+            )
+
+        env = popen.call_args.kwargs["env"]
+        assert env["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "deferred")
+
+
 class TestResult:
     def test_a_successful_transcript_comes_back_intact(self):
         with patch(_POPEN) as popen:
@@ -338,14 +428,47 @@ class TestAgainstTheRealCli:
     the round trip stays under a couple of seconds.
     """
 
-    def test_a_real_spawn_round_trips_an_error_result(self):
-        result = transcribe_audio_out_of_process("/nonexistent/definitely-not-here.mp3", timeout=120)
+    def test_a_real_spawn_round_trips_an_error_result(self, tmp_path):
+        """A missing file *inside the allowlist*, which is now two claims.
+
+        The path is scoped since ISSUE-447, so a bare `/nonexistent/...`
+        comes back refused as out-of-roots whatever the identity was — a
+        message that reads like a working boundary and would equally be
+        produced by a spawn that passed no identity at all. Naming a file
+        that would be admissible if it existed is what separates the two:
+        `not found` can only come back if the roots resolved in the child.
+        """
+        workspace = tmp_path / "mount" / "Users" / "alice"
+        workspace.mkdir(parents=True)
+        result = transcribe_audio_out_of_process(
+            str(workspace / "definitely-not-here.mp3"),
+            timeout=120,
+            user_id="alice",
+            mount_path=tmp_path / "mount",
+        )
 
         assert result["status"] == "error"
         assert "not found" in result["error"].lower()
         # The CLI's own message, not the runner's fallback for output it could
         # not parse — the distinction is the whole point of this test.
         assert "without a usable result" not in result["error"]
+
+    def test_a_real_spawn_without_the_identity_refuses_the_path(self, tmp_path):
+        """The negative half, run for real rather than asserted about argv.
+
+        With no identity the child's allowlist is empty, and an empty
+        allowlist refuses everything. That is the correct answer for a CLI
+        nobody told who is asking — and it is why the daemon has to say.
+        """
+        workspace = tmp_path / "mount" / "Users" / "alice"
+        workspace.mkdir(parents=True)
+        audio = workspace / "present.mp3"
+        audio.write_bytes(b"not really audio")
+
+        result = transcribe_audio_out_of_process(str(audio), timeout=120)
+
+        assert result["status"] == "error"
+        assert "allowed host roots" in result["error"]
 
 
 class TestParseCliJson:

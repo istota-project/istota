@@ -17,9 +17,11 @@ to one of the joins. So it lives here now, and the joins that build a
 containment base out of a user id call it: ``sandbox_plan.build_mount_plan``
 (the workspace bind, the mount bind and the per-resource skip that compares
 against it), ``executor.image_bind_roots``, ``executor.get_user_repos_dir``,
-``skill_host_paths.allowed_host_roots`` and the two memory skills'
-``_indexable_roots`` / ``_user_id``, plus ``db.create_task`` on the lexical
-half. **Three hand-rolled copies of the same equality deliberately remain**,
+``skill_host_paths.workspace_roots`` (the one derivation behind every
+host-path allowlist since ISSUE-447, which is why ``_indexable_roots`` is no
+longer in this list — it was a second copy and is deleted),
+``Config.workspace_root`` and the ``memory`` skill's ``_user_id``, plus
+``db.create_task`` on the lexical half. **Three hand-rolled copies of the same equality deliberately remain**,
 and each keeps a rule this function has no room for:
 ``executor.get_task_control_dir`` adds a casefold test against
 ``.control``, ``executor.daemon_work_dir`` uses the shared root itself as its

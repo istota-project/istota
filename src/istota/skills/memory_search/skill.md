@@ -19,8 +19,8 @@ istota-skill memory_search search "query text" [--limit 10] [--source-type TYPE]
 # Index a specific conversation
 istota-skill memory_search index conversation TASK_ID
 
-# Index a specific file
-istota-skill memory_search index file /path/to/file.md [--source-type TYPE]
+# Index a specific file, from your own workspace only
+istota-skill memory_search index file {workspace}/notes.md [--source-type TYPE]
 
 # Reindex all conversations and memory files
 istota-skill memory_search reindex [--lookback-days 90]
@@ -28,6 +28,8 @@ istota-skill memory_search reindex [--lookback-days 90]
 # Show indexing stats
 istota-skill memory_search stats
 ```
+
+`index file` reads from your own workspace or your task's own temp directory (`$ISTOTA_DEFERRED_DIR`) and nowhere else. What it indexes comes back out through `search` after this task is over, so a Talk attachment or a file in the channel directory — material somebody else put there — is refused. Copy it into `{workspace}` first if it belongs in your searchable memory.
 
 ## Knowledge graph (read-only)
 

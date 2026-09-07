@@ -50,7 +50,8 @@ from pathlib import Path
 
 from istota import skill_proxy
 from istota.skill_host_paths import developer_repos_root, resolve_under_repos
-from istota.skills._cli import emit, run_skill_cli
+from istota.skills._cli import emit, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import REPO, host_path
 
 from . import engine
 
@@ -601,8 +602,14 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_run = sub.add_parser("run", help="Review the changes in a worktree")
-    p_run.add_argument(
-        "--worktree",
+    host_path(
+        p_run, "--worktree", mode=REPO,
+        note=(
+            "the other allowlist: `resolve_under_repos` against this task's "
+            "own subtree of DEVELOPER_REPOS_DIR, applied by `cmd_run`. The "
+            "mount roots are the wrong tool for it, and a worktree is refused "
+            "for reasons `cmd_run` reports separately from a bad path"
+        ),
         required=True,
         help="Path to the worktree to review. Must resolve inside $DEVELOPER_REPOS_DIR",
     )
@@ -638,7 +645,7 @@ def build_parser():
 
 def main(argv=None):
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
     commands = {"run": cmd_run}
 
     def describe(exc: BaseException) -> dict:

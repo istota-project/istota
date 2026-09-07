@@ -11,8 +11,14 @@ before this module existed: five copies checked the status inside the ``try``,
 sites that printed an error envelope and exited 0. (``skills/kv`` checked no
 status in ``main`` either, but every one of its error paths already exited 1.)
 
-Imports ``json`` and ``sys`` and nothing else, so a skill subprocess pays
-nothing for it beyond what ``istota.skills.__init__`` already costs.
+Nothing from the package beyond ``._hostpath``, itself a leaf over
+``istota.skill_host_paths`` — so a skill subprocess pays nothing for it beyond
+what ``istota.skills.__init__`` already costs.
+
+``parse_and_resolve`` is the other half of the facade's contract and is here
+rather than in ``_hostpath`` for that reason: the refusal has to come back as
+one JSON envelope on stdout with the status in the exit code, which is this
+module's rule, not the allowlist's.
 
 Two things a reader will want to know before converting the next call site.
 
@@ -36,9 +42,12 @@ imports the standard library, Pillow and pytesseract and nothing from
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from typing import Any, Callable, NoReturn
+
+from ._hostpath import resolve_parsed
 
 
 def error_envelope(message: str, **extra: Any) -> dict:
@@ -107,6 +116,47 @@ def fail(message: str, **extra: Any) -> NoReturn:
     """
     print(json.dumps(error_envelope(message, **extra)))
     sys.exit(1)
+
+
+def parse_and_resolve(
+    parser: argparse.ArgumentParser, argv: Any = None,
+) -> argparse.Namespace:
+    """`parser.parse_args(argv)`, with every declared host path resolved.
+
+    The one call every skill ``main`` makes, so that a host-path stamp on an
+    argument is enforced by the fact of the argument being parsed rather than
+    by each handler remembering to ask. **Enforcement is at parse, not at
+    dispatch**: ``run_skill_cli`` looks like the chokepoint and is not —
+    ``money`` does not use it, and a handler-local existence probe would
+    already have run by the time dispatch saw the value.
+
+    A refusal is the facade's envelope on stdout and exit 1, with
+    ``reason="host_path_refused"`` so the model reads a boundary rather than a
+    missing file. That is also why this is not an argparse ``type=`` callable,
+    which is otherwise the tempting shape: argparse reports a ``type`` failure
+    through ``parser.error()`` — usage text on stderr and exit 2 — and getting
+    the envelope out of that means every skill building its parser through a
+    shared subclass, which is this conversion with more machinery and less
+    visible control flow.
+
+    A parser with no stamped argument behaves exactly as ``parse_args`` does,
+    which is what let all twenty skill ``main`` functions be converted in one
+    step with nothing declared.
+    """
+    args = parser.parse_args(argv)
+    refusal = resolve_parsed(parser, args)
+    if refusal is not None:
+        fail(refusal, reason="host_path_refused")
+        # `fail` exits. The raise is what makes that independent of it, and it
+        # is the property `health.cmd_export_csv` used to keep for itself with
+        # a bare `return` after its own `_fail`: a `fail` that ever stopped
+        # exiting would return a namespace `resolve_parsed` left *partially*
+        # rewritten — the dests before the refusing one absolute, the rest as
+        # parsed, and nothing on it saying which is which — and every handler
+        # would then run on the mixture. There is one refusal site now, so
+        # there is one place to keep this true.
+        raise SystemExit(1)  # pragma: no cover — `fail` is NoReturn
+    return args
 
 
 def run_skill_cli(

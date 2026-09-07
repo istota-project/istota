@@ -443,38 +443,42 @@ class TestTheProducer:
 class TestTheMemorySkillRoots:
     """The same allowlist shape in the two memory skills.
 
-    `memory_search`'s `_indexable_roots` says in its own docstring that an
-    unbounded read "would let a task index another user's workspace and then
-    retrieve the contents through `search`" — and built its one root by the
-    plain join. `memory`'s `_user_id` checked emptiness only, while two joins
-    below it build a *containment base* out of the result.
+    `memory_search index file` says in its own docstring that an unbounded
+    read "would let a task index another user's workspace and then retrieve
+    the contents through `search`" — and built its one root by the plain join,
+    in `_indexable_roots`, a second copy of the shared derivation. ISSUE-447
+    deleted that copy; the root set is now `env_host_roots(talk=False)`, which
+    is where these assertions moved. `memory`'s `_user_id` checked emptiness
+    only, while two joins below it build a *containment base* out of the result.
     """
 
     @pytest.mark.parametrize("user_id", [i for i in BAD_IDS if i.strip()])
-    def test_indexable_roots_drops_the_users_root(self, config, monkeypatch, user_id):
-        from istota.skills.memory_search import _indexable_roots
+    def test_index_file_roots_drop_the_users_root(self, config, monkeypatch, user_id):
+        from istota.skill_host_paths import env_host_roots
 
         mount = config.nextcloud_mount_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+        monkeypatch.setenv("ISTOTA_USER_ID", user_id)
         monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
         monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
-        roots = _indexable_roots(user_id)
+        roots = env_host_roots(talk=False)
         bob = (mount / "Users" / "bob").resolve()
         assert (mount / "Users").resolve() not in roots
         assert not any(bob == r or bob.is_relative_to(r) for r in roots), (
             f"user_id={user_id!r} makes bob's workspace indexable: {roots}"
         )
 
-    def test_indexable_roots_keeps_an_ordinary_users_own(self, config, monkeypatch):
-        from istota.skills.memory_search import _indexable_roots
+    def test_index_file_roots_keep_an_ordinary_users_own(self, config, monkeypatch):
+        from istota.skill_host_paths import env_host_roots
 
         mount = config.nextcloud_mount_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
         monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
         monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
 
-        assert (mount / "Users" / "alice").resolve() in _indexable_roots("alice")
+        assert (mount / "Users" / "alice").resolve() in env_host_roots(talk=False)
 
     @pytest.mark.parametrize("user_id", [i for i in BAD_IDS if i.strip()])
     def test_the_memory_skill_refuses_the_id(self, monkeypatch, user_id):

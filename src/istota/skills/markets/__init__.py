@@ -14,6 +14,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from istota.skills._cli import parse_and_resolve
+
 
 @dataclass
 class MarketQuote:
@@ -248,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parse_and_resolve(parser)
 
     if args.command == "quote":
         cmd_quote(args)

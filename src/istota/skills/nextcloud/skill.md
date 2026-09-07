@@ -31,7 +31,7 @@ istota-skill nextcloud share revoke (SHARE_ID | --token T | --path P --confirmed
 istota-skill nextcloud share delete SHARE_ID
 istota-skill nextcloud share search QUERY
 istota-skill nextcloud files stat|list|search|versions|trash|favorite|quota ...
-istota-skill nextcloud files upload LOCAL REMOTE / download REMOTE LOCAL
+istota-skill nextcloud files upload LOCAL REMOTE / download REMOTE LOCAL   # LOCAL to upload must be in {workspace}; LOCAL to download must be somewhere you may write
 istota-skill nextcloud talk rooms|room|read|send|share-file|search|participants ...
 istota-skill nextcloud notify list|get|dismiss|dismiss-all
 istota-skill nextcloud activity list [--since ID] [--limit N]
@@ -241,6 +241,12 @@ large file (chunked automatically, falling back to a plain upload when the
 server lacks chunking), a file that lives outside the mount, or a deployment
 with no mount at all. For anything already in the workspace, copy it with
 ordinary file tools instead.
+
+Both local paths are scoped, and not to the same set. `upload`'s LOCAL is the
+source of bytes that leave the task — Nextcloud serves them and a share can
+publish them — so it has to be in `{workspace}` or your task's temp directory.
+`download`'s LOCAL is a destination whose content stays in front of you, so it
+may also be this conversation's directory.
 
 `files trash empty` is irreversible and refuses without `--confirmed`.
 

@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from istota.atomic_write import write_text_atomic
-from istota.skills._cli import emit, error_envelope, status_exit_code
+from istota.skills._cli import emit, error_envelope, parse_and_resolve, status_exit_code
 from istota.user_scope import is_scopable_user_id
 from istota.memory.curation.audit import (
     write_audit_log,
@@ -706,7 +706,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_and_resolve(parser, argv)
     commands = {
         "append": cmd_append,
         "add-heading": cmd_add_heading,

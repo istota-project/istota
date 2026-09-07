@@ -65,7 +65,7 @@ istota-skill transcribe ocr {workspace}/inbox/screenshot.png
 
 Process a handwritten note with preprocessing:
 ```bash
-istota-skill transcribe ocr /tmp/handwritten_note.jpg --preprocess
+istota-skill transcribe ocr {workspace}/inbox/handwritten_note.jpg --preprocess
 ```
 
 ## Transcription procedure

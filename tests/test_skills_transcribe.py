@@ -207,10 +207,30 @@ class TestBuildParser:
 
 
 class TestMain:
+    """`image_path` is stamped `READ` (ISSUE-447).
+
+    The CLI runs host-side under the skill proxy with the daemon's whole
+    filesystem view, so the image is resolved against the roots the
+    environment names before `cmd_ocr` sees it. `workspace` is what puts a
+    root there; without one the allowlist is empty and everything is refused,
+    which is the right answer for a CLI nobody told who is asking.
+
+    The daemon's own automatic OCR is untouched by this: it spawns
+    `python -m istota.ocr_leaf`, not this skill.
+    """
+
+    @pytest.fixture
+    def workspace(self, tmp_path, monkeypatch):
+        path = tmp_path / "mount" / "Users" / "alice"
+        path.mkdir(parents=True)
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(tmp_path / "mount"))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        return path
+
     @patch("istota.ocr_leaf.pytesseract.image_to_data")
-    def test_main_ocr_success(self, mock_to_data, tmp_path, capsys):
+    def test_main_ocr_success(self, mock_to_data, workspace, capsys):
         # Create a test image
-        image_path = tmp_path / "test.png"
+        image_path = workspace / "test.png"
         Image.new("RGB", (100, 100), color="white").save(image_path)
 
         mock_to_data.return_value = {
@@ -224,22 +244,36 @@ class TestMain:
         assert output["status"] == "ok"
         assert output["text"] == "Test"
 
-    def test_main_ocr_file_not_found(self, tmp_path, capsys):
+    def test_main_ocr_file_not_found(self, workspace, capsys):
         with pytest.raises(SystemExit) as exc_info:
-            main(["ocr", str(tmp_path / "nonexistent.png")])
+            main(["ocr", str(workspace / "nonexistent.png")])
 
         assert exc_info.value.code == 1
         output = json.loads(capsys.readouterr().out)
         assert output["status"] == "error"
-        assert "not found" in output["error"]
+        assert "not found" in output["error"].lower()
+
+    def test_main_ocr_outside_the_workspace_is_refused(
+        self, workspace, tmp_path, capsys,
+    ):
+        """An image that is there, and is not the caller's to read."""
+        image_path = tmp_path / "elsewhere.png"
+        Image.new("RGB", (10, 10), color="white").save(image_path)
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["ocr", str(image_path)])
+
+        assert exc_info.value.code == 1
+        output = json.loads(capsys.readouterr().out)
+        assert output["reason"] == "host_path_refused"
 
     def test_main_missing_command(self):
         with pytest.raises(SystemExit):
             main([])
 
     @patch("istota.ocr_leaf.pytesseract.image_to_data")
-    def test_main_with_preprocess(self, mock_to_data, tmp_path, capsys):
-        image_path = tmp_path / "test.png"
+    def test_main_with_preprocess(self, mock_to_data, workspace, capsys):
+        image_path = workspace / "test.png"
         Image.new("RGB", (100, 100), color="red").save(image_path)
 
         mock_to_data.return_value = {

@@ -30,7 +30,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from istota.skills._cli import fail as _fail, run_skill_cli
+from istota.skills._cli import fail as _fail, parse_and_resolve, run_skill_cli
 
 # The response comes back as one line of JSON and lands in an agent's context.
 # Bound both directions.
@@ -924,7 +924,8 @@ def build_parser():
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parse_and_resolve(parser, argv)
     commands = {
         "status": cmd_status,
         "recent": cmd_recent,
