@@ -43,7 +43,7 @@ import os
 import subprocess
 import sys
 
-from istota.process_group import kill_process_group
+from istota.process_group import kill_group_if_live
 
 __all__ = ["ocr_image_out_of_process", "child_argv", "DEFAULT_TIMEOUT_SECONDS"]
 
@@ -165,9 +165,10 @@ def ocr_image_out_of_process(path: str, timeout: float = DEFAULT_TIMEOUT_SECONDS
         return {"status": "error", "error": f"OCR timed out after {timeout:.0f}s"}
     except Exception as e:
         # A broken pipe, or a decode that failed despite the pinned encoding.
-        # The child is still running and `start_new_session` means nothing else
+        # If the child is still running, `start_new_session` means nothing else
         # will ever signal it, so kill it here rather than leaving it to finish
-        # unsupervised.
+        # unsupervised. Whether it is still running is `_kill_and_reap`'s to
+        # decide: `communicate()` can also fail after the reap.
         logger.warning("OCR process failed: %s", e)
         _kill_and_reap(proc)
         return {"status": "error", "error": f"OCR process failed: {e}"}
@@ -189,10 +190,16 @@ def ocr_image_out_of_process(path: str, timeout: float = DEFAULT_TIMEOUT_SECONDS
 def _kill_and_reap(proc) -> tuple[str, str]:
     """SIGKILL the child's group and collect whatever it had already written.
 
+    The kill is skipped when the child has already been reaped: both callers
+    reach this after something went wrong with `communicate()`, and one of the
+    ways that goes wrong is a failure raised once the child is gone. The pid
+    would then be the OS's to reuse, and the group signalled somebody else's
+    (ISSUE-456).
+
     Returns `(stdout, stderr)`, empty strings if nothing could be collected.
     Never raises: both callers are already handling a failure.
     """
-    kill_process_group(proc.pid)
+    kill_group_if_live(proc)
     try:
         return proc.communicate(timeout=_REAP_TIMEOUT_SECONDS)
     except Exception as e:

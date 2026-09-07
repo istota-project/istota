@@ -311,12 +311,13 @@ class TestResult:
 class TestTimeout:
     def test_a_hung_child_is_killed_by_group_and_reported(self):
         with patch(_POPEN) as popen, patch(
-            "istota.skills.whisper.out_of_process.kill_process_group"
+            "istota.skills.whisper.out_of_process.kill_group_if_live"
         ) as kill:
-            popen.return_value = _fake_proc(timeout_first=True)
+            proc = _fake_proc(returncode=None, timeout_first=True)
+            popen.return_value = proc
             result = transcribe_audio_out_of_process("/tmp/voice.mp3", timeout=5)
 
-        kill.assert_called_once_with(4242)
+        kill.assert_called_once_with(proc)
         assert result["status"] == "error"
         assert "timed out" in result["error"]
 
@@ -326,10 +327,10 @@ class TestTimeout:
         timeout returns what was already buffered, so reporting a flat failure
         there loses a transcription that in fact completed."""
         with patch(_POPEN) as popen, patch(
-            "istota.skills.whisper.out_of_process.kill_process_group"
+            "istota.skills.whisper.out_of_process.kill_group_if_live"
         ):
             popen.return_value = _fake_proc(
-                stdout=_ok_payload("it did finish"), timeout_first=True
+                stdout=_ok_payload("it did finish"), returncode=None, timeout_first=True
             )
             result = transcribe_audio_out_of_process("/tmp/voice.mp3", timeout=5)
 
@@ -338,9 +339,9 @@ class TestTimeout:
 
     def test_a_reap_that_also_fails_still_returns_the_timeout_error(self):
         with patch(_POPEN) as popen, patch(
-            "istota.skills.whisper.out_of_process.kill_process_group"
+            "istota.skills.whisper.out_of_process.kill_group_if_live"
         ):
-            proc = _fake_proc()
+            proc = _fake_proc(returncode=None)
             proc.communicate.side_effect = [
                 subprocess.TimeoutExpired(cmd="whisper", timeout=1),
                 subprocess.TimeoutExpired(cmd="whisper", timeout=1),
@@ -358,14 +359,14 @@ class TestTimeout:
         """It is still running and still holding the memory this module exists
         to bound, and `start_new_session` means nothing else will signal it."""
         with patch(_POPEN) as popen, patch(
-            "istota.skills.whisper.out_of_process.kill_process_group"
+            "istota.skills.whisper.out_of_process.kill_group_if_live"
         ) as kill:
-            proc = _fake_proc()
+            proc = _fake_proc(returncode=None)
             proc.communicate.side_effect = [ValueError("pipe went away"), ("", "")]
             popen.return_value = proc
             result = transcribe_audio_out_of_process("/tmp/voice.mp3")
 
-        kill.assert_called_once_with(4242)
+        kill.assert_called_once_with(proc)
         assert result["status"] == "error"
 
     def test_the_timeout_is_handed_to_communicate(self):
@@ -374,6 +375,46 @@ class TestTimeout:
             transcribe_audio_out_of_process("/tmp/voice.mp3", timeout=123)
 
         assert popen.return_value.communicate.call_args.kwargs["timeout"] == 123
+
+
+class TestAReapedChildIsNeverSignalled:
+    """ISSUE-456: `_kill_and_reap` signalled `proc.pid` whatever state it was in.
+
+    The kill paths here run *after* something went wrong with `communicate()`,
+    and one of the ways that goes wrong is a failure raised once the child has
+    already exited and been reaped. A pid is not a handle: by then the number
+    may belong to an unrelated process, and `kill_process_group` would take its
+    whole group. Asserted through `process_group._signal`, the one place every
+    route to the OS passes, so the test does not depend on which helper the
+    module happens to call.
+    """
+
+    def test_a_child_that_has_already_been_reaped_is_not_signalled(self):
+        signalled = []
+        with patch(_POPEN) as popen, patch(
+            "istota.process_group._signal",
+            side_effect=lambda pid, sig: signalled.append(pid) or "gone",
+        ):
+            proc = _fake_proc(returncode=0)
+            proc.communicate.side_effect = [ValueError("pipe went away"), ("", "")]
+            popen.return_value = proc
+            result = transcribe_audio_out_of_process("/tmp/voice.mp3")
+
+        assert signalled == [], "signalled a pid the OS may have handed to somebody else"
+        assert result["status"] == "error"
+
+    def test_a_child_still_running_is_still_signalled(self):
+        # The control: a guard that refused everything would pass the test
+        # above and lose the kill this module exists to make.
+        signalled = []
+        with patch(_POPEN) as popen, patch(
+            "istota.process_group._signal",
+            side_effect=lambda pid, sig: signalled.append(pid) or "group",
+        ):
+            popen.return_value = _fake_proc(returncode=None, timeout_first=True)
+            transcribe_audio_out_of_process("/tmp/voice.mp3", timeout=5)
+
+        assert signalled == [4242]
 
 
 class TestTheHeavyModulesNeverEnterTheDaemon:

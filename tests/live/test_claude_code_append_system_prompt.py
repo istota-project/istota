@@ -45,7 +45,7 @@ import pytest
 
 from istota.brain._types import BrainRequest
 from istota.brain.claude_code import ClaudeCodeBrain, build_claude_cli_flags
-from istota.process_group import kill_process_group
+from istota.process_group import kill_group_if_live
 from istota.subscription_usage import resolve_token
 
 from .stream_json import answer_text, iter_frames, transcript_summary
@@ -102,7 +102,7 @@ def _run_cli(cmd: list[str], prompt: str, cwd: Path) -> tuple[int, str, str]:
     try:
         stdout, stderr = process.communicate(prompt, timeout=_TURN_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        kill_process_group(process.pid)
+        kill_group_if_live(process)
         stdout, stderr = process.communicate()
         pytest.fail(
             f"the CLI did not finish inside {_TURN_TIMEOUT_SECONDS}s. "

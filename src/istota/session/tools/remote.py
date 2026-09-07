@@ -74,7 +74,7 @@ from typing import Any
 from istota import task_cgroup, tool_server_protocol as proto
 from istota.agent.tools import AgentTool, ToolResult
 from istota.llm.types import ImageContent, TextContent, ToolSchema
-from istota.process_group import kill_process_group
+from istota.process_group import kill_group_if_live
 
 from .bash import BASH_SCHEMA
 from .files import (
@@ -454,7 +454,14 @@ class RemoteToolServer:
             # first thing on a teardown path that must always complete. A
             # `shutdown` that could not be delivered costs the graceful window
             # and nothing else — the kill below is what actually ends it.
-            with contextlib.suppress(Exception):
+            #
+            # `BaseException` for the same reason the graceful window below
+            # takes it: this is awaited, so a `CancelledError` delivered here
+            # is not an `Exception` and would leave `aclose` through the
+            # `finally` alone — `_closed` set, the kill never reached, and
+            # every later call a no-op, which strands the bwrap process and
+            # its whole Bash tree until the daemon exits.
+            with contextlib.suppress(BaseException):
                 await asyncio.wait_for(
                     self._send({"type": proto.MSG_SHUTDOWN}),
                     timeout=_SHUTDOWN_SEND_TIMEOUT_SECONDS,
@@ -474,7 +481,7 @@ class RemoteToolServer:
                 # window would otherwise leave the bwrap process and its whole
                 # build tree alive until the daemon exited.
                 with contextlib.suppress(BaseException):
-                    kill_process_group(self._proc.pid)
+                    kill_group_if_live(self._proc)
                 with contextlib.suppress(BaseException):
                     await asyncio.wait_for(self._proc.wait(), timeout=_REAP_TIMEOUT_SECONDS)
             for task in (self._reader_task, self._stderr_task):
@@ -670,7 +677,7 @@ async def start_tool_server(
     except BaseException:
         # Outside the block above, so nothing there closes either of these.
         with contextlib.suppress(BaseException):
-            kill_process_group(proc.pid)
+            kill_group_if_live(proc)
         with contextlib.suppress(BaseException):
             parent.close()
         raise
@@ -770,7 +777,7 @@ async def _abandon(server: RemoteToolServer) -> str:
     """
     server._stopping = True
     with contextlib.suppress(Exception):
-        kill_process_group(server._proc.pid)
+        kill_group_if_live(server._proc)
     with contextlib.suppress(Exception):
         await asyncio.wait_for(server._proc.wait(), timeout=5)
     detail = ""
