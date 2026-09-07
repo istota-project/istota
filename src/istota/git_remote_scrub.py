@@ -59,7 +59,9 @@ finding it could not remove comes back with ``removed=False`` rather than being
 dropped, because a caller must never mistake a failed sweep for a clean one.
 
 stdlib-only leaf: imported by the developer skill's ``setup_env`` hook, and
-usable from a maintenance one-liner.
+usable from a maintenance one-liner. The one package import is
+:mod:`istota.git_hardening`, which is itself a leaf and has no imports of its
+own beyond the stdlib.
 """
 
 from __future__ import annotations
@@ -72,6 +74,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit, urlunsplit
+
+from istota.git_hardening import GIT_SUBPROCESS_ENV
 
 logger = logging.getLogger("istota.git_remote_scrub")
 
@@ -267,17 +271,40 @@ def _first_credentialed_url(text: str) -> str | None:
 # Discovery
 # --------------------------------------------------------------------------
 
-def _is_git_dir(path: Path) -> bool:
+def is_git_dir(path: Path) -> bool:
     """Structural test, not a name test.
 
     ``git clone --bare <url> myrepo`` produces a bare repository whose
     directory is not named ``*.git``, and the threat model here is explicitly a
     repository made by hand.
 
-    Checked strictly, because finding a git directory *prunes the walk*.
-    ``repos_dir`` is bound read-write into the sandbox, so three empty files
-    named ``HEAD``, ``config`` and ``objects`` are something the model can
-    create — and a loose test would let that hide every repository beneath it.
+    Checked as strictly as a structural test can be, because finding a git
+    directory *prunes the walk*, here and in :mod:`istota.repos_relocate` which
+    shares this predicate. ``repos_dir`` is bound read-write into the sandbox,
+    so a directory of empty files with the right names is something the model
+    can create, and anything the walk accepts hides every repository beneath it
+    from the credential sweep and from worktree repair alike.
+
+    **The limit, stated rather than implied.** This raises the cost of a decoy;
+    it does not make one impossible. ``config`` may be empty and ``objects/``
+    may be empty — only ``HEAD`` is read, and four bytes of ``ref:`` satisfy it.
+    A directory built deliberately to look like a repository still prunes the
+    walk. What this rejects is the shape that does *not* carry a plausible
+    ``HEAD``: a partial copy, an interrupted clone, a scratch directory that
+    grew the right names, and the empty-``HEAD``-plus-``objects/``-plus-``refs/``
+    shape that the looser predicate in ``repos_relocate`` used to accept.
+    Proving provenance would mean reading the object store, which is a cost per
+    directory on a walk that runs for every task.
+
+    ``config`` and a readable ``HEAD``, and no requirement on ``refs/``. Those
+    two are the entries a decoy has to get right rather than merely create;
+    ``refs/`` is an empty directory in a fresh repository and proves nothing.
+    That does make this looser than ``repos_relocate``'s deleted predicate in
+    one dimension — a directory with ``config``, ``objects/`` and a valid
+    ``HEAD`` but no ``refs/`` is now accepted where that one refused it — and
+    no such shape is known: every layout git produces has all four. (Checked
+    against the reftable backend on git 2.55, which was the candidate: it keeps
+    ``refs/`` as a directory and adds ``reftable/`` beside it.)
     """
     try:
         if not (path / "config").is_file() or not (path / "objects").is_dir():
@@ -344,7 +371,7 @@ def find_git_dirs(
         return []
 
     found: list[Path] = []
-    if _is_git_dir(root):
+    if is_git_dir(root):
         return [root]
 
     # Strictly *under* the root, never the root itself and never above it.
@@ -385,13 +412,13 @@ def find_git_dirs(
             dirnames[:] = []
             continue
 
-        if _is_git_dir(here):
+        if is_git_dir(here):
             found.append(here)
             dirnames[:] = []
             continue
 
         # An ordinary clone: the git directory is `.git` beneath a checkout.
-        if ".git" in dirnames and _is_git_dir(here / ".git"):
+        if ".git" in dirnames and is_git_dir(here / ".git"):
             found.append(here / ".git")
             dirnames[:] = []
             continue
@@ -415,9 +442,9 @@ def find_git_dirs(
                 target = child.resolve()
             except OSError:
                 continue
-            if _is_git_dir(target):
+            if is_git_dir(target):
                 found.append(target)
-            elif _is_git_dir(target / ".git"):
+            elif is_git_dir(target / ".git"):
                 found.append(target / ".git")
 
         if depth >= max_depth:
@@ -468,13 +495,23 @@ def _git_config(*args: str) -> tuple[int, str]:
     return the empty list that means "looked, found nothing".
     ``surrogateescape`` round-trips those bytes back through ``os.fsencode``
     when a value is handed to git again, so a rewrite still matches.
+
+    Not :func:`istota.git_hardening.run_git`, deliberately. This is the one git
+    call here that names no repository at all: ``--file`` is the whole input, so
+    there is no ``-C``, nothing is discovered, and the ``-c`` overrides would
+    have nothing to override — ``git config --file`` does not report them and
+    runs no program. It does share the environment overlay, which is the part
+    that was duplicated. And it must keep *raising*: both callers tell an
+    unreadable config apart from a git that could not be run, and each logs a
+    different line, so a wrapper that swallowed the exception would report a
+    file that was never opened as a file that was read and rejected.
     """
     proc = subprocess.run(
         ["git", "config", *args],
         capture_output=True, timeout=_GIT_TIMEOUT,
         # The named file is the whole input; no repository is discovered and no
         # user or system config can redirect what this reads or writes.
-        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"},
+        env={**os.environ, **GIT_SUBPROCESS_ENV},
     )
     return proc.returncode, proc.stdout.decode("utf-8", "surrogateescape")
 

@@ -326,7 +326,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="center-msg">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if snapshots.length === 0}
   <div class="portfolio-empty">
     <p class="empty">No snapshots yet — import a positions CSV to start the history.</p>

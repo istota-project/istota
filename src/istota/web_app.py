@@ -63,6 +63,7 @@ from .build_info import build_description
 from .brain import make_brain
 from .config import load_config
 from .image_sniff import SNIFF_BYTES, sniff_raster
+from .ocs import OcsError, ocs_body_data, ocs_data
 from .usage import SYSTEM_USER_ID
 from .location_logic import (
     _location_discover_places,
@@ -544,6 +545,17 @@ async def _nc_oauth2_userinfo(token: dict) -> dict:
 
     The endpoint returns `{ocs: {data: {id, displayname, email, ...}}}`.
     Token is not stored — it lives only in this function's stack frame.
+
+    An answer carrying no `ocs` envelope at all raises `OcsError` rather than
+    reducing to an empty identity: the caller turned that into "Access denied:
+    user not configured", which names the wrong fault. It catches and answers
+    502. `snippet=False` because that error is logged and this endpoint is
+    configurable — one pointed at the *token* endpoint answers JSON with an
+    `access_token` in it, and the body prefix would carry that into the log.
+
+    An envelope whose `data` is falsy still collapses to `{}` and still reads
+    as "user not configured": PHP renders an empty associative array as `[]`,
+    so that is a shape a working Nextcloud emits, not a broken answer.
     """
     access_token = token.get("access_token")
     if not access_token:
@@ -562,8 +574,7 @@ async def _nc_oauth2_userinfo(token: dict) -> dict:
             },
         )
         resp.raise_for_status()
-        body = resp.json()
-    inner = body.get("ocs", {}).get("data") or {}
+        inner = ocs_data(resp, "OCS userinfo", default={}, snippet=False) or {}
     if not isinstance(inner, dict):
         raise ValueError("unexpected OCS userinfo shape")
     return inner
@@ -4801,7 +4812,18 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
                     room_id, token, existing.surface_ref,
                 )
 
-        room = await client.create_conversation(name)
+        try:
+            room = await client.create_conversation(name)
+        except OcsError as e:
+            # `failed` is the route's 502 "Nextcloud created no conversation".
+            # An envelope-less answer already produced it — `{}` had no token —
+            # so that half is preserved exactly. A body that is not JSON used
+            # to raise `JSONDecodeError` out of here and become a bare 500 at
+            # the route; it now joins the 502, which names the fault and is the
+            # answer the route was built to give. The status and body snippet
+            # go to the log, where neither used to appear at all.
+            logger.warning("promote: create_conversation for %s: %s", token, e)
+            return "failed", None
         talk_token = room.get("token")
         if not talk_token:
             return "failed", None
@@ -6218,7 +6240,19 @@ async def _post_as_user(
                 talk_ref, text, reply_to=reply_to_talk_id,
                 reference_id=reference_id,
             )
-            posted = resp.get("ocs", {}).get("data", {}).get("id")
+            try:
+                data = ocs_body_data(resp, "post-as-user Talk post", default={})
+            except OcsError as e:
+                # Best-effort mirror: the post itself returned 2xx, so the
+                # message may well be in the room — only the id is unreadable.
+                # Answer None as this always has, but say why instead of
+                # letting an unrecognised envelope look like a post with no id.
+                logger.warning(
+                    "post-as-user Talk post landed but its id could not be "
+                    "read user=%s room=%s: %s", username, talk_ref, e,
+                )
+                return None
+            posted = data.get("id")
             return int(posted) if posted else None
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0

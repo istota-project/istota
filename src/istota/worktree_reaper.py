@@ -80,13 +80,16 @@ NUL form contains it, and a listing with a duplicate path is refused entirely.
 the sandbox, so a checkout's own ``.git/config`` is model-written. Plain
 ``git status`` there runs whatever ``core.fsmonitor`` names, as the daemon user,
 with the daemon's environment — so every call goes through
-:data:`istota.git_hardening.GIT_HARDENING`. ``GIT_CONFIG_NOSYSTEM`` and
+:func:`istota.git_hardening.run_git`, which applies both
+:data:`~istota.git_hardening.GIT_HARDENING` and
+:data:`~istota.git_hardening.GIT_SUBPROCESS_ENV`. ``GIT_CONFIG_NOSYSTEM`` and
 ``GIT_CONFIG_GLOBAL`` do not cover repository config and are not a substitute.
 
-``GIT_OPTIONAL_LOCKS=0`` is load-bearing rather than tidiness: without it
-``git status`` rewrites the worktree's index, which is one of the mtimes the
-retention window reads, so every sweep would reset the idle clock of every
-worktree it looked at and nothing would ever be reaped after the first pass.
+``GIT_OPTIONAL_LOCKS=0`` in that overlay is load-bearing rather than tidiness:
+without it ``git status`` rewrites the worktree's index, which is one of the
+mtimes the retention window reads, so every sweep would reset the idle clock of
+every worktree it looked at and nothing would ever be reaped after the first
+pass.
 
 Where the answer cannot be established the worktree stays. A bare clone with no
 resolvable ``refs/remotes/origin/HEAD`` has no upstream to compare against, so
@@ -106,13 +109,12 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 
-from istota.git_hardening import GIT_HARDENING
+from istota.git_hardening import run_git
 from istota.git_remote_scrub import find_git_dirs
 
 logger = logging.getLogger("istota.worktree_reaper")
@@ -243,40 +245,15 @@ class ReapOutcome(NamedTuple):
 # --------------------------------------------------------------------------
 
 def _git(cwd: Path, *args: str, timeout: int = _GIT_TIMEOUT) -> tuple[int, str]:
-    """``(exit_status, stdout)``. Bytes are decoded, never rejected.
+    """``(exit_status, stdout)``, through :func:`istota.git_hardening.run_git`.
 
-    ``GIT_HARDENING`` first, before ``-C``: the repository this runs against is
-    model-writable, and a plain ``git`` there executes ``core.fsmonitor``,
-    ``diff.external`` or a ``gpg.*`` program of the writer's choosing, as the
-    daemon user, inheriting the daemon's environment. The two ``GIT_CONFIG_*``
-    variables below cover the system and user config and do nothing about the
-    repository's own, which is the writable one.
-
-    ``GIT_OPTIONAL_LOCKS=0`` keeps ``git status`` from rewriting the worktree's
-    index. That file is one of the mtimes :func:`_last_activity` reads, so
-    without this every sweep would reset the idle clock of every worktree it
-    examined and nothing would ever be reaped after the first pass.
-
-    ``text=True`` would raise ``UnicodeDecodeError`` — a ``ValueError``, caught
-    by neither ``OSError`` nor ``SubprocessError`` — on a repository holding a
-    path or a commit message with one non-UTF-8 byte, and would abort the sweep
-    from inside a helper every caller treats as total.
+    Stdout only, and an empty string when git could not be run at all: every
+    caller here parses the output, so git's own diagnosis must not arrive as
+    something that looks like a listing. ``GIT_OPTIONAL_LOCKS=0`` in
+    ``GIT_SUBPROCESS_ENV`` is what keeps ``git status`` from rewriting the
+    worktree's index, which is one of the mtimes :func:`_last_activity` reads.
     """
-    try:
-        proc = subprocess.run(
-            ["git", *GIT_HARDENING, "-C", str(cwd), *args],
-            capture_output=True, timeout=timeout,
-            env={
-                **os.environ,
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_OPTIONAL_LOCKS": "0",
-            },
-        )
-    except (OSError, subprocess.SubprocessError):
-        return 1, ""
-    return proc.returncode, proc.stdout.decode("utf-8", "surrogateescape")
+    return run_git(cwd, *args, timeout=timeout)
 
 
 def parse_worktree_list(data: str) -> list[WorktreeRecord] | None:

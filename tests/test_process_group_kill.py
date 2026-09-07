@@ -30,7 +30,7 @@ import pytest
 from istota import db
 from istota.brain import BrainRequest
 from istota.brain.claude_code import ClaudeCodeBrain
-from istota.process_group import kill_process_group
+from istota.process_group import kill_group_if_live, kill_process_group
 
 
 # =============================================================================
@@ -142,6 +142,148 @@ class TestKillProcessGroup:
 
 
 # =============================================================================
+# The reaped-process guard, shared by the three kill sites
+# =============================================================================
+
+
+class _FakeProcess:
+    """A Popen/asyncio-subprocess stand-in: `.returncode` and `.pid`, nothing else."""
+
+    def __init__(self, *, returncode, pid=4242):
+        self.returncode = returncode
+        self.pid = pid
+
+
+class TestKillGroupIfLive:
+    """`kill_group_if_live` is the guard three sites carried separately (F5).
+
+    `scheduler._kill_process_group` did not carry it at all — it signalled the
+    pid it was handed whatever state the process was in. The guard matters
+    because every caller signals from somewhere that can fire *after* the reap:
+    a `threading.Timer` outliving `process.wait()`, a `finally` unwinding a
+    cancelled coroutine, a timeout handler running after `communicate()`
+    returned. By then the number may belong to an unrelated process, and
+    `kill_process_group` would take its whole group.
+    """
+
+    def test_a_reaped_process_is_not_signalled(self):
+        signalled = []
+        with patch("istota.process_group.kill_process_group",
+                   side_effect=lambda pid, *a, **k: signalled.append(pid) or "group"):
+            kill_group_if_live(_FakeProcess(returncode=-9))
+        assert signalled == [], "signalled a pid that had already been reaped"
+
+    def test_a_reaped_process_with_a_zero_exit_status_is_not_signalled(self):
+        # `returncode == 0` is falsy and `if not process.returncode` would let
+        # a cleanly-exited process through — the shape this guard is easiest to
+        # write wrong.
+        signalled = []
+        with patch("istota.process_group.kill_process_group",
+                   side_effect=lambda pid, *a, **k: signalled.append(pid) or "group"):
+            kill_group_if_live(_FakeProcess(returncode=0))
+        assert signalled == []
+
+    def test_a_live_process_is_signalled(self):
+        # The control. Without it, a guard that refused everything would pass
+        # both tests above.
+        signalled = []
+        with patch("istota.process_group.kill_process_group",
+                   side_effect=lambda pid, *a, **k: signalled.append(pid) or "group"):
+            kill_group_if_live(_FakeProcess(returncode=None))
+        assert signalled == [4242]
+
+    def test_the_default_signal_is_sigkill(self):
+        # All three converted call sites passed no signal and got SIGKILL from
+        # `kill_process_group`'s own default. A different default here would be
+        # a behaviour change hidden inside a refactor.
+        sent = []
+        with patch("istota.process_group.kill_process_group",
+                   side_effect=lambda pid, sig="sentinel": sent.append(sig) or "group"):
+            kill_group_if_live(_FakeProcess(returncode=None))
+        assert sent == [signal.SIGKILL]
+
+    def test_the_signal_is_configurable(self):
+        sent = []
+        with patch("istota.process_group.kill_process_group",
+                   side_effect=lambda pid, sig=None: sent.append(sig) or "group"):
+            kill_group_if_live(_FakeProcess(returncode=None), signal.SIGTERM)
+        assert sent == [signal.SIGTERM]
+
+    def test_it_never_raises_when_the_helper_below_it_fails(self):
+        # Two of the three call sites are in a `finally` or a timer callback
+        # with no `try` around them.
+        with patch("istota.process_group._signal", side_effect=RuntimeError("boom")):
+            kill_group_if_live(_FakeProcess(returncode=None))
+
+    def test_a_real_process_group_dies(self):
+        # End to end against a real child, so the guard cannot be green against
+        # a mock while the actual signal path is broken. Asserted on the exit
+        # status rather than on the pid disappearing: our own child stays a
+        # zombie until `wait()`, so signal 0 still finds it.
+        proc = subprocess.Popen(["sh", "-c", "sleep 30"], start_new_session=True)
+        try:
+            kill_group_if_live(proc)
+            assert proc.wait(timeout=5) == -signal.SIGKILL
+        finally:
+            if proc.returncode is None:  # pragma: no cover - cleanup
+                proc.kill()
+                proc.wait(timeout=5)
+
+
+class TestSchedulerRunCaptureKillsTheGroup:
+    """The one converted call site nothing covered.
+
+    A negative control run at this stage found that deleting the kill from
+    `scheduler._run_capture` outright turned **zero** tests red — the timeout
+    path that ISSUE-144's comment describes at length had no test at all, and
+    it is also the site that gained the reaped-process guard in this change.
+    Two tests, because the real risk runs both ways: the kill has to still
+    happen, and it has to still take the grandchild with it.
+    """
+
+    def test_a_timeout_kills_the_backgrounded_grandchild(self, tmp_path):
+        # The ISSUE-144 shape: a CRON `command:` backgrounds a child, the
+        # command times out, and `subprocess.run`'s direct-child-only kill
+        # leaves the grandchild holding the stdout pipe — which then wedges the
+        # worker in the post-kill `communicate()` past its own timeout.
+        from istota.scheduler import _run_capture
+
+        pidfile = tmp_path / "grandchild.pid"
+        script = f"sleep 30 & echo $! > {pidfile}; sleep 30"
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_capture(
+                ["bash", "-c", script],
+                timeout=1.0, cwd=str(tmp_path), env=dict(os.environ),
+            )
+
+        grandchild = int(pidfile.read_text().strip())
+        assert _wait_gone(grandchild), (
+            "the backgrounded grandchild survived the timeout kill"
+        )
+
+    def test_the_timeout_signals_the_live_child_through_the_guarded_helper(
+        self, tmp_path,
+    ):
+        # The guard is a no-op on this path today (the child is unreaped when
+        # `communicate` times out), so what this pins is that the call happens
+        # at all and reaches the shared helper rather than a local copy.
+        from istota.scheduler import _run_capture
+
+        signalled = []
+        with patch("istota.process_group.kill_process_group",
+                   side_effect=lambda pid, *a, **k: signalled.append(pid) or "group"):
+            with pytest.raises(subprocess.TimeoutExpired):
+                # Short enough to exit on its own: the kill is patched out, so
+                # `_run_capture`'s bounded post-kill `communicate` would
+                # otherwise wait out its full 10s.
+                _run_capture(
+                    ["sleep", "2"],
+                    timeout=0.5, cwd=str(tmp_path), env=dict(os.environ),
+                )
+        assert len(signalled) == 1, "the timeout did not signal the process group"
+
+
+# =============================================================================
 # ClaudeCodeBrain wiring
 # =============================================================================
 
@@ -201,7 +343,7 @@ class TestClaudeCodeBrainKillsTheGroup:
         proc = _mock_process([_tool_use_line()], returncode=-9)
         killed = []
         with patch("istota.brain.claude_code.subprocess.Popen", return_value=proc), \
-             patch("istota.brain.claude_code.kill_process_group",
+             patch("istota.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: killed.append(pid) or "group"):
             result = ClaudeCodeBrain()._execute_streaming_once(
                 ["claude"], _req(tmp_path, cancel_check=lambda: True),
@@ -223,7 +365,7 @@ class TestClaudeCodeBrainKillsTheGroup:
         proc.stdout = _slow_stdout()
         killed = []
         with patch("istota.brain.claude_code.subprocess.Popen", return_value=proc), \
-             patch("istota.brain.claude_code.kill_process_group",
+             patch("istota.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: killed.append(pid) or "group"):
             result = ClaudeCodeBrain()._execute_streaming_once(
                 ["claude"], _req(tmp_path, timeout_seconds=0.05),
@@ -245,7 +387,7 @@ class TestClaudeCodeBrainKillsTheGroup:
         proc.returncode = -9  # reaped before the cancel poll runs
         killed = []
         with patch("istota.brain.claude_code.subprocess.Popen", return_value=proc), \
-             patch("istota.brain.claude_code.kill_process_group",
+             patch("istota.process_group.kill_process_group",
                    side_effect=lambda pid, *a, **k: killed.append(pid) or "group"):
             ClaudeCodeBrain()._execute_streaming_once(
                 ["claude"], _req(tmp_path, cancel_check=lambda: True),
