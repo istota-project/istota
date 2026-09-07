@@ -15,6 +15,9 @@ already been answered somewhere else.
 
 from __future__ import annotations
 
+import logging
+import sqlite3
+
 import pytest
 
 from istota import (
@@ -981,6 +984,131 @@ class TestConnectedServiceResolver:
         )
         items, _total = store.list_open(config, conn, "alice")
         assert items == []
+
+
+# ---------------------------------------------------------------------------
+# connected_service — the three never-raises guards
+# ---------------------------------------------------------------------------
+
+
+_GUARD_LOGGER = "istota.notification_resolvers.connected_service"
+
+
+def _guard_records(caplog):
+    return [r for r in caplog.records if r.name == _GUARD_LOGGER]
+
+
+class TestTheNeverRaisesGuardsSayWhatTheySwallowed:
+    """Never-raises is the contract; indistinguishable is not (ISSUE-460).
+
+    All three producer helpers absorb everything, because a dead credential must
+    not turn into a traceback out of the sync engine or out of a token refresh.
+    What the blanket handler used to lose is the difference between the failure
+    the guard exists for — the framework DB was locked when the row went to be
+    written — and a defect in this frame, of which a signature change on
+    `raise_notification` is the one Mulder found: `_row_kwargs` is splatted from
+    *here*, so the resulting `TypeError` never reaches the store's own guard and
+    every Garmin and Nextcloud credential-lost alert dies at warning level beside
+    the ordinary ones.
+    """
+
+    def test_a_signature_break_in_the_store_is_logged_as_a_defect(
+        self, config, caplog, monkeypatch,
+    ):
+        def _renamed(config, user_id):
+            raise AssertionError("unreachable: the splat fails before the body")
+
+        monkeypatch.setattr(
+            "istota.notification_store.raise_notification", _renamed,
+        )
+        with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
+            assert service_source.raise_for_service(
+                config, "alice", "garmin", "token_expired",
+            ) is None
+
+        (record,) = _guard_records(caplog)
+        assert record.levelno == logging.ERROR
+        assert "unexpected TypeError" in record.getMessage()
+        assert record.exc_info is not None
+
+    def test_a_locked_database_is_still_only_a_warning(
+        self, config, caplog, monkeypatch,
+    ):
+        """The case the contract was written for keeps the level it had.
+
+        Driven through the write leg rather than the raise leg: the store absorbs
+        its own DB failures, so a busy database cannot reach `raise_for_service`
+        at all, and asserting there would pin a path production cannot take.
+        """
+        def _locked(*_a, **_k):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("istota.db.get_db", _locked)
+        with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
+            assert service_source.write_for_service(
+                config.db_path, "alice", "nextcloud", "revoked",
+            ) is None
+
+        (record,) = _guard_records(caplog)
+        assert record.levelno == logging.WARNING
+
+    def test_a_broken_statement_is_not_filed_under_a_busy_database(
+        self, config, caplog, monkeypatch,
+    ):
+        """The reason the expected set is `OperationalError` and not `sqlite3.Error`.
+
+        `ProgrammingError` and `IntegrityError` sit under the same base and are
+        the same class of defect as the signature break above. Taking the whole
+        hierarchy would have left them at warning level — the reported bug, one
+        leg over.
+        """
+        def _closed(*_a, **_k):
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database")
+
+        monkeypatch.setattr("istota.db.get_db", _closed)
+        with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
+            assert service_source.write_for_service(
+                config.db_path, "alice", "garmin", "token_expired",
+            ) is None
+
+        (record,) = _guard_records(caplog)
+        assert record.levelno == logging.ERROR
+        assert "unexpected ProgrammingError" in record.getMessage()
+
+    def test_the_write_only_leg_reports_a_defect_the_same_way(
+        self, config, caplog, monkeypatch,
+    ):
+        """The skill-CLI leg: no delivery, same guard, same distinction."""
+        def _moved(*_a, **_k):
+            raise AttributeError("get_db moved")
+
+        monkeypatch.setattr("istota.db.get_db", _moved)
+        with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
+            assert service_source.write_for_service(
+                config.db_path, "alice", "garmin", "token_expired",
+            ) is None
+
+        (record,) = _guard_records(caplog)
+        assert record.levelno == logging.ERROR
+        assert "unexpected AttributeError" in record.getMessage()
+
+    def test_the_close_leg_treats_a_lock_timeout_as_expected(
+        self, config, caplog, monkeypatch,
+    ):
+        """`close_for_service` runs on a two-second budget and is *meant* to lose
+        the race — the resolver backstop marks the row stale on the next panel
+        read. That must not read as a defect."""
+        def _locked(*_a, **_k):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr("istota.db.get_db", _locked)
+        with caplog.at_level(logging.DEBUG, logger=_GUARD_LOGGER):
+            assert service_source.close_for_service(
+                config.db_path, "alice", "garmin", by="system",
+            ) is None
+
+        (record,) = _guard_records(caplog)
+        assert record.levelno == logging.WARNING
 
 
 # ---------------------------------------------------------------------------
