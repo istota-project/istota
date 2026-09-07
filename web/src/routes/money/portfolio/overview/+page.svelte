@@ -157,7 +157,7 @@
 {#if loading}
   <div class="center-msg">Loading…</div>
 {:else if error}
-  <div class="center-msg">{error}</div>
+  <div class="center-msg error">{error}</div>
 {:else if !summary}
   <div class="portfolio-empty">
     <p class="empty">

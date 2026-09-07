@@ -57,6 +57,20 @@ describe('findPaneErrorViolations', () => {
     expect(found[0].cond).toBe('error && !panel');
   });
 
+  it('catches the portfolio shape: the right box without the error modifier', () => {
+    // `.center-msg` on its own is the loading placeholder's dim body text, so
+    // the failure rendered in the same grey as "Loading…". The checker used to
+    // pass this on the box alone and both portfolio pages sat in it.
+    const found = findPaneErrorViolations(`
+{#if loading}
+  <div class="center-msg">Loading…</div>
+{:else if error}
+  <div class="center-msg">{error}</div>
+{/if}`);
+    expect(found).toHaveLength(1);
+    expect(found[0].markup).toContain('center-msg');
+  });
+
   it('catches it with the error branch written first', () => {
     const found = findPaneErrorViolations(`
 {#if error}
@@ -111,6 +125,20 @@ describe('findPaneErrorViolations', () => {
     <div class="error-msg">{error}</div>
   {/if}
   <div class="rows">…</div>
+{/if}`),
+    ).toEqual([]);
+  });
+
+  it('reads a negated mention as the empty state, not the failure', () => {
+    // admin/logs: this branch renders on the load having succeeded and found
+    // nothing, so demanding the failure colour on it would tint "No entries
+    // yet" red.
+    expect(
+      findPaneErrorViolations(`
+{#if loading && records.length === 0}
+  <div class="center-msg">Loading…</div>
+{:else if records.length === 0 && !error}
+  <div class="center-msg">No entries yet.</div>
 {/if}`),
     ).toEqual([]);
   });
