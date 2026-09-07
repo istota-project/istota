@@ -984,8 +984,10 @@ def _source_path_allowed(
     Two roots: the task's own deferred dir, and the user's base workspace
     (``{mount}/Users/{uid}``) — not merely the *bot* subdir, because the
     driving case is an email attachment the executor dropped in ``inbox/``.
-    Symlinks are resolved by the caller, so a link inside the workspace
-    pointing out of it is caught too.
+    Symlinks are resolved here as well as in `_resolved_source_path`, so a
+    link inside the workspace pointing out of it is caught either way — this
+    predicate is also called directly, and a containment test that assumed a
+    resolved argument would be a boundary resting on its caller.
 
     **No conversation token and no Talk root, and that is the point of
     deriving them here rather than reusing the skill CLIs' set.** The task

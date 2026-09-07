@@ -16,6 +16,7 @@ wherever the two lanes route to different kinds.
 
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -411,26 +412,54 @@ class TestDeferredImportCsvSourcePath:
         assert any("import_csv skipped" in r.getMessage() for r in caplog.records)
 
     def test_the_roots_come_from_a_real_config(self, tmp_path):
-        """Bind the guard to `Config.workspace_root`, not to the fake.
+        """The two derivations of one root have to agree, id by id.
 
-        The guard derives `{mount}/Users/{uid}` itself now, so this is what
-        holds that derivation to the one `Config.workspace_root` states. A
-        drift between the two would move the boundary for the daemon's replay
-        without moving it for anything else that asks the config where a
-        user's workspace is.
+        `_source_path_allowed` no longer *calls* `Config.workspace_root` — it
+        re-derives `{mount}/Users/{uid}` through `workspace_roots`. Two
+        derivations of one boundary is exactly how the four copies this
+        replaced drifted apart, so what holds them together has to be an
+        equality over a table rather than one shared happy case: asserting
+        each separately on `"alice"` stays green through any divergence that
+        does not happen to involve `"alice"`, which is the shape of every
+        real one.
         """
+        from istota.skill_host_paths import path_under_roots
         from istota.scheduler_deferred import _source_path_allowed
 
         config = Config(nextcloud_mount_path=tmp_path / "mount")
-        user_root = config.workspace_root("alice")
-        assert user_root == tmp_path / "mount" / "Users" / "alice"
+        assert config.workspace_root("alice") == tmp_path / "mount" / "Users" / "alice"
 
         deferred = tmp_path / "deferred"
         deferred.mkdir()
-        mine = self._write(user_root / "inbox" / "labs.csv")
+        mine = self._write(tmp_path / "mount" / "Users" / "alice" / "inbox" / "labs.csv")
         theirs = self._write(
             tmp_path / "mount" / "Users" / "bob" / "inbox" / "labs.csv",
         )
 
         assert _source_path_allowed(mine, deferred, config, "alice")
         assert not _source_path_allowed(theirs, deferred, config, "alice")
+
+        # An empty user id is the one case where the two must *not* agree, and
+        # it is excluded from the table below rather than passed: on
+        # `Config.workspace_root` a falsy id means "no user given, hand back
+        # the bare mount root", which is a different question from "this user
+        # id does not scope". The guard must never adopt that answer — the
+        # mount root is every user's directory at once.
+        assert config.workspace_root("") == tmp_path / "mount"
+        assert not _source_path_allowed(mine, deferred, config, "")
+
+        # The equality, over ids that do name a user. Neither file is under
+        # the deferred dir, so the guard's answer is entirely the own root's,
+        # which is what makes it comparable to the config's answer at all.
+        for user_id in (
+            "alice", " alice", "alice ", ".", "..", "/etc", "../bob", "a/b",
+        ):
+            root = config.workspace_root(user_id)
+            for candidate in (mine, theirs):
+                via_config = root is not None and path_under_roots(
+                    candidate.resolve(), [Path(root).resolve()],
+                )
+                via_guard = _source_path_allowed(
+                    candidate, deferred, config, user_id,
+                )
+                assert via_config == via_guard, (user_id, candidate)

@@ -1231,6 +1231,7 @@ class TestWorkspaceRoots:
         The channel and Talk roots are scoped by the token and by nothing, so
         they survive — the documented behaviour of the environment-reading
         version, restated here because this is now where it is decided.
+
         """
         from istota.skill_host_paths import workspace_roots
 
@@ -1244,6 +1245,33 @@ class TestWorkspaceRoots:
             (mount / "Users" / "bob").resolve().is_relative_to(r) for r in roots
         )
         assert (mount / "Channels" / "tok").resolve() in roots
+
+    @pytest.mark.parametrize("user_id", [" alice", "alice ", "\talice"])
+    def test_a_user_id_needing_a_strip_is_refused_rather_than_normalised(
+        self, tmp_path, user_id,
+    ):
+        """The case that is *not* about a collapsed join.
+
+        `" alice"` names a real, contained directory — a different one from
+        the id as written — so the failure mode is not a widened root but two
+        directories for one identity: the sandbox binds `{mount}/Users/ alice`
+        while a stripping allowlist admits `{mount}/Users/alice`, which is
+        somebody else's. `is_scopable_user_id` refuses the spelling for that
+        reason and this derivation has to agree with it, and with
+        `Config.workspace_root`, which asks the same question of the same
+        value. The env readers strip their own variables before calling in;
+        that is where the normalisation belongs and it is all it does there.
+
+        A version of this function stripping the id before scoping passes
+        every other case in this class.
+        """
+        from istota.skill_host_paths import workspace_roots
+
+        mount = tmp_path / "mount"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        roots = workspace_roots(mount=mount, user_id=user_id)
+        assert (mount / "Users" / "alice").resolve() not in roots
+        assert roots == []
 
     def test_an_absent_user_id_contributes_nothing_from_the_mount(self, tmp_path):
         """Fail closed: with no identity there is no subtree to scope to."""
@@ -1481,7 +1509,9 @@ class TestTheFourCallersRootSets:
         assert not allowed(mount / "Talk" / "labs.csv")
         assert not allowed(mount / "Users" / "bob" / "labs.csv")
 
-    @pytest.mark.parametrize("user_id", [".", "..", "/etc", "../bob", "a/b", ""])
+    @pytest.mark.parametrize(
+        "user_id", [".", "..", "/etc", "../bob", "a/b", "", " bob", "bob "],
+    )
     def test_the_deferred_replay_scopes_the_user_id(self, tmp_path, user_id):
         """ISSUE-402 reaches this caller too, through `Config.workspace_root`."""
         from istota.config import Config
@@ -1629,12 +1659,25 @@ class TestTheConsolidationNeverWidens:
             assert set(new) < set(old), bad
 
     def test_the_draft_derivation_matches_its_old_copy(self, bed):
-        from istota.skill_host_paths import workspace_roots
+        """Against `Config.workspace_root`, which is what the draft path uses.
+
+        `_confined_attachment` does not go through `workspace_roots` at all —
+        it takes `config.workspace_root(draft.user_id)` as its single root —
+        so comparing `workspace_roots` here would be a claim about a function
+        that is not on this path, and would stay green through a divergence
+        between the two derivations.
+        """
+        from istota.config import Config
 
         mount, _deferred = bed
-        assert workspace_roots(
-            mount=mount, user_id="alice",
-        ) == _legacy_draft_roots(mount, None, "alice", "tok1")
+        config = Config(nextcloud_mount_path=mount)
+        assert [Path(config.workspace_root("alice")).resolve()] == (
+            _legacy_draft_roots(mount, None, "alice", "tok1")
+        )
+        # And strictly narrower on every id the old copy joined blindly.
+        for bad in (" alice", "alice ", ".", "..", "/etc", "a/b"):
+            assert config.workspace_root(bad) is None, bad
+            assert _legacy_draft_roots(mount, None, bad, "tok1") != []
 
     def test_the_index_file_derivation_matches_its_old_copy(
         self, mount, monkeypatch, tmp_path,

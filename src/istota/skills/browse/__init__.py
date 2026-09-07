@@ -361,10 +361,10 @@ def cmd_screenshot(args):
     The destination is settled **before** the capture, so a path outside the
     allowlist costs no browser time and nothing is written; the name is
     settled after, because the derived default takes its extension from what
-    the bytes turn out to be. An *admitted* path's parent directory is created
-    by that early check, so a capture that then fails can leave an empty
-    directory inside the workspace — inside the allowlist either way, and the
-    cost of refusing before spending two minutes on a page.
+    the bytes turn out to be. The early check leaves nothing behind: since
+    ISSUE-447 resolution creates no directory, so an admitted path whose
+    capture then fails writes nothing at all — `write_resolved` is what makes
+    the parent, and only where a write actually happens.
     """
     directory = None
     if not args.output:

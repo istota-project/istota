@@ -128,6 +128,12 @@ def cmd_index_file(args) -> dict:
     `ISTOTA_CONVERSATION_TOKEN` raw — a token of `../..` reached every user's
     directory (ISSUE-447).
 
+    The channel root and the deferred dir survive that consolidation because
+    unifying the implementation is not unifying the roots, and narrowing one
+    caller in a refactor is as much a change as widening it. The spec's own
+    rule puts this verb at the user's own workspace alone; that narrowing
+    belongs to the stage that declares the argument, not to this one.
+
     Refused before the database is opened: a refusal should not connect on the
     way to saying no.
     """
@@ -140,6 +146,14 @@ def cmd_index_file(args) -> dict:
     )
     if err:
         return {"status": "error", "error": err}
+    # `resolve_in_roots` establishes existence, not regular-ness: `exists()` is
+    # true of a directory and of a FIFO, and the workspace is bound read-write
+    # into the sandbox — so `read_text()` on a model-made fifo would block a
+    # host-side proxy worker for the whole skill-proxy timeout, and on a
+    # directory would return an errno string instead of this verb's own
+    # message.
+    if not resolved.is_file():
+        return {"status": "error", "error": f"Not a regular file: {resolved}"}
 
     # The *resolved* path, both to read and to record: reopening the argument
     # re-walks every symlink the check just settled, and a row naming the

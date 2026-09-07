@@ -124,6 +124,17 @@ def workspace_roots(
     searchable — is a different question, and the caller is the only one that
     knows the answer. A writable call never gets it whatever `talk` says.
 
+    **The user id is passed to `scoped_user_dir` exactly as given, and in
+    particular is not stripped.** `is_scopable_user_id` refuses surrounding
+    whitespace by name, because `{mount}/Users/ alice` is what the sandbox
+    would bind while a stripping allowlist admitted `{mount}/Users/alice` —
+    two directories for one task, and the second is somebody else's. Stripping
+    here would have put that disagreement between this function and
+    `Config.workspace_root`, which asks the same question of the same value
+    and does not strip. The environment readers strip their *own* variables
+    before calling in, which is where that normalisation has always lived and
+    where it changes nothing.
+
     Returns `[]` when nothing resolves. An empty allowlist means refuse
     everything; `resolve_in_roots` and `path_under_roots` both read it that way.
     """
@@ -135,15 +146,14 @@ def workspace_roots(
         except OSError:
             pass
 
-    scoped_id = user_id.strip() if isinstance(user_id, str) else user_id
-    if not mount or not scoped_id:
+    if not mount or not user_id:
         return roots
     try:
         mount_path = Path(mount).resolve()
     except (OSError, TypeError, ValueError):
         return roots
 
-    own = scoped_user_dir(mount_path / "Users", scoped_id)
+    own = scoped_user_dir(mount_path / "Users", user_id)
     if own is not None:
         roots.append(own)
 
@@ -330,6 +340,16 @@ def write_resolved(path: Path, data: bytes, *, exclusive: bool = False) -> None:
     neither wider nor narrower than the workspace's other files. A fixed
     `0o644` would be narrower under a `umask 002` deployment, which is a
     shipped shape for a group-shared mount.
+
+    **It also ensures the parent**, which `resolve_in_roots` used to do and
+    deliberately no longer does. That moves the directory creation from check
+    time to write time, and the residual is worth naming: an ancestor of the
+    resolved path can be swapped between the resolution and this call, and
+    `mkdir(parents=True)` follows a symlink standing at an existing ancestor
+    while `O_NOFOLLOW` covers only the final component. That window was
+    already open — the old ordering did not make the check and the write
+    atomic either — and it is the same one the module docstring means by what
+    path validation cannot close on its own.
 
     Raises `OSError`, which every consumer already handles: a refusal is an
     envelope, not a traceback.
