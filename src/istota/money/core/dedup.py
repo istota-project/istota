@@ -39,7 +39,7 @@ def parse_ledger_transactions(ledger_path: Path) -> set[str]:
     if not ledger_path.exists():
         return set()
 
-    text = ledger_path.read_text()
+    text = ledger_path.read_text(encoding="utf-8")
     hashes: set[str] = set()
 
     # Also scan import staging files in the imports/ directory
@@ -47,7 +47,7 @@ def parse_ledger_transactions(ledger_path: Path) -> set[str]:
     texts = [text]
     if imports_dir.is_dir():
         for f in imports_dir.glob("*.beancount"):
-            texts.append(f.read_text())
+            texts.append(f.read_text(encoding="utf-8"))
 
     # Match transaction header: YYYY-MM-DD * "payee" "narration"
     txn_pattern = re.compile(

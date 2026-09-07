@@ -24,7 +24,7 @@ def read_toml_config(path: Path) -> dict:
 
     Raises ValueError if a markdown file has no toml code block.
     """
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if path.suffix.lower() == ".md":
         span = find_toml_block(text)
         if span is None:

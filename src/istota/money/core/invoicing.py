@@ -570,13 +570,13 @@ def check_scheduled_invoices(
 
 def update_invoice_number(config_path: Path, new_number: int) -> None:
     """Update next_invoice_number in the invoicing config file."""
-    text = config_path.read_text()
+    text = config_path.read_text(encoding="utf-8")
     updated = re.sub(
         r"(next_invoice_number\s*=\s*)\d+",
         f"\\g<1>{new_number}",
         text,
     )
-    config_path.write_text(updated)
+    config_path.write_text(updated, encoding="utf-8")
 
 
 # =============================================================================
