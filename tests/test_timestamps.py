@@ -86,18 +86,15 @@ class TestTheMigratedHelpers:
 
         assert _utc_now is iso_now_seconds
 
+    def test_health_db(self):
+        from istota.health.db import _now
 
-#: Files still carrying their own copy, with the reason.
-#:
-#: Both were held by a live sibling session when Stage 1 of the duplicate-code
-#: consolidation landed, so migrating them would have meant editing another
-#: session's working tree. They are `_now` in each file and are a one-line
-#: change each: replace the `def` with
-#: `from istota.timestamps import iso_now as _now` and drop this entry.
-_PENDING = {
-    "health/db.py",
-    "health/routes.py",
-}
+        assert _now is iso_now
+
+    def test_health_routes(self):
+        from istota.health.routes import _now
+
+        assert _now is iso_now
 
 
 class TestNoSecondCopy:
@@ -124,12 +121,7 @@ class TestNoSecondCopy:
                 # with the double backticks this repo uses throughout.
                 if needle in line and "``" not in line:
                     hits.add(rel)
-        assert hits == _PENDING, (
-            "a new copy of the UTC-now expression appeared (or a pending one was "
-            "migrated without updating _PENDING); call timestamps.iso_now instead"
+        assert hits == set(), (
+            "a new copy of the UTC-now expression appeared; call "
+            "timestamps.iso_now instead"
         )
-
-    def test_every_pending_entry_still_exists(self):
-        """A stale exemption is how a guard quietly stops guarding."""
-        for rel in _PENDING:
-            assert (SRC / rel).is_file(), f"{rel} is gone; drop it from _PENDING"
