@@ -11,9 +11,9 @@ import argparse
 import json
 from pathlib import Path
 
-from istota.skill_host_paths import write_resolved
-from istota.skills._cli import parse_and_resolve, run_skill_cli
-from istota.skills._hostpath import READ, host_path
+from istota.skill_host_paths import path_under_roots, resolve_in_roots, write_resolved
+from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import READ, host_path, write_roots
 from istota.skills.whisper.models import (
     download_model,
     get_available_memory_gb,
@@ -26,49 +26,111 @@ from istota.skills.whisper.transcribe import (
 )
 
 
-def _save_beside(audio_path: str, suffix: str, text: str) -> str:
-    """Write `text` next to the transcribed audio, under a code-owned name.
+#: The suffix `--save` swaps in, per `--output` format. A table rather than a
+#: literal at each branch, because the destination is now resolved once up
+#: front and the branches only have the text to write.
+_SUFFIXES = {"text": ".txt", "srt": ".srt", "vtt": ".vtt", "json": ".json"}
+
+
+def _save_destination(audio_path: str, output_format: str) -> tuple[Path | None, str | None]:
+    """Where `--save` may write, or the refusal saying why it may not.
 
     The destination is derived rather than named: `audio_path` is stamped
     `READ`, so it arrives resolved and inside a root, and swapping its suffix
-    cannot leave its parent. That is Layer 3 of ISSUE-447 — a derived path
-    whose only added component is code-owned is already contained and needs no
-    second resolution.
+    cannot leave its parent. Layer 3 of ISSUE-447 reads that as needing no
+    second resolution, and **that is right about containment and silent about
+    writability** (ISSUE-453). A `READ` argument is scoped against the task's
+    whole working context, which includes `{mount}/Talk` — where a Talk voice
+    message lands, and reading one is the point of this verb. The derived
+    destination was then inside `{mount}/Talk` too: a directory the sandbox
+    binds read-only, written host-side by the daemon user, where the task's
+    own file tools could not have written at all.
 
-    It still needs `write_resolved`. `Path.write_text` follows a symlink
-    standing at the derived name, and the workspace is bound read-write into
-    the sandbox, so such a link is model-plantable: the transcript would land
-    wherever it points, written by the daemon user, with containment already
-    reported as passed. `O_NOFOLLOW` makes the open fail instead.
+    So the derived path goes back through the resolver against the *write*
+    roots. `_hostpath.write_roots()` rather than `env_host_roots(writable=
+    True)` spelled here: the mode-to-roots mapping lives in `_hostpath`, and a
+    derived destination has no stamp to carry the mode, so asking that module
+    is what keeps this from drifting the next time `WRITE` narrows. The only
+    root it drops is `{mount}/Talk`; the channel directory and the task's
+    deferred directory both stay, the first because the sandbox binds it
+    read-write and a save there is one the task could have made itself.
+
+    **A read root is not a write root, and a derivation inherits the root it
+    came from rather than the one it needs.** That is the general rule, stated
+    in `.claude/rules/sandbox.md` beside Layer 3 rather than left as this
+    verb's own special case.
+
+    Resolved before the transcription runs, not after. The answer depends on
+    the arguments alone, so a refusal that waited would charge the task
+    minutes of CPU and then discard the transcript it had just produced.
+    """
+    roots = write_roots()
+    out_path = Path(audio_path).with_suffix(_SUFFIXES[output_format])
+    resolved, error = resolve_in_roots(
+        out_path, roots, writable=True, operation="whisper transcribe --save",
+    )
+    if error is None:
+        return resolved, None
+    # Only the containment refusal earns the copy-it-across remedy, and the
+    # write roots are what identify it: `resolve_in_roots` also refuses a
+    # symlink standing at the derived name, and refuses everything when there
+    # are no roots at all — a daemon-side spawn that did not pass the task
+    # identity. Telling either of those to copy the audio into the workspace
+    # sends the model round the same loop, since the first destination already
+    # is in the workspace and the second has no workspace to copy into. Those
+    # keep the resolver's own message.
+    if roots and not path_under_roots(out_path.parent, roots):
+        return None, (
+            f"{error}. --save writes beside the audio file, and this one is in "
+            "a directory this task may read but not write — Talk is shared and "
+            "bound read-only. Copy the audio into your workspace and transcribe "
+            "that, or take the transcript from this command's output and write "
+            "it where you want it."
+        )
+    return None, error
+
+
+def _save_beside(dest: Path, text: str) -> str:
+    """Write `text` to the destination `_save_destination` returned.
+
+    `write_resolved` rather than `Path.write_text`, and the resolution above
+    does not make it redundant: that check refuses a symlink standing at the
+    derived name as of the moment it looks, and the workspace is bound
+    read-write into the sandbox, so such a link is model-plantable in the
+    window after it. `O_NOFOLLOW` makes the open fail instead of landing the
+    transcript wherever the link points, written by the daemon user, with
+    containment already reported as passed.
+
+    **That window is now the length of the transcription**, because the
+    destination is resolved before the model runs rather than at the write,
+    and a long recording is minutes. Accepted rather than closed by a second
+    resolution here: the roots are per-user, so the only actor who can swap a
+    component of the path is another task of the same user, and what it can
+    reach that way is its own owner's directory. The leaf is still covered by
+    `O_NOFOLLOW` on every pass. Before this verb resolved the destination at
+    all the window was the whole run and unbounded, so this is narrower than
+    what it replaces rather than a cost the change introduced.
 
     `exclusive=False`, matching the overwrite this replaced: the name is
     derived from the caller's own argument rather than minted to be unique, so
     two runs over one file are a re-run rather than a collision.
 
-    **The recorded residual: `audio_path` is `READ`, so it may be under
-    `{mount}/Talk`, and the derived destination is then under `{mount}/Talk`
-    too.** That is a directory the sandbox binds read-only, so `--save` on a
-    Talk voice message writes where the task's own tools cannot. It is not a
-    regression — the `write_text` this replaced did the same from an entirely
-    unscoped path — and Layer 3 of the ISSUE-447 spec states the derived-write
-    rule as `write_resolved` with no second resolution, which is what this is.
-    Narrowing it means resolving the derived path against the *writable* roots
-    and refusing `--save` for a Talk source, which is a spec question rather
-    than a change to make here.
-    `tests/test_skills_whisper.py` asserts the current answer so that
-    changing it is visible.
-
     UTF-8 explicitly, where `write_text` took the locale's encoding — a
     transcript is model output in whatever language was spoken, and a daemon
     running under a C locale would otherwise raise on the first accent.
     """
-    out_path = Path(audio_path).with_suffix(suffix)
-    write_resolved(out_path, text.encode("utf-8"))
-    return str(out_path)
+    write_resolved(dest, text.encode("utf-8"))
+    return str(dest)
 
 
 def cmd_transcribe(args) -> dict:
     """Transcribe an audio file."""
+    save_to = None
+    if args.save:
+        save_to, refusal = _save_destination(args.audio_path, args.output)
+        if refusal is not None:
+            return error_envelope(refusal, reason="host_path_refused")
+
     result = transcribe_audio(
         args.audio_path,
         model=args.model,
@@ -82,32 +144,32 @@ def cmd_transcribe(args) -> dict:
 
     if output_format == "text":
         text = result["text"]
-        if args.save:
-            result["saved_to"] = _save_beside(args.audio_path, ".txt", text)
+        if save_to is not None:
+            result["saved_to"] = _save_beside(save_to, text)
         if args.no_segments:
             result.pop("segments", None)
         return result
 
     if output_format == "srt":
         formatted = format_srt(result["segments"])
-        if args.save:
-            result["saved_to"] = _save_beside(args.audio_path, ".srt", formatted)
+        if save_to is not None:
+            result["saved_to"] = _save_beside(save_to, formatted)
         result["formatted_output"] = formatted
         del result["segments"]
         return result
 
     if output_format == "vtt":
         formatted = format_vtt(result["segments"])
-        if args.save:
-            result["saved_to"] = _save_beside(args.audio_path, ".vtt", formatted)
+        if save_to is not None:
+            result["saved_to"] = _save_beside(save_to, formatted)
         result["formatted_output"] = formatted
         del result["segments"]
         return result
 
     # json (default) — return full result with segments
-    if args.save:
+    if save_to is not None:
         result["saved_to"] = _save_beside(
-            args.audio_path, ".json", json.dumps(result, indent=2, ensure_ascii=False),
+            save_to, json.dumps(result, indent=2, ensure_ascii=False),
         )
 
     # After the save, so `--save` still writes the whole thing. `segments` is

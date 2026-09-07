@@ -78,7 +78,7 @@ With `--model auto` (default), the largest model that fits in available RAM is s
 - **Short recordings** (< 5 min): Use default model auto-selection.
 - **Long recordings** (> 10 min): Warn the user this may take a while. Processing is ~0.5-2x real-time depending on model and CPU.
 - **Language**: Auto-detected by default. Specify `--language` if detection is unreliable or you know the language.
-- **Use `--save`** when the user wants to keep the transcription as a file.
+- **Use `--save`** when the user wants to keep the transcription as a file. It writes beside the audio, so it only works where you could write yourself: a recording in the user's workspace, in this room's directory or in the task's own deferred directory saves; one in `Talk` is shared and read-only, and `--save` is refused for it. Copy the audio into the workspace and transcribe that, or take the transcript out of the output and write it where you want it.
 - **SRT/VTT** formats are useful when the user wants subtitles or time-aligned text.
 - **Voice memos**: Commonly found in `/Users/{user_id}/inbox/` or shared files.
 - Models must be pre-downloaded before use inside sandboxed environments.
