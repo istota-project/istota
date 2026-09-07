@@ -17,8 +17,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from istota.skill_host_paths import env_host_roots, resolve_in_roots
 from istota.skills._cli import parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import EGRESS, host_path
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -119,46 +119,35 @@ def cmd_index_file(args) -> dict:
     makes the other subcommands safe is in their SQL; a filesystem argument
     needs its own.
 
-    **`talk=False`, which is the one thing that makes this root set its own.**
-    `{mount}/Talk` is bound read-only into the sandbox because a task may
-    legitimately read a Talk attachment into its own reasoning. Indexing one
-    puts it in a store `search` reads back afterwards, which is the other
-    question, so the shared read set is asked for without it. This used to be
-    `_indexable_roots`, a second copy of the derivation that joined
-    `ISTOTA_CONVERSATION_TOKEN` raw — a token of `../..` reached every user's
-    directory (ISSUE-447).
+    **`EGRESS`, which is a narrowing and is the point.** The bytes do not
+    stay in this task: `search` hands them back afterwards, to this user and
+    to whatever later task asks. So the root is the user's own workspace
+    alone — no `{mount}/Talk`, which the sandbox binds read-only because a
+    task may read an attachment into its own reasoning (a different question
+    from whether it may be indexed into a store), and no
+    `{mount}/Channels/{token}` or deferred dir either. This verb used to
+    resolve here against `_indexable_roots`, a second copy of the derivation
+    that joined `ISTOTA_CONVERSATION_TOKEN` raw — a token of `../..` reached
+    every user's directory. Stage 2 of ISSUE-447 put it on the shared rule
+    with its root set preserved exactly; the stamp is what narrows it, so the
+    narrowing has a test of its own rather than arriving inside a refactor.
 
-    The channel root and the deferred dir survive that consolidation because
-    unifying the implementation is not unifying the roots, and narrowing one
-    caller in a refactor is as much a change as widening it. The spec's own
-    rule puts this verb at the user's own workspace alone; that narrowing
-    belongs to the stage that declares the argument, not to this one.
-
-    Refused before the database is opened: a refusal should not connect on the
-    way to saying no.
+    The path is resolved before dispatch, so nothing here connects on the way
+    to saying no.
     """
     from istota.memory.search import index_file
 
     user_id = _get_user_id()
-    resolved, err = resolve_in_roots(
-        Path(args.path), env_host_roots(talk=False),
-        writable=False, operation="memory_search index file",
-    )
-    if err:
-        return {"status": "error", "error": err}
-    # `resolve_in_roots` establishes existence, not regular-ness: `exists()` is
-    # true of a directory and of a FIFO, and the workspace is bound read-write
-    # into the sandbox — so `read_text()` on a model-made fifo would block a
-    # host-side proxy worker for the whole skill-proxy timeout, and on a
-    # directory would return an errno string instead of this verb's own
-    # message.
+    # Stamped `EGRESS`: already resolved, already inside the workspace.
+    # Resolution establishes existence, not regular-ness — `exists()` is true
+    # of a directory and of a FIFO, and the workspace is bound read-write into
+    # the sandbox, so `read_text()` on a model-made fifo would block a
+    # host-side proxy worker for the whole skill-proxy timeout and on a
+    # directory would return an errno string instead of this verb's message.
+    resolved = Path(args.path)
     if not resolved.is_file():
         return {"status": "error", "error": f"Not a regular file: {resolved}"}
 
-    # The *resolved* path, both to read and to record: reopening the argument
-    # re-walks every symlink the check just settled, and a row naming the
-    # unresolved path would hand `search` a name that no longer means what was
-    # indexed.
     content = resolved.read_text()
     source_type = args.source_type or "memory_file"
     conn = _get_conn()
@@ -491,7 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     conv_p.add_argument("task_id", type=int, help="Task ID to index")
 
     file_p = index_sub.add_parser("file", help="Index a file")
-    file_p.add_argument("path", help="File path")
+    host_path(file_p, "path", mode=EGRESS, help="File in your own workspace")
     file_p.add_argument("--source-type", help="Source type (default: memory_file)")
 
     # reindex command

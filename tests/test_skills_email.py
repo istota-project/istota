@@ -476,9 +476,19 @@ class TestEmailCLIMain:
     def test_main_output_body_file(self, tmp_path, capsys):
         deferred_dir = tmp_path / "deferred"
         deferred_dir.mkdir()
-        body_file = tmp_path / "body.txt"
+        # `--body-file` is stamped `EGRESS` (ISSUE-447): the bytes become an
+        # outgoing message, so the one root is the sender's own workspace —
+        # not the deferred dir the op file goes to.
+        workspace = tmp_path / "mount" / "Users" / "alice"
+        workspace.mkdir(parents=True)
+        body_file = workspace / "body.txt"
         body_file.write_text("Body from file")
-        env = {"ISTOTA_TASK_ID": "101", "ISTOTA_DEFERRED_DIR": str(deferred_dir)}
+        env = {
+            "ISTOTA_TASK_ID": "101",
+            "ISTOTA_DEFERRED_DIR": str(deferred_dir),
+            "NEXTCLOUD_MOUNT_PATH": str(tmp_path / "mount"),
+            "ISTOTA_USER_ID": "alice",
+        }
         with patch.dict("os.environ", env):
             main(["output", "--subject", "S", "--body-file", str(body_file)])
 

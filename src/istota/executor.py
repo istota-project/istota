@@ -196,6 +196,10 @@ def _pre_transcribe_attachments(
     attachments: list[str] | None,
     prompt: str,
     cancel_check: "Callable[[], bool] | None" = None,
+    *,
+    user_id: str | None = None,
+    mount_path: "str | Path | None" = None,
+    deferred_dir: "str | Path | None" = None,
 ) -> str:
     """Pre-transcribe audio attachments so skill selection sees real text.
 
@@ -229,6 +233,12 @@ def _pre_transcribe_attachments(
     send can put normalization and OCR behind it on the same worker. What is
     already transcribed is kept: the prompt is still better with a partial
     transcript than with none.
+
+    The child is a *skill CLI*, and since ISSUE-447 its path argument is
+    resolved against the allowlist its own environment names. The daemon
+    carries none of those variables, so the identity is passed explicitly —
+    the same three the skill proxy exports — or the child refuses every path
+    and the failure disappears into the debug line below.
     """
     if not attachments:
         return prompt
@@ -258,7 +268,13 @@ def _pre_transcribe_attachments(
             )
             break
         try:
-            result = transcribe_audio_out_of_process(audio_path, timeout=remaining)
+            result = transcribe_audio_out_of_process(
+                audio_path,
+                timeout=remaining,
+                user_id=user_id,
+                mount_path=mount_path,
+                deferred_dir=deferred_dir,
+            )
             if result.get("status") == "ok" and result.get("text", "").strip():
                 text = result["text"].strip()
                 transcribed_parts.append(text)
@@ -6380,6 +6396,13 @@ def execute_task(
     # mutation used to carry is gone even though the assignment stays.
     enriched_prompt = _pre_transcribe_attachments(
         task.attachments, task.prompt, cancel_check=_cancel_check,
+        # The child is a skill CLI and scopes its path argument against these
+        # (ISSUE-447). `config.nextcloud_mount_path` is None on the mountless
+        # shapes, where a web-chat upload lands under the per-user temp dir
+        # instead — which is why the deferred dir goes too.
+        user_id=task.user_id,
+        mount_path=config.nextcloud_mount_path,
+        deferred_dir=user_temp_dir,
     )
     if enriched_prompt != task.prompt:
         logger.info("Pre-transcribed audio for task %s, enriched prompt for skill selection", task.id)

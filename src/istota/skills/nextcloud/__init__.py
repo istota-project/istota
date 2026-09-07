@@ -42,6 +42,7 @@ from istota.nextcloud_client import (
     ocs_search_sharees,
 )
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import EGRESS, host_path
 
 _SHARE_TYPE_MAP = shares_mod.SHARE_TYPES
 _DEFAULT_EXPIRE_DAYS = 14
@@ -900,7 +901,14 @@ def build_parser():
     p_fsearch.add_argument("--limit", type=int, default=100, help="Max results (default: 100)")
 
     p_upload = files_sub.add_parser("upload", help="Upload a local file")
-    p_upload.add_argument("local", help="Local file path")
+    # `EGRESS`, not `READ`: the bytes leave the task. What this verb does is
+    # put a host file into Nextcloud, where the web UI serves it, a share can
+    # publish it and nothing about the task bounds who reads it afterwards —
+    # the same question `email --attach` answers, so it gets the same root.
+    host_path(
+        p_upload, "local", mode=EGRESS,
+        help="Local file path, in your own workspace",
+    )
     p_upload.add_argument("remote", help="Destination Nextcloud path")
     p_upload.add_argument("--chunked", action="store_true", help="Force chunked upload")
 

@@ -1,6 +1,7 @@
 """WebDAV control plane — the files group (Stage 4)."""
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,11 +21,23 @@ def nc_config():
 
 
 @pytest.fixture(autouse=True)
-def _nc_env(monkeypatch):
+def _nc_env(monkeypatch, tmp_path):
     monkeypatch.setenv("NC_URL", "https://cloud.example.com")
     monkeypatch.setenv("NC_USER", "istota")
     monkeypatch.setenv("NC_PASS", "secret")
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    # `files upload --local` is a *host* read and this CLI runs host-side, so
+    # it is scoped to the caller's own workspace (ISSUE-447). The mount is
+    # what the executor would have put in the environment.
+    monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(tmp_path / "mount"))
+
+
+@pytest.fixture
+def workspace(tmp_path) -> Path:
+    """`{mount}/Users/alice` — where a local upload source may live."""
+    path = tmp_path / "mount" / "Users" / "alice"
+    path.mkdir(parents=True)
+    return path
 
 
 def _run(capsys, argv):
@@ -519,9 +532,9 @@ class TestFilesCli:
     @patch("istota.nextcloud.dav.upload")
     @patch("istota.nextcloud.capabilities.fetch_capabilities")
     def test_upload_consults_chunking_capability_only_when_relevant(
-        self, mock_caps, mock_upload, capsys, tmp_path
+        self, mock_caps, mock_upload, capsys, workspace
     ):
-        local = tmp_path / "small.txt"
+        local = workspace / "small.txt"
         local.write_bytes(b"hi")
         mock_upload.return_value = {"status": "ok"}
 
@@ -532,9 +545,9 @@ class TestFilesCli:
     @patch("istota.nextcloud.dav.upload")
     @patch("istota.nextcloud.capabilities.fetch_capabilities")
     def test_upload_probe_failure_degrades_to_plain(
-        self, mock_caps, mock_upload, capsys, tmp_path
+        self, mock_caps, mock_upload, capsys, workspace
     ):
-        local = tmp_path / "f.txt"
+        local = workspace / "f.txt"
         local.write_bytes(b"hi")
         mock_caps.side_effect = OcsError("down", None, None, "/cloud/capabilities")
         mock_upload.return_value = {"status": "ok"}
@@ -567,11 +580,31 @@ class TestFilesPathScoping:
         assert "/Users/alice" in out["error"]
 
     @patch("istota.nextcloud.dav.upload")
-    def test_upload_destination_is_scoped(self, mock_upload, capsys, tmp_path):
-        local = tmp_path / "f.txt"
+    def test_upload_destination_is_scoped(self, mock_upload, capsys, workspace):
+        """The *remote* scoping, and the local source is in-roots on purpose.
+
+        Since ISSUE-447 `--local` is scoped too, so a source under `tmp_path`
+        would be refused before the remote path was looked at — an exit 1 and
+        an un-called mock that say nothing about the thing this test names.
+        """
+        local = workspace / "f.txt"
         local.write_bytes(b"hi")
         out, code = _run(capsys, ["files", "upload", str(local), "/Users/bob/f.txt"])
         assert code == 1
+        assert out.get("reason") != "host_path_refused", out
+        mock_upload.assert_not_called()
+
+    @patch("istota.nextcloud.dav.upload")
+    def test_upload_source_is_scoped_to_the_callers_own_workspace(
+        self, mock_upload, capsys, tmp_path,
+    ):
+        """`EGRESS`: the bytes land in Nextcloud, where nothing about the
+        task bounds who reads them afterwards."""
+        local = tmp_path / "elsewhere.txt"
+        local.write_bytes(b"not yours")
+        out, code = _run(capsys, ["files", "upload", str(local), "/Users/alice/f.txt"])
+        assert code == 1
+        assert out["reason"] == "host_path_refused"
         mock_upload.assert_not_called()
 
     @patch("istota.nextcloud.dav.stat")

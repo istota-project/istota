@@ -116,7 +116,9 @@ def no_transcribe(monkeypatch):
     """Never spawn whisper: audio tests say what they want back."""
     monkeypatch.setattr(
         executor, "transcribe_audio_out_of_process",
-        lambda path, timeout=None: {"status": "error", "error": "stubbed"},
+        lambda path, timeout=None, **identity: {
+            "status": "error", "error": "stubbed",
+        },
     )
 
 
@@ -206,7 +208,13 @@ class TestEffectivePrompt:
         audio.write_bytes(b"not really audio")
         monkeypatch.setattr(
             executor, "transcribe_audio_out_of_process",
-            lambda path, timeout=None: {"status": "ok", "text": "buy more milk"},
+            # `**identity` because the runner is handed the task's user id,
+            # mount and temp dir since ISSUE-447 — a double narrower than the
+            # thing it stands in for turns a live call into a TypeError the
+            # caller swallows at debug.
+            lambda path, timeout=None, **identity: {
+                "status": "ok", "text": "buy more milk",
+            },
         )
         brain = _CaptureBrain()
 
@@ -235,7 +243,13 @@ class TestEffectivePrompt:
         audio.write_bytes(b"not really audio")
         monkeypatch.setattr(
             executor, "transcribe_audio_out_of_process",
-            lambda path, timeout=None: {"status": "ok", "text": "buy more milk"},
+            # `**identity` because the runner is handed the task's user id,
+            # mount and temp dir since ISSUE-447 — a double narrower than the
+            # thing it stands in for turns a live call into a TypeError the
+            # caller swallows at debug.
+            lambda path, timeout=None, **identity: {
+                "status": "ok", "text": "buy more milk",
+            },
         )
         brain = _CaptureBrain()
 
@@ -577,7 +591,7 @@ class TestCancellation:
         """`!stop` must not be inert for the whole 900 s audio budget."""
         calls = []
 
-        def fake(path, timeout=None):
+        def fake(path, timeout=None, **identity):
             calls.append(path)
             return {"status": "ok", "text": "hello"}
 

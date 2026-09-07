@@ -17,6 +17,7 @@ import argparse
 from istota.ocr_leaf import ocr_image, preprocess_image, text_from_data
 
 from istota.skills._cli import parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import READ, host_path
 
 __all__ = [
     "preprocess_image",
@@ -45,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ocr command
     ocr_parser = sub.add_parser("ocr", help="Extract text from image using OCR")
-    ocr_parser.add_argument("image_path", help="Path to image file")
+    host_path(ocr_parser, "image_path", mode=READ, help="Path to image file")
     ocr_parser.add_argument(
         "--preprocess",
         action="store_true",

@@ -14,7 +14,6 @@ from istota.skills.memory_search import (
     cmd_delete_fact,
     cmd_facts,
     cmd_index_conversation,
-    cmd_index_file,
     cmd_invalidate_fact,
     cmd_reindex,
     cmd_search,
@@ -22,6 +21,7 @@ from istota.skills.memory_search import (
     cmd_timeline,
     main,
 )
+from tests.support.skill_cli import run_skill_main
 
 
 def _init_db(db_path: Path) -> sqlite3.Connection:
@@ -194,46 +194,57 @@ class TestCmdIndexConversation:
 
 
 class TestCmdIndexFile:
+    """`index file` is stamped `EGRESS`, so its bound is at the parse.
+
+    Every refusal below drives `main` rather than `cmd_index_file`: the
+    resolution moved out of the handler into `parse_and_resolve` (ISSUE-447),
+    so calling the handler with a hostile path now exercises nothing at all —
+    which is the shape of test this whole spec is written against.
+
+    `EGRESS` and not `READ` because the bytes leave the task: `search` hands
+    them back afterwards. So the one root is `{mount}/Users/{user}` — the
+    deferred dir, the channel directory and `{mount}/Talk` are all refused,
+    where before this stage the first two were admitted.
+    """
+
+    @staticmethod
+    def _mount(tmp_path, monkeypatch, db_path):
+        mount = tmp_path / "mount"
+        for sub in ("Users/alice", "Users/bob", "Channels/tok1", "Talk"):
+            (mount / sub).mkdir(parents=True)
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path / "deferred"))
+        (tmp_path / "deferred").mkdir(exist_ok=True)
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
+        return mount
+
     def test_index_file(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         _init_db(db_path).close()
-
-        workspace = tmp_path / "work"
-        workspace.mkdir()
-        file_path = workspace / "memory.md"
-        file_path.write_text("Some memory content about projects")
-
-        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
-        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-        # index file reads with the daemon's filesystem access, so it is bounded
-        # to the caller's own roots; the deferred dir is one of them.
-        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(workspace))
-
-        args = MagicMock()
-        args.path = str(file_path)
-        args.source_type = None
+        mount = self._mount(tmp_path, monkeypatch, db_path)
+        note = mount / "Users" / "alice" / "memory.md"
+        note.write_text("Some memory content about projects")
 
         with patch("istota.memory.search.ensure_vec_table", return_value=False), \
              patch("istota.memory.search.enable_vec_extension", return_value=False):
-            result = cmd_index_file(args)
+            run = run_skill_main(main, ["index", "file", str(note)])
 
-        assert result["status"] == "ok"
-        assert result["chunks_inserted"] >= 1
+        assert run.exit_code == 0, run.stdout
+        assert run.envelope["status"] == "ok"
+        assert run.envelope["chunks_inserted"] >= 1
 
     def test_index_missing_file(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         _init_db(db_path).close()
+        mount = self._mount(tmp_path, monkeypatch, db_path)
 
-        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
-        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path))
-
-        args = MagicMock()
-        args.path = str(tmp_path / "nonexistent.md")
-        args.source_type = None
-
-        result = cmd_index_file(args)
-        assert result["status"] == "error"
+        run = run_skill_main(
+            main, ["index", "file", str(mount / "Users" / "alice" / "nope.md")],
+        )
+        assert run.exit_code == 1
+        assert run.envelope["status"] == "error"
 
     def test_refuses_path_outside_the_callers_roots(self, tmp_path, monkeypatch):
         """`index file` + `search` is a file read-back oracle if left unbounded.
@@ -246,94 +257,88 @@ class TestCmdIndexFile:
         """
         db_path = tmp_path / "test.db"
         _init_db(db_path).close()
-
-        workspace = tmp_path / "work"
-        workspace.mkdir()
+        self._mount(tmp_path, monkeypatch, db_path)
         secret = tmp_path / "config.toml"
         secret.write_text('app_password = "hunter2"')
 
-        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
-        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(workspace))
+        run = run_skill_main(main, ["index", "file", str(secret)])
 
-        args = MagicMock()
-        args.path = str(secret)
-        args.source_type = None
-
-        result = cmd_index_file(args)
-        assert result["status"] == "error"
+        assert run.exit_code == 1
+        assert run.envelope["status"] == "error"
+        assert run.envelope["reason"] == "host_path_refused"
         # The shared allowlist's message since ISSUE-447 put this verb on the
         # shared rule; it deliberately does not enumerate the roots.
-        assert "outside allowed roots" in result["error"]
-        assert str(secret.parent) not in result["error"].split("is outside")[1]
+        assert "outside allowed roots" in run.envelope["error"]
 
     def test_refuses_traversal_out_of_a_permitted_root(self, tmp_path, monkeypatch):
         """The bound is on the resolved path, or `../` walks straight out."""
         db_path = tmp_path / "test.db"
         _init_db(db_path).close()
-
-        workspace = tmp_path / "work"
-        workspace.mkdir()
+        mount = self._mount(tmp_path, monkeypatch, db_path)
         secret = tmp_path / "config.toml"
         secret.write_text('app_password = "hunter2"')
 
-        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
-        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(workspace))
+        run = run_skill_main(main, [
+            "index", "file",
+            str(mount / "Users" / "alice" / ".." / ".." / ".." / "config.toml"),
+        ])
 
-        args = MagicMock()
-        args.path = str(workspace / ".." / "config.toml")
-        args.source_type = None
-
-        result = cmd_index_file(args)
-        assert result["status"] == "error"
+        assert run.exit_code == 1
+        assert run.envelope["status"] == "error"
 
     def test_allows_the_users_own_mount_directory(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         _init_db(db_path).close()
-
-        mount = tmp_path / "mount"
-        user_dir = mount / "Users" / "alice"
-        user_dir.mkdir(parents=True)
-        note = user_dir / "USER.md"
+        mount = self._mount(tmp_path, monkeypatch, db_path)
+        note = mount / "Users" / "alice" / "USER.md"
         note.write_text("Some memory content about projects")
-
-        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
-        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
-        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
-
-        args = MagicMock()
-        args.path = str(note)
-        args.source_type = None
 
         with patch("istota.memory.search.ensure_vec_table", return_value=False), \
              patch("istota.memory.search.enable_vec_extension", return_value=False):
-            result = cmd_index_file(args)
-        assert result["status"] == "ok"
+            run = run_skill_main(main, ["index", "file", str(note)])
+
+        assert run.envelope["status"] == "ok", run.stdout
 
     def test_refuses_another_users_mount_directory(self, tmp_path, monkeypatch):
         db_path = tmp_path / "test.db"
         _init_db(db_path).close()
-
-        mount = tmp_path / "mount"
-        (mount / "Users" / "alice").mkdir(parents=True)
-        other = mount / "Users" / "bob"
-        other.mkdir(parents=True)
-        theirs = other / "USER.md"
+        mount = self._mount(tmp_path, monkeypatch, db_path)
+        theirs = mount / "Users" / "bob" / "USER.md"
         theirs.write_text("bob's private notes")
 
-        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
-        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
-        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
+        run = run_skill_main(main, ["index", "file", str(theirs)])
 
-        args = MagicMock()
-        args.path = str(theirs)
-        args.source_type = None
+        assert run.exit_code == 1
+        assert run.envelope["status"] == "error"
 
-        result = cmd_index_file(args)
-        assert result["status"] == "error"
+    @pytest.mark.parametrize("where", ["deferred", "channel", "talk"])
+    def test_the_egress_stamp_narrows_it_to_the_workspace(
+        self, tmp_path, monkeypatch, where,
+    ):
+        """The three roots this verb used to have and no longer does.
+
+        Stage 2 of ISSUE-447 moved `index file` onto the shared rule with its
+        root set preserved exactly — deferred dir, channel directory, own
+        workspace — because a consolidation that changes a boundary is the
+        failure the spec exists to prevent. The `EGRESS` stamp is what
+        narrows it, and this is the test that says so: indexing puts the
+        content in a store `search` reads back after the task is over, so the
+        only root is the one the user owns.
+        """
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+        mount = self._mount(tmp_path, monkeypatch, db_path)
+        source = {
+            "deferred": tmp_path / "deferred" / "note.md",
+            "channel": mount / "Channels" / "tok1" / "note.md",
+            "talk": mount / "Talk" / "note.md",
+        }[where]
+        source.write_text("someone else's content")
+
+        run = run_skill_main(main, ["index", "file", str(source)])
+
+        assert run.exit_code == 1
+        assert run.envelope["reason"] == "host_path_refused"
 
 
 class TestCmdReindex:

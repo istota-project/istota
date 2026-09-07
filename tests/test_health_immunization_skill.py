@@ -34,8 +34,21 @@ def ready(tmp_path) -> tuple[Path, dict]:
         "ISTOTA_DEFERRED_DIR": "",
         "ISTOTA_TASK_ID": "",
         "ISTOTA_USER_ID": "alice",
+        # `--paste-file` is a host path and this CLI runs host-side, so it is
+        # scoped to the caller's own workspace (ISSUE-447). This is what the
+        # executor would have put in the environment; the `workspace` fixture
+        # below is the one directory a paste file may be read from.
+        "NEXTCLOUD_MOUNT_PATH": str(tmp_path / "mount"),
     }
     return ctx.db_path, env
+
+
+@pytest.fixture
+def workspace(tmp_path) -> Path:
+    """`{mount}/Users/alice`, the root every scoped path here resolves under."""
+    path = tmp_path / "mount" / "Users" / "alice"
+    path.mkdir(parents=True)
+    return path
 
 
 class TestVaccineRefsAndCoverage:
@@ -139,29 +152,29 @@ class TestDeferredOps:
 
 
 class TestImportImmunizations:
-    def test_dry_run_inline(self, ready, tmp_path):
+    def test_dry_run_inline(self, ready, workspace):
         _, env = ready
-        paste_file = tmp_path / "paste.txt"
+        paste_file = workspace / "paste.txt"
         paste_file.write_text(
             "INFS Pres Free 6mos-Adult (Fluzone trivalent) (influenza) "
             "(Given 11/28/2025)\n"
             "Tdap (Given 12/1/2016)\n"
         )
         out = _run([
-            "import-immunizations", "--paste", f"@{paste_file}", "--dry-run",
+            "import-immunizations", "--paste-file", str(paste_file), "--dry-run",
         ], env)
         assert out["dry_run"] is True
         names = [r["name"] for r in out["rows"]]
         assert names == ["Influenza", "Tdap"]
 
-    def test_confirm_writes(self, ready, tmp_path):
+    def test_confirm_writes(self, ready, workspace):
         _, env = ready
-        paste_file = tmp_path / "paste.txt"
+        paste_file = workspace / "paste.txt"
         paste_file.write_text(
             "Influenza (Given 11/28/2025)\nTdap (Given 12/1/2016)\n"
         )
         out = _run([
-            "import-immunizations", "--paste", f"@{paste_file}", "--confirm",
+            "import-immunizations", "--paste-file", str(paste_file), "--confirm",
         ], env)
         assert out["status"] == "ok"
         assert out["count"] == 2
@@ -170,13 +183,13 @@ class TestImportImmunizations:
             "Influenza", "Tdap",
         }
 
-    def test_confirm_requires_dates(self, ready, tmp_path):
+    def test_confirm_requires_dates(self, ready, workspace):
         _, env = ready
-        paste_file = tmp_path / "paste.txt"
+        paste_file = workspace / "paste.txt"
         paste_file.write_text("Got my flu shot at the pharmacy\n")
         proc = subprocess.run(
             [sys.executable, "-m", "istota.skills.health",
-             "import-immunizations", "--paste", f"@{paste_file}",
+             "import-immunizations", "--paste-file", str(paste_file),
              "--confirm"],
             capture_output=True, text=True, env=env,
         )
@@ -187,7 +200,7 @@ class TestImportImmunizations:
         # find out which row is at fault.
         assert "Got my flu shot at the pharmacy" in body["error"]
 
-    def test_confirm_names_the_line_whose_date_is_impossible(self, ready, tmp_path):
+    def test_confirm_names_the_line_whose_date_is_impossible(self, ready, workspace):
         """The row that used to import, and the message that used to lie.
 
         ``Influenza 2026-02-31`` parsed to a high-confidence date before
@@ -199,11 +212,11 @@ class TestImportImmunizations:
         visibly carries a date.
         """
         _, env = ready
-        paste_file = tmp_path / "paste.txt"
+        paste_file = workspace / "paste.txt"
         paste_file.write_text("Influenza 2026-02-31\n")
         proc = subprocess.run(
             [sys.executable, "-m", "istota.skills.health",
-             "import-immunizations", "--paste", f"@{paste_file}",
+             "import-immunizations", "--paste-file", str(paste_file),
              "--confirm"],
             capture_output=True, text=True, env=env,
         )
@@ -212,22 +225,111 @@ class TestImportImmunizations:
         assert "not a real date" in body["error"]
         assert "Influenza 2026-02-31" in body["error"]
 
-    def test_defers_under_sandbox(self, ready, tmp_path):
+    def test_defers_under_sandbox(self, ready, workspace, tmp_path):
         _, base_env = ready
         deferred = tmp_path / "deferred"
         deferred.mkdir()
         env = {**base_env, "ISTOTA_DEFERRED_DIR": str(deferred),
                "ISTOTA_TASK_ID": "55"}
-        paste_file = tmp_path / "paste.txt"
+        paste_file = workspace / "paste.txt"
         paste_file.write_text("Influenza (Given 11/28/2025)\n")
         out = _run([
-            "import-immunizations", "--paste", f"@{paste_file}", "--confirm",
+            "import-immunizations", "--paste-file", str(paste_file), "--confirm",
         ], env)
         assert out["deferred"] is True
         ops = json.loads((deferred / "task_55_health_ops.json").read_text())
         assert ops[0]["op"] == "bulk_insert_immunizations"
         assert ops[0]["dedup_key_prefix"]
         assert len(ops[0]["rows"]) == 1
+
+
+class TestThePasteMigration:
+    """`--paste @PATH` was the one genuine inline host read in this skill.
+
+    The other three health file verbs defer on every model-driven path, so
+    what they leaked was an existence probe. This one read the file itself,
+    on every deployment shape, before any deferral — and `--dry-run` handed
+    the parsed content straight back to the caller. `@` in a value argparse
+    delivers as a string is also invisible to every enumeration of path
+    arguments in the tree, which is why the read moves to a flag of its own
+    rather than being scoped where it stood (ISSUE-447).
+
+    The refusal matters as much as the move. Treating `@/etc/passwd` as
+    literal text after taking the meaning away would import the string
+    `@/etc/passwd` as an immunization record and report success.
+    """
+
+    def test_a_leading_at_is_refused_and_names_the_new_flag(self, ready, workspace):
+        _, env = ready
+        paste_file = workspace / "paste.txt"
+        paste_file.write_text("Influenza (Given 11/28/2025)\n")
+
+        out = _run(
+            ["import-immunizations", "--paste", f"@{paste_file}", "--dry-run"],
+            env, expect_success=False,
+        )
+        assert out["status"] == "error"
+        assert "--paste-file" in out["error"]
+
+    def test_a_refused_at_value_is_not_imported_as_text(self, ready, workspace):
+        """The silent reading, asserted against rather than described."""
+        _, env = ready
+        paste_file = workspace / "paste.txt"
+        paste_file.write_text("Influenza (Given 11/28/2025)\n")
+
+        out = _run(
+            ["import-immunizations", "--paste", f"@{paste_file}", "--confirm"],
+            env, expect_success=False,
+        )
+        assert out.get("rows") is None
+        assert out.get("count") is None
+        listing = _run(["immunizations"], env)
+        assert listing["immunizations"] == []
+
+    def test_a_paste_file_outside_the_workspace_is_refused(self, ready, tmp_path):
+        """The scoping the flag exists to carry."""
+        _, env = ready
+        outside = tmp_path / "outside.txt"
+        outside.write_text("Influenza (Given 11/28/2025)\n")
+
+        out = _run(
+            ["import-immunizations", "--paste-file", str(outside), "--dry-run"],
+            env, expect_success=False,
+        )
+        assert out["status"] == "error"
+        assert out["reason"] == "host_path_refused"
+
+    def test_literal_text_still_goes_through_paste(self, ready):
+        _, env = ready
+        out = _run(
+            ["import-immunizations", "--paste", "Influenza (Given 11/28/2025)",
+             "--dry-run"],
+            env,
+        )
+        assert [r["name"] for r in out["rows"]] == ["Influenza"]
+
+    def test_neither_flag_is_an_error_rather_than_a_usage_dump(self, ready):
+        """`--paste` was `required=True` and the pair cannot be.
+
+        argparse would answer a missing required argument with usage text on
+        stderr and exit 2; the facade's contract is one JSON envelope on
+        stdout, which is what every other refusal in this CLI produces.
+        """
+        _, env = ready
+        out = _run(["import-immunizations", "--dry-run"], env, expect_success=False)
+        assert out["status"] == "error"
+        assert "--paste" in out["error"]
+
+    def test_both_flags_at_once_is_an_error(self, ready, workspace):
+        _, env = ready
+        paste_file = workspace / "paste.txt"
+        paste_file.write_text("Influenza (Given 11/28/2025)\n")
+        out = _run(
+            ["import-immunizations", "--paste", "Tdap (Given 12/1/2016)",
+             "--paste-file", str(paste_file), "--dry-run"],
+            env, expect_success=False,
+        )
+        assert out["status"] == "error"
 
 
 class TestExplainImmunization:

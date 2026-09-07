@@ -19,6 +19,7 @@ import os
 import sys
 
 from istota.skills._cli import parse_and_resolve
+from istota.skills._hostpath import READ, host_path
 
 
 def _unwrap_inner_error(raw: str) -> str:
@@ -925,7 +926,7 @@ def build_parser():
     )
 
     p_csv = sub.add_parser("import-csv", help="Import transactions from CSV")
-    p_csv.add_argument("file", help="CSV file path")
+    host_path(p_csv, "file", mode=READ, help="CSV file path")
     p_csv.add_argument("--account", "-a", required=True, help="Bank account")
     p_csv.add_argument("--tag", "-t", action="append", help="Include tag")
     p_csv.add_argument("--exclude-tag", "-x", action="append", help="Exclude tag")
@@ -1021,7 +1022,7 @@ def build_parser():
     pf_sub = p_pf.add_subparsers(dest="portfolio_command")
 
     p_pf_imp = pf_sub.add_parser("import", help="Import a positions CSV")
-    p_pf_imp.add_argument("file", help="CSV file path")
+    host_path(p_pf_imp, "file", mode=READ, help="CSV file path")
     p_pf_imp.add_argument("--source", "-s", help="Import source name (auto-detected)")
     p_pf_imp.add_argument("--dry-run", action="store_true", help="Preview without writing")
     p_pf_imp.add_argument("--replace", type=int, help="Delete this snapshot id first")

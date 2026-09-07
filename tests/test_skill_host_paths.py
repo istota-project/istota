@@ -18,7 +18,6 @@ check that never resolves, a lexical ``startswith`` containment, a root echoed
 back instead of resolved. Where a test looks redundant, that is usually why.
 """
 
-import argparse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1393,78 +1392,49 @@ class TestTheFourCallersRootSets:
             (mount / "Talk").resolve(),
         }
 
-    def test_memory_search_index_file_gets_no_talk_root(self, mount, monkeypatch):
-        """`index file` content comes back out through `search`.
-
-        Talk is bound read-only into the sandbox because a task may read a
-        Talk attachment into its own reasoning; indexing one into this user's
-        searchable store is the other question, and this root set is what
-        answers it. Driven through the verb rather than a helper, since a
-        helper a test names is one the verb can stop calling.
-
-        No `ISTOTA_DB_PATH` is set, so reaching the database would exit with a
-        different message — which is what shows the refusal came first.
-        """
-        from istota.skills import memory_search
-
-        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
-        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
-        talk_file = mount / "Talk" / "shared.txt"
-        talk_file.write_text("someone else's attachment")
-
-        out = memory_search.cmd_index_file(
-            argparse.Namespace(path=str(talk_file), source_type=None),
-        )
-        assert out["status"] == "error"
-        assert "outside allowed roots" in out["error"]
-
-    def test_memory_search_index_file_keeps_its_other_three_roots(
+    def test_memory_search_index_file_is_the_workspace_alone(
         self, mount, monkeypatch, tmp_path,
     ):
-        from istota.memory import search as memory_search_lib
-        from istota.skills import memory_search
+        """The narrowing stage 5 carries, asserted as a set.
+
+        Stage 2 put `index file` on the shared rule with its three roots
+        preserved — own workspace, channel directory, deferred dir — because
+        moving a boundary inside a consolidation is the failure this work
+        exists to prevent. The `EGRESS` stamp is what narrows it to one, and
+        the reason is where the bytes end up: `search` hands the indexed
+        content back after the task is over.
+
+        Driven through the verb's own `main` rather than the handler, since
+        that is where the resolution now happens; `tests/test_skills_memory_
+        search.py` is what drives each refused root one at a time.
+        """
+        from istota.skills._hostpath import EGRESS, _roots_for
 
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
-        monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "framework.db"))
-        seen: list[str] = []
-
-        def _record(conn, user_id, path, content, source_type):
-            seen.append(path)
-            return 1
-
-        monkeypatch.setattr(memory_search_lib, "index_file", _record)
-
-        candidates = [
-            mount / "Users" / "alice" / "own.txt",
-            mount / "Channels" / "tok1" / "channel.txt",
-            tmp_path / "deferred" / "deferred.txt",
-        ]
-        for candidate in candidates:
-            candidate.write_text("x")
-            out = memory_search.cmd_index_file(
-                argparse.Namespace(path=str(candidate), source_type=None),
-            )
-            assert out["status"] == "ok", out
-        # The *resolved* path is what the row records, not the argument.
-        assert seen == [str(c.resolve()) for c in candidates]
+        assert set(_roots_for(EGRESS, writable=False)) == {
+            (mount / "Users" / "alice").resolve(),
+        }
 
     def test_memory_search_index_file_guards_the_conversation_token(
         self, mount, monkeypatch,
     ):
         """The guard `_indexable_roots` lacked and the consolidation adds:
-        it joined `ISTOTA_CONVERSATION_TOKEN` raw."""
-        from istota.skills import memory_search
+        it joined `ISTOTA_CONVERSATION_TOKEN` raw.
 
-        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+        `EGRESS` drops the channel root altogether, so this verb no longer
+        depends on the guard — the shared derivation still does, and every
+        `READ` argument in the tree is behind it, which is why the case is
+        kept and asked of the derivation rather than deleted with the roots.
+        """
+        from istota.skill_host_paths import path_under_roots
+
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "../..")
         victim = mount / "Users" / "bob" / "private.txt"
         victim.write_text("bob's notes")
 
-        out = memory_search.cmd_index_file(
-            argparse.Namespace(path=str(victim), source_type=None),
+        assert not path_under_roots(
+            victim.resolve(), allowed_host_roots(writable=False),
         )
-        assert out["status"] == "error"
-        assert "outside allowed roots" in out["error"]
 
     def test_the_deferred_replay_gets_no_channel_root_and_no_talk_root(
         self, tmp_path, monkeypatch,

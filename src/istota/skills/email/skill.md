@@ -57,7 +57,7 @@ istota-skill email send --to "recipient@example.com" --subject "Subject line" --
 
 Options:
 - `--html` — send as HTML instead of plain text
-- `--body-file /path/to/file` — read body from a file (useful for long HTML content)
+- `--body-file {workspace}/file` — read body from a file in your own workspace (useful for long HTML content)
 - `--cc a@x,b@y` / `--bcc a@x` — carbon-copy / blind-carbon-copy recipients (comma-separated). Bcc addresses receive the mail but never appear in any transmitted header.
 - `--attach /path/to/file` — attach a file (repeatable). The file must be inside the user's own workspace; see the attachment rule under "When a send is held".
 - `--reply-to addr` — set the Reply-To header.
@@ -121,7 +121,7 @@ Sending email is subject to the same "verify, don't assume" discipline as writin
 
 Then tell the user the email was sent (do NOT output raw JSON to the user).
 
-For HTML emails with complex formatting, write the body to a temp file first and use `--body-file`.
+For HTML emails with complex formatting, write the body to a file under `{workspace}` first and use `--body-file` (it is scoped to your own workspace).
 
 ## Replying to incoming emails (`output`)
 
@@ -134,20 +134,20 @@ istota-skill email output --subject "Subject line" --body "The email content"
 Options:
 - `--subject` — email subject (optional for replies; the original subject with "Re:" prefix is used if omitted)
 - `--body` — the email body text (required, or use `--body-file`)
-- `--body-file /path/to/file` — read body from a file (useful for long content)
+- `--body-file {workspace}/file` — read body from a file in your own workspace (useful for long content)
 - `--html` — format body as HTML instead of plain text
 
 This writes a structured file that the scheduler picks up for delivery. The scheduler adds proper threading headers so the reply appears in the same email thread.
 
-For long email bodies, write the body to a temp file first and use `--body-file`:
+For long email bodies, write the body to a file in your own workspace and use `--body-file`. It has to be your workspace: the bytes leave as an outgoing message, so `--body-file` is scoped to `{workspace}` and will refuse `/tmp` or a Talk attachment.
 
 ```bash
-# Write body to temp file, then use --body-file
-cat > /tmp/email_body.txt << 'BODY'
+# Write the body to a file under your workspace, then use --body-file
+cat > {workspace}/email_body.txt << 'BODY'
 The full email content goes here.
 Multiple paragraphs, quotes, etc.
 BODY
-istota-skill email output --subject "Subject" --body-file /tmp/email_body.txt
+istota-skill email output --subject "Subject" --body-file {workspace}/email_body.txt
 ```
 
 **When to use HTML:** Use `--html` when the content benefits from rich formatting (tables, styled sections, links). For simple text responses, use plain text (the default).

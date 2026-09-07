@@ -98,16 +98,11 @@ class Entry:
 REGISTRY: dict[tuple[str, str, str], Entry] = {
     # -- Scoped: the path goes through the shared allowlist ------------------
     #
-    # One entry left. Everything that used to be here is *stamped* now — the
-    # disposition is on the argument, in the parser, and `stamps()` below reads
-    # it back. `memory_search index file` is the last argument scoped by a
-    # guard rather than by a declaration, and it is stage 5 of the spec.
-    ("memory_search", "index.file", "path"): Entry(
-        SCOPED, guard="istota.skills.memory_search.cmd_index_file",
-        helper="resolve_in_roots",
-        note="the shared rule over `env_host_roots(talk=False)`: the indexed "
-             "content comes back through `search`, so Talk is not a root",
-    ),
+    # Empty. Every argument that was here is *stamped* now — the disposition
+    # is on the argument, in the parser, and `stamps()` below reads it back.
+    # `SCOPED` survives as a disposition because an argument a stamp cannot
+    # reach may still be scoped by a guard; `UNSCOPED` does not survive its
+    # last entry, which is the difference between a record and an invitation.
 
     # -- Remote: the path names somewhere else -------------------------------
     ("nextcloud", "share.list", "path"): Entry(REMOTE, note="Nextcloud path"),
@@ -157,46 +152,14 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
         note="host write: attachments are saved into any directory named. The "
              "docstring on cmd_attachments says 'scoped' and nothing scopes it.",
     ),
-    ("email", "send", "body_file"): Entry(
-        UNSCOPED, note="host read: any file becomes the body of an outgoing message",
-    ),
-    ("email", "reply", "body_file"): Entry(
-        UNSCOPED, note="host read: any file becomes the body of an outgoing message",
-    ),
-    ("email", "reply-all", "body_file"): Entry(
-        UNSCOPED, note="host read: any file becomes the body of an outgoing message",
-    ),
-    ("email", "output", "body_file"): Entry(
-        UNSCOPED, note="host read: any file becomes the body of a deferred reply",
-    ),
-    ("health", "upload", "file_path"): Entry(
-        UNSCOPED,
-        note="host read. Sandboxed it defers, and scheduler_deferred."
-             "_source_path_allowed scopes the replay; unsandboxed it reads the "
-             "path here with nothing in front of it.",
-    ),
-    ("health", "import-csv", "file_path"): Entry(
-        UNSCOPED, note="host read; same deferred-only scoping as `upload`",
-    ),
-    ("health", "attach-document", "path"): Entry(
-        UNSCOPED, note="host read; same deferred-only scoping as `upload`",
-    ),
     ("health", "import-immunizations", "paste"): Entry(
-        UNSCOPED, note="host read: a leading @ makes the value a path to read",
-    ),
-    ("money", "import-csv", "file"): Entry(UNSCOPED, note="host read"),
-    ("money", "portfolio.import", "file"): Entry(UNSCOPED, note="host read"),
-    ("nextcloud", "files.upload", "local"): Entry(
-        UNSCOPED, note="host read: any host file is uploaded to Nextcloud",
+        NOT_A_PATH,
+        note="literal text. `@PATH` used to make it a path and no longer "
+             "does: a leading @ is refused with a message naming "
+             "--paste-file, which is the stamped read.",
     ),
     ("nextcloud", "files.download", "local"): Entry(
         UNSCOPED, note="host write: the download lands wherever this names",
-    ),
-    ("transcribe", "ocr", "image_path"): Entry(
-        UNSCOPED, note="host read; the OCR text comes back to the caller",
-    ),
-    ("whisper", "transcribe", "audio_path"): Entry(
-        UNSCOPED, note="host read; the transcript comes back to the caller",
     ),
 }
 
@@ -353,7 +316,7 @@ def test_no_argument_is_both_stamped_and_registered():
 def test_the_stamps_reach_the_arguments_they_are_meant_to_cover():
     """A stamp walk over an empty set accounts for everything, vacuously."""
     found = stamps()
-    assert len(found) >= 14, sorted(found)
+    assert len(found) >= 28, sorted(found)
     for key in [
         ("browse", "screenshot", "output"),
         ("kv", "set", "value_file"),
@@ -362,6 +325,12 @@ def test_the_stamps_reach_the_arguments_they_are_meant_to_cover():
         ("health", "export-csv", "output"),
         ("code_review", "run", "worktree"),
         ("email", "send", "attach"),
+        ("email", "send", "body_file"),
+        ("health", "import-csv", "file_path"),
+        ("memory_search", "index.file", "path"),
+        ("money", "portfolio.import", "file"),
+        ("nextcloud", "files.upload", "local"),
+        ("whisper", "transcribe", "audio_path"),
     ]:
         assert key in found, f"{key} carries no stamp"
 

@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from istota.skills._cli import parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import READ, host_path
 from istota.skills.whisper.models import (
     download_model,
     get_available_memory_gb,
@@ -108,7 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # transcribe command
     tr = sub.add_parser("transcribe", help="Transcribe an audio file")
-    tr.add_argument("audio_path", help="Path to audio file")
+    # The transcript comes back to whoever called, inside the task, so this is
+    # the task's whole working context — including `{mount}/Talk`, which is
+    # where a Talk voice message lands. `out_of_process.py` is the daemon-side
+    # caller and has to pass the task identity for any of it to resolve.
+    host_path(tr, "audio_path", mode=READ, help="Path to audio file")
     tr.add_argument(
         "--model",
         default="auto",

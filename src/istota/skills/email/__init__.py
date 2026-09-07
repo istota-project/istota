@@ -1986,7 +1986,12 @@ def _write_deferred_sent_email(message_id: str, to_addr: str, subject: str) -> N
 
 
 def _read_body(args) -> str:
-    """Resolve an email body from --body / --body-file, raising if neither set."""
+    """Resolve an email body from --body / --body-file, raising if neither set.
+
+    `body_file` is stamped `EGRESS`, so what reaches here is already the
+    resolved path under the sender's own workspace — the bytes become an
+    outgoing message, which is the one thing `EGRESS` names.
+    """
     if getattr(args, "body_file", None):
         body = Path(args.body_file).read_text()
     else:
@@ -2511,7 +2516,10 @@ def build_parser():
     p_send.add_argument("--to", required=True, help="Recipient email address")
     p_send.add_argument("--subject", required=True, help="Email subject")
     p_send.add_argument("--body", help="Email body text")
-    p_send.add_argument("--body-file", help="Read body from file (for large content)")
+    host_path(
+        p_send, "--body-file", mode=EGRESS,
+        help="Read the body from a file in your own workspace",
+    )
     p_send.add_argument("--html", action="store_true", help="Send as HTML email")
     p_send.add_argument("--cc", help="Cc recipients (comma-separated)")
     p_send.add_argument("--bcc", help="Bcc recipients (comma-separated; never transmitted in headers)")
@@ -2526,7 +2534,10 @@ def build_parser():
         p_reply = sub.add_parser(verb, help=f"{verb.capitalize()} to a fetched message (threaded)")
         p_reply.add_argument("id", help="Email UID to reply to")
         p_reply.add_argument("--body", help="Reply body text")
-        p_reply.add_argument("--body-file", help="Read body from file")
+        host_path(
+            p_reply, "--body-file", mode=EGRESS,
+            help="Read the body from a file in your own workspace",
+        )
         p_reply.add_argument("--html", action="store_true", help="Send as HTML")
         host_path(
             p_reply, "--attach", mode=EGRESS, action="append",
@@ -2551,7 +2562,10 @@ def build_parser():
     p_output = sub.add_parser("output", help="Write email response for scheduler delivery")
     p_output.add_argument("--subject", help="Email subject (optional for replies)")
     p_output.add_argument("--body", help="Email body text")
-    p_output.add_argument("--body-file", help="Read body from file (for large content)")
+    host_path(
+        p_output, "--body-file", mode=EGRESS,
+        help="Read the body from a file in your own workspace",
+    )
     p_output.add_argument("--html", action="store_true", help="Send as HTML email")
 
     return parser

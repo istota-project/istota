@@ -107,12 +107,13 @@ class Case:
     a module attribute for a skill whose `main` builds its command table from
     module globals, and a `(dict, key)` pair for one whose table is built at
     import — `devbox._DISPATCH` is the second kind, and patching the function
-    it already captured would record nothing.
+    it already captured would record nothing. The key of such a dict need not
+    be a string: `nextcloud._COMMANDS` is keyed on `(group, command)`.
     """
 
     argv: Callable[[str], list[str]]
     main: str
-    patch: tuple[str, str]
+    patch: tuple[str, object]
 
 
 CASES: dict[tuple[str, str, str], Case] = {
@@ -174,12 +175,87 @@ CASES: dict[tuple[str, str, str], Case] = {
         main="istota.skills.email",
         patch=("istota.skills.email", "cmd_reply"),
     ),
+
+    # -- Stage 5: the reads ------------------------------------------------- #
+    ("email", "send", "body_file"): Case(
+        argv=lambda p: [
+            "send", "--to", "someone@example.com", "--subject", "hi",
+            "--body-file", p,
+        ],
+        main="istota.skills.email",
+        patch=("istota.skills.email", "cmd_send"),
+    ),
+    ("email", "reply", "body_file"): Case(
+        argv=lambda p: ["reply", "17", "--body-file", p],
+        main="istota.skills.email",
+        patch=("istota.skills.email", "cmd_reply"),
+    ),
+    ("email", "reply-all", "body_file"): Case(
+        argv=lambda p: ["reply-all", "17", "--body-file", p],
+        main="istota.skills.email",
+        patch=("istota.skills.email", "cmd_reply"),
+    ),
+    ("email", "output", "body_file"): Case(
+        argv=lambda p: ["output", "--subject", "S", "--body-file", p],
+        main="istota.skills.email",
+        patch=("istota.skills.email", "cmd_output"),
+    ),
+    ("health", "upload", "file_path"): Case(
+        argv=lambda p: ["upload", p, "--drawn-at", "2026-01-02"],
+        main="istota.skills.health",
+        patch=("istota.skills.health", "cmd_upload"),
+    ),
+    ("health", "import-csv", "file_path"): Case(
+        argv=lambda p: ["import-csv", p],
+        main="istota.skills.health",
+        patch=("istota.skills.health", "cmd_import_csv"),
+    ),
+    ("health", "attach-document", "path"): Case(
+        argv=lambda p: ["attach-document", "--path", p, "--to", "encounter:42"],
+        main="istota.skills.health",
+        patch=("istota.skills.health", "cmd_attach_document"),
+    ),
+    ("health", "import-immunizations", "paste_file"): Case(
+        argv=lambda p: ["import-immunizations", "--paste-file", p, "--dry-run"],
+        main="istota.skills.health",
+        patch=("istota.skills.health", "cmd_import_immunizations"),
+    ),
+    ("memory_search", "index.file", "path"): Case(
+        argv=lambda p: ["index", "file", p],
+        main="istota.skills.memory_search",
+        patch=("istota.skills.memory_search", "cmd_index_file"),
+    ),
+    ("money", "import-csv", "file"): Case(
+        argv=lambda p: ["import-csv", p, "--account", "checking"],
+        main="istota.skills.money",
+        patch=("istota.skills.money", "cmd_import_csv"),
+    ),
+    ("money", "portfolio.import", "file"): Case(
+        argv=lambda p: ["portfolio", "import", p],
+        main="istota.skills.money",
+        patch=("istota.skills.money", "cmd_portfolio_import"),
+    ),
+    ("nextcloud", "files.upload", "local"): Case(
+        argv=lambda p: ["files", "upload", p, "/Users/alice/uploaded.bin"],
+        main="istota.skills.nextcloud",
+        patch=("istota.skills.nextcloud._COMMANDS", ("files", "upload")),
+    ),
+    ("transcribe", "ocr", "image_path"): Case(
+        argv=lambda p: ["ocr", p],
+        main="istota.skills.transcribe",
+        patch=("istota.skills.transcribe", "cmd_ocr"),
+    ),
+    ("whisper", "transcribe", "audio_path"): Case(
+        argv=lambda p: ["transcribe", p],
+        main="istota.skills.whisper.cli",
+        patch=("istota.skills.whisper.cli", "cmd_transcribe"),
+    ),
 }
 
 #: How many resolving stamps this file expects to find at the very least.
 #: A parametrization that shrinks is a green run, so the count is asserted
 #: rather than trusted — the same reason the coverage walk asserts a floor.
-STAMP_FLOOR = 11
+STAMP_FLOOR = 25
 
 
 def _skill_parser_modules() -> dict[str, str]:
@@ -519,6 +595,22 @@ class TestTheModeDecidesTheRoots:
         source.write_bytes(b"payload")
         run, recorder = drive(key, source)
         assert not recorder.called, f"{key} mailed a file from a channel dir"
+
+    @pytest.mark.parametrize("key", _params(_keys_for(EGRESS)))
+    def test_egress_refuses_the_deferred_directory(self, key, mount, drive):
+        """The third root `OWN` drops, and the one a reader forgets.
+
+        `memory_search index file` had it before stage 5 and no longer does.
+        The deferred dir is the task's own scratch space — a `READ` and a
+        `WRITE` both reach it — but a file in it is as fit to be mailed out
+        or indexed as anything else the task wrote, which is the question
+        `EGRESS` answers rather than where the bytes currently sit.
+        """
+        source = mount.deferred / "scratch.bin"
+        source.write_bytes(b"payload")
+        run, recorder = drive(key, source)
+        assert not recorder.called, f"{key} took a file from the deferred dir"
+        assert run.envelope.get("reason") == "host_path_refused", run.envelope
 
     @pytest.mark.parametrize("key", _params(_keys_for(EGRESS)))
     def test_egress_still_admits_the_users_own_workspace(

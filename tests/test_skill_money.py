@@ -259,6 +259,23 @@ class TestCommandDispatch:
         with patch("istota.skills.money._run", side_effect=fake_run):
             yield captured
 
+    @pytest.fixture
+    def positions_csv(self, tmp_path, monkeypatch):
+        """A CSV where `portfolio import` is allowed to read one.
+
+        `file` is stamped `READ` (ISSUE-447): the CLI runs host-side with the
+        daemon's filesystem view, so the path is resolved against the roots
+        the environment names before any dispatch. The value the handler
+        splices into the moneyman argv is therefore the *resolved* path.
+        """
+        workspace = tmp_path / "mount" / "Users" / "alice"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(tmp_path / "mount"))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        path = workspace / "pos.csv"
+        path.write_text("symbol,quantity\nVTI,10\n")
+        return path
+
     def test_list(self, captured):
         from istota.skills.money import main
 
@@ -338,22 +355,39 @@ class TestCommandDispatch:
         assert "--no-match-invoices" in args
         assert "--tolerance" in args and "5.0" in args
 
-    def test_portfolio_import(self, captured):
+    def test_portfolio_import(self, captured, positions_csv):
         from istota.skills.money import main
 
-        main(["portfolio", "import", "/tmp/pos.csv", "--source",
+        main(["portfolio", "import", str(positions_csv), "--source",
               "fidelity-positions-csv", "--dry-run"])
         args = captured[-1]
-        assert args[:3] == ["portfolio", "import", "/tmp/pos.csv"]
+        assert args[:3] == [
+            "portfolio", "import", str(positions_csv.resolve()),
+        ]
+        # A string, not a `Path`: `_run` splices it into a `CliRunner` argv,
+        # which takes a sequence of strings.
+        assert isinstance(args[2], str)
         assert "--source" in args and "fidelity-positions-csv" in args
         assert "--dry-run" in args
 
-    def test_portfolio_import_replace(self, captured):
+    def test_portfolio_import_replace(self, captured, positions_csv):
         from istota.skills.money import main
 
-        main(["portfolio", "import", "/tmp/pos.csv", "--replace", "3"])
+        main(["portfolio", "import", str(positions_csv), "--replace", "3"])
         args = captured[-1]
         assert "--replace" in args and "3" in args
+
+    def test_portfolio_import_refuses_a_path_outside_the_workspace(
+        self, captured, positions_csv, tmp_path,
+    ):
+        from istota.skills.money import main
+
+        outside = tmp_path / "elsewhere.csv"
+        outside.write_text("symbol,quantity\nVTI,10\n")
+        with pytest.raises(SystemExit) as exc:
+            main(["portfolio", "import", str(outside)])
+        assert exc.value.code == 1
+        assert captured == []
 
     def test_portfolio_autoclass(self, captured):
         from istota.skills.money import main

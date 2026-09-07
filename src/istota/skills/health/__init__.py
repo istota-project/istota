@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
-from istota.skills._hostpath import WRITE, host_path
+from istota.skills._hostpath import READ, WRITE, host_path
 
 
 _DEFER_FILENAME = "task_{task_id}_health_ops.json"
@@ -453,10 +453,18 @@ def cmd_upload(args: argparse.Namespace) -> None:
     The sandboxed Claude process can't move files into the uploads
     directory directly, so callers point at a workspace-relative path and
     the scheduler relocates it during deferred processing.
+
+    `file_path` is stamped `READ`, so it arrives resolved and inside the
+    caller's own roots. That is what the existence probe this used to open
+    with cost: `exists()` before the deferral answered "is there a file at
+    this path" for any path on the host, which is an oracle over the whole
+    filesystem for a verb that never reads the bytes. Resolution establishes
+    existence too, and refuses before dispatch — so the probe is gone rather
+    than moved. What the op carries is likewise the *resolved* path, so the
+    replay re-resolves a string this CLI already contained instead of an
+    attacker-chosen one (ISSUE-447).
     """
     path = Path(args.file_path)
-    if not path.exists():
-        _fail(f"file not found: {path}")
     op = {
         "op": "register_upload",
         "drawn_at": args.drawn_at,
@@ -594,9 +602,12 @@ def cmd_attach_document(args: argparse.Namespace) -> None:
     (the same shape ``upload`` uses for ``register_upload``).
     """
     entity_type, entity_id = _parse_entity_ref(args.to)
+    # Stamped `READ`, so this is the resolved path and it exists. The
+    # regular-file check stays: resolution establishes existence, not
+    # regular-ness — `exists()` is true of a directory and of a FIFO, and the
+    # workspace is bound read-write into the sandbox, so a model-made fifo
+    # would otherwise be filed as a document and read by the scheduler.
     path = Path(args.path)
-    if not path.exists():
-        _fail(f"file not found: {path}")
     if not path.is_file():
         _fail(f"not a regular file: {path}")
 
@@ -743,10 +754,11 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
     In sandbox mode the read + parse happens here (CLI is allowed to read
     files), but the writes are deferred so the scheduler applies them
     against the per-user health DB outside the sandbox.
+
+    `file_path` is stamped `READ`; see `cmd_upload` for what the existence
+    probe that used to stand here was doing and why resolution replaces it.
     """
     path = Path(args.file_path)
-    if not path.exists():
-        _fail(f"file not found: {path}")
     op = {
         "op": "import_csv",
         "source_path": str(path),
@@ -1594,16 +1606,34 @@ def cmd_coverage(args: argparse.Namespace) -> None:
 
 
 def cmd_import_immunizations(args: argparse.Namespace) -> None:
+    """Parse an EHR paste into immunization rows.
+
+    `--paste @PATH` used to mean "read the paste from this file", which was
+    the one inline host read in this skill: it happened here, before any
+    deferral, on every deployment shape, and `--dry-run` handed the parsed
+    content back to the caller. A path hidden inside a value argparse
+    delivers as a string is also invisible to every enumeration of path
+    arguments in the tree, so the read moved to `--paste-file`, where it
+    carries a `READ` stamp and is resolved before dispatch (ISSUE-447).
+
+    `--paste` now **refuses** a leading `@` rather than taking it as text.
+    Reading it literally would import the string `@/etc/passwd` as an
+    immunization record and report success, which is worse than either the
+    old behaviour or a refusal.
+    """
     from istota.health import db as health_db
     from istota.health.parser import parse_paste
 
-    raw = args.paste
-    if raw.startswith("@"):
-        # @path means: read the paste from this file.
-        src = Path(raw[1:])
-        if not src.is_file():
-            _fail(f"paste file not found: {src}")
-        raw = src.read_text(encoding="utf-8")
+    if args.paste_file and args.paste:
+        _fail("pass --paste or --paste-file, not both")
+    if args.paste_file:
+        raw = Path(args.paste_file).read_text(encoding="utf-8")
+    else:
+        raw = args.paste
+        if not raw:
+            _fail("one of --paste (literal text) or --paste-file is required")
+        if raw.startswith("@"):
+            _fail("pass --paste-file for a file; --paste takes literal text")
 
     conn = _connect()
     try:
@@ -1824,7 +1854,7 @@ def build_parser() -> argparse.ArgumentParser:
     trend.add_argument("--until")
 
     upload = sub.add_parser("upload", help="Register a file as a draft panel source")
-    upload.add_argument("file_path")
+    host_path(upload, "file_path", mode=READ)
     upload.add_argument("--drawn-at", dest="drawn_at", required=True)
     upload.add_argument("--lab")
 
@@ -1832,7 +1862,7 @@ def build_parser() -> argparse.ArgumentParser:
         "import-csv",
         help="Import a bloodwork CSV (Date,Lab,Marker (unit) layout)",
     )
-    import_csv.add_argument("file_path")
+    host_path(import_csv, "file_path", mode=READ)
 
     export_csv = sub.add_parser(
         "export-csv",
@@ -2041,8 +2071,17 @@ def build_parser() -> argparse.ArgumentParser:
         "import-immunizations",
         help="Parse an EHR/MyChart paste; --dry-run previews, --confirm writes",
     )
-    imp.add_argument("--paste", required=True,
-                     help="Multi-line paste; @PATH reads from a file")
+    # Exactly one of the two, checked in the handler rather than by argparse:
+    # a missing required argument is usage text on stderr and exit 2, where
+    # every other refusal this CLI produces is one JSON envelope on stdout.
+    imp.add_argument(
+        "--paste",
+        help="Multi-line paste of literal text; use --paste-file for a file",
+    )
+    host_path(
+        imp, "--paste-file", mode=READ,
+        help="Read the paste from a file in your own workspace",
+    )
     imp.add_argument("--dry-run", action="store_true", dest="dry_run")
     imp.add_argument("--confirm", action="store_true")
 
@@ -2068,8 +2107,9 @@ def build_parser() -> argparse.ArgumentParser:
         "attach-document",
         help="File a workspace file against a health record",
     )
-    attach_p.add_argument(
-        "--path", required=True, help="Path to the file to attach",
+    host_path(
+        attach_p, "--path", mode=READ, required=True,
+        help="Path to the file to attach",
     )
     attach_p.add_argument(
         "--to", required=True, metavar="TYPE:ID",

@@ -2255,6 +2255,29 @@ class TestPreTranscribeAttachments:
         assert mock_transcribe.call_args[0][0] == "/tmp/voice.mp3"
 
     @patch(_TRANSCRIBE_PATCH)
+    def test_the_task_identity_is_handed_to_the_runner(self, mock_transcribe):
+        """The child is a skill CLI and its path argument is scoped.
+
+        `whisper transcribe` resolves `audio_path` against the allowlist the
+        *child's* environment names (ISSUE-447), so the daemon has to say who
+        the task belongs to. Without it the child's allowlist is empty, every
+        path is refused, and the failure is logged at debug and swallowed —
+        which is what makes this worth pinning at the call rather than
+        leaving to the runner's own tests.
+        """
+        mock_transcribe.return_value = {"status": "ok", "text": "call the plumber"}
+        _pre_transcribe_attachments(
+            ["/mnt/shared/Users/alice/voice.mp3"], "",
+            user_id="alice",
+            mount_path="/mnt/shared",
+            deferred_dir="/tmp/istota/alice",
+        )
+        kwargs = mock_transcribe.call_args.kwargs
+        assert kwargs["user_id"] == "alice"
+        assert kwargs["mount_path"] == "/mnt/shared"
+        assert kwargs["deferred_dir"] == "/tmp/istota/alice"
+
+    @patch(_TRANSCRIBE_PATCH)
     def test_empty_prompt_becomes_the_transcript(self, mock_transcribe):
         """A voice memo sent with nothing typed: the transcript is the prompt."""
         mock_transcribe.return_value = {"status": "ok", "text": "call the plumber"}
@@ -2394,7 +2417,7 @@ class TestPreTranscriptionStaysOutOfTheDaemon:
     def test_files_after_the_budget_runs_out_are_skipped_and_earlier_text_kept(
         self, monkeypatch,
     ):
-        def eat_the_budget(path, timeout=None):
+        def eat_the_budget(path, timeout=None, **identity):
             # First file consumes the whole budget, as a wedged child would.
             if path.endswith("a.mp3"):
                 _clock[0] += _PRE_TRANSCRIBE_TOTAL_TIMEOUT_SECONDS + 1

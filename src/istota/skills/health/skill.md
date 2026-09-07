@@ -108,8 +108,9 @@ istota-skill health coverage                              # status per ref
 istota-skill health coverage --due-soon                   # filter
 istota-skill health coverage --overdue
 
-istota-skill health import-immunizations --paste @clipboard.txt --dry-run
-istota-skill health import-immunizations --paste @clipboard.txt --confirm
+istota-skill health import-immunizations --paste-file /Users/{user_id}/inbox/vaccines.txt --dry-run
+istota-skill health import-immunizations --paste-file /Users/{user_id}/inbox/vaccines.txt --confirm
+istota-skill health import-immunizations --paste "Influenza (Given 11/28/2025)" --dry-run
 
 istota-skill health explain-immunization Influenza        # educational primer
 
@@ -190,7 +191,7 @@ Use canonical names where possible (`Hemoglobin`, `LDL`, `HDL`, `Cholesterol_Tot
 | "Give me a summary for my new doctor" | `history-summary` |
 | "Got my flu shot today" | `add-immunization --name Influenza --date 2026-05-16` |
 | "Tdap booster 2 weeks ago at the pharmacy" | `add-immunization --name Tdap --date 2026-05-02 --facility "pharmacy"` |
-| "Here's my MyChart vaccine list: …" | `import-immunizations --paste @inline --dry-run` then `--confirm` after the user reviews the parsed rows |
+| "Here's my MyChart vaccine list: …" | `import-immunizations --paste "…" --dry-run` then `--confirm` after the user reviews the parsed rows |
 | "Am I due for anything?" | `coverage --due-soon` and `coverage --overdue` |
 | "When was my last tetanus?" | `immunizations --name Tdap --limit 1` |
 | "What's the deal with Shingrix?" | `explain-immunization Shingles` |
