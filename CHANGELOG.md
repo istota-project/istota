@@ -111,6 +111,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Fixed
 
+- Pressing Enter to pick an account while editing a transaction no longer saves the transaction along with it. The edit form committed on Enter from anywhere on the page, so confirming an option in the account dropdown selected it and closed the form in one keystroke, with whatever was in the other fields at the time. Every other money form already withheld Enter from anything that is not a text field.
+
 - A portfolio page that fails to load now says so in the failure colour. Overview and History under Money → Portfolio rendered their error message in the same dim grey as the "Loading…" placeholder it stands in for, so a page that had given up looked like one still working. Every other page in the app already had this right; the check that holds them to it was only looking for the right box and not for the colour on it, which is why these two went unnoticed.
 
 - Nextcloud answering with something other than the reply Istota asked for — an error page from a proxy in front of it, an empty body, a response from an endpoint that is not the one configured — no longer reads as "nothing there". A message poll reported no new messages, a room's participant list came back empty, and a sign-in Nextcloud declined to describe was refused as "user not configured" rather than as an identity provider that could not be reached. Each of those now names the status, the content type and the first part of what actually came back. Where the answer was only ever best-effort — copying a web message into a Talk room, for instance — the old result still stands and the reason goes to the log instead.
