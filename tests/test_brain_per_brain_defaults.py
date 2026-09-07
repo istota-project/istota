@@ -496,11 +496,10 @@ class TestTheTmuxBrainBorrowsOnlyModelAndEffort:
     """
 
     def test_it_reads_only_model_and_effort_off_its_config(self):
-        import inspect
-
         from istota.brain import claude_code as cc
+        from tests.support.drift import source_of
 
-        source = inspect.getsource(cc.ClaudeCodeBrain)
+        source = source_of(cc.ClaudeCodeBrain)
         read = set(re.findall(r'self\._config,\s*"([a-z_]+)"', source))
         read |= set(re.findall(r"self\._config\.([a-z_]+)", source))
         assert read <= {"model", "effort"}, (

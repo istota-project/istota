@@ -195,11 +195,12 @@ class TestTheSharedTranscriptTupleIsNotWidenedForOneConsumer:
         # dropped also folds the implicit string concatenation into the one SQL
         # string the database actually receives.
         import ast
-        import inspect
         import textwrap
 
+        from tests.support.drift import source_of
+
         fn = db._migrate_nonconversational_transcript_cleanup
-        node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
+        node = ast.parse(textwrap.dedent(source_of(fn))).body[0]
         body = node.body
         if ast.get_docstring(node) is not None:
             body = body[1:]

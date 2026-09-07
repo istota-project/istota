@@ -25,6 +25,14 @@
 #     the 39 tests that exercise it sit right there. So any non-Python change
 #     falls back to the full suite rather than being trusted to testmon.
 #
+#   * **A test that reads source instead of running it is invisible too.**
+#     A drift guard asserting against `inspect.getsource(...)` executes none of
+#     the lines it reads, so testmon recorded no dependency on them and this
+#     wrapper never selected one -- green because it did not run (ISSUE-459).
+#     The guards read through `tests/support/drift.py`'s `source_of` instead,
+#     which registers the range with testmon from `tests/conftest.py`. Nothing
+#     here has to know about it: the selection is testmon's again.
+#
 #   * **An extensionless source file used to crash testmon outright.**
 #     `tests/test_devbox_exec_server.py` imports
 #     `docker/devbox/scripts/istota-exec-serve` in-process, and that program

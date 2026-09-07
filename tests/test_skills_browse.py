@@ -1181,11 +1181,12 @@ class TestTheDeadHttpStatusErrorBranchIsGone:
         # why raise_for_status() is the wrong tool here, and a substring scan
         # would fail on the explanation.
         import ast
-        import inspect
 
         import istota.skills.browse as browse
 
-        tree = ast.parse(inspect.getsource(browse))
+        from tests.support.drift import source_of
+
+        tree = ast.parse(source_of(browse))
 
         handled = [
             ast.unparse(h.type)

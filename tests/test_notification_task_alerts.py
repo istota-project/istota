@@ -134,9 +134,9 @@ class TestNoLinkEver:
         The rule is unconditional, so it can be asserted against the source of
         the resolve method rather than against a sample of inputs.
         """
-        import inspect
+        from tests.support.drift import source_of
 
-        body = inspect.getsource(task_alert.TaskAlertResolver.resolve)
+        body = source_of(task_alert.TaskAlertResolver.resolve)
         assert "link=None" in body
         assert "LINK" not in body
         assert "href" not in body

@@ -65,7 +65,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import inspect
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -77,6 +76,7 @@ from istota.skills._hostpath import (
     click_stamped,
     stamped,
 )
+from tests.support.drift import source_of
 
 REPO = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO / "src" / "istota" / "skills"
@@ -539,7 +539,7 @@ def test_a_scoped_entry_names_a_guard_that_calls_its_helper(key):
     """
     entry = REGISTRY[key]
     assert entry.guard and entry.helper, key
-    source = inspect.getsource(_resolve(entry.guard))
+    source = source_of(_resolve(entry.guard))
     # The open paren is load-bearing: a bare name match is satisfied by the
     # function-scope `from istota.skill_host_paths import resolve_host_path`
     # several of these guards carry, so deleting the call and leaving the

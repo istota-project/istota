@@ -463,20 +463,18 @@ class TestNoDirectTalkClientInLogPath:
     TalkTransport.resolve_channel_name."""
 
     def test_log_channel_consumer_has_no_direct_talk_client(self):
-        import inspect
-
         from istota.consumers import log_channel
+        from tests.support.drift import source_of
 
-        src = inspect.getsource(log_channel)
+        src = source_of(log_channel)
         assert "get_talk_client" not in src
         assert ".send_message(" not in src
 
     def test_finalize_log_channel_has_no_direct_talk_client(self):
-        import inspect
-
         from istota.scheduler import _finalize_log_channel
+        from tests.support.drift import source_of
 
-        src = inspect.getsource(_finalize_log_channel)
+        src = source_of(_finalize_log_channel)
         assert "get_talk_client" not in src
         assert ".send_message(" not in src
 

@@ -1160,14 +1160,13 @@ class TestPathPrependOrdering:
 
     def test_reserved_key_is_not_merged_into_env(self):
         """The hook loop skips it, so it cannot ride into proxy_base_env."""
-        import inspect
-
         from istota import task_env
+        from tests.support.drift import source_of
 
         # Reads `build_task_runtime` rather than `execute_task`: the env
         # assembly moved to `task_env` whole, and the ordering it guards moved
         # with it. Same two statements, same order, one function along.
-        src = inspect.getsource(task_env.build_task_runtime)
+        src = source_of(task_env.build_task_runtime)
         assert "if k == HOOK_PATH_PREPEND_KEY:" in src
         # ...and the application site is after the snapshot, not before.
         # Anchored on the assignment target rather than its right-hand side:

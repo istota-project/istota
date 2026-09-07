@@ -14,7 +14,7 @@ from .support.env_isolation import (
     SUITE_ENV_DEFAULTS,
     scrubbed_env_names,
 )
-from .support import testmon_compat
+from .support import drift, testmon_compat
 
 # At import, and this file is the right place for it in both directions.
 # Early enough: testmon reaches the patched method from `pytest_configure`
@@ -26,6 +26,14 @@ from .support import testmon_compat
 # dies with every test already passed. A no-op when testmon is not installed.
 # See `tests/support/testmon_compat.py`.
 testmon_compat.install()
+
+# Installed here for the same reason, at a different testmon seam. A guard
+# asserting against a function's source text executes none of the lines it
+# reads, so testmon records no dependency on them and `scripts/qt` never
+# selects it (ISSUE-459). `source_of` records what was read; this patches the
+# collector to store it. Also a no-op when testmon is not installed.
+# See `tests/support/drift.py`.
+drift.install()
 
 
 def _load_dotenv():

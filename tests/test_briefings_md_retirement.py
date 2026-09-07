@@ -575,11 +575,10 @@ class TestTheBootPath:
         user's briefing. Read by text — this fails loudly (no match, no test)
         rather than drifting.
         """
-        import inspect
-
         from istota import scheduler
+        from tests.support.drift import source_of
 
-        src = inspect.getsource(scheduler.run_daemon)
+        src = source_of(scheduler.run_daemon)
         seed = src.index("import_from_user_configs(")
         workspace = src.index("import_from_workspace_files(")
         apply = src.index("_apply_user_briefings(config)")

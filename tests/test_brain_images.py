@@ -479,11 +479,10 @@ class TestTmuxPromptFile:
 
     def test_the_brain_writes_that_text_to_the_prompt_file(self, tmp_path):
         """One file, one bracketed paste — the directive rides in, not beside."""
-        import inspect
-
         from istota.brain import tmux_claude
+        from tests.support.drift import source_of
 
-        src = inspect.getsource(tmux_claude.TmuxClaudeBrain)
+        src = source_of(tmux_claude.TmuxClaudeBrain)
         assert "prompt_file.write_text(prompt_file_text(req)" in src
         # Still exactly one load-buffer submission per run.
         assert src.count('self._tmux("load-buffer"') <= 1
