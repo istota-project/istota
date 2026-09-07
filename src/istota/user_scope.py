@@ -20,15 +20,26 @@ against it), ``executor.image_bind_roots``, ``executor.get_user_repos_dir``,
 ``skill_host_paths.workspace_roots`` (the one derivation behind every
 host-path allowlist since ISSUE-447, which is why ``_indexable_roots`` is no
 longer in this list — it was a second copy and is deleted),
-``Config.workspace_root`` and the ``memory`` skill's ``_user_id``, plus
-``db.create_task`` on the lexical half. **Three hand-rolled copies of the same equality deliberately remain**,
-and each keeps a rule this function has no room for:
-``executor.get_task_control_dir`` adds a casefold test against
-``.control``, ``executor.daemon_work_dir`` uses the shared root itself as its
-refusal signal, and ``skill_host_paths.developer_repos_root`` validates a leaf
-it was handed rather than a root plus a component. Converting them is a
-separate change; naming them here is what stops this docstring claiming more
-than it holds.
+``Config.workspace_root``, ``executor._daemon_dirs``,
+``repos_relocate._contained``, ``sandbox_cache_sweeper``'s two candidate
+scans, the ``developer`` skill's ``_user_repos_dir`` and the ``memory``
+skill's ``_user_id``, plus ``db.create_task`` on the lexical half.
+
+**Two hand-rolled copies of the same equality deliberately remain**, and each
+keeps a rule this function has no room for.
+``skill_host_paths.developer_repos_root`` validates a leaf it was handed
+rather than a root plus a component — there is no configured root in a skill
+subprocess to check it against.
+
+``executor.get_task_control_dir`` is the one that would be a **widening**, and
+it is worth being exact about, because it reads like the most obvious
+conversion in the tree. Its root is ``{temp_dir}/.control`` with the last
+component deliberately left unresolved, and it compares
+``candidate.resolve()`` against ``root / user_id`` *as spelled*. This function
+compares against ``root.resolve() / user_id``, so a symlink planted at
+``.control`` moves both sides of the equality and the check passes — a control
+root pointing anywhere on disk, holding every task's assembled prompt. Read
+both docstrings before folding that one in.
 
 **Two checks, because neither catches the other's cases**, and the pair is the
 whole content of the function. The lexical one refuses a component that never
@@ -120,3 +131,50 @@ def scoped_user_dir(root: Path | str | None, user_id: object) -> Path | None:
     except (OSError, RuntimeError, TypeError, ValueError):
         return None
     return candidate if contained else None
+
+
+def is_within(child: Path, root: Path) -> bool:
+    """``child`` is ``root`` itself, or sits beneath it.
+
+    **Lexical, and the caller resolves first.** ``{root}/..`` is "within"
+    ``root`` by this test and names the root's parent on disk, so a caller that
+    hands over an unresolved path has asked a question about spelling rather
+    than about containment. Every caller here resolves both sides before
+    asking, each with the resolution discipline its own boundary needs —
+    ``Path.resolve()`` where the paths exist, ``os.path.realpath`` where one of
+    them is a rename target that does not yet. Taking a ``resolve=`` keyword
+    instead would put that choice in the hands of whoever writes the next call
+    site, and the wrong default is a widened boundary rather than a wrong
+    answer.
+
+    **The root itself counts as within it.** ``Path.is_relative_to`` already
+    answers ``True`` for two equal paths, which is why the ``a == b or
+    a.is_relative_to(b)`` spelling this replaces at four sites was a redundant
+    first term rather than a different rule. Stated here so a reader does not
+    add the term back on the assumption that it does something.
+
+    Never raises, for anything: a ``None``, a non-path, an embedded NUL. The
+    callers are ``worktree_reaper``, ``repos_relocate``, ``doctor`` and
+    ``sandbox_cache_sweeper``, each of which promises never to raise out of its
+    own entry point, and a containment predicate that raises fails *open* at
+    every one of them that wraps it in a truthiness test.
+    """
+    try:
+        return Path(child).is_relative_to(Path(root))
+    except (TypeError, ValueError):
+        return False
+
+
+def paths_overlap(a: Path, b: Path) -> bool:
+    """Either path is at or inside the other — the test in both directions.
+
+    The question a bind or a mask asks about a configured path, where the two
+    failures are not the same size and are equally unacceptable: above the task
+    control tree reaches every user's, inside it reaches one user's or one
+    task's. A single-direction test answers one of those and reads as though it
+    answered both.
+
+    Lexical and never-raising, for :func:`is_within`'s reasons; both callers
+    resolve first.
+    """
+    return is_within(a, b) or is_within(b, a)
