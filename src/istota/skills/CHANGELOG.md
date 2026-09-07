@@ -7,7 +7,7 @@
 - `health import-immunizations --paste @PATH` is gone. Use `--paste-file PATH`; `--paste` is literal text and refuses a leading `@` rather than importing it as a record
 - An empty value is refused rather than read as "not given": `--output ""` used to mean the process working directory, which is not a directory anything named
 - Handlers receive the *resolved* path, so a symlinked or relative argument comes back in the output as the absolute path it pointed at
-- `google_workspace` arguments are scanned for host paths before `gws` runs, under the same rule. Google's own identifiers (`--fileId`, `--parents`, spreadsheet ids, a `--query` containing a slash) are untouched, and a relative path resolves against the user's workspace
+- `google_workspace` arguments are scanned for host paths before `gws` runs, under the read rule — `drive +upload` therefore still accepts a `Talk` attachment, where `email --attach` no longer does. Google's own identifiers (`--fileId`, `--parents`, spreadsheet ids, a `--query` containing a slash) are untouched, and a relative path resolves against the user's workspace
 
 ## 2026-07-26
 - `nextcloud` grew from four sharing verbs into the full control plane: `capabilities` (a deployment fit-check), `user`/`group` lookup, extended `share` including `share link` for download links, a `files` group for the WebDAV operations the mount can't express, a `talk` control surface, and `notify`/`activity` reads

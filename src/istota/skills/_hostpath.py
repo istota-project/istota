@@ -167,16 +167,34 @@ def click_host_path(mode: str, *, note: str = ""):
     Decorators run bottom-up, so by the time this one sees the function the
     `click.option` below it has already appended its `Parameter` to
     `__click_params__` and the last entry is that parameter. Placed *above*
-    `@cli.command()` there is no such answer — Click reverses the list when it
-    builds the command, so the last entry is then the bottom-most decorator
-    rather than the one directly below — and a stamp on the wrong argument is
-    worse than no stamp, since the coverage walk would call it accounted for.
-    So that case raises.
+    `@cli.command()` there is no parameter left to stamp at all: Click's
+    `command` decorator consumes `__click_params__`, deletes the attribute and
+    returns a `Command`. That raises rather than falling back to `.params`,
+    because a stamp on the wrong argument is worse than no stamp — the
+    coverage walk would call it accounted for.
 
     A resolving mode also wraps the parameter's callback, which is where the
     value is resolved and written back. Wrapped rather than replaced: a
     parameter may already have a callback of its own, and losing it silently
     is the kind of thing a stamp is not allowed to cost.
+
+    **A `click.File` parameter is refused outright.** Click converts a
+    parameter's `type` *before* the callback runs, so by the time a stamp could
+    refuse the path the file is already open — and the callback then resolves
+    the `str()` of a file object, which fails for a legitimate path too. The
+    stamp would be ineffective and always-refusing at once, and the coverage
+    walk pushes an author toward exactly that by demanding a disposition for
+    such a parameter. Declare it `click.Path` or a plain string and open the
+    resolved value.
+
+    **The operator CLI shares this resolution point, and that is worth knowing
+    before stamping anything here.** `istota.cli_briefings` invokes the same
+    Click group for `istota briefings ...` in an operator shell, which carries
+    none of the four task variables — so a stamped parameter refuses there
+    exactly as `whisper`'s did when its daemon-side caller passed no identity.
+    That is the same rule stated for that case (a caller passes the task
+    identity, or the CLI refuses every path) reaching an in-process caller,
+    and it is why nothing in `briefings.cli` is stamped today.
     """
     _check_declaration(mode, note)
 
@@ -189,6 +207,12 @@ def click_host_path(mode: str, *, note: str = ""):
                 "the command decorator"
             )
         param = params[-1]
+        if type(getattr(param, "type", None)).__name__ == "File":
+            raise ValueError(
+                "click.File opens the path during type conversion, before any "
+                "stamp can refuse it. Declare click.Path (or a plain string) "
+                "and open the resolved value."
+            )
         setattr(param, STAMP, mode)
         setattr(param, NOTE, note)
         if mode in RESOLVING:
@@ -198,20 +222,56 @@ def click_host_path(mode: str, *, note: str = ""):
     return decorator
 
 
+#: Parameter sources whose value nobody outside this repository chose. Click's
+#: own spelling, read off the enum member's name so this module still imports
+#: no click.
+_CODE_OWNED_SOURCES = frozenset({"DEFAULT", "DEFAULT_MAP"})
+
+
 def _click_resolver(mode: str, previous):
-    """A parameter callback that resolves the value before anything sees it."""
+    """A parameter callback that resolves the value before anything sees it.
+
+    Two values reach it that are not the model's and must not be resolved.
+    Click runs the callback on a **default** as well as on a passed value, so a
+    stamped `--output` with `default="out.json"` would resolve that default
+    against the cwd and refuse *every* invocation of its command, including one
+    that never passed the flag — total rather than scoped to the argument, and
+    the shape the next person to add one would write. And under
+    `resilient_parsing` (shell completion, a partial parse) Click's documented
+    contract is that a callback returns the value untouched; raising there
+    would turn a tab-press into a refusal.
+
+    A code-owned default is safe to skip on the rule Layer 3 states for a
+    derived path: the component was not chosen by the model.
+    """
 
     def callback(ctx, param, value):
-        if value is not None:
+        if getattr(ctx, "resilient_parsing", False):
+            return value
+        source = None
+        if hasattr(ctx, "get_parameter_source"):
+            source = getattr(ctx.get_parameter_source(param.name), "name", None)
+        if value is not None and source not in _CODE_OWNED_SOURCES:
             operation = _click_operation(ctx, param)
             resolved, error = _resolve_value(value, mode, operation)
             if error is not None:
-                log.warning("host path refused: %s", operation)
+                log.warning("host path refused: %s %s", _click_skill(ctx), operation)
                 raise HostPathRefused(error)
             value = resolved
         return previous(ctx, param, value) if previous is not None else value
 
     return callback
+
+
+def _click_skill(ctx) -> str:
+    """The root group's own name, so a refusal line names the CLI that refused.
+
+    `resolve_parsed` logs `parser.prog` beside the operation and this is the
+    same field; the two halves of one message shape drifting is the drift this
+    module is organised against.
+    """
+    root = ctx.find_root() if hasattr(ctx, "find_root") else ctx
+    return str(getattr(root, "info_name", "") or "")
 
 
 def _click_operation(ctx, param) -> str:

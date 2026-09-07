@@ -683,6 +683,104 @@ class TestTheClickStamp:
             "wrapping it"
         )
 
+    def test_a_default_is_not_resolved(self, linked_mount):
+        """Click runs the callback on a default too, and a default is ours.
+
+        A stamped `--out` with `default="out.json"` would otherwise resolve
+        that default against the process cwd and refuse *every* invocation of
+        its command, including one that never passed the flag — a total
+        failure rather than one scoped to the argument, and the shape the next
+        person to add a stamped option would write.
+        """
+        import click
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("go")
+        @click_host_path(WRITE)
+        @click.option("--out", default="out.json")
+        @click.pass_context
+        def go(ctx, out):
+            ctx.obj["out"] = out
+
+        obj = {}
+        _invoke(cli, ["go"], obj)
+        assert obj["out"] == "out.json"
+
+    def test_a_passed_value_is_still_resolved_when_a_default_exists(
+        self, linked_mount,
+    ):
+        """The other half: skipping the default must not skip the argument."""
+        import click
+
+        target = linked_mount / "Users" / "alice" / "given.json"
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("go")
+        @click_host_path(WRITE)
+        @click.option("--out", default="out.json")
+        @click.pass_context
+        def go(ctx, out):
+            ctx.obj["out"] = out
+
+        obj = {}
+        _invoke(cli, ["go", "--out", str(target)], obj)
+        assert obj["out"] == str(target.resolve())
+        assert obj["out"] != str(target)
+
+    def test_resilient_parsing_leaves_the_value_alone(self, linked_mount):
+        """Click's own contract, and a tab-press must not be a refusal.
+
+        Shell completion parses with `resilient_parsing` set, where a callback
+        is documented to return the value untouched. Raising there would turn
+        completion of a half-typed path into a `HostPathRefused`.
+        """
+        import click
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("go")
+        @click_host_path(READ)
+        @click.option("--file")
+        @click.pass_context
+        def go(ctx, file):
+            ctx.obj["file"] = file
+
+        ctx = click.Context(cli, resilient_parsing=True)
+        param = cli.commands["go"].params[0]
+        assert param.callback(ctx, param, "/etc/hosts") == "/etc/hosts"
+
+    def test_a_click_file_parameter_is_refused_at_declaration(self):
+        """`click.File` opens the path before any callback can refuse it.
+
+        Type conversion runs ahead of the callback, so a stamp on one is
+        ineffective (the file is already open) and always-refusing (the
+        callback then resolves the `str()` of a file object, which fails for a
+        legitimate path too). The coverage walk demands a disposition for such
+        a parameter, so without this guard it pushes an author straight into
+        that.
+        """
+        import click
+
+        @click.group()
+        def cli():
+            pass
+
+        with pytest.raises(ValueError, match="click.File"):
+
+            @cli.command("go")
+            @click_host_path(READ)
+            @click.option("--inp", type=click.File("r"))
+            def go(inp):
+                pass
+
     def test_stamping_a_built_command_is_refused(self):
         """Placed above `@cli.command()` the stamp cannot say which parameter
         it means: Click reverses `__click_params__` when it builds the command,

@@ -256,16 +256,22 @@ def _is_path_shaped(action: argparse.Action) -> bool:
 def _is_click_path_shaped(param) -> bool:
     """The same heuristic over a Click parameter, plus the type Click has.
 
-    `click.Path` is the one signal argparse has no equivalent of and it is
-    the strongest of the four: a parameter declaring it *is* a path however
-    its help text reads. The rest mirrors `_is_path_shaped` — a flag carries
-    no path and `click.Choice` bounds the value to a list that is not one.
+    `click.Path` and `click.File` are the signals argparse has no equivalent
+    of and they are the strongest of the five: a parameter declaring either
+    *is* a path however its help text reads, and `click.File` opens one by
+    definition. The rest mirrors `_is_path_shaped` — a flag carries no path
+    and `click.Choice` bounds the value to a list that is not one.
+
+    A `click.Argument` carries no `help` at all, so for a positional the type
+    is often the only signal there is; missing one of the two types would
+    leave the Click walk weaker than the argparse one, which does see a
+    positional's help text.
     """
     import click
 
     if getattr(param, "is_flag", False):
         return False
-    if isinstance(param.type, click.Path):
+    if isinstance(param.type, (click.Path, click.File)):
         return True
     if isinstance(param.type, click.Choice):
         return False
@@ -431,6 +437,52 @@ def test_a_repo_stamp_names_a_handler_that_still_scopes(key):
         f"{key} is stamped REPO, which records that the handler scopes it "
         f"against DEVELOPER_REPOS_DIR, and {skill} calls resolve_under_repos "
         f"nowhere."
+    )
+
+
+@pytest.mark.parametrize("declare", ["path", "file"])
+def test_the_click_heuristic_sees_both_of_clicks_own_path_types(declare):
+    """A positional carries no help text, so the type is the only signal.
+
+    `click.Argument` has no `help` attribute at all, which makes the Click
+    walk weaker than the argparse one unless both of Click's path-opening
+    types are recognised. Under-matching is the failure this file exists to
+    prevent.
+    """
+    import click
+
+    @click.group()
+    def cli():
+        pass
+
+    kind = click.Path() if declare == "path" else click.File("rb")
+
+    @cli.command("go")
+    @click.argument("target", type=kind)
+    def go(target):
+        pass
+
+    found = []
+    _walk_click(cli, found)
+    assert found == [("go", "target")]
+
+
+def test_no_skill_exposes_both_kinds_of_parser():
+    """One key space, two walks, and nothing reconciles a collision.
+
+    `discovered()` and `stamps()` write `(skill, dotted command, dest)` from
+    both walks into one dict, and both spell the root command `""`. A skill
+    exposing `build_parser` *and* `build_cli` could therefore have one entry
+    overwrite the other and hide an unstamped argument. No skill does today;
+    this is what keeps that true rather than assumed.
+    """
+    both = sorted(
+        d.name for d in _skill_dirs()
+        if _module_for(d) is not None and _click_module_for(d) is not None
+    )
+    assert both == [], (
+        f"{both} expose both an argparse parser and a Click group, and the two "
+        f"walks share one key space. Key on the parser kind before adding one."
     )
 
 

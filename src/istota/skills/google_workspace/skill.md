@@ -60,6 +60,8 @@ Google's own identifiers are untouched: `--fileId`, `--parents FOLDER_ID`, sprea
 
 Relative paths resolve against the user's workspace, so `+upload notes.pdf` means the file of that name in it.
 
+`+upload` sends the file to Google, and the check it goes through is the read rule rather than the narrower rule `email --attach` uses — so a `Talk` attachment or a channel file can be uploaded to Drive where it could not be mailed. Telling an upload from a read means knowing every gws verb, which is a list that would go stale against a program shipped elsewhere.
+
 ### Helper commands (prefixed with +)
 
 | Service | Command | Description |

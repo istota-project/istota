@@ -30,6 +30,15 @@ The costs are stated rather than hidden.
 - **False positives are refusals, not silent passes.** A `~`-prefixed token
   and a destination that does not exist yet are both refused where they are
   path-shaped, which is the direction to be wrong in.
+- **A workspace file named like a gws verb rewrites the verb.** The cwd is the
+  workspace, so `drive` is path-shaped when a file of that name sits there and
+  the token becomes an absolute path where gws wants a service name. `docs`,
+  `calendar`, `chat` and `list` are all plausible filenames in a directory the
+  model writes to. The command then fails in gws rather than doing something
+  unintended, which is why the existence signal stays: dropping it for
+  separator-less tokens would let a bare `secret.pdf` beside a cwd that is
+  *not* the workspace through unscanned, trading a loud failure for a quiet
+  read.
 """
 
 from __future__ import annotations
@@ -171,6 +180,54 @@ def _scoped(token: str, operation: str) -> tuple[str | None, str | None]:
     return str(resolved), None
 
 
+def _attached_values(token: str) -> list[tuple[str, str, str]]:
+    """`(prefix, candidate value, operation)` for each way a token can hold one.
+
+    A path does not have to *be* the token to reach gws. Three spellings put
+    one inside it, and a scan that reads only whole tokens passes all three:
+
+    - `--file=/abs/path`, one token that starts with a dash, holds no `..` and
+      names nothing relative to the cwd, so gws splits it and we would not.
+      Applied to every token rather than only a dashed one, since the split
+      costs nothing on a token with no `=` and some CLIs take `key=value`
+      positionally.
+    - `-f/abs/path`, the short-flag spelling of the same thing, which
+      argparse, Click, pflag and cobra all accept. Whether gws does is
+      unverified — it is not in this tree — which is the reason to scan it
+      rather than the reason not to.
+    - `@/abs/path`, the response-file convention. Also unverified for gws, and
+      this codebase has its own precedent in the `--paste @PATH` form ISSUE-447
+      removed from `health`.
+
+    Order is widest-first and every candidate is *tested* before it is used, so
+    a token holding no path is returned untouched however many candidates it
+    produced.
+    """
+    out: list[tuple[str, str, str]] = []
+    flag, sep, value = token.partition("=")
+    if sep:
+        out.append((f"{flag}=", value, flag or "argument"))
+    if len(token) > 2 and token[0] == "-" and token[1] != "-":
+        out.append((token[:2], token[2:], token[:2]))
+    if len(token) > 1 and token[0] == "@":
+        out.append(("@", token[1:], "@argument"))
+    return out
+
+
+def _scan_token(token: str) -> tuple[str | None, str | None]:
+    """One token, rewritten to its resolution where it names a host path."""
+    if _is_path_shaped(token):
+        return _scoped(token, "argument")
+    for prefix, value, operation in _attached_values(token):
+        if not _is_path_shaped(value):
+            continue
+        resolved, error = _scoped(value, operation)
+        if error is not None:
+            return None, error
+        return f"{prefix}{resolved}", None
+    return token, None
+
+
 def scan_argv(argv: list[str]) -> tuple[list[str], str | None]:
     """The argv to exec, or `([], refusal)`.
 
@@ -180,72 +237,68 @@ def scan_argv(argv: list[str]) -> tuple[list[str], str | None]:
     spreadsheet ids — and a query may legitimately contain a slash
     (`--query "name contains 'a/b'"`), none of which is path-shaped.
 
-    **A token beginning with `-` is split on its first `=`.**
-    `--file=/srv/app/istota/data/istota.db` is one token that starts with a
-    dash, holds no `..` component and names nothing relative to the cwd, so a
-    per-token rule passes it straight through and gws splits it itself. The
-    right-hand side is scanned and rewritten in place.
-
-    **`--` is honoured and everything after it is still scanned.** gws takes
-    no positional passthrough today, so treating the tail as opaque would be
-    a bypass by one character. What honouring it means here is that nothing
-    after it is read as a flag, so the whole token is scanned rather than its
-    right-hand side — the wider of the two readings, which is the direction
-    to be wrong in.
+    **There is no `--` arm, and its absence is the rule rather than an
+    omission.** Everything after a separator is scanned exactly as everything
+    before it is, which is what "gws takes no positional passthrough today, so
+    treating the tail as opaque would be a bypass by one character" means. An
+    earlier version did have one, and it read `--` as a switch to whole-token
+    testing — which is *narrower* than the attached-value scan, not wider, so
+    `-- --file=/etc/passwd` went through untouched. Scanning both readings of
+    every token is the wide answer; making one of them conditional on a token
+    gws may or may not honour is how the bypass got back in.
     """
     out: list[str] = []
-    positional_only = False
     for token in argv:
-        if not positional_only and token == "--":
-            positional_only = True
-            out.append(token)
-            continue
-        if not positional_only and token.startswith("-") and len(token) > 1:
-            flag, sep, value = token.partition("=")
-            if sep and _is_path_shaped(value):
-                resolved, error = _scoped(value, flag)
-                if error is not None:
-                    return [], error
-                out.append(f"{flag}={resolved}")
-            else:
-                out.append(token)
-            continue
-        if _is_path_shaped(token):
-            resolved, error = _scoped(token, "argument")
-            if error is not None:
-                return [], error
-            out.append(resolved)
-        else:
-            out.append(token)
+        rewritten, error = _scan_token(token)
+        if error is not None:
+            return [], error
+        out.append(rewritten)
     return out, None
 
 
-def _enter_workspace() -> None:
-    """Stand in the user's own workspace before handing over to gws.
+def _enter_workspace() -> str | None:
+    """Stand in the user's own workspace. The refusal, or None.
 
     This is what carries the residual `scan_argv` cannot classify: a relative
     token naming something that does not exist yet is not path-shaped, passes
     through, and is resolved by gws against *this* process's cwd — which for a
-    proxied skill is the daemon's working directory. Standing in the
-    workspace puts it in-roots by construction.
+    proxied skill is the daemon's working directory. Standing in the workspace
+    puts it in-roots by construction.
 
-    A deployment where no workspace resolves is left where it is rather than
-    refused: there is nothing to scope an opaque-id verb against, and every
-    path-shaped token is already refused by the empty allowlist.
+    **A workspace that resolves and cannot be entered is a refusal, not a
+    warning.** `user_workspace_root` does not check that the directory exists,
+    so a deployment whose workspace has not been created yet gets a path and an
+    `ENOENT` from `chdir` — and carrying on there would leave the residual
+    resolving against the daemon's working directory, which is the one thing
+    this function exists to prevent, with only a log line saying so.
+
+    A deployment where no workspace *resolves at all* is a different state and
+    is left where it is: the allowlist is empty or nearly so, every path-shaped
+    token is refused by it, and refusing the invocation outright would break
+    the opaque-id verbs that have nothing to do with host paths. The residual
+    is uncarried there and is the narrower one — a relative path naming
+    something that does not exist.
     """
     root = user_workspace_root()
     if root is None:
-        return
+        return None
     try:
         os.chdir(root)
     except OSError as e:
         logger.warning("Could not enter the workspace before gws: %s", e)
+        return (
+            "Could not enter the workspace before running gws "
+            f"({e.strerror or e}). Refusing rather than resolving relative "
+            "paths against the daemon's working directory."
+        )
+    return None
 
 
 def main() -> None:
     """Scan the argv for host paths, then pass through to the gws binary."""
-    _enter_workspace()
-    argv, refusal = scan_argv(sys.argv[1:])
+    refusal = _enter_workspace()
+    if refusal is None:
+        argv, refusal = scan_argv(sys.argv[1:])
     if refusal is not None:
         fail(refusal, reason="host_path_refused")
     os.execvp("gws", ["gws"] + argv)
