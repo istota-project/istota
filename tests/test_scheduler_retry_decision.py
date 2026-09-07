@@ -132,9 +132,10 @@ class TestDecideRetryAgainstTheBranchItReplaced:
             assert decision.will_retry is False, name
             assert decision.delay_minutes == 0, name
 
-    def test_the_reason_names_the_arm_the_call_sites_branch_on(self):
-        # The row-writing branch selects its arm on `reason`, so these four
-        # strings are load-bearing rather than diagnostic.
+    def test_the_reason_names_the_winning_arm(self):
+        # `reason` is diagnostic — no branch in `src/` reads it. This pins the
+        # strings so a log line keeps meaning the same thing, and pins the
+        # precedence order, which is the part a future reader could get wrong.
         task = _task(attempt_count=0, max_attempts=3)
         base = dict.fromkeys(FLAG_NAMES, False)
         assert decide_retry(task, "x", **(base | {"is_cancelled": True})).reason == "cancelled"

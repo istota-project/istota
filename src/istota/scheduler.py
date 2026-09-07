@@ -536,9 +536,19 @@ def _is_shutdown_collateral(result: str) -> bool:
 class RetryDecision:
     """What `process_one_task` does with a finished attempt.
 
-    `reason` names the winning arm, so the branch that writes the row and the
-    block that emits the terminal event select on the same value instead of
-    each re-deriving it. `delay_minutes` is 0 unless `will_retry`.
+    `will_retry` is the shared answer; `delay_minutes` is 0 unless it holds.
+
+    **`reason` is diagnostic — nothing in `src/` selects on it.** Both call
+    sites branch on the `retry_flags` dict for the arms that need one and on
+    `will_retry` for the rest, which is what keeps each arm's condition
+    identical to the one it replaced. It is stated here because the tempting
+    refactor is to put the sites on `reason`, and that would be wrong twice
+    over: `oom`, `permanent`, `sigpipe` and `attempts_exhausted` all have to
+    collapse onto the row branch's single else-arm, and the event block tests
+    `is_requeued` *without* having excluded `is_cancelled` first, so a
+    reason-based test there would drop a case the old code handled. The strings
+    are pinned by a test so they stay stable for the log, not because a branch
+    reads them.
     """
 
     will_retry: bool
@@ -1933,6 +1943,13 @@ def _run_capture(
         # `start_new_session=True` above, so the child leads its own group and
         # the shared helper takes the group path; the single-process fallback
         # covers a group that is already gone.
+        #
+        # The helper's reaped guard is dead code *here* and must not be leaned
+        # on: `communicate(timeout=…)` raises from inside `_communicate`,
+        # before its trailing `wait()`, so `returncode` is still None. A
+        # `proc.poll()` added between the two — the natural thing to reach for
+        # when adding a log line — would set it and silently turn this kill
+        # into a no-op, orphaning the group. That is the ISSUE-257 shape.
         kill_group_if_live(proc)
         # The group is dead now, so this drains the pipes and reaps without
         # blocking; bound it anyway so a pathological case can't hang the worker.
@@ -3445,6 +3462,13 @@ def process_one_task(
         # live: `is_sigpipe` needs `task.command`, and a command task never
         # reaches the `else` arm that builds an `event_writer`. Sharing the
         # classifier is what keeps it latent if either of those facts changes.
+        #
+        # One disagreement the sharing does *not* close, pre-existing and
+        # unchanged: another thread can set `_shutdown_requested` between the
+        # two calls, so the branch above can have taken the retry arm while
+        # `is_requeued` is true down here and the client is told the scheduler
+        # is restarting. Both messages are honest about a task that is going
+        # back on the queue, which is why this is left rather than latched.
         flags = retry_flags(task, result, success=success)
         decision = decide_retry(task, result, success=success, **flags)
         if flags["is_requeued"]:
