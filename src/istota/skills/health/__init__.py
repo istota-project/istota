@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import WRITE, host_path
 
 
 _DEFER_FILENAME = "task_{task_id}_health_ops.json"
@@ -780,27 +781,16 @@ def cmd_export_csv(args: argparse.Namespace) -> None:
     ``--output`` is a *host* path and this CLI runs host-side, spawned by the
     skill proxy with the daemon's whole filesystem view, so the flag was an
     arbitrary write as the daemon user with every bloodwork panel as its
-    payload. Scoped to the roots the sandbox binds for this caller, and the
-    resolved path is what gets opened — reopening the argument re-walks the
-    symlinks the check just settled.
+    payload. It is declared ``WRITE`` on the argument and resolved at parse,
+    which is also what keeps the refusal ahead of the query: the export is the
+    caller's whole health record, and a refusal should not read it out of the
+    database on the way to saying no. The value on the namespace *is* the
+    resolved path — reopening the argument would re-walk the symlinks the
+    resolution settled.
     """
-    from istota.skill_host_paths import resolve_host_path, write_resolved
+    from istota.skill_host_paths import write_resolved
 
-    resolved = None
-    if args.output:
-        # Before the query, not after: the export is the caller's whole health
-        # record, and a refusal should not read it out of the database first.
-        resolved, err = resolve_host_path(
-            Path(args.output), writable=True,
-            operation="health export-csv --output",
-        )
-        if err:
-            _fail(err)
-            # `_fail` exits, three call frames away. The `return` is what makes
-            # that independent of it: without one, a `_fail` that ever stopped
-            # exiting would fall through to the no-path branch below and print
-            # every confirmed panel to stdout, where the model reads it.
-            return
+    resolved = Path(args.output) if args.output else None
 
     from istota.health import csv_io
 
@@ -1848,7 +1838,7 @@ def build_parser() -> argparse.ArgumentParser:
         "export-csv",
         help="Export confirmed panels as a CSV (prints to stdout if no path)",
     )
-    export_csv.add_argument("--output", "-o", default=None)
+    host_path(export_csv, "--output", "-o", mode=WRITE, default=None)
 
     sub.add_parser("summary", help="Dashboard-style snapshot")
 

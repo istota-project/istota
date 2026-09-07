@@ -27,6 +27,7 @@ from istota.skill_host_paths import (
     write_resolved,
 )
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import WRITE, host_path
 from istota.user_scope import scoped_user_dir
 
 DEFAULT_API_URL = "http://localhost:9223"
@@ -358,29 +359,23 @@ def _workspace_relative(path):
 def cmd_screenshot(args):
     """Take a screenshot, into the caller's own workspace.
 
-    The destination is settled **before** the capture, so a path outside the
-    allowlist costs no browser time and nothing is written; the name is
-    settled after, because the derived default takes its extension from what
-    the bytes turn out to be. The early check leaves nothing behind: since
-    ISSUE-447 resolution creates no directory, so an admitted path whose
-    capture then fails writes nothing at all — `write_resolved` is what makes
-    the parent, and only where a write actually happens.
+    `--output` is declared `WRITE`, so it arrives already resolved and already
+    contained: `parse_and_resolve` refuses an out-of-allowlist path before the
+    handler is dispatched at all, which is a stronger version of the early
+    check this used to make by hand — no browser time, no envelope from here,
+    and no second resolution to keep in step with the first. Resolution
+    creates no directory, so a refusal leaves nothing behind; `write_resolved`
+    is what makes the parent, and only where a write actually happens.
+
+    The derived default still resolves per candidate name in
+    `_write_derived_capture`, because those names are built here rather than
+    declared, and the extension is not known until the bytes are.
     """
     directory = None
     if not args.output:
         directory, reason = screenshot_dir()
         if directory is None:
             return {"status": "error", "error": reason}
-    else:
-        # Resolved twice for the `--output` case: once here to refuse early,
-        # and once below on the same value. The second is not redundant — the
-        # first happens before a capture that takes up to two minutes, and a
-        # check that old is not the one to write behind.
-        _, path_err = resolve_host_path(
-            Path(args.output), writable=True, operation="browse screenshot --output",
-        )
-        if path_err:
-            return {"status": "error", "error": path_err}
 
     url = get_api_url()
     payload = {
@@ -420,12 +415,10 @@ def cmd_screenshot(args):
                 ),
             }
         if args.output:
-            resolved, path_err = resolve_host_path(
-                Path(args.output), writable=True,
-                operation="browse screenshot --output",
-            )
-            if path_err:
-                return {"status": "error", "error": path_err}
+            # Already resolved and already contained — the stamp on the
+            # declaration did it, and the value on the namespace *is* the
+            # resolved path.
+            resolved = Path(args.output)
             try:
                 write_resolved(resolved, content)
             except OSError as e:
@@ -646,8 +639,8 @@ def build_parser():
     p_ss = sub.add_parser("screenshot", help="Take a screenshot")
     p_ss.add_argument("url", nargs="?", help="URL to screenshot")
     p_ss.add_argument("--session", help="Existing session ID")
-    p_ss.add_argument(
-        "--output", "-o",
+    host_path(
+        p_ss, "--output", "-o", mode=WRITE,
         help=(
             "Output file path, absolute and inside your own workspace. "
             "Defaults to {bot dir}/screenshots/ in your workspace."

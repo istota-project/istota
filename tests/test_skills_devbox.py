@@ -42,6 +42,7 @@ import pytest
 
 from istota import devbox_exec_protocol as proto
 from istota.skills import devbox
+from tests.support.skill_cli import run_skill_main
 
 _REPO = Path(__file__).resolve().parents[1]
 _SKILL_DIR = _REPO / "src" / "istota" / "skills" / "devbox"
@@ -182,6 +183,18 @@ def dbx(monkeypatch):
 
 def _args(**kw):
     return type("A", (), kw)()
+
+
+def _cli(*argv):
+    """One verb through the real `main`, envelope back.
+
+    The host-path arguments are declared and resolved at parse (ISSUE-447), so
+    a test about a *host* path has to go through `main` — handing `cmd_cp_in` a
+    namespace built by `_args` skips the resolution entirely and would pass
+    against a verb carrying no stamp at all. Everything else here keeps calling
+    the handlers directly, which is what makes the container side readable.
+    """
+    return run_skill_main(devbox.main, list(argv)).envelope
 
 
 def _exec(command: str, timeout: int | None = None) -> dict:
@@ -589,9 +602,9 @@ class TestAPostAcknowledgementFailureNeverReadsAsSuccess:
         )
 
     def test_cp_out_does_not_follow_a_link_planted_after_the_check(
-        self, scripted, tmp_path, monkeypatch
+        self, scripted, tmp_path,
     ):
-        """The window `resolve_host_path` cannot close on its own.
+        """The window path validation cannot close on its own.
 
         The resolution refuses a symlink standing at the destination's own
         name as of its own check; the write happens later, and the tree is
@@ -599,24 +612,17 @@ class TestAPostAcknowledgementFailureNeverReadsAsSuccess:
         `write_resolved` opens with ``O_NOFOLLOW``, so the write fails rather
         than landing wherever the link points, as the daemon user.
 
-        The link is planted through a patched resolver rather than by racing —
-        what is under test is the open, and reproducing the race would make
-        the test flaky about something the flags settle deterministically.
+        The handler is called directly rather than through `main`, and that is
+        what models the window: since ISSUE-447 `args.dest` *is* the value the
+        resolution approved, so handing the handler a path whose leaf is now a
+        link is exactly what the check would have returned an instant before
+        the link appeared. Reproducing the race for real would make the test
+        flaky about something the open flags settle deterministically.
         """
         victim = tmp_path / "victim.txt"
         victim.write_text("do not overwrite me")
         dest = tmp_path / "landed.bin"
         dest.symlink_to(victim)
-
-        real = devbox.resolve_host_path
-
-        def _resolve_past_the_link(path, **kwargs):
-            resolved, err = real(path, **kwargs)
-            # What the check would have returned an instant before the link
-            # appeared: a contained path whose leaf is now a symlink.
-            return (Path(str(path)) if err else resolved), None
-
-        monkeypatch.setattr(devbox, "resolve_host_path", _resolve_past_the_link)
 
         def handler(server, conn, request, rest):
             conn.sendall(_ack_ok())
@@ -869,21 +875,26 @@ class TestTheGuardsThatWentWithDockerCp:
             "a refusal list naming it is a list nothing needs"
         )
 
-    def test_skill_host_paths_is_still_the_host_side_rule(self, tmp_path):
-        """Explicitly *not* on the deletion list. It scopes the host side of a
-        verb whose host path the model still picks, which is a different
-        question from what the container may touch."""
-        from istota import skill_host_paths
+    def test_the_host_side_is_still_scoped_but_by_a_declaration(self):
+        """Explicitly *not* on the deletion list above. The host side of a verb
+        whose host path the model still picks stays scoped, which is a
+        different question from what the container may touch.
 
-        resolved, err = devbox._resolve_host_path(
-            Path("/etc/passwd"), must_exist=True
-        )
-        assert resolved is None
-        assert "outside allowed roots" in err
-        # And it is the shared rule, not a copy: `kv set --value-file` and the
-        # deferred health ops go through the same function.
-        assert devbox._resolve_host_path.__module__ != skill_host_paths.__name__
-        assert skill_host_paths.resolve_host_path is not None
+        Since ISSUE-447 it is scoped by a stamp on the declaration rather than
+        by a private wrapper, so what there is to assert here is that the
+        declarations exist and split host from container. The refusal itself is
+        driven end to end in `tests/test_skill_host_paths_refusals.py` and the
+        modes are pinned in `tests/test_skill_host_paths.py`.
+        """
+        from istota.skills._hostpath import RESOLVING, stamped
+
+        modes = {
+            (command, dest): mode
+            for command, dest, mode in stamped(devbox.build_parser())
+        }
+        assert modes[("cp-in", "src")] in RESOLVING
+        assert modes[("cp-out", "dest")] in RESOLVING
+        assert modes[("exec-file", "path")] in RESOLVING
 
 
 # --------------------------------------------------------------------------- #
@@ -1114,10 +1125,9 @@ class TestExecFile:
         assert "basename" in result["error"]
 
     def test_it_refuses_a_host_path_outside_the_allowlist(self, dbx):
-        result = devbox.cmd_exec_file(
-            _args(path="/etc/hosts", interpreter=None, timeout=None)
-        )
+        result = _cli("exec-file", "/etc/hosts")
         assert result["status"] == "error"
+        assert result["reason"] == "host_path_refused"
         assert "outside allowed roots" in result["error"]
 
     def test_it_imposes_no_pipefail_on_the_script(self, dbx, tmp_path):
@@ -1189,10 +1199,9 @@ class TestCopyIn:
         assert not (dbx.outside / "probe.txt").exists()
 
     def test_a_host_source_outside_the_allowlist_is_refused(self, dbx):
-        result = devbox.cmd_cp_in(
-            _args(src="/etc/hosts", dest=str(dbx.home / "hosts"))
-        )
+        result = _cli("cp-in", "/etc/hosts", str(dbx.home / "hosts"))
         assert result["status"] == "error"
+        assert result["reason"] == "host_path_refused"
         assert "outside allowed roots" in result["error"]
         assert not (dbx.home / "hosts").exists()
 
@@ -1202,9 +1211,7 @@ class TestCopyIn:
         link = tmp_path / "link.txt"
         link.symlink_to(real)
 
-        result = devbox.cmd_cp_in(
-            _args(src=str(link), dest=str(dbx.home / "out.txt"))
-        )
+        result = _cli("cp-in", str(link), str(dbx.home / "out.txt"))
 
         assert result["status"] == "error"
         assert "symlink" in result["error"]
@@ -1287,12 +1294,17 @@ class TestCopyOut:
         )
 
     def test_a_refusal_creates_no_host_directories(self, dbx, tmp_path):
-        """Container side first, then the host path. `_resolve_host_path`
-        creates the destination's parents, so the other order left an empty
-        tree in the user's workspace behind every refusal."""
+        """A refused *container* source leaves no host tree behind.
+
+        The host destination here is admissible and is resolved at parse, ahead
+        of the container round trip — resolution creates nothing, and
+        `write_resolved` is what makes the parent, at a write that never
+        happens. The ordering this used to work around (resolve second, because
+        resolving created the parents) is gone with the mkdir.
+        """
         dest = tmp_path / "deep" / "nested" / "out.txt"
 
-        result = devbox.cmd_cp_out(_args(src=str(dbx.outside / "x"), dest=str(dest)))
+        result = _cli("cp-out", str(dbx.outside / "x"), str(dest))
 
         assert result["status"] == "error"
         assert not dest.parent.exists(), dest.parent
@@ -1301,9 +1313,13 @@ class TestCopyOut:
         remote = dbx.home / "out.txt"
         assert _exec(f"echo hi > {remote}")["exit_code"] == 0
 
-        result = devbox.cmd_cp_out(_args(src=str(remote), dest="/etc/istota-probe"))
+        result = _cli("cp-out", str(remote), "/etc/istota-probe")
 
         assert result["status"] == "error"
+        # Refused by the allowlist, not by the filesystem: a test taking the
+        # error alone would pass on a host where `/etc` merely happens to be
+        # unwritable by whoever is running the suite.
+        assert result["reason"] == "host_path_refused"
         assert not Path("/etc/istota-probe").exists()
 
     def test_binary_round_trips(self, dbx, tmp_path):

@@ -20,7 +20,8 @@ import pytest
 
 from istota import db, outbound_drafts as drafts
 from istota.config import Config, EmailConfig, UserConfig
-from istota.skills.email import Email, cmd_reply, cmd_send
+from istota.skills.email import Email, cmd_reply, cmd_send, main
+from tests.support.skill_cli import run_skill_main
 
 OWN = "alice@example.com"
 TRUSTED = "colleague@partner.example.org"
@@ -378,13 +379,36 @@ class TestGateFailsClosed:
 
 
 class TestHeldAttachments:
+    """`--attach` is `EGRESS`, and every case here goes through `main`.
+
+    The scoping moved onto the declaration with ISSUE-447, so it runs at parse
+    and a `_Args` namespace reaches none of it — a refusal test built that way
+    passes against a verb with no stamp on it. `_send` below is what makes the
+    difference visible: the same argv the model would send.
+
+    The narrowing the stamp carries is that these roots are the user's own
+    workspace **alone**, not the task's whole working context. It is not a new
+    rule, it is the rule `outbound_drafts._confined_attachment` already applies
+    at release; what changed is that a direct send now answers the same way as
+    a held one, whether or not a draft happened to be held.
+    """
+
+    def _send(self, *, to=STRANGER, attach=None):
+        argv = [
+            "send", "--to", to, "--subject", "Re: Invite",
+            "--body", "Tuesday at four.",
+        ]
+        if attach is not None:
+            argv += ["--attach", str(attach)]
+        return run_skill_main(main, argv)
+
     def test_an_attachment_in_the_workspace_is_held_by_resolved_path(
         self, skill_env, workspace,
     ):
         f = workspace / "report.txt"
         f.write_text("data")
         with patch("istota.skills.email._send_smtp"):
-            cmd_send(_Args(attach=[str(f)]))
+            self._send(attach=f)
 
         held = _pending(skill_env)[0]
         assert held.attachments == [str(f.resolve())]
@@ -398,10 +422,11 @@ class TestHeldAttachments:
         outside = tmp_path / "secret.txt"
         outside.write_text("data")
         with patch("istota.skills.email._send_smtp") as smtp:
-            result = cmd_send(_Args(attach=[str(outside)]))
+            run = self._send(attach=outside)
 
         smtp.assert_not_called()
-        assert result["status"] == "error"
+        assert run.envelope["status"] == "error"
+        assert run.envelope["reason"] == "host_path_refused"
         assert _pending(skill_env) == []
 
     def test_an_unscoped_attachment_is_refused_on_an_ungated_send_too(
@@ -419,22 +444,24 @@ class TestHeldAttachments:
         secret = tmp_path / "config.toml"
         secret.write_text("smtp_password = 'hunter2'")
         with patch("istota.skills.email._send_smtp") as smtp:
-            result = cmd_send(_Args(to=TRUSTED, attach=[str(secret)]))
+            run = self._send(to=TRUSTED, attach=secret)
 
         smtp.assert_not_called()
-        assert result["status"] == "error"
+        assert run.envelope["status"] == "error"
 
     def test_the_gate_being_off_does_not_unscope_attachments(
         self, skill_env, tmp_path,
     ):
+        """And now it cannot: the resolution runs before the gate is consulted
+        at all, rather than as the gate's own first step."""
         skill_env.email.outbound_approval_floor = "off"
         secret = tmp_path / "config.toml"
         secret.write_text("smtp_password = 'hunter2'")
         with patch("istota.skills.email._send_smtp") as smtp:
-            result = cmd_send(_Args(to=STRANGER, attach=[str(secret)]))
+            run = self._send(attach=secret)
 
         smtp.assert_not_called()
-        assert result["status"] == "error"
+        assert run.envelope["status"] == "error"
 
     def test_a_workspace_attachment_sends_on_the_ungated_path(
         self, skill_env, workspace,
@@ -442,11 +469,11 @@ class TestHeldAttachments:
         f = workspace / "report.txt"
         f.write_text("data")
         with patch("istota.skills.email._send_smtp") as smtp:
-            result = cmd_send(_Args(to=TRUSTED, attach=[str(f)]))
+            run = self._send(to=TRUSTED, attach=f)
 
         smtp.assert_called_once()
-        assert result["status"] == "ok"
-        assert result["attachments"] == ["report.txt"]
+        assert run.envelope["status"] == "ok"
+        assert run.envelope["attachments"] == ["report.txt"]
 
     def test_a_symlinked_attachment_is_refused(self, skill_env, workspace, tmp_path):
         target = tmp_path / "secret.txt"
@@ -454,10 +481,10 @@ class TestHeldAttachments:
         link = workspace / "innocent.txt"
         link.symlink_to(target)
         with patch("istota.skills.email._send_smtp") as smtp:
-            result = cmd_send(_Args(to=TRUSTED, attach=[str(link)]))
+            run = self._send(to=TRUSTED, attach=link)
 
         smtp.assert_not_called()
-        assert result["status"] == "error"
+        assert run.envelope["status"] == "error"
 
 
 # ---------------------------------------------------------------------------

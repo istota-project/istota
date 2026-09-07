@@ -13,9 +13,17 @@ its consumers as three.
 The shape is `tests/test_lint_scope.py`'s and is here for the same reason: a
 hand-maintained list that nothing walks goes stale in silence. So the tree is
 walked instead. Every skill's argparse parser is built, every subparser is
-descended, and every argument that could name a path has to appear in
-``REGISTRY`` below with an explicit disposition. A new argument fails this test
-rather than shipping unguarded.
+descended, and every argument that could name a path has to carry an explicit
+disposition. A new argument fails this test rather than shipping unguarded.
+
+**There are two places a disposition can live, and one of them is going away.**
+Since ISSUE-447 the disposition belongs on the *declaration*
+(``_hostpath.host_path``, read back by ``stamps()`` below), where the same
+value the enforcement reads is the one this walk sees — so an argument that is
+declared is enforced, and there is no second list to keep in step. ``REGISTRY``
+is what is left for the arguments that have not been converted yet, and it
+shrinks to nothing as the remaining stages land. An argument may be in one or
+the other and never both.
 
 **What the registry claims, and what it does not.** ``SCOPED`` is a claim about
 the code and is checked: the named guard function's source must call the named
@@ -42,6 +50,11 @@ the host, ``email --body-file`` reads any host file into an outgoing message,
 ``email attachments --dest`` writes into any directory (and its docstring says
 "scoped", which is where a stale claim ends up), and the ``health`` file verbs
 read any host file on a deployment where the deferred path does not apply.
+
+Being *stamped* is not enough on its own either, and the difference matters
+when reading a green run here: this file says an argument has a disposition,
+and ``tests/test_skill_host_paths_refusals.py`` is what drives each stamped
+argument through its own CLI and requires the refusal and the acceptance.
 """
 
 from __future__ import annotations
@@ -53,6 +66,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+
+from istota.skills._hostpath import stamped
 
 REPO = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO / "src" / "istota" / "skills"
@@ -82,68 +97,19 @@ class Entry:
 #: Keyed on (skill, dotted subcommand path, argparse dest).
 REGISTRY: dict[tuple[str, str, str], Entry] = {
     # -- Scoped: the path goes through the shared allowlist ------------------
-    ("browse", "screenshot", "output"): Entry(
-        SCOPED, guard="istota.skills.browse.cmd_screenshot",
-        helper="resolve_host_path",
-    ),
-    ("code_review", "run", "worktree"): Entry(
-        SCOPED, guard="istota.skills.code_review.cmd_run",
-        helper="resolve_under_repos",
-        note="the other allowlist: a worktree under DEVELOPER_REPOS_DIR",
-    ),
-    ("devbox", "cp-in", "src"): Entry(
-        SCOPED, guard="istota.skills.devbox.cmd_cp_in",
-        helper="_resolve_host_path",
-        note="the private wrapper delegates to resolve_host_path",
-    ),
-    ("devbox", "cp-out", "dest"): Entry(
-        SCOPED, guard="istota.skills.devbox.cmd_cp_out",
-        helper="_resolve_host_path",
-    ),
-    ("devbox", "exec-file", "path"): Entry(
-        SCOPED, guard="istota.skills.devbox.cmd_exec_file",
-        helper="_resolve_host_path",
-    ),
-    ("feeds", "import-opml", "path"): Entry(
-        SCOPED, guard="istota.skills.feeds.cmd_import_opml", helper="_scoped",
-    ),
-    ("feeds", "export-opml", "output"): Entry(
-        SCOPED, guard="istota.skills.feeds.cmd_export_opml", helper="_scoped",
-    ),
-    ("health", "export-csv", "output"): Entry(
-        SCOPED, guard="istota.skills.health.cmd_export_csv",
-        helper="resolve_host_path",
-    ),
-    ("kv", "set", "value_file"): Entry(
-        SCOPED, guard="istota.skills.kv._resolve_set_value",
-        helper="resolve_host_path",
-    ),
+    #
+    # One entry left. Everything that used to be here is *stamped* now — the
+    # disposition is on the argument, in the parser, and `stamps()` below reads
+    # it back. `memory_search index file` is the last argument scoped by a
+    # guard rather than by a declaration, and it is stage 5 of the spec.
     ("memory_search", "index.file", "path"): Entry(
         SCOPED, guard="istota.skills.memory_search.cmd_index_file",
         helper="resolve_in_roots",
         note="the shared rule over `env_host_roots(talk=False)`: the indexed "
              "content comes back through `search`, so Talk is not a root",
     ),
-    ("email", "send", "attach"): Entry(
-        SCOPED, guard="istota.skills.email._scoped_attachments",
-        helper="resolve_host_path",
-    ),
-    ("email", "reply", "attach"): Entry(
-        SCOPED, guard="istota.skills.email._scoped_attachments",
-        helper="resolve_host_path",
-    ),
-    ("email", "reply-all", "attach"): Entry(
-        SCOPED, guard="istota.skills.email._scoped_attachments",
-        helper="resolve_host_path",
-    ),
 
     # -- Remote: the path names somewhere else -------------------------------
-    ("devbox", "cp-in", "dest"): Entry(
-        REMOTE, note="inside the container; the exec server resolves it there",
-    ),
-    ("devbox", "cp-out", "src"): Entry(
-        REMOTE, note="inside the container; the exec server resolves it there",
-    ),
     ("nextcloud", "share.list", "path"): Entry(REMOTE, note="Nextcloud path"),
     ("nextcloud", "share.create", "path"): Entry(REMOTE, note="Nextcloud path"),
     ("nextcloud", "share.link", "path"): Entry(REMOTE, note="Nextcloud path"),
@@ -316,19 +282,46 @@ def discovered() -> dict[tuple[str, str, str], str]:
     return out
 
 
+def stamps() -> dict[tuple[str, str, str], str]:
+    """Every argument carrying a disposition on its own declaration.
+
+    The same walk, reading `istota.skills._hostpath.stamped` instead of the
+    help-text heuristic. Keyed identically, so the two enumerations of one
+    tree compare key for key.
+    """
+    out: dict[tuple[str, str, str], str] = {}
+    for skill_dir in _skill_dirs():
+        module_name = _module_for(skill_dir)
+        if module_name is None:
+            continue
+        module = importlib.import_module(module_name)
+        for command, dest, mode in stamped(module.build_parser()):
+            out[(skill_dir.name, command, dest)] = mode
+    return out
+
+
 def _resolve(dotted: str):
     module_name, _, attribute = dotted.rpartition(".")
     return getattr(importlib.import_module(module_name), attribute)
 
 
-def test_every_path_shaped_argument_is_registered():
-    unregistered = sorted(k for k in discovered() if k not in REGISTRY)
+def test_every_path_shaped_argument_is_accounted_for():
+    """Stamped, or registered. An argument that is neither is an open hole.
+
+    The stamp is the disposition that lives *on the declaration* and is read
+    back by the enforcement (`resolve_parsed`), so an argument that carries one
+    is scoped by the fact of being parsed. `REGISTRY` is what remains for the
+    arguments a stamp cannot yet express, and it shrinks to nothing as the
+    ISSUE-447 stages land.
+    """
+    accounted = set(REGISTRY) | set(stamps())
+    unregistered = sorted(k for k in discovered() if k not in accounted)
     assert not unregistered, (
-        f"{unregistered} name a path and are in no disposition in REGISTRY. A "
-        f"skill CLI runs host-side with the daemon's filesystem view, so a host "
-        f"path the model chooses is an arbitrary read or write unless it goes "
-        f"through istota.skill_host_paths. Scope it and register it as SCOPED, "
-        f"or register why it needs no scoping."
+        f"{unregistered} name a path and carry no disposition. A skill CLI "
+        f"runs host-side with the daemon's filesystem view, so a host path the "
+        f"model chooses is an arbitrary read or write unless it goes through "
+        f"istota.skill_host_paths. Declare it with `_hostpath.host_path`, or "
+        f"register why it needs no scoping."
     )
 
 
@@ -341,6 +334,36 @@ def test_the_registry_holds_nothing_that_no_longer_exists():
         f"registry carrying arguments that do not exist cannot be read as a "
         f"description of the tree."
     )
+
+
+def test_no_argument_is_both_stamped_and_registered():
+    """Two dispositions for one argument is the drift this file exists under.
+
+    The registry entry would go on asserting a guard that the conversion to a
+    stamp deleted — which is exactly the stale-claim failure `SCOPED`'s helper
+    check was added to catch, one level up.
+    """
+    both = sorted(set(REGISTRY) & set(stamps()))
+    assert not both, (
+        f"{both} carry a stamp on the declaration and a REGISTRY entry. Delete "
+        f"the entry: the stamp is the disposition, and the enforcement reads it."
+    )
+
+
+def test_the_stamps_reach_the_arguments_they_are_meant_to_cover():
+    """A stamp walk over an empty set accounts for everything, vacuously."""
+    found = stamps()
+    assert len(found) >= 14, sorted(found)
+    for key in [
+        ("browse", "screenshot", "output"),
+        ("kv", "set", "value_file"),
+        ("devbox", "cp-out", "dest"),
+        ("feeds", "import-opml", "path"),
+        ("health", "export-csv", "output"),
+        ("code_review", "run", "worktree"),
+        ("email", "send", "attach"),
+    ]:
+        assert key in found, f"{key} carries no stamp"
 
 
 def test_the_walk_finds_the_arguments_it_is_meant_to_guard():

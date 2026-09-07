@@ -19,7 +19,6 @@ back instead of resolved. Where a test looks redundant, that is usually why.
 """
 
 import argparse
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,6 +34,7 @@ from istota.skill_host_paths import (
     write_resolved,
 )
 from istota.user_scope import scoped_user_dir
+from tests.support.skill_cli import run_skill_main
 
 
 @pytest.fixture
@@ -221,38 +221,47 @@ class TestValidateHostPathWrapper:
         ) is not None
 
 
-class TestDevboxStillDelegates:
-    """The devbox skill keeps its private wrapper name, but must not keep a
-    second copy of the rule.
+class TestDevboxKeepsNoCopyOfTheRule:
+    """The devbox skill declares its host paths; it does not re-state the rule.
 
-    There was a second wrapper here, `_validate_host_path`, which returned the
-    error alone. It went when the file verbs moved onto the exec transport: all
-    three call sites send the resolved path over the wire, so none of them had a
-    use for a variant that threw it away."""
+    Two private wrappers stood here over time. `_validate_host_path` returned
+    the error alone and went when the file verbs moved onto the exec transport;
+    `_resolve_host_path` went with ISSUE-447, when the three host-side
+    arguments were declared through `_hostpath.host_path` and the resolution
+    moved to parse time. Neither may come back: a second spelling of one
+    boundary check is how the four implementations that issue consolidated came
+    about in the first place.
 
-    def test_wrapper_delegates_to_the_shared_validator(self, mount):
+    What each argument *does* is driven end to end in
+    `tests/test_skill_host_paths_refusals.py`. What is asserted here is that
+    the disposition exists and says the right thing, verb by verb — the host
+    side scoped, the container side left to the server.
+    """
+
+    def test_the_private_wrappers_are_gone(self):
         from istota.skills import devbox
-        _, err = devbox._resolve_host_path(Path("/etc/passwd"), must_exist=True)
-        assert err is not None
-        p = mount / "Users" / "alice" / "ok.txt"
-        p.write_text("x")
-        _, err = devbox._resolve_host_path(p, must_exist=True)
-        assert err is None
 
-    def test_resolving_wrapper_returns_the_approved_path(self, mount):
-        from istota.skills import devbox
-        p = mount / "Users" / "alice" / "ok.txt"
-        p.write_text("x")
-        resolved, err = devbox._resolve_host_path(p, must_exist=True)
-        assert err is None
-        assert resolved == p.resolve()
+        for name in ("_resolve_host_path", "_validate_host_path"):
+            assert not hasattr(devbox, name), (
+                f"{name} is back. The rule lives in skill_host_paths and is "
+                f"applied by the stamp on the declaration."
+            )
 
-    def test_cross_user_cp_in_is_refused(self, mount):
+    def test_the_host_and_container_sides_are_declared_apart(self):
         from istota.skills import devbox
-        p = mount / "Users" / "bob" / "secret.txt"
-        p.write_text("x")
-        _, err = devbox._resolve_host_path(p, must_exist=True)
-        assert err is not None
+        from istota.skills._hostpath import READ, REMOTE, WRITE, stamped
+
+        modes = {
+            (command, dest): mode
+            for command, dest, mode in stamped(devbox.build_parser())
+        }
+        assert modes == {
+            ("exec-file", "path"): READ,
+            ("cp-in", "src"): READ,
+            ("cp-in", "dest"): REMOTE,
+            ("cp-out", "src"): REMOTE,
+            ("cp-out", "dest"): WRITE,
+        }
 
 
 class TestDeveloperReposRoot:
@@ -663,6 +672,11 @@ class TestALeafSymlinkIsRefusedAsADestination:
     passes containment as a *name* and is then followed by whatever opens it —
     `cp-out`'s `write_bytes`, the OPML exporter's own open. The tree is bound
     read-write into the sandbox, so the link is model-plantable.
+
+    That the shipped destination verbs inherit this is asserted where they are
+    now driven, in `tests/test_skill_host_paths_refusals.py`: the refusal moved
+    to parse time with the stamps, so there is no per-skill wrapper left here
+    to reach the branch through.
     """
 
     def test_refused(self, mount, tmp_path):
@@ -693,22 +707,6 @@ class TestALeafSymlinkIsRefusedAsADestination:
         resolved, err = resolve_host_path(target, writable=True, operation="export")
         assert err is None
         assert resolved == target.resolve()
-
-    def test_devbox_cp_out_inherits_the_refusal(self, mount, tmp_path):
-        """`cp-out` is the one pre-existing destination consumer.
-
-        It reaches the same branch through its own wrapper, so the rule holds
-        for it without the skill being touched — and it is the writer the
-        comment inside `resolve_host_path` names.
-        """
-        from istota.skills import devbox
-
-        outside = tmp_path / "victim.txt"
-        link = mount / "Users" / "alice" / "out.txt"
-        link.symlink_to(outside)
-        _, err = devbox._resolve_host_path(link, must_exist=False)
-        assert err is not None and "symlink" in err
-        assert not outside.exists()
 
 
 class TestADotDotLeafIsRefusedAsADestination:
@@ -814,6 +812,12 @@ class TestBrowseScreenshotIsScoped:
     the proxy while the model's `/tmp` is the sandbox's own tmpfs, so the file
     landed on the host and the model was handed a path it could not open.
 
+    **Driven through `main`, because that is where the scoping is.** `--output`
+    is declared `WRITE` and resolved by `parse_and_resolve`, so calling
+    `cmd_screenshot` with a hand-built namespace exercises no boundary at all —
+    it would pass against a verb with no stamp on it. The refusals below are
+    the facade's envelope and exit 1, ahead of dispatch.
+
     Every case here asserts on the filesystem as well as on the envelope. The
     ordering bug this module already carries a test for created the directory
     and *then* refused, which a test reading the return value alone cannot see.
@@ -832,13 +836,15 @@ class TestBrowseScreenshotIsScoped:
             yield m
 
     def _shot(self, *argv):
-        from istota.skills.browse import build_parser, cmd_screenshot
-        return cmd_screenshot(build_parser().parse_args(["screenshot", *argv]))
+        from istota.skills.browse import main
+
+        return run_skill_main(main, ["screenshot", *argv]).envelope
 
     def test_an_output_outside_the_workspace_is_refused(self, mount, tmp_path, post):
         dest = tmp_path / "attacker" / "deep" / "shot.png"
         result = self._shot("https://example.com", "-o", str(dest))
         assert result["status"] == "error"
+        assert result["reason"] == "host_path_refused"
         assert not dest.exists()
         # The mkdir must never have run: an out-of-bounds tree created as the
         # daemon user is a write, whatever the envelope then says.
@@ -951,10 +957,10 @@ class TestBrowseScreenshotIsScoped:
     ):
         """`/chat/files` serves `/Users/{uid}` and refuses `/Channels/{token}`.
 
-        The allowlist admits the task's own channel directory as a
-        destination, so writing there is legitimate — but handing back a
-        `?path=` spelling for it would have the reply build a URL the endpoint
-        refuses by design.
+        A `WRITE` admits the task's own channel directory — a destination's
+        content stays inside the task's working context — so writing there is
+        legitimate, and handing back a `?path=` spelling for it would have the
+        reply build a URL the endpoint refuses by design.
         """
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
         dest = mount / "Channels" / "tok1" / "shot.png"
@@ -984,42 +990,43 @@ class TestBrowseScreenshotIsScoped:
 
 
 class TestHealthExportCsvIsScoped:
-    """`--output` was an arbitrary host write with a whole health record in it."""
+    """`--output` was an arbitrary host write with a whole health record in it.
+
+    Driven through `main`, for the reason the browse class above states: the
+    resolution is at parse and a hand-built namespace reaches none of it.
+    `health.main` takes no argv and parses `sys.argv`, which `run_skill_main`
+    sets — the one skill in the tree written that way.
+    """
 
     def _export(self, output):
-        import argparse
+        from istota.skills.health import main
 
-        from istota.skills.health import cmd_export_csv
-
-        return cmd_export_csv(argparse.Namespace(output=str(output)))
+        return run_skill_main(main, ["export-csv", "--output", str(output)])
 
     def test_a_path_outside_the_workspace_is_refused_before_the_database(
-        self, mount, tmp_path, capsys,
+        self, mount, tmp_path,
     ):
         """No `HEALTH_DB_PATH` is set here, so reaching `_connect` would fail
         with a different message — which is what shows the refusal came first.
         The export is the caller's entire health record; a refusal should not
         read it out of the database on the way to saying no."""
         dest = tmp_path / "attacker" / "panels.csv"
-        with pytest.raises(SystemExit) as exc:
-            self._export(dest)
-        assert exc.value.code == 1
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["status"] == "error"
-        assert "outside allowed roots" in payload["error"]
+        run = self._export(dest)
+        assert run.exit_code == 1
+        assert run.envelope["status"] == "error"
+        assert run.envelope["reason"] == "host_path_refused"
+        assert "outside allowed roots" in run.envelope["error"]
         assert not dest.exists()
         assert not (tmp_path / "attacker").exists()
 
-    def test_another_users_workspace_is_refused(self, mount, capsys):
+    def test_another_users_workspace_is_refused(self, mount):
         dest = mount / "Users" / "bob" / "panels.csv"
-        with pytest.raises(SystemExit):
-            self._export(dest)
-        # The payload, not the exit: with the guard removed this verb still
-        # raises SystemExit, from `_db_path` finding no HEALTH_DB_PATH. A test
-        # reading only the exception passes against an unguarded verb, which is
-        # what the control found.
-        payload = json.loads(capsys.readouterr().out)
-        assert "outside allowed roots" in payload["error"]
+        run = self._export(dest)
+        # The payload, not the exit: with the stamp removed this verb still
+        # exits 1, from `_db_path` finding no HEALTH_DB_PATH. A test reading
+        # only the status passes against an unguarded verb, which is what the
+        # control found.
+        assert "outside allowed roots" in run.envelope["error"]
         assert not dest.exists()
 
 
@@ -1027,7 +1034,10 @@ class TestFeedsOpmlIsScoped:
     """One read and one write, and both go to a CLI that opens the path itself.
 
     So the *resolved* path is what has to travel: handing the Click CLI the
-    original argument re-walks every symlink the check just settled.
+    original argument re-walks every symlink the check just settled. Since the
+    resolution is `parse_and_resolve`'s, that is now a property of the value on
+    the namespace rather than of anything these two handlers do — which is what
+    the two "the resolved path is what reaches the CLI" cases pin.
     """
 
     @pytest.fixture
@@ -1039,34 +1049,29 @@ class TestFeedsOpmlIsScoped:
         ) as m:
             yield m
 
+    def _feeds(self, *argv):
+        from istota.skills.feeds import main
+
+        return run_skill_main(main, list(argv))
+
     def test_import_outside_the_workspace_is_refused(
-        self, mount, tmp_path, capsys, ran,
+        self, mount, tmp_path, ran,
     ):
-        import argparse
-
-        from istota.skills.feeds import cmd_import_opml
-
         source = tmp_path / "elsewhere" / "subs.opml"
         source.parent.mkdir()
         source.write_text("<opml/>")
-        with pytest.raises(SystemExit) as exc:
-            cmd_import_opml(argparse.Namespace(path=str(source)))
-        assert exc.value.code == 1
-        assert json.loads(capsys.readouterr().out)["status"] == "error"
+        run = self._feeds("import-opml", str(source))
+        assert run.exit_code == 1
+        assert run.envelope["status"] == "error"
         ran.assert_not_called()
 
     def test_export_outside_the_workspace_is_refused_and_creates_nothing(
-        self, mount, tmp_path, capsys, ran,
+        self, mount, tmp_path, ran,
     ):
-        import argparse
-
-        from istota.skills.feeds import cmd_export_opml
-
         dest = tmp_path / "attacker" / "deep" / "subs.opml"
-        with pytest.raises(SystemExit) as exc:
-            cmd_export_opml(argparse.Namespace(output=str(dest)))
-        assert exc.value.code == 1
-        assert json.loads(capsys.readouterr().out)["status"] == "error"
+        run = self._feeds("export-opml", "--output", str(dest))
+        assert run.exit_code == 1
+        assert run.envelope["status"] == "error"
         assert not dest.exists()
         assert not (tmp_path / "attacker").exists()
         ran.assert_not_called()
@@ -1079,10 +1084,6 @@ class TestFeedsOpmlIsScoped:
         resolving implementation from a passthrough, and on a host whose temp
         directory is already a realpath they are equal for every plain path.
         """
-        import argparse
-
-        from istota.skills.feeds import cmd_export_opml
-
         real = mount / "Users" / "alice" / "real" / "exports"
         real.mkdir(parents=True)
         (mount / "Users" / "alice" / "via").symlink_to(
@@ -1091,29 +1092,21 @@ class TestFeedsOpmlIsScoped:
         dest = mount / "Users" / "alice" / "via" / "exports" / "subs.opml"
         assert str(dest) != str(dest.resolve())
 
-        cmd_export_opml(argparse.Namespace(output=str(dest)))
+        self._feeds("export-opml", "--output", str(dest))
         ran.assert_called_once()
         assert ran.call_args[0][0] == [
             "export-opml", "--output", str(real.resolve() / "subs.opml"),
         ]
 
     def test_export_inside_the_workspace_is_allowed(self, mount, ran):
-        import argparse
-
-        from istota.skills.feeds import cmd_export_opml
-
         dest = mount / "Users" / "alice" / "exports" / "subs.opml"
-        cmd_export_opml(argparse.Namespace(output=str(dest)))
+        self._feeds("export-opml", "--output", str(dest))
         ran.assert_called_once()
         # The Click CLI opens the path itself, so the facade is what has to
-        # have made the directory: `resolve_host_path` no longer does.
+        # have made the directory: resolution creates nothing.
         assert dest.parent.is_dir()
 
     def test_import_inside_the_workspace_is_allowed(self, mount, ran):
-        import argparse
-
-        from istota.skills.feeds import cmd_import_opml
-
         real = mount / "Users" / "alice" / "real"
         real.mkdir()
         (real / "subs.opml").write_text("<opml/>")
@@ -1121,7 +1114,7 @@ class TestFeedsOpmlIsScoped:
         source = mount / "Users" / "alice" / "via" / "subs.opml"
         assert str(source) != str(source.resolve())
 
-        cmd_import_opml(argparse.Namespace(path=str(source)))
+        self._feeds("import-opml", str(source))
         ran.assert_called_once()
         # Resolved, again: reopening the argument re-walks `via`.
         assert ran.call_args[0][0] == [

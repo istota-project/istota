@@ -69,8 +69,9 @@ from pathlib import Path
 
 from istota import devbox_exec_client as _client
 from istota import devbox_exec_protocol as proto
-from istota.skill_host_paths import resolve_host_path, write_resolved
+from istota.skill_host_paths import write_resolved
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import READ, REMOTE, WRITE, host_path
 
 DEFAULT_MAX_OUTPUT_BYTES = 102_400
 MAX_COMMAND_BYTES = 32 * 1024  # `bash -o pipefail -c` argv length cap
@@ -571,24 +572,18 @@ def _check_owned(container: str) -> str | None:
 
 
 # ---- Host paths ------------------------------------------------------------
-
-
-def _resolve_host_path(p: Path, *, must_exist: bool) -> tuple[Path | None, str | None]:
-    """Validate a host path and hand back the one to actually operate on.
-
-    The rule itself lives in ``istota.skill_host_paths`` — ``kv set
-    --value-file`` needs the identical scoping, and two copies of a boundary
-    check drift. **Use the returned path**: acting on the caller-supplied one
-    re-walks its symlinks and reopens the window the check closed.
-
-    This is the host side, and it is unchanged by the move onto the transport.
-    The container side is the server's business, decided inside the container;
-    this one is about a path the model picked for a CLI running host-side with
-    the daemon's whole filesystem view, which is a different question.
-    """
-    return resolve_host_path(
-        p, writable=not must_exist, operation="cp-in/cp-out",
-    )
+#
+# There is no helper here any more. The three host-side arguments — ``cp-in
+# src``, ``cp-out dest`` and ``exec-file path`` — are declared through
+# ``_hostpath.host_path`` in ``build_parser``, so they arrive on the namespace
+# already resolved and already contained, and the private wrapper that used to
+# state the rule for this skill went with them: two spellings of one boundary
+# check is how the four implementations ISSUE-447 consolidated came about.
+#
+# The container-side arguments are declared ``REMOTE`` in the same place. That
+# is unchanged in substance and is now written down at the declaration: the
+# containment decision belongs to the server, inside the container, where the
+# mount table is not a guess (ISSUE-306).
 
 
 def _confirm_write(reply: _Reply, path: str, expected: int) -> str | None:
@@ -685,9 +680,8 @@ def cmd_exec(args) -> dict:
 
 @_reports_refusals
 def cmd_exec_file(args) -> dict:
-    local, path_err = _resolve_host_path(Path(args.path), must_exist=True)
-    if path_err:
-        return _err(path_err)
+    # Resolved and contained by the `READ` stamp on the declaration.
+    local = Path(args.path)
     if not local.is_file():
         return _err(f"Script not found: {local}")
 
@@ -783,9 +777,8 @@ def _guess_interpreter(path: Path) -> str | None:
 
 @_reports_refusals
 def cmd_cp_in(args) -> dict:
-    src, path_err = _resolve_host_path(Path(args.src), must_exist=True)
-    if path_err:
-        return _err(path_err)
+    # Resolved and contained by the `READ` stamp on the declaration.
+    src = Path(args.src)
     if src.is_dir():
         return _err(
             f"{src} is a directory. The transport moves one file per call — "
@@ -818,10 +811,11 @@ def cmd_cp_in(args) -> dict:
 
 @_reports_refusals
 def cmd_cp_out(args) -> dict:
-    # The container side first, then the host path. `_resolve_host_path`
-    # creates the destination's parents (inside the allowlist, after its own
-    # containment check), so resolving before the source is known to be
-    # readable left an empty tree in the user's workspace behind every refusal.
+    # The host destination is settled before this runs — the `WRITE` stamp on
+    # the declaration resolves it at parse time — which is the stronger
+    # ordering: a refused destination costs no round trip into the container
+    # at all. It also creates nothing, which is what the old ordering here was
+    # working around; the parent is made by `write_resolved`, at the write.
     reply = _converse(proto.encode_read_file_request(path=args.src))
 
     # **Checked before anything reaches the host disk.** The server
@@ -846,9 +840,7 @@ def cmd_cp_out(args) -> dict:
             f"{len(reply.stdout)} arrived; nothing was written to the host."
         )
 
-    dest, path_err = _resolve_host_path(Path(args.dest), must_exist=False)
-    if path_err:
-        return _err(path_err)
+    dest = Path(args.dest)
     try:
         # `write_resolved`, not `dest.write_bytes`: the resolution refused a
         # symlink standing at the leaf as of its own check, and a plain open
@@ -983,17 +975,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_exec.add_argument("--timeout", type=int, help="Per-exec timeout (s); none by default")
 
     p_xf = sub.add_parser("exec-file", help="Copy a local script in and run it")
-    p_xf.add_argument("path", help="Local file path")
+    host_path(p_xf, "path", mode=READ, help="Local file path")
     p_xf.add_argument("--interpreter", help="Interpreter (python3, bash, node, ruby). Default: guess from suffix")
     p_xf.add_argument("--timeout", type=int)
 
+    # One verb, two namespaces. The host side is scoped here; the container
+    # side is the server's own `realpath` under its root list, decided inside
+    # the container where the mount table is not a guess (ISSUE-306).
+    _in_container = "the server resolves it inside the container, under its own roots"
+
     p_in = sub.add_parser("cp-in", help="Copy a file into the devbox")
-    p_in.add_argument("src", help="Local path")
-    p_in.add_argument("dest", help="Path inside the container")
+    host_path(p_in, "src", mode=READ, help="Local path")
+    host_path(p_in, "dest", mode=REMOTE, note=_in_container,
+              help="Path inside the container")
 
     p_out = sub.add_parser("cp-out", help="Copy a file out of the devbox")
-    p_out.add_argument("src", help="Path inside the container")
-    p_out.add_argument("dest", help="Local path")
+    host_path(p_out, "src", mode=REMOTE, note=_in_container,
+              help="Path inside the container")
+    host_path(p_out, "dest", mode=WRITE, help="Local path")
 
     sub.add_parser("status", help="Devbox state, image, uptime, transport liveness")
 

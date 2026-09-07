@@ -25,6 +25,7 @@ from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from pathlib import Path
 
 from istota.skills._cli import parse_and_resolve, run_skill_cli
+from istota.skills._hostpath import EGRESS, host_path
 
 logger = logging.getLogger("istota.skills.email")
 
@@ -2021,15 +2022,6 @@ def _reply_subject(subject: str) -> str:
 # pressure, and it would supply the flag in exactly that state.
 
 
-class _GateRefusal(Exception):
-    """The gate cannot decide, or cannot hold. Refuse the send.
-
-    Never "send anyway". A gate that fails open on a missing database is not a
-    gate, and the addresses it most needs to hold are the ones nothing vouches
-    for.
-    """
-
-
 def _gate_error(message: str) -> dict:
     return {
         "status": "error",
@@ -2074,71 +2066,6 @@ def _task_context(conn, user_id: str) -> tuple[int | None, str | None, str | Non
     origin = routing.origin_descriptor(task, conn)
     room = origin[len("room:"):] if origin and origin.startswith("room:") else None
     return task.id, room, origin
-
-
-def _scoped_attachments(attachments: list[str]) -> list[str]:
-    """Resolved host paths for an outbound message's attachments.
-
-    Runs on **every** send, held or not. The skill CLI is spawned host-side by
-    the proxy with the daemon's whole filesystem view, so a path argument the
-    model chose is an arbitrary read unless it is scoped — the exact condition
-    `skill_host_paths` exists for. `_attach_files` does a bare `read_bytes` on
-    whatever it is handed, so before this the verb would cheerfully mail
-    `/etc/istota/config.toml` to anyone. The roots are the ones the sandbox
-    binds for this caller: the deferred dir, the user's workspace, the task's
-    own channel dir, and Talk read-only.
-
-    Callers use the returned paths, not the ones passed in — re-opening the
-    original re-walks the symlinks this resolution just settled.
-    """
-    from ...skill_host_paths import resolve_host_path
-
-    resolved: list[str] = []
-    for raw in attachments or []:
-        path, err = resolve_host_path(
-            Path(raw), writable=False, operation="attaching a file to an email",
-        )
-        if err is not None:
-            raise _GateRefusal(err)
-        resolved.append(str(path))
-    return resolved
-
-
-def _holdable_attachments(
-    app_config, user_id: str, originals: list[str], resolved: list[str],
-) -> list[str]:
-    """The same, narrowed to the user's own workspace, for a draft.
-
-    Narrower than `_scoped_attachments` because a *held* attachment has a second
-    check ahead of it: `outbound_drafts._confined_attachment` re-validates
-    against `{mount}/Users/{uid}` at release — necessarily, since a pending
-    draft sits for as long as the user likes and the path stays writable that
-    whole time. Anything accepted here but outside the workspace would be a
-    draft the user could approve and never send. Refusing now leaves the model
-    able to retry without the attachment; refusing at release leaves the user
-    with a dead draft they cannot fix.
-
-    Validated at hold time rather than release time for the other half of the
-    same reason: the holding task's environment describes the roots it may read,
-    and the daemon that runs `release` hours later has none of it set.
-    """
-    if not resolved:
-        return []
-    root = app_config.workspace_root(user_id)
-    if root is None:
-        raise _GateRefusal(
-            "attachment paths cannot be checked without a local workspace"
-        )
-    root = Path(root).resolve()
-    for raw, path in zip(originals, resolved):
-        try:
-            Path(path).relative_to(root)
-        except ValueError:
-            raise _GateRefusal(
-                f"attachment {raw} is outside your workspace, so the held draft "
-                "could not be sent on approval"
-            ) from None
-    return resolved
 
 
 def _unparseable(entry: object) -> bool:
@@ -2220,10 +2147,13 @@ def _outbound_gate(
     different arguments. A gate that could not run returns `status: "error"`
     and exits non-zero, which is the one case where these verbs fail.
 
-    The second element carries the *resolved* attachment paths back to the
-    caller, which must attach those rather than the strings it passed in:
-    re-opening the originals would re-walk the symlinks the scoping just
-    settled.
+    The second element carries the attachment paths back to the caller, which
+    attaches those. Since ISSUE-447 they arrive already resolved: `--attach` is
+    declared `EGRESS` on the parser and `parse_and_resolve` rewrites the value
+    on the namespace, so there is no unresolved original left anywhere for a
+    caller to re-open. The element stays on the return rather than the callers
+    reading `args.attach` directly, because a hold has to carry the same list
+    into the draft and one source for it is what keeps the two in step.
     """
     from ... import db, outbound_drafts as drafts
     from ...notification_resolvers import outbound_draft as draft_source
@@ -2236,14 +2166,12 @@ def _outbound_gate(
         # is exactly the one nothing would have held.
         return _gate_error("ISTOTA_USER_ID is not set, so no approval policy applies"), []
 
-    # Attachment paths first, and under every policy. This is not part of the
-    # approval decision — it is the host-path scoping the CLI owes because the
-    # proxy runs it outside the sandbox with the daemon's filesystem view — so
-    # it must not be reachable-around by having the gate switched off.
-    try:
-        send_paths = _scoped_attachments(attachments)
-    except _GateRefusal as e:
-        return _gate_error(str(e)), []
+    # Already resolved, and already narrowed to the user's own workspace: the
+    # `EGRESS` stamp on `--attach` did both at parse time, under every policy
+    # and before this gate could be switched off. That the scoping is not
+    # reachable-around by setting the policy to `off` used to be a property of
+    # where the call sat in this function; it is now a property of the verb.
+    send_paths = list(attachments)
 
     try:
         from ...config import load_config
@@ -2273,9 +2201,14 @@ def _outbound_gate(
                 if isinstance(e, str)
                 and recipients_require_hold(app_config, conn, user_id, [e])
             ]
-            paths = _holdable_attachments(
-                app_config, user_id, attachments, send_paths,
-            )
+            # The same list a direct send would attach. `EGRESS` is what makes
+            # the two agree: `outbound_drafts._confined_attachment` re-checks a
+            # held path against `{mount}/Users/{uid}` hours later at release,
+            # and anything wider accepted here would be a draft the user could
+            # approve and never send. That narrowing used to be applied only on
+            # this branch, by `_holdable_attachments`; it is the whole verb's
+            # rule now, so the held and direct paths cannot answer differently.
+            paths = send_paths
             task_id, room_token, origin_target = _task_context(conn, user_id)
             draft_id = drafts.hold(
                 conn,
@@ -2314,8 +2247,6 @@ def _outbound_gate(
                 ),
                 room_token=room_token,
             )
-    except _GateRefusal as e:
-        return _gate_error(str(e)), []
     except drafts.DraftError as e:
         return _gate_error(f"the draft could not be stored ({e})"), []
     except Exception as e:  # noqa: BLE001 — a gate that fails open is not a gate
@@ -2582,7 +2513,10 @@ def build_parser():
     p_send.add_argument("--html", action="store_true", help="Send as HTML email")
     p_send.add_argument("--cc", help="Cc recipients (comma-separated)")
     p_send.add_argument("--bcc", help="Bcc recipients (comma-separated; never transmitted in headers)")
-    p_send.add_argument("--attach", action="append", help="Attach a file (repeatable)")
+    host_path(
+        p_send, "--attach", mode=EGRESS, action="append",
+        help="Attach a file from your own workspace (repeatable)",
+    )
     p_send.add_argument("--reply-to", dest="reply_to", help="Reply-To header address")
 
     # reply / reply-all
@@ -2592,7 +2526,10 @@ def build_parser():
         p_reply.add_argument("--body", help="Reply body text")
         p_reply.add_argument("--body-file", help="Read body from file")
         p_reply.add_argument("--html", action="store_true", help="Send as HTML")
-        p_reply.add_argument("--attach", action="append", help="Attach a file (repeatable)")
+        host_path(
+            p_reply, "--attach", mode=EGRESS, action="append",
+            help="Attach a file from your own workspace (repeatable)",
+        )
         if verb == "reply":
             p_reply.add_argument("--all", action="store_true", help="Reply to all recipients")
         _add_scope(p_reply)

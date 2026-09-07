@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,9 +19,12 @@ from istota.skills.email import (
     cmd_mark,
     cmd_reply,
     cmd_send,
+    main,
     mark_email,
     send_email,
 )
+
+from tests.support.skill_cli import run_skill_main
 
 BOT = "bot@example.com"
 
@@ -54,18 +56,25 @@ def skill_env(monkeypatch, tmp_path):
     }
     monkeypatch.setattr("istota.config.load_config", lambda *a, **k: cfg)
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-    # An attachment path is scoped to the roots the sandbox binds for this
-    # caller — the skill CLI runs host-side with the daemon's filesystem view,
-    # so an unscoped path argument is an arbitrary read. Give the fixture the
-    # deferred-dir root the executor always exports, and a file inside it.
+    # An attachment path is scoped, because the skill CLI runs host-side with
+    # the daemon's filesystem view and an unscoped path argument is an
+    # arbitrary read. `--attach` is `EGRESS`, so the root is the caller's own
+    # workspace and nothing else — not the deferred dir, and not the task's
+    # channel directory — since the bytes leave the task. Give the fixture both
+    # roots the executor exports and put the attachment in the workspace.
     deferred = tmp_path / "deferred"
     deferred.mkdir()
-    (deferred / "x.txt").write_text("attachment")
+    (deferred / "x.txt").write_text("in the deferred dir")
     monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
+    mount = tmp_path / "mount"
+    (mount / "Users" / "alice").mkdir(parents=True)
+    (mount / "Users" / "alice" / "x.txt").write_text("attachment")
+    monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
     for k, v in {"SMTP_HOST": "smtp.test", "IMAP_HOST": "imap.test",
                  "IMAP_USER": "u", "IMAP_PASSWORD": "p", "SMTP_FROM": BOT}.items():
         monkeypatch.setenv(k, v)
-    cfg._test_attachment = str(deferred / "x.txt")
+    cfg._test_attachment = str(mount / "Users" / "alice" / "x.txt")
+    cfg._test_deferred_attachment = str(deferred / "x.txt")
     return cfg
 
 
@@ -209,22 +218,57 @@ class TestSend:
         _, kwargs = se.call_args
         assert kwargs["cc"] == ["c@out.com"]
         assert kwargs["bcc"] == ["d@out.com"]
-        # The *resolved* path, not the string passed in — reopening the original
-        # would re-walk the symlinks the scoping settled.
-        assert kwargs["attachments"] == [str(Path(attachment).resolve())]
+        assert kwargs["attachments"] == [attachment]
         assert kwargs["reply_to"] == "r@x.com"
 
-    def test_cmd_send_refuses_an_unscoped_attachment_path(self, skill_env):
+    def test_an_attachment_outside_the_workspace_is_refused(self, skill_env):
         """The CLI runs host-side with the daemon's filesystem view, so a path
-        the model chose is an arbitrary read unless it is scoped."""
-        args = MagicMock(to="a@out.com", subject="S", body="hi", body_file=None,
-                         html=False, cc=None, bcc=None,
-                         attach=["/etc/hosts"], reply_to=None)
+        the model chose is an arbitrary read unless it is scoped.
+
+        Driven through `main`: `--attach` is declared `EGRESS` and resolved by
+        `parse_and_resolve`, so a hand-built namespace reaches no boundary at
+        all and this would pass against a verb carrying no stamp.
+        """
         with patch("istota.skills.email.send_email") as se, \
              patch("istota.skills.email._write_deferred_sent_email"):
-            res = cmd_send(args)
+            run = run_skill_main(main, [
+                "send", "--to", "a@out.com", "--subject", "S", "--body", "hi",
+                "--attach", "/etc/hosts",
+            ])
         se.assert_not_called()
-        assert res["status"] == "error"
+        assert run.exit_code == 1
+        assert run.envelope["reason"] == "host_path_refused"
+
+    def test_an_attachment_in_the_deferred_dir_is_refused(self, skill_env):
+        """The narrowing `EGRESS` carries, at the verb it was named for.
+
+        The deferred dir is a root for a `READ` and not for an `EGRESS`: these
+        bytes leave the task. The held-draft path already answered this way —
+        `outbound_drafts._confined_attachment` re-checks against the workspace
+        alone at release — so what changes is that a direct send now gets the
+        same answer as a held one, which is the point.
+        """
+        with patch("istota.skills.email.send_email") as se, \
+             patch("istota.skills.email._write_deferred_sent_email"):
+            run = run_skill_main(main, [
+                "send", "--to", "a@out.com", "--subject", "S", "--body", "hi",
+                "--attach", skill_env._test_deferred_attachment,
+            ])
+        se.assert_not_called()
+        assert run.envelope["reason"] == "host_path_refused"
+
+    def test_an_attachment_in_the_workspace_is_sent(self, skill_env):
+        """The other half: the refusal above passes against a verb that refuses
+        everything, so the admitted case has to be asserted beside it."""
+        with patch("istota.skills.email.send_email", return_value="<m@x>") as se, \
+             patch("istota.skills.email._write_deferred_sent_email"):
+            run = run_skill_main(main, [
+                "send", "--to", "a@out.com", "--subject", "S", "--body", "hi",
+                "--attach", skill_env._test_attachment,
+            ])
+        assert run.exit_code == 0, run.stdout
+        _, kwargs = se.call_args
+        assert kwargs["attachments"] == [skill_env._test_attachment]
 
     def test_cmd_send_echoes_message_id(self, skill_env):
         """The ok envelope carries the sent Message-ID so 'sent' is backed by
