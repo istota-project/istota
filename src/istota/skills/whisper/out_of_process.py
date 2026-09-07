@@ -57,12 +57,26 @@ _REAP_TIMEOUT_SECONDS = 10.0
 _ERROR_DETAIL_MAX_CHARS = 500
 
 
+#: The three the child's allowlist is derived from. Cleared before the
+#: identity is applied, so an unsupplied one is absent rather than inherited.
+_IDENTITY_VARS = ("ISTOTA_USER_ID", "NEXTCLOUD_MOUNT_PATH", "ISTOTA_DEFERRED_DIR")
+
+
 def _identity_env(
     user_id: str | None,
     mount_path: str | os.PathLike[str] | None,
     deferred_dir: str | os.PathLike[str] | None,
 ) -> dict[str, str]:
-    """The task identity, spelled the way the skill proxy spells it.
+    """The task identity the child derives its allowlist from.
+
+    Three of the four variables `build_task_runtime` exports;
+    `ISTOTA_CONVERSATION_TOKEN` is deliberately not among them, so the child
+    gets no `{mount}/Channels/{token}` root. Nothing writes an audio
+    attachment there — Talk shares land in `{mount}/Talk`, web-chat uploads
+    in the workspace inbox or the per-user temp dir — and the caller stages
+    anything out of reach into the temp dir anyway
+    (`executor._audio_in_reach`), so the root would widen what the child may
+    name without making any shipped attachment reachable.
 
     `whisper transcribe`'s path argument is scoped against the allowlist the
     *child's* environment names (ISSUE-447), and the daemon's own environment
@@ -81,6 +95,13 @@ def _identity_env(
     A value that was not given is left out rather than exported blank: an
     empty string reads to `env_host_roots` exactly as an unset variable does,
     and inventing one would only obscure which caller failed to say.
+
+    **The caller has to clear the three names first**, which `_child_env`
+    does, and that is not tidiness. The child inherits `os.environ`, so a
+    name omitted here would otherwise fall through to whatever the daemon's
+    own environment holds — and the daemon has no task, so any value it
+    carries belongs to something else. That also makes the negative case
+    honest rather than dependent on the machine the tests run on.
     """
     out: dict[str, str] = {}
     if user_id:
@@ -90,6 +111,18 @@ def _identity_env(
     if deferred_dir:
         out["ISTOTA_DEFERRED_DIR"] = str(deferred_dir)
     return out
+
+
+def _child_env(
+    user_id: str | None,
+    mount_path: str | os.PathLike[str] | None,
+    deferred_dir: str | os.PathLike[str] | None,
+) -> dict[str, str]:
+    """The daemon's environment, with the identity replaced rather than merged."""
+    env = {k: v for k, v in os.environ.items() if k not in _IDENTITY_VARS}
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.update(_identity_env(user_id, mount_path, deferred_dir))
+    return env
 
 
 def transcribe_audio_out_of_process(
@@ -175,11 +208,7 @@ def transcribe_audio_out_of_process(
             # worth more than no transcript.
             encoding="utf-8",
             errors="replace",
-            env={
-                **os.environ,
-                "PYTHONIOENCODING": "utf-8",
-                **_identity_env(user_id, mount_path, deferred_dir),
-            },
+            env=_child_env(user_id, mount_path, deferred_dir),
             # Never the daemon's stdin. Under systemd that is /dev/null and
             # this changes nothing, but `istota serve` in a terminal would hand
             # the child the operator's tty — and a child that reads from it (an

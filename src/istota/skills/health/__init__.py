@@ -463,6 +463,20 @@ def cmd_upload(args: argparse.Namespace) -> None:
     than moved. What the op carries is likewise the *resolved* path, so the
     replay re-resolves a string this CLI already contained instead of an
     attacker-chosen one (ISSUE-447).
+
+    **The replay's roots are narrower than this stamp's, and the difference
+    is visible to the model as a success that imports nothing.** `READ` is
+    `env_host_roots()` — the workspace, the deferred dir, this task's channel
+    directory and `{mount}/Talk` — while `scheduler_deferred._source_path_
+    allowed` derives the workspace and the deferred dir only, deliberately
+    and with a docstring saying why: there is no conversation token on the
+    replay path and the daemon reads these bytes after the task is over. So
+    a source under `{mount}/Talk` is accepted here, deferred, and dropped
+    there, with the drop only in the scheduler log. The stamp follows the
+    spec, which states `READ` for these three and walks `import-csv` through
+    all four roots; closing the gap means settling which set is right for a
+    verb whose only real execution path is the replay, and that is a spec
+    question rather than a stamp to change quietly.
     """
     path = Path(args.file_path)
     op = {
@@ -1624,10 +1638,19 @@ def cmd_import_immunizations(args: argparse.Namespace) -> None:
     from istota.health import db as health_db
     from istota.health.parser import parse_paste
 
-    if args.paste_file and args.paste:
+    if args.paste_file is not None and args.paste is not None:
         _fail("pass --paste or --paste-file, not both")
-    if args.paste_file:
-        raw = Path(args.paste_file).read_text(encoding="utf-8")
+    if args.paste_file is not None:
+        src = Path(args.paste_file)
+        # Resolution establishes existence, not regular-ness: `exists()` is
+        # true of a directory and of a FIFO, and the workspace is bound
+        # read-write into the sandbox, so `read_text()` on a model-made fifo
+        # would block a host-side proxy worker for the whole skill-proxy
+        # timeout. `cmd_attach_document` keeps the same guard for the same
+        # reason; the `@PATH` read this replaced had it too.
+        if not src.is_file():
+            _fail(f"not a regular file: {src}")
+        raw = src.read_text(encoding="utf-8")
     else:
         raw = args.paste
         if not raw:
@@ -1854,6 +1877,10 @@ def build_parser() -> argparse.ArgumentParser:
     trend.add_argument("--until")
 
     upload = sub.add_parser("upload", help="Register a file as a draft panel source")
+    # `READ`, per the spec, which admits `{mount}/Talk` and this task's
+    # `{mount}/Channels/{token}` beside the workspace and the deferred dir.
+    # The replay is narrower — see `cmd_upload` — so a source in either of
+    # those two is accepted here and dropped there.
     host_path(upload, "file_path", mode=READ)
     upload.add_argument("--drawn-at", dest="drawn_at", required=True)
     upload.add_argument("--lab")
@@ -1862,7 +1889,7 @@ def build_parser() -> argparse.ArgumentParser:
         "import-csv",
         help="Import a bloodwork CSV (Date,Lab,Marker (unit) layout)",
     )
-    host_path(import_csv, "file_path", mode=READ)
+    host_path(import_csv, "file_path", mode=READ)  # see `upload` on the roots
 
     export_csv = sub.add_parser(
         "export-csv",
@@ -2108,7 +2135,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="File a workspace file against a health record",
     )
     host_path(
-        attach_p, "--path", mode=READ, required=True,
+        attach_p, "--path", mode=READ, required=True,  # see `upload` on the roots
         help="Path to the file to attach",
     )
     attach_p.add_argument(

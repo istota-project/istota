@@ -1,5 +1,6 @@
 """Configuration loading for istota.executor module."""
 
+import logging
 import os
 import sys
 from unittest.mock import patch, MagicMock
@@ -37,6 +38,7 @@ from istota.brain import claude_code
 from tests.support.monotonic_spy import monotonic_spy
 from tests.support.sleep_spy import sleep_spy
 from istota.brain._types import BrainResult
+from istota.skill_host_paths import path_under_roots, workspace_roots
 import json
 from pathlib import Path
 
@@ -2352,6 +2354,156 @@ class TestPreTranscribeAttachments:
     def test_all_audio_extensions_recognized(self):
         for ext in ["mp3", "wav", "ogg", "flac", "m4a", "opus", "webm", "mp4", "aac", "wma"]:
             assert ext in _AUDIO_EXTENSIONS
+
+
+class TestTheAudioTheChildIsActuallyHandedIsInReach:
+    """The end-to-end half of the identity plumbing, through the real chain.
+
+    Passing the task identity is necessary and is not sufficient, and the two
+    halves fail differently: without the identity the child has an empty
+    allowlist, and with it the child still refuses three of the four shapes a
+    Talk attachment arrives in. `download_talk_attachments` produces all
+    four — `{mount}/Talk/<name>` when the bot's own view holds the file,
+    `/mnt/nc-data/<user>/files/Talk/<name>` when Nextcloud kept it in the
+    sender's data dir instead, the bare relative `Talk/<name>` when neither
+    resolves, and `{temp_dir}/<name>` on the rclone branch, which is a
+    *sibling* of the per-user temp dir rather than a child.
+
+    So these drive `_pre_transcribe_attachments` with a path shaped like each
+    producer's output and assert on the argv the child would actually be
+    given, with only `Popen` faked. Asserting that three kwargs reached a
+    `MagicMock` is what left this uncovered: it pins the first hop of a chain
+    whose second hop is where the refusal happens.
+    """
+
+    @staticmethod
+    def _identity(tmp_path):
+        mount = tmp_path / "mount"
+        (mount / "Talk").mkdir(parents=True)
+        (mount / "Users" / "alice").mkdir(parents=True)
+        temp = tmp_path / "temp" / "alice"
+        temp.mkdir(parents=True)
+        return {
+            "user_id": "alice",
+            "mount_path": mount,
+            "deferred_dir": temp,
+        }
+
+    @staticmethod
+    def _spawn(monkeypatch):
+        """Fake `Popen`, returning the argv the child would have run."""
+        seen = {}
+
+        def fake_popen(argv, **kwargs):
+            seen["argv"] = argv
+            seen["env"] = kwargs.get("env") or {}
+            proc = MagicMock()
+            proc.pid = 99
+            proc.returncode = 0
+            proc.communicate.return_value = (
+                json.dumps({"status": "ok", "text": "buy milk"}), "",
+            )
+            return proc
+
+        monkeypatch.setattr(
+            "istota.skills.whisper.out_of_process.subprocess.Popen", fake_popen,
+        )
+        return seen
+
+    def test_a_talk_attachment_on_the_mount_is_passed_through(
+        self, tmp_path, monkeypatch,
+    ):
+        identity = self._identity(tmp_path)
+        seen = self._spawn(monkeypatch)
+        audio = identity["mount_path"] / "Talk" / "memo.m4a"
+        audio.write_bytes(b"not really audio")
+
+        out = executor._pre_transcribe_attachments([str(audio)], "", **identity)
+
+        assert "buy milk" in out
+        # Handed through unchanged: it was already in reach, so nothing is
+        # copied and the prompt still names the file the user shared.
+        assert seen["argv"][-1] == str(audio)
+
+    @pytest.mark.parametrize("shape", ["nc_data", "sibling_temp"])
+    def test_an_attachment_outside_the_roots_is_staged_into_them(
+        self, tmp_path, monkeypatch, shape,
+    ):
+        """The two shipped shapes the identity alone does not reach.
+
+        Both were transcribable before the path argument was scoped, and a
+        refusal here is logged at debug and swallowed — so without the
+        staging step this regression would have been invisible in production
+        and green in the suite.
+        """
+        identity = self._identity(tmp_path)
+        seen = self._spawn(monkeypatch)
+        if shape == "nc_data":
+            source = tmp_path / "nc-data" / "bob" / "files" / "Talk" / "memo.m4a"
+        else:
+            source = tmp_path / "temp" / "memo.m4a"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"not really audio")
+
+        out = executor._pre_transcribe_attachments([str(source)], "", **identity)
+
+        assert "buy milk" in out
+        handed = Path(seen["argv"][-1])
+        assert handed != source
+        assert handed.read_bytes() == b"not really audio"
+        # In reach means: under a root the child derives from the very
+        # environment it was given, asked of the shared rule rather than
+        # recomputed here.
+        roots = workspace_roots(
+            mount=seen["env"].get("NEXTCLOUD_MOUNT_PATH"),
+            user_id=seen["env"].get("ISTOTA_USER_ID", ""),
+            deferred_dir=seen["env"].get("ISTOTA_DEFERRED_DIR"),
+            talk=True,
+        )
+        assert path_under_roots(handed.resolve(), roots), (handed, roots)
+
+    def test_an_attachment_that_cannot_be_staged_is_skipped_loudly(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """Roots to scope against, a path outside them, nowhere to copy to.
+
+        Every other outcome of this pass leaves a prompt that is merely
+        shorter than it could be. A path the child would refuse is the one
+        that reads as a broken feature, so it is the one that warns rather
+        than joining the debug line the rest of the failures share.
+        """
+        identity = self._identity(tmp_path)
+        identity["deferred_dir"] = None  # a mount to scope by, nowhere to stage
+        seen = self._spawn(monkeypatch)
+        source = tmp_path / "nc-data" / "bob" / "memo.m4a"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"not really audio")
+
+        with caplog.at_level(logging.WARNING, logger="istota.executor"):
+            out = executor._pre_transcribe_attachments([str(source)], "typed", **identity)
+
+        assert out == "typed"
+        assert "argv" not in seen, "the child was spawned with a path it must refuse"
+        assert any("outside the roots" in r.message for r in caplog.records)
+
+    def test_a_caller_that_supplied_no_identity_still_reaches_the_child(
+        self, tmp_path, monkeypatch,
+    ):
+        """Silence is not a boundary.
+
+        With no identity there is nothing to scope against, so the path goes
+        through and the child answers — refusing, with a message naming the
+        missing variables. Deciding here instead would turn a caller's
+        omission into a skip with no spawn and nothing said by the one
+        component that knows why.
+        """
+        seen = self._spawn(monkeypatch)
+        source = tmp_path / "memo.m4a"
+        source.write_bytes(b"not really audio")
+
+        executor._pre_transcribe_attachments([str(source)], "")
+
+        assert seen["argv"][-1] == str(source)
 
 
 class TestPreTranscriptionStaysOutOfTheDaemon:

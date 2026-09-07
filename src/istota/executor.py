@@ -5,6 +5,7 @@ import errno
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -84,6 +85,7 @@ from .image_attachments import (
     render_ocr_context,
 )
 from .shell_exec import pipefail_env
+from .skill_host_paths import path_under_roots, workspace_roots
 from .user_scope import scoped_user_dir
 from .skills.calendar import get_caldav_client, get_calendars_for_user
 from .skills.whisper.out_of_process import transcribe_audio_out_of_process
@@ -192,6 +194,79 @@ from .session.result import (  # noqa: E402,F401
 )
 
 
+def _audio_in_reach(
+    audio_path: str,
+    *,
+    user_id: str | None,
+    mount_path: "str | Path | None",
+    deferred_dir: "str | Path | None",
+) -> str | None:
+    """`audio_path`, or a copy of it the child will be allowed to open.
+
+    The transcription child is a skill CLI and resolves its path argument
+    against the allowlist its own environment names (ISSUE-447). Three of the
+    four shapes a Talk attachment arrives in are outside that allowlist, and
+    all three are shipped: `download_talk_attachments` falls back to
+    `/mnt/nc-data/<user>/files/Talk/<name>` when the bot's own `Talk/` view
+    does not hold the file (Nextcloud keeps a shared file in the *sender's*
+    data dir), it falls back again to the bare relative `Talk/<name>` when
+    neither resolves, and the rclone branch copies to `config.temp_dir`
+    rather than to the per-user directory below it. Only `{mount}/Talk/<name>`
+    is in reach as it stands.
+
+    So the file is copied into the task's own temp dir, which is a root
+    because the caller passes it as `ISTOTA_DEFERRED_DIR` — the same answer
+    `prepare_image_attachments` already gives for an out-of-roots image, and
+    for the same reason: the daemon can read the bytes, and the boundary is
+    about what the *child* may name, not about what the daemon may hand it.
+    `cleanup_old_temp_files` owns the copy afterwards.
+
+    Containment is asked of `skill_host_paths`, never re-derived here: a
+    second copy of that rule is the defect ISSUE-447 exists to remove.
+
+    **A caller that supplied no identity gets the path back unchanged**, and
+    that is not the same answer as "out of bounds". An empty root list means
+    this function was told nothing to scope against, so the judgement belongs
+    to the child, which refuses and says why; deciding here would turn a
+    caller's silence into a skip with no spawn and no message from the one
+    component that knows. None is reserved for the case where there *are*
+    roots, the path is outside them, and there is nowhere in reach to put a
+    copy.
+    """
+    source = Path(audio_path)
+    roots = workspace_roots(
+        mount=mount_path,
+        user_id=user_id or "",
+        deferred_dir=deferred_dir,
+        talk=True,
+    )
+    if not roots:
+        return audio_path
+    try:
+        resolved = source.resolve()
+    except OSError:
+        return None
+    if path_under_roots(resolved, roots):
+        return audio_path
+    if not deferred_dir:
+        return None
+    try:
+        landing = Path(deferred_dir) / "transcribe"
+        landing.mkdir(parents=True, exist_ok=True)
+        # The leaf is the daemon's to choose, so a sender-supplied name cannot
+        # traverse out of the directory; the task id is not in scope here, so
+        # the source's own inode keeps two attachments of one name apart.
+        target = landing / f"{resolved.stat().st_ino}-{Path(audio_path).name}"
+        shutil.copyfile(resolved, target)
+    except OSError as e:
+        logger.warning(
+            "Could not stage %s for transcription: %s", Path(audio_path).name, e,
+        )
+        return None
+    logger.debug("Staged %s for transcription at %s", audio_path, target)
+    return str(target)
+
+
 def _pre_transcribe_attachments(
     attachments: list[str] | None,
     prompt: str,
@@ -236,9 +311,11 @@ def _pre_transcribe_attachments(
 
     The child is a *skill CLI*, and since ISSUE-447 its path argument is
     resolved against the allowlist its own environment names. The daemon
-    carries none of those variables, so the identity is passed explicitly —
-    the same three the skill proxy exports — or the child refuses every path
-    and the failure disappears into the debug line below.
+    carries none of those variables, so the identity is passed explicitly, or
+    the child refuses every path and the failure disappears into the debug
+    line below. `_audio_in_reach` is the other half: the identity says who is
+    asking, and three of the four shapes a Talk attachment arrives in are
+    still outside every root it names.
     """
     if not attachments:
         return prompt
@@ -268,8 +345,25 @@ def _pre_transcribe_attachments(
             )
             break
         try:
-            result = transcribe_audio_out_of_process(
+            in_reach = _audio_in_reach(
                 audio_path,
+                user_id=user_id,
+                mount_path=mount_path,
+                deferred_dir=deferred_dir,
+            )
+            if in_reach is None:
+                # Above debug, deliberately: a refusal the child would report
+                # is the one failure here that no operator can see otherwise,
+                # since every other outcome of this pass is a prompt that is
+                # merely shorter than it could have been.
+                logger.warning(
+                    "Audio attachment %s is outside the roots the transcription "
+                    "child can open and could not be staged; skipping it",
+                    Path(audio_path).name,
+                )
+                continue
+            result = transcribe_audio_out_of_process(
+                in_reach,
                 timeout=remaining,
                 user_id=user_id,
                 mount_path=mount_path,
@@ -6399,7 +6493,9 @@ def execute_task(
         # The child is a skill CLI and scopes its path argument against these
         # (ISSUE-447). `config.nextcloud_mount_path` is None on the mountless
         # shapes, where a web-chat upload lands under the per-user temp dir
-        # instead — which is why the deferred dir goes too.
+        # instead — which is why the deferred dir goes too, and why
+        # `_audio_in_reach` stages into it. Not the conversation token: see
+        # `out_of_process._identity_env` for why that root is withheld.
         user_id=task.user_id,
         mount_path=config.nextcloud_mount_path,
         deferred_dir=user_temp_dir,

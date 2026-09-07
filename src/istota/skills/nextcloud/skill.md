@@ -31,7 +31,7 @@ istota-skill nextcloud share revoke (SHARE_ID | --token T | --path P --confirmed
 istota-skill nextcloud share delete SHARE_ID
 istota-skill nextcloud share search QUERY
 istota-skill nextcloud files stat|list|search|versions|trash|favorite|quota ...
-istota-skill nextcloud files upload LOCAL REMOTE / download REMOTE LOCAL
+istota-skill nextcloud files upload LOCAL REMOTE / download REMOTE LOCAL   # LOCAL to upload must be in {workspace}
 istota-skill nextcloud talk rooms|room|read|send|share-file|search|participants ...
 istota-skill nextcloud notify list|get|dismiss|dismiss-all
 istota-skill nextcloud activity list [--since ID] [--limit N]

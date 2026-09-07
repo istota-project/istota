@@ -190,24 +190,44 @@ class TestTheTaskIdentityReachesTheChild:
         assert env["NEXTCLOUD_MOUNT_PATH"] == str(tmp_path / "mount")
         assert env["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "deferred")
 
-    def test_an_identity_it_was_not_given_is_not_invented(self, tmp_path):
-        """Absent, not blank, and not the daemon's own.
+    def test_an_identity_it_was_not_given_is_not_inherited(self, tmp_path):
+        """Absent, not blank, and above all not the daemon's own.
 
-        An empty string reads to `env_host_roots` exactly as an unset
-        variable does, so this is about not fabricating a value: a caller
-        with no mount configured must leave the child with no mount, rather
-        than with a root the daemon happened to have in its environment
-        under another name.
+        The child inherits `os.environ`, so omitting a name is not the same
+        as clearing it: whatever the daemon carries falls straight through,
+        and the daemon has no task, so any value it holds belongs to
+        something else. The three names are removed from the copied
+        environment before the identity is applied, which is what makes
+        "absent" mean absent.
+
+        The ambient values here are the whole test. Popping them first —
+        which is what an earlier version of this did — asserts only that a
+        dict this function never wrote to has no key in it.
         """
-        with patch.dict(os.environ, {}, clear=False), patch(_POPEN) as popen:
-            os.environ.pop("ISTOTA_USER_ID", None)
-            os.environ.pop("NEXTCLOUD_MOUNT_PATH", None)
+        ambient = {
+            "ISTOTA_USER_ID": "someone-else",
+            "NEXTCLOUD_MOUNT_PATH": "/mnt/shared",
+            "ISTOTA_DEFERRED_DIR": "/tmp/another-task",
+        }
+        with patch.dict(os.environ, ambient), patch(_POPEN) as popen:
             popen.return_value = _fake_proc(stdout=_ok_payload())
             transcribe_audio_out_of_process(str(tmp_path / "voice.mp3"))
 
         env = popen.call_args.kwargs["env"]
         assert "ISTOTA_USER_ID" not in env
         assert "NEXTCLOUD_MOUNT_PATH" not in env
+        assert "ISTOTA_DEFERRED_DIR" not in env
+
+    def test_a_supplied_identity_overrides_the_daemons_own(self, tmp_path):
+        """The other direction, which a merge gets right and a leak does not."""
+        ambient = {"ISTOTA_USER_ID": "someone-else"}
+        with patch.dict(os.environ, ambient), patch(_POPEN) as popen:
+            popen.return_value = _fake_proc(stdout=_ok_payload())
+            transcribe_audio_out_of_process(
+                str(tmp_path / "voice.mp3"), user_id="alice",
+            )
+
+        assert popen.call_args.kwargs["env"]["ISTOTA_USER_ID"] == "alice"
 
     def test_a_partial_identity_still_exports_what_it_has(self, tmp_path):
         """The standalone shape: a deferred dir and no mount at all.

@@ -591,7 +591,10 @@ class TestFilesPathScoping:
         local.write_bytes(b"hi")
         out, code = _run(capsys, ["files", "upload", str(local), "/Users/bob/f.txt"])
         assert code == 1
-        assert out.get("reason") != "host_path_refused", out
+        # The remote-scoping message, not merely "something refused it": an
+        # exit 1 with an un-called mock is equally what a missing config or a
+        # refused *local* path produces, neither of which is this test.
+        assert "/Users/alice" in out["error"], out
         mock_upload.assert_not_called()
 
     @patch("istota.nextcloud.dav.upload")

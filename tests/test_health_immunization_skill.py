@@ -299,6 +299,30 @@ class TestThePasteMigration:
         assert out["status"] == "error"
         assert out["reason"] == "host_path_refused"
 
+    def test_a_paste_file_that_is_not_a_regular_file_is_refused(
+        self, ready, workspace,
+    ):
+        """Resolution establishes existence, not regular-ness.
+
+        The `@PATH` read this replaced checked `is_file()` and the move to a
+        stamped flag dropped it, which the review caught. `exists()` is true
+        of a directory and of a FIFO, and the workspace is bound read-write
+        into the sandbox — so a model-made fifo at this name would block a
+        host-side proxy worker for the whole skill-proxy timeout, and a
+        directory would come back as an errno string rather than this verb's
+        own message. A directory is the portable half of that pair.
+        """
+        _, env = ready
+        (workspace / "a-directory").mkdir()
+
+        out = _run(
+            ["import-immunizations", "--paste-file",
+             str(workspace / "a-directory"), "--dry-run"],
+            env, expect_success=False,
+        )
+        assert out["status"] == "error"
+        assert "not a regular file" in out["error"]
+
     def test_literal_text_still_goes_through_paste(self, ready):
         _, env = ready
         out = _run(
