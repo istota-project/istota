@@ -1392,7 +1392,7 @@ class TestTheFourCallersRootSets:
             (mount / "Talk").resolve(),
         }
 
-    def test_memory_search_index_file_is_the_workspace_alone(
+    def test_memory_search_index_file_drops_both_shared_roots(
         self, mount, monkeypatch, tmp_path,
     ):
         """The narrowing stage 5 carries, asserted as a set.
@@ -1400,9 +1400,18 @@ class TestTheFourCallersRootSets:
         Stage 2 put `index file` on the shared rule with its three roots
         preserved — own workspace, channel directory, deferred dir — because
         moving a boundary inside a consolidation is the failure this work
-        exists to prevent. The `EGRESS` stamp is what narrows it to one, and
-        the reason is where the bytes end up: `search` hands the indexed
-        content back after the task is over.
+        exists to prevent. The `EGRESS` stamp is what narrows it, and the
+        reason is where the bytes end up: `search` hands the indexed content
+        back after the task is over.
+
+        **What it drops is the two *shared* roots, not the deferred dir**, and
+        stage 5 got that wrong in the narrower direction. `{mount}/Channels/
+        {token}` and `{mount}/Talk` hold material other people put there; the
+        deferred dir is this one task's own, and excluding it made every
+        `EGRESS` argument refuse unconditionally on a mountless deployment —
+        the shape `index file` used to work on. It is also the exact pair
+        `scheduler_deferred._source_path_allowed` derives, which is what stops
+        the CLI and the replay disagreeing about one path.
 
         Driven through the verb's own `main` rather than the handler, since
         that is where the resolution now happens; `tests/test_skills_memory_
@@ -1413,6 +1422,7 @@ class TestTheFourCallersRootSets:
         monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "tok1")
         assert set(_roots_for(EGRESS, writable=False)) == {
             (mount / "Users" / "alice").resolve(),
+            (tmp_path / "deferred").resolve(),
         }
 
     def test_memory_search_index_file_guards_the_conversation_token(

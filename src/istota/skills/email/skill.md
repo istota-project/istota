@@ -59,7 +59,7 @@ Options:
 - `--html` — send as HTML instead of plain text
 - `--body-file {workspace}/file` — read body from a file in your own workspace (useful for long HTML content)
 - `--cc a@x,b@y` / `--bcc a@x` — carbon-copy / blind-carbon-copy recipients (comma-separated). Bcc addresses receive the mail but never appear in any transmitted header.
-- `--attach /path/to/file` — attach a file (repeatable). The file must be inside the user's own workspace; see the attachment rule under "When a send is held".
+- `--attach /path/to/file` — attach a file (repeatable). The file must be inside the user's own workspace or your task's own temp directory; see the attachment rule under "When a send is held".
 - `--reply-to addr` — set the Reply-To header.
 
 The command prints JSON on success: `{"status": "ok", "message_id": "<...>", "to": "...", "subject": "..."}`. The `message_id` is your evidence the send happened — see "Confirm the send actually happened" below.
@@ -109,7 +109,7 @@ There is no flag that skips this. If you believe the hold is wrong, say so to th
 
 A `{"status": "error"}` from these verbs means nothing was sent and nothing was held. Causes: the check could not run (no user identity, no database); or an `--attach` path outside the user's own workspace.
 
-**An attachment must be inside the user's own workspace, on every send.** Not the conversation's folder, not `/Talk`, and not the task's working directory — those are places you may *read*, and an attachment leaves the task rather than staying in it. The rule is the same whether the send goes straight out or is held for approval, because a held draft is re-checked against that one directory when the user approves it, hours later. Report the error, then either send without the attachment or copy the file into the user's workspace first and attach the copy.
+**An attachment must be inside the user's own workspace or your task's own temp directory, on every send.** Not the conversation's folder and not `/Talk` — those hold material other people put there, which you may *read*, and an attachment leaves the task rather than staying in it. The rule is the same whether the send goes straight out or is held for approval, because a held draft is re-checked against that one directory when the user approves it, hours later. Report the error, then either send without the attachment or copy the file into the user's workspace first and attach the copy.
 
 ## Confirm the send actually happened before reporting it
 
@@ -139,7 +139,7 @@ Options:
 
 This writes a structured file that the scheduler picks up for delivery. The scheduler adds proper threading headers so the reply appears in the same email thread.
 
-For long email bodies, write the body to a file in your own workspace and use `--body-file`. It has to be your workspace: the bytes leave as an outgoing message, so `--body-file` is scoped to `{workspace}` and will refuse `/tmp` or a Talk attachment.
+For long email bodies, write the body to a file in your own workspace and use `--body-file`. It has to be yours: the bytes leave as an outgoing message, so `--body-file` is scoped to `{workspace}` and your task's own temp directory, and will refuse a Talk attachment or a file in the channel directory.
 
 ```bash
 # Write the body to a file under your workspace, then use --body-file

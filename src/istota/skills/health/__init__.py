@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from istota.skills._cli import emit, error_envelope, parse_and_resolve, run_skill_cli
-from istota.skills._hostpath import READ, WRITE, host_path
+from istota.skills._hostpath import EGRESS, READ, WRITE, host_path
 
 
 _DEFER_FILENAME = "task_{task_id}_health_ops.json"
@@ -454,7 +454,7 @@ def cmd_upload(args: argparse.Namespace) -> None:
     directory directly, so callers point at a workspace-relative path and
     the scheduler relocates it during deferred processing.
 
-    `file_path` is stamped `READ`, so it arrives resolved and inside the
+    `file_path` is stamped `EGRESS`, so it arrives resolved and inside the
     caller's own roots. That is what the existence probe this used to open
     with cost: `exists()` before the deferral answered "is there a file at
     this path" for any path on the host, which is an oracle over the whole
@@ -464,19 +464,18 @@ def cmd_upload(args: argparse.Namespace) -> None:
     replay re-resolves a string this CLI already contained instead of an
     attacker-chosen one (ISSUE-447).
 
-    **The replay's roots are narrower than this stamp's, and the difference
-    is visible to the model as a success that imports nothing.** `READ` is
-    `env_host_roots()` — the workspace, the deferred dir, this task's channel
-    directory and `{mount}/Talk` — while `scheduler_deferred._source_path_
-    allowed` derives the workspace and the deferred dir only, deliberately
-    and with a docstring saying why: there is no conversation token on the
-    replay path and the daemon reads these bytes after the task is over. So
-    a source under `{mount}/Talk` is accepted here, deferred, and dropped
-    there, with the drop only in the scheduler log. The stamp follows the
-    spec, which states `READ` for these three and walks `import-csv` through
-    all four roots; closing the gap means settling which set is right for a
-    verb whose only real execution path is the replay, and that is a spec
-    question rather than a stamp to change quietly.
+    **`EGRESS` rather than `READ`, because the reader is the daemon.** Layer
+    1's rule is where the bytes end up, and it names this case in as many
+    words: a path persisted for the daemon to read after the task has ended.
+    Under `READ` the stamp gave this verb `env_host_roots()` — the workspace,
+    the deferred dir, this task's channel directory and `{mount}/Talk` —
+    while `scheduler_deferred._source_path_allowed` derives the workspace and
+    the deferred dir only, deliberately and with a docstring saying why: there
+    is no conversation token on the replay path. So `health upload
+    {mount}/Talk/x.pdf` was accepted here, reported `deferred: true`, and then
+    silently dropped there with nothing but a scheduler warning — the model
+    told "ok" and no row ever written. `EGRESS` is exactly the replay's pair,
+    so the two sets cannot diverge again.
     """
     path = Path(args.file_path)
     op = {
@@ -616,7 +615,8 @@ def cmd_attach_document(args: argparse.Namespace) -> None:
     (the same shape ``upload`` uses for ``register_upload``).
     """
     entity_type, entity_id = _parse_entity_ref(args.to)
-    # Stamped `READ`, so this is the resolved path and it exists. The
+    # Stamped `EGRESS`, so this is the resolved path and it exists — and its
+    # roots are the deferred replay's, since the replay is what reads it. The
     # regular-file check stays: resolution establishes existence, not
     # regular-ness — `exists()` is true of a directory and of a FIFO, and the
     # workspace is bound read-write into the sandbox, so a model-made fifo
@@ -769,8 +769,9 @@ def cmd_import_csv(args: argparse.Namespace) -> None:
     files), but the writes are deferred so the scheduler applies them
     against the per-user health DB outside the sandbox.
 
-    `file_path` is stamped `READ`; see `cmd_upload` for what the existence
-    probe that used to stand here was doing and why resolution replaces it.
+    `file_path` is stamped `EGRESS`; see `cmd_upload` for what the existence
+    probe that used to stand here was doing, why resolution replaces it, and
+    why the mode is the replay's root set rather than this task's.
     """
     path = Path(args.file_path)
     op = {
@@ -1877,11 +1878,10 @@ def build_parser() -> argparse.ArgumentParser:
     trend.add_argument("--until")
 
     upload = sub.add_parser("upload", help="Register a file as a draft panel source")
-    # `READ`, per the spec, which admits `{mount}/Talk` and this task's
-    # `{mount}/Channels/{token}` beside the workspace and the deferred dir.
-    # The replay is narrower — see `cmd_upload` — so a source in either of
-    # those two is accepted here and dropped there.
-    host_path(upload, "file_path", mode=READ)
+    # `EGRESS`, which is Layer 1's rule read literally: this path is persisted
+    # for the *daemon* to read after the task is over, so its roots have to be
+    # the ones the replay derives. See `cmd_upload`.
+    host_path(upload, "file_path", mode=EGRESS)
     upload.add_argument("--drawn-at", dest="drawn_at", required=True)
     upload.add_argument("--lab")
 
@@ -1889,7 +1889,7 @@ def build_parser() -> argparse.ArgumentParser:
         "import-csv",
         help="Import a bloodwork CSV (Date,Lab,Marker (unit) layout)",
     )
-    host_path(import_csv, "file_path", mode=READ)  # see `upload` on the roots
+    host_path(import_csv, "file_path", mode=EGRESS)  # see `upload` on the roots
 
     export_csv = sub.add_parser(
         "export-csv",
@@ -2135,7 +2135,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="File a workspace file against a health record",
     )
     host_path(
-        attach_p, "--path", mode=READ, required=True,  # see `upload` on the roots
+        attach_p, "--path", mode=EGRESS, required=True,  # see `upload` on the roots
         help="Path to the file to attach",
     )
     attach_p.add_argument(

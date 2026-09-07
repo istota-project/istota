@@ -311,11 +311,11 @@ class TestCmdIndexFile:
         assert run.exit_code == 1
         assert run.envelope["status"] == "error"
 
-    @pytest.mark.parametrize("where", ["deferred", "channel", "talk"])
-    def test_the_egress_stamp_narrows_it_to_the_workspace(
+    @pytest.mark.parametrize("where", ["channel", "talk"])
+    def test_the_egress_stamp_drops_the_shared_roots(
         self, tmp_path, monkeypatch, where,
     ):
-        """The three roots this verb used to have and no longer does.
+        """The two roots this verb used to have and no longer does.
 
         Stage 2 of ISSUE-447 moved `index file` onto the shared rule with its
         root set preserved exactly — deferred dir, channel directory, own
@@ -323,13 +323,14 @@ class TestCmdIndexFile:
         failure the spec exists to prevent. The `EGRESS` stamp is what
         narrows it, and this is the test that says so: indexing puts the
         content in a store `search` reads back after the task is over, so the
-        only root is the one the user owns.
+        *shared* roots go. The deferred dir stays — it is this one task's own
+        directory, the case beside this one asserts it, and dropping it made
+        the verb refuse everything on a deployment with no mount.
         """
         db_path = tmp_path / "test.db"
         _init_db(db_path).close()
         mount = self._mount(tmp_path, monkeypatch, db_path)
         source = {
-            "deferred": tmp_path / "deferred" / "note.md",
             "channel": mount / "Channels" / "tok1" / "note.md",
             "talk": mount / "Talk" / "note.md",
         }[where]
@@ -339,6 +340,27 @@ class TestCmdIndexFile:
 
         assert run.exit_code == 1
         assert run.envelope["reason"] == "host_path_refused"
+
+    def test_the_tasks_own_deferred_directory_is_still_indexable(
+        self, tmp_path, monkeypatch,
+    ):
+        """`EGRESS` drops what is *shared*, and this directory is not.
+
+        It is one task's own scratch space, per user, writable by nothing
+        else — and on a deployment with no mount it is the only root there
+        is, so excluding it made this verb refuse every path on a shape where
+        it used to work.
+        """
+        db_path = tmp_path / "test.db"
+        _init_db(db_path).close()
+        self._mount(tmp_path, monkeypatch, db_path)
+        source = tmp_path / "deferred" / "note.md"
+        source.write_text("my own scratch note")
+
+        run = run_skill_main(main, ["index", "file", str(source)])
+
+        assert run.exit_code == 0, run.stdout
+        assert run.envelope["status"] == "ok", run.stdout
 
 
 class TestCmdReindex:

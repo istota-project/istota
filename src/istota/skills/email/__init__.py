@@ -2158,7 +2158,9 @@ def _outbound_gate(
     on the namespace, so there is no unresolved original left anywhere for a
     caller to re-open. The element stays on the return rather than the callers
     reading `args.attach` directly, because a hold has to carry the same list
-    into the draft and one source for it is what keeps the two in step.
+    into the draft and one source for it is what keeps the two in step. Held
+    and direct do not answer *identically*, and the one root they differ by is
+    named at the hold below.
     """
     from ... import db, outbound_drafts as drafts
     from ...notification_resolvers import outbound_draft as draft_source
@@ -2171,7 +2173,7 @@ def _outbound_gate(
         # is exactly the one nothing would have held.
         return _gate_error("ISTOTA_USER_ID is not set, so no approval policy applies"), []
 
-    # Already resolved, and already narrowed to the user's own workspace: the
+    # Already resolved, and already narrowed to what the user owns: the
     # `EGRESS` stamp on `--attach` did both at parse time, under every policy
     # and before this gate could be switched off. That the scoping is not
     # reachable-around by setting the policy to `off` used to be a property of
@@ -2206,13 +2208,22 @@ def _outbound_gate(
                 if isinstance(e, str)
                 and recipients_require_hold(app_config, conn, user_id, [e])
             ]
-            # The same list a direct send would attach. `EGRESS` is what makes
-            # the two agree: `outbound_drafts._confined_attachment` re-checks a
-            # held path against `{mount}/Users/{uid}` hours later at release,
-            # and anything wider accepted here would be a draft the user could
-            # approve and never send. That narrowing used to be applied only on
-            # this branch, by `_holdable_attachments`; it is the whole verb's
-            # rule now, so the held and direct paths cannot answer differently.
+            # The same list a direct send would attach. `EGRESS` is what
+            # brought the two paths together — the narrowing used to be
+            # applied on this branch alone, by `_holdable_attachments`, and it
+            # is the whole verb's rule now.
+            #
+            # **They still differ by one root, and it is a different rule
+            # rather than a leftover.** `EGRESS` admits the task's own
+            # deferred dir, because what it excludes is material *other
+            # people* put there; `outbound_drafts._confined_attachment`
+            # re-checks a held path against `{mount}/Users/{uid}` alone hours
+            # later, because a pending draft outlives the temp dir the
+            # scheduler sweeps. So an attachment from `$ISTOTA_DEFERRED_DIR`
+            # goes out on a direct send and cannot be *held*: the release
+            # refuses it, visibly, to the user who approved it. Copy such a
+            # file into the workspace before attaching it to anything a policy
+            # might hold.
             paths = send_paths
             task_id, room_token, origin_target = _task_context(conn, user_id)
             draft_id = drafts.hold(

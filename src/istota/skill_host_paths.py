@@ -195,7 +195,9 @@ def user_workspace_root() -> Path | None:
     return own[0] if own else None
 
 
-def env_host_roots(*, writable: bool = False, talk: bool = True) -> list[Path]:
+def env_host_roots(
+    *, writable: bool = False, talk: bool = True, channel: bool = True,
+) -> list[Path]:
     """`workspace_roots` for a skill CLI, from the environment the proxy set.
 
     The four variables are the ones `build_task_runtime` exports per task, and
@@ -203,15 +205,20 @@ def env_host_roots(*, writable: bool = False, talk: bool = True) -> list[Path]:
     the daemon has none of them set, so a daemon-side caller reading them would
     silently get an empty allowlist (or, worse, another task's).
 
-    `talk=False` is for a read whose bytes leave the task — see
-    `workspace_roots` for why that is the caller's question and not this
-    module's.
+    `talk=False` and `channel=False` together are for a read whose bytes leave
+    the task — see `workspace_roots` for why that is the caller's question and
+    not this module's. They are two switches rather than one because the two
+    roots are shared in different ways and a future caller may well want one
+    and not the other; what they never drop is the deferred directory, which
+    is the task's own and is a root on a deployment with no mount at all.
     """
     return workspace_roots(
         mount=os.environ.get("NEXTCLOUD_MOUNT_PATH", "").strip() or None,
         user_id=os.environ.get("ISTOTA_USER_ID", "").strip(),
         deferred_dir=os.environ.get("ISTOTA_DEFERRED_DIR", "").strip() or None,
-        conversation_token=os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip(),
+        conversation_token=(
+            os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip() if channel else ""
+        ),
         writable=writable,
         talk=talk,
     )

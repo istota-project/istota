@@ -36,7 +36,8 @@ own workspace, its deferred dir, its channel directory and `{mount}/Talk`,
 mirroring what the sandbox binds. `WRITE` gets the same set with the read-only
 roots dropped, because a destination's content does not leave that context: it
 lands in storage the task reads back and `/chat/files` serves. `EGRESS` gets
-the user's own workspace alone, because its content *does* leave — mailed to an
+the same set with both *shared* roots dropped — the user's own workspace and
+the task's own deferred dir — because its content *does* leave: mailed to an
 address the model chose, indexed into something later searchable, uploaded, or
 persisted for the daemon to read after the task is over. Talk is in the first
 set and not the last for the same reason read the other way — a task may
@@ -72,11 +73,7 @@ import logging
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from istota.skill_host_paths import (
-    env_host_roots,
-    resolve_in_roots,
-    user_workspace_root,
-)
+from istota.skill_host_paths import env_host_roots, resolve_in_roots
 
 log = logging.getLogger(__name__)
 
@@ -246,15 +243,41 @@ def stamp_conflicts(
 
 
 def _own_roots(*, writable: bool) -> list[Path]:
-    """`{mount}/Users/{ISTOTA_USER_ID}` alone, or nothing.
+    """`{mount}/Users/{ISTOTA_USER_ID}` and the task's own deferred dir.
 
-    `user_workspace_root` is the existing derivation of that one root and is
-    asked for it rather than a fourth root list being built here. `writable` is
-    accepted and unused: the workspace is the same directory either way, and
-    taking it keeps the two branches of `_resolve_one` reading alike.
+    The `TASK` set with both *shared* roots dropped, which is what `OWN`
+    means: `{mount}/Channels/{token}` and `{mount}/Talk` hold material other
+    people put there, and a verb sending bytes out of the task must not be
+    able to name it directly. The deferred directory is the opposite of
+    shared — one task's own directory, per user, writable by nothing else —
+    so excluding it bought no boundary and cost two things.
+
+    **An earlier reading of `OWN` as the workspace alone was over-narrow, and
+    both costs are the kind a stamp hides.** `NEXTCLOUD_MOUNT_PATH` is `""` on
+    a deployment with no mount configured, so that reading made the root list
+    *empty* there and every `EGRESS` argument refused unconditionally —
+    correctly, since an empty allowlist means refuse everything, but for a
+    reason nothing in the refusal named. `memory_search index file` worked on
+    that shape before it was stamped. And it put this CLI's accepted set at
+    odds with the deferred replay's: `scheduler_deferred._source_path_allowed`
+    derives exactly this pair, so a source the CLI accepted could be deferred
+    and then dropped at replay with nothing but a daemon warning.
+
+    It gives up nothing. `EGRESS` is a guard against naming shared material
+    directly — a speed bump on accident rather than a barrier against intent,
+    since a task may already copy a Talk attachment into its workspace and
+    mail that — and it is not weakened by admitting the most private root
+    there is. `outbound_drafts._confined_attachment` is the one caller that
+    genuinely needs the workspace alone, and it keeps its own check for a
+    reason about durability rather than sharing: a held draft is released
+    hours later, by which time the temp dir has been swept.
+
+    `writable` is accepted and unused: `env_host_roots` drops the read-only
+    roots on a writable call and neither of these two is one, so the answer is
+    the same either way, and taking it keeps the two branches of `_roots_for`
+    reading alike.
     """
-    own = user_workspace_root()
-    return [own] if own is not None else []
+    return env_host_roots(writable=writable, talk=False, channel=False)
 
 
 def _roots_for(mode: str, *, writable: bool) -> list[Path]:
@@ -277,12 +300,12 @@ def _roots_for(mode: str, *, writable: bool) -> list[Path]:
     acceptable for moving in the safer-looking direction.
 
     `EGRESS` is the one narrowing the spec does carry, and it is stated as
-    such: `{mount}/Users/{user_id}` alone, so a verb whose content leaves the
-    task can name neither `{mount}/Channels/{token}` nor `{mount}/Talk`.
+    such: the workspace and the deferred dir, so a verb whose content leaves
+    the task can name neither `{mount}/Channels/{token}` nor `{mount}/Talk`.
     Talk is in the first set and not the second for the same rule read the
     other way — a task may legitimately read a Talk attachment into its own
     reasoning, which is a different question from whether those bytes may be
-    mailed out.
+    mailed out. Why the deferred dir stays: see `_own_roots`.
     """
     if mode == EGRESS:
         return _own_roots(writable=writable)

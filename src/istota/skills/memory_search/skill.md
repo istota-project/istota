@@ -29,7 +29,7 @@ istota-skill memory_search reindex [--lookback-days 90]
 istota-skill memory_search stats
 ```
 
-`index file` reads from your own workspace and nowhere else. What it indexes comes back out through `search` after this task is over, so a Talk attachment, a file in the channel directory or one in the task's temp directory is refused — copy it into `{workspace}` first if it belongs in your searchable memory.
+`index file` reads from your own workspace or your task's own temp directory (`$ISTOTA_DEFERRED_DIR`) and nowhere else. What it indexes comes back out through `search` after this task is over, so a Talk attachment or a file in the channel directory — material somebody else put there — is refused. Copy it into `{workspace}` first if it belongs in your searchable memory.
 
 ## Knowledge graph (read-only)
 

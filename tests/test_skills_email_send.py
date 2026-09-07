@@ -239,23 +239,27 @@ class TestSend:
         assert run.exit_code == 1
         assert run.envelope["reason"] == "host_path_refused"
 
-    def test_an_attachment_in_the_deferred_dir_is_refused(self, skill_env):
-        """The narrowing `EGRESS` carries, at the verb it was named for.
+    def test_an_attachment_in_the_deferred_dir_is_sent(self, skill_env):
+        """The root `EGRESS` keeps, and the one it is easy to drop by accident.
 
-        The deferred dir is a root for a `READ` and not for an `EGRESS`: these
-        bytes leave the task. The held-draft path already answered this way —
-        `outbound_drafts._confined_attachment` re-checks against the workspace
-        alone at release — so what changes is that a direct send now gets the
-        same answer as a held one, which is the point.
+        What `EGRESS` excludes is *shared* material — `{mount}/Talk` and the
+        channel directory, asserted above. The task's own deferred dir is
+        neither: nothing else writes into it, and on a deployment with no
+        mount it is the only root a task has, so excluding it refused every
+        attachment on that shape. The held-draft path is narrower still and
+        stays so — `outbound_drafts._confined_attachment` re-checks against
+        the workspace alone at release, because a draft outlives the temp dir
+        — which is a durability rule rather than this one.
         """
-        with patch("istota.skills.email.send_email") as se, \
+        with patch("istota.skills.email.send_email", return_value="<m@x>") as se, \
              patch("istota.skills.email._write_deferred_sent_email"):
             run = run_skill_main(main, [
                 "send", "--to", "a@out.com", "--subject", "S", "--body", "hi",
                 "--attach", skill_env._test_deferred_attachment,
             ])
-        se.assert_not_called()
-        assert run.envelope["reason"] == "host_path_refused"
+        assert run.exit_code == 0, run.stdout
+        _, kwargs = se.call_args
+        assert kwargs["attachments"] == [skill_env._test_deferred_attachment]
 
     def test_an_attachment_in_the_workspace_is_sent(self, skill_env):
         """The other half: the refusal above passes against a verb that refuses

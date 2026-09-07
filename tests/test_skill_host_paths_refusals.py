@@ -597,20 +597,25 @@ class TestTheModeDecidesTheRoots:
         assert not recorder.called, f"{key} mailed a file from a channel dir"
 
     @pytest.mark.parametrize("key", _params(_keys_for(EGRESS)))
-    def test_egress_refuses_the_deferred_directory(self, key, mount, drive):
-        """The third root `OWN` drops, and the one a reader forgets.
+    def test_egress_admits_the_deferred_directory(self, key, mount, drive):
+        """`OWN` is the workspace **and the task's own deferred dir**.
 
-        `memory_search index file` had it before stage 5 and no longer does.
-        The deferred dir is the task's own scratch space — a `READ` and a
-        `WRITE` both reach it — but a file in it is as fit to be mailed out
-        or indexed as anything else the task wrote, which is the question
-        `EGRESS` answers rather than where the bytes currently sit.
+        Stage 5 asserted the opposite and it was wrong. What `EGRESS` exists
+        to exclude is *shared* material — `{mount}/Channels/{token}` and
+        `{mount}/Talk`, which other people put there — so that a verb sending
+        bytes out of the task cannot name something the model did not author.
+        The deferred dir is the opposite of shared: one task's own directory,
+        per user, writable by nothing else. Excluding it bought no boundary
+        and cost two things — every `EGRESS` argument refused unconditionally
+        on a deployment with no mount (`NEXTCLOUD_MOUNT_PATH` is `""` there,
+        so `OWN` came back empty), and a CLI whose accepted set disagreed with
+        `scheduler_deferred._source_path_allowed`, whose two roots are exactly
+        this pair.
         """
         source = mount.deferred / "scratch.bin"
         source.write_bytes(b"payload")
         run, recorder = drive(key, source)
-        assert not recorder.called, f"{key} took a file from the deferred dir"
-        assert run.envelope.get("reason") == "host_path_refused", run.envelope
+        assert recorder.called, run.envelope or run.stdout
 
     @pytest.mark.parametrize("key", _params(_keys_for(EGRESS)))
     def test_egress_still_admits_the_users_own_workspace(
@@ -620,3 +625,130 @@ class TestTheModeDecidesTheRoots:
         source.write_bytes(b"payload")
         run, recorder = drive(key, source)
         assert recorder.called, run.envelope or run.stdout
+
+
+# --------------------------------------------------------------------------- #
+# A deployment with no mount
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def mountless(tmp_path, monkeypatch) -> Path:
+    """The rclone-CLI shape: `nextcloud_mount_path` unset, a deferred dir set.
+
+    `task_env` exports `NEXTCLOUD_MOUNT_PATH=""` on a deployment with no
+    mount configured, so the only root a task has is its own deferred
+    directory. Returns it.
+    """
+    deferred = tmp_path / "deferred"
+    deferred.mkdir()
+    monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", "")
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(deferred))
+    monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
+    monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", "istota")
+    return deferred
+
+
+class TestAMountlessDeployment:
+    """The shape correction A was found on, asserted rather than reasoned about.
+
+    With `OWN` as `{mount}/Users/{user_id}` alone, an empty mount made the
+    `EGRESS` root list empty and `resolve_in_roots` refuses everything against
+    an empty allowlist — correctly, since an empty allowlist must never read
+    as "allow everything". The bug was upstream of that: the deferred dir is a
+    root and was being dropped. `memory_search index file` worked on this shape
+    before the stamp.
+    """
+
+    @pytest.mark.parametrize("key", _params(_keys_for(EGRESS)))
+    def test_egress_still_accepts_the_deferred_directory(
+        self, key, mountless, drive,
+    ):
+        given = mountless / "source.bin"
+        given.write_bytes(b"payload")
+
+        run, recorder = drive(key, given)
+
+        assert recorder.called, run.envelope or run.stdout
+
+    @pytest.mark.parametrize("key", _params(_keys_for(EGRESS)))
+    def test_egress_still_refuses_everything_else(self, key, mountless, tmp_path, drive):
+        """The half that makes the one above mean something.
+
+        A root list of one is still an allowlist, and the acceptance test
+        alone would pass just as well against a mountless shape that had
+        stopped resolving at all.
+        """
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        given = outside / "source.bin"
+        given.write_bytes(b"payload")
+
+        run, recorder = drive(key, given)
+
+        assert not recorder.called, f"{key} reached outside the deferred dir"
+        assert run.envelope.get("reason") == "host_path_refused", run.envelope
+
+
+# --------------------------------------------------------------------------- #
+# The verbs whose reader is the daemon
+# --------------------------------------------------------------------------- #
+
+
+#: The three health verbs that defer a *path* for `scheduler_deferred` to read
+#: after the task has ended. Named here rather than derived, because what the
+#: class below asserts is precisely that their stamp has not drifted away from
+#: the replay's own root set — and deriving the list from the stamp would make
+#: that assertion circular.
+DEFERRED_TO_THE_DAEMON = [
+    ("health", "upload", "file_path"),
+    ("health", "import-csv", "file_path"),
+    ("health", "attach-document", "path"),
+]
+
+
+class TestTheVerbsTheDaemonReplays:
+    """The CLI accepts exactly what the replay will, and no more.
+
+    These three verbs never read the bytes themselves: they write a deferred
+    op carrying the path and return, and `scheduler_deferred` opens it later
+    from the daemon, where `_source_path_allowed` derives its own two roots.
+    A stamp wider than that set is a success the model is told about and a row
+    nobody ever wrote — accepted here, deferred, then dropped there with
+    nothing but a scheduler warning. That is what stamping them `READ` did,
+    and it is why the assertion is against the *replay's* derivation rather
+    than against a mode spelled out in a table.
+    """
+
+    @pytest.mark.parametrize("key", _params(DEFERRED_TO_THE_DAEMON))
+    def test_the_stamp_gives_exactly_the_replay_roots(self, key, mount):
+        from istota.skill_host_paths import workspace_roots
+        from istota.skills._hostpath import _roots_for
+
+        # `scheduler_deferred._source_path_allowed`'s own call, ingredient for
+        # ingredient: the mount and the user id it holds, the task's temp dir,
+        # no conversation token and no Talk.
+        replay = workspace_roots(
+            mount=mount.link, user_id="alice", deferred_dir=mount.deferred,
+        )
+
+        assert set(_roots_for(resolving_stamps()[key], writable=False)) == set(replay)
+
+    @pytest.mark.parametrize("key", _params(DEFERRED_TO_THE_DAEMON))
+    def test_a_talk_attachment_is_refused_here_rather_than_at_replay(
+        self, key, mount, drive,
+    ):
+        """The observable half of the same property, at the CLI.
+
+        `{mount}/Talk` is the root the two sets disagreed about, so it is the
+        one worth driving end to end: the refusal has to arrive in the turn
+        that asked, not as a warning in a log the model cannot read.
+        """
+        source = mount.talk("labs.pdf")
+        source.write_bytes(b"payload")
+
+        run, recorder = drive(key, source)
+
+        assert not recorder.called, f"{key} deferred a path the replay drops"
+        assert run.envelope.get("reason") == "host_path_refused", run.envelope
