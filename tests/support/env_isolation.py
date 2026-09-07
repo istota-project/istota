@@ -162,6 +162,17 @@ _SCRUB_NAMES = frozenset({
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_CEILING_DIRECTORIES",
+    # The three the list was missing when `git_hardening.GIT_SUBPROCESS_ENV_UNSET`
+    # was written against the same hazard (ISSUE-457). `GIT_COMMON_DIR` is the
+    # one to know about: it leaves `rev-parse --absolute-git-dir` answering with
+    # this repository while the refs and the worktree registry come from
+    # another. `GIT_GRAFT_FILE` forges parentage, so a fixture built under one
+    # would disagree with itself about what is merged. Restated rather than
+    # imported from `istota`: this module runs before the suite has a right to
+    # assume the package imports cleanly.
+    "GIT_COMMON_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_EXTERNAL_DIFF",
 })
 
 # `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` / … — the numbered half of the pair

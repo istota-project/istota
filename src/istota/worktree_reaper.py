@@ -81,9 +81,14 @@ the sandbox, so a checkout's own ``.git/config`` is model-written. Plain
 ``git status`` there runs whatever ``core.fsmonitor`` names, as the daemon user,
 with the daemon's environment — so every call goes through
 :func:`istota.git_hardening.run_git`, which applies both
-:data:`~istota.git_hardening.GIT_HARDENING` and
-:data:`~istota.git_hardening.GIT_SUBPROCESS_ENV`. ``GIT_CONFIG_NOSYSTEM`` and
+:data:`~istota.git_hardening.GIT_HARDENING` and the environment policy
+:func:`~istota.git_hardening.git_env` builds. ``GIT_CONFIG_NOSYSTEM`` and
 ``GIT_CONFIG_GLOBAL`` do not cover repository config and are not a substitute.
+
+That policy removes as well as sets, and this module is why (ISSUE-457): an
+inherited ``GIT_DIR`` or ``GIT_WORK_TREE`` outranks the ``-C`` passed below, so
+the ``git worktree remove`` further down would delete from a repository nobody
+named.
 
 ``GIT_OPTIONAL_LOCKS=0`` in that overlay is load-bearing rather than tidiness:
 without it ``git status`` rewrites the worktree's index, which is one of the

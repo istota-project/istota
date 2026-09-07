@@ -24,7 +24,13 @@ from pathlib import Path
 
 import pytest
 
-from istota.git_hardening import GIT_HARDENING, GIT_SUBPROCESS_ENV, run_git
+from istota.git_hardening import (
+    GIT_HARDENING,
+    GIT_SUBPROCESS_ENV,
+    GIT_SUBPROCESS_ENV_UNSET,
+    git_env,
+    run_git,
+)
 
 # Written out, not imported. This is the restatement that makes the test able
 # to fail when a variable is dropped from the constant.
@@ -126,6 +132,194 @@ class TestTheEnvironmentOverlay:
 
         assert status != 0
         assert "leaked-from-the-environment" not in out
+
+
+class TestTheRedirectVariablesAreRemoved:
+    """ISSUE-457: the overlay set four names and unset none.
+
+    `GIT_DIR` and its relatives are read at a scope that outranks the `-C` a
+    caller passes, so an inherited one silently points the command at another
+    repository. The caller that matters is `worktree_reaper`, which removes
+    worktrees — misdirection there is destructive rather than merely wrong.
+
+    Restated below rather than imported, for the reason at the top of this
+    file: a test comparing the module's tuple to itself cannot fail when a
+    name is dropped from it.
+    """
+
+    def test_it_removes_exactly_these(self):
+        assert list(GIT_SUBPROCESS_ENV_UNSET) == [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_GRAFT_FILE",
+            "GIT_EXTERNAL_DIFF",
+        ]
+
+    def test_the_two_halves_do_not_overlap(self):
+        """What makes `git_env`'s pop-then-overlay order inert. Asserted rather
+        than reasoned about, because the order is otherwise untestable and a
+        name added to both lists would make it decide the answer."""
+        assert not set(GIT_SUBPROCESS_ENV) & set(GIT_SUBPROCESS_ENV_UNSET)
+
+    @pytest.mark.parametrize("name", GIT_SUBPROCESS_ENV_UNSET)
+    def test_none_of_them_reaches_the_subprocess(self, name, tmp_path, shim, monkeypatch):
+        monkeypatch.setenv(name, "/somewhere/else")
+
+        run_git(tmp_path, "status")
+
+        _, env = shim()
+        assert name not in env, f"{name} was inherited by the git subprocess"
+
+    def test_an_inherited_git_dir_does_not_redirect_the_command(
+        self, repo, tmp_path, monkeypatch
+    ):
+        """The reported failure, against real git rather than the shim.
+
+        Measured on git 2.55: with `GIT_DIR` set, `git -C <repo> rev-parse`
+        answers with the *other* repository's directory.
+        """
+        other = tmp_path / "other"
+        other.mkdir()
+        _plain_git(other, "init", "-q", "-b", "main", ".")
+        monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+
+        status, out = run_git(repo, "rev-parse", "--absolute-git-dir")
+
+        assert status == 0, out
+        assert Path(out.strip()).resolve() == (repo / ".git").resolve()
+
+    def test_an_inherited_work_tree_does_not_redirect_the_command(
+        self, repo, tmp_path, monkeypatch
+    ):
+        """The half that decides what `git worktree remove` and `git status`
+        are looking at, which is the destructive direction."""
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / "README").write_text("a different tree entirely\n")
+        monkeypatch.setenv("GIT_WORK_TREE", str(other))
+
+        status, out = run_git(repo, "status", "--porcelain")
+
+        assert status == 0, out
+        assert out.strip() == "", f"status read another work tree: {out!r}"
+
+    def test_an_inherited_graft_file_cannot_forge_a_merge(
+        self, repo, tmp_path, monkeypatch
+    ):
+        """The destructive one. `worktree_reaper` authorises `worktree remove`
+        on `merge-base --is-ancestor` and `rev-list --parents`, and a graft file
+        rewrites parentage, so an inherited one turns an unmerged branch into a
+        merged one and the sweep deletes the worktree and its branch ref.
+
+        Measured on git 2.55, which still honours the file while calling it
+        deprecated.
+        """
+        _plain_git(repo, "checkout", "-q", "-b", "side")
+        (repo / "README").write_text("side work\n")
+        _plain_git(repo, "commit", "-q", "-am", "side")
+        side = _plain_git(repo, "rev-parse", "HEAD").strip()
+        _plain_git(repo, "checkout", "-q", "main")
+        (repo / "README").write_text("main work\n")
+        _plain_git(repo, "commit", "-q", "-am", "main")
+        main = _plain_git(repo, "rev-parse", "HEAD").strip()
+
+        graft = tmp_path / "grafts"
+        graft.write_text(f"{main} {side}\n")
+        monkeypatch.setenv("GIT_GRAFT_FILE", str(graft))
+
+        status, _ = run_git(repo, "merge-base", "--is-ancestor", side, main)
+
+        assert status != 0, "an unmerged branch was reported as merged"
+
+    def test_a_replace_ref_cannot_forge_a_merge(self, repo):
+        """The same forgery from the repository side, which needs no hostile
+        environment at all — a checkout under `developer.repos_dir` is bound
+        read-write into the sandbox, so the model can write `refs/replace/*`
+        itself. `--no-replace-objects` in `GIT_HARDENING` is what refuses it.
+        """
+        _plain_git(repo, "checkout", "-q", "-b", "side")
+        (repo / "README").write_text("side work\n")
+        _plain_git(repo, "commit", "-q", "-am", "side")
+        side = _plain_git(repo, "rev-parse", "HEAD").strip()
+        _plain_git(repo, "checkout", "-q", "main")
+        (repo / "README").write_text("main work\n")
+        _plain_git(repo, "commit", "-q", "-am", "main")
+        main = _plain_git(repo, "rev-parse", "HEAD").strip()
+
+        forged = _plain_git(
+            repo, "commit-tree", f"{main}^{{tree}}", "-p", side, "-m", "forged"
+        ).strip()
+        _plain_git(repo, "update-ref", f"refs/replace/{main}", forged)
+
+        status, _ = run_git(repo, "merge-base", "--is-ancestor", side, main)
+
+        assert status != 0, "an unmerged branch was reported as merged"
+
+    def test_an_inherited_external_diff_is_not_executed(
+        self, repo, tmp_path, monkeypatch
+    ):
+        """`GIT_EXTERNAL_DIFF` is not in the `GIT_DIR` family and is here for a
+        measured reason: it beats the `-c diff.external=` override in
+        `GIT_HARDENING`, which that list names as one of its run-a-command
+        defences. Removing the variable is what makes that claim true.
+        """
+        marker = tmp_path / "external-diff-ran.txt"
+        script = tmp_path / "ext.sh"
+        script.write_text(f"#!/bin/sh\necho ran > {marker}\n")
+        script.chmod(0o755)
+        (repo / "README").write_text("changed\n")
+        monkeypatch.setenv("GIT_EXTERNAL_DIFF", str(script))
+
+        run_git(repo, "diff")
+
+        assert not marker.exists(), "GIT_EXTERNAL_DIFF ran a program of its own choosing"
+
+    def test_the_rest_of_the_environment_still_reaches_git(
+        self, tmp_path, shim, monkeypatch
+    ):
+        """The control. `run_git` overlays `os.environ`; a fix that built the
+        environment from nothing instead would pass every test above and take
+        `PATH`, the proxy settings and the CA bundle with it."""
+        monkeypatch.setenv("ISTOTA_UNRELATED_MARKER", "kept")
+
+        run_git(tmp_path, "status")
+
+        _, env = shim()
+        assert env.get("ISTOTA_UNRELATED_MARKER") == "kept"
+        assert env.get("PATH")
+
+
+class TestTheEnvironmentBuilder:
+    """`git_env` is the whole policy in one call, which is what keeps a second
+    consumer from applying half of it."""
+
+    def test_it_applies_the_overlay_and_the_removals_together(self, monkeypatch):
+        monkeypatch.setenv("GIT_DIR", "/somewhere/else")
+        monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+
+        env = git_env()
+
+        assert "GIT_DIR" not in env
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_it_returns_a_fresh_mapping_each_time(self):
+        """A caller adding one variable of its own must not edit the process
+        environment, which is what `os.environ` itself would give it.
+
+        The injected name is in neither half on purpose. A name this function
+        removes could not fail here: against `env = os.environ` the write would
+        land in the real environment and the next call's `pop` would take it
+        straight back out, so both assertions would hold with the defect present.
+        """
+        first = git_env()
+        first["ISTOTA_FRESHNESS_MARKER"] = "injected"
+
+        assert "ISTOTA_FRESHNESS_MARKER" not in git_env()
+        assert "ISTOTA_FRESHNESS_MARKER" not in os.environ
 
 
 class TestTheHardeningOverrides:

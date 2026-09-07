@@ -162,6 +162,9 @@ class TestThePolicy:
             "GIT_DIR",
             "GIT_WORK_TREE",
             "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_GRAFT_FILE",
+            "GIT_EXTERNAL_DIFF",
         ],
     )
     def test_it_goes(self, name):
