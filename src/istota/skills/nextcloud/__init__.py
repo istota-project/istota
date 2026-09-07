@@ -1087,9 +1087,13 @@ def main(argv=None):
         sys.exit(1)
 
     def describe(exc: BaseException) -> dict:
-        # An OcsError carries the status, content-type and body snippet a bare
-        # message does not. `PathScopeError` and everything else name themselves,
-        # which is why the two branches this replaced had identical bodies.
+        # The *package* OcsError carries the HTTP status, the OCS status and
+        # the endpoint a bare message does not, and `to_envelope` is defined on
+        # it alone. `PathScopeError` and everything else name themselves, which
+        # is why the two branches this replaced had identical bodies. A leaf
+        # `istota.ocs.OcsError` — what the `talk *` commands now raise on an
+        # unreadable answer — is not an instance of it and takes the second
+        # branch, where its own message already names the status and the body.
         if isinstance(exc, OcsError):
             return exc.to_envelope()
         return error_envelope(str(exc))

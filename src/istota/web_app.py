@@ -546,9 +546,16 @@ async def _nc_oauth2_userinfo(token: dict) -> dict:
     The endpoint returns `{ocs: {data: {id, displayname, email, ...}}}`.
     Token is not stored — it lives only in this function's stack frame.
 
-    An answer that is not that shape raises `OcsError` rather than reducing to
-    an empty identity: the caller turned that into "Access denied: user not
-    configured", which names the wrong fault. It catches and answers 502.
+    An answer carrying no `ocs` envelope at all raises `OcsError` rather than
+    reducing to an empty identity: the caller turned that into "Access denied:
+    user not configured", which names the wrong fault. It catches and answers
+    502. `snippet=False` because that error is logged and this endpoint is
+    configurable — one pointed at the *token* endpoint answers JSON with an
+    `access_token` in it, and the body prefix would carry that into the log.
+
+    An envelope whose `data` is falsy still collapses to `{}` and still reads
+    as "user not configured": PHP renders an empty associative array as `[]`,
+    so that is a shape a working Nextcloud emits, not a broken answer.
     """
     access_token = token.get("access_token")
     if not access_token:
@@ -567,7 +574,7 @@ async def _nc_oauth2_userinfo(token: dict) -> dict:
             },
         )
         resp.raise_for_status()
-        inner = ocs_data(resp, "OCS userinfo", default={})
+        inner = ocs_data(resp, "OCS userinfo", default={}, snippet=False) or {}
     if not isinstance(inner, dict):
         raise ValueError("unexpected OCS userinfo shape")
     return inner
@@ -4808,10 +4815,13 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
         try:
             room = await client.create_conversation(name)
         except OcsError as e:
-            # `failed` is the route's 502 "Nextcloud created no conversation",
-            # which is what an unreadable create answer has always produced —
-            # keep it, and put the status and body snippet in the log, where
-            # an unhandled raise would have made it a bare 500.
+            # `failed` is the route's 502 "Nextcloud created no conversation".
+            # An envelope-less answer already produced it — `{}` had no token —
+            # so that half is preserved exactly. A body that is not JSON used
+            # to raise `JSONDecodeError` out of here and become a bare 500 at
+            # the route; it now joins the 502, which names the fault and is the
+            # answer the route was built to give. The status and body snippet
+            # go to the log, where neither used to appear at all.
             logger.warning("promote: create_conversation for %s: %s", token, e)
             return "failed", None
         talk_token = room.get("token")

@@ -103,14 +103,58 @@ class TestOcsData:
         assert len(str(excinfo.value)) < 400
 
     def test_a_body_whose_text_raises_still_reports_the_fault(self):
-        """The diagnostic must not become the thing that raises."""
+        """The diagnostic must not become the thing that raises.
+
+        And it must not report an unreadable body as an empty one: "0 chars"
+        for both is the same one-message-three-faults problem this module was
+        written to remove, one level down.
+        """
         resp = _response(json_error=json.JSONDecodeError("Expecting value", "", 0))
         type(resp).text = property(
             lambda self: (_ for _ in ()).throw(RuntimeError("never read"))
         )
         with pytest.raises(OcsError) as excinfo:
             ocs_data(resp, "poll room1")
-        assert "0 chars" in str(excinfo.value)
+        message = str(excinfo.value)
+        assert "body unreadable" in message
+        assert "0 chars" not in message
+
+    def test_an_empty_body_reports_its_length(self):
+        """The other half of the pair above: empty is not unreadable."""
+        resp = _response(
+            json_error=json.JSONDecodeError("Expecting value", "", 0), text="",
+        )
+        with pytest.raises(OcsError) as excinfo:
+            ocs_data(resp, "poll room1")
+        message = str(excinfo.value)
+        assert "0 chars" in message
+        assert "body unreadable" not in message
+
+    def test_the_snippet_can_be_withheld_without_losing_the_fault(self):
+        """For a caller whose error text reaches a log and whose endpoint is
+        configurable — the body may then be someone else's response."""
+        resp = _response(json_body={"access_token": "must-not-appear"})
+        with pytest.raises(OcsError) as excinfo:
+            ocs_data(resp, "OCS userinfo", snippet=False)
+        message = str(excinfo.value)
+        assert "must-not-appear" not in message
+        assert "body withheld" in message
+        assert "HTTP 200" in message
+
+    def test_a_withheld_snippet_still_names_status_and_type_on_a_non_json_body(self):
+        resp = _response(
+            json_error=json.JSONDecodeError("Expecting value", "", 0),
+            status=502,
+            headers={"content-type": "text/html"},
+            text="<html>secret-page-content</html>",
+        )
+        with pytest.raises(OcsError) as excinfo:
+            ocs_data(resp, "OCS userinfo", snippet=False)
+        message = str(excinfo.value)
+        assert "secret-page-content" not in message
+        assert "HTTP 502" in message
+        assert "text/html" in message
+        assert "32 chars" in message
 
     def test_json_that_is_not_an_envelope_is_a_different_fault(self):
         resp = _response(json_body={"error": "nope"}, status=200)
@@ -228,35 +272,94 @@ def test_poll_messages_still_returns_empty_on_304():
 
 
 class TestBestEffortCallersKeepTheirOldAnswer:
-    """Three sites sit under a caller that treats the empty default as normal.
+    """The callers whose handling had to be decided site by site.
 
-    Each gets an explicit catch that logs and returns what it returned before,
+    Two get an explicit catch that logs and returns what they returned before,
     so the failure is visible in the log without moving what the caller sees.
+    The Talk transport's post is the one that deliberately does not: it already
+    owns a mechanism for this exact failure, and catching would disable it.
     """
 
-    def test_talk_transport_post_part_returns_none_and_logs(self, caplog):
-        """`_post_part` raises on a failure, so its `None` is reserved for "the
-        post landed and carried no id" — which is what its own docstring calls
-        "a real outcome of a 2xx with an unexpected body"."""
+    def test_talk_transport_post_part_reads_the_room_back(self):
+        """This one is deliberately *not* caught at the unwrap.
+
+        `_may_have_been_stored` names this exact case — "a 2xx whose body does
+        not parse raises after Nextcloud has written the message" — and the
+        readback is what turns it into the real id. Swallowing it into a `None`
+        return would report a post the user can see as undelivered, which is
+        the ambiguity ISSUE-404 removed.
+        """
         from istota.transport.talk import TalkTransport
 
         config = Config(nextcloud=NextcloudConfig(
             url=NC_URL, username="bot", app_password="secret",
         ))
+        config.talk.bot_username = "bot"
         client = MagicMock()
         client.send_message = AsyncMock(return_value={"message": "no envelope"})
+        client.fetch_chat_history = AsyncMock(return_value=[
+            {"id": 4242, "referenceId": "ref-1", "actorType": "users",
+             "actorId": "bot"},
+        ])
         transport = TalkTransport(config)
 
-        with caplog.at_level("WARNING"):
-            posted = asyncio.run(transport._post_part(
+        posted = asyncio.run(transport._post_part(
+            client, "tok", "hello",
+            reply_to=None, reference_id="ref-1",
+            readback_allowed=True, task=None,
+        ))
+
+        assert posted == 4242
+        # Not re-posted: `_is_transient` is False for an OcsError, so the loop
+        # breaks on the first attempt and nothing is doubled in the room.
+        assert client.send_message.await_count == 1
+
+    def test_talk_transport_post_part_raises_when_the_room_says_no(self):
+        """The readback settles it the other way: nothing in the room, so the
+        failure ends delivery loudly instead of being a silent `None`."""
+        from istota.transport.talk import TalkTransport
+
+        config = Config(nextcloud=NextcloudConfig(
+            url=NC_URL, username="bot", app_password="secret",
+        ))
+        config.talk.bot_username = "bot"
+        client = MagicMock()
+        client.send_message = AsyncMock(return_value={"message": "no envelope"})
+        client.fetch_chat_history = AsyncMock(return_value=[])
+        transport = TalkTransport(config)
+
+        with pytest.raises(OcsError):
+            asyncio.run(transport._post_part(
                 client, "tok", "hello",
                 reply_to=None, reference_id="ref-1",
-                readback_allowed=False, task=None,
+                readback_allowed=True, task=None,
             ))
+        assert client.send_message.await_count == 1
 
-        assert posted is None
-        assert "id could not be read" in caplog.text
-        # A 2xx post that landed must not be retried into a duplicate.
+    def test_an_unreadable_readback_holds_the_message_rather_than_reposting(self):
+        """The readback's own `fetch_chat_history` now raises where it returned
+        `[]`. An unanswerable question must hold the post back, not re-post it
+        — a duplicate in the user's room is the outcome this module ranks
+        worst."""
+        from istota.transport.talk import TalkTransport
+
+        config = Config(nextcloud=NextcloudConfig(
+            url=NC_URL, username="bot", app_password="secret",
+        ))
+        config.talk.bot_username = "bot"
+        client = MagicMock()
+        client.send_message = AsyncMock(return_value={"message": "no envelope"})
+        client.fetch_chat_history = AsyncMock(
+            side_effect=OcsError("chat history tok: JSON without an ocs envelope"),
+        )
+        transport = TalkTransport(config)
+
+        with pytest.raises(OcsError):
+            asyncio.run(transport._post_part(
+                client, "tok", "hello",
+                reply_to=None, reference_id="ref-1",
+                readback_allowed=True, task=None,
+            ))
         assert client.send_message.await_count == 1
 
     def test_post_as_user_returns_none_and_logs(self, caplog, monkeypatch):
@@ -347,6 +450,67 @@ class TestOauthUserinfo:
         finally:
             web_app._config = original
         assert "OCS userinfo" in str(excinfo.value)
+
+    def test_a_falsy_data_still_reads_as_user_not_configured(self):
+        """PHP renders an empty associative array as `[]`, so `{"ocs":
+        {"data": []}}` is a shape a working Nextcloud emits. It collapsed to
+        `{}` and the login answered "user not configured"; switching that to a
+        502 would be an unannounced change on the sign-in path."""
+        from istota import web_app
+
+        config = Config(nextcloud=NextcloudConfig(url=NC_URL))
+        config.web.oauth2_userinfo_endpoint = f"{NC_URL}/ocs/v2.php/cloud/user"
+
+        resp = _response(json_body={"ocs": {"data": []}})
+        http = AsyncMock()
+        http.get.return_value = resp
+        http.__aenter__ = AsyncMock(return_value=http)
+        http.__aexit__ = AsyncMock(return_value=False)
+
+        original = web_app._config
+        web_app._config = config
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("istota.web_app.httpx.AsyncClient", lambda **k: http)
+                out = asyncio.run(web_app._nc_oauth2_userinfo({"access_token": "at"}))
+        finally:
+            web_app._config = original
+        assert out == {}
+
+    def test_the_error_withholds_the_body_it_would_otherwise_log(self):
+        """The caller logs this error. A `oauth2_userinfo_endpoint` pointed at
+        the token endpoint answers JSON with no `ocs` key and a bearer token in
+        it, and the body prefix would carry that straight into the log."""
+        from istota import web_app
+
+        config = Config(nextcloud=NextcloudConfig(url=NC_URL))
+        config.web.oauth2_userinfo_endpoint = f"{NC_URL}/ocs/v2.php/cloud/user"
+
+        leaked = "sensitive-value-that-must-not-be-logged"
+        resp = _response(
+            json_body={"access_token": leaked, "token_type": "Bearer"},
+            status=200,
+        )
+        http = AsyncMock()
+        http.get.return_value = resp
+        http.__aenter__ = AsyncMock(return_value=http)
+        http.__aexit__ = AsyncMock(return_value=False)
+
+        original = web_app._config
+        web_app._config = config
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr("istota.web_app.httpx.AsyncClient", lambda **k: http)
+                with pytest.raises(OcsError) as excinfo:
+                    asyncio.run(web_app._nc_oauth2_userinfo({"access_token": "at"}))
+        finally:
+            web_app._config = original
+        message = str(excinfo.value)
+        assert leaked not in message
+        assert "access_token" not in message
+        # The fault is still identified: what failed, and the status it failed on.
+        assert "OCS userinfo" in message
+        assert "HTTP 200" in message
 
     def test_a_real_envelope_still_yields_the_identity(self):
         from istota import web_app
@@ -476,6 +640,13 @@ class TestNoSecondUnwrap:
         (fake / "nextcloud" / "_client.py").write_text(
             'if "ocs" in body:\n    data = body["ocs"]["data"]\n'
         )
+        # Both exempt paths, carrying the very pattern the guard hunts. Without
+        # these the `if rel in EXEMPT: continue` line is never taken during the
+        # control and the whole exemption mechanism is untested — the test
+        # would pass identically with `EXEMPT = set()`.
+        for rel in sorted(self.EXEMPT):
+            (fake / rel).parent.mkdir(parents=True, exist_ok=True)
+            (fake / rel).write_text('data = body.get("ocs", {}).get("data")\n')
         monkeypatch.setattr("tests.test_ocs.SRC", fake, raising=False)
         offenders = self._offenders()
         assert set(offenders) == {"regrown.py", "nextcloud/_client.py"}
