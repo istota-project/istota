@@ -237,11 +237,6 @@ class TestRunSkillCli:
 #: `handlers_print=True` exists for and is how `kv`, `location`, `feeds`,
 #: `health` and `tasks` are converted.
 EPILOGUE_EXEMPT = {
-    # A sibling session holds `skills/money/`; converting it would edit their
-    # tree. Left for the round that follows theirs. Its `main` is also a nested
-    # if/elif over four sub-tables, so it is not the one-line conversion the
-    # others are.
-    "money": "held by a parallel session, and a nested sub-table dispatcher",
     # Not a dispatcher at all: `os.execvp` into the `gws` binary, which replaces
     # this process and so has no envelope and no exit code of its own.
     "google_workspace": "execvp passthrough, no envelope",
@@ -397,9 +392,10 @@ from {module} import main
 sys.exit(main())
 '''
 
-#: `skills/money/` is held by a parallel session; its `__main__.py` is left as
-#: it was and converted in the round that follows theirs.
-MAIN_MODULE_EXEMPT = {"money"}
+#: Nothing is exempt. The one entry this held — `skills/money/`, left alone
+#: while a parallel session had the file open — is converted, and an empty set
+#: keeps the guard's shape rather than being a place to put the next one.
+MAIN_MODULE_EXEMPT: set[str] = set()
 
 
 class TestEveryMainModuleIsOneShape:

@@ -18,7 +18,7 @@ import json
 import os
 import sys
 
-from istota.skills._cli import parse_and_resolve
+from istota.skills._cli import emit as _output, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import READ, host_path
 
 
@@ -104,12 +104,6 @@ def _run(args: list[str]) -> dict:
         return json.loads(output)
     except json.JSONDecodeError:
         return {"status": "error", "error": f"invalid JSON from CLI: {output[:200]}"}
-
-
-def _output(data):
-    print(json.dumps(data, indent=2, ensure_ascii=False))
-    if isinstance(data, dict) and data.get("status") == "error":
-        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -1080,101 +1074,88 @@ def build_parser():
     return parser
 
 
+#: Every verb, flattened, keyed the way the argv reads: a group's sub-command
+#: is `"<group> <action>"`. Module-level rather than built inside `main` as the
+#: other skill CLIs build theirs, because this is the only one whose table is
+#: forty entries deep across five groups — `tests/test_skill_money.py` asserts
+#: it covers every command `build_parser` declares, which a table living inside
+#: `main` cannot be asked.
+COMMANDS = {
+    "list": cmd_list,
+    "check": cmd_check,
+    "balances": cmd_balances,
+    "query": cmd_query,
+    "report": cmd_report,
+    "lots": cmd_lots,
+    "wash-sales": cmd_wash_sales,
+    "backfill-ids": cmd_backfill_ids,
+    "add-transaction": cmd_add_transaction,
+    "edit-transaction": cmd_edit_transaction,
+    "sync-monarch": cmd_sync_monarch,
+    "debug-monarch": cmd_debug_monarch,
+    "import-csv": cmd_import_csv,
+    "run-scheduled": cmd_run_scheduled,
+    "transaction-rules list": cmd_transaction_rules_list,
+    "transaction-rules set": cmd_transaction_rules_set,
+    "transaction-rules test": cmd_transaction_rules_test,
+    "monarch-category-map list": cmd_monarch_category_map_list,
+    "monarch-category-map set": cmd_monarch_category_map_set,
+    "invoice generate": cmd_invoice_generate,
+    "invoice list": cmd_invoice_list,
+    "invoice paid": cmd_invoice_paid,
+    "invoice create": cmd_invoice_create,
+    "invoice unpaid": cmd_invoice_unpaid,
+    "invoice void": cmd_invoice_void,
+    "work list": cmd_work_list,
+    "work add": cmd_work_add,
+    "work update": cmd_work_update,
+    "work remove": cmd_work_remove,
+    "portfolio import": cmd_portfolio_import,
+    "portfolio snapshots": cmd_portfolio_snapshots,
+    "portfolio summary": cmd_portfolio_summary,
+    "portfolio history": cmd_portfolio_history,
+    "portfolio diff": cmd_portfolio_diff,
+    "portfolio symbol": cmd_portfolio_symbol,
+    "portfolio delete-snapshot": cmd_portfolio_delete_snapshot,
+    "portfolio accounts": cmd_portfolio_accounts,
+    "portfolio classifications": cmd_portfolio_classifications,
+    "portfolio classify": cmd_portfolio_classify,
+    "portfolio unclassify": cmd_portfolio_unclassify,
+    "portfolio autoclass": cmd_portfolio_autoclass,
+}
+
+#: Each group, and the argparse dest its own subparser stores the action in.
+GROUP_ACTION_DEST = {
+    "transaction-rules": "transaction_rules_action",
+    "monarch-category-map": "category_map_action",
+    "invoice": "invoice_command",
+    "work": "work_command",
+    "portfolio": "portfolio_command",
+}
+
+
 def main(argv=None):
     parser = build_parser()
     args = parse_and_resolve(parser, argv)
 
-    commands = {
-        "list": cmd_list,
-        "check": cmd_check,
-        "balances": cmd_balances,
-        "query": cmd_query,
-        "report": cmd_report,
-        "lots": cmd_lots,
-        "wash-sales": cmd_wash_sales,
-        "backfill-ids": cmd_backfill_ids,
-        "add-transaction": cmd_add_transaction,
-        "edit-transaction": cmd_edit_transaction,
-        "sync-monarch": cmd_sync_monarch,
-        "debug-monarch": cmd_debug_monarch,
-        "import-csv": cmd_import_csv,
-        "run-scheduled": cmd_run_scheduled,
-    }
+    command = args.command
+    if command in GROUP_ACTION_DEST:
+        action = getattr(args, GROUP_ACTION_DEST[command], None)
+        if not action:
+            # A group named with no action: argparse prints that group's help
+            # and exits 0 from inside `parse_args`, which is where the model
+            # reads the actions. Nothing below runs.
+            parser.parse_args([command, "--help"])
+        command = f"{command} {action}"
 
-    if args.command == "transaction-rules":
-        rule_commands = {
-            "list": cmd_transaction_rules_list,
-            "set": cmd_transaction_rules_set,
-            "test": cmd_transaction_rules_test,
-        }
-        fn = rule_commands.get(getattr(args, "transaction_rules_action", None))
-        if fn:
-            fn(args)
-        else:
-            parser.parse_args(["transaction-rules", "--help"])
-    elif args.command == "monarch-category-map":
-        map_commands = {
-            "list": cmd_monarch_category_map_list,
-            "set": cmd_monarch_category_map_set,
-        }
-        fn = map_commands.get(getattr(args, "category_map_action", None))
-        if fn:
-            fn(args)
-        else:
-            parser.parse_args(["monarch-category-map", "--help"])
-    elif args.command == "invoice":
-        invoice_commands = {
-            "generate": cmd_invoice_generate,
-            "list": cmd_invoice_list,
-            "paid": cmd_invoice_paid,
-            "create": cmd_invoice_create,
-            "unpaid": cmd_invoice_unpaid,
-            "void": cmd_invoice_void,
-        }
-        fn = invoice_commands.get(getattr(args, "invoice_command", None))
-        if fn:
-            fn(args)
-        else:
-            parser.parse_args(["invoice", "--help"])
-    elif args.command == "work":
-        work_commands = {
-            "list": cmd_work_list,
-            "add": cmd_work_add,
-            "update": cmd_work_update,
-            "remove": cmd_work_remove,
-        }
-        fn = work_commands.get(getattr(args, "work_command", None))
-        if fn:
-            fn(args)
-        else:
-            parser.parse_args(["work", "--help"])
-    elif args.command == "portfolio":
-        portfolio_commands = {
-            "import": cmd_portfolio_import,
-            "snapshots": cmd_portfolio_snapshots,
-            "summary": cmd_portfolio_summary,
-            "history": cmd_portfolio_history,
-            "diff": cmd_portfolio_diff,
-            "symbol": cmd_portfolio_symbol,
-            "delete-snapshot": cmd_portfolio_delete_snapshot,
-            "accounts": cmd_portfolio_accounts,
-            "classifications": cmd_portfolio_classifications,
-            "classify": cmd_portfolio_classify,
-            "unclassify": cmd_portfolio_unclassify,
-            "autoclass": cmd_portfolio_autoclass,
-        }
-        fn = portfolio_commands.get(getattr(args, "portfolio_command", None))
-        if fn:
-            fn(args)
-        else:
-            parser.parse_args(["portfolio", "--help"])
-    else:
-        fn = commands.get(args.command)
-        if fn:
-            fn(args)
-        else:
-            parser.print_help()
-            sys.exit(1)
+    if command not in COMMANDS:
+        parser.print_help()
+        sys.exit(1)
+
+    # Every handler prints its own envelope through `_output` and returns
+    # nothing, so the epilogue's job here is the facade's rule that a raised
+    # exception comes back as one JSON line and exit 1 rather than a traceback.
+    run_skill_cli(COMMANDS, args, command=command, handlers_print=True)
 
 
 if __name__ == "__main__":

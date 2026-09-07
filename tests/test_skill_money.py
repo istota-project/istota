@@ -984,3 +984,76 @@ class TestTransactionRules:
                 "--source", "monarch-api",
             ])
         assert "MONEY_USER not set" in capsys.readouterr().out
+
+
+class TestDispatch:
+    """One flat table, and the two fallbacks argparse used to reach.
+
+    `main` was a nested if/elif over five sub-tables — the one skill CLI that
+    could not hand its dispatch to `skills/_cli.run_skill_cli`, and so the one
+    with no shared epilogue (ISSUE-465). Flattening forty verbs by hand is the
+    kind of change that silently drops one, which is what the first test here
+    is for: it reads the parser rather than a list written beside the table.
+    """
+
+    def _command_paths(self, parser) -> set[str]:
+        """Every terminal command the parser declares, as the argv reads it."""
+        import argparse as _argparse
+
+        paths = set()
+        for action in parser._actions:
+            if not isinstance(action, _argparse._SubParsersAction):
+                continue
+            for name, sub in action.choices.items():
+                nested = self._command_paths(sub)
+                paths |= {f"{name} {leaf}" for leaf in nested} or {name}
+        return paths
+
+    def test_the_table_covers_every_command_the_parser_declares(self):
+        from istota.skills.money import COMMANDS, build_parser
+
+        assert self._command_paths(build_parser()) == set(COMMANDS)
+
+    def test_every_group_names_the_dest_its_subparser_stores(self):
+        from istota.skills.money import GROUP_ACTION_DEST, build_parser
+
+        groups = {
+            path.split(" ", 1)[0]
+            for path in self._command_paths(build_parser())
+            if " " in path
+        }
+        assert groups == set(GROUP_ACTION_DEST)
+
+    def test_a_group_with_no_action_prints_that_groups_help(self):
+        from tests.support.skill_cli import run_skill_main
+
+        from istota.skills.money import main
+
+        run = run_skill_main(main, ["invoice"])
+        assert run.exit_code == 0
+        assert "generate" in run.stdout
+        assert "sync-monarch" not in run.stdout
+
+    def test_no_command_at_all_prints_the_top_level_help(self):
+        from tests.support.skill_cli import run_skill_main
+
+        from istota.skills.money import main
+
+        run = run_skill_main(main, [])
+        assert run.exit_code == 1
+        assert "sync-monarch" in run.stdout
+
+    def test_a_raised_exception_comes_back_as_one_envelope(self):
+        """What the facade adds that this skill did not have: a handler that
+        raises used to reach the terminal as a traceback on stderr with nothing
+        on stdout, which the scheduler reads as a step that produced no output.
+        """
+        from tests.support.skill_cli import run_skill_main
+
+        from istota.skills.money import main
+
+        with patch("istota.skills.money._run", side_effect=RuntimeError("boom")):
+            run = run_skill_main(main, ["list"])
+
+        assert run.exit_code == 1
+        assert run.envelope == {"status": "error", "error": "boom"}
