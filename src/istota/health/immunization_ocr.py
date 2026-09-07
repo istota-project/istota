@@ -148,15 +148,22 @@ def _parse_llm_response(raw: str) -> tuple[list[dict], int]:
     date_given — likely OCR errors or hallucinations (analog of the
     bloodwork pipeline's >10× canonical-range guard). Those rows are
     discarded rather than allowed through to the bulk endpoint.
+
+    A bare list is only the answer when the candidate is whole (ISSUE-455) —
+    ``llm_json``'s widest-``[...]`` arm can match the inner array of an
+    envelope that did not parse, and an inner array is not evidence that the
+    model answered with a list. A bare array in ordinary prose still reads;
+    one whose prose carries a brace is refused with the fragments, being
+    indistinguishable from them.
     """
     for candidate in candidate_json_blocks(raw):
         try:
-            parsed = json.loads(candidate)
+            parsed = json.loads(candidate.text)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict) and "immunizations" in parsed:
             items = parsed["immunizations"]
-        elif isinstance(parsed, list):
+        elif isinstance(parsed, list) and candidate.whole:
             items = parsed
         else:
             continue

@@ -296,6 +296,16 @@ def _parse_llm_response(raw: str) -> dict:
 
     Falls back to an empty payload (``biomarkers=[]``, metadata fields
     None) when the response can't be coerced into the expected shape.
+
+    A bare list is only the answer when the candidate is whole (ISSUE-455).
+    ``llm_json``'s widest-``[...]`` arm matches the panel's own inner
+    biomarker array whenever the surrounding object failed to parse — prose
+    carrying a ``{``, a response the model cut short — and taking it dropped
+    ``drawn_at``, ``lab_name`` and ``panel_type`` with nothing logged. The
+    empty payload is worse-looking and better: the extract path turns it
+    into a warning the user acts on. What it costs is the bare array whose
+    prose happens to carry a brace, which is refused with it; a bare array
+    in ordinary prose still reads.
     """
     empty: dict = {
         "biomarkers": [],
@@ -305,7 +315,7 @@ def _parse_llm_response(raw: str) -> dict:
     }
     for candidate in candidate_json_blocks(raw):
         try:
-            parsed = json.loads(candidate)
+            parsed = json.loads(candidate.text)
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict) and "biomarkers" in parsed:
@@ -315,7 +325,7 @@ def _parse_llm_response(raw: str) -> dict:
                 "lab_name": _coerce_str(parsed.get("lab_name")),
                 "panel_type": _coerce_str(parsed.get("panel_type")),
             }
-        elif isinstance(parsed, list):
+        elif isinstance(parsed, list) and candidate.whole:
             items = parsed
             metadata = {"drawn_at": None, "lab_name": None, "panel_type": None}
         else:

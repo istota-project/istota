@@ -162,6 +162,24 @@ class TestExtractParser:
         assert rows[0]["encounter_date"] is None
         assert rows[0]["confidence"] == "low"
 
+    def test_an_inner_array_is_not_taken_as_the_whole_payload(self):
+        """ISSUE-455, in the module the entry did not name.
+
+        The prose carries a ``{``, so the widest-``{...}`` span does not
+        parse and the widest-``[...]`` arm matches the inner array. The
+        bare-list branch is the same one all three OCR modules carry, and a
+        fragment that parses is not evidence that the model answered with a
+        list.
+        """
+        from istota.health.encounter_ocr import _parse_llm_response
+
+        raw = (
+            "The header {illegible} on page 1. "
+            '{"source": "chart", "encounters": '
+            '[{"encounter_date": "2020-01-15", "encounter_type": "visit"}]}'
+        )
+        assert _parse_llm_response(raw) == ([], 0)
+
 
 class TestExtractRoute:
     def test_extract_returns_fallback_when_brain_unavailable(self, client):

@@ -14,6 +14,7 @@ import pytest
 from istota.llm_json import (
     FENCE_CLOSE_RE,
     FENCE_OPEN_RE,
+    JsonCandidate,
     candidate_json_blocks,
     find_fenced_block,
     iter_fenced_blocks,
@@ -100,7 +101,7 @@ class TestAMarkerIsALine:
         assert find_fenced_block(text) is None
         # …and this is the narrowing `candidate_json_blocks`' relaxed arm
         # exists to undo, where a wrong block is tried rather than returned.
-        assert candidate_json_blocks(text)[0] == '{"a": 1}'
+        assert candidate_json_blocks(text)[0].text == '{"a": 1}'
 
 
 class TestTheBoundsAreLoose:
@@ -275,16 +276,20 @@ class TestCandidateJsonBlocks:
 
     def test_fenced_blocks_come_first(self):
         raw = 'Here you go:\n```json\n{"biomarkers": []}\n```\n'
-        assert candidate_json_blocks(raw)[0] == '{"biomarkers": []}'
+        assert candidate_json_blocks(raw)[0].text == '{"biomarkers": []}'
 
     def test_the_whole_text_then_the_widest_object_then_the_widest_array(self):
         raw = 'prose {"a": 1} more [1, 2] tail'
         got = candidate_json_blocks(raw)
-        assert got == [raw.strip(), '{"a": 1}', "[1, 2]"]
+        assert got == [
+            JsonCandidate(raw.strip(), True),
+            JsonCandidate('{"a": 1}', False),
+            JsonCandidate("[1, 2]", False),
+        ]
 
     def test_duplicates_collapse_and_order_is_kept(self):
         raw = '{"a": 1}'
-        assert candidate_json_blocks(raw) == ['{"a": 1}']
+        assert candidate_json_blocks(raw) == [JsonCandidate('{"a": 1}', True)]
 
     def test_empty_candidates_are_dropped(self):
         assert candidate_json_blocks("") == []
@@ -314,7 +319,7 @@ class TestCandidateJsonBlocks:
             '{"biomarkers": [{"name": "HGB"}], "lab_name": "Acme Labs"}'
         ]
         assert not _parses(relaxed[0])
-        assert candidate_json_blocks(raw)[0] == strict[0]
+        assert candidate_json_blocks(raw)[0].text == strict[0]
 
     def test_an_opener_sharing_its_line_with_prose_is_still_read(self):
         """The relaxed arm. ``find_fenced_block`` declines this one.
@@ -324,7 +329,7 @@ class TestCandidateJsonBlocks:
         """
         raw = 'Here it is: ```json\n{"biomarkers": [1]}\n```'
         assert find_fenced_block(raw) is None
-        assert candidate_json_blocks(raw)[0] == '{"biomarkers": [1]}'
+        assert candidate_json_blocks(raw)[0].text == '{"biomarkers": [1]}'
 
     def test_the_relaxed_arm_is_what_stops_a_silently_different_answer(self):
         """The measured regression the relaxed arm was added for.
@@ -332,17 +337,18 @@ class TestCandidateJsonBlocks:
         With prose carrying a ``{`` in front of the fence, the
         widest-``{...}`` span reaches from that brace into the JSON and is
         invalid, and the widest-``[...]`` arm then answers with the *inner*
-        array — which ``ocr._parse_llm_response`` accepts through its
-        bare-list branch, returning a panel that has silently lost
-        ``drawn_at``, ``lab_name`` and ``panel_type``. A lost parse is
-        visible; this one is not.
+        array. That fragment is refused now (ISSUE-455), so the cost of
+        losing the relaxed arm would be an empty panel rather than one
+        silently missing ``drawn_at``, ``lab_name`` and ``panel_type`` — but
+        the arm is what makes the panel parse at all, which is what this
+        pins.
         """
         raw = (
             "The row {x} was unclear. Here: ```json\n"
             '{"biomarkers": [{"name": "HGB"}], "lab_name": "Acme Labs"}\n```'
         )
         first = candidate_json_blocks(raw)[0]
-        assert json.loads(first)["lab_name"] == "Acme Labs"
+        assert json.loads(first.text)["lab_name"] == "Acme Labs"
 
     def test_the_relaxed_arm_does_not_reopen_the_defect_it_sits_beside(self):
         """A stray run inside the JSON must still not close the block.
@@ -352,7 +358,7 @@ class TestCandidateJsonBlocks:
         and the first candidate would be a truncated fragment.
         """
         raw = '```json\n{"note": "run ```make``` first", "biomarkers": []}\n```'
-        assert candidate_json_blocks(raw)[0] == (
+        assert candidate_json_blocks(raw)[0].text == (
             '{"note": "run ```make``` first", "biomarkers": []}'
         )
 
@@ -360,7 +366,9 @@ class TestCandidateJsonBlocks:
         """That one is F38's actual fix, so the relaxed arm must not undo it."""
         raw = '```json\n{"biomarkers": [1]}\n``` done'
         assert list(iter_fenced_blocks(raw, relaxed=True)) == []
-        assert '{"biomarkers": [1]}' in candidate_json_blocks(raw)
+        assert '{"biomarkers": [1]}' in [
+            c.text for c in candidate_json_blocks(raw)
+        ]
 
     def test_a_forgotten_closer_before_a_second_opener_still_yields_a_block(self):
         """The other shape the old ``finditer`` reached.
@@ -382,7 +390,7 @@ class TestCandidateJsonBlocks:
         )
         got = candidate_json_blocks(raw)
         parsed = next(
-            (json.loads(c) for c in got if _parses(c)), None,
+            (json.loads(c.text) for c in got if _parses(c.text)), None,
         )
         assert parsed == {"biomarkers": [{"name": "HDL"}]}
 
@@ -393,13 +401,68 @@ class TestCandidateJsonBlocks:
         OCR modules return their empty payload. Recorded here so the next
         change to the fallbacks sees the boundary rather than rediscovering
         it, and because the old expression did parse this one.
+
+        This is the half of the residual ISSUE-455 did **not** change: it
+        narrowed what the OCR modules do with a fragment, and there is no
+        fragment here to narrow. Reaching this one back means changing the
+        fence rule, not the fallbacks.
         """
         raw = (
             '```json\n{"biomarkers": [{"name": "HGB"}], "lab_name": "Acme"}\n'
             '``` done, see [1] and {x}'
         )
         assert _old(OLD_HEALTH_RE, raw) is not None
-        assert not any(_parses(c) for c in candidate_json_blocks(raw))
+        assert not any(_parses(c.text) for c in candidate_json_blocks(raw))
+
+    def test_a_bracket_scan_with_an_enclosing_opener_outside_it_is_a_fragment(self):
+        """The flag the OCR modules read (ISSUE-455).
+
+        The widest-``[...]`` arm matches the envelope's *inner* array, and a
+        ``{`` sits outside that span — the envelope's own, which failed to
+        parse because the prose carries a brace of its own. That is the
+        signature of a fragment, and the bare-list branch refuses it.
+        """
+        raw = 'The row {x} was unclear. {"biomarkers": [{"name": "HGB"}]}'
+        got = candidate_json_blocks(raw)
+        assert got[-1] == JsonCandidate('[{"name": "HGB"}]', False)
+
+    def test_a_bare_array_in_prose_is_whole(self):
+        """The narrowing stops here, and the control is the point.
+
+        Nothing outside the span could have enclosed it, so this is the
+        model's whole answer with a sentence in front of it — a shape all
+        three OCR modules have always read. Marking every bracket scan a
+        fragment instead would lose it, and no other test in the tree would
+        have noticed.
+        """
+        raw = 'Here are the biomarkers:\n[{"name": "HGB"}]'
+        got = candidate_json_blocks(raw)
+        assert got[-1] == JsonCandidate('[{"name": "HGB"}]', True)
+
+    def test_a_fenced_block_is_whole_however_the_prose_reads(self):
+        """The delimited arms are whole by arm, not by a bracket check.
+
+        Demoting them would refuse a fenced bare list, which all three OCR
+        modules take. Pinned here because every other ``whole=True`` in this
+        file lands on the whole-text arm, so the fenced arms had no control.
+        """
+        raw = 'The row {x} was unclear:\n```json\n[{"name": "HGB"}]\n```'
+        assert candidate_json_blocks(raw)[0] == JsonCandidate(
+            '[{"name": "HGB"}]', True,
+        )
+
+    def test_a_candidate_two_arms_both_reach_keeps_the_first_arm_flag(self):
+        """De-duplication must not demote a whole candidate to a fragment.
+
+        A bare payload with no prose around it is both the whole text and
+        its own widest span, and the OCR modules have always taken it.
+        """
+        raw = '[{"name": "HGB"}]'
+        got = candidate_json_blocks(raw)
+        assert got[0] == JsonCandidate(raw, True)
+        # The widest-array arm reaches the same string; keeping *its* flag
+        # would make the OCR modules refuse a payload they have always taken.
+        assert JsonCandidate(raw, False) not in got
 
     def test_the_relaxed_walk_is_linear_too(self):
         started = time.monotonic()
