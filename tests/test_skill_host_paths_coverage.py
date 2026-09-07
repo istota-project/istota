@@ -12,23 +12,25 @@ its consumers as three.
 
 The shape is `tests/test_lint_scope.py`'s and is here for the same reason: a
 hand-maintained list that nothing walks goes stale in silence. So the tree is
-walked instead. Every skill's argparse parser is built, every subparser is
-descended, and every argument that could name a path has to carry an explicit
-disposition. A new argument fails this test rather than shipping unguarded.
+walked instead. Every skill's parser is built — argparse through
+`build_parser`, Click through `build_cli` — every subcommand is descended, and
+every argument that could name a path has to carry an explicit disposition. A
+new argument fails this test rather than shipping unguarded.
 
-**There are two places a disposition can live, and one of them is going away.**
-Since ISSUE-447 the disposition belongs on the *declaration*
-(``_hostpath.host_path``, read back by ``stamps()`` below), where the same
-value the enforcement reads is the one this walk sees — so an argument that is
-declared is enforced, and there is no second list to keep in step. ``REGISTRY``
-is what is left for the arguments that have not been converted yet, and it
-shrinks to nothing as the remaining stages land. An argument may be in one or
-the other and never both.
+**There are two places a disposition can live, and the declaration is the
+one to reach for.** Since ISSUE-447 a stamp goes on the argument
+(``_hostpath.host_path`` or ``_hostpath.click_host_path``, read back by
+``stamps()`` below), where the value the enforcement reads is the one this
+walk sees — so an argument that is declared is enforced, and there is no
+second list to keep in step. ``REGISTRY`` is what is left for the arguments a
+stamp cannot express: a path this allowlist does not govern, and a value the
+heuristic matched that is not a path at all. An argument may be in one or the
+other and never both.
 
 **What the registry claims, and what it does not.** ``SCOPED`` is a claim about
 the code and is checked: the named guard function's source must call the named
 helper, so removing the guard turns this red rather than leaving a registry
-entry asserting a boundary that is gone. The other three dispositions are
+entry asserting a boundary that is gone. The other two dispositions are
 *records*, not guarantees:
 
 - ``REMOTE`` — the path names a place on another machine (a Nextcloud path, a
@@ -37,25 +39,26 @@ entry asserting a boundary that is gone. The other three dispositions are
 - ``NOT_A_PATH`` — the walk's help-text heuristic matched a value that is not a
   path at all. Registered rather than filtered, because narrowing the heuristic
   to exclude it is how the next real one gets missed.
-- ``UNSCOPED`` — a host path that goes through no allowlist. **These are open
-  gaps**, listed so they are countable and so the next one added to the tree has
-  to be added here too. Reading a green run of this file as "every host path is
-  scoped" is a misreading; read it as "every host path is enumerated".
 
-The unscoped list was the deliverable this file existed to produce, and it is
-now empty. Six of its entries came out of the first run and were in no issue:
-``nextcloud files upload --local`` read any host file and put it in Nextcloud,
-``nextcloud files download --local`` wrote anywhere on the host, ``email
---body-file`` read any host file into an outgoing message, ``email attachments
---dest`` wrote into any directory (and its docstring said "scoped", which is
-where a stale claim ends up), and the ``health`` file verbs read any host file
-on a deployment where the deferred path does not apply. Every one of them is a
-stamp on its own declaration now.
+**There is no way to record a gap, and that is the point.** ``UNSCOPED`` was
+the third record and the deliverable this file existed to produce: sixteen host
+paths that went through no allowlist, six of them found by the first run of
+this walk and in no issue. It is gone with its last entry (ISSUE-447 stage 7),
+because a disposition whose only behaviour is to fail is a second way to be red
+for a state the walk already reports — an unstamped argument fails by name,
+with its verb and dest in the message — and an available way to record a gap is
+an invitation to record one. So a green run of this file now says every
+path-shaped argument in a walkable skill CLI is stamped, scoped by a checked
+guard, or recorded as naming somewhere this allowlist does not govern.
 
-Being *stamped* is not enough on its own either, and the difference matters
-when reading a green run here: this file says an argument has a disposition,
-and ``tests/test_skill_host_paths_refusals.py`` is what drives each stamped
-argument through its own CLI and requires the refusal and the acceptance.
+Two things it still does not say. Being *stamped* is a disposition rather than
+a driven refusal: ``tests/test_skill_host_paths_refusals.py`` is what runs each
+stamped argument through its own CLI and requires both the refusal and the
+acceptance. And one skill is outside the walk altogether —
+``google_workspace`` execs a program that is not in this tree, so its arguments
+belong to somebody else's parser and are bounded by an argv scan
+(``tests/test_skill_host_paths_gws.py``) rather than enumerated. That is a
+weaker claim than the rest of this file makes and ``UNWALKABLE`` says so.
 """
 
 from __future__ import annotations
@@ -68,7 +71,12 @@ from pathlib import Path
 
 import pytest
 
-from istota.skills._hostpath import REPO as HOSTPATH_REPO, stamped
+from istota.skills._hostpath import (
+    REPO as HOSTPATH_REPO,
+    click_commands,
+    click_stamped,
+    stamped,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO / "src" / "istota" / "skills"
@@ -76,7 +84,6 @@ SKILLS_DIR = REPO / "src" / "istota" / "skills"
 SCOPED = "scoped"
 REMOTE = "remote"
 NOT_A_PATH = "not_a_path"
-UNSCOPED = "unscoped"
 
 
 @dataclass(frozen=True)
@@ -85,7 +92,7 @@ class Entry:
 
     ``guard`` and ``helper`` are required for ``SCOPED`` and are what makes the
     claim checkable: ``helper`` must appear in ``guard``'s source. ``note`` is
-    required for everything else, because the other three dispositions are
+    required for everything else, because the other two dispositions are
     assertions about the world that no test can settle.
     """
 
@@ -102,7 +109,7 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
     # Empty. Every argument that was here is *stamped* now — the disposition
     # is on the argument, in the parser, and `stamps()` below reads it back.
     # `SCOPED` survives as a disposition because an argument a stamp cannot
-    # reach may still be scoped by a guard; `UNSCOPED` does not survive its
+    # reach may still be scoped by a guard. `UNSCOPED` did not survive its
     # last entry, which is the difference between a record and an invitation.
 
     # -- Remote: the path names somewhere else -------------------------------
@@ -154,13 +161,9 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
              "--paste-file, which is the stamped read.",
     ),
 
-    # -- Unscoped: open gaps, listed so they are countable -------------------
-    #
-    # Empty. `email attachments --dest` and `nextcloud files download --local`
-    # were the last two and are stamped `WRITE` now. The disposition survives
-    # only until stage 7 of ISSUE-447 deletes it: an available way to record a
-    # gap is an invitation to record one, and an unstamped argument already
-    # fails this walk by name.
+    # There is no fourth section. `UNSCOPED` held sixteen entries and is
+    # deleted with its last one: an unstamped argument already fails this walk
+    # by name, and a second way to be red is a way to stay green.
 }
 
 #: A `cli: true` skill whose CLI this walk cannot reach, and why. Held to the
@@ -168,8 +171,16 @@ REGISTRY: dict[tuple[str, str, str], Entry] = {
 #: named one at a time, never inferred, so a skill that stops exposing a parser
 #: fails rather than silently leaving the walk.
 UNWALKABLE: dict[str, str] = {
-    "briefings": "a bare Click passthrough: argv goes straight to briefings.cli",
-    "google_workspace": "os.execvp('gws'): the arguments are another program's",
+    "google_workspace": (
+        "os.execvp('gws'): the arguments belong to a program that is not in "
+        "this tree and cannot be enumerated. What stands in for enumeration "
+        "is the argv scan in google_workspace.main — a path-shaped token is "
+        "resolved through the shared allowlist before the exec, and the "
+        "passthrough's cwd is the user's own workspace so a relative one "
+        "lands in-roots by construction. Coarser than a declaration and "
+        "self-maintaining, which a per-verb policy table for a program we do "
+        "not ship would not be. Driven by tests/test_skill_host_paths_gws.py."
+    ),
 }
 
 #: Argument dests that name a path whatever the help text says.
@@ -178,14 +189,35 @@ _PATH_DESTS = frozenset({
 })
 
 
-def _module_for(skill_dir: Path) -> str | None:
-    """The dotted module exposing this skill's parser, or None."""
+def _module_declaring(skill_dir: Path, function: str) -> str | None:
+    """The dotted skill module defining `function`, or None.
+
+    Source text rather than an import, so a skill whose module raises on
+    import is a failure at the walk rather than a skill that quietly leaves
+    the enumeration.
+    """
     for candidate in ("__init__", "cli"):
         source = skill_dir / f"{candidate}.py"
-        if source.exists() and "def build_parser" in source.read_text():
+        if source.exists() and f"def {function}" in source.read_text():
             suffix = "" if candidate == "__init__" else ".cli"
             return f"istota.skills.{skill_dir.name}{suffix}"
     return None
+
+
+def _module_for(skill_dir: Path) -> str | None:
+    """The dotted module exposing this skill's argparse parser, or None."""
+    return _module_declaring(skill_dir, "build_parser")
+
+
+def _click_module_for(skill_dir: Path) -> str | None:
+    """The dotted module exposing this skill's Click group, or None.
+
+    `build_cli` is to Click what `build_parser` is to argparse, and the
+    symmetry is the whole mechanism: a Click skill is walkable by exposing
+    the function, not by being named in a list here. `briefings` is the one
+    today, which is what took it out of `UNWALKABLE`.
+    """
+    return _module_declaring(skill_dir, "build_cli")
 
 
 def _skill_dirs() -> list[Path]:
@@ -221,6 +253,28 @@ def _is_path_shaped(action: argparse.Action) -> bool:
     return any(word in help_text for word in ("path", "file", "directory"))
 
 
+def _is_click_path_shaped(param) -> bool:
+    """The same heuristic over a Click parameter, plus the type Click has.
+
+    `click.Path` is the one signal argparse has no equivalent of and it is
+    the strongest of the four: a parameter declaring it *is* a path however
+    its help text reads. The rest mirrors `_is_path_shaped` — a flag carries
+    no path and `click.Choice` bounds the value to a list that is not one.
+    """
+    import click
+
+    if getattr(param, "is_flag", False):
+        return False
+    if isinstance(param.type, click.Path):
+        return True
+    if isinstance(param.type, click.Choice):
+        return False
+    if param.name in _PATH_DESTS or param.name.endswith(("_path", "_file", "_dir")):
+        return True
+    help_text = (getattr(param, "help", "") or "").lower()
+    return any(word in help_text for word in ("path", "file", "directory"))
+
+
 def _walk(parser: argparse.ArgumentParser, trail: list[str], found: list):
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -230,18 +284,31 @@ def _walk(parser: argparse.ArgumentParser, trail: list[str], found: list):
             found.append((".".join(trail), action.dest))
 
 
+def _walk_click(group, found: list):
+    for dotted, command in click_commands(group):
+        for param in command.params:
+            if _is_click_path_shaped(param):
+                found.append((dotted, param.name))
+
+
 def discovered() -> dict[tuple[str, str, str], str]:
-    """Every path-shaped argument in every walkable skill parser."""
+    """Every path-shaped argument in every walkable skill CLI.
+
+    Both kinds of parser, keyed identically: the dotted command as the walk
+    spells it and the dest — `param.name` on the Click side, which is what a
+    Click command's own signature receives.
+    """
     out: dict[tuple[str, str, str], str] = {}
     for skill_dir in _skill_dirs():
-        module_name = _module_for(skill_dir)
-        if module_name is None:
-            continue
-        module = importlib.import_module(module_name)
         found: list = []
-        _walk(module.build_parser(), [], found)
+        module_name = _module_for(skill_dir)
+        if module_name is not None:
+            _walk(importlib.import_module(module_name).build_parser(), [], found)
+        click_module_name = _click_module_for(skill_dir)
+        if click_module_name is not None:
+            _walk_click(importlib.import_module(click_module_name).build_cli(), found)
         for command, dest in found:
-            out[(skill_dir.name, command, dest)] = module_name
+            out[(skill_dir.name, command, dest)] = module_name or click_module_name
     return out
 
 
@@ -255,11 +322,15 @@ def stamps() -> dict[tuple[str, str, str], str]:
     out: dict[tuple[str, str, str], str] = {}
     for skill_dir in _skill_dirs():
         module_name = _module_for(skill_dir)
-        if module_name is None:
-            continue
-        module = importlib.import_module(module_name)
-        for command, dest, mode in stamped(module.build_parser()):
-            out[(skill_dir.name, command, dest)] = mode
+        if module_name is not None:
+            module = importlib.import_module(module_name)
+            for command, dest, mode in stamped(module.build_parser()):
+                out[(skill_dir.name, command, dest)] = mode
+        click_module_name = _click_module_for(skill_dir)
+        if click_module_name is not None:
+            module = importlib.import_module(click_module_name)
+            for command, dest, mode in click_stamped(module.build_cli()):
+                out[(skill_dir.name, command, dest)] = mode
     return out
 
 
@@ -363,6 +434,26 @@ def test_a_repo_stamp_names_a_handler_that_still_scopes(key):
     )
 
 
+def test_the_click_walk_reaches_the_briefings_group():
+    """The other half of the walk, which no argparse assertion can establish.
+
+    `briefings` holds no path-shaped parameter today, so every count-based
+    assertion in this file is satisfied whether the Click walk works or not —
+    and an import that starts failing, a renamed `build_cli` or a group whose
+    subcommands stop being descended would all leave it that way. What is
+    asserted is therefore that the walk *arrives*: the group is reached and
+    its nested commands are enumerated, so a `click.Path` parameter added to
+    one of them lands in `discovered()` rather than in nobody's list. That is
+    the deliverable — the walk being able to reach it, not the count.
+    """
+    module_name = _click_module_for(SKILLS_DIR / "briefings")
+    assert module_name is not None, "briefings exposes no build_cli"
+    group = importlib.import_module(module_name).build_cli()
+    walked = {dotted for dotted, _ in click_commands(group)}
+    for command in ("list", "blocks", "blocks.add", "sources.add", "archive.show"):
+        assert command in walked, f"{command} not walked; walked {sorted(walked)}"
+
+
 def test_the_walk_finds_the_arguments_it_is_meant_to_guard():
     """A guard over an empty set passes on any tree at all.
 
@@ -412,21 +503,26 @@ def test_a_scoped_entry_names_a_guard_that_calls_its_helper(key):
 )
 def test_an_unscoped_or_exempt_entry_says_why(key):
     entry = REGISTRY[key]
-    assert entry.disposition in (REMOTE, NOT_A_PATH, UNSCOPED), entry.disposition
+    assert entry.disposition in (REMOTE, NOT_A_PATH), entry.disposition
     assert entry.note, f"{key} is {entry.disposition} and says nothing about why"
 
 
 def test_every_cli_skill_is_walkable_or_exempted():
-    """The walk only sees argparse, and not every skill CLI is argparse.
+    """Two kinds of parser are walked, and one kind of CLI cannot be.
 
-    A skill whose CLI is a Click passthrough or an `execvp` has arguments this
-    file cannot enumerate. Naming each one keeps that a decision rather than a
-    blind spot — and makes a skill that *loses* its parser fail here instead of
-    quietly dropping out of the enumeration.
+    A skill that execs another program has arguments this file cannot
+    enumerate at all. `briefings` looked like the same case and was not: a
+    Click group is walkable with different machinery, which is what
+    `_click_module_for` and `_walk_click` are, so the exemption is gone and
+    only `google_workspace` is left. Naming that one keeps it a decision
+    rather than a blind spot — and makes a skill that *loses* its parser fail
+    here instead of quietly dropping out of the enumeration.
     """
     unreachable = sorted(
         d.name for d in _skill_dirs()
-        if _declares_cli(d) and _module_for(d) is None
+        if _declares_cli(d)
+        and _module_for(d) is None
+        and _click_module_for(d) is None
     )
     assert unreachable == sorted(UNWALKABLE), (
         f"skills with a CLI and no reachable argparse parser: {unreachable}; "

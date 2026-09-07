@@ -61,9 +61,24 @@ be converted in one behaviour-preserving step. It also retires "callers must
 use the returned resolved path" as a rule each handler has to remember:
 `args.file_path` already *is* the resolved path.
 
+**Click gets the same stamp through a different door.** `briefings` is a Click
+group rather than an argparse tree, which is why the coverage walk could not
+reach it. `click_host_path` stamps a Click parameter and wraps its callback,
+so resolution happens during the parse and before the command body — where
+argparse gets a post-parse pass because it has no per-argument hook that can
+report through the facade. That asymmetry is not a second design: the argparse
+`type=` callable was rejected because `parser.error()` prints usage on stderr
+and exits 2, and Click under `standalone_mode=False` hands a callback's
+exception straight back to the caller, which is `HostPathRefused` and one
+envelope. `click_stamped` and `click_commands` are the walk over the other
+tree, keyed the way the argparse walk keys, so one coverage check reads both.
+
 Nothing from the package beyond `istota.skill_host_paths`, itself a leaf over
 `istota.user_scope` — so a skill subprocess pays nothing beyond what
-`istota.skills.__init__` already costs.
+`istota.skills.__init__` already costs. Click is never imported here either:
+the two walks and the decorator go through `__click_params__`, `.params` and
+`.commands` by duck typing, so a skill CLI that has nothing to do with Click
+does not pay for it.
 """
 
 from __future__ import annotations
@@ -95,6 +110,21 @@ STAMP = "istota_host_path"
 NOTE = "istota_host_path_note"
 
 
+class HostPathRefused(Exception):
+    """A stamped Click parameter naming a path outside the allowlist.
+
+    The argparse side returns the message — `resolve_parsed`'s convention, and
+    `resolve_host_path`'s before it — because it runs as a pass after the
+    parse, where there is a caller to hand it to. A Click parameter callback
+    has no such caller: its return value is the parameter's value, so a
+    refusal has to raise. Under `standalone_mode=False` Click hands the
+    exception back untouched, which is what lets the facade render the same
+    envelope with the same `reason` as an argparse refusal — an exception type
+    of our own rather than `click.UsageError`, whose message Click formats
+    with usage text the model would then read as a malformed call.
+    """
+
+
 def host_path(
     parser: argparse.ArgumentParser, *names: str, mode: str, note: str = "", **kwargs,
 ) -> argparse.Action:
@@ -106,6 +136,15 @@ def host_path(
     by running it, and a mode that does not is an assertion about the world
     that only a sentence can carry.
     """
+    _check_declaration(mode, note)
+    action = parser.add_argument(*names, **kwargs)
+    setattr(action, STAMP, mode)
+    setattr(action, NOTE, note)
+    return action
+
+
+def _check_declaration(mode: str, note: str) -> None:
+    """The two rules every declaration is held to, argparse or Click."""
     if mode not in MODES:
         raise ValueError(f"unknown host-path mode {mode!r}; one of {MODES}")
     if mode not in RESOLVING and not note:
@@ -113,10 +152,116 @@ def host_path(
             f"mode {mode!r} passes the value through unscoped and needs a note "
             f"saying why: it is a record, not a guarantee"
         )
-    action = parser.add_argument(*names, **kwargs)
-    setattr(action, STAMP, mode)
-    setattr(action, NOTE, note)
-    return action
+
+
+def click_host_path(mode: str, *, note: str = ""):
+    """Stamp the Click parameter declared directly below this decorator.
+
+    Used as::
+
+        @cli.command("add")
+        @click_host_path(READ)
+        @click.option("--file")
+        def add(file): ...
+
+    Decorators run bottom-up, so by the time this one sees the function the
+    `click.option` below it has already appended its `Parameter` to
+    `__click_params__` and the last entry is that parameter. Placed *above*
+    `@cli.command()` there is no such answer — Click reverses the list when it
+    builds the command, so the last entry is then the bottom-most decorator
+    rather than the one directly below — and a stamp on the wrong argument is
+    worse than no stamp, since the coverage walk would call it accounted for.
+    So that case raises.
+
+    A resolving mode also wraps the parameter's callback, which is where the
+    value is resolved and written back. Wrapped rather than replaced: a
+    parameter may already have a callback of its own, and losing it silently
+    is the kind of thing a stamp is not allowed to cost.
+    """
+    _check_declaration(mode, note)
+
+    def decorator(f):
+        params = getattr(f, "__click_params__", None)
+        if not params:
+            raise ValueError(
+                "click_host_path found no parameter to stamp: put it directly "
+                "above the click.option/click.argument it applies to, below "
+                "the command decorator"
+            )
+        param = params[-1]
+        setattr(param, STAMP, mode)
+        setattr(param, NOTE, note)
+        if mode in RESOLVING:
+            param.callback = _click_resolver(mode, param.callback)
+        return f
+
+    return decorator
+
+
+def _click_resolver(mode: str, previous):
+    """A parameter callback that resolves the value before anything sees it."""
+
+    def callback(ctx, param, value):
+        if value is not None:
+            operation = _click_operation(ctx, param)
+            resolved, error = _resolve_value(value, mode, operation)
+            if error is not None:
+                log.warning("host path refused: %s", operation)
+                raise HostPathRefused(error)
+            value = resolved
+        return previous(ctx, param, value) if previous is not None else value
+
+    return callback
+
+
+def _click_operation(ctx, param) -> str:
+    """How the refusal names what was refused: the verb and the flag.
+
+    `ctx.command_path` leads with the program name, which for a skill CLI is
+    whatever Click was invoked as and says nothing; dropping it leaves the
+    same "verb flag" spelling `_operation` produces on the argparse side.
+    Never the roots, and never another argument's value.
+    """
+    path = str(getattr(ctx, "command_path", "") or "").split()
+    flag = param.opts[0] if getattr(param, "opts", None) else param.name
+    return " ".join([*path[1:], flag])
+
+
+def click_commands(group) -> list[tuple[str, object]]:
+    """`(dotted command, command)` for a Click group and everything under it.
+
+    The root is `""`, matching the argparse walk's spelling for an argument on
+    the top-level parser, so the two enumerations of one tree compare key for
+    key. Duck-typed on `.commands` rather than `isinstance(click.Group)` so
+    this module still imports nothing but the standard library and the
+    allowlist.
+    """
+    out: list[tuple[str, object]] = []
+
+    def walk(command, trail: list[str]) -> None:
+        out.append((".".join(trail), command))
+        children = getattr(command, "commands", None)
+        if not children:
+            return
+        for name in sorted(children):
+            walk(children[name], [*trail, name])
+
+    walk(group, [])
+    return out
+
+
+def click_stamped(group) -> list[tuple[str, str, str]]:
+    """Every stamped Click parameter, as `(dotted command, name, mode)`.
+
+    `stamped`'s counterpart, keyed the same way — `param.name` is the Click
+    side's dest, being the name the command's own signature receives.
+    """
+    return [
+        (dotted, param.name, getattr(param, STAMP))
+        for dotted, command in click_commands(group)
+        for param in getattr(command, "params", [])
+        if getattr(param, STAMP, None) is not None
+    ]
 
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction | None:
@@ -357,6 +502,31 @@ def _resolve_one(
     return str(resolved), None
 
 
+def _resolve_value(
+    value: object, mode: str, operation: str,
+) -> tuple[object | None, str | None]:
+    """One stamped value, whatever shape it arrived in.
+
+    A list or tuple resolves element by element and comes back in the same
+    container type, and the first refusal refuses the whole call: `email
+    --attach` naming three files, one of them outside the workspace, is one
+    refused send rather than a send with two attachments.
+
+    An element is refused rather than skipped. Dropping it shortens the list
+    silently, and a handler pairing a stamped list positionally against
+    another argument then reads the wrong element with nothing having failed.
+    """
+    if isinstance(value, (list, tuple)):
+        resolved_all: list[str] = []
+        for element in value:
+            resolved, error = _resolve_one(element, mode, operation)
+            if error is not None:
+                return None, error
+            resolved_all.append(resolved)
+        return type(value)(resolved_all), None
+    return _resolve_one(value, mode, operation)
+
+
 def _actions_on_path(
     parser: argparse.ArgumentParser, args: argparse.Namespace,
 ) -> Iterator[tuple[str, argparse.Action]]:
@@ -413,24 +583,7 @@ def resolve_parsed(
         operation = _operation(dotted, action)
         skill = parser.prog
 
-        if isinstance(value, (list, tuple)):
-            resolved_all: list[str] = []
-            for element in value:
-                # Refused rather than skipped. Dropping it shortens the list
-                # silently, and a handler pairing a stamped list positionally
-                # against another argument then reads the wrong element with
-                # nothing having failed. Argparse's own `nargs` never produces
-                # one, so reaching here means a `type=` callable or a
-                # `set_defaults` put it there and the declaration is the bug.
-                resolved, error = _resolve_one(element, mode, operation)
-                if error is not None:
-                    log.warning("host path refused: %s %s", skill, operation)
-                    return error
-                resolved_all.append(resolved)
-            setattr(args, action.dest, type(value)(resolved_all))
-            continue
-
-        resolved, error = _resolve_one(value, mode, operation)
+        resolved, error = _resolve_value(value, mode, operation)
         if error is not None:
             log.warning("host path refused: %s %s", skill, operation)
             return error
@@ -440,6 +593,7 @@ def resolve_parsed(
 
 __all__: Sequence[str] = (
     "EGRESS",
+    "HostPathRefused",
     "MODES",
     "NOTE",
     "NOT_A_PATH",
@@ -449,6 +603,9 @@ __all__: Sequence[str] = (
     "RESOLVING",
     "STAMP",
     "WRITE",
+    "click_commands",
+    "click_host_path",
+    "click_stamped",
     "host_path",
     "resolve_parsed",
     "stamp_conflicts",

@@ -53,6 +53,10 @@ from istota.skills._hostpath import (
     REMOTE,
     REPO,
     WRITE,
+    HostPathRefused,
+    click_commands,
+    click_host_path,
+    click_stamped,
     host_path,
     resolve_parsed,
     stamp_conflicts,
@@ -506,6 +510,286 @@ class TestParseAndResolve:
         go.add_argument("rest", nargs="*")
         argv = ["go", "--file", "/etc/hosts", "a", "b"]
         assert vars(parse_and_resolve(parser, argv)) == vars(parser.parse_args(argv))
+
+
+@pytest.fixture
+def linked_mount(tmp_path, monkeypatch):
+    """The same mount, reached through a symlink.
+
+    What every *acceptance* assertion rests on. On a plain path the argument
+    and its resolution are the same string, so `received == resolved` passes
+    against an implementation that resolves nothing at all — measured: with
+    the Click resolver disabled, every acceptance test below stayed green on
+    the plain `mount` fixture and only the refusals went red.
+    `tests/test_skill_host_paths_refusals.py` holds the same property for the
+    argparse verbs and states the same reason.
+    """
+    real = tmp_path / "srv" / "shared"
+    (real / "Users" / "alice").mkdir(parents=True)
+    (real / "Talk").mkdir(parents=True)
+    link = tmp_path / "mount"
+    link.symlink_to(real, target_is_directory=True)
+    monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(link))
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
+    monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
+    return link
+
+
+class TestTheClickStamp:
+    """The same disposition, on the other kind of parser.
+
+    `briefings` is a Click group rather than an argparse tree, which is why it
+    was exempted from the coverage walk. Click's parameters take the same
+    stamp and the same resolution — through a parameter callback rather than a
+    post-parse pass, because Click, unlike argparse, lets a callback raise an
+    exception the caller sees intact under `standalone_mode=False`. The
+    argparse rejection of a `type=` callable does not carry over: what was
+    wrong there was `parser.error()`'s usage text and exit 2, and there is no
+    equivalent here.
+    """
+
+    @staticmethod
+    def _group(mode=READ, **kwargs):
+        import click
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.group()
+        def blocks():
+            pass
+
+        @blocks.command("add")
+        @click_host_path(mode, **kwargs)
+        @click.option("--file", "file")
+        @click.pass_context
+        def blocks_add(ctx, file):
+            ctx.obj["file"] = file
+
+        return cli
+
+    def test_it_stamps_the_parameter_declared_below_it(self):
+        found = click_stamped(self._group())
+        assert found == [("blocks.add", "file", READ)]
+
+    def test_the_dotted_command_is_the_coverage_walks_spelling(self):
+        import click
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("go")
+        @click_host_path(WRITE)
+        @click.option("--out")
+        def go(out):
+            pass
+
+        assert click_stamped(cli) == [("go", "out", WRITE)]
+
+    def test_it_walks_every_command_in_the_tree(self):
+        walked = [dotted for dotted, _ in click_commands(self._group())]
+        assert walked == ["", "blocks", "blocks.add"]
+
+    def test_an_unknown_mode_is_refused_at_declaration(self):
+        with pytest.raises(ValueError, match="unknown host-path mode"):
+            self._group("sideways")
+
+    def test_a_non_resolving_mode_has_to_say_why(self):
+        with pytest.raises(ValueError, match="note"):
+            self._group(REMOTE)
+
+    def test_a_pass_through_mode_stamps_and_resolves_nothing(self, linked_mount):
+        group = self._group(REMOTE, note="a Nextcloud path")
+        obj = {}
+        _invoke(group, ["blocks", "add", "--file", "/etc/hosts"], obj)
+        assert obj["file"] == "/etc/hosts"
+        assert click_stamped(group) == [("blocks.add", "file", REMOTE)]
+
+    def test_an_in_root_value_reaches_the_command_resolved(self, linked_mount):
+        target = linked_mount / "Users" / "alice" / "notes.txt"
+        target.write_text("x")
+        obj = {}
+        _invoke(self._group(), ["blocks", "add", "--file", str(target)], obj)
+        assert obj["file"] == str(target.resolve())
+        assert obj["file"] != str(target), (
+            "the command was handed the argument rather than its resolution"
+        )
+
+    def test_a_value_outside_the_roots_raises_the_refusal(self, mount):
+        with pytest.raises(HostPathRefused) as exc:
+            _invoke(self._group(), ["blocks", "add", "--file", "/etc/hosts"], {})
+        assert "/etc/hosts" in str(exc.value)
+
+    def test_the_refusal_does_not_name_the_roots(self, mount):
+        with pytest.raises(HostPathRefused) as exc:
+            _invoke(self._group(), ["blocks", "add", "--file", "/etc/hosts"], {})
+        assert str(mount / "Channels") not in str(exc.value)
+
+    def test_a_parameter_that_was_not_passed_is_skipped(self, mount):
+        obj = {}
+        _invoke(self._group(), ["blocks", "add"], obj)
+        assert obj["file"] is None
+
+    def test_every_element_of_a_multiple_is_resolved(self, linked_mount):
+        import click
+
+        first = linked_mount / "Users" / "alice" / "one.txt"
+        second = linked_mount / "Users" / "alice" / "two.txt"
+        for path in (first, second):
+            path.write_text("x")
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("go")
+        @click_host_path(READ)
+        @click.option("--file", multiple=True)
+        @click.pass_context
+        def go(ctx, file):
+            ctx.obj["file"] = file
+
+        obj = {}
+        _invoke(cli, ["go", "--file", str(first), "--file", str(second)], obj)
+        assert obj["file"] == (str(first.resolve()), str(second.resolve()))
+
+    def test_an_existing_callback_still_runs_on_the_resolved_value(
+        self, linked_mount,
+    ):
+        import click
+
+        target = linked_mount / "Users" / "alice" / "notes.txt"
+        target.write_text("x")
+        seen: list[str] = []
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("go")
+        @click_host_path(READ)
+        @click.option("--file", callback=lambda c, p, v: seen.append(v) or v)
+        @click.pass_context
+        def go(ctx, file):
+            ctx.obj["file"] = file
+
+        obj = {}
+        _invoke(cli, ["go", "--file", str(target)], obj)
+        assert seen == [str(target.resolve())], (
+            "the stamp replaced the parameter's own callback instead of "
+            "wrapping it"
+        )
+
+    def test_stamping_a_built_command_is_refused(self):
+        """Placed above `@cli.command()` the stamp cannot say which parameter
+        it means: Click reverses `__click_params__` when it builds the command,
+        so the last one is the *bottom* decorator rather than the one directly
+        below. An error beats a stamp on the wrong argument.
+        """
+        import click
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("go")
+        @click.option("--file")
+        def go(file):
+            pass
+
+        with pytest.raises(ValueError, match="directly above"):
+            click_host_path(READ)(go)
+
+
+def _invoke(group, argv, obj):
+    """Run a Click group the way `briefings._run` does.
+
+    `standalone_mode=False` is what lets a parameter callback's exception
+    reach the caller instead of being rendered as usage text, which is the
+    whole reason resolution can live in a callback here and not in argparse.
+    """
+    return group.main(argv, obj=obj, standalone_mode=False)
+
+
+class TestTheBriefingsFacade:
+    """The one Click skill, and the refusal it has to answer with.
+
+    `briefings` forwards its argv to `istota.briefings.cli` through a
+    `CliRunner`, so a `HostPathRefused` raised inside a parameter callback
+    arrives as `result.exception`. Without the mapping it would come back as
+    `HostPathRefused: ...` in the generic error field — an envelope with no
+    `reason`, which is the one field telling the model it hit a boundary
+    rather than a broken file.
+    """
+
+    @pytest.fixture
+    def briefings_cli(self, monkeypatch, linked_mount):
+        import click
+
+        import istota.briefings as briefings_pkg
+        import istota.briefings.cli as briefings_cli_module
+        import istota.config as config_module
+
+        @click.group()
+        def cli():
+            pass
+
+        @cli.command("go")
+        @click_host_path(READ)
+        @click.option("--file", required=True)
+        def go(file):
+            print(json.dumps({"status": "ok", "file": file}))
+
+        monkeypatch.setattr(briefings_cli_module, "cli", cli)
+        monkeypatch.setattr(config_module, "load_config", lambda *a, **k: object())
+        monkeypatch.setattr(
+            briefings_pkg, "resolve_for_user", lambda user_id, cfg: object(),
+        )
+        monkeypatch.setattr(
+            briefings_pkg, "ensure_initialised", lambda ctx, app_config=None: None,
+        )
+        monkeypatch.setenv("BRIEFINGS_USER", "alice")
+        return cli
+
+    def test_a_refusal_is_the_facades_envelope_with_the_reason(
+        self, briefings_cli, linked_mount,
+    ):
+        from istota.skills.briefings import _run
+
+        payload = _run(["go", "--file", "/etc/hosts"])
+
+        assert payload["status"] == "error"
+        assert payload["reason"] == "host_path_refused"
+        assert "/etc/hosts" in payload["error"]
+
+    def test_an_in_root_path_reaches_the_command_resolved(
+        self, briefings_cli, linked_mount,
+    ):
+        from istota.skills.briefings import _run
+
+        target = linked_mount / "Users" / "alice" / "notes.txt"
+        target.write_text("x")
+
+        payload = _run(["go", "--file", str(target)])
+
+        assert payload["status"] == "ok", payload
+        assert payload["file"] == str(target.resolve())
+        assert payload["file"] != str(target)
+
+    def test_the_skill_exposes_the_group_the_walk_reaches(self):
+        """`build_cli` is to Click what `build_parser` is to argparse.
+
+        The coverage walk finds a skill's parser by looking for the function,
+        so a Click skill that does not expose one is unwalkable by definition
+        — which is what `briefings` was.
+        """
+        from istota.briefings.cli import cli
+        from istota.skills.briefings import build_cli
+
+        assert build_cli() is cli
 
 
 def _skill_parser_modules() -> dict[str, str]:
