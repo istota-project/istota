@@ -26,7 +26,6 @@ from typing import TYPE_CHECKING
 import httpx
 
 from ...async_runtime import get_talk_client
-from ...ocs import ocs_body_data
 from ...talk import split_message
 from .._types import IncomingMessage, TransportCapabilities
 from .inbound import get_dm_token, poll_talk_conversations
@@ -122,9 +121,9 @@ def _may_have_been_stored(exc: BaseException) -> bool:
     The question the readback exists to answer, and it is **not** the same as
     `_is_transient`. Two failures are worth retrying and cannot have stored
     anything (the connect class); one is not worth retrying and can have stored
-    something — `send_message` calls `raise_for_status()` and then
-    `response.json()`, so a 2xx whose body does not parse raises after
-    Nextcloud has written the message. Asking the retry predicate here would
+    something — `send_message` calls `raise_for_status()` and then unwraps the
+    OCS envelope, so a 2xx whose body does not unwrap raises after Nextcloud
+    has written the message. Asking the retry predicate here would
     return `None` for a post the user can see, which is exactly the ambiguity
     this change exists to remove.
 
@@ -397,20 +396,18 @@ class TalkTransport:
                     if landed is not None:
                         return self._reuse(landed, last_exc, token, task_id)
             try:
-                response = await client.send_message(
+                # The `OcsError` this can raise is deliberately *not* caught
+                # here, unlike the other best-effort Talk paths.
+                # `_may_have_been_stored` names the case — a 2xx whose body
+                # does not unwrap raises after Nextcloud has written the
+                # message — and letting it reach the loop's own handler is what
+                # runs the readback and recovers the real id. Swallowing it
+                # into a `None` return would reinstate the ambiguity this file
+                # was written to remove: a post the user can see, reported as
+                # undelivered. `_is_transient` is False for it, so nothing is
+                # re-posted and nothing is doubled.
+                data = await client.send_message(
                     token, part, reply_to=reply_to, reference_id=reference_id,
-                )
-                # Deliberately *not* caught here, unlike the other
-                # best-effort Talk paths. `_may_have_been_stored` names this
-                # exact case — "a 2xx whose body does not parse raises after
-                # Nextcloud has written the message" — and letting it reach the
-                # loop's own handler is what runs the readback and recovers the
-                # real id. Swallowing it into a `None` return would reinstate
-                # the ambiguity this file was written to remove: a post the
-                # user can see, reported as undelivered. `_is_transient` is
-                # False for it, so nothing is re-posted and nothing is doubled.
-                data = ocs_body_data(
-                    response, f"Talk post to {token}", default={},
                 )
                 return data.get("id")
             except Exception as e:

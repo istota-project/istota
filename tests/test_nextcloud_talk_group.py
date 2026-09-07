@@ -8,6 +8,7 @@ import pytest
 from istota.config import Config, NextcloudConfig
 from istota.nextcloud import OcsError
 from istota.skills.nextcloud import build_parser, main
+from istota.talk import TalkResponseError
 
 CAPS_WITH_TALK = {"capabilities": {"spreed": {"features": ["chat-v2"]}}}
 CAPS_WITHOUT_TALK = {"capabilities": {"files_sharing": {}}}
@@ -145,18 +146,44 @@ class TestWritePaths:
         assert out["message_id"] == 99
         assert talk_client.send_message.call_args[0][1] == "hello"
 
-    def test_send_unwraps_the_ocs_envelope(self, talk_client, capsys):
-        """send_message alone returns the raw body, not ocs.data.
+    def test_send_no_longer_unwraps_the_envelope_a_second_time(
+        self, talk_client, capsys,
+    ):
+        """`send_message` answers `ocs.data` since ISSUE-463, so nothing here
+        unwraps.
 
-        Reading "id" straight off it yields None, so every send reported no
-        message id and --reply-to could not be chained off one. Caught live.
+        This test used to assert the opposite: the client returned the raw
+        body, `talk send` read `id` off the envelope and found None, and the
+        skill grew a tolerant unwrap that had to guess which shape it held.
+        With one shape there is nothing to guess, and an envelope arriving here
+        means the client broke its contract — which must not quietly yield an
+        id. Against the pre-change code this answered 42.
         """
         talk_client.send_message.return_value = {
             "ocs": {"meta": {"statuscode": 201}, "data": {"id": 42, "message": "hello"}}
         }
         out, code = _run(capsys, ["talk", "send", "abc123", "hello"])
         assert code == 0
-        assert out["message_id"] == 42
+        assert out["message_id"] is None
+
+    def test_an_unreadable_send_answer_is_reported_as_a_failure(
+        self, talk_client, capsys,
+    ):
+        """The consequence of deleting the tolerance, pinned where it shows.
+
+        `send_message` raises only after `raise_for_status`, so a 2xx body with
+        no `ocs` key did not come from Talk's chat endpoint — Talk always wraps
+        — but from something interposed, which most likely never passed the
+        post on. Answering "ok, message_id null" there is the silent success
+        `istota.ocs` exists to end, so the command fails and the caller can
+        read the room back. Pre-change this exited 0.
+        """
+        talk_client.send_message.side_effect = TalkResponseError(
+            "send message to abc123: JSON without an ocs envelope (HTTP 200)",
+        )
+        out, code = _run(capsys, ["talk", "send", "abc123", "hello"])
+        assert code != 0
+        assert out["status"] == "error"
 
     def test_send_reply_to(self, talk_client, capsys):
         talk_client.send_message.return_value = {"id": 100}

@@ -1594,10 +1594,18 @@ async def _process_poll_results(
                 else:
                     prefix = ModelPrefixOutcome(matched=False, content=content)
                 if prefix.usage is not None:
-                    await _await_in_txn(
-                        hold,
-                        client.send_message(conversation_token, prefix.usage),
-                    )
+                    # Best-effort, like the channel-gate post below it. The
+                    # usage reply is a courtesy; a failure posting it must not
+                    # abandon the rest of the batch, and `send_message` unwraps
+                    # its answer (ISSUE-463), so a 2xx whose body is not an
+                    # envelope raises here where it used to return.
+                    try:
+                        await _await_in_txn(
+                            hold,
+                            client.send_message(conversation_token, prefix.usage),
+                        )
+                    except Exception as e:
+                        logger.debug("Failed to send the usage reply: %s", e)
                     continue
                 if prefix.matched:
                     model_override = prefix.model

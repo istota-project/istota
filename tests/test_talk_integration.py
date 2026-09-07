@@ -109,35 +109,31 @@ class TestMessageSending:
         message = f"[integration test] send_message {tag}"
         response = run(client.send_message(TEST_ROOM, message))
 
+        # `ocs.data`, already unwrapped by the client (ISSUE-463).
         assert isinstance(response, dict)
-        ocs = response.get("ocs", {})
-        assert "data" in ocs
-        data = ocs["data"]
-        assert "id" in data
-        assert isinstance(data["id"], int)
+        assert "id" in response
+        assert isinstance(response["id"], int)
 
     def test_sent_message_has_correct_actor(self, client, run):
         """Sent message is attributed to the bot user."""
         tag = uuid.uuid4().hex[:8]
         message = f"[integration test] actor_check {tag}"
         response = run(client.send_message(TEST_ROOM, message))
-        data = response["ocs"]["data"]
-        assert data["actorId"] == _config.talk.bot_username
-        assert data["actorType"] == "users"
+        assert response["actorId"] == _config.talk.bot_username
+        assert response["actorType"] == "users"
 
     def test_sent_message_content_preserved(self, client, run):
         """Message content survives the round-trip."""
         tag = uuid.uuid4().hex[:8]
         message = f"[integration test] content_check {tag}"
         response = run(client.send_message(TEST_ROOM, message))
-        data = response["ocs"]["data"]
-        assert data["message"] == message
+        assert response["message"] == message
 
     def test_send_message_returns_id(self, client, run):
         """Response includes a message ID we can use for reply tracking."""
         tag = uuid.uuid4().hex[:8]
         response = run(client.send_message(TEST_ROOM, f"[integration test] id_check {tag}"))
-        msg_id = response.get("ocs", {}).get("data", {}).get("id")
+        msg_id = response.get("id")
         assert msg_id is not None
         assert isinstance(msg_id, int)
         assert msg_id > 0
@@ -178,7 +174,7 @@ class TestMessagePolling:
         # First, send a marker message
         tag = uuid.uuid4().hex[:8]
         response = run(client.send_message(TEST_ROOM, f"[integration test] poll_marker {tag}"))
-        marker_id = response["ocs"]["data"]["id"]
+        marker_id = response["id"]
 
         # Send another message after the marker
         tag2 = uuid.uuid4().hex[:8]
@@ -244,7 +240,7 @@ class TestReplyTracking:
         # Send original message
         tag = uuid.uuid4().hex[:8]
         original = run(client.send_message(TEST_ROOM, f"[integration test] original {tag}"))
-        original_id = original["ocs"]["data"]["id"]
+        original_id = original["id"]
 
         # Reply to it
         reply = run(client.send_message(
@@ -252,10 +248,9 @@ class TestReplyTracking:
             f"[integration test] reply {tag}",
             reply_to=original_id,
         ))
-        reply_data = reply["ocs"]["data"]
 
         # The reply should reference the parent
-        parent = reply_data.get("parent")
+        parent = reply.get("parent")
         assert parent is not None, "Reply should have parent field"
         assert parent.get("id") == original_id
 
@@ -263,9 +258,8 @@ class TestReplyTracking:
         """Regular messages don't have a parent reference."""
         tag = uuid.uuid4().hex[:8]
         response = run(client.send_message(TEST_ROOM, f"[integration test] no_parent {tag}"))
-        data = response["ocs"]["data"]
         # parent should be absent or empty for non-replies
-        parent = data.get("parent")
+        parent = response.get("parent")
         # Nextcloud may omit parent entirely or set it to empty
         if parent is not None:
             assert parent.get("id") is None or parent.get("id") == 0
@@ -278,9 +272,8 @@ class TestMessageParameters:
         """Text messages have messageParameters (may be empty dict or list)."""
         tag = uuid.uuid4().hex[:8]
         response = run(client.send_message(TEST_ROOM, f"[integration test] params {tag}"))
-        data = response["ocs"]["data"]
         # messageParameters should exist (our code handles both dict and list)
-        assert "messageParameters" in data
+        assert "messageParameters" in response
 
 
 class TestPollingRoundTrip:
@@ -295,7 +288,7 @@ class TestPollingRoundTrip:
         tag = uuid.uuid4().hex[:8]
         expected_content = f"[integration test] roundtrip {tag}"
         send_response = run(client.send_message(TEST_ROOM, expected_content))
-        sent_id = send_response["ocs"]["data"]["id"]
+        sent_id = send_response["id"]
 
         # Poll from before — should pick up our message
         messages = run(client.poll_messages(
@@ -370,7 +363,7 @@ class TestReferenceIdRoundTrip:
         response = run(client.send_message(
             TEST_ROOM, message, reference_id=ref_id,
         ))
-        sent_id = response["ocs"]["data"]["id"]
+        sent_id = response["id"]
 
         # Fetch history and find our message
         messages = run(client.fetch_chat_history(TEST_ROOM, limit=20))
@@ -383,7 +376,7 @@ class TestReferenceIdRoundTrip:
         tag = uuid.uuid4().hex[:8]
         message = f"[integration test] no_refid {tag}"
         response = run(client.send_message(TEST_ROOM, message))
-        sent_id = response["ocs"]["data"]["id"]
+        sent_id = response["id"]
 
         messages = run(client.fetch_chat_history(TEST_ROOM, limit=20))
         found = [m for m in messages if m.get("id") == sent_id]

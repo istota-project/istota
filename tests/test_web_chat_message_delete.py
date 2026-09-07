@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from istota import db
+from istota.ocs import OcsError
 from istota.config import Config, NextcloudConfig, SiteConfig, UserConfig, WebConfig
 
 try:
@@ -349,3 +350,37 @@ class TestTalkPropagation:
         assert resp.status_code == 200
         with db.get_db(_db_path()) as conn:
             assert db.get_message_room(conn, mid) is None
+
+    async def test_an_unreadable_talk_answer_does_not_fail_the_delete(
+        self, chat_client, caplog,
+    ):
+        """`delete_message` unwraps its answer since ISSUE-463, so a 2xx whose
+        body is not an envelope now raises where it used to return the body.
+
+        It lands in the same best-effort handler every other Talk fault does:
+        the web-side delete stands, and the Talk leg is logged as an error
+        rather than a refusal — the DELETE cleared `raise_for_status`, but a
+        2xx carrying no envelope most likely came from something interposed,
+        so whether Nextcloud saw it is open. That is the bucket the function's
+        own comment reserves for exactly this.
+        """
+        cookies = await _login(chat_client, "alice")
+        room = await self._bound_room(chat_client, cookies)
+        mid = _add_msg(room["token"], external_ids={"talk": "7"})
+
+        client = MagicMock()
+        client.delete_message = AsyncMock(side_effect=OcsError(
+            "delete message 7 in TALKROOM: JSON without an ocs envelope "
+            "(HTTP 200)",
+        ))
+        with _fake_talk_class(client):
+            with caplog.at_level("WARNING"):
+                resp = await chat_client.delete(
+                    f"/istota/api/chat/messages/{mid}",
+                    cookies=cookies, headers=ORIGIN,
+                )
+                await _drain_bg()
+        assert resp.status_code == 200
+        with db.get_db(_db_path()) as conn:
+            assert db.get_message_room(conn, mid) is None
+        assert "ocs envelope" in caplog.text

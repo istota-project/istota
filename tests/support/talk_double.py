@@ -542,8 +542,9 @@ class FakeTalkClient:
         # walk two lists in step. `_check` returned, so that call is the last
         # one and it was accepted.
         self.calls[-1] = replace(self.calls[-1], sent_id=self._next_message_id)
-        # The shape `TalkTransport.deliver` unwraps.
-        return {"ocs": {"data": {"id": self._next_message_id}}}
+        # `ocs.data`, as the real client answers since ISSUE-463 — the envelope
+        # is unwrapped inside `TalkClient`, not by `TalkTransport.deliver`.
+        return {"id": self._next_message_id}
 
     async def edit_message(
         self, conversation_token: str, message_id: int, message: str,
@@ -551,7 +552,7 @@ class FakeTalkClient:
         self._check("edit_message", conversation_token, {
             "message_id": message_id, "message": message,
         })
-        return {"ocs": {"data": {"id": message_id}}}
+        return {"id": message_id}
 
     async def get_conversation_info(self, conversation_token: str) -> dict:
         self._check("get_conversation_info", conversation_token, {})
@@ -715,7 +716,7 @@ class FakeTalkClient:
         self._check("delete_message", conversation_token, {
             "message_id": message_id,
         })
-        return {"ocs": {"data": {"id": message_id}}}
+        return {"id": message_id}
 
     async def mark_conversation_read(
         self, conversation_token: str, *, raise_on_error: bool = False,

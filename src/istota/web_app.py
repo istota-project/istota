@@ -63,7 +63,7 @@ from .build_info import build_description
 from .brain import make_brain
 from .config import load_config
 from .image_sniff import SNIFF_BYTES, sniff_raster
-from .ocs import OcsError, ocs_body_data, ocs_data
+from .ocs import OcsError, ocs_data
 from .usage import SYSTEM_USER_ID
 from .location_logic import (
     _location_discover_places,
@@ -6240,24 +6240,24 @@ async def _post_as_user(
     for attempt in (0, 1):
         client = TalkClient(_config, bearer_token=access, timeout=5)
         try:
-            resp = await client.send_message(
+            data = await client.send_message(
                 talk_ref, text, reply_to=reply_to_talk_id,
                 reference_id=reference_id,
             )
-            try:
-                data = ocs_body_data(resp, "post-as-user Talk post", default={})
-            except OcsError as e:
-                # Best-effort mirror: the post itself returned 2xx, so the
-                # message may well be in the room — only the id is unreadable.
-                # Answer None as this always has, but say why instead of
-                # letting an unrecognised envelope look like a post with no id.
-                logger.warning(
-                    "post-as-user Talk post landed but its id could not be "
-                    "read user=%s room=%s: %s", username, talk_ref, e,
-                )
-                return None
             posted = data.get("id")
             return int(posted) if posted else None
+        except OcsError as e:
+            # Best-effort mirror: the post cleared `raise_for_status`, so it
+            # may well be in the room and only the answer is unreadable. Answer
+            # None as this always has, but say why instead of letting an
+            # unrecognised body look like a post with no id. Not retried: a
+            # re-post would double a message the user can already see.
+            logger.warning(
+                "post-as-user Talk post got a 2xx it could not read, so its "
+                "id is unknown and it may be in the room user=%s room=%s: %s",
+                username, talk_ref, e,
+            )
+            return None
         except httpx.HTTPStatusError as e:
             status = e.response.status_code if e.response is not None else 0
             if attempt == 0 and status == 401:

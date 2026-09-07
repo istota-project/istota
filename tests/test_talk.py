@@ -55,7 +55,7 @@ class TestTalkClient:
         assert "room1" in call_kwargs.args[0]
         assert call_kwargs.kwargs["json"] == {"message": "Hello!"}
         assert call_kwargs.kwargs["auth"] == ("istota", "pass")
-        assert result == {"ocs": {"data": {"id": 42}}}
+        assert result == {"id": 42}
 
     @pytest.mark.asyncio
     async def test_send_message_with_reply(self, client):

@@ -41,7 +41,6 @@ from istota.nextcloud_client import (
     ocs_list_shares,
     ocs_search_sharees,
 )
-from istota.ocs import is_ocs_envelope, ocs_body_data
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, WRITE, host_path
 
@@ -599,30 +598,14 @@ def cmd_talk_read(args):
     }
 
 
-def _ocs_data(result):
-    """Unwrap an OCS envelope, tolerating an already-unwrapped payload.
-
-    ``TalkClient.send_message`` is the one method that returns the raw response
-    body rather than ``ocs.data`` — its other callers (the transport mirror,
-    web_app) unwrap it themselves. Reading ``id`` off the envelope silently
-    yields None, which is how ``talk send`` came to report no message id at all.
-    """
-    if not isinstance(result, dict):
-        return {}
-    if not is_ocs_envelope(result):
-        return result
-    inner = ocs_body_data(result, "talk send", default={})
-    return inner if isinstance(inner, dict) else {}
-
-
 def cmd_talk_send(args):
-    result = _talk_run(
+    posted = _talk_run(
         lambda c: c.send_message(args.token, args.message, reply_to=args.reply_to)
     )
     return {
         "status": "ok",
         "token": args.token,
-        "message_id": _ocs_data(result).get("id"),
+        "message_id": posted.get("id"),
     }
 
 
