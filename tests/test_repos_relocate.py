@@ -1199,16 +1199,33 @@ class TestAFakeRepositoryDoesNotHideARealOne:
     """
 
     @staticmethod
-    def _decoy(path: Path) -> None:
-        """Everything the loose test asked for and nothing a repository has."""
+    def _decoy(path: Path, *, config: bool = False, head: str = "") -> None:
+        """A shape the model can create under a read-write-bound `repos_dir`.
+
+        The default is everything the deleted loose predicate asked for and
+        nothing a repository has. `config` and `head` reach the later arms of
+        the strict predicate, which the default short-circuits past — without
+        them this class would prove only that the first clause fires.
+        """
         path.mkdir(parents=True)
-        (path / "HEAD").write_text("")
+        (path / "HEAD").write_text(head)
         (path / "objects").mkdir()
         (path / "refs").mkdir()
+        if config:
+            (path / "config").write_text("")
 
-    def test_the_walk_does_not_prune_on_it(self, tree, tmp_path):
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            pytest.param({}, id="no-config-empty-head"),
+            pytest.param({"config": True}, id="config-empty-head"),
+            pytest.param({"config": True, "head": "not-a-ref\n"}, id="config-junk-head"),
+            pytest.param({"config": True, "head": "deadbeef\n"}, id="config-short-hex"),
+        ],
+    )
+    def test_the_walk_does_not_prune_on_it(self, tree, tmp_path, shape):
         repos_dir = tree["repos_dir"]
-        self._decoy(repos_dir / "acme" / "not-a-repo")
+        self._decoy(repos_dir / "acme" / "not-a-repo", **shape)
         hidden = _clone(
             repos_dir, "acme/not-a-repo", "hidden", _upstream(tmp_path, "hidden")
         )
@@ -1234,15 +1251,32 @@ class TestAFakeRepositoryDoesNotHideARealOne:
 
         assert not any("not-a-repo" in str(r.clone_src) for r in outcome.resume_repairs)
 
-    def test_a_real_repository_is_still_found(self, tree):
-        """The other direction, so the stricter predicate cannot pass by
-        recognising nothing at all."""
+    def test_a_deliberate_decoy_still_prunes_and_that_is_the_limit(self, tree, tmp_path):
+        """The residual limit, asserted rather than left to a docstring.
+
+        A `HEAD` saying `ref: …` beside an empty `config` and an empty
+        `objects/` satisfies the predicate, so a directory built on purpose to
+        look like a repository still hides what is under it. The stage raises
+        the cost of a decoy; it does not remove one. If this starts failing,
+        the predicate got stricter and both modules' accounts of where it stops
+        need rewriting with it."""
         repos_dir = tree["repos_dir"]
+        self._decoy(
+            repos_dir / "acme" / "not-a-repo",
+            config=True,
+            head="ref: refs/heads/main\n",
+        )
+        hidden = _clone(
+            repos_dir, "acme/not-a-repo", "hidden", _upstream(tmp_path, "hidden")
+        )
+        worktree = _worktree(hidden, "hidden--istota-9-task")
 
         apply(plan(repos_dir, {"alice"}))
 
-        moved = repos_dir / "alice" / "acme" / "widget--istota-42-add-auth"
-        assert _resolves(moved)
+        moved = repos_dir / "alice" / "acme" / "not-a-repo" / "hidden--istota-9-task"
+        assert not worktree.exists()
+        assert moved.is_dir()
+        assert not _resolves(moved)
 
 
 class TestAlreadyMigratedStillReports:

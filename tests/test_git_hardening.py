@@ -15,8 +15,11 @@ module's own dict is the same test with more steps.
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -75,20 +78,22 @@ def shim(tmp_path, monkeypatch):
     argv_log = tmp_path / "argv.log"
     env_log = tmp_path / "env.log"
     script = bindir / "git"
+    # A python shim writing JSON, not `env >> log`: `env` emits one line per
+    # variable, so an inherited value containing a newline shifts every line
+    # after it and a name reappearing as a fragment overwrites a real reading
+    # silently. The paths are quoted because `tmp_path` may hold a space.
     script.write_text(
         "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> {argv_log}\n'
-        f"env >> {env_log}\n"
+        f'exec {sys.executable} -c \'\nimport json, os, sys\n'
+        f'open(sys.argv[1], "a").write(" ".join(sys.argv[3:]) + "\\n")\n'
+        f'open(sys.argv[2], "w").write(json.dumps(dict(os.environ)))\n'
+        f"\' \"{argv_log}\" \"{env_log}\" \"$@\"\n"
     )
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 
     def read():
-        env = {}
-        for line in env_log.read_text().splitlines():
-            key, _, value = line.partition("=")
-            env[key] = value
-        return argv_log.read_text().strip(), env
+        return argv_log.read_text().strip(), json.loads(env_log.read_text())
 
     return read
 
@@ -219,7 +224,7 @@ class TestItNeverRaises:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         script = bindir / "git"
-        script.write_text("#!/bin/sh\nsleep 30\n")
+        script.write_text("#!/bin/sh\nexec sleep 30\n")
         script.chmod(0o755)
         monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
 
@@ -235,18 +240,52 @@ class TestTheOverlayIsStatedOnce:
     allowlist of variables to pass through to a forge subprocess, which is a
     different mechanism, and a guard that exempted it by name would go blind to
     a copy that later grew inside it.
+
+    Parsed rather than grepped, for two reasons that pull in opposite
+    directions. A substring search over the text misses
+    `dict(GIT_TERMINAL_PROMPT="0")` and anything built from a variable, which
+    is a form a fifth copy is as likely to take as a quoted key. And it hits
+    every docstring that merely *names* a variable, of which this change added
+    several — so the naive widening that fixes the first problem makes the
+    guard fire on prose. Matching a string constant exactly, a keyword argument,
+    or an assignment target does both.
     """
 
+    @staticmethod
+    def _names_stated_as_code(path: Path) -> list[str]:
+        names = set(EXPECTED_ENV)
+        found = set()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and node.value in names:
+                found.add(node.value)
+            elif isinstance(node, ast.keyword) and node.arg in names:
+                found.add(node.arg)
+            elif isinstance(node, ast.Name) and node.id in names:
+                found.add(node.id)
+        return sorted(found)
+
+    def test_the_matcher_sees_an_unquoted_restatement(self, tmp_path):
+        """The guard's own negative control. A guard that could only see one
+        spelling would report green against the other."""
+        quoted = tmp_path / "quoted.py"
+        quoted.write_text('E = {"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}\n')
+        kwargs = tmp_path / "kwargs.py"
+        kwargs.write_text('E = dict(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")\n')
+        prose = tmp_path / "prose.py"
+        prose.write_text('"""GIT_TERMINAL_PROMPT and GIT_OPTIONAL_LOCKS are set."""\n')
+
+        assert len(self._names_stated_as_code(quoted)) == 2
+        assert len(self._names_stated_as_code(kwargs)) == 2
+        assert self._names_stated_as_code(prose) == []
+
     def test_no_module_restates_the_overlay(self):
-        names = tuple(EXPECTED_ENV)
         src = Path(__file__).resolve().parents[1] / "src" / "istota"
         offenders = {}
         for path in sorted(src.rglob("*.py")):
-            text = path.read_text(encoding="utf-8")
-            hits = [n for n in names if f'"{n}"' in text or f"'{n}'" in text]
+            hits = self._names_stated_as_code(path)
             if len(hits) >= 2:
                 offenders[path.relative_to(src).as_posix()] = hits
 
         assert offenders == {
-            "git_hardening.py": list(names),
+            "git_hardening.py": sorted(EXPECTED_ENV),
         }, f"a second copy of the git environment overlay: {offenders}"

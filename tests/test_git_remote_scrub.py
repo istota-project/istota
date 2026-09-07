@@ -29,15 +29,18 @@ and `https://oauth2@host/x` both contain an `@` and neither carries a secret.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from istota import git_remote_scrub
 from istota.git_remote_scrub import (
     config_files_for,
     find_git_dirs,
+    is_git_dir,
     scrub_remotes,
     strip_url_credential,
     url_credential,
@@ -973,6 +976,135 @@ class TestOneBadRepoDoesNotEndTheSweep:
         from istota import git_remote_scrub
 
         assert isinstance(git_remote_scrub.scrub_and_report(tmp_path), list)
+
+
+class TestTheConfigWrapperKeepsRaising:
+    """The contract that keeps `_git_config` off `git_hardening.run_git`.
+
+    `run_git` never raises: it answers `(1, "")` for a git that could not be
+    run, because its callers are sweeps that must not abort. This one must
+    raise, because both of its callers separate "the file could not be opened
+    at all" from "git read it and refused it" and log a different line for
+    each. Nothing tested that before, so a later stage finishing the
+    consolidation by routing this through `run_git` would turn a file that was
+    never opened into a file that was read and rejected, with the suite green.
+    """
+
+    def test_a_git_that_cannot_run_raises(self, tmp_path, monkeypatch):
+        empty = tmp_path / "empty-bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+
+        with pytest.raises(OSError):
+            git_remote_scrub._git_config("--file", str(tmp_path / "cfg"), "--list")
+
+    def test_a_git_that_ran_and_refused_is_a_status(self, tmp_path):
+        """The other side of the same seam: a real failure comes back as a
+        non-zero status, not an exception, so the two are distinguishable."""
+        status, _ = git_remote_scrub._git_config(
+            "--file", str(tmp_path / "nonexistent"), "--list"
+        )
+
+        assert status != 0
+
+    def test_read_entries_reports_the_two_failures_differently(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        missing = tmp_path / "nonexistent"
+        with caplog.at_level(logging.WARNING):
+            assert git_remote_scrub._read_entries(missing) is None
+        ran_and_refused = caplog.text
+        caplog.clear()
+
+        empty = tmp_path / "empty-bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        with caplog.at_level(logging.WARNING):
+            assert git_remote_scrub._read_entries(missing) is None
+        could_not_run = caplog.text
+
+        assert "git exit" in ran_and_refused
+        assert "git exit" not in could_not_run
+        assert could_not_run.strip(), "a git that could not run was logged as nothing"
+
+
+class TestIsGitDir:
+    """The predicate itself, arm by arm.
+
+    It had no direct test — every exercise of it went through `find_git_dirs`
+    or `scrub_remotes`, so an arm that stopped being reached could go on
+    reporting green. It is now shared with `repos_relocate`, where it decides
+    what gets its worktrees repaired during a move, so both consumers rest on
+    these cases.
+    """
+
+    @staticmethod
+    def _shape(root: Path, *, config=True, objects=True, head=b"ref: refs/heads/main\n"):
+        root.mkdir(parents=True)
+        if config:
+            (root / "config").write_text("")
+        if objects:
+            (root / "objects").mkdir()
+        if head is not None:
+            (root / "HEAD").write_bytes(head)
+        return root
+
+    def test_a_real_bare_repository_passes(self, tmp_path):
+        bare = _bare(tmp_path)
+
+        assert is_git_dir(bare)
+
+    def test_a_real_checkouts_dot_git_passes(self, tmp_path):
+        work = tmp_path / "work"
+        work.mkdir()
+        _git(work, "init", "-q", ".")
+
+        assert is_git_dir(work / ".git")
+
+    def test_a_detached_head_passes(self, tmp_path):
+        bare, _ = _with_upstream(tmp_path)
+        sha = _git(bare, "rev-parse", "HEAD").strip()
+        (bare / "HEAD").write_text(f"{sha}\n")
+
+        assert is_git_dir(bare)
+
+    def test_no_config_is_not_a_repository(self, tmp_path):
+        assert not is_git_dir(self._shape(tmp_path / "a", config=False))
+
+    def test_objects_as_a_file_is_not_a_repository(self, tmp_path):
+        root = self._shape(tmp_path / "b", objects=False)
+        (root / "objects").write_text("")
+
+        assert not is_git_dir(root)
+
+    def test_an_empty_head_is_not_a_repository(self, tmp_path):
+        """The arm `repos_relocate`'s old predicate did not have. This is the
+        shape three empty files and two empty directories produce."""
+        assert not is_git_dir(self._shape(tmp_path / "c", head=b""))
+
+    def test_a_head_that_is_not_a_ref_or_an_object_id_is_not_a_repository(self, tmp_path):
+        assert not is_git_dir(self._shape(tmp_path / "d", head=b"not-a-ref\n"))
+
+    def test_a_short_hex_head_is_not_a_repository(self, tmp_path):
+        assert not is_git_dir(self._shape(tmp_path / "e", head=b"deadbeef\n"))
+
+    def test_a_sha256_head_passes(self, tmp_path):
+        """64 hex plus a newline, against a 64-byte read. The regex is
+        `{40,64}` on the truncated bytes, so the newline never arrives."""
+        assert is_git_dir(self._shape(tmp_path / "f", head=b"a" * 64 + b"\n"))
+
+    def test_a_missing_directory_is_not_a_repository(self, tmp_path):
+        assert not is_git_dir(tmp_path / "nothing-here")
+
+    def test_the_residual_limit_a_deliberate_decoy_still_passes(self, tmp_path):
+        """Stated, not implied. The test is structural: an empty `config`, an
+        empty `objects/` and four bytes of `ref:` satisfy it. Raising the cost
+        of a decoy is what it does; proving provenance would mean reading the
+        object store on every directory of a walk that runs per task.
+
+        If this ever starts failing, the predicate got stricter and the
+        docstring's account of where it stops needs rewriting with it."""
+        assert is_git_dir(self._shape(tmp_path / "g"))
 
 
 class TestPlantedDirectoriesDoNotHideRepos:

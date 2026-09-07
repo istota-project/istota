@@ -101,13 +101,23 @@ GIT_HARDENING = (
 #: of every worktree it examined and nothing would ever be reaped after the
 #: first pass.
 #:
+#: **Not a sanitiser.** It overlays four names and neutralises nothing else, so
+#: an inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`
+#: or `GIT_OBJECT_DIRECTORY` still beats the `-C` a caller passes and silently
+#: redirects the command at another repository. Every caller today runs from a
+#: daemon that sets none of them, and the wrappers this replaced had the same
+#: hole; `code_review.engine._git_env` is the one that is immune, because it
+#: builds its environment from nothing rather than overlaying `os.environ`.
+#:
 #: A mapping proxy rather than a dict, for the same reason `GIT_HARDENING` is a
 #: tuple: a caller that mutates a shared safety constant in place removes a
 #: variable from every other caller with nothing reporting the loss.
 GIT_SUBPROCESS_ENV: Mapping[str, str] = MappingProxyType(
     {
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
+        # `os.devnull`, not the literal, because `code_review.engine` wrote it
+        # that way and folding it in here should not narrow the expression.
+        "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_OPTIONAL_LOCKS": "0",
     }

@@ -278,18 +278,33 @@ def is_git_dir(path: Path) -> bool:
     directory is not named ``*.git``, and the threat model here is explicitly a
     repository made by hand.
 
-    Checked strictly, because finding a git directory *prunes the walk*, here
-    and in :func:`istota.repos_relocate` which shares this predicate.
-    ``repos_dir`` is bound read-write into the sandbox, so a directory holding
-    an empty ``HEAD`` beside an empty ``objects/`` and ``refs/`` is something
-    the model can create — and a loose test would let that hide every
-    repository beneath it, from the credential sweep and from worktree repair
-    alike.
+    Checked as strictly as a structural test can be, because finding a git
+    directory *prunes the walk*, here and in :mod:`istota.repos_relocate` which
+    shares this predicate. ``repos_dir`` is bound read-write into the sandbox,
+    so a directory of empty files with the right names is something the model
+    can create, and anything the walk accepts hides every repository beneath it
+    from the credential sweep and from worktree repair alike.
 
-    ``config`` and a resolvable ``HEAD`` rather than ``refs/``: a repository on
-    the reftable backend has ``refs`` as a *file*, so requiring it as a
-    directory would miss a real repository while still admitting the hand-made
-    one.
+    **The limit, stated rather than implied.** This raises the cost of a decoy;
+    it does not make one impossible. ``config`` may be empty and ``objects/``
+    may be empty — only ``HEAD`` is read, and four bytes of ``ref:`` satisfy it.
+    A directory built deliberately to look like a repository still prunes the
+    walk. What this rejects is the shape that does *not* carry a plausible
+    ``HEAD``: a partial copy, an interrupted clone, a scratch directory that
+    grew the right names, and the empty-``HEAD``-plus-``objects/``-plus-``refs/``
+    shape that the looser predicate in ``repos_relocate`` used to accept.
+    Proving provenance would mean reading the object store, which is a cost per
+    directory on a walk that runs for every task.
+
+    ``config`` and a readable ``HEAD``, and no requirement on ``refs/``. Those
+    two are the entries a decoy has to get right rather than merely create;
+    ``refs/`` is an empty directory in a fresh repository and proves nothing.
+    That does make this looser than ``repos_relocate``'s deleted predicate in
+    one dimension — a directory with ``config``, ``objects/`` and a valid
+    ``HEAD`` but no ``refs/`` is now accepted where that one refused it — and
+    no such shape is known: every layout git produces has all four. (Checked
+    against the reftable backend on git 2.55, which was the candidate: it keeps
+    ``refs/`` as a directory and adds ``reftable/`` beside it.)
     """
     try:
         if not (path / "config").is_file() or not (path / "objects").is_dir():

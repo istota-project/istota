@@ -121,8 +121,11 @@ model-written and a plain ``git`` command there runs whatever
 
 A repository is recognised by :func:`istota.git_remote_scrub.is_git_dir`, the
 strict structural test, for the same reason: recognising one *prunes the walk*,
-so a hand-made directory carrying an empty ``HEAD`` beside empty ``objects/``
-and ``refs/`` would otherwise hide every real clone beneath it from repair.
+so a directory carrying an empty ``HEAD`` beside empty ``objects/`` and
+``refs/`` — which the predicate this module used to carry accepted — would
+otherwise hide every real clone beneath it from repair. That predicate is not a
+proof of provenance, and its own docstring says both where it stops and the one
+dimension in which it is looser than the one deleted here.
 
 Error posture follows :mod:`istota.worktree_reaper` and
 :mod:`istota.sandbox_cache_sweeper`, the other two delete-adjacent paths:
@@ -132,7 +135,9 @@ the exit code as well as by the text. ``--dry-run`` touches nothing.
 
 The planning and applying halves are a stdlib-only leaf — the root and the
 admin set are parameters. Only :func:`main` reads configuration, the admins
-file and the task table.
+file and the task table. The two package imports are
+:mod:`istota.git_hardening` and :mod:`istota.git_remote_scrub`, both of which
+are themselves leaves.
 """
 
 from __future__ import annotations
