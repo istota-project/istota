@@ -33,11 +33,13 @@ of the six expresses is a missing mode, not a special case.
 **Two root sets, and the mode picks which.** What varies is not who is asking
 but where the bytes end up. `READ` gets the task's whole working context — its
 own workspace, its deferred dir, its channel directory and `{mount}/Talk`,
-mirroring what the sandbox binds. `EGRESS` and `WRITE` get the user's own
-workspace alone, because their content *leaves* that context: mailed to an
+mirroring what the sandbox binds. `WRITE` gets the same set with the read-only
+roots dropped, because a destination's content does not leave that context: it
+lands in storage the task reads back and `/chat/files` serves. `EGRESS` gets
+the user's own workspace alone, because its content *does* leave — mailed to an
 address the model chose, indexed into something later searchable, uploaded, or
 persisted for the daemon to read after the task is over. Talk is in the first
-set and not the second for the same reason read the other way — a task may
+set and not the last for the same reason read the other way — a task may
 legitimately read a Talk attachment into its own reasoning, which is a
 different question from whether those bytes may be mailed out.
 
@@ -256,32 +258,35 @@ def _own_roots(*, writable: bool) -> list[Path]:
 
 
 def _roots_for(mode: str, *, writable: bool) -> list[Path]:
-    """`TASK` for a `READ`, `OWN` for an `EGRESS` or a `WRITE`.
+    """`TASK` for a `READ` or a `WRITE`, `OWN` for an `EGRESS`.
 
-    **`OWN` is narrower than what every shipped host-path consumer uses
-    today, and stamping an existing argument is therefore a behaviour
-    change.** The six scoped call sites all go through
-    `resolve_host_path(writable=True)`, whose roots are
-    `env_host_roots(writable=True)` — the deferred dir and
-    `{mount}/Channels/{token}` as well as the workspace. A `WRITE` stamp
-    drops both. `browse screenshot --output`, `devbox cp-out --dest`,
-    `feeds export-opml --output` and `health export-csv --output` are the
-    four that will feel it, and each is declared in the stage that also
-    carries its own control over the behaviour that is already known.
+    **A `WRITE` takes the task's roots with the read-only ones dropped —
+    exactly today's `env_host_roots(writable=True)` — and reading `OWN` into
+    it is the mistake this docstring exists to stop.** The rule above the two
+    sets is where the bytes end up, and a destination's content does not
+    *leave* the task's context: it lands in storage the same task then reads
+    back and `/chat/files` serves. `user_workspace_root` is the case that
+    settles it, since it exists precisely because `browse screenshot` needs a
+    destination that is both. Narrowing a `WRITE` to `OWN` would silently
+    refuse `browse screenshot --output`, `devbox cp-out --dest`, `feeds
+    export-opml --output` and `health export-csv --output` into the deferred
+    dir or `{mount}/Channels/{token}`, all four of which work today — and it
+    would arrive with no test naming it, because every test is written
+    against the stamp. A consolidation that moves a boundary as a side effect
+    is the failure this work exists to prevent, and it does not become
+    acceptable for moving in the safer-looking direction.
 
-    `EGRESS` has the same shape against a different incumbent:
-    `memory_search index file` states this idea today as
-    `env_host_roots(talk=False)`, which drops `{mount}/Talk` and keeps the
-    deferred and channel roots. That is a second spelling of egress and it
-    is deliberately left standing until the stage that restamps that verb,
-    since narrowing it is a boundary change that wants its own control
-    rather than arriving as a side effect of the machinery landing.
-
-    Nothing is stamped yet, so neither narrowing is live in this commit.
+    `EGRESS` is the one narrowing the spec does carry, and it is stated as
+    such: `{mount}/Users/{user_id}` alone, so a verb whose content leaves the
+    task can name neither `{mount}/Channels/{token}` nor `{mount}/Talk`.
+    Talk is in the first set and not the second for the same rule read the
+    other way — a task may legitimately read a Talk attachment into its own
+    reasoning, which is a different question from whether those bytes may be
+    mailed out.
     """
-    if mode == READ:
-        return env_host_roots(writable=writable)
-    return _own_roots(writable=writable)
+    if mode == EGRESS:
+        return _own_roots(writable=writable)
+    return env_host_roots(writable=writable)
 
 
 def _operation(dotted: str, action: argparse.Action) -> str:

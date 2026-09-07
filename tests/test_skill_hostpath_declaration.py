@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -349,6 +350,31 @@ class TestResolveParsed:
         args = parser.parse_args(["go", "--file", str(own)])
         assert resolve_parsed(parser, args) is None
         assert args.file == str(own)
+
+    def test_a_write_keeps_the_tasks_roots_minus_the_read_only_ones(self, mount):
+        """`WRITE` is `env_host_roots(writable=True)`, not the workspace alone.
+
+        A destination's content does not leave the task's context — it lands
+        where the task reads it back and `/chat/files` serves — so a `WRITE`
+        gets the deferred dir and the task's own channel directory, exactly as
+        every shipped write consumer did before it was stamped. An earlier
+        draft resolved `WRITE` against `OWN`, which would have silently refused
+        four verbs that work today; both roots are asserted because the
+        workspace alone passes under either reading.
+        """
+        parser = _one_verb_parser(WRITE)
+        for dest in (
+            Path(os.environ["ISTOTA_DEFERRED_DIR"]) / "out.csv",
+            mount / "Channels" / "tok1" / "out.csv",
+        ):
+            args = parser.parse_args(["go", "--file", str(dest)])
+            assert resolve_parsed(parser, args) is None, dest
+            assert args.file == str(dest)
+
+        # And the read-only root is still dropped, which is the half `writable`
+        # was already deciding.
+        args = parser.parse_args(["go", "--file", str(mount / "Talk" / "out.csv")])
+        assert resolve_parsed(parser, args) is not None
 
     def test_read_admits_talk_and_egress_does_not(self, mount):
         shared = mount / "Talk" / "attachment.pdf"
