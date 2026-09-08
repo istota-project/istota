@@ -104,6 +104,11 @@ echo
 # --- preflight ---
 [ -f "$EXAMPLE_FILE" ] || die ".env.example not found at $EXAMPLE_FILE"
 command -v openssl >/dev/null 2>&1 || die "openssl is required (used to generate passwords)"
+# Two users, and neither announces itself where it is reached: the bot login
+# is derived with a python3 one-liner partway through the questions, and the
+# .env is rendered by a python3 heredoc at the end. Without this the wizard
+# dies mid-interview on a bare `python3: not found`.
+command -v python3 >/dev/null 2>&1 || die "python3 is required (derives the bot login, renders .env)"
 
 DOCKER_MISSING=false
 COMPOSE_MISSING=false
@@ -339,7 +344,23 @@ cat <<'EOF'
 EOF
 read -rp "  CLAUDE_CODE_OAUTH_TOKEN (paste, or empty to use an API key): " CLAUDE_CODE_OAUTH_TOKEN
 mark CLAUDE_CODE_OAUTH_TOKEN
-if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+# Both credentials begin `sk-ant-` and differ at one segment, and they are now
+# consecutive prompts under one heading — which is exactly where an API key
+# gets pasted into the token box. The entrypoint writes whatever is here into
+# .credentials.json as an OAuth access token and never falls back, so the
+# mis-paste is silent and the symptom is an authentication failure naming
+# nothing. Rerouted rather than refused: the operator gave a usable credential.
+case "$CLAUDE_CODE_OAUTH_TOKEN" in
+    sk-ant-api*)
+        ANTHROPIC_API_KEY="$CLAUDE_CODE_OAUTH_TOKEN"
+        CLAUDE_CODE_OAUTH_TOKEN=""
+        mark ANTHROPIC_API_KEY
+        warn "That is an Anthropic API key, not an OAuth token — a token from"
+        warn "  'claude setup-token' starts sk-ant-oat. Taking it as"
+        warn "  ANTHROPIC_API_KEY, which the CLI accepts just as well."
+        ;;
+esac
+if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
     read -rp "  ANTHROPIC_API_KEY (paste, or empty to skip both): " ANTHROPIC_API_KEY
     mark ANTHROPIC_API_KEY
 fi
