@@ -167,6 +167,7 @@ ISTOTA_EMAIL_IMAP_USER=""
 ISTOTA_EMAIL_IMAP_PASSWORD=""
 ISTOTA_EMAIL_SMTP_HOST=""
 ISTOTA_EMAIL_BOT_ADDRESS=""
+ANTHROPIC_API_KEY=""
 ISTOTA_DEVELOPER_GITLAB_TOKEN=""
 ISTOTA_DEVELOPER_GITLAB_USERNAME=""
 ISTOTA_DEVELOPER_GITHUB_TOKEN=""
@@ -266,34 +267,45 @@ if [ "$MINIMAL" = false ]; then
     fi
 fi
 
-# --- Claude Code OAuth token ---
-section "Claude Code OAuth token"
+# --- Claude credentials ---
+# Two credentials, one question. The CLI accepts either, and the entrypoint
+# checks for both — so the wizard asks for both rather than naming the second
+# one in passing and leaving the operator to hand-edit .env for a variable it
+# never prompted for.
+section "Claude authentication"
 if [ "$ISTOTA_BRAIN_KIND" = "native" ]; then
-    dim "Native brain selected — the Claude CLI isn't used, so a Claude token"
-    dim "is optional. Press Enter to skip; the provider API key is used instead."
+    dim "Native brain selected — the Claude CLI isn't used, so a Claude"
+    dim "credential is optional. Press Enter at both prompts to skip; the"
+    dim "provider API key you already gave is used instead."
     echo
 fi
 cat <<'EOF'
-  Istota needs a long-lived Claude Code OAuth token to talk to the model.
+  Istota reaches the model through the Claude CLI, which takes either of
+  two credentials. Give one; the second prompt only appears if you skip
+  the first.
 
-  On a machine that already has Claude Code installed and authenticated,
-  run:
+  1. A Claude Code OAuth token, billed against a Claude subscription. On a
+     machine that already has Claude Code installed and authenticated:
 
-      claude setup-token
+         claude setup-token
 
-  That prints a token starting with "sk-ant-...". Copy it and paste it
-  below. The token does not expire automatically; revoke it from the
-  Anthropic console if you ever need to.
+     That prints a token starting with "sk-ant-". It does not expire on its
+     own; revoke it from the Anthropic console when you need to. Without
+     Claude Code installed:
 
-  If you don't have Claude Code yet:
-      npm install -g @anthropic-ai/claude-code
-      claude          # log in interactively, then run setup-token
+         npm install -g @anthropic-ai/claude-code
+         claude          # log in interactively, then run setup-token
 
-  You can also leave this blank and set ANTHROPIC_API_KEY later in .env.
+  2. An Anthropic API key, billed per token. Create one at
+     https://console.anthropic.com/settings/keys
 
 EOF
-read -rp "  CLAUDE_CODE_OAUTH_TOKEN (paste, or empty to skip): " CLAUDE_CODE_OAUTH_TOKEN
+read -rp "  CLAUDE_CODE_OAUTH_TOKEN (paste, or empty to use an API key): " CLAUDE_CODE_OAUTH_TOKEN
 mark CLAUDE_CODE_OAUTH_TOKEN
+if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+    read -rp "  ANTHROPIC_API_KEY (paste, or empty to skip both): " ANTHROPIC_API_KEY
+    mark ANTHROPIC_API_KEY
+fi
 echo
 
 # --- primary user ---
@@ -608,6 +620,7 @@ USER_TIMEZONE="$USER_TIMEZONE" \
 USER_EMAIL="$USER_EMAIL" \
 USER_DISABLED_MODULES="$USER_DISABLED_MODULES" \
 CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
 VNC_PASSWORD="$VNC_PASSWORD" \
 COMPOSE_PROFILES="$COMPOSE_PROFILES" \
 COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" \
@@ -687,6 +700,15 @@ echo
 echo -e "  ${_BOLD}Configuration:${_RESET}"
 echo "    Bot name          :  $ISTOTA_BOT_NAME"
 echo "    Brain             :  $ISTOTA_BRAIN_KIND$([ "$ISTOTA_BRAIN_KIND" = "native" ] && echo " (model: ${ISTOTA_BRAIN_NATIVE_MODEL:-unset}, $ISTOTA_BRAIN_NATIVE_BASE_URL)")"
+if [ "$ISTOTA_BRAIN_KIND" != "native" ]; then
+    if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+        echo "    Claude auth       :  OAuth token"
+    elif [ -n "$ANTHROPIC_API_KEY" ]; then
+        echo "    Claude auth       :  API key"
+    else
+        echo "    Claude auth       :  (none — set one in .env)"
+    fi
+fi
 echo "    Public hostname   :  ${DOMAIN:-(localhost-only)}"
 echo "    Compose profiles  :  ${COMPOSE_PROFILES:-(none — only the core stack)}"
 echo "    Email             :  $ISTOTA_EMAIL_ENABLED"
@@ -717,8 +739,8 @@ if [ "$ISTOTA_BRAIN_KIND" = "native" ] && [ -z "$ISTOTA_BRAIN_NATIVE_API_KEY" ];
     warn "  start, but the bot can't call the model until you set"
     warn "  ISTOTA_BRAIN_NATIVE_API_KEY in $ENV_FILE and 'docker compose restart istota web'."
     echo
-elif [ "$ISTOTA_BRAIN_KIND" != "native" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-    warn "No Claude Code token set. The stack will start, but the bot can't"
+elif [ "$ISTOTA_BRAIN_KIND" != "native" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+    warn "No Claude credential set. The stack will start, but the bot can't"
     warn "  call the model until you set CLAUDE_CODE_OAUTH_TOKEN or"
     warn "  ANTHROPIC_API_KEY in $ENV_FILE and 'docker compose restart istota'."
     echo
