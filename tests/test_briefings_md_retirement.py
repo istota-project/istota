@@ -12,7 +12,12 @@ table before that happens.
 
 from __future__ import annotations
 
+import os
+import shutil
+import stat
 from pathlib import Path
+
+import pytest
 
 from istota import user_briefings
 from istota.config import BriefingConfig, Config, UserConfig
@@ -330,11 +335,45 @@ class TestNothingSeedsTheFileAnyMore:
         config_dir = mount / "Users" / "alice" / "istota" / "config"
         assert not (config_dir / "BRIEFINGS.md").exists()
 
-    def test_the_shipped_example_points_at_the_real_surface(self):
-        from istota.storage import BRIEFINGS_EXAMPLE
+    def test_no_briefings_example_constant_survives(self):
+        """The constant is gone, so no importer can put it back by name.
 
-        assert "[[briefings]]" not in BRIEFINGS_EXAMPLE
-        assert "[briefings.components]" not in BRIEFINGS_EXAMPLE
+        This is the narrow half and the docstring says so deliberately:
+        re-adding the same text under another name and wiring it back into the
+        seed dict leaves this green. What holds the actual property is the
+        on-disk sibling below; this one pins that ``tests/test_storage.py``
+        and any future caller lost their import rather than keeping a live
+        reference to a tombstone.
+        """
+        import istota.storage as storage
+
+        assert not hasattr(storage, "BRIEFINGS_EXAMPLE")
+
+    def test_ensure_user_directories_writes_no_briefings_example(self, tmp_path):
+        from istota.storage import ensure_user_directories_v2
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+
+        assert ensure_user_directories_v2(config, "alice") is True
+        examples = mount / "Users" / "alice" / "istota" / "examples"
+        assert not (examples / "BRIEFINGS.md").exists()
+
+    def test_the_neighbouring_examples_still_ship(self, tmp_path):
+        """The control: the sweep clears one name, not the directory."""
+        from istota.storage import ensure_user_directories_v2
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+
+        ensure_user_directories_v2(config, "alice")
+        examples = mount / "Users" / "alice" / "istota" / "examples"
+        for name in (
+            "README.md", "TASKS.md", "HEARTBEAT.md", "CRON.md", "WORKFLOW.md",
+        ):
+            assert (examples / name).exists(), name
 
     def test_the_skill_body_does_not_teach_the_file(self):
         """The skill is prompt text, so a stale example is a wrong action.
@@ -354,6 +393,154 @@ class TestNothingSeedsTheFileAnyMore:
 
         assert "[briefings.components]" not in body
         assert "istota briefing" in body
+
+
+class TestTheRetiredExampleIsSweptFromTheWorkspace:
+    """Dropping it from the seed set is only half of it.
+
+    ``examples/`` is bot-managed and rewritten wholesale on every call, so a
+    file the refresh has stopped writing has nothing left keeping it current:
+    on every deployment that ran a refresh since the retirement the tombstone
+    is on disk, and it would stay there for ever. The user's own
+    ``config/BRIEFINGS.md`` is a different thing and is deliberately untouched.
+    """
+
+    def _refresh(self, tmp_path):
+        from istota.storage import ensure_user_directories_v2
+
+        mount = tmp_path / "mount"
+        mount.mkdir(exist_ok=True)
+        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+        ensure_user_directories_v2(config, "alice")
+        return mount / "Users" / "alice" / "istota"
+
+    def test_a_stale_example_is_removed_on_the_next_refresh(self, tmp_path):
+        bot_dir = self._refresh(tmp_path)
+        stale = bot_dir / "examples" / "BRIEFINGS.md"
+        stale.write_text("# Briefing Schedule\n\nThis file is no longer read.\n")
+
+        self._refresh(tmp_path)
+
+        assert not stale.exists()
+
+    def test_the_users_own_config_file_is_left_alone(self, tmp_path):
+        """The whole reason the retirement deleted nothing.
+
+        ``config/BRIEFINGS.md`` is the user's — inert, but theirs. A sweep
+        reaching it would delete a file the user wrote, which is the one thing
+        this retirement has refused to do since it landed.
+        """
+        bot_dir = self._refresh(tmp_path)
+        theirs = bot_dir / "config" / "BRIEFINGS.md"
+        theirs.write_text('[[briefings]]\nname = "morning"\n')
+
+        self._refresh(tmp_path)
+
+        assert theirs.exists()
+        assert "morning" in theirs.read_text()
+
+    def test_a_symlink_at_the_name_is_refused_and_its_target_survives(
+        self, tmp_path,
+    ):
+        """The boundary. ``examples/`` is bound read-write into the sandbox.
+
+        ``unlink`` never follows a symlink, so the victim was never reachable
+        through the removal itself; what this pins is that the probe refuses
+        the link rather than tidying it away, which is the posture
+        ``write_regular_file`` already takes at these same names.
+        """
+        bot_dir = self._refresh(tmp_path)
+        victim = tmp_path / "victim.txt"
+        victim.write_text("not yours to delete")
+        planted = bot_dir / "examples" / "BRIEFINGS.md"
+        planted.unlink(missing_ok=True)
+        planted.symlink_to(victim)
+
+        self._refresh(tmp_path)
+
+        assert victim.exists()
+        assert victim.read_text() == "not yours to delete"
+        assert planted.is_symlink()
+
+    def test_a_directory_at_the_name_is_refused(self, tmp_path):
+        """Two guards, and it takes both mutations to turn this red.
+
+        Removing the ``S_ISREG`` block alone leaves it green, because
+        ``unlink`` refuses a directory on its own; adding an ``rmtree``
+        fallback alone leaves it green too, because the probe never lets it
+        run. Measured, both ways. What the test pins is the conjunction — that
+        neither guard is dropped on the assumption the other covers it.
+        """
+        bot_dir = self._refresh(tmp_path)
+        planted = bot_dir / "examples" / "BRIEFINGS.md"
+        planted.unlink(missing_ok=True)
+        planted.mkdir()
+        (planted / "keep.txt").write_text("keep")
+
+        self._refresh(tmp_path)
+
+        assert (planted / "keep.txt").exists()
+
+    @pytest.mark.skipif(
+        not hasattr(os, "mkfifo"), reason="no mkfifo on this platform",
+    )
+    def test_a_fifo_at_the_name_is_refused(self, tmp_path):
+        """The only case that reaches ``S_ISREG``, which is why it is here.
+
+        ``O_NOFOLLOW`` refuses the symlink at the open and ``unlink`` refuses
+        the directory on its own, so neither of the two tests above exercises
+        the ``S_ISREG`` check: dropping that block alone leaves both green.
+        A FIFO passes ``O_NOFOLLOW`` — ``O_NONBLOCK`` is what stops the open
+        hanging on it — and ``unlink`` would remove it happily, so this is the
+        one shape where the check is the only thing standing there. Dropping
+        the ``S_ISREG`` block turns this red on its own.
+        """
+        bot_dir = self._refresh(tmp_path)
+        planted = bot_dir / "examples" / "BRIEFINGS.md"
+        planted.unlink(missing_ok=True)
+        os.mkfifo(planted)
+
+        self._refresh(tmp_path)
+
+        assert planted.exists()
+        assert stat.S_ISFIFO(planted.stat().st_mode)
+
+    def test_no_sweep_where_the_directory_failed_containment(self, tmp_path):
+        """The delete has to sit behind the containment check, not beside it.
+
+        ``examples/`` is model-writable, so a symlink planted at the directory
+        itself is the shape that decides whether the sweep can reach outside
+        the user's tree at all. ``_contained_under_user_root`` refuses it and
+        the whole block — writes and sweep together — is skipped.
+
+        What turns this red is hoisting the sweep out of that ``else``, which
+        deletes the victim outside the tree; measured. Rewriting the join to
+        the unresolved ``bot_dir_path / "examples"`` does *not*, because the
+        guard is the branch rather than the path — so the property this holds
+        is the sweep's position, and nothing here pins which spelling of the
+        directory it uses once it is inside.
+        """
+        from istota.storage import ensure_user_directories_v2
+
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "BRIEFINGS.md"
+        victim.write_text("not in the user's tree")
+
+        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+        ensure_user_directories_v2(config, "alice")
+
+        bot_dir = mount / "Users" / "alice" / "istota"
+        examples = bot_dir / "examples"
+        shutil.rmtree(examples)
+        examples.symlink_to(outside, target_is_directory=True)
+
+        ensure_user_directories_v2(config, "alice")
+
+        assert victim.exists()
+        assert victim.read_text() == "not in the user's tree"
 
 
 class TestWhatTheFileDoesNotWin:

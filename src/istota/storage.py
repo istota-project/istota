@@ -80,27 +80,13 @@ Additionally, you can share any of your own Nextcloud folders with Istota \
 for direct access to your files.
 """
 
-BRIEFINGS_EXAMPLE = """\
-# Briefing Schedule
-
-This file is no longer read.
-
-Briefing schedules used to live here. They are now the operator's TOML config
-plus your own entries in the database, which is what the settings page and the
-`istota briefing` command write. Anything this file held was carried over
-automatically the first time the new version started.
-
-The file was retired because it silently won: a schedule set in the settings
-page was overridden by whatever this file said, and the page went on showing
-the value you had chosen.
-
-## Changing a briefing
-
-- In the web UI: Briefings, then Settings.
-- Just ask, in any room: "move my morning briefing to 8am".
-
-Your own `config/BRIEFINGS.md` (if you have one) is inert and can be deleted.
-"""
+# Examples we have stopped shipping, swept out of `examples/` on the next
+# refresh. `BRIEFINGS.md` was a tombstone: the retirement left it in place to
+# say the file was inert and could be deleted, and that message has been on
+# every workspace since. It now lives in the briefings docs and the
+# `briefings_config` skill body, so the example goes rather than sitting in a
+# bot-managed directory for ever describing a file nothing reads.
+RETIRED_EXAMPLES = ("BRIEFINGS.md",)
 
 
 # Template for initial HEARTBEAT.md file
@@ -696,6 +682,81 @@ def write_regular_file(path: Path, text: str) -> bool:
         return False
 
 
+def remove_regular_file(path: Path) -> bool:
+    """Delete ``path``, refusing anything that is not a plain file.
+
+    For the ``examples/`` refresh, the one caller here that removes rather than
+    writes. An example we have stopped shipping has to leave the workspace or
+    it sits in a bot-managed directory for ever with nothing keeping it
+    current — the refresh overwrites what it still ships and would simply stop
+    mentioning the rest.
+
+    **The probe is doing a different job from ``write_regular_file``'s.** What
+    it buys is that nothing but a regular file is removed, so a directory, a
+    device or a link the model planted at the name survives and is reported
+    instead of being tidied away — the posture the write already takes at these
+    same names. ``O_NOFOLLOW`` refuses a symlink at the last component and
+    ``O_NONBLOCK`` keeps the probe from blocking on a FIFO while it decides;
+    ``S_ISREG`` on the fd is what refuses the FIFO and the device, and it is
+    reached only for something ``O_NOFOLLOW`` let through.
+
+    **``unlink`` does not follow a symlink at the leaf, and that is a claim
+    about the leaf alone.** A link planted at ``BRIEFINGS.md`` costs its
+    target nothing. A link planted at ``examples/`` is a different matter:
+    ``unlink`` resolves every component above the last, so containment there is
+    the caller's ``_contained_under_user_root``, which is a realpath comparison
+    rather than a descriptor pinned to an inode. That is the ISSUE-341 window
+    ``skills/_loader.open_overlay_dir`` exists to close, and it is open here:
+    every component under ``{mount}/Users/{user_id}`` is model-writable, the
+    check runs before the five ``write_regular_file`` calls above this one, and
+    a ``mv``/``ln -s``/``mv`` in that window lands the unlink on a regular file
+    named ``BRIEFINGS.md`` outside the user's tree. The probe does not narrow
+    it either — the fd is closed before the unlink, which re-resolves the path
+    by name from scratch.
+
+    That residual is accepted rather than absent, on two grounds. It is
+    strictly smaller than the one ``write_regular_file`` already carries
+    through the same ancestor check, where the same swap is an arbitrary
+    *clobber*. And it is bounded by the single hard-coded leaf in
+    ``RETIRED_EXAMPLES``. If this ever grows a second name, or a name anything
+    but a code constant supplies, close it properly: ``open_overlay_dir`` for
+    the directory and ``os.unlink(name, dir_fd=fd)`` for the leaf, which is
+    containment by construction rather than by comparison.
+
+    False on refusal, on failure and on an absent file — the ordinary case
+    after the first sweep — never an exception. The caller runs on every task,
+    every scheduler pass and every inbound email, and treats the result as
+    advisory.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        logger.warning("remove_refused path=%s errno=%s", path.name, e.errno)
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            logger.warning(
+                "remove_refused path=%s reason=not_a_regular_file", path.name,
+            )
+            return False
+    except OSError as e:
+        logger.warning("remove_refused path=%s errno=%s", path.name, e.errno)
+        return False
+    finally:
+        os.close(fd)
+
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        logger.warning("remove_failed path=%s error=%s", path.name, type(e).__name__)
+        return False
+
+
 def open_user_skill_overlays(
     config: "Config", user_id: str
 ) -> tuple[Path | None, int | None]:
@@ -1285,7 +1346,9 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
         # No BRIEFINGS.md is seeded. The file is retired as an input — briefings
         # are the TOML config plus the `briefing_configs` table the web UI and
         # `istota briefing` write. An existing one is left alone rather than
-        # deleted (it is the user's file), and `examples/BRIEFINGS.md` says so.
+        # deleted: it is the user's file, which is what separates it from the
+        # `examples/BRIEFINGS.md` tombstone in `RETIRED_EXAMPLES`, ours to
+        # remove. The `briefings_config` skill body says the file is inert.
 
         heartbeat_file = config_dir / "HEARTBEAT.md"
         if create_file_if_absent(
@@ -1338,13 +1401,34 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             examples = {
                 "README.md": WORKSPACE_README_EXAMPLE,
                 "TASKS.md": TASKS_FILE_EXAMPLE,
-                "BRIEFINGS.md": BRIEFINGS_EXAMPLE,
                 "HEARTBEAT.md": HEARTBEAT_EXAMPLE,
                 "CRON.md": CRON_EXAMPLE,
                 "WORKFLOW.md": WORKFLOW_EXAMPLE,
             }
             for filename, content in examples.items():
                 write_regular_file(examples_dir / filename, content)
+            # Dropping a name from the dict above only stops the overwrite;
+            # the file stays on every workspace that ever got one. This
+            # directory is ours and is rewritten wholesale on every call, so a
+            # retired example is removed rather than abandoned.
+            #
+            # The bare-name check is what keeps "the user's own `config/`
+            # files are never in this list" structural rather than a promise
+            # about future edits: a `/` or a `..` in an entry would escape
+            # `examples_dir` on the join, before any of the leaf guards in
+            # `remove_regular_file` run.
+            for filename in RETIRED_EXAMPLES:
+                if filename != Path(filename).name or filename in (".", ".."):
+                    logger.error(
+                        "retired_example_refused name=%s reason=not_a_bare_name",
+                        filename,
+                    )
+                    continue
+                if remove_regular_file(examples_dir / filename):
+                    logger.info(
+                        "Removed retired %s example %s for %s",
+                        bot_dir, filename, user_id,
+                    )
             logger.debug("Updated %s examples for %s", bot_dir, user_id)
 
         # Auto-share bot dir back to the user (OCS). Skipped entirely when
