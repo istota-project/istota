@@ -42,9 +42,10 @@ class TestStatusWriter:
         with _dav_ok() as mock_request:
             write_status(cfg, active_workers=2, pending_fg=3, pending_bg=1)
 
-            # MKCOL for the config dir, then PUT of the status file.
+            # One PUT of the status file, and nothing else: the account root
+            # always exists, so there is no directory to create first.
             methods = [c[0][0] for c in mock_request.call_args_list]
-            assert methods == ["MKCOL", "PUT"]
+            assert methods == ["PUT"]
 
             content = _call(mock_request, "PUT").kwargs["content"]
             data = json.loads(content)
@@ -79,23 +80,44 @@ class TestStatusWriter:
 
             put_url = _call(mock_request, "PUT")[0][1]
             assert put_url == (
-                "https://cloud.example.com/remote.php/dav/files/botuser/config/status.json"
+                "https://cloud.example.com/remote.php/dav/files/botuser/status.json"
             )
 
-    def test_mkcol_on_existing_dir_still_writes(self):
-        """MKCOL answers 405 once config/ exists — the steady state, not a failure."""
+    def test_creates_no_directory(self):
+        """The whole write is one PUT to the account root, and nothing else.
+
+        It used to be preceded by ``MKCOL config``, which left a directory
+        beside ``Users/`` and ``Channels/`` holding one file. Asserting the
+        exact request sequence rather than the absence of an MKCOL is what
+        makes the name and the assertion say the same thing: any extra
+        request fails this, whatever its method or path.
+        """
         cfg = _make_config()
         init_status_writer()
 
-        with patch("istota.nextcloud._http.httpx.request") as mock_request:
-            mock_request.side_effect = [
-                MagicMock(status_code=405, text=""),
-                MagicMock(status_code=204, text=""),
-            ]
+        with _dav_ok() as mock_request:
             write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
 
-            methods = [c[0][0] for c in mock_request.call_args_list]
-            assert methods == ["MKCOL", "PUT"]
+            calls = [(c[0][0], c[0][1]) for c in mock_request.call_args_list]
+            assert calls == [
+                ("PUT", "https://cloud.example.com/remote.php/dav/files/botuser/status.json")
+            ]
+
+    def test_a_failed_put_is_logged_rather_than_raised(self):
+        """The 60s `status-write` gate calls this; a raise would break the tick.
+
+        A 403 on the account root is the live failure mode — `dav_request`
+        raises `OcsError` on any non-2xx, and swallowing it here is what keeps
+        an unwritable root to a log line rather than a broken scheduler tick.
+        """
+        cfg = _make_config()
+        init_status_writer()
+
+        with patch(
+            "istota.nextcloud._http.httpx.request",
+            return_value=MagicMock(status_code=403, text="Forbidden"),
+        ):
+            write_status(cfg, active_workers=0, pending_fg=0, pending_bg=0)
 
     def test_users_configured_count(self):
         from istota.config import UserConfig
