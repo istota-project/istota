@@ -1153,6 +1153,33 @@ def cmd_user_ensure(args):
             )
             sys.exit(1)
         updates["default_destination"] = args.default_destination or "talk"
+    if args.default_room is not None:
+        room = args.default_room.strip()
+        # Membership, the same question the web endpoint asks, and *not* the
+        # operator exemption `_validate_descriptor_rooms` documents. That
+        # exemption exists where an operator's value is one the reader will
+        # honour; here `db.configured_default_room` requires membership itself,
+        # so a room the user is not in is a value every lookup discards. Writing
+        # it would be inert at both ends and silent at both ends. An operator
+        # provisioning a room adds the member first, then pins it.
+        if room:
+            from . import db
+
+            with db.get_db(db_path) as conn:
+                if db.get_room(conn, room) is None:
+                    print(
+                        f"Error: no room with token {room!r}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                if not db.is_room_member(conn, room, user_id):
+                    print(
+                        f"Error: {user_id!r} is not a member of room {room!r}; "
+                        "add them to the room before pinning it",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+        updates["default_room"] = room
     if args.route is not None:
         from .notifications import PURPOSES
         from .transport import parse_output_target
@@ -1255,6 +1282,8 @@ def cmd_user_ensure(args):
         print(f"  disabled_modules: {', '.join(profile.disabled_modules)}")
     if profile.default_destination and profile.default_destination != "talk":
         print(f"  default_destination: {profile.default_destination}")
+    if profile.default_room:
+        print(f"  default_room: {profile.default_room}")
     if profile.email_reply_routing and profile.email_reply_routing != "origin+thread":
         print(f"  email_reply_routing: {profile.email_reply_routing}")
     if profile.outbound_approval:
@@ -1302,6 +1331,7 @@ def cmd_user_show(args):
         "quiet_email_senders": profile.quiet_email_senders,
         "routing": profile.routing,
         "default_destination": profile.default_destination,
+        "default_room": profile.default_room,
         "email_reply_routing": profile.email_reply_routing,
         "outbound_approval": profile.outbound_approval,
         "external_turn_display": profile.external_turn_display,
@@ -2904,6 +2934,15 @@ def main():
         help=(
             "Fallback delivery descriptor (e.g. talk, email, both, talk:<token>). "
             "Default 'talk'."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--default-room",
+        metavar="TOKEN",
+        help=(
+            "Canonical room token a destination naming no room lands in, on "
+            "web and on Talk. Empty clears it, and the per-surface default is "
+            "worked out again."
         ),
     )
     user_ensure_parser.add_argument(

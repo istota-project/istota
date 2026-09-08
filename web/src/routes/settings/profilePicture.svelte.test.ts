@@ -28,6 +28,7 @@ await fillApiDouble(api, {
       disabled_modules: [],
       routing: {},
       default_destination: 'talk',
+      default_room: '',
       // Spelled out rather than omitted: the page's dropdowns normalize an
       // absent value onto the record as they mount, which adds a key the
       // loaded snapshot did not have and leaves the form dirty before anybody

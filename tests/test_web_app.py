@@ -3665,6 +3665,103 @@ class TestProfileEndpoints:
         p = user_profiles.get_profile(self._db_path, "alice")
         assert p.routing == {"alert": f"web:{room.token}"}
 
+    async def test_the_default_room_round_trips(self, tmp_path, client, app):
+        """ISSUE-477. One configured room token, answering for both surfaces,
+        saved through the same membership check a `web:` route leaf gets."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "ideas")
+
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"default_room": room.token},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert user_profiles.get_profile(
+            self._db_path, "alice",
+        ).default_room == room.token
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert resp.json()["profile"]["default_room"] == room.token
+
+    async def test_the_default_room_may_not_name_someone_elses_room(
+        self, tmp_path, client, app,
+    ):
+        """The setting decides where every bare `web` and bare `talk` lands, so
+        an unchecked write here is the standing post ISSUE-473 closed, reached
+        by a shorter route than a descriptor."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            bobs = db.create_web_chat_room(conn, "bob", "bob's room")
+
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"default_room": bobs.token},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+        assert "room" in resp.json()["detail"].lower()
+        assert user_profiles.get_profile(self._db_path, "alice").default_room == ""
+
+    async def test_an_unchanged_default_room_is_not_re_judged(
+        self, tmp_path, client, app,
+    ):
+        """The operator exemption: a room only an operator could have set must
+        not refuse the user's own unrelated edit, on a row the page offers no
+        way to correct. Same skip `default_destination` and the routes get."""
+        from istota import user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        user_profiles.ensure_profile(self._db_path, "alice", display_name="Alice")
+        user_profiles.update_profile(
+            self._db_path, "alice", default_room="room-operator-set",
+        )
+
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"default_room": "room-operator-set", "display_name": "Alice B"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.default_room == "room-operator-set"
+        assert p.display_name == "Alice B"
+
+    async def test_the_default_room_can_be_cleared(self, tmp_path, client, app):
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "ideas")
+        user_profiles.update_profile(
+            self._db_path, "alice", default_room=room.token,
+        )
+
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"default_room": ""},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        assert user_profiles.get_profile(self._db_path, "alice").default_room == ""
+
     async def test_a_web_route_may_not_name_someone_elses_room(
         self, tmp_path, client, app,
     ):

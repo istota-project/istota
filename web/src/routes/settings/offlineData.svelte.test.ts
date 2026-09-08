@@ -30,6 +30,7 @@ await fillApiDouble(api, {
       disabled_modules: [],
       routing: {},
       default_destination: 'talk',
+      default_room: '',
       delivery_surfaces: ['talk'],
     },
   })),
