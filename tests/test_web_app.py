@@ -3677,6 +3677,97 @@ class TestProfileEndpoints:
         general = next(r for r in by_token.values() if r["default"])
         assert general["shared"] is False and general["channel"] is False
 
+    async def test_web_rooms_report_the_registry_name_not_the_stale_handle(
+        self, tmp_path, client, app,
+    ):
+        """A handle minted before its room had a name keeps the "Talk room"
+        placeholder for good — `ensure_web_chat_handle` is INSERT OR IGNORE and
+        no writer refreshes it — so the picker listed a column of identical
+        entries (ISSUE-474). The registry name is the current one."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            for token, later_name in (("talk-1", "team"), ("talk-2", "ops")):
+                db.register_room(conn, token, "alice", origin="talk", name=None)
+                db.add_room_member(conn, token, "alice")
+                # What the web listing mints for a room with no name yet.
+                db.ensure_web_chat_handle(conn, "alice", token, "Talk room")
+                # What the Talk poller's backfill writes a cycle later.
+                db.rename_room(conn, token, later_name)
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        by_token = {r["token"]: r for r in resp.json()["profile"]["web_rooms"]}
+        assert by_token["talk-1"]["name"] == "team"
+        assert by_token["talk-2"]["name"] == "ops"
+
+    async def test_web_rooms_fall_back_to_the_handle_when_the_room_is_nameless(
+        self, tmp_path, client, app,
+    ):
+        """The registry wins only when it has something. A room still waiting on
+        its backfill keeps the placeholder rather than showing an empty label."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "talk-1", "alice", origin="talk", name=None)
+            db.add_room_member(conn, "talk-1", "alice")
+            db.ensure_web_chat_handle(conn, "alice", "talk-1", "Talk room")
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        by_token = {r["token"]: r for r in resp.json()["profile"]["web_rooms"]}
+        assert by_token["talk-1"]["name"] == "Talk room"
+
+    async def test_the_room_picker_and_the_sidebar_agree_on_a_name(
+        self, tmp_path, client, app,
+    ):
+        """The sidebar and the picker named the same room differently, because
+        each spelled the registry-first rule out by hand and the picker did not.
+        They read one helper now (ISSUE-474)."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "talk-1", "alice", origin="talk", name=None)
+            db.add_room_member(conn, "talk-1", "alice")
+            db.ensure_web_chat_handle(conn, "alice", "talk-1", "Talk room")
+            db.rename_room(conn, "talk-1", "team")
+
+        listing = await client.get("/istota/api/chat/rooms", cookies=cookies)
+        sidebar = {r["token"]: r["name"] for r in listing.json()["rooms"]}
+        profile = await client.get("/istota/api/settings/profile", cookies=cookies)
+        picker = {r["token"]: r["name"] for r in profile.json()["profile"]["web_rooms"]}
+        assert picker == sidebar
+        assert sidebar["talk-1"] == "team"
+
+    async def test_a_colour_only_patch_answers_with_the_registry_name(
+        self, tmp_path, client, app,
+    ):
+        """The client spreads this response over its room record, so a save that
+        did not touch the name must not answer with the handle's mint-time one —
+        that would overwrite a correct sidebar entry (ISSUE-474)."""
+        from istota import db, web_app
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        with db.get_db(self._db_path) as conn:
+            db.register_room(conn, "talk-1", "alice", origin="talk", name=None)
+            db.add_room_member(conn, "talk-1", "alice")
+            handle = db.ensure_web_chat_handle(conn, "alice", "talk-1", "Talk room")
+            db.rename_room(conn, "talk-1", "team")
+
+        d = web_app._chat_update_room("alice", handle.id, None, None, color="rose")
+        assert d["name"] == "team"
+
 
 @_needs_web_deps
 class TestResourcesSettingsRemoved:

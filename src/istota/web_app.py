@@ -3181,7 +3181,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
             out[r.token] = {
                 "id": handle.id,
                 "token": r.token,
-                "name": r.name or handle.name,
+                "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
                 "model": r.model,
@@ -4083,7 +4083,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
                 handle = db.update_web_chat_room(conn, handle.id, archived=False) or handle
             db.add_room_binding(conn, r.token, "web", r.token)
             d = _room_to_dict(handle)
-            d["name"] = r.name or handle.name
+            d["name"] = db.room_display_name(r, handle)
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
             # Standing per-room model/effort default lives on the shared registry
@@ -4419,6 +4419,12 @@ def _chat_update_room(
             return None
         d = _room_to_dict(updated)
         reg = db.get_room(conn, updated.token)
+        # Registry first, for the reason `_promoted_room_dict` gives: the client
+        # spreads this response over its room record, so a colour-only or
+        # archive-only PATCH answering with the handle's mint-time name would
+        # overwrite a correct sidebar entry with the stale one (ISSUE-474). A
+        # rename is unaffected either way — it writes both rows.
+        d["name"] = db.room_display_name(reg, updated)
         d["model"] = reg.model if reg else None
         d["effort"] = reg.effort if reg else None
         d["brain"] = reg.brain if reg else None
@@ -4787,7 +4793,7 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
         if reg is None or reg.origin != "web":
             return "not_found", None  # only web-origin rooms promote
         existing = db.get_room_binding(conn, token, "talk")
-        name = reg.name or handle.name
+        name = db.room_display_name(reg, handle)
     if not _config.nextcloud.url:
         return "not_found", None
 
@@ -4919,15 +4925,14 @@ def _promoted_room_dict(room_id: int, token: str, talk_token: str) -> dict | Non
     """The room as the client should now see it, re-read so a change that landed
     during the OCS calls is not rolled back by the answer.
 
-    **The name comes from the registry first, as the listing builds it.**
-    `_room_to_dict` reads the `web_chat_rooms` handle, but `db.rename_room`
-    writes `rooms.name` only — and `transport.ingest` calls it whenever Talk
-    reports a different channel name — so a Talk-side rename landing during the
-    OCS calls would come back as the stale handle name and be adopted by the
-    client's spread-merge. `model` and `effort` ride along for the reason the
-    room PATCH carries them (ISSUE-342): this dict is merged into the client's
-    record, so a key the listing sends and this omits reads as absent to any
-    consumer that replaces rather than spreads.
+    **The name comes from the registry first**, through `db.room_display_name`,
+    as the listing builds it — `_room_to_dict` reads the `web_chat_rooms` handle,
+    so a Talk-side rename landing during the OCS calls would otherwise come back
+    as the stale handle name and be adopted by the client's spread-merge. That
+    helper's docstring has the rest. `model` and `effort` ride along for the
+    reason the room PATCH carries them (ISSUE-342): this dict is merged into the
+    client's record, so a key the listing sends and this omits reads as absent
+    to any consumer that replaces rather than spreads.
     """
     from . import db
     with db.get_db(_config.db_path) as conn:
@@ -4937,7 +4942,7 @@ def _promoted_room_dict(room_id: int, token: str, talk_token: str) -> dict | Non
         return None
     d = _room_to_dict(handle)
     if reg is not None:
-        d["name"] = reg.name or handle.name
+        d["name"] = db.room_display_name(reg, handle)
         d["model"] = reg.model
         d["effort"] = reg.effort
         d["brain"] = reg.brain
@@ -9798,6 +9803,13 @@ def _user_web_rooms(user_id: str) -> list[dict]:
     list has to agree with `_validate_descriptor_rooms`, or the dropdown offers a
     room the save then refuses. Best-effort — delivery routing must still render
     when the DB is unreachable.
+
+    The loop runs over handles rather than `db.list_member_rooms` because the
+    order has to be the one `db.default_web_room` picks in — oldest handle first,
+    not the registry's activity order — so the room flagged `default` here is the
+    room a bare `web` route actually lands in. The name still comes from the
+    registry, through `db.room_display_name`: reading the handle's own name here
+    is ISSUE-474.
     """
     from . import db
 
@@ -9815,7 +9827,9 @@ def _user_web_rooms(user_id: str) -> list[dict]:
                 others = set(db.list_room_members(conn, r.token)) - {user_id}
                 out.append({
                     "token": r.token,
-                    "name": r.name,
+                    # `or r.token`: the helper answers "" when neither row has a
+                    # name, and an option with an empty label is unpickable.
+                    "name": db.room_display_name(db.get_room(conn, r.token), r) or r.token,
                     "default": r.token == default_token,
                     "shared": bool(others),
                     "channel": r.token in channels,

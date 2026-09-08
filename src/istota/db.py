@@ -4030,7 +4030,35 @@ def archive_orphaned_talk_rooms(
 
 
 def rename_room(conn: sqlite3.Connection, token: str, name: str) -> None:
+    """Rename a room. Writes `rooms.name` only — see `room_display_name` for
+    why the per-user handle is not kept in step."""
     conn.execute("UPDATE rooms SET name = ? WHERE token = ?", (name, token))
+
+
+def room_display_name(room: Room | None, handle: WebChatRoom | None) -> str:
+    """The name to show for a room: the registry's, falling back to the handle's.
+
+    A room carries two names and only one of them is kept current. `rooms.name`
+    is canonical — the room PATCH, the Talk poller's title backfill and
+    `transport.ingest` (whenever Talk reports a different channel name) all write
+    it through `rename_room`. `web_chat_rooms.name` is a mint-time snapshot:
+    `ensure_web_chat_handle` is INSERT OR IGNORE, so a handle minted before its
+    room's name was known keeps the `"Talk room"` placeholder its caller passed,
+    for good. Every reader must therefore prefer the registry.
+
+    This is that rule, in one place. Seven readers needed it and four had it,
+    each spelled out by hand; the three without it are ISSUE-474. The visible
+    one was the settings room picker, listing a column of identical `Talk room`
+    entries while the sidebar, two hundred lines away in the same file, named
+    the same rooms correctly. `_CROSS_ROOM_COLUMNS` applies the same rule in
+    SQL, since a join is cheaper there than a lookup per row.
+
+    Both arguments are optional because the callers differ in what they hold —
+    a promoted room's registry row may not be there yet, and a Talk token
+    resolved from a command has no handle of its own. With neither name the
+    token is all a caller has left, so this returns `""` and they supply it.
+    """
+    return (room.name if room else None) or (handle.name if handle else "") or ""
 
 
 def set_room_model_effort(
@@ -5090,7 +5118,12 @@ def get_starred_message_ids(
 _CROSS_ROOM_COLUMNS = (
     "SELECT m.role AS role, m.body AS body, m.title AS title, "
     "  m.task_id AS task_id, m.id AS msg_id, m.created_at AS created_at, "
-    "  m.room_token AS room_token, r.name AS room_name, "
+    # `room_display_name`'s rule in SQL: the registry name, then the reader's
+    # own handle. A room registered before Talk reported a title has a NULL
+    # `rooms.name`, and the client hides the room chip on an empty one — so
+    # without the fallback a message in the All / Unread / Starred panes named
+    # no room at all (ISSUE-474).
+    "  m.room_token AS room_token, COALESCE(r.name, h.name) AS room_name, "
     "  m.attachments AS attachments, t.attachments AS task_attachments, "
     "  m.attachment_paths AS attachment_paths, "
     "  t.status AS status, t.actions_taken AS actions_taken, "
@@ -5125,6 +5158,11 @@ _CROSS_ROOM_FROM = (
     "JOIN rooms r ON r.token = m.room_token AND r.archived = 0 "
     "JOIN room_members mm ON mm.room_token = m.room_token "
     "  AND mm.user_id = :user "
+    # The reader's own handle, for the name fallback in the column list. LEFT,
+    # because membership does not imply a handle — the web listing is what mints
+    # one, and these views are reachable before it has run.
+    "LEFT JOIN web_chat_rooms h ON h.token = m.room_token "
+    "  AND h.user_id = :user "
     "LEFT JOIN message_stars s ON s.message_id = m.id "
     "  AND s.user_id = :user "
     "LEFT JOIN tasks t ON t.id = m.task_id "

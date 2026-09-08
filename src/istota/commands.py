@@ -336,8 +336,10 @@ async def resolve_room_name(ctx: CommandContext, token: str) -> str:
     """Resolve a channel token to a human-readable name, surface-agnostically.
 
     Talk goes through the registered transport's ``resolve_channel_name`` (an OCS
-    read); web chat reads the room's stored name; any other surface falls back to
-    the opaque token.
+    read); web chat reads the room's stored name, registry first — the per-user
+    handle is a mint-time snapshot and can still hold the ``"Talk room"``
+    placeholder long after the room has a real title (ISSUE-474). Any other
+    surface falls back to the opaque token.
     """
     if not token:
         return token
@@ -351,9 +353,12 @@ async def resolve_room_name(ctx: CommandContext, token: str) -> str:
                 return token
     if ctx.surface == "web":
         try:
-            room = db.get_web_chat_room_by_token(ctx.conn, token)
-            if room is not None and room.name:
-                return room.name
+            name = db.room_display_name(
+                db.get_room(ctx.conn, token),
+                db.get_web_chat_room_by_token(ctx.conn, token),
+            )
+            if name:
+                return name
         except Exception:
             pass
     return token
