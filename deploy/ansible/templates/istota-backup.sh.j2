@@ -20,6 +20,8 @@
 # this script: anything named *.db.gz in them is subject to age-based deletion,
 # whoever wrote it. That is what reclaims the artifacts of a prefix that stopped
 # being produced. Do not park a copy there expecting it to survive.
+# ${REMOTE_DIR}/db/snapshots is owned by `db_backup.py`; it is not written or
+# swept by this script.
 set -euo pipefail
 
 DB="{{ istota_home }}/data/istota.db"

@@ -365,7 +365,7 @@ class SchedulerConfig:
     skill_overlay_reindex_interval: int = 21600
     db_backup_enabled: bool = True  # checkpoint + snapshot local DBs (framework + per-user modules) to the mount so they stay off-host durable now that they've left Nextcloud-synced workspaces
     db_backup_interval: int = 86400  # seconds between DB backup snapshots (default daily)
-    db_backup_dir: str = ""  # snapshot destination; empty = {nextcloud_mount}/istota-db-backups. Backup requires a resolvable destination on durable (off-host) storage
+    db_backup_dir: str = ""  # snapshot destination; empty = {nextcloud_mount}/Backups/db/snapshots. Backup requires a resolvable destination on durable (off-host) storage
     db_backup_retention: int = 7  # number of newest dated snapshot dirs to keep (0 = keep all). Older dirs are pruned, but any dir holding the newest good copy of a DB is protected from pruning
     scheduler_stats_interval: int = 60  # seconds between scheduler_stats health-line emits (0 = disabled)
     loop_stall_alert_seconds: int = 180  # alert if the main dispatch loop hasn't ticked in this long (0 = disabled)

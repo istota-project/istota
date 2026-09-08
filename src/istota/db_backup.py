@@ -125,7 +125,7 @@ def backup_destination(config) -> Path | None:
         return Path(explicit)
     mount = getattr(config, "nextcloud_mount_path", None)
     if mount:
-        return Path(mount) / "istota-db-backups"
+        return Path(mount) / "Backups" / "db" / "snapshots"
     return None
 
 

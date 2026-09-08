@@ -984,7 +984,7 @@ main_loop_read_timeout_ms = 2000
 # moved to local disk. Uses SQLite's online backup API (consistent live copy).
 db_backup_enabled = true
 db_backup_interval = 86400          # seconds between snapshots (daily)
-# db_backup_dir = ""                # empty = {nextcloud_mount}/istota-db-backups
+# db_backup_dir = ""                # empty = {nextcloud_mount}/Backups/db/snapshots
 # Where a [nextcloud] url is set, a destination at or under nextcloud_mount_path
 # is skipped while that mount is down, however it is spelled — a stale mountpoint
 # would take the copies to local disk and lose them when the mount returns.

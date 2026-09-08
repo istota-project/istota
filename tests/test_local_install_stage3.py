@@ -1316,9 +1316,12 @@ class TestDirectories:
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
         rc, _, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
         assert rc == 0
-        for name in ("tmp", "db-backups"):
-            mode = stat.S_IMODE((tmp_path / "ws" / name).stat().st_mode)
-            assert mode == 0o700, f"{name} is {oct(mode)}"
+        for path in (
+            tmp_path / "ws" / "tmp",
+            tmp_path / "ws" / "Backups" / "db" / "snapshots",
+        ):
+            mode = stat.S_IMODE(path.stat().st_mode)
+            assert mode == 0o700, f"{path} is {oct(mode)}"
 
     def test_a_rerun_is_idempotent(self, tmp_path):
         args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
@@ -1326,7 +1329,32 @@ class TestDirectories:
         args2 = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice", force=True)
         rc, _, _ = _run(args2, tmp_path, which_result="/usr/bin/claude")
         assert rc == 0
-        assert (tmp_path / "ws" / "db-backups").is_dir()
+        assert (tmp_path / "ws" / "Backups" / "db" / "snapshots").is_dir()
+
+    def test_force_keeps_an_existing_explicit_backup_destination(self, tmp_path):
+        args = _args(yes=True, workspace=str(tmp_path / "ws"), user="alice")
+        _, config_path, _ = _run(args, tmp_path, which_result="/usr/bin/claude")
+        current = str(tmp_path / "ws" / "Backups" / "db" / "snapshots")
+        legacy = tmp_path / "ws" / "db-backups"
+        legacy_snapshot = legacy / "2026-09-01" / "framework" / "istota.db"
+        legacy_snapshot.parent.mkdir(parents=True)
+        legacy_snapshot.write_bytes(b"backup")
+        config_path.write_text(
+            config_path.read_text().replace(current, str(legacy))
+        )
+
+        rerun = _args(
+            yes=True,
+            force=True,
+            workspace=str(tmp_path / "ws"),
+            user="alice",
+        )
+        rc, _, _ = _run(rerun, tmp_path, which_result="/usr/bin/claude")
+
+        assert rc == 0
+        from istota.config import load_config
+        assert Path(load_config(config_path).scheduler.db_backup_dir) == legacy
+        assert legacy_snapshot.read_bytes() == b"backup"
 
 
 # ---------------------------------------------------------------------------

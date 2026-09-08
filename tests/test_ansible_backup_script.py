@@ -66,6 +66,12 @@ def render(**overrides) -> str:
     return env.from_string(source).render(**variables)
 
 
+def test_header_reserves_snapshots_for_the_scheduler():
+    script = render()
+    assert "${REMOTE_DIR}/db/snapshots" in script
+    assert "it is not written or\n# swept by this script." in script
+
+
 def _sqlite_with_a_row(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)

@@ -2236,6 +2236,56 @@
     group: "{{ istota_group }}"
   when: not ansible_check_mode and not istota_web_only
 
+# The scheduler's dated snapshots used to live at a separate top-level mount
+# path. Move those directory trees into Backups/db/snapshots before the new
+# default starts writing there. The migrator refuses to merge two histories,
+# and it refuses while the scheduler holds its flock, so the role detects the
+# legacy dates and stops only that writer around the move. `always` brings the
+# service back even when a collision needs operator attention.
+- name: Detect legacy database snapshot directories
+  find:
+    paths: "{{ istota_nextcloud_mount_path }}/istota-db-backups"
+    patterns: "????-??-??"
+    recurse: false
+    file_type: directory
+  register: _legacy_db_snapshot_dirs
+  changed_when: false
+  when:
+    - not istota_web_only
+    - istota_use_nextcloud_mount | default(false) | bool
+
+- name: Relocate legacy database snapshots
+  block:
+    - name: Stop scheduler for database snapshot relocation
+      systemd:
+        name: "{{ istota_namespace }}-scheduler"
+        state: stopped
+      failed_when: false
+
+    - name: Run database snapshot relocation migrator
+      command: >-
+        {{ istota_home }}/.venv/bin/python -m {{ istota_package }}.db_backup_relocate
+      args:
+        chdir: "{{ istota_repo_dir }}"
+      become: true
+      become_user: "{{ istota_user }}"
+      register: _db_backup_relocate
+      changed_when: "'moved: ' in (_db_backup_relocate.stdout | default(''))"
+
+    - name: Show database snapshot relocation output
+      debug:
+        msg: "{{ _db_backup_relocate.stdout_lines + _db_backup_relocate.stderr_lines }}"
+  always:
+    - name: Restart scheduler after database snapshot relocation
+      systemd:
+        name: "{{ istota_namespace }}-scheduler"
+        state: started
+      failed_when: false
+  when:
+    - not istota_web_only
+    - istota_use_nextcloud_mount | default(false) | bool
+    - (_legacy_db_snapshot_dirs.matched | default(0)) > 0
+
 # One-time relocation: `developer.repos_dir` from one shared tree into per-user
 # subtrees, `{repos_dir}/{namespace}/` -> `{repos_dir}/{user_id}/{namespace}/`.
 # The sandbox now binds a task's own subtree rather than the whole root, so a
