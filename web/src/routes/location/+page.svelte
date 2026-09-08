@@ -23,7 +23,7 @@
   import ElevationProfile from '$lib/components/location/ElevationProfile.svelte';
   import LocationMap from '$lib/components/location/LocationMap.svelte';
   import StopsPanel from '$lib/components/location/StopsPanel.svelte';
-  import { formatMinutes } from '$lib/dateFormat';
+  import { formatMinutes, formatRelative } from '$lib/dateFormat';
 
   let current = $state<CurrentLocation | null>(null);
   let pings: LocationPing[] = $state([]);
@@ -66,16 +66,6 @@
 
   const formatDuration = (minutes: number | null) => formatMinutes(minutes);
 
-  function timeAgo(timestamp: string): string {
-    const diff = Date.now() - new Date(timestamp).getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    return `${Math.floor(hrs / 24)}d ago`;
-  }
-
   let currentLabel = $derived.by(() => {
     if (!current?.last_ping) return null;
     const placeName = current.current_visit?.place_name ?? current.last_ping.place ?? null;
@@ -85,7 +75,7 @@
     return {
       placeName,
       visitDuration,
-      ago: timeAgo(current.last_ping.timestamp),
+      ago: formatRelative(current.last_ping.timestamp),
       battery:
         current.last_ping.battery != null ? `${Math.round(current.last_ping.battery * 100)}%` : '',
     };
