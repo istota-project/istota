@@ -154,4 +154,29 @@ describe('the default room', () => {
     expect(control('Default room')).toBeTruthy();
     expect(screen.getByLabelText('Default room')).toBeTruthy();
   });
+
+  it('says so when the server reports the pin is being ignored', async () => {
+    // ISSUE-479. Until now a dead `default_room` rendered as a bare token with
+    // no mark, so a setting that had silently stopped working looked like one
+    // pinned from the CLI. It is `(ignored)` rather than the route rows'
+    // `(unavailable)` because the delivery still arrives — just not here.
+    currentProfile.value = profile('room-archived');
+    currentProfile.value.ignored_default_room = 'room-archived';
+    renderPage();
+    await settled();
+    expect(control('Default room')).toHaveTextContent('room-archived (ignored)');
+  });
+
+  it('leaves an operator-set room the server did not name unmarked', async () => {
+    // The control. A pin absent from `web_rooms` is not evidence of anything —
+    // it may have no handle yet, or merely be hidden, both of which deliver. So
+    // the server names a *different* token here: marking has to key on which
+    // room was named, not on the key being present.
+    currentProfile.value = profile('room-set-by-operator');
+    currentProfile.value.ignored_default_room = 'room-archived-elsewhere';
+    renderPage();
+    await settled();
+    expect(control('Default room')).toHaveTextContent('room-set-by-operator');
+    expect(control('Default room')).not.toHaveTextContent('ignored');
+  });
 });

@@ -10070,6 +10070,70 @@ def _unavailable_web_room_pins(user_id: str, descriptors: list[str]) -> list[str
         return []
 
 
+def _ignored_default_room_pin(user_id: str, token: str) -> str:
+    """``token`` when ``user_id``'s configured `default_room` is not being
+    honoured, else ``""`` (ISSUE-479).
+
+    **A third place a web room token is pinned, and the one `default_room`
+    needs its own predicate for.** `_unavailable_web_room_pins` above answers
+    for `default_destination` and `routing`, and ISSUE-478 left this field
+    unmarked deliberately rather than by oversight: deciding what to mark needed
+    the arm split ISSUE-479 made. The two failure modes land on opposite sides of
+    the dismissal arm, so one predicate over both would be wrong whichever way it
+    was written.
+
+    - `db.configured_default_room`'s arms — the registry row exists, is not
+      archived, the user is still a member — are **terminal**. When one fails
+      every reader discards the value, the resolver falls back to the heuristic,
+      and the room the user chose is quietly never used again. That is what this
+      marks, and it is exactly `configured_default_room` answering `None` for a
+      token that is set.
+    - `db.configured_delivery_room`'s web arms — the room is dismissed, or the
+      handle is archived — are **recoverable by design**.
+      `db.ensure_default_web_chat_room` un-hides the room on the next delivery,
+      so a pin that trips one of those is working rather than broken. Marking it
+      would be a false alarm; not marking an archived one would hide a setting
+      that has stopped doing anything.
+    - **A pinned room with no view on the surface being delivered to is a third
+      case, and it is neither.** A web-only room refuses a bare `talk` and falls
+      to `alerts_channel`, which is ISSUE-477's surface asymmetry working as
+      specified rather than a fault — the pin is still honoured on web, so
+      marking it would call a live setting broken. Nothing repairs it either,
+      since only the promote button writes a `talk` binding, so it is not the
+      recoverable case above. Left unmarked deliberately, not by omission.
+
+    **No membership gate, unlike the neighbour above, and the reason the
+    neighbour has one does not apply.** There it guards against becoming a
+    room-directory oracle: it is asked about arbitrary tokens, so answering
+    "unavailable" for a stranger's archived room while staying silent about a
+    token naming nothing would confirm the room exists. Here the token comes from
+    this user's own profile row — they wrote it, and it is returned to them in
+    the same payload — so nothing is disclosed that the caller did not supply.
+    That is also what lets the mark cover "no longer a member", which is one of
+    the three terminal arms and the one a membership gate would have hidden.
+
+    Best-effort like the neighbour: an unreachable database marks nothing, since
+    the mark is an assertion and a failed lookup has established none.
+    """
+    from . import db
+
+    # Returned exactly as the payload's own `default_room` carries it, because
+    # that is the string the picker compares against. Emptiness is tested on a
+    # stripped copy — `configured_default_room` strips before reading, since a
+    # value written past this endpoint can carry padding — but handing back the
+    # *stripped* form would never match the raw `current` the client holds, so
+    # a padded pin could never be marked.
+    raw = token or ""
+    if not raw.strip() or _config is None or not _config.db_path:
+        return ""
+    try:
+        with db.get_db(_config.db_path) as conn:
+            return "" if db.configured_default_room(conn, user_id) else raw
+    except Exception as e:
+        logger.warning("default room pin check failed for user %s: %s", user_id, e)
+        return ""
+
+
 def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
     """Raise ValueError if a ``web:`` or ``talk:`` leaf names a room ``user_id``
     is not a member of.
@@ -10424,6 +10488,12 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "unavailable_web_rooms": _unavailable_web_room_pins(
             user["username"],
             [profile.default_destination or "", *profile.routing.values()],
+        ),
+        # `default_room` is the third pinned web token and takes its own answer,
+        # not a place in the list above — see `_ignored_default_room_pin` for why
+        # one predicate cannot serve both.
+        "ignored_default_room": _ignored_default_room_pin(
+            user["username"], profile.default_room,
         ),
         "talk_rooms": _user_talk_rooms(user["username"]),
     }}
