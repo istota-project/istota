@@ -183,7 +183,7 @@ describe('webRoomOptions', () => {
     // ISSUE-478: a delivery pinned to an archived, deleted or hidden room lands
     // where nothing renders it and reports success. Keeping the value is right;
     // letting it read like the named rooms above it is not.
-    const opts = webRoomOptions(rooms, 'web-alice-archived', ['web-alice-archived']);
+    const opts = webRoomOptions(rooms, 'web-alice-archived', undefined, ['web-alice-archived']);
     expect(opts[opts.length - 1]).toEqual({
       value: 'web-alice-archived',
       label: 'web-alice-archived (unavailable)',
@@ -206,11 +206,9 @@ describe('webRoomOptions', () => {
   it('marks nothing when the pinned room is one of the offered ones', () => {
     // The other control: a room the server named cannot also be offered, so the
     // mark must never reach an option built from `rooms`.
-    expect(labels(webRoomOptions(rooms, 'web-alice-ideas', ['web-alice-ideas']))).toEqual([
-      'Default room (general)',
-      'general',
-      'ideas',
-    ]);
+    expect(
+      labels(webRoomOptions(rooms, 'web-alice-ideas', undefined, ['web-alice-ideas'])),
+    ).toEqual(['Default room (general)', 'general', 'ideas']);
   });
 });
 

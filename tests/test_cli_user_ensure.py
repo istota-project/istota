@@ -39,6 +39,7 @@ class _FakeArgs:
             "disabled_skill": None,
             "disabled_module": None,
             "default_destination": None,
+            "default_room": None,
             "route": None,
             "email_reply_routing": None,
             "outbound_approval": None,
@@ -379,3 +380,73 @@ class TestUserEnsureExternalTurnDisplay:
             _PROFILE_EDITABLE_FIELDS["external_turn_display"]["values"]
             is up.EXTERNAL_TURN_DISPLAY_VALUES
         )
+
+
+class TestUserEnsureDefaultRoom:
+    """ISSUE-477. The room a destination naming no room lands in, on either
+    surface. Ansible provisions it the same way it provisions a route."""
+
+    def _room(self, db_path, token="room-alerts", owner="alice"):
+        # `register_room` records the registering user as a member, so a room
+        # alice is not in has to be registered by somebody else.
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, token, owner, origin="web", name="alerts")
+
+    def test_it_persists(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._room(db_path)
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", default_room="room-alerts",
+        ))
+        assert user_profiles.get_profile(db_path, "alice").default_room == "room-alerts"
+
+    def test_a_room_the_user_is_not_in_is_refused(self, cfg_with_db, capsys):
+        # `db.configured_default_room` requires membership, so writing one would
+        # be a value every lookup discards — inert and silent at both ends.
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._room(db_path, token="room-theirs", owner="bob")
+        with pytest.raises(SystemExit):
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice", default_room="room-theirs",
+            ))
+        assert "not a member" in capsys.readouterr().err
+
+    def test_a_token_no_room_carries_is_refused(self, cfg_with_db, capsys):
+        # A typo would otherwise leave the setting silently inert — the resolver
+        # would fall straight back to the heuristic and never say why.
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        with pytest.raises(SystemExit):
+            cmd_user_ensure(_FakeArgs(
+                config=str(cfg), name="alice", default_room="room-typo",
+            ))
+        assert "room-typo" in capsys.readouterr().err
+
+    def test_empty_clears_it(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._room(db_path)
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", default_room="room-alerts",
+        ))
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", default_room=""))
+        assert user_profiles.get_profile(db_path, "alice").default_room == ""
+
+    def test_omitted_flag_preserves_it(self, cfg_with_db):
+        from istota.cli import cmd_user_ensure
+
+        cfg, db_path = cfg_with_db
+        self._room(db_path)
+        cmd_user_ensure(_FakeArgs(
+            config=str(cfg), name="alice", default_room="room-alerts",
+        ))
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice", display_name="Alice K"))
+        profile = user_profiles.get_profile(db_path, "alice")
+        assert profile.default_room == "room-alerts"
+        assert profile.display_name == "Alice K"

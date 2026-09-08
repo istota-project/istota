@@ -168,15 +168,21 @@ export function routeOptions(
  * repeat gets a piece of its token (ISSUE-474). Only where it repeats: a token
  * fragment beside every name is noise, and the marks already tell some pairs
  * apart on their own.
+ *
+ * `emptyLabel` overrides the leading option, and one caller needs it: the
+ * "Default room" row itself (ISSUE-477), where naming the default room as the
+ * way to leave the default room unset would be circular. Everywhere else the
+ * default is what this function works out.
  */
 export function webRoomOptions(
   rooms: WebRoom[],
   current: string,
+  emptyLabel?: string,
   unavailable: string[] = [],
 ): RouteOption[] {
   const label = (token: string) =>
     unavailable.includes(token) ? unavailableRoomLabel(token) : token;
-  return roomOptions(rooms, current, defaultRoomLabel(rooms), webRoomMarks, label);
+  return roomOptions(rooms, current, emptyLabel ?? defaultRoomLabel(rooms), webRoomMarks, label);
 }
 
 /**

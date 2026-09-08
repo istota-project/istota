@@ -220,6 +220,7 @@
         // Normalize optional routing fields so the bindings are safe.
         profile.routing = profile.routing || {};
         profile.default_destination = profile.default_destination || 'talk';
+        profile.default_room = profile.default_room || '';
       }
       initialProfileJson = profile ? JSON.stringify(profile) : '';
       allModules = modResp.modules;
@@ -307,8 +308,17 @@
   // The room half of a `web` or `talk` route (ISSUE-473, ISSUE-475). Both are
   // surfaces whose destination is one room out of several the user has; email
   // and ntfy have no room at all, so their rows show the surface dropdown alone.
-  const webRooms = (current: string) =>
-    webRoomOptions(profile?.web_rooms || [], current, profile?.unavailable_web_rooms || []);
+  // `emptyLabel` is passed only by the "Default room" row, where the leading
+  // option means "no room pinned" rather than "the room a bare `web` lands in"
+  // — which after ISSUE-477 is whatever this setting says, so naming it there
+  // would be circular.
+  const webRooms = (current: string, emptyLabel?: string) =>
+    webRoomOptions(
+      profile?.web_rooms || [],
+      current,
+      emptyLabel,
+      profile?.unavailable_web_rooms || [],
+    );
   const talkRooms = (current: string, emptyLabel: string) =>
     talkRoomOptions(profile?.talk_rooms || [], current, emptyLabel);
 
@@ -448,6 +458,7 @@
         disabled_skills: profile.disabled_skills,
         disabled_modules: profile.disabled_modules,
         default_destination: profile.default_destination || 'talk',
+        default_room: profile.default_room || '',
         routing: profile.routing || {},
         timezone_follow_location: profile.timezone_follow_location,
         external_turn_display: profile.external_turn_display || 'collapsed',
@@ -745,6 +756,29 @@
               ariaLabel="Default delivery destination"
               fullWidth
               onValueChange={setDestination}
+            />
+          </div>
+        </SettingsField>
+        <!-- Beside `default_destination` because the two answer different
+             questions about one delivery: that row names the transport, this
+             one names the room on it. It stays off that row for the reason
+             ISSUE-475 gave — a room pinned there governs notifications only,
+             while this governs every destination that named no room, on both
+             surfaces at once. -->
+        <SettingsField
+          labelled={false}
+          label="Default room"
+          hint="Where a delivery that names no room of its own lands — both in web chat and, if the room is also on Talk, in Talk. Leave it automatic and the oldest room you are alone in is used, which changes if you archive that room."
+        >
+          <div class="route-row">
+            <Select
+              value={profile.default_room || ''}
+              options={webRooms(profile.default_room || '', 'Automatic')}
+              ariaLabel="Default room"
+              fullWidth
+              onValueChange={(v) => {
+                if (profile) profile.default_room = v || '';
+              }}
             />
           </div>
         </SettingsField>

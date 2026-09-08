@@ -1253,6 +1253,11 @@ export interface UserProfile {
   max_foreground_workers: number;
   max_background_workers: number;
   default_destination: string;
+  // The room a destination naming no room of its own lands in — a canonical
+  // room token, '' for unset, when the per-surface default is worked out
+  // instead. One token for both surfaces: a promoted room answers on web and on
+  // Talk without being named twice (ISSUE-477).
+  default_room: string;
   routing: Record<string, string>;
   briefing_email_html: boolean;
   // Opt-in: follow the GPS timezone on travel (ISSUE-096). Off by default —

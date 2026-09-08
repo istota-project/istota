@@ -9746,6 +9746,9 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "max_foreground_workers": {"type": "int"},
     "max_background_workers": {"type": "int"},
     "default_destination":    {"type": "descriptor"},
+    # A canonical room token, not a descriptor: it names where a destination
+    # that named no room lands, on whichever surface asks (ISSUE-477).
+    "default_room":           {"type": "room"},
     "routing":                {"type": "routing"},
     "briefing_email_html":    {"type": "bool"},
     "timezone_follow_location": {"type": "bool"},
@@ -10134,6 +10137,29 @@ def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
                 raise ValueError(f"web room {token!r} is not one of your rooms")
 
 
+def _validate_default_room(token: str, user_id: str) -> None:
+    """Raise ValueError if ``token`` is not a room ``user_id`` is a member of.
+
+    `default_room` is one canonical room token answering for both surfaces
+    (ISSUE-477), so the question it asks is the registry's — "is this one of
+    your rooms" — rather than either surface's. That is the same question the
+    ``web:`` leaf of a route asks, and the same predicate `_user_web_rooms`
+    builds the picker on, so the dropdown cannot offer a room the save refuses.
+
+    Not `_validate_talk_route_token`'s question, even though the setting answers
+    for Talk too: a `talk:` leaf carries a Nextcloud conversation id, and this
+    carries the room token that id is *bound to*. Checking the room the user is
+    in covers the binding by construction.
+    """
+    from . import db
+
+    if not token or _config is None or not _config.db_path:
+        return
+    with db.get_db(_config.db_path) as conn:
+        if not db.is_room_member(conn, token, user_id):
+            raise ValueError(f"room {token!r} is not one of your rooms")
+
+
 def _validate_talk_route_token(token: str, user_id: str) -> None:
     """Raise ValueError if ``token`` is not a Talk conversation ``user_id`` may
     deliver to.
@@ -10293,6 +10319,19 @@ def _coerce_profile_value(
         if value and value != ((stored or "") if isinstance(stored, str) else ""):
             _validate_talk_channel(value, user_id)
         return value
+    if t == "room":
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+        value = value.strip()
+        # Same membership check the `web:` leaf of a route gets, and the same
+        # skip when the value did not change: an operator-set room the registry
+        # cannot vouch for must not refuse the user's own unrelated edit, on a
+        # row the page offers no way to correct. See `_validate_descriptor_rooms`.
+        if value and value != ((stored or "") if isinstance(stored, str) else ""):
+            _validate_default_room(value, user_id)
+        return value
     if t == "descriptor":
         from .transport import parse_output_target
         if value is None or value == "":
@@ -10372,6 +10411,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "max_foreground_workers": profile.max_foreground_workers,
         "max_background_workers": profile.max_background_workers,
         "default_destination": profile.default_destination,
+        "default_room": profile.default_room,
         "routing": profile.routing,
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,

@@ -69,6 +69,12 @@ class UserProfile:
     routing: dict[str, str] = field(default_factory=dict)
     # Default delivery descriptor when no per-purpose route applies.
     default_destination: str = "talk"
+    # The room a destination naming no room of its own lands in — a canonical
+    # room token, '' for unset. Surface-agnostic: the room registry is unified,
+    # so one token answers for web and for Talk, and a room promoted to Talk
+    # does not need naming twice. Read only through
+    # `db.configured_delivery_room`; see ISSUE-477.
+    default_room: str = ""
     # Email-reply mirror policy: origin+thread | origin | thread.
     email_reply_routing: str = "origin+thread"
     # Outbound email approval: '' (unset — follow the operator floor) | off |
@@ -96,7 +102,7 @@ _PROFILE_COLUMNS = (
     "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders", "quiet_email_senders",
     "disabled_modules",
-    "routing", "default_destination", "email_reply_routing",
+    "routing", "default_destination", "default_room", "email_reply_routing",
     "outbound_approval", "external_turn_display",
     "default_briefings", "briefing_email_html",
     "timezone_follow_location",
@@ -155,6 +161,11 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         disabled_modules=_parse_json_list(row["disabled_modules"]),
         routing=_parse_json_dict(row["routing"]),
         default_destination=row["default_destination"] or "talk",
+        # `_row_get`, like the columns below it: a row from a database whose
+        # ALTER was blocked has no such column, and '' is the right answer there
+        # — the per-surface heuristic keeps answering, which is what every user
+        # had before this column existed.
+        default_room=str(_row_get(row, "default_room") or ""),
         email_reply_routing=row["email_reply_routing"] or "origin+thread",
         # No `or` default: '' is the unset value the floor resolution reads.
         outbound_approval=str(_row_get(row, "outbound_approval") or ""),
@@ -553,6 +564,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         json.dumps(list(profile.disabled_modules)),
         json.dumps(dict(profile.routing)),
         profile.default_destination or "talk",
+        profile.default_room or "",
         profile.email_reply_routing or "origin+thread",
         profile.outbound_approval or "",
         profile.external_turn_display or "collapsed",

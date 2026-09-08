@@ -181,14 +181,27 @@ def effective_log_destinations(config: "Config", user_id: str):
         return []
 
 
-def resolve_conversation_token(config: "Config", user_id: str) -> str | None:
+def resolve_conversation_token(
+    config: "Config", user_id: str, conn=None,
+) -> str | None:
     """Resolve Talk conversation token for a user.
 
     Priority: an explicit Talk route (``routing["alert"]`` / ``routing["reply"]``)
-    > alerts_channel > briefing token > auto-detected 1:1 DM. Retains the
+    > alerts_channel > the configured `default_room`'s Talk binding > briefing
+    token > auto-detected 1:1 DM. Retains the
     unconditional Talk auto-DM fallback so routing a purpose off-Talk does not
     make this report Talk as unconfigured (which would corrupt heartbeat's
     ``consecutive_errors`` accounting).
+
+    ``conn`` is an open connection the caller already holds, and a caller that
+    has one must pass it. Only the `default_room` rung touches the database, and
+    only to read, so a nested connection would not deadlock under WAL — but it
+    would be opened at `get_db`'s 30s busy timeout on a path
+    `transport.routing._room_for_destination` reaches per destination per
+    message from inside the email poller's write transaction, and that
+    function's own comment forbids taking a second connection on a database its
+    caller already holds. Passing one through is cheaper than reasoning about
+    when it is safe not to.
     """
     user_config = config.users.get(user_id)
     if not user_config:
@@ -207,6 +220,35 @@ def resolve_conversation_token(config: "Config", user_id: str) -> str | None:
 
     if user_config.alerts_channel:
         return user_config.alerts_channel
+
+    # The user's configured default room, when it is on Talk (ISSUE-477). Below
+    # the two rungs above and above the two below, because those are the ones
+    # that are provisioned or explicitly set: putting it higher would move every
+    # existing Talk user's alerts out of their alerts channel on upgrade, which
+    # is a behaviour change nobody asked for. What it does replace is the guess.
+    #
+    # Read from the row rather than from `user_config`, unlike `alerts_channel`
+    # beside it. The web rung reads the row too — it lives in `db.py` with a
+    # connection in hand — and one setting with two readers that disagree about
+    # where it is stored is the drift this issue exists to remove.
+    if config.db_path:
+        try:
+            from . import db
+            if conn is not None:
+                token = db.configured_delivery_room(conn, user_id, "talk")
+            else:
+                with db.get_db(config.db_path) as own:
+                    token = db.configured_delivery_room(own, user_id, "talk")
+            if token:
+                return token
+        except Exception as e:
+            # No `exc_info`, and a warning rather than an error: this runs per
+            # message on the delivery path and once per user per heartbeat
+            # sweep, so a stack trace per call would bury the event that caused
+            # it. The ladder carries on to the rungs below.
+            logger.warning(
+                "configured default room lookup failed for user %s: %s", user_id, e,
+            )
 
     for briefing in user_config.briefings:
         if briefing.conversation_token:
@@ -511,6 +553,13 @@ def is_channel_configured(
     user_config = config.users.get(user_id)
 
     def _talk_ok() -> bool:
+        # Unlike `_web_ok` below, this one does reach the database since
+        # ISSUE-477 — the `default_room` rung is a read, once per user per
+        # heartbeat sweep. That is the distinction `_web_ok`'s objection turns
+        # on: it refuses a resolver that *writes*, and a probe that reads is
+        # only a cost. The rung can also only add a way to answer "configured",
+        # never take one away, so the `consecutive_errors` corruption this
+        # function's docstring warns about stays out of reach.
         if not config.nextcloud.url:
             return False
         if conversation_token:
