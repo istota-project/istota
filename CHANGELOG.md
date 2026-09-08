@@ -117,6 +117,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Fixed
 
+- A task that finishes now delivers its answer even when one of the follow-up steps behind it fails. Those steps — filing health records, saving notes, starting a subtask, sending a queued email — ran one after another with nothing between them, so anything unexpected in one skipped the rest and then skipped the reply too, leaving the task recorded as a success with nothing sent. Each step is contained on its own now: one that fails costs only its own work and is written to the task's log, and the answer goes out either way.
+
 - An accounting command that fails in a way nobody anticipated now says so instead of answering with nothing. Every other skill reports an unexpected failure as a readable error; the accounting one was the last that did not, so a sync or an invoice run that broke came back empty and the assistant had nothing to tell you beyond that it had not worked. Commands that were already reporting their errors are unchanged.
 
 - `istota doctor` now handles a database whose path contains a `?`, `#` or `%`. It built that path into a URL-shaped string without escaping those characters: a `?` or `#` cut the path short, so the check opened a second database at the shortened name, for writing, and created that file — under `sudo`, owned by root — while a `%` made it look for a name it had decoded and fail to open anything. Nothing changes for an ordinary path.
