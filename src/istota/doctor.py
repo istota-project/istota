@@ -404,14 +404,20 @@ def check_tmux(config: "Config", probe: bool) -> CheckResult:
 def _native_key_holders(config: "Config") -> int:
     """How many configured users have a ``native_brain``/``api_key`` secret.
 
-    **Its own read-only query rather than ``secrets_store.secret_exists``**, for
-    the reason ``check_framework_db`` states two ways below: that helper opens
-    the database read-write and commits, which materializes the ``-wal`` /
-    ``-shm`` sidecars, and against a *missing* file creates a zero-byte database
-    that later reads as corruption rather than as absence. A diagnostic run as
-    root beside a stopped daemon would leave all of that owned by the wrong
-    user. So this opens ``mode=ro`` like every other database-touching check
-    here.
+    **Its own read-only query rather than ``secrets_store.secret_exists``**:
+    that helper opens the database read-write *and commits*, and against a
+    missing file it creates a zero-byte database that later reads as corruption
+    rather than as absence. So this goes through
+    :func:`~istota.sqlite_util.connect_read_only` like every other
+    database-touching check here, which refuses the write and refuses to create.
+
+    **What that helper does not buy is sidecar avoidance, which is the reverse
+    of what this docstring used to claim** (ISSUE-458). A read-write open is the
+    one that *removes* the ``-wal`` / ``-shm`` pair on last close; a ``mode=ro``
+    open creates them and leaves them, owned by whoever ran the diagnostic — and
+    a pair the daemon cannot write locks it out of its own database. That is why
+    ``connect_read_only`` opens ``mode=rw`` and withholds the write with
+    ``PRAGMA query_only``; its docstring carries the measurements.
 
     Presence, never the value: no decryption, so no provider credential enters
     this process and no ``last_accessed_at`` is bumped. Gated on the store's key
@@ -593,12 +599,18 @@ def check_framework_db(config: "Config", probe: bool) -> CheckResult:
             remedy="Run `istota init` to create the framework database.",
         )
     try:
-        # Read-only, via the URI form — `sqlite_util.connect_read_only` carries
-        # the reason. Deliberately not a `with`: a failure to *open* is reported
-        # differently from a failure in the body below, and one block cannot
-        # tell them apart.
+        # `sqlite_util.connect_read_only` carries the reason it opens `mode=rw`
+        # and withholds the write with a pragma rather than opening `mode=ro`
+        # (ISSUE-458). Deliberately not a `with`: a failure to *open* is
+        # reported differently from a failure in the body below, and one block
+        # cannot tell them apart.
         conn = sqlite_util.connect_read_only(db_path)
-    except sqlite3.DatabaseError as exc:
+    except sqlite3.Error as exc:
+        # `sqlite3.Error`, not `DatabaseError`: the helper runs a pragma inside
+        # itself now, and `InterfaceError` is a sibling of `DatabaseError`
+        # rather than a subclass, so the narrower catch could let one escape a
+        # check that must never raise. `check_task_failure_rate` already
+        # catches the wider class.
         return CheckResult(
             "runtime.framework_db",
             FAIL,
@@ -2100,7 +2112,8 @@ def check_task_failure_rate(config: "Config", probe: bool) -> CheckResult:
         # `check_framework_db` already reports the absence and owns its remedy.
         return CheckResult(name, SKIP, f"{db_path} does not exist")
     try:
-        # Read-only via the URI form; see `sqlite_util.connect_read_only`.
+        # Reads without writing; see `sqlite_util.connect_read_only` for why
+        # that is a `mode=rw` open with `PRAGMA query_only` on it (ISSUE-458).
         conn = sqlite_util.connect_read_only(db_path)
     except sqlite3.Error as exc:
         return CheckResult(
@@ -2157,12 +2170,18 @@ _MODEL_PROBE_MARKER = "healthcheck-ok"
 def _read_user_resources(config: "Config", user_id: str) -> list:
     """The user's resource rows, for the probe's sandbox plan. Never raises.
 
-    Read-only through the URI form rather than through ``db.get_db``, which
-    connects read-write and commits on exit: on a WAL database that
-    materializes the ``-wal`` / ``-shm`` sidecars, and ``sudo istota doctor``
-    against a stopped daemon would leave them owned by root. That is
+    Through :func:`~istota.sqlite_util.connect_read_only` rather than through
+    ``db.get_db``, which connects read-write and *commits* on exit. That is
     :func:`check_framework_db`'s rule, and a check reached from the same CLI
     does not get an exemption from it for being a port of daemon-side code.
+    What the rule is about is the commit and the create, not the ``-wal`` /
+    ``-shm`` sidecars this docstring used to blame it for: a read-write open is
+    the one that *removes* those on last close (ISSUE-458).
+
+    Unlike the four other read-only sites here it does **not** check
+    ``db_path.exists()`` first, and does not need to — ``connect_read_only``
+    opens ``mode=rw``, which raises on a missing file rather than creating one,
+    and the bare ``except`` below turns that into the empty list.
 
     An empty list on any failure only narrows the mounts the probe's namespace
     gets; a check about the model must not fail on the resource table.
@@ -2299,8 +2318,9 @@ def check_model_execution(config: "Config", probe: bool) -> CheckResult:
             # operator shell, so a `sudo istota doctor` would leave a
             # root-owned `{temp_dir}/{user_id}` that every later task for that
             # user then binds read-write and cannot write to — the same
-            # ownership hazard `check_framework_db` opens read-only to avoid,
-            # and worse, because it persists. A directory the daemon has not
+            # ownership hazard `sqlite_util.connect_read_only` avoids by
+            # leaving no sidecar behind, and worse, because a directory nothing
+            # cleans up persists. A directory the daemon has not
             # made yet means no task has run as this user, which is a fact
             # worth reporting rather than papering over.
             user_temp = Path(config.temp_dir) / user_id
@@ -2761,10 +2781,14 @@ def _stored_secret_count(config: "Config") -> int:
     are real, and an empty scope would then read as an empty store and soften
     the verdict on the deployment that most needs it.
 
-    ``mode=ro`` like every other database-touching check here, for the reason
-    :func:`_native_key_holders` states: a read-write open materializes the
-    ``-wal``/``-shm`` sidecars and, against a missing file, creates a zero-byte
-    database that later reads as corruption rather than as absence.
+    Through :func:`~istota.sqlite_util.connect_read_only` like every other
+    database-touching check here, for the half of
+    :func:`_native_key_holders`'s reason that survived ISSUE-458: an ordinary
+    read-write open would, against a missing file, create a zero-byte database
+    that later reads as corruption rather than as absence. The ``-wal`` /
+    ``-shm`` half was backwards — a read-write open removes those on last close
+    — which is why that helper opens ``mode=rw`` and withholds the write with a
+    pragma instead of opening ``mode=ro``.
 
     Never decrypts and never selects ``encrypted_value``, so no ciphertext
     enters this process. Never raises — one caller is the daemon's boot

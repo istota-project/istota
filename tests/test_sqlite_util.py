@@ -18,6 +18,7 @@ in agreement.
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import threading
 from pathlib import Path
@@ -187,22 +188,19 @@ class TestConnectReadOnly:
         finally:
             conn.close()
 
-    def test_it_does_materialize_the_wal_sidecars_and_leaves_them(self, tmp_path):
-        """Measured, and it is the opposite of the reason the callers give.
+    def test_it_leaves_no_wal_sidecars_behind(self, tmp_path):
+        """ISSUE-458: the guarantee all five `doctor` call sites claim.
 
-        All five `doctor` call sites say they open ``mode=ro`` so that a
-        ``sudo istota doctor`` against a stopped daemon does not materialize the
-        ``-wal`` / ``-shm`` sidecars and leave root-owned files behind. Driven
-        against sqlite 3.47, ``mode=ro`` creates both **and leaves them**,
-        because a read-only connection cannot delete them on close — while the
-        read-write open they were avoiding creates them and cleans them up. Only
-        ``immutable=1`` avoids creating them, and that is unsafe against a live
-        database because it tells SQLite the file never changes.
+        They say the URI form exists so that a ``sudo istota doctor`` against a
+        stopped daemon does not materialize the ``-wal`` / ``-shm`` sidecars and
+        leave root-owned files beside the database. Under ``mode=ro`` that was
+        the other way round — measured against sqlite 3.47, a read-only open
+        creates both and *leaves* them, because a read-only connection cannot
+        delete them on close.
 
-        Pinned as measured rather than corrected: this stage moved the open, and
-        changing which URI these checks use is a decision about what a
-        diagnostic may assume of a running daemon. A later fix turns this red on
-        purpose.
+        The cost is not clutter. A sidecar owned by another uid stops the daemon
+        opening its own database at all, which
+        ``test_a_stray_sidecar_the_daemon_cannot_write_locks_it_out`` drives.
         """
         db = tmp_path / "t.db"
         with sqlite_util.open_db(db, commit=True) as conn:
@@ -217,12 +215,15 @@ class TestConnectReadOnly:
             conn.execute("SELECT COUNT(*) FROM t").fetchone()
         finally:
             conn.close()
-        assert sorted(p.name for p in tmp_path.iterdir()) == [
-            "t.db", "t.db-shm", "t.db-wal",
-        ]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["t.db"]
 
     def test_a_read_write_open_cleans_its_sidecars_up(self, tmp_path):
-        """The control for the case above: same tree, the other open."""
+        """The control, and the mechanism the fix borrows.
+
+        A read-write open is what deletes the sidecars on last close, which is
+        why :func:`connect_read_only` opens ``mode=rw`` and withholds the write
+        with ``PRAGMA query_only`` rather than opening ``mode=ro``.
+        """
         db = tmp_path / "t.db"
         with sqlite_util.open_db(db, commit=True) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -233,6 +234,231 @@ class TestConnectReadOnly:
         with sqlite_util.open_db(db) as conn:
             conn.execute("SELECT COUNT(*) FROM t").fetchone()
         assert sorted(p.name for p in tmp_path.iterdir()) == ["t.db"]
+
+    @pytest.mark.requires_dac
+    def test_a_stray_sidecar_the_daemon_cannot_write_locks_it_out(self, tmp_path):
+        """Why the strays mattered: they are an outage, not clutter.
+
+        A ``-wal`` / ``-shm`` pair left by a root-run diagnostic is owned by
+        root, and the daemon runs as its own user. Approximated here by dropping
+        write permission on the pair this process owns: the read-write open the
+        daemon needs then fails outright. This is the control that says what the
+        test above is protecting, so it drives the *old* behaviour by hand
+        rather than through :func:`connect_read_only`.
+        """
+        db = tmp_path / "t.db"
+        with sqlite_util.open_db(db, commit=True) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE t(a)")
+        strays = [db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")]
+        for sidecar in strays:
+            sidecar.touch()
+            sidecar.chmod(0o444)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                with sqlite_util.open_db(db, commit=True) as conn:
+                    conn.execute("INSERT INTO t VALUES (1)")
+        finally:
+            for sidecar in strays:
+                sidecar.chmod(0o644)
+
+    @staticmethod
+    def _crashed_db(src: Path, dst: Path) -> Path:
+        """A database in the shape a SIGKILLed daemon leaves: a hot WAL.
+
+        Copied out from under a live writer rather than made with a subprocess,
+        because Python's `close()` always checkpoints — there is no in-process
+        way to *stop* at the crashed shape, only to snapshot it. Verified
+        equivalent to a real `SIGKILL` of a writing process: same three files,
+        same un-checkpointed `-wal`, same row count on read.
+        """
+        db = src / "istota.db"
+        w = sqlite3.connect(str(db))
+        try:
+            w.execute("PRAGMA journal_mode=WAL")
+            w.execute("PRAGMA wal_autocheckpoint=0")
+            w.execute("CREATE TABLE t(a)")
+            w.commit()
+            for i in range(2000):
+                w.execute("INSERT INTO t VALUES (?)", (i,))
+            w.commit()
+            for suffix in ("", "-wal", "-shm"):
+                p = src / ("istota.db" + suffix)
+                if p.exists():
+                    shutil.copy2(p, dst / p.name)
+        finally:
+            w.close()
+        return dst / "istota.db"
+
+    def test_it_does_not_checkpoint_a_crashed_database_into_its_main_file(
+        self, tmp_path,
+    ):
+        """The diagnostic must not rewrite the artifact it is diagnosing.
+
+        A read-write open that is the *last* connection checkpoints an
+        un-checkpointed WAL into the main database file and unlinks the
+        sidecars. `PRAGMA query_only` does not prevent that — it bounds
+        statements, not SQLite's own close-time housekeeping — so the naive
+        `mode=rw` swap rewrote the framework database of a *crashed* daemon,
+        as root under `sudo istota doctor`. Measured: main file 4096 -> 28672
+        bytes, mtime changed.
+
+        That is precisely the database `check_framework_db` exists to inspect
+        and whose remedy is `python -m istota.db_restore`, so altering it before
+        the operator has decided anything is the standing "no mutating probes"
+        rule with the artifact in hand. `connect_read_only` therefore reads a
+        database that has a hot journal read-only and takes the read-write path
+        only where there is nothing to recover.
+        """
+        src = tmp_path / "live"
+        dst = tmp_path / "crashed"
+        src.mkdir()
+        dst.mkdir()
+        db = self._crashed_db(src, dst)
+
+        before = db.stat()
+        conn = sqlite_util.connect_read_only(db)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 2000
+        finally:
+            conn.close()
+        after = db.stat()
+
+        assert after.st_size == before.st_size, "the main database was rewritten"
+        assert after.st_mtime_ns == before.st_mtime_ns, "the main database was touched"
+
+    def test_it_adds_no_sidecar_to_a_database_that_already_has_one(self, tmp_path):
+        """The other half: reading a hot-WAL database leaves the tree as found.
+
+        The read-only path is only acceptable here because a database with a hot
+        WAL already has both sidecars, so nothing new is stranded — which is
+        what makes the split safe rather than a return to the old defect.
+        """
+        src = tmp_path / "live"
+        dst = tmp_path / "crashed"
+        src.mkdir()
+        dst.mkdir()
+        db = self._crashed_db(src, dst)
+        before = sorted(p.name for p in dst.iterdir())
+        assert before == ["istota.db", "istota.db-shm", "istota.db-wal"]
+
+        conn = sqlite_util.connect_read_only(db)
+        try:
+            conn.execute("SELECT COUNT(*) FROM t").fetchone()
+        finally:
+            conn.close()
+        assert sorted(p.name for p in dst.iterdir()) == before
+
+    def test_it_reads_wal_content_a_live_writer_has_not_checkpointed(self, tmp_path):
+        """The measurement that rules ``immutable=1`` out, kept as a test.
+
+        ``immutable=1`` is the one URI that creates no sidecars, and it is
+        unusable here: it tells SQLite the file never changes, so the whole WAL
+        is ignored. Against a database whose table lives in an un-checkpointed
+        WAL it does not return stale rows, it reports ``no such table`` — every
+        one of doctor's five checks would then call a healthy deployment broken.
+        Switching this function to it turns this test red.
+        """
+        db = tmp_path / "t.db"
+        with sqlite_util.open_db(db, commit=True) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+
+        live = sqlite_util.connect(db)
+        try:
+            live.execute("CREATE TABLE t(a)")
+            live.execute("INSERT INTO t VALUES (42)")
+            live.commit()
+
+            conn = sqlite_util.connect_read_only(db)
+            try:
+                assert conn.execute("SELECT a FROM t").fetchall() == [(42,)]
+            finally:
+                conn.close()
+        finally:
+            live.close()
+
+    def test_it_leaves_a_live_writer_its_sidecars_and_its_write(self, tmp_path):
+        """A concurrent daemon keeps working, and keeps owning the sidecars.
+
+        The cleanup on close is SQLite's own last-connection rule, so it must
+        not fire while somebody else still holds the database.
+        """
+        db = tmp_path / "t.db"
+        with sqlite_util.open_db(db, commit=True) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE t(a)")
+
+        live = sqlite_util.connect(db)
+        try:
+            live.execute("INSERT INTO t VALUES (1)")
+            live.commit()
+
+            conn = sqlite_util.connect_read_only(db)
+            conn.execute("SELECT COUNT(*) FROM t").fetchone()
+            conn.close()
+
+            assert sorted(p.name for p in tmp_path.iterdir()) == [
+                "t.db", "t.db-shm", "t.db-wal",
+            ]
+            live.execute("INSERT INTO t VALUES (2)")
+            live.commit()
+            assert live.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 2
+        finally:
+            live.close()
+
+    @pytest.mark.requires_dac
+    def test_it_still_reads_a_database_the_process_cannot_write(self, tmp_path):
+        """`mode=rw` is not a promise the handle is writable, and that is relied on.
+
+        SQLite retries the open read-only when `O_RDWR` is refused, so a
+        database file at 0444 opens and reads rather than failing. Without that
+        fallback a non-root operator, or a container running as another uid,
+        would turn `check_framework_db` into `could not be opened` with a
+        remedy telling them to restore from a snapshot — a destructive-sounding
+        instruction for a permissions problem. The read-write branch depends on this
+        since ISSUE-458, and nothing else would notice it changing.
+
+        The cost of the fallback is in the same measurement: the handle cannot
+        write, so it cannot clean up, and the sidecars are left exactly as
+        `mode=ro` left them. Asserted so the limit is recorded rather than
+        discovered.
+        """
+        db = tmp_path / "t.db"
+        with sqlite_util.open_db(db, commit=True) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE t(a)")
+            conn.execute("INSERT INTO t VALUES (42)")
+        for sidecar in (db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
+            sidecar.unlink(missing_ok=True)
+        db.chmod(0o444)
+        try:
+            conn = sqlite_util.connect_read_only(db)
+            try:
+                assert conn.execute("SELECT a FROM t").fetchone()[0] == 42
+                with pytest.raises(sqlite3.OperationalError):
+                    conn.execute("INSERT INTO t VALUES (1)")
+            finally:
+                conn.close()
+        finally:
+            db.chmod(0o644)
+
+    def test_the_pragma_does_not_touch_the_database_header(self, tmp_path):
+        """A non-database file must still fail at the first query, not at open.
+
+        `connect_read_only` runs `PRAGMA query_only` before returning, and
+        `check_framework_db` splits "failed to open" from "failed in the body"
+        precisely because they carry different remedies. A pragma that read a
+        page would move every corrupt-database report onto the open branch.
+        """
+        db = tmp_path / "bad.db"
+        db.write_bytes(b"this is definitely not a sqlite database")
+
+        conn = sqlite_util.connect_read_only(db)
+        try:
+            with pytest.raises(sqlite3.DatabaseError):
+                conn.execute("SELECT 1 FROM sqlite_master").fetchone()
+        finally:
+            conn.close()
 
     def test_a_missing_database_raises_rather_than_creating_one(self, tmp_path):
         db = tmp_path / "gone.db"
@@ -634,13 +860,47 @@ class TestNoSecondCopy:
             body = (SRC / rel).read_text(encoding="utf-8")
             assert "journal_mode=WAL" in body or "journal_mode = WAL" in body, rel
 
-    def test_the_read_only_uri_spelling_lives_in_one_place(self):
+    def test_no_module_builds_its_own_read_only_uri(self):
+        """Every spelling, since ISSUE-458 made the mode a per-database choice.
+
+        A hand-built `?mode=ro` elsewhere in the tree is now the defect
+        `connect_read_only` exists to prevent — it strands the `-wal` / `-shm`
+        pair beside a cold database — and a hand-built `?mode=rw` is the other
+        one, rewriting a hot database's main file. The interpolated form this
+        module uses is matched too, so a copy of it cannot pass by not spelling
+        a mode out.
+
+        **Scoped to `src/` on purpose, and four `?mode=ro` opens live outside
+        it.** `testbed/probe.py` has two and cannot use this helper at all —
+        that package deliberately imports nothing from `src/istota/`
+        (`.claude/rules/testbed.md`) — and the `istota` healthchecks in
+        `docker/docker-compose.test.yml` and `testbed/compose/testbed.yml` open
+        the live framework database on an interval, so they do strand the pair.
+        Harmless there rather than fixed: the image declares no `USER`, the
+        compose services set no `user:`, and the entrypoint drops no privilege,
+        so the healthcheck and the daemon are both root and the daemon can
+        write what the probe left. That reasoning is what makes the narrow glob
+        a decision rather than an oversight, and it stops holding the day
+        anything in that stack runs as something other than root.
+        """
+        needles = ("?mode=ro", "?mode=rw", "?mode={")
         hits = sorted(
             str(p.relative_to(SRC))
             for p in SRC.rglob("*.py")
-            if "?mode=ro" in p.read_text(encoding="utf-8")
+            if any(n in p.read_text(encoding="utf-8") for n in needles)
         )
         assert hits == ["sqlite_util.py"], (
             "a read-only URI open appeared outside sqlite_util; call "
             "sqlite_util.connect_read_only"
         )
+
+    def test_the_mode_is_chosen_rather_than_fixed(self):
+        """The guard above passes for a module that hardcodes either mode.
+
+        This is what says the choice is still a choice: reverting
+        `connect_read_only` to a single mode puts back exactly one of the two
+        defects ISSUE-458 is about, and every other drift guard stays green.
+        """
+        body = (SRC / "sqlite_util.py").read_text(encoding="utf-8")
+        assert "_has_hot_journal" in body
+        assert '"ro" if' in body and '"rw"' in body
