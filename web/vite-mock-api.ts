@@ -3720,6 +3720,7 @@ const handlers: MockHandler[] = [
       max_foreground_workers: 0,
       max_background_workers: 0,
       default_destination: 'talk',
+      default_room: '',
       routing: {},
       briefing_email_html: true,
       timezone_follow_location: false,

@@ -781,6 +781,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     disabled_modules TEXT NOT NULL DEFAULT '[]',         -- JSON array (default-on otherwise)
     routing TEXT NOT NULL DEFAULT '{}',                  -- JSON object: purpose -> output_target descriptor
     default_destination TEXT NOT NULL DEFAULT 'talk',    -- fallback delivery descriptor
+    default_room TEXT NOT NULL DEFAULT '',               -- canonical room token a destination naming no room lands in ('' = the heuristic answers); one token for both surfaces
     email_reply_routing TEXT NOT NULL DEFAULT 'origin+thread', -- email-reply mirror policy: origin+thread | origin | thread
     outbound_approval TEXT NOT NULL DEFAULT '',          -- outbound email approval: '' = unset (follow [email] outbound_approval_floor) | off | untrusted | all
     external_turn_display TEXT NOT NULL DEFAULT 'collapsed', -- external-origin turn body in web chat: full | collapsed | hidden (the turn itself always renders)

@@ -33,6 +33,7 @@ function profile(routing: Record<string, string> = {}): UserProfile {
     max_background_workers: 0,
     routing,
     default_destination: 'talk',
+    default_room: '',
     briefing_email_html: true,
     timezone_follow_location: false,
     external_turn_display: 'collapsed',

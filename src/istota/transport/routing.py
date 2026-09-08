@@ -674,10 +674,14 @@ def _room_for_destination(
         candidate = channel
     elif surface == "talk":
         from ..notifications import resolve_conversation_token
+        # `conn` is passed, not left to be reopened: since ISSUE-477 that
+        # resolver reads the user's configured default room, and the web branch
+        # below states the rule — resolving a transcript room must not take a
+        # second connection on a database this caller already holds.
         candidate = (
             channel
             or talk_delivery_token
-            or resolve_conversation_token(config, user_id)
+            or resolve_conversation_token(config, user_id, conn)
         )
     elif surface == "web":
         # `db.default_web_room` rather than `default_web_room_token`, which

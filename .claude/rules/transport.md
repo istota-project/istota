@@ -1346,8 +1346,9 @@ of them.
   order: **(0)** `tasks.talk_delivery_token`
   when set, absolutely; **(1)** the task's room's `talk` binding; **(2)**
   `conversation_token` itself, when the task has one and is not email-sourced;
-  **(3)** `notifications.resolve_conversation_token` (alerts → briefing →
-  auto-DM) for an email task whose token is a synthetic 16-char hex thread hash
+  **(3)** `notifications.resolve_conversation_token` (alerts → configured
+  `default_room` → briefing → auto-DM) for an email task whose token is a
+  synthetic 16-char hex thread hash
   naming no Talk room. No token and no room gives `None`, deliberately *not* the
   alerts ladder — a task with nothing to deliver to is not an email thread hash
   needing redirection. A synthetic token that resolves to nothing is returned
