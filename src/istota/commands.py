@@ -2734,8 +2734,10 @@ def _search_memory(
       - ``memory_file`` / ``user_memory`` / ``skill_overlay`` rows are the user's
         personal memory — not room-bound, ``is_memory=True``, room token ``None``.
 
-    Results are deduped by ``task_id`` (conversation) and
-    ``(source_type, source_id)`` (memory), keeping the higher-ranked hit.
+    ``search()`` has already collapsed results carrying identical text
+    (ISSUE-471); on top of that these are deduped by ``task_id``
+    (conversation) and ``(source_type, source_id)`` (memory), keeping the
+    higher-ranked hit.
     """
     if source_types is None:
         source_types = list(_DEFAULT_SEARCH_SOURCE_TYPES)
