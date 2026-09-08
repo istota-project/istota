@@ -45,6 +45,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .modules import MODULE_NAMES
+from .user_scope import is_within
 
 logger = logging.getLogger(__name__)
 
@@ -128,28 +129,94 @@ def backup_destination(config) -> Path | None:
     return None
 
 
+def _resolve_or_none(path) -> Path | None:
+    """``Path(path).resolve()``, or None when it cannot be resolved.
+
+    ``Path.resolve`` raises ``ValueError`` on an embedded NUL and, before 3.13,
+    ``RuntimeError`` on a symlink cycle; a dead or hung filesystem underneath
+    gives ``OSError``. Every caller here treats None as "can't tell" and errs
+    toward keeping the mount check, so the failure is a skipped run rather than
+    a snapshot written to local disk.
+    """
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning("db_backup_path_unresolvable path=%s err=%s", path, exc)
+        return None
+
+
+def _destination_is_under_mount(dest: Path, mount: Path) -> bool:
+    """Whether ``dest`` lands at or inside ``mount``, both sides already resolved.
+
+    The comparison is :func:`~istota.user_scope.is_within`, which is lexical —
+    the discipline that module's docstring asks each caller to choose for its
+    own boundary. ``mount`` arrives resolved from
+    :func:`_destination_is_durable`, which resolves it once and then uses that
+    one value for this test *and* for ``os.path.ismount``. Resolving here
+    instead would split them, and the two answers disagree in a way that is not
+    obvious: ``posixpath.ismount`` short-circuits to False for a symlink ("a
+    symlink can never be a mount point"), so a symlinked ``nextcloud_mount_path``
+    would be judged to contain the destination and to be permanently down, and
+    every backup under a healthy mount would be skipped forever.
+
+    **Unresolvable means inside.** A destination that cannot be proved outside
+    the mount gets ismount-tested anyway: the worst case is a skipped run,
+    against a silent write onto local disk under a stale mountpoint.
+    """
+    resolved_dest = _resolve_or_none(dest)
+    if resolved_dest is None:
+        return True
+    return is_within(resolved_dest, mount)
+
+
 def _destination_is_durable(config) -> bool:
     """True when the backup destination is a real off-host target.
 
-    An explicit ``db_backup_dir`` is trusted (the operator chose it). A
-    mount-derived destination is durable ONLY if the Nextcloud mount is actually
-    mounted: if the rclone FUSE mount is down, the mountpoint reverts to an
-    ordinary local directory, and a naive ``mkdir`` would write the "backup" to
-    local disk under the stale mountpoint — silently defeating off-host
-    durability with no error (the copies vanish when the mount returns). Guard
-    against that by requiring ``os.path.ismount`` before treating a mount-derived
-    destination as usable.
+    Durability is decided by where the destination *points*, not by which config
+    branch produced it (ISSUE-480). If the rclone FUSE mount is down, the
+    mountpoint reverts to an ordinary local directory, and a naive ``mkdir``
+    would write the "backup" to local disk under the stale mountpoint — silently
+    defeating off-host durability with no error, the copies vanishing when the
+    mount returns. That exposure belongs to any destination under the mount, so
+    ``os.path.ismount`` gates the mount-derived default and an explicit
+    ``db_backup_dir`` under the mount alike.
+
+    A destination outside the mount is trusted as the operator's claim: an
+    explicit ``/mnt/backup-nas/...`` asserts a durability this module has no way
+    to check, and the ismount test would be asking about the wrong filesystem.
+
+    **The gate needs a Nextcloud to be gating.** ``nextcloud_mount_path`` is only
+    a FUSE mountpoint when a Nextcloud server backs the file workspace; a
+    standalone install points the same field at its plain local workspace
+    directory (``setup_wizard.render_config_toml``), which is never a mountpoint
+    and never will be. ``storage_is_nextcloud`` is the existing predicate for
+    that distinction — "no URL means a plain local folder" — and without it,
+    keying the gate on the resolved path would refuse every backup on every
+    standalone install, whose ``db_backup_dir`` sits inside that workspace by
+    design.
     """
-    explicit = (getattr(config.scheduler, "db_backup_dir", "") or "").strip()
-    if explicit:
-        return True
+    dest = backup_destination(config)
+    if dest is None:
+        return False
     mount = getattr(config, "nextcloud_mount_path", None)
     if not mount:
-        return False
-    if not os.path.ismount(str(mount)):
+        return True
+    # Defaults True, unlike the other reads in this module: an unknown config
+    # shape should keep the guard, not silently drop it.
+    if not getattr(config, "storage_is_nextcloud", True):
+        return True
+    # Resolved once, then used for both the containment test and the liveness
+    # test — see _destination_is_under_mount for why splitting them breaks a
+    # symlinked mount path. An unresolvable mount falls back to the raw
+    # spelling, which keeps both halves consistent with each other.
+    resolved_mount = _resolve_or_none(mount) or Path(mount)
+    if not _destination_is_under_mount(dest, resolved_mount):
+        return True
+    if not os.path.ismount(str(resolved_mount)):
         logger.error(
-            "db_backup skipped: Nextcloud mount %s is not mounted — refusing to "
-            "write backups to local disk under a stale mountpoint", mount,
+            "db_backup skipped: backup destination %s is under Nextcloud mount %s "
+            "and that mount is not mounted — refusing to write backups to local "
+            "disk under a stale mountpoint", dest, resolved_mount,
         )
         return False
     return True
@@ -332,7 +399,12 @@ def backup_databases(config, *, today: str | None = None) -> list[dict]:
     if not _destination_is_durable(config):
         # Not a real off-host target right now (mount down). Do NOT write to a
         # stale mountpoint, and do NOT advance the persisted clock — leaving it
-        # stale is what lets the staleness alert eventually fire.
+        # stale is what lets the staleness alert fire on a deployment that has
+        # backed up successfully before. It does not fire on one that never has:
+        # `_maybe_alert_backup_stale` is gated on `persisted > 0` so a fresh
+        # deploy cannot false-alarm, so an install whose mount has been down
+        # since first boot has only the ERROR logged above. Pre-existing, and
+        # widened by ISSUE-480 to explicit destinations under the mount.
         return []
 
     date_str = _date_str(today)

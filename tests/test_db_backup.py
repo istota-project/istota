@@ -23,17 +23,20 @@ from istota.config import (
 FIXED_DAY = "2026-07-12"
 
 
-def _config(tmp_path: Path, **sched) -> Config:
+def _config(tmp_path: Path, *, nextcloud_url: str = "", **sched) -> Config:
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
-    # Default to an explicit db_backup_dir so integration tests exercise the
-    # "operator-designated durable target" path and don't trip the mount-liveness
-    # guard (a tmp dir isn't a real OS mountpoint). Pass db_backup_dir="" to
-    # exercise the mount-derived default resolution.
+    # Default to an explicit db_backup_dir *outside* the mount so integration
+    # tests exercise the "operator-designated durable target" path and don't trip
+    # the mount-liveness guard (a tmp dir isn't a real OS mountpoint). Pass
+    # db_backup_dir="" to exercise the mount-derived default resolution.
     sched.setdefault("db_backup_dir", str(tmp_path / "backups"))
+    # The mount-liveness gate only applies where a Nextcloud backs the workspace
+    # (`storage_is_nextcloud`); a URL-less config is a standalone install whose
+    # `nextcloud_mount_path` is a plain directory. TestMountLiveness passes one.
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud=NextcloudConfig(),
+        nextcloud=NextcloudConfig(url=nextcloud_url),
         talk=TalkConfig(),
         email=EmailConfig(),
         scheduler=SchedulerConfig(**sched),
@@ -321,12 +324,20 @@ class TestBackupPermissions:
 
 
 class TestMountLiveness:
-    """A mount-derived destination must not be written when the mount is down —
-    otherwise the 'backup' lands on local disk under a stale mountpoint and
-    silently vanishes when the mount returns (Mulder #1)."""
+    """A destination under the Nextcloud mount must not be written when the mount
+    is down — otherwise the 'backup' lands on local disk under a stale mountpoint
+    and silently vanishes when the mount returns (Mulder #1).
+
+    Durability follows the resolved destination, not the config branch that
+    produced it (ISSUE-480): the mount-derived default and an explicit
+    ``db_backup_dir`` under the mount carry the same exposure and get the same
+    gate. A destination outside the mount stays the operator's claim.
+    """
+
+    NC = "https://cloud.example.com"
 
     def test_mount_derived_skips_when_not_mounted(self, tmp_path, monkeypatch):
-        cfg = _config(tmp_path, db_backup_dir="")  # mount-derived destination
+        cfg = _config(tmp_path, db_backup_dir="", nextcloud_url=self.NC)
         db.init_db(cfg.db_path)
         monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
 
@@ -337,7 +348,7 @@ class TestMountLiveness:
         assert db_backup.last_backup_time(cfg) == 0.0
 
     def test_mount_derived_runs_when_mounted(self, tmp_path, monkeypatch):
-        cfg = _config(tmp_path, db_backup_dir="")
+        cfg = _config(tmp_path, db_backup_dir="", nextcloud_url=self.NC)
         db.init_db(cfg.db_path)
         monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
 
@@ -345,13 +356,197 @@ class TestMountLiveness:
         assert any(r["status"] == "ok" for r in results)
         assert (tmp_path / "mount" / "istota-db-backups" / FIXED_DAY / "framework" / "istota.db").exists()
 
-    def test_explicit_dir_is_trusted_without_ismount(self, tmp_path, monkeypatch):
-        # An explicit db_backup_dir is the operator's choice; don't ismount-gate it.
-        cfg = _config(tmp_path)  # explicit db_backup_dir
+    def test_explicit_dir_outside_mount_is_trusted_without_ismount(self, tmp_path, monkeypatch):
+        # A db_backup_dir the mount does not contain is the operator's claim
+        # about a filesystem this module cannot check; don't ismount-gate it.
+        cfg = _config(tmp_path, nextcloud_url=self.NC)  # explicit dir outside the mount
         db.init_db(cfg.db_path)
         monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
         results = db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert any(r["status"] == "ok" for r in results)
+
+    def test_explicit_dir_under_mount_skips_when_not_mounted(self, tmp_path, monkeypatch):
+        # ISSUE-480: the same filesystem one directory over used to be trusted
+        # purely because the operator had spelled it out.
+        cfg = _config(
+            tmp_path,
+            db_backup_dir=str(tmp_path / "mount" / "Backups" / "snapshots"),
+            nextcloud_url=self.NC,
+        )
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert results == []
+        assert not (tmp_path / "mount" / "Backups").exists()
+        assert db_backup.last_backup_time(cfg) == 0.0
+
+    def test_explicit_dir_under_mount_runs_when_mounted(self, tmp_path, monkeypatch):
+        cfg = _config(
+            tmp_path,
+            db_backup_dir=str(tmp_path / "mount" / "Backups" / "snapshots"),
+            nextcloud_url=self.NC,
+        )
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: True)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+        snap = tmp_path / "mount" / "Backups" / "snapshots" / FIXED_DAY / "framework" / "istota.db"
+        assert snap.exists()
+
+    def test_symlinked_explicit_dir_into_mount_is_gated(self, tmp_path, monkeypatch):
+        # Containment is the resolved-path comparison, so a symlink landing
+        # inside the mount is caught even though the spelling is outside it.
+        (tmp_path / "mount" / "Backups").mkdir(parents=True)
+        link = tmp_path / "backups-link"
+        link.symlink_to(tmp_path / "mount" / "Backups")
+        cfg = _config(tmp_path, db_backup_dir=str(link), nextcloud_url=self.NC)
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+
+    def _symlinked_mount(self, tmp_path):
+        """Config whose nextcloud_mount_path is a symlink to the real mount."""
+        real_mount = tmp_path / "real-mount"
+        (real_mount / "Backups").mkdir(parents=True)
+        link_mount = tmp_path / "linked-mount"
+        link_mount.symlink_to(real_mount)
+        cfg = _config(
+            tmp_path,
+            db_backup_dir=str(real_mount / "Backups"),
+            nextcloud_url=self.NC,
+        )
+        cfg.nextcloud_mount_path = link_mount
+        db.init_db(cfg.db_path)
+        return cfg, real_mount
+
+    def test_symlinked_mount_path_still_catches_destination(self, tmp_path, monkeypatch):
+        # Both sides resolve: a mount path that is itself a symlink must not
+        # hide a destination spelled through the real directory.
+        cfg, _real = self._symlinked_mount(tmp_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+
+    def test_symlinked_mount_path_runs_when_the_real_mount_is_up(self, tmp_path, monkeypatch):
+        # The negative control for the test above, and the one that fails if the
+        # liveness test is handed the unresolved path: `posixpath.ismount`
+        # short-circuits to False for a symlink, so asking it about
+        # `linked-mount` would report a healthy mount as down forever.
+        cfg, real_mount = self._symlinked_mount(tmp_path)
+        # Answers truthfully per path, the way the real ismount does.
+        monkeypatch.setattr(
+            db_backup.os.path, "ismount",
+            lambda p: Path(p) == real_mount and not Path(p).is_symlink(),
+        )
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+        assert (real_mount / "Backups" / FIXED_DAY / "framework" / "istota.db").exists()
+
+    def test_unresolvable_destination_keeps_the_gate(self, tmp_path, monkeypatch):
+        # "Can't tell" has to mean "still check the mount": the alternative is a
+        # snapshot written to local disk under a stale mountpoint.
+        cfg = _config(tmp_path, db_backup_dir=str(tmp_path / "somewhere"), nextcloud_url=self.NC)
+        db.init_db(cfg.db_path)
+        real_resolve = Path.resolve
+
+        def _boom(self, *a, **kw):
+            if self == Path(str(tmp_path / "somewhere")):
+                raise OSError("simulated dead filesystem")
+            return real_resolve(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "resolve", _boom)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+
+    def test_unresolvable_mount_falls_back_to_the_raw_spelling(self, tmp_path, monkeypatch):
+        # Both halves must still agree when the mount itself will not resolve.
+        cfg = _config(
+            tmp_path,
+            db_backup_dir=str(tmp_path / "mount" / "Backups"),
+            nextcloud_url=self.NC,
+        )
+        db.init_db(cfg.db_path)
+        real_resolve = Path.resolve
+
+        def _boom(self, *a, **kw):
+            if self == Path(str(tmp_path / "mount")):
+                raise OSError("simulated dead filesystem")
+            return real_resolve(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "resolve", _boom)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+
+    def test_textual_prefix_sibling_of_mount_is_trusted(self, tmp_path, monkeypatch):
+        # ``<tmp>/mountains`` shares a prefix with ``<tmp>/mount`` and is not
+        # under it; a string-prefix containment test would gate it wrongly.
+        cfg = _config(tmp_path, db_backup_dir=str(tmp_path / "mountains"), nextcloud_url=self.NC)
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+    def test_explicit_dir_equal_to_mount_root_is_gated(self, tmp_path, monkeypatch):
+        # The mount root itself counts as within the mount.
+        cfg = _config(tmp_path, db_backup_dir=str(tmp_path / "mount"), nextcloud_url=self.NC)
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+
+
+class TestStandaloneInstallIsNotGated:
+    """A standalone install points ``nextcloud_mount_path`` at its plain local
+    workspace, which is never a mountpoint. Gating on the resolved path alone
+    would refuse every backup there — including the one ``istota setup`` writes,
+    which lives inside that workspace by design."""
+
+    def _standalone(self, tmp_path, **kw):
+        # Mirrors setup_wizard.render_config_toml: no Nextcloud URL, mount path
+        # is the workspace, backups sit inside it.
+        return _config(
+            tmp_path,
+            db_backup_dir=str(tmp_path / "mount" / "db-backups"),
+            **kw,
+        )
+
+    def test_backup_dir_inside_workspace_runs_without_ismount(self, tmp_path, monkeypatch):
+        cfg = self._standalone(tmp_path)
+        assert not cfg.storage_is_nextcloud
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+        assert (tmp_path / "mount" / "db-backups" / FIXED_DAY / "framework" / "istota.db").exists()
+
+    def test_derived_destination_runs_without_ismount(self, tmp_path, monkeypatch):
+        cfg = _config(tmp_path, db_backup_dir="")  # no URL: standalone
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
+
+    def test_adding_a_nextcloud_url_arms_the_gate(self, tmp_path, monkeypatch):
+        # The accepted consequence of keying the gate on `storage_is_nextcloud`:
+        # the same layout with a URL is a Nextcloud deployment as far as this
+        # module can tell, so its ordinary directory gets ismount-tested and the
+        # run is refused. Documented in docs/configuration/reference.md; pinned
+        # here so it is a decision rather than a surprise.
+        cfg = self._standalone(tmp_path, nextcloud_url="https://cloud.example.com")
+        assert cfg.storage_is_nextcloud
+        db.init_db(cfg.db_path)
+        monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
+
+        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
 
 
 class TestClockOnlyAdvancesOnOk:
