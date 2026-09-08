@@ -598,11 +598,135 @@ class TestGetFactCount:
         counts = get_fact_count(conn, "user1")
         assert counts["total"] == 3
         assert counts["current"] == 2  # globex + python
-        assert counts["historical"] == 1  # acme (superseded)
+        assert counts["superseded"] == 1  # acme, replaced by globex
+        assert counts["expired"] == 0
 
     def test_empty(self, conn):
         counts = get_fact_count(conn, "user1")
-        assert counts == {"total": 0, "current": 0, "historical": 0}
+        assert counts == {
+            "total": 0, "current": 0, "expired": 0, "superseded": 0,
+        }
+
+    def test_a_future_expiry_is_current_not_historical(self, conn):
+        """ISSUE-472: having a `valid_until` at all was read as expired.
+
+        One durable fact, one expiring in the future, one already lapsed.
+        The middle row is the regression: `get_current_facts` has always
+        counted it as current, and the counter reported it as historical.
+        """
+        future = (date.today() + timedelta(days=30)).isoformat()
+        past = (date.today() - timedelta(days=30)).isoformat()
+        add_fact(conn, "user1", "bob", "knows", "python")
+        add_fact(conn, "user1", "bob", "interested_in", "sailing",
+                 valid_until=future)
+        add_fact(conn, "user1", "bob", "traveled_to", "lisbon",
+                 valid_until=past)
+
+        counts = get_fact_count(conn, "user1")
+        assert counts["total"] == 3
+        assert counts["current"] == 2  # python + sailing
+        assert counts["expired"] == 1  # lisbon
+        assert counts["superseded"] == 0
+
+    def test_current_agrees_with_get_current_facts(self, conn):
+        """The two definitions of "current" in this module must not drift."""
+        future = (date.today() + timedelta(days=30)).isoformat()
+        add_fact(conn, "user1", "bob", "knows", "python")
+        add_fact(conn, "user1", "bob", "interested_in", "sailing",
+                 valid_until=future)
+        add_fact(conn, "user1", "bob", "traveled_to", "lisbon",
+                 valid_until=(date.today() - timedelta(days=1)).isoformat())
+
+        counts = get_fact_count(conn, "user1")
+        assert counts["current"] == len(get_current_facts(conn, "user1"))
+
+    def test_expiring_today_is_not_current(self, conn):
+        """`get_current_facts` uses a strict `>`, so today's expiry has passed."""
+        today = date.today().isoformat()
+        add_fact(conn, "user1", "bob", "interested_in", "sailing",
+                 valid_until=today)
+
+        counts = get_fact_count(conn, "user1")
+        assert counts["current"] == 0
+        assert counts["expired"] == 1
+        assert counts["current"] == len(get_current_facts(conn, "user1"))
+
+    def test_a_lapsed_temporary_fact_is_expired_not_superseded(self, conn):
+        """Supersession skips temporary facts, so a lapsed one only expired."""
+        add_fact(conn, "user1", "bob", "staying_in", "lisbon",
+                 valid_until=(date.today() - timedelta(days=1)).isoformat())
+        add_fact(conn, "user1", "bob", "staying_in", "porto")
+
+        counts = get_fact_count(conn, "user1")
+        assert counts["expired"] == 1
+        assert counts["superseded"] == 0
+
+    def test_a_lapsed_multi_valued_fact_is_expired_not_superseded(self, conn):
+        """A live sibling under a multi-valued predicate replaced nothing."""
+        add_fact(conn, "user1", "bob", "traveled_to", "lisbon",
+                 valid_until=(date.today() - timedelta(days=1)).isoformat())
+        add_fact(conn, "user1", "bob", "traveled_to", "porto")
+
+        counts = get_fact_count(conn, "user1")
+        assert counts["expired"] == 1
+        assert counts["superseded"] == 0
+
+    def test_the_buckets_partition_the_table(self, conn):
+        add_fact(conn, "user1", "bob", "works_at", "acme",
+                 valid_from="2025-01-01")
+        add_fact(conn, "user1", "bob", "works_at", "globex",
+                 valid_from="2026-04-01")
+        add_fact(conn, "user1", "bob", "knows", "python")
+        add_fact(conn, "user1", "bob", "interested_in", "sailing",
+                 valid_until=(date.today() + timedelta(days=30)).isoformat())
+        add_fact(conn, "user1", "bob", "traveled_to", "lisbon",
+                 valid_until=(date.today() - timedelta(days=30)).isoformat())
+
+        counts = get_fact_count(conn, "user1")
+        assert (
+            counts["current"] + counts["expired"] + counts["superseded"]
+            == counts["total"]
+        )
+
+    def test_invalidate_then_replace_reads_as_superseded(self, conn):
+        """A documented residual, pinned so a change to it is visible.
+
+        `add_fact` only supersedes rows still open, so nothing superseded
+        this one — it was invalidated and a new value happened to follow.
+        Telling the two apart needs the audit trail, which the counter
+        deliberately does not read. Health metric, not an audit.
+        """
+        fact_id = add_fact(conn, "user1", "bob", "works_at", "acme")
+        invalidate_fact(conn, fact_id,
+                        ended=(date.today() - timedelta(days=1)).isoformat())
+        add_fact(conn, "user1", "bob", "works_at", "globex")
+
+        counts = get_fact_count(conn, "user1")
+        assert counts["superseded"] == 1
+        assert counts["expired"] == 0
+
+    def test_a_superseded_fact_whose_replacement_lapsed_reads_as_expired(self, conn):
+        """The other direction of the same residual."""
+        add_fact(conn, "user1", "bob", "works_at", "acme")
+        replacement = add_fact(conn, "user1", "bob", "works_at", "globex")
+        invalidate_fact(conn, replacement,
+                        ended=(date.today() - timedelta(days=1)).isoformat())
+
+        counts = get_fact_count(conn, "user1")
+        assert counts["current"] == 0
+        assert counts["superseded"] == 0
+        assert counts["expired"] == 2
+
+    def test_counts_are_scoped_to_the_user(self, conn):
+        add_fact(conn, "user1", "bob", "knows", "python")
+        add_fact(conn, "user2", "carol", "knows", "rust")
+        add_fact(conn, "user2", "carol", "traveled_to", "lisbon",
+                 valid_until=(date.today() - timedelta(days=1)).isoformat())
+
+        counts = get_fact_count(conn, "user1")
+        assert counts == {
+            "total": 1, "current": 1, "expired": 0, "superseded": 0,
+        }
 
 
 class TestFormatFactsForPrompt:

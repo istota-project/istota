@@ -1806,13 +1806,15 @@ async def cmd_memory(ctx: CommandContext):
 
     if target == "facts":
         try:
-            from .memory.knowledge_graph import ensure_table, get_current_facts, get_fact_count, format_facts_for_prompt
+            from .memory.knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
             ensure_table(conn)
-            counts = get_fact_count(conn, user_id)
-            total = counts["current"]
+            # Count the list this renders rather than asking a counter for the
+            # same number — that split is what let the header disagree with the
+            # body it labels (ISSUE-472).
+            facts = get_current_facts(conn, user_id)
+            total = len(facts)
             if total == 0:
                 return "**Knowledge graph:** (no facts)"
-            facts = get_current_facts(conn, user_id)
             text = format_facts_for_prompt(facts)
             if total <= 20:
                 return f"**Knowledge graph** ({total} facts):\n\n{text}"
