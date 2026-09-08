@@ -1264,6 +1264,21 @@ export interface UserProfile {
   external_turn_display: ExternalTurnDisplay;
   // Read-only hint from the server: surfaces available for delivery routing.
   delivery_surfaces?: string[];
+  // Read-only: the rooms a `web:<token>` route can name, oldest first. `default`
+  // marks the one a bare `web` route lands in, so the picker can say which room
+  // that is rather than leaving it unnamed (ISSUE-473).
+  web_rooms?: WebRoomOption[];
+}
+
+export interface WebRoomOption {
+  token: string;
+  name: string;
+  /** A bare `web` route lands here. */
+  default: boolean;
+  /** Somebody else is in it — the picker marks it. */
+  shared: boolean;
+  /** The user's machine-owned log or alerts room. */
+  channel: boolean;
 }
 
 /**

@@ -9752,8 +9752,8 @@ def _registered_delivery_surfaces() -> list[str]:
     default destination, alert route).
 
     Only ``user_routable`` registered transports — ``talk`` / ``email`` /
-    ``ntfy``. Self-routing surfaces (``istota_file`` delivers back to its own
-    TASKS.md line; ``repl`` is the inline terminal) and the events-only
+    ``ntfy`` / ``web``. Self-routing surfaces (``istota_file`` delivers back to
+    its own TASKS.md line; ``repl`` is the inline terminal) and the events-only
     ``stream`` surface are held back from the UI; all still validate on the wire
     via ``_validate_descriptor_surfaces`` so programmatic / CLI descriptors keep
     working."""
@@ -9782,6 +9782,83 @@ def _user_rooms(uc) -> list[dict]:
     return rooms
 
 
+def _user_web_rooms(user_id: str) -> list[dict]:
+    """The web chat rooms a ``web:<token>`` route can name, oldest first.
+
+    Each carries three flags: ``default`` (a bare ``web`` route lands here),
+    ``shared`` (somebody else is in it) and ``channel`` (it is the user's
+    machine-owned log or alerts room). The last two are the two classes
+    `db.default_web_room` refuses, and the picker offers them anyway — pinning
+    one is a deliberate choice, unlike the implicit default — but says which is
+    which, since delivering a personal alert into a room another person reads is
+    what ISSUE-473 is about.
+
+    Membership, not the handle, decides what is listed: a handle outlives
+    membership (a Talk-backed hide archives it rather than deleting it), and this
+    list has to agree with `_validate_descriptor_rooms`, or the dropdown offers a
+    room the save then refuses. Best-effort — delivery routing must still render
+    when the DB is unreachable.
+    """
+    from . import db
+
+    if _config is None or not _config.db_path:
+        return []
+    try:
+        with db.get_db(_config.db_path) as conn:
+            default = db.default_web_room(conn, user_id)
+            default_token = default.token if default else None
+            channels = db.channel_room_tokens(conn, user_id)
+            out: list[dict] = []
+            for r in db.list_web_chat_rooms(conn, user_id):
+                if not db.is_room_member(conn, r.token, user_id):
+                    continue
+                others = set(db.list_room_members(conn, r.token)) - {user_id}
+                out.append({
+                    "token": r.token,
+                    "name": r.name,
+                    "default": r.token == default_token,
+                    "shared": bool(others),
+                    "channel": r.token in channels,
+                })
+            return out
+    except Exception as e:
+        logger.warning("web room lookup failed for user %s: %s", user_id, e)
+        return []
+
+
+def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
+    """Raise ValueError if a ``web:<token>`` leaf names a room ``user_id`` is not
+    a member of.
+
+    A room token is not a secret — the room settings pane offers a copy button —
+    and `WebTransport.deliver` checks only that the room exists, so without this
+    a saved route is a standing write into any transcript whose token the caller
+    has seen, on every alert (ISSUE-473). Membership rather than ownership: a
+    shared room is a legitimate deliberate choice, and it is the predicate the
+    offered list is built on.
+
+    Only ``web`` is checked. A ``talk`` channel is a Nextcloud conversation id
+    resolved by Talk's own ladder, not a row in this registry, and ``ntfy`` /
+    ``email`` carry no room at all. The check is on the *web API* rather than in
+    the descriptor grammar: an operator setting a token through
+    ``istota user ensure`` or config.toml is trusted, and is also the one who
+    would be repairing a room the user cannot reach.
+    """
+    from . import db
+    from .transport import parse_output_target
+
+    tokens = [
+        d.channel for d in parse_output_target(descriptor)
+        if d.surface == "web" and d.channel
+    ]
+    if not tokens or _config is None or not _config.db_path:
+        return
+    with db.get_db(_config.db_path) as conn:
+        for token in tokens:
+            if not db.is_room_member(conn, token, user_id):
+                raise ValueError(f"web room {token!r} is not one of your rooms")
+
+
 _BUILTIN_DELIVERY_SURFACES = frozenset({
     "talk", "email", "ntfy", "istota_file", "stream",
 })
@@ -9804,7 +9881,7 @@ def _validate_descriptor_surfaces(descriptor: str) -> None:
             raise ValueError(f"unknown delivery surface: {dest.surface}")
 
 
-def _coerce_profile_value(field: str, value: object) -> object:
+def _coerce_profile_value(field: str, value: object, user_id: str) -> object:
     """Validate + coerce a profile field. Raises ValueError on bad input."""
     spec = _PROFILE_EDITABLE_FIELDS.get(field)
     if spec is None:
@@ -9879,6 +9956,7 @@ def _coerce_profile_value(field: str, value: object) -> object:
         if not parse_output_target(value):
             raise ValueError(f"{field} is not a valid delivery descriptor")
         _validate_descriptor_surfaces(value)
+        _validate_descriptor_rooms(value, user_id)
         return value
     if t == "routing":
         from .notifications import PURPOSES
@@ -9907,6 +9985,7 @@ def _coerce_profile_value(field: str, value: object) -> object:
             if not parse_output_target(descriptor):
                 raise ValueError(f"route {purpose} is not a valid descriptor")
             _validate_descriptor_surfaces(descriptor)
+            _validate_descriptor_rooms(descriptor, user_id)
             out[purpose] = descriptor
         return out
     raise ValueError(f"unsupported field type: {t}")  # pragma: no cover
@@ -9946,6 +10025,7 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "timezone_follow_location": profile.timezone_follow_location,
         "external_turn_display": profile.external_turn_display or "collapsed",
         "delivery_surfaces": _registered_delivery_surfaces(),
+        "web_rooms": _user_web_rooms(user["username"]),
     }}
 
 
@@ -9971,7 +10051,9 @@ async def settings_update_profile(
         if field not in _PROFILE_EDITABLE_FIELDS:
             raise HTTPException(status_code=400, detail=f"unknown field: {field}")
         try:
-            coerced[field] = _coerce_profile_value(field, value)
+            coerced[field] = _coerce_profile_value(
+                field, value, user["username"],
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
