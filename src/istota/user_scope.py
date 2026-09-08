@@ -204,8 +204,8 @@ def is_within(child: Path, root: Path) -> bool:
 
     Never raises, for anything: a ``None``, a non-path, an embedded NUL. The
     callers are ``worktree_reaper``, ``repos_relocate``, ``git_remote_scrub``,
-    ``skill_host_paths``, ``doctor``, ``executor``, ``image_attachments`` and
-    ``session/tools/env``. The first four promise never to raise out of their
+    ``skill_host_paths``, ``doctor``, ``executor``, ``image_attachments``,
+    ``db_backup`` and ``session/tools/env``. The first four promise never to raise out of their
     own entry points, and a containment predicate that raises fails *open* at
     any caller that wraps it in a truthiness test.
 

@@ -157,6 +157,6 @@ See the [configuration reference](../configuration/reference.md) for every optio
 
 - **Loopback only.** No-auth mode refuses to start on a non-loopback bind — you cannot accidentally expose an unauthenticated instance on the network. Use the server deployment if you need remote access.
 - **One instance.** `serve` holds a lock; a second `serve` reports "already running" and exits.
-- **Backups.** `setup` writes an explicit `[scheduler] db_backup_dir` under the workspace, and creates it at `0700`, so local snapshots run even though the workspace isn't a mountpoint.
+- **Backups.** `setup` writes an explicit `[scheduler] db_backup_dir` under the workspace and creates it at `0700`. The mount-liveness check that gates snapshots on a Nextcloud deployment does not apply here: it only runs where a `[nextcloud] url` says a Nextcloud backs the workspace, so the local shape snapshots normally even though the workspace isn't a mountpoint.
 - **Everything in one folder.** The database, module databases, and workspace all live under the workspace directory — back it up or move it as a unit.
 - **Storage vocabulary follows the backend.** The bot describes storage based on whether a Nextcloud server backs it, keyed on `[nextcloud] url` presence (not the standalone flag). With no URL — the local shape — the prompt and skill docs talk about "your workspace" (a local folder) instead of a Nextcloud mount, and tell the model it also has ordinary access to the rest of the machine's filesystem. Set a `[nextcloud] url` and the vocabulary switches back to Nextcloud/rclone.

@@ -985,6 +985,12 @@ main_loop_read_timeout_ms = 2000
 db_backup_enabled = true
 db_backup_interval = 86400          # seconds between snapshots (daily)
 # db_backup_dir = ""                # empty = {nextcloud_mount}/istota-db-backups
+# Where a [nextcloud] url is set, a destination at or under nextcloud_mount_path
+# is skipped while that mount is down, however it is spelled — a stale mountpoint
+# would take the copies to local disk and lose them when the mount returns.
+# Naming a path off the mount instead is trusted as-is; nothing here can check
+# it. With no [nextcloud] url the mount path is a plain local folder and the
+# check does not apply.
 
 # Runtime self-check re-run. The auto-update cron changes what is installed
 # under a config the daemon already loaded, so a boot-only check is blind to it.

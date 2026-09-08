@@ -209,7 +209,7 @@ One persisted, typed event stream per task (the `task_events` table) feeds Talk,
 |---|---|---|
 | `db_backup_enabled` | `true` | Take timed online-backup snapshots of the local DBs |
 | `db_backup_interval` | `86400` | Seconds between snapshots (24h) |
-| `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty derives `{nextcloud_mount_path}/istota-db-backups`. Use `db_backup_enabled = false` to disable |
+| `db_backup_dir` | `""` | Destination for dated snapshot dirs; empty derives `{nextcloud_mount_path}/istota-db-backups`. Where a `[nextcloud] url` is set, any destination resolving at or under `nextcloud_mount_path` is skipped while that mount is not mounted, rather than written to local disk under a stale mountpoint — symlinks on either side are followed, so how the path is spelled does not change the answer. A destination outside the mount is taken at face value. With no `[nextcloud] url` the mount path is a plain local folder and the check does not apply, so **adding a URL to a config whose `nextcloud_mount_path` is an ordinary directory will stop backups**; point `db_backup_dir` outside that directory if you do. Use `db_backup_enabled = false` to disable |
 | `db_backup_retention` | `7` | Keep this many snapshot dirs |
 
 ### Host memory: breadcrumb, admission gate, snapshots
