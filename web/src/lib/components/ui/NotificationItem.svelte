@@ -17,6 +17,7 @@
    */
   import { base } from '$app/paths';
   import { isSafeActionPath, type NotificationAction, type ResolvedNotification } from '$lib/api';
+  import { formatRelative } from '$lib/dateFormat';
   import Button from './Button.svelte';
 
   interface Props {
@@ -59,24 +60,16 @@
     danger: 'danger',
   };
 
-  /** Relative time, coarse.
-   *
+  /**
    * Read off `updated_at` rather than `created_at`: a reopened row keeps the
    * date it was first seen and refreshes the other, and "40 days ago" on an
    * alert that fired an hour ago is the wrong answer to the question the panel
-   * is being asked. Local to this component — `/admin`, `/location` and the
-   * device card each carry their own copy of this arithmetic, and folding the
-   * four into one helper is a cleanup of its own rather than part of this.
+   * is being asked.
+   *
+   * Which column is read is this component's decision; how the age renders is
+   * `formatRelative`'s.
    */
-  function relative(ts: string): string {
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return '';
-    const diff = (Date.now() - d.getTime()) / 1000;
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  }
+  const age = $derived(formatRelative(item.updated_at));
 </script>
 
 <div class="notification-item" class:unseen={!item.seen_at}>
@@ -90,7 +83,7 @@
     <span class="item-text">
       <span class="item-title">{item.title}</span>
       <span class="item-meta caption">
-        <span>{relative(item.updated_at)}</span>
+        <span>{age}</span>
         {#if item.occurrences > 1}
           <span class="occurrences" title="Raised {item.occurrences} times"
             >×{item.occurrences}</span

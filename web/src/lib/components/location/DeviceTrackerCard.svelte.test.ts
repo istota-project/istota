@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import DeviceTrackerCard from './DeviceTrackerCard.svelte';
+import { formatDateTime } from '$lib/dateFormat';
 import { encodeProvisioning } from '$lib/location/provisioning';
 import type { TrackerStatus } from '$lib/platform/nativeLocation';
 import type { Place } from '$lib/api';
@@ -457,5 +458,62 @@ describe('the wifi zone', () => {
     render(DeviceTrackerCard);
     await settle();
     expect(screen.getByText(/could not load your places/i)).toBeTruthy();
+  });
+});
+
+/**
+ * The seam, not the ladder — `dateFormat.test.ts` owns which rung a given age
+ * lands on. What is asserted here is that this row reaches the shared helper
+ * with the options this card is supposed to pass, since those are the two
+ * things a conversion silently gets wrong.
+ */
+describe('the last-sent row', () => {
+  const lastSent = (): HTMLElement => {
+    const dt = screen.getByText('Last sent');
+    const dd = dt.nextElementSibling as HTMLElement | null;
+    if (!dd) throw new Error('Last sent has no value beside it');
+    return dd;
+  };
+
+  /** The relative rung alone, without the exact-instant line beneath it. */
+  const rung = (): string => lastSent().firstChild?.textContent?.trim() ?? '';
+
+  it('renders the tight ladder rather than the spaced one it used to', async () => {
+    // `5 min ago` and `2 h ago` were this card's alone; every other surface
+    // rendered `5m ago`. Rounding went with the spacing — 90 seconds read as
+    // "2 min ago" here, a figure larger than the time that had elapsed.
+    installShell({ lastSentAt: new Date(Date.now() - 90_000).toISOString() });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(rung()).toBe('1m ago');
+  });
+
+  it('keeps its own empty fallback', async () => {
+    installShell({ lastSentAt: null });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(rung()).toBe('never');
+  });
+
+  it('shows the exact instant on the surface, not behind a hover', async () => {
+    // The absolute timestamp this row fell back to past a day is now a second
+    // line, so the "when did it stop" question a stalled queue raises is still
+    // answerable — and answerable on a touch screen, which is the only place
+    // this card mounts. `formatDateTime` rather than a restatement of it, so
+    // swapping the component to another formatter fails here.
+    const iso = new Date(Date.now() - 3 * 86_400_000).toISOString();
+    installShell({ lastSentAt: iso });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(rung()).toBe('3d ago');
+    const exact = lastSent().querySelector('.sent-exact');
+    expect(exact?.textContent?.trim()).toBe(formatDateTime(iso));
+  });
+
+  it('offers no dangling exact line when there is no instant to carry', async () => {
+    installShell({ lastSentAt: null });
+    render(DeviceTrackerCard);
+    await settle();
+    expect(lastSent().querySelector('.sent-exact')).toBeNull();
   });
 });

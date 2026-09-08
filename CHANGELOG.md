@@ -93,6 +93,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Changed
 
+- Relative timestamps read the same everywhere in the web UI. The notification bell, the admin dashboard, the location page and the device tracker card each carried their own version, and the four disagreed: one rounded up, so 90 seconds read as "2 min ago"; two counted backwards for a row stamped by a clock slightly ahead of yours; and one rendered `NaNd ago` for a timestamp it could not read. All four now round down, read a future timestamp as `just now`, and show an unreadable one as it arrived. Past thirty days they stop counting days and show a date instead, which is what a dormant account or a long-idle scheduled job reaches; the admin dashboard keeps its seconds under a minute, since that page refreshes on a timer and its liveness figures are being asked exactly that.
+
 - The admin dashboard's file-size and uptime figures now match the ones shown elsewhere in the app. Its size rounding disagreed with the health document list, so the same number read as `1.5 KB` on one screen and `2 KB` on the other. Uptime now pads its minutes, so it reads `1h 05m` like every other duration the app and the CLI show.
 
 - **Upgrade note:** a Docker deployment now reroutes a persistent transient API error to the backup brain by default. Every other statement of `fallback_on_transient` has said `true` since ISSUE-212 — the dataclass, the documented example, the Ansible default and the Ansible template — and the Docker path said `false` in three places, so it was the only shape that kept a task on a primary the provider was refusing. Set `ISTOTA_BRAIN_FALLBACK_ON_TRANSIENT=false` in `docker/.env` to keep the old behaviour. It has an effect only where `ISTOTA_BRAIN_FALLBACK` names a brain; with none configured there is nothing to reroute to.
@@ -116,6 +118,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 - `health import-immunizations --paste @PATH` is gone; pass `--paste-file PATH` instead. `--paste` now takes literal text and refuses a leading `@` rather than importing the file name as a record.
 
 ### Fixed
+
+- A task that finishes now delivers its answer even when one of the follow-up steps behind it fails. Those steps — filing health records, saving notes, starting a subtask, sending a queued email — ran one after another with nothing between them, so anything unexpected in one skipped the rest and then skipped the reply too, leaving the task recorded as a success with nothing sent. Each step is contained on its own now: one that fails costs only its own work and is written to the task's log, and the answer goes out either way.
 
 - An accounting command that fails in a way nobody anticipated now says so instead of answering with nothing. Every other skill reports an unexpected failure as a readable error; the accounting one was the last that did not, so a sync or an invoice run that broke came back empty and the assistant had nothing to tell you beyond that it had not worked. Commands that were already reporting their errors are unchanged.
 

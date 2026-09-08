@@ -13,6 +13,7 @@
    * tell whether that is by design.
    */
   import { onMount } from 'svelte';
+  import { formatDateTime, formatRelative } from '$lib/dateFormat';
   import { SettingsCard, SettingsField } from '$lib/components/settings';
   import { Button, Select, type SelectOption } from '$lib/components/ui';
   import {
@@ -172,17 +173,7 @@
     });
   }
 
-  function formatSent(iso: string | null): string {
-    if (!iso) return 'never';
-    const at = new Date(iso);
-    if (Number.isNaN(at.getTime())) return iso;
-    const minutes = Math.round((Date.now() - at.getTime()) / 60000);
-    if (minutes < 1) return 'just now';
-    if (minutes < 60) return `${minutes} min ago`;
-    const hours = Math.round(minutes / 60);
-    if (hours < 24) return `${hours} h ago`;
-    return at.toLocaleString();
-  }
+  const formatSent = (iso: string | null) => formatRelative(iso, { empty: 'never' });
 
   /**
    * One line under the Tracking row, and only one.
@@ -438,7 +429,22 @@
         <dt>Queued points</dt>
         <dd>{status.queuedPoints}</dd>
         <dt>Last sent</dt>
-        <dd>{formatSent(status.lastSentAt)}</dd>
+        <!-- This row used to fall back to an absolute timestamp past a day, and
+             it is the one place here where the exact instant is worth having:
+             the question a stalled queue raises is when it stopped. The ladder
+             is the same as everywhere else now, so the instant is rendered
+             beside it rather than instead of it.
+
+             A second line rather than a `title`: this card only mounts inside
+             the iOS shell, where a hover tooltip cannot be reached at all.
+             `web/AGENTS.md` — "do not put anything the user needs to act on
+             behind hover". -->
+        <dd>
+          {formatSent(status.lastSentAt)}
+          {#if status.lastSentAt}
+            <span class="caption sent-exact">{formatDateTime(status.lastSentAt)}</span>
+          {/if}
+        </dd>
         {#if status.droppedPoints > 0}
           <dt>Dropped</dt>
           <dd class="tracker-bad">{status.droppedPoints}</dd>
@@ -525,5 +531,11 @@
   .kv dd {
     margin: 0;
     color: var(--text-secondary);
+  }
+
+  /* Placement only. The colour and the size are `.caption`'s, per
+	   `web/AGENTS.md` — restating either here is what `captions.test.ts` fails. */
+  .sent-exact {
+    display: block;
   }
 </style>

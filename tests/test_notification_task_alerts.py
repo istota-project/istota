@@ -398,12 +398,12 @@ class TestTheRowSurvivesADeliveryThatReachedNobody:
     def test_a_failed_raise_never_fails_the_drain(
         self, config, task, temp_dir, caplog,
     ):
-        """`_drain_deferred_ops` calls nine handlers with nothing between them.
+        """`write_notification` never raises, but `db.get_db` can.
 
-        `write_notification` never raises, but `db.get_db` can, and an exception
-        escaping this handler skips `_deliver_deferred_email_output` and the
-        unconsumed-file warning behind it — a lost email reply as the price of a
-        failed notification write.
+        The drain contains an escape from here since ISSUE-469, so this is no
+        longer about the handlers behind it. It is about what the except does
+        instead of raising: it sends the alert directly, with no row. Reaching
+        the drain's guard would contain the exception and lose the alert.
         """
         _write_alerts(temp_dir, task.id, [{"message": "Phishing attempt", "type": "security"}])
         with (
