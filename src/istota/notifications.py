@@ -528,9 +528,16 @@ def is_channel_configured(
         return _ntfy_settings(config, user_id) is not None
 
     def _web_ok() -> bool:
-        # Web chat is always-on; a user always has (or auto-provisions) a room.
-        from .transport.web import default_web_room_token
-        return default_web_room_token(config, user_id) is not None
+        # Web chat is always-on: delivery provisions a room for a user who has
+        # none, so the question is whether the store is reachable, not whether a
+        # room exists today. Deliberately does not call
+        # `default_web_room_token` — this is a probe, and that resolver writes
+        # (it can mint a `general` or un-hide a handle), on its own connection at
+        # the default 30s busy timeout. Answering "no" here would be worse than
+        # the write: `heartbeat.check_heartbeats` skips the alert outright when
+        # this returns False, so a user whose rooms are all shared would lose the
+        # alert that delivery would have provisioned a room for.
+        return bool(config.db_path)
 
     probes = {"talk": _talk_ok, "email": _email_ok, "ntfy": _ntfy_ok, "web": _web_ok}
     dests = parse_output_target(surface)

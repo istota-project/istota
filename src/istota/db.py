@@ -3363,28 +3363,26 @@ def ensure_default_web_chat_room(
     `general` beside the Talk one on a user's first web visit, since a Talk
     room's handle does not exist until that loop runs.
 
-    Two rules on the fallback, both about it being a delivery target:
-
-    - **A room the user is alone in.** A shared Talk room is one other people
-      read, and a personal alert delivered into it is delivered in front of
-      them.
-    - **Not a channel room.** `log_channel` and `alerts_channel` are
-      machine-owned; the entrypoint even posts into `alerts` at boot, so
-      activity order alone would hand a user's default to whichever the daemon
-      last wrote to. Worse, the pick sticks: the handle minted here becomes the
-      user's oldest, and the first branch returns it from then on.
+    `default_web_room` owns which room qualifies; this adds only the creation,
+    and one thing that lookup deliberately will not do. The lookup skips a room
+    the user hid, because preferring a hidden room over a visible one is not
+    what they asked for. The fallback may still **un-hide** one: an alert has to
+    go somewhere, and putting it back in the user's own room — where they can
+    see it — beats minting a second `general` beside the one they archived, and
+    beats dropping the alert. So a user with exactly one room, hidden, gets that
+    room back rather than a duplicate.
 
     A user whose only rooms are shared or machine-owned gets a private
     `general`, which is the old behaviour and the right answer for delivery.
     """
-    rooms = list_web_chat_rooms(conn, user_id, include_archived=False)
-    if rooms:
-        return rooms[0]
+    handle = default_web_room(conn, user_id)
+    if handle is not None:
+        return handle
     for room in _default_room_candidates(conn, user_id):
         handle = ensure_web_chat_handle(
             conn, user_id, room.token, room.name or "Talk room",
         )
-        # `list_member_rooms` filters `rooms.archived` while the branch above
+        # `list_member_rooms` filters `rooms.archived` while the lookup above
         # filters the per-user handle flag, so a room the user hid and was then
         # re-added to (ISSUE-134) arrives here with an archived handle. Clear
         # it, the same way the web listing does, or this returns a row the
@@ -3395,15 +3393,36 @@ def ensure_default_web_chat_room(
     return create_web_chat_room(conn, user_id, "general")
 
 
-def _default_room_candidates(
+def default_web_room(
     conn: sqlite3.Connection, user_id: str,
-) -> "list[Room]":
-    """Registry rooms usable as ``user_id``'s default delivery target.
+) -> WebChatRoom | None:
+    """The room a bare ``web`` route delivers into, or None when the user has no
+    room that qualifies. Creates nothing.
 
-    Activity-ordered, like `list_member_rooms`, minus the two classes that must
-    never become a delivery default: rooms with another member in them, and the
-    user's own log / alerts channels. See `ensure_default_web_chat_room`.
+    Oldest handle first, not activity order: a delivery target that moves when
+    you speak in a room is the surprise this is meant to remove, and the daemon
+    itself writes into these rooms.
+
+    Split out of `ensure_default_web_chat_room` for ISSUE-473. The rule was
+    stated in that function's docstring and applied by `_default_room_candidates`
+    on the branch that runs only when the user has no handles at all; the branch
+    that runs every other time returned the oldest handle unfiltered. That is the
+    `general` room right up until the user archives it, and from then on whatever
+    was minted next — a shared Talk room, or a machine-owned log / alerts
+    channel. `transport.routing._room_for_destination` had a third copy of the
+    same unfiltered rule, kept separate because it must not provision; it calls
+    this now.
     """
+    excluded = channel_room_tokens(conn, user_id)
+    for handle in list_web_chat_rooms(conn, user_id, include_archived=False):
+        if _usable_as_delivery_default(conn, user_id, handle.token, excluded):
+            return handle
+    return None
+
+
+def channel_room_tokens(conn: sqlite3.Connection, user_id: str) -> set[str]:
+    """The user's machine-owned channel room tokens (`log_channel` /
+    `alerts_channel`). Public because the settings payload flags them too."""
     row = conn.execute(
         "SELECT log_channel, alerts_channel FROM user_profiles WHERE user_id = ?",
         (user_id,),
@@ -3412,14 +3431,70 @@ def _default_room_candidates(
         (row["log_channel"] or ""), (row["alerts_channel"] or "")
     } if row else set()
     channels.discard("")
-    out: "list[Room]" = []
-    for room in list_member_rooms(conn, user_id, include_archived=False):
-        if room.token in channels:
-            continue
-        if len(list_room_members(conn, room.token)) > 1:
-            continue
-        out.append(room)
-    return out
+    return channels
+
+
+def _usable_as_delivery_default(
+    conn: sqlite3.Connection, user_id: str, token: str, channels: set[str],
+) -> bool:
+    """Whether ``token`` may be ``user_id``'s default delivery room.
+
+    Five exclusions, each about the room being written to unprompted:
+
+    - **A room somebody else reads.** A shared Talk room is one other people are
+      in, and a personal alert delivered there is delivered in front of them.
+      Tested as "no member but this user" rather than as a count: a handle can
+      outlive membership, so counting would admit a room whose one member is
+      somebody else.
+    - **A channel room.** `log_channel` and `alerts_channel` are machine-owned;
+      the entrypoint even posts into `alerts` at boot, so activity alone would
+      hand a user's default to whichever the daemon last wrote to.
+    - **A room the user hid.** `list_member_rooms` already drops a dismissed
+      room, so without this the two candidate lists disagree.
+    - **A room that no longer exists**, or one the registry has archived.
+      A handle with no `rooms` row is a deleted room, and
+      `archive_orphaned_talk_rooms` sets `rooms.archived` when the bot leaves a
+      Nextcloud conversation while leaving the per-user handle alone — so
+      without the archived test the default can be a room that is invisible in
+      web and dead on Talk, which `deliver` writes into perfectly happily.
+    """
+    if token in channels:
+        return False
+    room = get_room(conn, token)
+    if room is None or room.archived:
+        return False
+    if is_room_dismissed(conn, token, user_id):
+        return False
+    return not (set(list_room_members(conn, token)) - {user_id})
+
+
+def _default_room_candidates(
+    conn: sqlite3.Connection, user_id: str,
+) -> "list[Room]":
+    """Registry rooms usable as ``user_id``'s default delivery target.
+
+    Oldest first, **not** `list_member_rooms`' activity order, and that
+    re-sort is the point: this feeds the branch that mints the handle a bare
+    `web` route then lands on for good, so taking the most recently active room
+    would make a permanent delivery target out of whichever room the user
+    happened to speak in last — the surprise `default_web_room` exists to
+    remove. `created_at` then `token`, so the order is total.
+
+    The exclusions are `_usable_as_delivery_default`'s, shared with
+    `default_web_room`. The two lists still differ on one axis, deliberately:
+    this one is drawn from the registry (`rooms.archived`) while the lookup is
+    drawn from the per-user handles (`web_chat_rooms.archived`), so a room the
+    user hid is absent from the lookup and present here. That is what lets the
+    fallback un-hide the user's own room rather than mint a second one — see
+    `ensure_default_web_chat_room`.
+    """
+    channels = channel_room_tokens(conn, user_id)
+    candidates = [
+        room
+        for room in list_member_rooms(conn, user_id, include_archived=False)
+        if _usable_as_delivery_default(conn, user_id, room.token, channels)
+    ]
+    return sorted(candidates, key=lambda r: (r.created_at, r.token))
 
 
 # The legacy `web_chat_messages` accessors (`add_web_chat_message` /
