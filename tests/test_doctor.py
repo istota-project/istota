@@ -917,10 +917,12 @@ class TestNativeBrainCredential:
 
         `secrets_store.secret_exists` opens read-write and commits, so against
         an absent path it leaves a zero-byte database that a later read reports
-        as `no such table` — which reads as corruption rather than absence — and
-        against a live WAL database it materializes the sidecars. `sudo istota
-        doctor` beside a stopped daemon would leave both owned by root.
+        as `no such table` — which reads as corruption rather than absence.
         `check_framework_db` states the rule; this check now follows it.
+
+        The sidecars are no longer part of that reason (ISSUE-458): a
+        read-write open is the one that *removes* them, which is why
+        `connect_read_only` uses one wherever there is nothing to recover.
         """
         from istota.config import UserConfig
 
@@ -946,7 +948,16 @@ class TestNativeBrainCredential:
         the missing-file case is covered by an `exists()` guard that a partial
         revert would leave in place. Reverting to `secrets_store.secret_exists`
         — which connects read-write and commits — turns this red, because that
-        helper's own connect carries no `mode=ro`.
+        helper's own connect carries no mode at all.
+
+        **Which mode is not the assertion, since ISSUE-458.** The URI is
+        `mode=ro` or `mode=rw` depending on whether the database has a hot
+        journal, and this fixture's `db.init_db` leaves a connection open, so
+        the read-only branch is the one taken here. What is pinned is that a
+        mode is named at all — never the default `rwc`, which would create a
+        missing database — and, on the read-write branch, that the write is
+        withheld, since a revert dropping `PRAGMA query_only` would hand doctor
+        a writable connection and satisfy a mode-only check.
         """
         import sqlite3
 
@@ -960,11 +971,17 @@ class TestNativeBrainCredential:
         secrets_store.set_secret(db_path, "alice", "native_brain", "api_key", "sk-u")
 
         opens: list[tuple[tuple, dict]] = []
+        statements: list[str] = []
         real_connect = sqlite3.connect
+
+        class _Recording(sqlite3.Connection):
+            def execute(self, sql, *a, **kw):
+                statements.append(str(sql))
+                return super().execute(sql, *a, **kw)
 
         def _recording(*args, **kwargs):
             opens.append((args, kwargs))
-            return real_connect(*args, **kwargs)
+            return real_connect(*args, factory=_Recording, **kwargs)
 
         monkeypatch.setattr(sqlite3, "connect", _recording)
 
@@ -975,9 +992,16 @@ class TestNativeBrainCredential:
 
         assert r.status == OK
         assert opens, "the check reached no database at all"
+        modes = set()
         for args, kwargs in opens:
             assert kwargs.get("uri") is True, (args, kwargs)
-            assert "mode=ro" in str(args[0]), (args, kwargs)
+            target = str(args[0])
+            assert "?mode=ro" in target or "?mode=rw" in target, (args, kwargs)
+            modes.add("ro" if "?mode=ro" in target else "rw")
+        if "rw" in modes:
+            assert any(
+                "query_only" in s.lower() for s in statements
+            ), f"the write was never withheld: {statements}"
 
     def test_a_secret_for_a_user_the_config_does_not_list_does_not_count(
         self, make_config, monkeypatch, tmp_path,
@@ -1260,9 +1284,26 @@ class TestTaskFailureRate:
         assert "db_restore" in r.remedy
         assert "init" not in r.remedy
 
-    def test_opens_the_database_read_only(self, make_config, tmp_path, monkeypatch):
-        """`sudo istota doctor` against a stopped daemon must not materialize
-        root-owned WAL sidecars — `check_framework_db`'s reasoning, same file."""
+    def test_opens_the_database_without_writing_to_it(
+        self, make_config, tmp_path, monkeypatch,
+    ):
+        """`sudo istota doctor` must not write to the database it inspects.
+
+        Asserted on the URI rather than on a directory listing, and the reason
+        is the fixture: `db.init_db` leaves a connection open, so this tree has
+        a hot WAL and its `-wal` / `-shm` pair already — which is also why the
+        read-only branch is the one taken here. A before/after listing would be
+        equal under every implementation, including one that opened nothing, so
+        it is deliberately not asserted; `.claude/rules/testbed.md` catalogues
+        that shape. The guarantees themselves — no strays beside a cold
+        database, no checkpoint into a hot one — are owned by
+        `tests/test_sqlite_util.py::TestConnectReadOnly`, which controls the
+        fixture. What this pins is that the check goes through that helper.
+
+        Either mode is accepted because ISSUE-458 made it a per-database
+        choice. What may never appear is the default `rwc`, which would create
+        a missing database.
+        """
         import sqlite3
 
         seen = []
@@ -1273,10 +1314,15 @@ class TestTaskFailureRate:
             return real_connect(target, *args, **kwargs)
 
         db_path = self._db(tmp_path, ["completed"])
+
         monkeypatch.setattr(sqlite3, "connect", _spy)
         assert self._run(make_config, db_path).status == OK
         assert seen, "the check opened no connection"
-        assert all(str(t).startswith("file:") and "mode=ro" in str(t) for t in seen), seen
+        assert all(
+            str(t).startswith("file:")
+            and ("?mode=ro" in str(t) or "?mode=rw" in str(t))
+            for t in seen
+        ), seen
 
     def test_is_deployment_scoped(self, make_config, tmp_path):
         assert self._run(make_config, tmp_path / "absent.db").scope == DEPLOYMENT
@@ -1556,11 +1602,16 @@ class TestModelExecution:
         assert r.status == SKIP
         assert not user_temp.exists(), "the check created the directory it was asked about"
 
-    def test_reads_user_resources_read_only(
+    def test_reads_user_resources_without_writing(
         self, make_config, make_user_config, tmp_path, monkeypatch
     ):
-        """`db.get_db` connects read-write and commits; on a WAL database that
-        materializes sidecars a `sudo` run would leave owned by root."""
+        """`db.get_db` connects read-write and *commits*; this must not.
+
+        The sidecars are no longer the reason — ISSUE-458 measured that a
+        read-write open is the one that removes them, and `connect_read_only`
+        now opens `mode=rw` for exactly that. What is left of the rule is the
+        commit and the refusal to create a missing database.
+        """
         import sqlite3
 
         from istota import db, executor
@@ -1583,7 +1634,33 @@ class TestModelExecution:
 
         assert self._run(config).status == OK
         assert seen, "the resource lookup opened no connection"
-        assert all("mode=ro" in target for target in seen), seen
+        assert all(("?mode=ro" in t or "?mode=rw" in t) for t in seen), seen
+
+    def test_an_absent_database_yields_no_resources_and_creates_nothing(
+        self, make_config, make_user_config, tmp_path, monkeypatch
+    ):
+        """This is the one read-only call site with no `exists()` guard.
+
+        The other four check the path first; `_read_user_resources` relies
+        entirely on `connect_read_only` naming a mode rather than defaulting to
+        `rwc`, so a missing database raises and its bare `except` returns `[]`.
+        Nothing tested that, and the failure it guards against is silent: a
+        zero-byte database created under `sudo` beside a stopped daemon, which
+        a later read reports as corruption rather than absence.
+        """
+        from istota import executor
+
+        config = self._config(make_config, make_user_config, tmp_path)
+        db_path = Path(config.db_path)
+        assert not db_path.exists()
+        (Path(config.temp_dir) / "alice").mkdir(parents=True)
+
+        monkeypatch.setattr(executor, "effective_sandboxing", lambda config: True)
+        monkeypatch.setattr(executor, "build_bwrap_cmd", lambda cmd, *a, **kw: list(cmd))
+        self._stub(monkeypatch)
+
+        assert doctor._read_user_resources(config, "alice") == []
+        assert not db_path.exists(), "the check created the database it was reading"
 
     def test_wraps_under_effective_sandboxing_not_the_flag(
         self, make_config, make_user_config, tmp_path, monkeypatch
@@ -2824,11 +2901,11 @@ class TestSecretKey:
     def test_the_row_count_query_leaves_no_sidecars_and_no_database(
         self, make_config, monkeypatch
     ):
-        """Read-only, like every other database-touching check here. A
-        read-write open materializes `-wal`/`-shm` and, against a missing
-        file, creates a zero-byte database that later reads as corruption
-        rather than as absence — and a diagnostic run as root beside a stopped
-        daemon would leave all of it owned by the wrong user."""
+        """Through `connect_read_only`, like every other database-touching
+        check here: an ordinary read-write open would, against a missing file,
+        create a zero-byte database that later reads as corruption rather than
+        as absence. The `-wal`/`-shm` half of that reason was backwards and is
+        gone (ISSUE-458) — a read-write open removes those on last close."""
         self._clear(monkeypatch)
         config = make_config()
         self._run(config)

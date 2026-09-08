@@ -77,35 +77,122 @@ def connect(
     return conn
 
 
+def _has_hot_journal(path: Path | str) -> bool:
+    """Whether ``path`` has WAL or rollback-journal content to recover.
+
+    The question :func:`connect_read_only` asks before choosing its mode, and it
+    is asked of the filesystem because SQLite has no way to answer it without
+    opening — and opening read-write is the act being decided.
+
+    A non-empty ``-wal`` or ``-journal`` beside the database means either a
+    process is holding it open right now or one died without checkpointing.
+    Both are cases where a read-write open would *write*: recovery, then a
+    checkpoint into the main file on last close. Zero-length counts as cold,
+    which is what a cleanly closed WAL database leaves behind on some platforms.
+
+    Racy by construction and safe in both directions, which is why a check this
+    weak is worth having: the file can appear or vanish between this call and
+    the open, and the worst either way is one run behaving as the other branch
+    would have — a checkpoint that had nothing to do, or a sidecar pair left
+    beside a database that already had one. Neither is new behaviour.
+    """
+    base = Path(path)
+    for suffix in ("-wal", "-journal"):
+        sidecar = base.with_name(base.name + suffix)
+        try:
+            if sidecar.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def connect_read_only(path: Path | str) -> sqlite3.Connection:
-    """Open ``path`` read-only through the URI form. Caller closes it.
+    """Open ``path`` for reading without writing to it. Caller closes it.
 
-    ``doctor`` is the only caller, five times, and what it gets out of this is
-    that the connection cannot write to the database. No pragmas: a read-only
-    connection has nothing to protect from a writer, and all five call sites
-    issued none.
+    ``doctor`` is the only caller, five times, and what it needs is a connection
+    that does not change what it is inspecting and strands nothing beside it.
 
-    **What it does not get is the thing all five said it was for.** Their
-    comments claim ``mode=ro`` avoids materializing the ``-wal`` / ``-shm``
-    sidecars, so that ``sudo istota doctor`` against a stopped daemon leaves no
-    root-owned files behind. Driven against sqlite 3.47 it is the other way
-    round: a read-only open creates both **and leaves them**, because a
-    read-only connection cannot delete them on close, while the read-write open
-    they were avoiding creates them and cleans them up. Only ``immutable=1``
-    creates neither, and that is unsafe against a live database because it
-    tells SQLite the file never changes. Recorded rather than corrected —
-    changing which URI a diagnostic uses is a decision about what it may assume
-    of a running daemon, and this function is a move. Pinned by
-    ``tests/test_sqlite_util.py::TestConnectReadOnly``.
+    **The mode is chosen per database, and neither mode is right for both
+    shapes** (ISSUE-458). A database with a hot journal is opened ``mode=ro``; a
+    database with none is opened ``mode=rw`` with ``PRAGMA query_only``. Both
+    halves are counter-intuitive and both were measured, against sqlite 3.47.
+
+    **Why ``mode=ro`` is wrong for a cold database.** It is the obvious spelling
+    and it cannot clean up after itself: opening a WAL database ``mode=ro``
+    *creates* the ``-wal`` / ``-shm`` sidecars and then leaves them, because
+    deleting them on last close is itself a write. The read-write open the five
+    call sites were avoiding is the one that removes them, so their comments had
+    the mechanism exactly backwards. The strays were an outage rather than
+    clutter: ``sudo istota doctor`` against a stopped daemon left both owned by
+    root while the daemon runs as its own user, and a database whose sidecars
+    the caller cannot write refuses a read-write open outright — the diagnostic
+    locked the daemon out of its own database.
+
+    **Why ``mode=rw`` is wrong for a hot one.** A read-write connection that is
+    the *last* one out checkpoints an un-checkpointed WAL into the main database
+    file and unlinks the sidecars, and ``query_only`` does not stop it — that
+    pragma bounds statements, not SQLite's own close-time housekeeping. Measured
+    against a database left by a ``SIGKILL``ed writer, the main file went from
+    4096 to 28672 bytes with its mtime moved. That database is exactly what
+    :func:`~istota.doctor.check_framework_db` exists to inspect, and its remedy
+    is ``python -m istota.db_restore``, so recovering and rewriting it before
+    the operator has decided anything is a diagnostic altering the evidence.
+    Hence :func:`_has_hot_journal`, and hence the read-only branch — which
+    strands nothing, because a database with a hot journal already has its
+    sidecars.
+
+    **``immutable=1`` is the only URI that creates no sidecars, and it is
+    unusable here.** It tells SQLite the file never changes, so the WAL is
+    ignored entirely: against a database whose table has not been checkpointed
+    out of the WAL yet it reports ``no such table`` rather than stale rows, and
+    all five checks would then call a healthy running daemon broken. Doctor runs
+    inside the daemon at boot, on the scheduler's interval and behind the admin
+    dashboard, so a live database is its ordinary case rather than its edge one.
+    That is the question ISSUE-458 posed — what a diagnostic may assume of a
+    database another process is using — and the answer is nothing.
+
+    **``query_only`` is weaker than ``mode=ro`` and strong enough.** It refuses
+    ``INSERT``, ``CREATE``, ``DROP`` and a ``PRAGMA`` write with SQLite's own
+    ``attempt to write a readonly database``, so a check that grew a write fails
+    loudly at the statement — but the pragma is reversible by SQL, where
+    ``mode=ro`` was structural. That is a guard against a mistake rather than a
+    boundary, which is the right size here: all five call sites execute fixed
+    SQL this package writes, none of it model-supplied. It must also stay
+    **header-free**: it is the first statement the connection runs, and a pragma
+    that touched the database header would move a corrupt-file failure off
+    ``check_framework_db``'s body branch and onto its "could not be opened" one.
+    ``PRAGMA query_only`` does not read a page, which is measured and pinned.
+
+    Two properties of ``mode=ro`` are deliberately kept on the read-write
+    branch. ``rw`` rather than the default ``rwc`` means a **missing database
+    still raises rather than being created** — ``_secret_row_count`` names that
+    zero-byte file as something that later reads as corruption rather than as
+    absence, and four of the five call sites guard it by hand as well, so the
+    structural form is what keeps them agreeing. And a read-only *directory*
+    fails exactly as it did before, since ``mode=ro`` could not create the
+    sidecars it needs there either.
+
+    **Three residuals, none of them closed by this.** ``mode=rw`` is not a
+    promise the handle is writable: SQLite retries read-only when ``O_RDWR`` is
+    refused, so against a database file the process can read and not write the
+    open succeeds and the sidecars are created and left exactly as before — the
+    likelier permission shape of the two, and the reason that branch is a
+    best-effort cleanup rather than a guarantee. The sidecars also exist *for
+    the duration* of every read-write open, so a ``SIGKILL`` or an OOM between
+    open and close strands them again; every call site closes in a ``finally``,
+    which covers an exception but not process death. And the branch is chosen
+    from a filesystem check that can be stale by the time SQLite opens the file.
+    None of the three is worse than the behaviour this replaced.
 
     **The path is percent-encoded into the URI, and it has to be** (ISSUE-461).
     All five call sites interpolated it raw, so `?` or `#` ended the path early
     and `%41` decoded to `A`. The reported symptom was reading the wrong file;
     the worse one is that the truncated remainder is not a ``mode`` parameter
-    SQLite recognises, so ``mode=ro`` was dropped with it and the open landed
-    **read-write** on a path the caller never named — measured, and it
-    materialized that file. Under ``sudo istota doctor`` that is the root-owned
-    stray these call sites say the URI form exists to avoid.
+    SQLite recognises, so the mode was dropped with it and the open fell back to
+    ``rwc`` on a path the caller never named — measured, and it materialized
+    that file. The encoding is what stops that, and it carries at least as much
+    weight under ``rw`` as it did under ``ro``.
 
     ``os.fsencode`` rather than ``str``: the encode goes through the
     filesystem encoding, so a name carrying undecodable bytes round-trips
@@ -113,10 +200,21 @@ def connect_read_only(path: Path | str) -> sqlite3.Connection:
     which is inert for a path of ordinary characters — a space or a non-ASCII
     name worked before and still does, since SQLite decodes ``%HH`` back.
     """
-    return sqlite3.connect(
-        "file:" + quote(os.fsencode(Path(path)), safe="/") + "?mode=ro",
+    mode = "ro" if _has_hot_journal(path) else "rw"
+    conn = sqlite3.connect(
+        "file:" + quote(os.fsencode(Path(path)), safe="/") + f"?mode={mode}",
         uri=True,
     )
+    if mode == "ro":
+        return conn
+    try:
+        conn.execute("PRAGMA query_only = ON")
+    except BaseException:
+        # Without the pragma this is an ordinary writable connection, which is
+        # the one thing the caller must not be handed.
+        conn.close()
+        raise
+    return conn
 
 
 @contextmanager
