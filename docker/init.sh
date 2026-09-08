@@ -137,6 +137,30 @@ if [ -f "$ENV_FILE" ] && [ "$FORCE" = false ]; then
     esac
 fi
 
+# The host's own address on the network. On a stack with no DOMAIN this is the
+# only address that satisfies both legs of the signaling URL: measured from a
+# sibling container, the host's LAN address on a published port answers and
+# `localhost` does not, because inside the nextcloud container localhost is its
+# own loopback. Every branch is guarded — a machine with no route out is not an
+# error here, it just means no default is offered.
+detect_host_ip() {
+    local ip="" iface=""
+    if command -v ip >/dev/null 2>&1; then
+        ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}' || true)"
+    fi
+    if [ -z "$ip" ] && command -v ipconfig >/dev/null 2>&1; then
+        iface="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }' || true)"
+        [ -n "$iface" ] && ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+    fi
+    if [ -z "$ip" ]; then
+        ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    fi
+    case "$ip" in
+        127.*|"") echo "" ;;
+        *)        echo "$ip" ;;
+    esac
+}
+
 # --- password generator ---
 # url-safe, ~24 chars, no shell-special characters
 gen_pw() { openssl rand -base64 18 | tr -d '/+=\n' | head -c 24; }
@@ -160,6 +184,7 @@ module_off() {
 # Inert defaults — only written to .env if `mark` adds the key.
 DOMAIN=""
 ISTOTA_BOT_NAME="Istota"
+ISTOTA_PUBLIC_PROTO="http"
 USER_EMAIL=""
 ISTOTA_EMAIL_ENABLED="false"
 ISTOTA_EMAIL_IMAP_HOST=""
@@ -167,6 +192,7 @@ ISTOTA_EMAIL_IMAP_USER=""
 ISTOTA_EMAIL_IMAP_PASSWORD=""
 ISTOTA_EMAIL_SMTP_HOST=""
 ISTOTA_EMAIL_BOT_ADDRESS=""
+ANTHROPIC_API_KEY=""
 ISTOTA_DEVELOPER_GITLAB_TOKEN=""
 ISTOTA_DEVELOPER_GITLAB_USERNAME=""
 ISTOTA_DEVELOPER_GITHUB_TOKEN=""
@@ -229,6 +255,18 @@ dim "Nextcloud trusted domains and the SvelteKit site host all derive"
 dim "from it. Examples: 'istota.example.com', 'home.example.com:8080'."
 prompt_value DOMAIN "DOMAIN" ""
 [ -n "$DOMAIN" ] && mark DOMAIN
+if [ -n "$DOMAIN" ]; then
+    echo
+    dim "Answer yes if TLS is terminated in front of this stack (Caddy,"
+    dim "Traefik, a load balancer, an nginx of your own). It sets"
+    dim "ISTOTA_PUBLIC_PROTO, which the OAuth2 callback URL, Nextcloud's"
+    dim "overwrite settings and the signaling path below are all built from."
+    prompt_bool _public_https "Is $DOMAIN served over https?" "n"
+    if [ "$_public_https" = "true" ]; then
+        ISTOTA_PUBLIC_PROTO="https"
+        mark ISTOTA_PUBLIC_PROTO
+    fi
+fi
 
 # --- model backend (brain) ---
 if [ "$MINIMAL" = false ]; then
@@ -266,34 +304,45 @@ if [ "$MINIMAL" = false ]; then
     fi
 fi
 
-# --- Claude Code OAuth token ---
-section "Claude Code OAuth token"
+# --- Claude credentials ---
+# Two credentials, one question. The CLI accepts either, and the entrypoint
+# checks for both — so the wizard asks for both rather than naming the second
+# one in passing and leaving the operator to hand-edit .env for a variable it
+# never prompted for.
+section "Claude authentication"
 if [ "$ISTOTA_BRAIN_KIND" = "native" ]; then
-    dim "Native brain selected — the Claude CLI isn't used, so a Claude token"
-    dim "is optional. Press Enter to skip; the provider API key is used instead."
+    dim "Native brain selected — the Claude CLI isn't used, so a Claude"
+    dim "credential is optional. Press Enter at both prompts to skip; the"
+    dim "provider API key you already gave is used instead."
     echo
 fi
 cat <<'EOF'
-  Istota needs a long-lived Claude Code OAuth token to talk to the model.
+  Istota reaches the model through the Claude CLI, which takes either of
+  two credentials. Give one; the second prompt only appears if you skip
+  the first.
 
-  On a machine that already has Claude Code installed and authenticated,
-  run:
+  1. A Claude Code OAuth token, billed against a Claude subscription. On a
+     machine that already has Claude Code installed and authenticated:
 
-      claude setup-token
+         claude setup-token
 
-  That prints a token starting with "sk-ant-...". Copy it and paste it
-  below. The token does not expire automatically; revoke it from the
-  Anthropic console if you ever need to.
+     That prints a token starting with "sk-ant-". It does not expire on its
+     own; revoke it from the Anthropic console when you need to. Without
+     Claude Code installed:
 
-  If you don't have Claude Code yet:
-      npm install -g @anthropic-ai/claude-code
-      claude          # log in interactively, then run setup-token
+         npm install -g @anthropic-ai/claude-code
+         claude          # log in interactively, then run setup-token
 
-  You can also leave this blank and set ANTHROPIC_API_KEY later in .env.
+  2. An Anthropic API key, billed per token. Create one at
+     https://console.anthropic.com/settings/keys
 
 EOF
-read -rp "  CLAUDE_CODE_OAUTH_TOKEN (paste, or empty to skip): " CLAUDE_CODE_OAUTH_TOKEN
+read -rp "  CLAUDE_CODE_OAUTH_TOKEN (paste, or empty to use an API key): " CLAUDE_CODE_OAUTH_TOKEN
 mark CLAUDE_CODE_OAUTH_TOKEN
+if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+    read -rp "  ANTHROPIC_API_KEY (paste, or empty to skip both): " ANTHROPIC_API_KEY
+    mark ANTHROPIC_API_KEY
+fi
 echo
 
 # --- primary user ---
@@ -521,26 +570,68 @@ if [ "$MINIMAL" = false ]; then
     prompt_bool signaling_wanted "Enable the Talk signaling server?" "n"
     if [ "$signaling_wanted" = "true" ]; then
         echo
-        # No default is offered, and that is the finding rather than caution.
-        # Two different things use this one URL: a browser connects to it, and
-        # Nextcloud's own PHP posts room and chat events to it — that second leg
-        # is what makes inbound a push at all, and it runs inside the nextcloud
-        # container. So http://localhost:8081 is wrong even for a localhost-only
-        # evaluation: it is a host-side publish, and from PHP `localhost` is
-        # nextcloud's own loopback. The stack offers no address satisfying both,
-        # so there is nothing to derive and nothing is suggested.
+        # Talk stores one URL and two different clients use it: a browser
+        # connects to it, and Nextcloud's own PHP posts room and chat events to
+        # it — that second leg is what makes inbound a push at all, and it runs
+        # inside the nextcloud container. So the server's own published port is
+        # wrong for both: it is a host-side publish, and from PHP `localhost` is
+        # nextcloud's own loopback. nginx proxies /standalone-signaling/ to the
+        # server for exactly this reason, which makes the public address
+        # Nextcloud is already served from an answer the stack can derive —
+        # but only when there is a public name, so a localhost-only evaluation
+        # still has nothing to offer.
         dim "Talk needs one URL for the server, and two different things use it:"
         dim "a browser connects to it, and Nextcloud's own PHP posts room and"
         dim "chat events to it. That second leg is what makes inbound a push, and"
         dim "it runs inside the nextcloud container — so the URL has to resolve"
         dim "from a browser and from in there."
         echo
-        dim "This stack provides no such address on its own: the server is"
-        dim "published on loopback only (ISTOTA_TALK_SIGNALING_PORT, 8081 by"
-        dim "default) and nginx does not proxy it. Put a TLS front end in front"
-        dim "of that port on a name both sides resolve, and give its URL here."
-        dim "Leave empty to skip signaling; nothing else in the stack changes."
-        prompt_value ISTOTA_TALK_SIGNALING_SERVER "Signaling URL (empty to skip)" ""
+        _sig_default=""
+        _sig_use_default=false
+        if [ -n "$DOMAIN" ]; then
+            _sig_default="${ISTOTA_PUBLIC_PROTO}://${DOMAIN}/standalone-signaling/"
+            dim "This stack can serve it itself: nginx proxies"
+            dim "/standalone-signaling/ through to the server, so both legs land"
+            dim "on the same address Nextcloud is already served from."
+            dim "That needs $DOMAIN to resolve from inside the nextcloud"
+            dim "container as well as from a browser, which a public name on a"
+            dim "host that can reach its own address does."
+            prompt_bool _sig_use_default "Use $_sig_default?" "y"
+        else
+            _host_ip="$(detect_host_ip)"
+            _nc_port="$(awk -F= '/^NC_PORT=/ { print $2; exit }' "$EXAMPLE_FILE" 2>/dev/null || true)"
+            [ -n "$_nc_port" ] || _nc_port=8080
+            dim "No DOMAIN was set. nginx proxies /standalone-signaling/ through"
+            dim "to the server, but a localhost URL is wrong from inside the"
+            dim "nextcloud container, where localhost is its own loopback."
+            if [ -n "$_host_ip" ]; then
+                _sig_default="http://${_host_ip}:${_nc_port}/standalone-signaling/"
+                echo
+                dim "This machine's own address on the network is one both sides"
+                dim "do resolve, and it is enough for an evaluation:"
+                dim "  $_sig_default"
+                dim "It is baked into Nextcloud at first install, so it stops"
+                dim "working the day this machine's address changes — which on"
+                dim "DHCP is a matter of when."
+                echo
+                dim "That covers istota's own inbound, which names the container"
+                dim "network. Talk's browser client names the URL Nextcloud"
+                dim "advertises for itself instead, and with no DOMAIN that is"
+                dim "localhost — which the signaling server cannot post back to."
+                dim "For the whole stack to agree, answer DOMAIN with"
+                dim "${_host_ip}:${_nc_port} and take the offer above it."
+                prompt_bool _sig_use_default "Use $_sig_default?" "n"
+            fi
+        fi
+        if [ "$_sig_use_default" = "true" ]; then
+            ISTOTA_TALK_SIGNALING_SERVER="$_sig_default"
+        else
+            echo
+            dim "Give a URL that resolves from a browser and from inside the"
+            dim "nextcloud container. Leave empty to skip signaling; nothing"
+            dim "else in the stack changes."
+            prompt_value ISTOTA_TALK_SIGNALING_SERVER "Signaling URL (empty to skip)" ""
+        fi
         if [ -n "$ISTOTA_TALK_SIGNALING_SERVER" ]; then
             ISTOTA_TALK_SIGNALING_ENABLED="true"
             ISTOTA_TALK_SIGNALING_SECRET="$(gen_pw)"
@@ -608,11 +699,13 @@ USER_TIMEZONE="$USER_TIMEZONE" \
 USER_EMAIL="$USER_EMAIL" \
 USER_DISABLED_MODULES="$USER_DISABLED_MODULES" \
 CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
+ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
 VNC_PASSWORD="$VNC_PASSWORD" \
 COMPOSE_PROFILES="$COMPOSE_PROFILES" \
 COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME" \
 DOMAIN="$DOMAIN" \
 ISTOTA_BOT_NAME="$ISTOTA_BOT_NAME" \
+ISTOTA_PUBLIC_PROTO="$ISTOTA_PUBLIC_PROTO" \
 ISTOTA_EMAIL_ENABLED="$ISTOTA_EMAIL_ENABLED" \
 ISTOTA_EMAIL_IMAP_HOST="$ISTOTA_EMAIL_IMAP_HOST" \
 ISTOTA_EMAIL_IMAP_USER="$ISTOTA_EMAIL_IMAP_USER" \
@@ -687,6 +780,15 @@ echo
 echo -e "  ${_BOLD}Configuration:${_RESET}"
 echo "    Bot name          :  $ISTOTA_BOT_NAME"
 echo "    Brain             :  $ISTOTA_BRAIN_KIND$([ "$ISTOTA_BRAIN_KIND" = "native" ] && echo " (model: ${ISTOTA_BRAIN_NATIVE_MODEL:-unset}, $ISTOTA_BRAIN_NATIVE_BASE_URL)")"
+if [ "$ISTOTA_BRAIN_KIND" != "native" ]; then
+    if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+        echo "    Claude auth       :  OAuth token"
+    elif [ -n "$ANTHROPIC_API_KEY" ]; then
+        echo "    Claude auth       :  API key"
+    else
+        echo "    Claude auth       :  (none — set one in .env)"
+    fi
+fi
 echo "    Public hostname   :  ${DOMAIN:-(localhost-only)}"
 echo "    Compose profiles  :  ${COMPOSE_PROFILES:-(none — only the core stack)}"
 echo "    Email             :  $ISTOTA_EMAIL_ENABLED"
@@ -717,8 +819,8 @@ if [ "$ISTOTA_BRAIN_KIND" = "native" ] && [ -z "$ISTOTA_BRAIN_NATIVE_API_KEY" ];
     warn "  start, but the bot can't call the model until you set"
     warn "  ISTOTA_BRAIN_NATIVE_API_KEY in $ENV_FILE and 'docker compose restart istota web'."
     echo
-elif [ "$ISTOTA_BRAIN_KIND" != "native" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-    warn "No Claude Code token set. The stack will start, but the bot can't"
+elif [ "$ISTOTA_BRAIN_KIND" != "native" ] && [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+    warn "No Claude credential set. The stack will start, but the bot can't"
     warn "  call the model until you set CLAUDE_CODE_OAUTH_TOKEN or"
     warn "  ANTHROPIC_API_KEY in $ENV_FILE and 'docker compose restart istota'."
     echo
