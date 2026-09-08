@@ -5753,7 +5753,7 @@ def check_travel_timezone(
                     f"while (was {current_tz}). Briefings and calendar times "
                     f"follow this. Turn this off under Settings if you'd rather "
                     f"set it yourself.",
-                    purpose="notification",
+                    purpose="alert",
                 )
             except Exception as e:
                 sent = False

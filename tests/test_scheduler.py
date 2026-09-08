@@ -1152,7 +1152,7 @@ class TestDeferredGarminImport:
         monkeypatch.setattr(gi, "import_tracks", fake_import)
         monkeypatch.setattr(
             notif, "send_notification",
-            lambda cfg, uid, msg, **k: sent.append((uid, msg)) or True,
+            lambda cfg, uid, msg, **k: sent.append((uid, msg, k)) or True,
         )
 
         n = sd._process_deferred_garmin_import(config, self._make_task(), user_dir)
@@ -1161,8 +1161,77 @@ class TestDeferredGarminImport:
         assert calls == {"user_id": "alice", "days_back": 14}
         assert sent and sent[0][0] == "alice"
         assert "42" in sent[0][1] and "2 activit" in sent[0][1]
+        assert sent[0][2]["purpose"] == "alert"
         # File consumed.
         assert not (user_dir / "task_7_garmin_import.json").exists()
+
+    def test_every_outcome_sends_on_the_alert_route(self, tmp_path, monkeypatch):
+        """Success, no-connection and rate-limited all take `alert`.
+
+        `notification` was the old purpose, and no settings page can point it
+        at a room: it falls through to `default_destination`, so a user who had
+        moved their alerts to a dedicated room still got these in whatever room
+        a bare `web`/`talk` resolves to (ISSUE-476).
+        """
+        from istota import scheduler_deferred as sd
+        from istota.health import garmin as gm
+        from istota.location import garmin_import as gi
+        import istota.notifications as notif
+
+        config = Config(temp_dir=tmp_path)
+        purposes = []
+        monkeypatch.setattr(
+            notif, "send_notification",
+            lambda cfg, uid, msg, **k: purposes.append(k.get("purpose")) or True,
+        )
+
+        outcomes = [
+            lambda *a, **k: gi.ImportResult(False, 3, 1, [{"inserted": 3}]),
+            lambda *a, **k: (_ for _ in ()).throw(gm.GarminAuthError("nope")),
+            lambda *a, **k: (_ for _ in ()).throw(gm.GarminRateLimited("slow")),
+        ]
+        for i, outcome in enumerate(outcomes):
+            user_dir = self._write_op(tmp_path, task_id=20 + i)
+            monkeypatch.setattr(gi, "import_tracks", outcome)
+            sd._process_deferred_garmin_import(
+                config, self._make_task(task_id=20 + i), user_dir,
+            )
+
+        assert purposes == ["alert", "alert", "alert"]
+
+    def test_the_alert_route_wins_over_the_default_destination(
+        self, tmp_path, monkeypatch,
+    ):
+        """Through the real `send_notification`, not a stub of it.
+
+        The stubs above prove the argument; this proves the argument reaches a
+        destination. A user whose alerts go to one web room and whose default
+        destination is a bare `web` (i.e. some other room) must get the import
+        summary in the alerts room.
+        """
+        from istota import scheduler_deferred as sd
+        from istota.location import garmin_import as gi
+        import istota.notifications as notif
+
+        config = Config(temp_dir=tmp_path)
+        config.users["alice"] = UserConfig(
+            default_destination="web",
+            routing={"alert": "web:alerts-room"},
+        )
+        user_dir = self._write_op(tmp_path)
+        monkeypatch.setattr(
+            gi, "import_tracks",
+            lambda *a, **k: gi.ImportResult(False, 5, 1, [{"inserted": 5}]),
+        )
+        dests = []
+        monkeypatch.setattr(
+            notif, "_dispatch",
+            lambda cfg, uid, msg, d, **k: dests.extend(d) or (True, None),
+        )
+
+        sd._process_deferred_garmin_import(config, self._make_task(), user_dir)
+
+        assert [(d.surface, d.channel) for d in dests] == [("web", "alerts-room")]
 
     def test_no_activities_message(self, tmp_path, monkeypatch):
         from istota import scheduler_deferred as sd
