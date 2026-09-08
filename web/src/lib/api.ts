@@ -1279,6 +1279,14 @@ export interface UserProfile {
   // covers a room with no handle yet and a failed lookup, both of which deliver
   // perfectly well (ISSUE-478).
   unavailable_web_rooms?: string[];
+  // Read-only: this profile's `default_room` when it is not being honoured — the
+  // room is archived, gone or no longer theirs, so the bare-`web` heuristic
+  // answers instead. Its own key rather than a place in the list above, and its
+  // own mark in the picker: an unavailable route swallows the delivery, while an
+  // ignored default room only means the delivery lands somewhere the user did
+  // not choose (ISSUE-479). A pin that is merely hidden is not reported — the
+  // next delivery un-hides the room.
+  ignored_default_room?: string;
   // Read-only: the Talk conversations a `talk:<token>` route can name — the two
   // the bot provisioned, then every Talk-bound room the user is in. No
   // `default` flag: a bare `talk` resolves per purpose, and each row says where

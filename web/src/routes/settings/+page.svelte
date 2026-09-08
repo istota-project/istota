@@ -308,16 +308,35 @@
   // The room half of a `web` or `talk` route (ISSUE-473, ISSUE-475). Both are
   // surfaces whose destination is one room out of several the user has; email
   // and ntfy have no room at all, so their rows show the surface dropdown alone.
-  // `emptyLabel` is passed only by the "Default room" row, where the leading
-  // option means "no room pinned" rather than "the room a bare `web` lands in"
-  // — which after ISSUE-477 is whatever this setting says, so naming it there
-  // would be circular.
-  const webRooms = (current: string, emptyLabel?: string) =>
+  const webRooms = (current: string) =>
     webRoomOptions(
       profile?.web_rooms || [],
       current,
-      emptyLabel,
+      undefined,
       profile?.unavailable_web_rooms || [],
+    );
+
+  // The "Default room" row asks a different question of a dead pin than a route
+  // row does, so it gets its own builder rather than a flag on the one above
+  // (ISSUE-479). Its leading option means "no room pinned" rather than "the room
+  // a bare `web` lands in" — which after ISSUE-477 is whatever this setting says,
+  // so naming it there would be circular. And `ignored_default_room` marks a pin
+  // the resolvers have stopped honouring, which is not the route rows'
+  // `(unavailable)`: the delivery still arrives, just not where the user chose.
+  //
+  // It passes an empty `unavailable`, which this row used to receive and no
+  // longer does. That drops one mark, deliberately: the only token in both sets
+  // is a room the user *hid* that a route also pins, and a hidden pin is
+  // recoverable — the next delivery un-hides it — so `(unavailable)` there was
+  // reporting a working setting as broken. Everything the route list would have
+  // marked here that is genuinely dead, `ignored_default_room` already names.
+  const defaultRoomOpts = () =>
+    webRoomOptions(
+      profile?.web_rooms || [],
+      profile?.default_room || '',
+      'Automatic',
+      [],
+      profile?.ignored_default_room || '',
     );
   const talkRooms = (current: string, emptyLabel: string) =>
     talkRoomOptions(profile?.talk_rooms || [], current, emptyLabel);
@@ -773,7 +792,7 @@
           <div class="route-row">
             <Select
               value={profile.default_room || ''}
-              options={webRooms(profile.default_room || '', 'Automatic')}
+              options={defaultRoomOpts()}
               ariaLabel="Default room"
               fullWidth
               onValueChange={(v) => {

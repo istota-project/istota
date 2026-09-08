@@ -190,6 +190,47 @@ describe('webRoomOptions', () => {
     });
   });
 
+  it('marks an ignored default room differently from an unavailable route', () => {
+    // ISSUE-479. The two say opposite things about where the delivery went: an
+    // unavailable route swallows it, while an ignored `default_room` means it
+    // arrived somewhere the user did not choose, via the heuristic. Reusing the
+    // route's word would report a lost message where nothing was lost.
+    const opts = webRoomOptions(rooms, 'web-alice-archived', 'Automatic', [], 'web-alice-archived');
+    expect(opts[opts.length - 1]).toEqual({
+      value: 'web-alice-archived',
+      label: 'web-alice-archived (ignored)',
+    });
+    expect(labels(opts)[0]).toBe('Automatic');
+  });
+
+  it('marks only the token the server named, not every pin it was given', () => {
+    // The control that makes the mark an assertion rather than an inference.
+    // `current` is absent from `rooms` — the only input where the new branch
+    // decides anything — and `ignored` names a *different* token, so the guard
+    // has to compare rather than merely see a non-empty parameter.
+    const opts = webRoomOptions(rooms, 'web-alice-nohandle', 'Automatic', [], 'web-alice-archived');
+    expect(opts[opts.length - 1]).toEqual({
+      value: 'web-alice-nohandle',
+      label: 'web-alice-nohandle',
+    });
+  });
+
+  it('prefers the ignored mark over the route mark for one token', () => {
+    // A guard rather than a live case: the two call sites pass one input each,
+    // so nothing produces this combination today. It is asserted because the
+    // ordering is the answer a caller passing both would want — the field's
+    // verdict on its own pin over a route's verdict on the same room.
+    const opts = webRoomOptions(
+      rooms,
+      'web-alice-archived',
+      'Automatic',
+      ['web-alice-archived'],
+      'web-alice-archived',
+    );
+    expect(labels(opts)).toContain('web-alice-archived (ignored)');
+    expect(labels(opts)).not.toContain('web-alice-archived (unavailable)');
+  });
+
   it('leaves a pin the server did not name as a bare token', () => {
     // The load-bearing control. Absence from `rooms` is three states, not one:
     // this list is handle-driven, so a room with no handle yet and one with a

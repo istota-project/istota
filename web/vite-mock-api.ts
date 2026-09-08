@@ -3738,6 +3738,7 @@ const handlers: MockHandler[] = [
         { token: 'web-alice-ideas', name: 'ideas', default: false, shared: false, channel: false },
       ],
       unavailable_web_rooms: [],
+      ignored_default_room: '',
       talk_rooms: [
         { token: 'alerts-tok', name: 'Alerts channel', channel: true },
         { token: 'logs-tok', name: 'Logs channel', channel: true },

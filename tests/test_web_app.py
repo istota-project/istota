@@ -3873,6 +3873,145 @@ class TestProfileEndpoints:
         )).json()["profile"]
         assert p["unavailable_web_rooms"] == []
 
+    async def test_ignored_default_room_names_a_pin_that_has_gone_dead(
+        self, tmp_path, client, app,
+    ):
+        """ISSUE-479. `default_room` is the third pinned web token and ISSUE-478
+        left it unmarked. An archived room trips a *terminal* arm — every reader
+        discards the value and the heuristic answers instead — so the setting has
+        silently stopped doing anything and the picker has to say so."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            general = db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-pin", "alice", origin="talk", name="crew")
+            db.add_room_member(conn, "conv-pin", "alice")
+            db.ensure_web_chat_handle(conn, "alice", "conv-pin", "crew")
+        user_profiles.update_profile(self._db_path, "alice", default_room="conv-pin")
+        with db.get_db(self._db_path) as conn:
+            assert db.archive_orphaned_talk_rooms(conn, set()) == 1
+            # The pin is dead, so delivery has quietly moved to the heuristic.
+            assert db.default_web_room(conn, "alice").token == general.token
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["ignored_default_room"] == "conv-pin"
+        assert "conv-pin" not in {r["token"] for r in p["web_rooms"]}
+
+    async def test_ignored_default_room_spares_a_pin_the_user_merely_hid(
+        self, tmp_path, client, app,
+    ):
+        """The control that decides which arms the mark covers (ISSUE-479). A
+        dismissal is *recoverable*: `ensure_default_web_chat_room` un-hides the
+        room on the next delivery, so the pin is working and marking it would be
+        a false alarm. This is the case that made a single "unavailable"
+        predicate over both fields wrong whichever way it was written."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-hid", "alice", origin="web", name="notes")
+            db.add_room_member(conn, "conv-hid", "alice")
+            db.ensure_web_chat_handle(conn, "alice", "conv-hid", "notes")
+            db.dismiss_room(conn, "conv-hid", "alice")
+        user_profiles.update_profile(self._db_path, "alice", default_room="conv-hid")
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["ignored_default_room"] == ""
+        # And the pin really is honoured — the writer puts the room back.
+        with db.get_db(self._db_path) as conn:
+            assert db.ensure_default_web_chat_room(conn, "alice").token == "conv-hid"
+
+    async def test_ignored_default_room_covers_a_room_the_user_left(
+        self, tmp_path, client, app,
+    ):
+        """The arm a membership gate would have hidden. `_unavailable_web_room_pins`
+        needs one to avoid being a room-directory oracle; this predicate is asked
+        only about the caller's own profile value, so it can report the third
+        terminal arm instead of going quiet on it (ISSUE-479)."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-left", "bob", origin="web", name="team")
+            db.ensure_web_chat_handle(conn, "alice", "conv-left", "team")
+        user_profiles.update_profile(self._db_path, "alice", default_room="conv-left")
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["ignored_default_room"] == "conv-left"
+
+    async def test_ignored_default_room_is_empty_when_the_pin_is_live(
+        self, tmp_path, client, app,
+    ):
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            room = db.create_web_chat_room(conn, "alice", "ideas")
+        user_profiles.update_profile(
+            self._db_path, "alice", default_room=room.token,
+        )
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["ignored_default_room"] == ""
+        assert p["default_room"] == room.token
+
+    async def test_ignored_default_room_echoes_the_stored_token_verbatim(
+        self, tmp_path, client, app,
+    ):
+        """The mark is compared client-side against the payload's own
+        `default_room`, so the two keys have to carry the same string. This
+        endpoint strips a `room:` value on the way in, but the CLI and a direct
+        write do not — and `configured_default_room` strips before reading for
+        exactly that reason, so returning the stripped form would leave a padded
+        pin permanently unmarkable."""
+        from istota import user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        user_profiles.update_profile(
+            self._db_path, "alice", default_room=" conv-padded ",
+        )
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["ignored_default_room"] == p["default_room"] == " conv-padded "
+
+    async def test_ignored_default_room_is_empty_when_nothing_is_pinned(
+        self, tmp_path, client, app,
+    ):
+        # An unset field is not a dead pin, and `configured_default_room` answers
+        # `None` for both — so the emptiness test has to come first.
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["default_room"] == ""
+        assert p["ignored_default_room"] == ""
+
     async def test_a_web_route_may_name_a_room(self, tmp_path, client, app):
         from istota import db, user_profiles
 

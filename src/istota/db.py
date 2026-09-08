@@ -3485,18 +3485,26 @@ def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | Non
     the token *before* the room has a view on web — the one case where minting
     that view is the right answer rather than falling back.
 
-    Three of `_usable_as_delivery_default`'s five arms are dropped, for two
-    different reasons. **Unwise, so deliberately not applied:** a room somebody
-    else reads, and a machine-owned channel room. Those keep a *guess* out of
-    somewhere embarrassing, the picker offers both classes marked, and the whole
-    point of this setting is that the answer is no longer a guess. **A view
-    concern, so checked one level down:** a room the user hid. Whether the
-    user can see the room is a question about the surface's view of it, not
-    about the room, so `configured_delivery_room` asks it per surface and
-    `ensure_default_web_chat_room` undoes it — a pin and a hide on one room
-    contradict each other, and the pin is the more recent deliberate act.
+    Two arms: `_live_room` — the core shared with `visible_room` — and any
+    membership. Three of `_usable_as_delivery_default`'s five are dropped, for
+    two different reasons. **Unwise, so deliberately not applied:** a room
+    somebody else reads, and a machine-owned channel room. Those keep a *guess*
+    out of somewhere embarrassing, the picker offers both classes marked, and the
+    whole point of this setting is that the answer is no longer a guess. **A view
+    concern, so checked one level down:** a room the user hid — see `_live_room`
+    for why the dismissal arm sits where it does (ISSUE-479).
 
     What is left is the room being unusable: gone, archived, or not the user's.
+
+    **These three arms are terminal, and that is what separates them from the
+    ones above.** When one fails the pin is dead: the caller falls back to the
+    heuristic and the room the user chose is quietly never used again. The
+    dismissal and archived-handle arms in `configured_delivery_room`'s web arm
+    are recoverable by design, because `ensure_default_web_chat_room` un-hides
+    the room on the next delivery — a pin that trips one of those is working
+    rather than broken. `web_app._ignored_default_room_pin` marks exactly this
+    half in the settings page, and marking the recoverable half would be a false
+    alarm. That function's docstring carries the third case, which is neither.
 
     A configured room that is gone falls back to the heuristic rather than being
     recreated. The user pointed at a room, and inventing a different one under
@@ -3515,8 +3523,7 @@ def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | Non
     token = ((row["default_room"] or "") if row else "").strip()
     if not token:
         return None
-    room = get_room(conn, token)
-    if room is None or room.archived:
+    if _live_room(conn, token) is None:
         return None
     if not is_room_member(conn, token, user_id):
         return None
@@ -3550,6 +3557,20 @@ def configured_delivery_room(
     a room they dismissed is one they cannot see, and neither this nor
     `default_web_room` may write, so the answer here is None and the recovery is
     `ensure_default_web_chat_room`'s. Talk has no per-user view state to check.
+
+    **Three kinds of `None` leave this function and only one of them is a
+    fault** (ISSUE-479). The two *web view* arms — the room is dismissed, the
+    handle is archived or absent — are **recoverable**: the next delivery
+    through `ensure_default_web_chat_room` un-hides the room and clears the
+    dismissal, so a pin that trips one is working. The **has-no-view** arms are
+    neither recoverable nor a fault — they are the surface asymmetry two
+    paragraphs up, and a web-only room refusing a bare `talk` is this setting
+    behaving as specified. Nothing repairs those: the writer is web-only and
+    mints no `talk` binding, which only the promote button writes (ISSUE-401).
+    Terminal *and* a fault is `configured_default_room`'s three arms beneath,
+    and that is the set the settings page marks — see
+    `web_app._ignored_default_room_pin`. Do not read a `None` from here as
+    benign on its own; which arm answered decides.
     """
     token = configured_default_room(conn, user_id)
     if token is None:
@@ -3580,6 +3601,44 @@ def channel_room_tokens(conn: sqlite3.Connection, user_id: str) -> set[str]:
     return channels
 
 
+def _live_room(conn: sqlite3.Connection, token: str) -> "Room | None":
+    """``token``'s registry row when the room exists and is not archived, else
+    ``None``. The shared core of the four predicates below (ISSUE-479).
+
+    Four of them answer some form of "can this room be delivered to" —
+    `visible_room`, `_usable_as_delivery_default`, `configured_default_room` and
+    `configured_delivery_room` — and this pair of tests is the whole of what they
+    share: every one wants it and none of them disagrees about it. It was written
+    out twice before, and held in agreement by comments cross-referencing each
+    other, which is the failure ISSUE-473 was filed about re-forming one level up.
+
+    Deliberately the *whole* of the shared part. Two arms stay out:
+
+    - **Dismissal**, which is the decision ISSUE-479 existed to make.
+      `visible_room` counts a hide, because "can this user open it" is the
+      question the picker needs answered. The configured pin does not: a hide is
+      a fact about the *web sidebar's view* of a room, so it is asked one level
+      down in `configured_delivery_room` and undone by
+      `ensure_default_web_chat_room`. Two things depend on that placement — Talk
+      has no dismissal at all, so a room hidden in web must still answer a bare
+      `talk`, and the pin outranks the hide as the more recent deliberate act.
+      Folding it in here would break both at once.
+    - **Membership**, because the callers that ask want different answers: sole
+      membership for `_usable_as_delivery_default`, any membership for
+      `configured_default_room`, and `visible_room` does not ask at all. Three
+      questions that happen to touch one table.
+
+    Takes no ``user_id``: both tests are facts about the room rather than about
+    anyone's view of it, which is what keeps this a core rather than a predicate
+    with a flag per caller. Returns the `Room` for the reason `visible_room`
+    does — a caller that needs the name gets it off the same lookup.
+    """
+    room = get_room(conn, token)
+    if room is None or room.archived:
+        return None
+    return room
+
+
 def visible_room(
     conn: sqlite3.Connection, user_id: str, token: str,
 ) -> "Room | None":
@@ -3588,7 +3647,10 @@ def visible_room(
 
     The same three tests `list_member_rooms` — the sidebar's own query — applies
     for a single token: the row exists (its `JOIN` on `rooms`), `archived = 0`,
-    and no `room_dismissals` tombstone. Two of the three have a live producer:
+    and no `room_dismissals` tombstone. The first two are `_live_room`'s, shared
+    with the configured pin; the dismissal is this predicate's own, and
+    `_live_room`'s docstring says why it stays here rather than moving down.
+    Two of the three have a live producer:
 
     - **A room the registry has archived.** `archive_orphaned_talk_rooms` sets
       `rooms.archived` when the bot leaves a Nextcloud conversation or the
@@ -3612,8 +3674,8 @@ def visible_room(
     rather than a bool is what lets the picker take the name off the same
     lookup instead of asking twice.
     """
-    room = get_room(conn, token)
-    if room is None or room.archived:
+    room = _live_room(conn, token)
+    if room is None:
         return None
     if is_room_dismissed(conn, token, user_id):
         return None

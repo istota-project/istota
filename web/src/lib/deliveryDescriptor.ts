@@ -173,15 +173,37 @@ export function routeOptions(
  * "Default room" row itself (ISSUE-477), where naming the default room as the
  * way to leave the default room unset would be circular. Everywhere else the
  * default is what this function works out.
+ *
+ * `ignored` is that same row's pin when the server says it is not being
+ * honoured, and it takes a different mark from `unavailable` (ISSUE-479). Two
+ * different things are being reported: an unavailable *route* swallows the
+ * delivery, while an ignored `default_room` means the pin does nothing and the
+ * delivery lands somewhere else, visibly, through the heuristic. The server
+ * answers them with separate predicates for the same reason — see
+ * `_ignored_default_room_pin`. It is one token rather than a list because one
+ * profile has one `default_room`.
+ *
+ * The two inputs are **mutually exclusive at today's call sites** — the route
+ * rows pass `unavailable` and no `ignored`, the Default room row the reverse —
+ * so the ordering below decides nothing yet. It is written `ignored` first
+ * anyway, because that is the answer a caller passing both would want: the
+ * field's own verdict on its own pin outranks a route's verdict on the same
+ * token. Kept as a guard rather than removed, so a later caller that does pass
+ * both gets the right label instead of whichever branch happened to be first.
  */
 export function webRoomOptions(
   rooms: WebRoom[],
   current: string,
   emptyLabel?: string,
   unavailable: string[] = [],
+  ignored = '',
 ): RouteOption[] {
   const label = (token: string) =>
-    unavailable.includes(token) ? unavailableRoomLabel(token) : token;
+    token && token === ignored
+      ? ignoredRoomLabel(token)
+      : unavailable.includes(token)
+        ? unavailableRoomLabel(token)
+        : token;
   return roomOptions(rooms, current, emptyLabel ?? defaultRoomLabel(rooms), webRoomMarks, label);
 }
 
@@ -265,6 +287,28 @@ function roomOptions<T extends { token: string; name: string }>(
  * false about a working route. */
 function unavailableRoomLabel(token: string): string {
   return `${token} (unavailable)`;
+}
+
+/** The label for a `default_room` pin the server has told us is not being
+ * honoured — the room is archived, gone, or no longer the user's, so every
+ * reader discards the value and the bare-`web` heuristic answers instead
+ * (ISSUE-479).
+ *
+ * Deliberately **not** `(unavailable)`, which is the neighbour's word for a
+ * route. That mark says the delivery is swallowed: it goes nowhere and the user
+ * sees nothing. This one says the opposite — the delivery arrives, in whichever
+ * room the heuristic picks, and what has stopped working is the setting. Reusing
+ * the route's wording would tell a user their alerts were being lost when they
+ * are merely landing somewhere they did not choose.
+ *
+ * The option is kept and editable for the same reason the route mark's is:
+ * dropping it blanks the field and rewrites the setting on the next save,
+ * losing the only trace of which room was pinned. There is no name to show
+ * beside the token — the room is absent from `web_rooms` precisely because it is
+ * not offerable. A pin that is merely hidden gets no mark at all: the next
+ * delivery un-hides the room, so it is working. */
+function ignoredRoomLabel(token: string): string {
+  return `${token} (ignored)`;
 }
 
 function tally(labels: string[]): Map<string, number> {
