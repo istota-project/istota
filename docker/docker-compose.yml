@@ -701,11 +701,13 @@ services:
     depends_on:
       nextcloud:
         condition: service_healthy
-    # Loopback by default. A browser has to reach this for Talk's own client to
-    # use it, so a real deployment fronts it with TLS at a public path and
-    # registers *that* URL with Talk; publishing it unencrypted on a public
-    # interface would put the hello token and every relayed chat message on the
-    # wire in clear.
+    # Loopback by default, and normally nothing outside the container network
+    # needs it: nginx proxies `/standalone-signaling/` through to this service,
+    # which is the address Talk gets registered with — one URL that a browser
+    # and Nextcloud's own PHP both resolve. The publish stays for debugging and
+    # for an operator fronting the server themselves. Loopback rather than
+    # 0.0.0.0 because publishing it unencrypted on a public interface would put
+    # the hello token and every relayed chat message on the wire in clear.
     ports:
       - "${ISTOTA_TALK_SIGNALING_BIND:-127.0.0.1}:${ISTOTA_TALK_SIGNALING_PORT:-8081}:8080"
     environment:

@@ -38,6 +38,7 @@ server {
     resolver 127.0.0.11 valid=30s ipv6=off;
     set $upstream_web      web:${WEB_PORT};
     set $upstream_nextcloud nextcloud:80;
+    set $upstream_signaling signaling:8080;
 
     # Every location below forwards `Host: $http_host`, not `$host`. The two
     # differ in exactly one way that matters here: `$host` is normalized with
@@ -83,6 +84,37 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
+    }
+
+    # Nextcloud Talk's standalone signaling server (the "high-performance
+    # backend"), which runs behind the `signaling` compose profile. It is
+    # proxied here because Talk stores exactly one URL for it and two different
+    # clients use that URL: a browser, and Nextcloud's own PHP from inside the
+    # `nextcloud` container. The server's own published port satisfies neither
+    # pair — it is a host-side publish, and from PHP `localhost` is Nextcloud's
+    # own loopback — so the address that works for both is a path on the front
+    # end that already serves Nextcloud.
+    #
+    # `$upstream_signaling` is a variable so the name is resolved per request.
+    # With the profile off there is no `signaling` container at all, and a
+    # literal upstream would fail config load and take the front end for the
+    # whole stack down with it. `rewrite ... break` strips the prefix, which
+    # proxy_pass cannot do once its upstream is a variable.
+    #
+    # Buffering off and a long read timeout because `/spreed` is a websocket
+    # that stays open for the life of a client's session.
+    location /standalone-signaling/ {
+        rewrite ^/standalone-signaling/(.*)$ /$1 break;
+        proxy_pass http://$upstream_signaling;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
     }
 
     # WebDAV / sync endpoints — disable buffering so large file uploads stream
