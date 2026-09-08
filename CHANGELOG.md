@@ -119,6 +119,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Fixed
 
+- The nightly memory pass now dates what it writes by the day the conversations happened, not the day the run finished. It fires at 2am over the previous 24 hours, so nearly everything it summarizes is from the day before, yet every bullet and the memory file's own name carried the run's date; the same was true of the shared room memories written at 3am UTC. Those files go back into Istota's prompts and nothing downstream could tell the dates were wrong, so yesterday's conversation read as today's. Room memories are still dated in UTC, which is a separate question from this one.
+
 - A task that finishes now delivers its answer even when one of the follow-up steps behind it fails. Those steps — filing health records, saving notes, starting a subtask, sending a queued email — ran one after another with nothing between them, so anything unexpected in one skipped the rest and then skipped the reply too, leaving the task recorded as a success with nothing sent. Each step is contained on its own now: one that fails costs only its own work and is written to the task's log, and the answer goes out either way.
 
 - An accounting command that fails in a way nobody anticipated now says so instead of answering with nothing. Every other skill reports an unexpected failure as a readable error; the accounting one was the last that did not, so a sync or an invoice run that broke came back empty and the assistant had nothing to tell you beyond that it had not worked. Commands that were already reporting their errors are unchanged.

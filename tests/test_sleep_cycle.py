@@ -11,7 +11,10 @@ from istota import db
 from istota.config import Config, SleepCycleConfig, UserConfig
 from istota.memory import sleep_cycle as sleep_cycle_module
 from istota.memory.sleep_cycle import (
+    _append_dated_memory,
     _excerpt,
+    _task_timestamp,
+    _window_date_str,
     _parse_structured_extraction,
     _topics_per_chunk,
     _validate_fact,
@@ -458,13 +461,12 @@ class TestProcessUserSleepCycle:
 
         assert result is True
 
-        # Verify file was written. Filename uses user-local date; this
-        # fixture has no configured user, so the sleep cycle falls back to UTC.
+        # Verify a file was written. What it is named is TestSleepCycleDating's
+        # business; this test only cares that the write happened.
         context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        date_str = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
-        memory_file = context_dir / f"{date_str}.md"
-        assert memory_file.exists()
-        assert "project Alpha" in memory_file.read_text()
+        written = list(context_dir.glob("*.md"))
+        assert len(written) == 1
+        assert "project Alpha" in written[0].read_text()
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_no_file_when_no_new_memories(self, mock_run, mount_config, db_path):
@@ -633,7 +635,11 @@ class TestProcessUserSleepCycle:
             process_user_sleep_cycle(mount_config, conn, "alice")
 
         context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
-        expected_date = datetime.now(ZoneInfo("Pacific/Kiritimati")).strftime("%Y-%m-%d")
+        # The window midpoint, in the user's zone — half a 24h lookback back
+        # from now (ISSUE-470).
+        expected_date = (
+            datetime.now(ZoneInfo("Pacific/Kiritimati")) - timedelta(hours=12)
+        ).strftime("%Y-%m-%d")
         assert (context_dir / f"{expected_date}.md").exists()
 
 
@@ -1621,3 +1627,226 @@ class TestUserMemoryObservability:
         assert "user_md_size_bytes" in last
         assert isinstance(last["user_md_size_bytes"], int)
         assert last["user_md_size_bytes"] > 0
+
+
+class TestWindowDateStr:
+    """The window date, not the run date (ISSUE-470)."""
+
+    LA = ZoneInfo("America/Los_Angeles")
+
+    def test_2am_run_dates_the_previous_day(self):
+        now = datetime(2026, 9, 7, 2, 0, tzinfo=self.LA)
+        assert _window_date_str(24, self.LA, now=now) == "2026-09-06"
+
+    def test_short_lookback_dates_the_day_the_window_sits_in(self):
+        # A 2h window at 02:00 is [00:00, 02:00] — wholly today, so today is
+        # the right answer and the "previous day" rule does not apply.
+        now = datetime(2026, 9, 7, 2, 0, tzinfo=self.LA)
+        assert _window_date_str(2, self.LA, now=now) == "2026-09-07"
+
+    def test_six_hour_lookback_still_reaches_back(self):
+        now = datetime(2026, 9, 7, 2, 0, tzinfo=self.LA)
+        assert _window_date_str(6, self.LA, now=now) == "2026-09-06"
+
+    def test_naive_now_is_read_as_utc(self):
+        assert _window_date_str(24, ZoneInfo("UTC"), now=datetime(2026, 9, 7, 2, 0)) == "2026-09-06"
+
+    def test_midday_run_dates_today(self):
+        now = datetime(2026, 9, 7, 14, 0, tzinfo=self.LA)
+        assert _window_date_str(24, self.LA, now=now) == "2026-09-07"
+
+    def test_now_is_converted_into_the_target_zone(self):
+        # 03:00 UTC on the 7th is 20:00 on the 6th in LA; a 24h window from
+        # there is mostly the 6th either way, but the zone must be applied
+        # before the midpoint is taken, not after.
+        now = datetime(2026, 9, 7, 3, 0, tzinfo=ZoneInfo("UTC"))
+        assert _window_date_str(24, self.LA, now=now) == "2026-09-06"
+
+
+class TestTaskTimestamp:
+    def test_naive_utc_is_converted_and_labelled(self):
+        assert (
+            _task_timestamp("2026-09-07 01:43:20", ZoneInfo("America/Los_Angeles"))
+            == "2026-09-06 18:43:20 PDT"
+        )
+
+    def test_utc_stays_utc_and_is_labelled(self):
+        assert (
+            _task_timestamp("2026-09-07 01:43:20", ZoneInfo("UTC"))
+            == "2026-09-07 01:43:20 UTC"
+        )
+
+    def test_missing_timestamp_reads_unknown(self):
+        assert _task_timestamp(None, ZoneInfo("UTC")) == "unknown"
+        assert _task_timestamp("", ZoneInfo("UTC")) == "unknown"
+
+    def test_unparseable_timestamp_passes_through(self):
+        assert _task_timestamp("not a date", ZoneInfo("UTC")) == "not a date"
+
+
+class TestDayDataTimestamps:
+    def test_task_timestamps_carry_the_users_zone(self, mount_config, db_path):
+        mount_config.users["alice"] = UserConfig(timezone="Asia/Tokyo")
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Morning?", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Yes.")
+            created_at = db.get_task(conn, t).created_at
+
+            result = gather_day_data(mount_config, conn, "alice", 24, None)
+
+        # The whole header, not just the zone abbreviation — a helper that
+        # returned the bare string "JST" would satisfy the looser assertion.
+        stamp = _task_timestamp(created_at, ZoneInfo("Asia/Tokyo"))
+        assert stamp.endswith("JST")
+        assert f"--- Task {t} (cli, {stamp}) ---" in result
+
+
+class TestSleepCycleDating:
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_memory_file_is_named_for_the_window_not_the_run(
+        self, mock_run, mount_config, db_path
+    ):
+        # A 48h lookback puts the window midpoint a full day back whatever the
+        # clock says, so the pre-fix behaviour (today's date) is always wrong
+        # here and the assertion never depends on when the test runs.
+        mock_run.return_value = (True, "- Discussed project Alpha (2026-01-28)\n")
+        mount_config.sleep_cycle.lookback_hours = 48
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Project Alpha?", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Going well.")
+
+            assert process_user_sleep_cycle(mount_config, conn, "alice") is True
+
+        expected = (
+            datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
+        ).strftime("%Y-%m-%d")
+        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        assert (context_dir / f"{expected}.md").exists()
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_prompt_date_matches_the_window(self, mock_run, mount_config, db_path):
+        mock_run.return_value = (True, "- Something (2026-01-28)\n")
+        mount_config.sleep_cycle.lookback_hours = 48
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Anything?", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Sure.")
+
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        expected = (
+            datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
+        ).strftime("%Y-%m-%d")
+        prompt = mock_run.call_args[0][1]
+        assert f"Date: {expected}" in prompt
+
+    @patch("istota.memory.sleep_cycle._process_extracted_playbooks")
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_playbooks_are_stamped_with_the_run_date(
+        self, mock_run, mock_playbooks, mount_config, db_path
+    ):
+        # `created:` on a playbook means when it was written, so it keeps
+        # following the clock while the memory file follows the window.
+        mock_run.return_value = (
+            True,
+            "MEMORIES:\n- Something (2026-01-28)\n\nPLAYBOOKS:\n"
+            '[{"title": "Do a thing", "triggers": ["thing"], "steps": "1. Do it"}]\n',
+        )
+        mount_config.sleep_cycle.lookback_hours = 48
+        mount_config.playbooks.enabled = True
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Anything?", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Sure.")
+
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        today = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
+        assert mock_playbooks.call_args[0][4] == today
+
+
+class TestDatedFileCollision:
+    """Two runs landing on one date must not lose the earlier one (ISSUE-470).
+
+    The window date makes collisions ordinary rather than exotic: the first
+    post-fix run lands on the last pre-fix run's filename, and a catch-up run
+    lands on the next scheduled run's. `gather_day_data` is bounded by
+    `after_task_id`, so the second file is never a superset of the first.
+    """
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_second_run_keeps_the_first_runs_bullets(
+        self, mock_run, mount_config, db_path
+    ):
+        mount_config.sleep_cycle.lookback_hours = 48
+
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(conn, prompt="First", user_id="alice")
+            db.update_task_status(conn, t1, "running")
+            db.update_task_status(conn, t1, "completed", result="One.")
+
+            mock_run.return_value = (True, "- The first thing (ref:1)\n")
+            assert process_user_sleep_cycle(mount_config, conn, "alice") is True
+
+            t2 = db.create_task(conn, prompt="Second", user_id="alice")
+            db.update_task_status(conn, t2, "running")
+            db.update_task_status(conn, t2, "completed", result="Two.")
+
+            mock_run.return_value = (True, "- The second thing (ref:2)\n")
+            assert process_user_sleep_cycle(mount_config, conn, "alice") is True
+
+        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        written = list(context_dir.glob("*.md"))
+        assert len(written) == 1, "both runs share one window date"
+        text = written[0].read_text()
+        assert "The first thing" in text
+        assert "The second thing" in text
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_a_pre_existing_file_survives_the_first_run(
+        self, mock_run, mount_config, db_path
+    ):
+        # The deploy-day case: yesterday's file is already on disk under the
+        # date this run is about to compute.
+        mock_run.return_value = (True, "- Written tonight (ref:1)\n")
+        mount_config.sleep_cycle.lookback_hours = 48
+
+        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir.mkdir(parents=True)
+        stamp = (datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)).strftime("%Y-%m-%d")
+        (context_dir / f"{stamp}.md").write_text("- Written last night (ref:0)\n")
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(conn, prompt="Anything?", user_id="alice")
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Sure.")
+
+            process_user_sleep_cycle(mount_config, conn, "alice")
+
+        text = (context_dir / f"{stamp}.md").read_text()
+        assert "Written last night" in text
+        assert "Written tonight" in text
+
+
+class TestAppendDatedMemory:
+    def test_creates_the_file_when_absent(self, tmp_path):
+        path = tmp_path / "2026-09-06.md"
+        assert _append_dated_memory(path, "- One\n") == "- One\n"
+        assert path.read_text() == "- One\n"
+
+    def test_appends_with_one_blank_line_between(self, tmp_path):
+        path = tmp_path / "2026-09-06.md"
+        _append_dated_memory(path, "- One\n")
+        result = _append_dated_memory(path, "- Two\n")
+        assert result == "- One\n\n- Two\n"
+        assert path.read_text() == result
+
+    def test_an_empty_existing_file_is_not_treated_as_content(self, tmp_path):
+        path = tmp_path / "2026-09-06.md"
+        path.write_text("\n\n")
+        assert _append_dated_memory(path, "- One\n") == "- One\n"

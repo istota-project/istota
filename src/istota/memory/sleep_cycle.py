@@ -392,10 +392,78 @@ def speaker_labels(
     return labels
 
 
+def _window_date_str(
+    lookback_hours: int,
+    tz: ZoneInfo,
+    now: datetime | None = None,
+) -> str:
+    """Date the extraction window is about, rather than the date it runs.
+
+    Both cycles fire at the tail of their own window — 02:00 in the user's zone,
+    03:00 UTC — with a 24-hour lookback, so ``now`` names a day the window
+    barely covers while the interactions are almost all from the day before.
+    The midpoint always lands in the bulk of the window, which at the shipped
+    schedule and lookback is the previous day; a lookback short enough to keep
+    the window inside one day dates that day instead, which is equally right
+    (ISSUE-470).
+
+    A naive ``now`` is read as UTC, matching :func:`_task_timestamp`. The
+    subtraction is done in UTC so a DST transition inside the window can't
+    shift the midpoint by an hour.
+    """
+    moment = datetime.now(tz) if now is None else now
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=ZoneInfo("UTC"))
+    midpoint = moment.astimezone(ZoneInfo("UTC")) - timedelta(hours=lookback_hours / 2)
+    return midpoint.astimezone(tz).strftime("%Y-%m-%d")
+
+
+def _append_dated_memory(path: Path, new_text: str) -> str:
+    """Add ``new_text`` to a dated memory file, keeping what is already there.
+
+    Returns the file's full text after the write, which is what callers index —
+    ``index_file`` replaces every chunk for a path, so indexing only the new
+    part would drop the earlier run's bullets from recall while leaving them on
+    disk.
+    """
+    existing = ""
+    if path.exists():
+        try:
+            existing = path.read_text()
+        except OSError as e:
+            logger.warning("Could not read %s before appending: %s", path, e)
+    body = new_text.rstrip("\n")
+    if existing.strip():
+        file_text = existing.rstrip("\n") + "\n\n" + body + "\n"
+    else:
+        file_text = body + "\n"
+    path.write_text(file_text)
+    return file_text
+
+
+def _task_timestamp(created_at: str | None, tz: ZoneInfo) -> str:
+    """Render a task's naive-UTC ``created_at`` in ``tz``, naming the zone.
+
+    Unlabelled, ``2026-09-07 01:43:20`` reads as local to anything looking at
+    it, the extraction model included — and for a US-evening task the UTC date
+    is already the next day, which is the drift ISSUE-470 was filed for.
+    """
+    if not created_at:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return str(created_at)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+    return parsed.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
 def _format_task_section(
     tasks: list,
     per_task_budget: int,
     speakers: dict[int, str] | None = None,
+    tz: ZoneInfo | None = None,
 ) -> list[str]:
     """Format a group of tasks with conversation grouping and budget control.
 
@@ -430,7 +498,8 @@ def _format_task_section(
                 )
             speaker = (speakers or {}).get(task.id, "User")
             parts.append(
-                f"--- Task {task.id} ({task.source_type}, {task.created_at or 'unknown'}) ---\n"
+                f"--- Task {task.id} ({task.source_type}, "
+                f"{_task_timestamp(task.created_at, tz or ZoneInfo('UTC'))}) ---\n"
                 f"{speaker}: {prompt_text}\n"
                 f"Bot: {result_text}\n"
                 f"{tools_line}"
@@ -482,6 +551,10 @@ def gather_day_data(
 
     parts = []
     speakers = speaker_labels(conn, config, tasks)
+    try:
+        user_tz = ZoneInfo(config.resolve_user_timezone(user_id, conn=conn))
+    except Exception:
+        user_tz = ZoneInfo("UTC")
 
     if interactive:
         interactive_per_task = max(_MIN_TASK_BUDGET, interactive_budget // len(interactive))
@@ -490,7 +563,7 @@ def gather_day_data(
             "(User spoke directly — primary source for fact extraction)\n"
         )
         parts.extend(
-            _format_task_section(interactive, interactive_per_task, speakers)
+            _format_task_section(interactive, interactive_per_task, speakers, user_tz)
         )
 
     if automated:
@@ -499,7 +572,7 @@ def gather_day_data(
             "\n======== AUTOMATED/SCHEDULED OUTPUT ========\n"
             "(Bot-generated — do not attribute facts to people merely mentioned here)\n"
         )
-        parts.extend(_format_task_section(automated, automated_per_task, speakers))
+        parts.extend(_format_task_section(automated, automated_per_task, speakers, user_tz))
 
     combined = "\n".join(parts)
     if len(combined) > MAX_DAY_DATA_CHARS:
@@ -524,7 +597,8 @@ def build_memory_extraction_prompt(
         user_id: The user ID
         day_data: Concatenated interaction data from the day
         existing_memory: Current contents of memory.md (to avoid duplication)
-        date_str: Date string for the memory file (e.g. "2026-01-28")
+        date_str: Date the interactions are from — the window's date, not
+            the run's (e.g. "2026-01-28"). Also names the memory file.
         existing_facts: Formatted current knowledge-graph facts (one per line),
             or None when the graph is empty / unavailable. When provided, the
             LLM is instructed to skip re-emitting these and only output
@@ -605,7 +679,9 @@ If no reusable procedures emerged today, output an empty array: []"""
 
     return f"""You are extracting important memories from a day of interactions with user '{user_id}'.
 
-Date: {date_str}
+Date: {date_str} — the day these interactions are from. Each task header
+carries its own timestamp; where one falls on a different day, date that
+bullet from the task rather than from the line above.
 {existing_section}{kg_section}
 ## Today's interactions
 
@@ -656,7 +732,11 @@ Good: "Project Alpha is migrating from Django to FastAPI; target completion is Q
 Format: dated bullet points with task references.
 - Project Alpha migrating from Django to FastAPI, targeting Q2 completion ({date_str}, ref:1234)
 - Prefers email summaries limited to 5 bullet points, not full reports ({date_str}, ref:1235)
-- Sent introduction email to Dana (dana@example.com) about consulting engagement ({date_str}, ref:1236)
+- Sent introduction email to Dana (dana@example.com) about consulting engagement (2026-01-27, ref:1236)
+
+The third bullet's task header showed 2026-01-27, so it carries that date
+instead of the one above. Use {date_str} for every bullet whose task falls on
+that day, which is most of them.
 
 When the day had few interactions, still extract what is there. A single substantive
 memory is better than {NO_NEW_MEMORIES}.
@@ -928,13 +1008,17 @@ def process_user_sleep_cycle(
     # Build extraction prompt — date_str follows the user's timezone so
     # filenames and bullet timestamps match the user's calendar day, not the
     # server's. Falls back to UTC for unknown tz strings. Live DB value so a
-    # web-UI tz change is honored without a daemon restart (ISSUE-099).
+    # web-UI tz change is honored without a daemon restart (ISSUE-099). It is
+    # derived from the window rather than from the clock: the run fires at
+    # 02:00 local, so `now` names a day the lookback barely reaches into
+    # (ISSUE-470). run_date_str is the clock, and only playbooks want it.
     tz_name = config.resolve_user_timezone(user_id)
     try:
         user_tz = ZoneInfo(tz_name)
     except Exception:
         user_tz = ZoneInfo("UTC")
-    date_str = datetime.now(user_tz).strftime("%Y-%m-%d")
+    date_str = _window_date_str(sleep_config.lookback_hours, user_tz)
+    run_date_str = datetime.now(user_tz).strftime("%Y-%m-%d")
     prompt = build_memory_extraction_prompt(
         user_id, day_data, existing_memory, date_str,
         existing_facts=existing_facts,
@@ -993,8 +1077,15 @@ def process_user_sleep_cycle(
     context_dir.mkdir(parents=True, exist_ok=True)
 
     memory_file = context_dir / f"{date_str}.md"
-    memory_file.write_text(memories_text + "\n")
-    logger.info("Wrote dated memory file for %s: %s (%d chars)", user_id, memory_file.name, len(memories_text))
+    # Append when the day's file already exists rather than replacing it. Two
+    # runs can now land on the same date — the first post-fix run collides with
+    # the last pre-fix one, and a catch-up run collides with the next scheduled
+    # one — and `gather_day_data` is bounded by `after_task_id`, so the later
+    # run holds only the tasks the earlier one didn't. A truncating write
+    # therefore loses a day of memories outright, and `index_file` replaces the
+    # chunks for the path, so it would go from recall too (ISSUE-470).
+    file_text = _append_dated_memory(memory_file, memories_text)
+    logger.info("Wrote dated memory file for %s: %s (%d chars)", user_id, memory_file.name, len(file_text))
 
     # Insert extracted facts into knowledge graph (non-critical). While we're
     # here, record each episodic fact's effective close date keyed by its
@@ -1046,7 +1137,12 @@ def process_user_sleep_cycle(
                 chunk_text as _chunk_text,
                 index_file as _index_file,
             )
-            chunks = _chunk_text(memories_text)
+            # The file may carry an earlier run's bullets too, and index_file
+            # replaces every chunk for the path — so index what the file holds.
+            # Chunks whose refs aren't in this run's maps degrade to NULL topic
+            # and no episode window, which is the conservative default both
+            # helpers already document.
+            chunks = _chunk_text(file_text)
             topic_per_chunk = (
                 _topics_per_chunk(chunks, extracted_topics)
                 if extracted_topics else None
@@ -1056,7 +1152,7 @@ def process_user_sleep_cycle(
                 if episodic_windows else None
             )
             _index_file(
-                conn, user_id, str(memory_file), memories_text, "memory_file",
+                conn, user_id, str(memory_file), file_text, "memory_file",
                 topic_per_chunk=topic_per_chunk,
                 valid_until_per_chunk=valid_until_per_chunk,
             )
@@ -1068,7 +1164,7 @@ def process_user_sleep_cycle(
     if config.playbooks.enabled and extracted_playbooks:
         try:
             _process_extracted_playbooks(
-                config, conn, user_id, extracted_playbooks, date_str, last_task_id,
+                config, conn, user_id, extracted_playbooks, run_date_str, last_task_id,
             )
         except Exception as e:
             logger.warning("Playbook processing failed for %s: %s", user_id, e)
@@ -1741,6 +1837,9 @@ def cleanup_old_memory_files(
         user_tz = ZoneInfo(tz_name)
     except Exception:
         user_tz = ZoneInfo("UTC")
+    # Stems name the day the memories are about, not the day the run fired
+    # (ISSUE-470), so retention measures the age of the content. That is one
+    # calendar day tighter than it was before the stems moved.
     cutoff = datetime.now(user_tz) - timedelta(days=retention_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
@@ -2161,7 +2260,8 @@ def gather_channel_data(
         result_text = _excerpt(task.result or "", result_budget)
         speaker = speakers.get(task.id, "User")
         parts.append(
-            f"--- Task {task.id} (user: {task.user_id}, {task.source_type}, {task.created_at or 'unknown'}) ---\n"
+            f"--- Task {task.id} (user: {task.user_id}, {task.source_type}, "
+            f"{_task_timestamp(task.created_at, ZoneInfo('UTC'))}) ---\n"
             f"{speaker}: {prompt_text}\n"
             f"Bot: {result_text}\n"
         )
@@ -2199,7 +2299,9 @@ produce new items that could be appended under appropriate headings.
 
     return f"""You are extracting shared memories from a day of conversations in channel '{conversation_token}'.
 
-Date: {date_str}
+Date: {date_str} — the day these interactions are from. Each task header
+carries its own timestamp; where one falls on a different day, date that
+bullet from the task rather than from the line above.
 {existing_section}
 ## Today's channel interactions
 
@@ -2225,7 +2327,10 @@ Do NOT include:
 
 Format your output as concise bullet points with dates, attribution, and task references, like:
 - Decided to migrate API to GraphQL (alice, 2026-01-28, ref:1234)
-- Blocked on infrastructure approval for prod deploy (bob, 2026-01-28, ref:1235)
+- Blocked on infrastructure approval for prod deploy (bob, 2026-01-27, ref:1235)
+
+The second bullet's task header showed the earlier day, so it carries that date
+rather than the one at the top.
 
 If there is genuinely nothing new worth remembering, respond with exactly: {NO_NEW_MEMORIES}
 
@@ -2267,8 +2372,10 @@ def process_channel_sleep_cycle(
 
     # Build extraction prompt — channel sleep cycle stays UTC because
     # channels span timezones. (`datetime.now()` is server-local, so go
-    # via ZoneInfo("UTC") explicitly.)
-    date_str = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
+    # via ZoneInfo("UTC") explicitly.) The date names the window, not the
+    # 03:00 UTC run that closes it (ISSUE-470); which zone a room's dates
+    # should be in, if not UTC, is a separate question.
+    date_str = _window_date_str(csc.lookback_hours, ZoneInfo("UTC"))
     prompt = build_channel_memory_extraction_prompt(
         conversation_token, day_data, existing_memory, date_str
     )
@@ -2307,12 +2414,13 @@ def process_channel_sleep_cycle(
     memories_dir.mkdir(parents=True, exist_ok=True)
 
     memory_file = memories_dir / f"{date_str}.md"
-    memory_file.write_text(output + "\n")
+    # Append rather than replace, for the reason the user cycle documents.
+    file_text = _append_dated_memory(memory_file, output)
     logger.info(
         "Wrote channel memory file for %s: %s (%d chars)",
         conversation_token,
         memory_file.name,
-        len(output),
+        len(file_text),
     )
 
     # Index memory file for semantic search (non-critical)
@@ -2325,7 +2433,7 @@ def process_channel_sleep_cycle(
                 conn,
                 channel_user_id,
                 str(memory_file),
-                output,
+                file_text,
                 "channel_memory",
             )
         except Exception as e:
@@ -2463,6 +2571,8 @@ def cleanup_old_channel_memory_files(
 
     # Channel filenames are written in UTC (channels span timezones); cutoff
     # follows the same convention to stay aligned.
+    # Stems name the window's day, not the run's (ISSUE-470) — see the user
+    # cycle's cleanup for what that means for the cutoff.
     cutoff = datetime.now(ZoneInfo("UTC")) - timedelta(days=retention_days)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
