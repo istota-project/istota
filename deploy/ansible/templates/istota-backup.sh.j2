@@ -106,6 +106,48 @@ _copy_to_remote() {
     return 1
 }
 
+_weekly_backup_for_date() {
+    local dir="$1" weekly_key="$2" backup
+    for backup in "${dir}/${weekly_key}_"*.db.gz; do
+        [ -f "$backup" ] || continue
+        if ! gzip -t "$backup" 2>/dev/null; then
+            log "WARNING: removing invalid weekly backup: $(basename "$backup")" >&2
+            rm -f "$backup"
+            continue
+        fi
+        printf '%s\n' "$backup"
+        return 0
+    done
+    return 1
+}
+
+_ensure_local_weekly_backup() {
+    local daily_backup="$1" weekly_key="$2" backup_name="$3"
+    local existing temp claim target
+    if existing=$(_weekly_backup_for_date "$LOCAL_DIR/weekly" "$weekly_key"); then
+        printf '%s\n' "$existing"
+        return 0
+    fi
+
+    temp="${LOCAL_DIR}/weekly/.${backup_name}.part.$$"
+    claim="${LOCAL_DIR}/weekly/.${weekly_key}.claim.db.gz"
+    target="${LOCAL_DIR}/weekly/${backup_name}"
+    if cp "$daily_backup" "$temp" && gzip -t "$temp" 2>/dev/null; then
+        # The common claim name makes the choice atomic when two backup runs
+        # overlap. Only one hard link can claim the date; either process may
+        # rename that complete file to the finished timestamped name.
+        ln "$temp" "$claim" 2>/dev/null || true
+    fi
+    rm -f "$temp"
+    mv "$claim" "$target" 2>/dev/null || true
+
+    if existing=$(_weekly_backup_for_date "$LOCAL_DIR/weekly" "$weekly_key"); then
+        printf '%s\n' "$existing"
+        return 0
+    fi
+    return 1
+}
+
 # Backup a single SQLite DB with WAL-aware .backup, integrity check, gzip and
 # a remote copy. Retention is NOT done here — see _rotate_backups.
 #   $1 — source DB path
@@ -168,10 +210,16 @@ _backup_one_db() {
 
     # Weekly + remote copies are best-effort: a failure here is logged but does
     # not fail the DB (the authoritative local daily artifact already exists).
+    local backup_date="${TIMESTAMP%%_*}"
+    local weekly_key="${prefix}-${backup_date}"
+    local weekly_backup=""
     if [ "$DAY_OF_WEEK" -eq 7 ]; then
-        cp "${LOCAL_DIR}/daily/${backup_name}" "${LOCAL_DIR}/weekly/${backup_name}" \
-            && log "Local weekly backup saved: ${LOCAL_DIR}/weekly/${backup_name}" \
-            || log "WARNING: local weekly copy failed for ${prefix}"
+        if weekly_backup=$(_ensure_local_weekly_backup \
+            "${LOCAL_DIR}/daily/${backup_name}" "$weekly_key" "$backup_name"); then
+            log "Local weekly backup ready: ${weekly_backup}"
+        else
+            log "WARNING: local weekly copy failed for ${prefix}"
+        fi
     fi
 
     if mount_available; then
@@ -179,9 +227,12 @@ _backup_one_db() {
             && log "Remote daily backup copied: ${backup_name}" \
             || log "WARNING: remote daily copy failed for ${prefix}"
 
-        if [ "$DAY_OF_WEEK" -eq 7 ]; then
-            _copy_to_remote "${LOCAL_DIR}/weekly/${backup_name}" "${REMOTE_DIR}/db/weekly/${backup_name}" \
-                && log "Remote weekly backup copied: ${backup_name}" \
+        local remote_weekly=""
+        if [ "$DAY_OF_WEEK" -eq 7 ] && [ -n "$weekly_backup" ] \
+            && ! remote_weekly=$(_weekly_backup_for_date "$REMOTE_DIR/db/weekly" "$weekly_key"); then
+            remote_weekly="${REMOTE_DIR}/db/weekly/$(basename "$weekly_backup")"
+            _copy_to_remote "$weekly_backup" "$remote_weekly" \
+                && log "Remote weekly backup copied: $(basename "$weekly_backup")" \
                 || log "WARNING: remote weekly copy failed for ${prefix}"
         fi
     else
@@ -204,12 +255,21 @@ _catch_up_remote() {
     mount_available || return 0
 
     local tier local_file remote_file copied=0 failed=0 untimed=0
+    local backup_name weekly_key existing_weekly
     for tier in daily weekly; do
         mkdir -p "${REMOTE_DIR}/db/${tier}" 2>/dev/null || true
         for local_file in "${LOCAL_DIR}/${tier}"/*.db.gz; do
             # nullglob is not set, so an unmatched glob expands to the pattern.
             [ -f "$local_file" ] || continue
-            remote_file="${REMOTE_DIR}/db/${tier}/$(basename "$local_file")"
+            backup_name=$(basename "$local_file")
+            if [ "$tier" = weekly ]; then
+                weekly_key="${backup_name%%_*}"
+                if existing_weekly=$(_weekly_backup_for_date \
+                    "${REMOTE_DIR}/db/weekly" "$weekly_key"); then
+                    continue
+                fi
+            fi
+            remote_file="${REMOTE_DIR}/db/${tier}/${backup_name}"
             [ -e "$remote_file" ] && continue
             # Don't promote bytes nobody has checked. The primary path integrity
             # checks the DB before gzipping; this one is picking up a file off
@@ -298,6 +358,7 @@ _rotate_backups() {
     # full-size file that nothing else ever removes. On the disk-pressure issue
     # that motivated all of this, that is the one leftover worth sweeping.
     find "${LOCAL_DIR}" -maxdepth 1 -name '*-backup-*.db' -mmin +360 -delete 2>/dev/null || true
+    find "${LOCAL_DIR}/weekly" -maxdepth 1 -name '.*.db.gz.part.*' -mmin +360 -delete 2>/dev/null || true
     return 0
 }
 

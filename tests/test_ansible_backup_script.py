@@ -148,8 +148,36 @@ class Fixture:
         self.script.chmod(0o755)
         return rendered
 
-    def run(self, mode: str = "db") -> subprocess.CompletedProcess:
+    def set_backup_clock(self, day_of_week: int) -> None:
+        stub = self.bin / "date"
+        stub.write_text(
+            f"""#!/bin/sh
+case "${{1:-}}" in
+    +%u) printf '{day_of_week}\\n' ;;
+    +%Y-%m-%d_%H%M%S) printf '%s\\n' "$FAKE_BACKUP_TIMESTAMP" ;;
+    *) /bin/date "$@" ;;
+esac
+"""
+        )
+        stub.chmod(0o755)
+
+    def use_concurrent_mktemp(self) -> None:
+        stub = self.bin / "mktemp"
+        stub.write_text(
+            """#!/bin/sh
+path=$(printf '%s\n' "$1" | sed "s/XXXXXX/$$/")
+(umask 077; set -C; : > "$path") || exit 1
+printf '%s\n' "$path"
+"""
+        )
+        stub.chmod(0o755)
+
+    def run(
+        self, mode: str = "db", timestamp: str | None = None
+    ) -> subprocess.CompletedProcess:
         env = {**os.environ, "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}
+        if timestamp is not None:
+            env["FAKE_BACKUP_TIMESTAMP"] = timestamp
         return subprocess.run(
             ["bash", str(self.script), mode],
             capture_output=True,
@@ -350,6 +378,21 @@ class TestRemoteCatchUp:
 
         assert remote.read_bytes() == b"remote-copy"
 
+    def test_copies_only_one_legacy_weekly_per_date(self, mounted):
+        mounted.set_backup_clock(day_of_week=1)
+        for timestamp in ("000001", "060001", "120001", "180001"):
+            _aged_backup(
+                mounted.local
+                / "weekly"
+                / f"istota-2026-08-16_{timestamp}.db.gz",
+                1,
+            )
+
+        result = mounted.run(timestamp="2026-08-17_000001")
+
+        assert result.returncode == 0, result.stdout
+        assert len(list((mounted.remote / "db" / "weekly").glob("istota-*.db.gz"))) == 1
+
     def test_does_not_resurrect_a_file_past_the_remote_window(self, mounted):
         """Catch-up runs before the sweep, so an ancient local leftover must not
         be copied up and kept: the copy carries its original mtime, so the sweep
@@ -404,6 +447,53 @@ class TestHealthyRun:
     def test_leaves_no_temp_files_behind(self, mounted):
         mounted.run()
         assert not [p for p in mounted.local.iterdir() if p.is_file()]
+
+    def test_one_weekly_copy_is_kept_for_multiple_sunday_runs(self, mounted):
+        mounted.set_backup_clock(day_of_week=7)
+        timestamps = [
+            "2026-08-16_000001",
+            "2026-08-16_060001",
+            "2026-08-16_120001",
+            "2026-08-16_180001",
+        ]
+
+        results = [mounted.run(timestamp=timestamp) for timestamp in timestamps]
+
+        assert all(result.returncode == 0 for result in results)
+        assert len(list((mounted.local / "weekly").glob("istota-*.db.gz"))) == 1
+        assert len(list((mounted.remote / "db" / "weekly").glob("istota-*.db.gz"))) == 1
+
+    def test_concurrent_sunday_runs_claim_one_weekly_copy(self, mounted):
+        from concurrent.futures import ThreadPoolExecutor
+
+        mounted.set_backup_clock(day_of_week=7)
+        mounted.use_concurrent_mktemp()
+        timestamps = ["2026-08-16_000001", "2026-08-16_000002"]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(mounted.run, timestamp=timestamp) for timestamp in timestamps]
+            results = [future.result() for future in futures]
+
+        assert all(result.returncode == 0 for result in results), "\n---\n".join(
+            f"exit {result.returncode}\n{result.stdout}\n{result.stderr}" for result in results
+        )
+        assert len(list((mounted.local / "weekly").glob("istota-*.db.gz"))) == 1
+        assert len(list((mounted.remote / "db" / "weekly").glob("istota-*.db.gz"))) == 1
+
+    def test_replaces_an_invalid_weekly_before_remote_copy(self, mounted):
+        import gzip
+
+        mounted.set_backup_clock(day_of_week=7)
+        invalid = mounted.local / "weekly" / "istota-2026-08-16_000000.db.gz"
+        invalid.write_bytes(b"truncated")
+
+        result = mounted.run(timestamp="2026-08-16_060001")
+
+        assert result.returncode == 0, result.stdout
+        (local_weekly,) = list((mounted.local / "weekly").glob("istota-*.db.gz"))
+        (remote_weekly,) = list((mounted.remote / "db" / "weekly").glob("istota-*.db.gz"))
+        gzip.decompress(local_weekly.read_bytes())
+        gzip.decompress(remote_weekly.read_bytes())
 
 
 # ---------------------------------------------------------------------------
@@ -552,3 +642,15 @@ class TestTempFileSweep:
         mounted.run()
 
         assert live.exists()
+
+    def test_removes_an_orphaned_weekly_claim_copy(self, mounted):
+        orphan = _aged_backup(
+            mounted.local
+            / "weekly"
+            / ".istota-2026-08-16_000001.db.gz.part.1234",
+            1,
+        )
+
+        mounted.run()
+
+        assert not orphan.exists()
