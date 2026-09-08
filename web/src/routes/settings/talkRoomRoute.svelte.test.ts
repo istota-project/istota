@@ -2,11 +2,12 @@
  * Picking the Talk conversation an alert or log route lands in (ISSUE-475).
  *
  * `talk:<token>` has been a valid descriptor everywhere and was offered nowhere:
- * the `talk (alerts channel)` / `talk (logs channel)` labels are not picks, they
- * are the bare `talk` value labelled with where it resolves for that purpose.
- * Wanting alerts in a different conversation was CLI-or-config.toml only, which
- * is the gap ISSUE-473 closed for web and left open on the surface that has more
- * rooms in it.
+ * the old `talk (alerts channel)` / `talk (logs channel)` labels were not picks,
+ * they were the bare `talk` value labelled with where it resolves for that
+ * purpose. Wanting alerts in a different conversation was CLI-or-config.toml
+ * only, which is the gap ISSUE-473 closed for web and left open on the surface
+ * that has more rooms in it. Those labels are gone with the arrival of a control
+ * that can say the same thing and act on it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
@@ -141,7 +142,7 @@ describe('the conversation a talk route lands in', () => {
     currentProfile.value = profile({ alert: `talk:${TEAM}` });
     renderPage();
     await settled();
-    expect(control('Alert delivery destination')).toHaveTextContent('talk (alerts channel)');
+    expect(control('Alert delivery destination')).toHaveTextContent('talk');
     expect(control('Alert delivery room')).toHaveTextContent('team');
   });
 
@@ -150,6 +151,17 @@ describe('the conversation a talk route lands in', () => {
     renderPage();
     await settled();
     expect(control('Alert delivery room')).toHaveTextContent('Alerts channel (default)');
+  });
+
+  it('says it in the room picker only, not twice across both selects', async () => {
+    // The surface label used to carry the same sentence, from before there was
+    // a room control that could (ISSUE-475).
+    currentProfile.value = profile({ alert: 'talk', log: 'talk' });
+    renderPage();
+    await settled();
+    expect(control('Alert delivery destination')).toHaveTextContent(/^talk$/);
+    expect(control('Execution log destination')).toHaveTextContent(/^talk$/);
+    expect(control('Execution log room')).toHaveTextContent('Logs channel (default)');
   });
 
   it('marks a conversation the bot provisioned, as the web picker marks its own', async () => {

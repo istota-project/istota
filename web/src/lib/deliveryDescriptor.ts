@@ -104,18 +104,23 @@ export interface TalkRoom {
 /**
  * The surface dropdown for one route.
  *
- * `emptyValue`/`emptyLabel` is the leading no-op option; `talkLabel` spells out
- * where a bare `talk` resolves for this purpose (the logs room against the
- * alerts channel), which the bare word does not say. `omit` drops a surface the
- * purpose has no use for — the execution log omits `web`, because web chat
+ * `emptyValue`/`emptyLabel` is the leading no-op option. `omit` drops a surface
+ * the purpose has no use for — the execution log omits `web`, because web chat
  * already shows a task's tool calls in the turn itself and the surface is
  * non-edit, so a log route there posts a second copy of the final summary
  * alone.
  *
+ * Every surface is labelled by its own name. `talk` used to be spelled out per
+ * purpose — `talk (alerts channel)`, `talk (logs channel)` — because the bare
+ * word did not say which conversation it meant, and there was no other control
+ * that could. The room dropdown beside it is that control now and its leading
+ * option carries the same sentence, so the parenthetical said it twice in two
+ * adjacent selects (ISSUE-475).
+ *
  * A `current` that is not among the offered surfaces is kept as its own option:
- * a CLI-set `talk:<token>` or `talk,email`, or an omitted surface someone set
- * before it was withdrawn. Without that it would show as blank and be rewritten
- * on the next save.
+ * a `talk,email` pair, or an omitted surface someone set before it was
+ * withdrawn. Without that it would show as blank and be rewritten on the next
+ * save.
  */
 export function routeOptions(
   surfaces: string[],
@@ -123,14 +128,13 @@ export function routeOptions(
   opts: {
     emptyValue?: string;
     emptyLabel?: string;
-    talkLabel?: string;
     omit?: string[];
   } = {},
 ): RouteOption[] {
-  const { emptyValue = '', emptyLabel = '(default)', talkLabel = 'talk', omit = [] } = opts;
+  const { emptyValue = '', emptyLabel = '(default)', omit = [] } = opts;
   const offered = surfaces.filter((s) => !omit.includes(s));
   const out: RouteOption[] = [{ value: emptyValue, label: emptyLabel }];
-  for (const s of offered) out.push({ value: s, label: s === 'talk' ? talkLabel : s });
+  for (const s of offered) out.push({ value: s, label: s });
   if (current && current !== emptyValue && !offered.includes(current))
     out.push({ value: current, label: current });
   return out;

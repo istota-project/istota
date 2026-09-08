@@ -139,12 +139,18 @@ describe('routeOptions', () => {
     ]);
   });
 
-  it('spells out where a bare talk lands for this purpose', () => {
-    // `talk` alone does not say whether it means the logs room or the alerts
-    // channel, and the two are different rooms.
-    expect(labels(routeOptions(SURFACES, '', { talkLabel: 'talk (logs channel)' }))).toContain(
-      'talk (logs channel)',
-    );
+  it('labels talk with the bare word, leaving the room to the room picker', () => {
+    // It used to read `talk (alerts channel)` / `talk (logs channel)`, because
+    // nothing else said which conversation a bare `talk` meant. The room
+    // dropdown beside it says exactly that now, so the two selects sat side by
+    // side stating one fact twice (ISSUE-475).
+    expect(labels(routeOptions(SURFACES, ''))).toEqual([
+      '(default)',
+      'talk',
+      'email',
+      'ntfy',
+      'web',
+    ]);
   });
 });
 

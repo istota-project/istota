@@ -312,13 +312,14 @@
     talkRoomOptions(profile?.talk_rooms || [], current, emptyLabel);
 
   /** The room dropdown's options for whichever roomed surface the route is on.
-   * `talkLabel` is the row's own wording for a bare `talk` — where it resolves
-   * for this purpose — which is the leading option the Talk picker needs and
-   * the web picker supplies for itself. */
-  function roomOptionsFor(descriptor: string, talkLabel: string): SelectOption[] {
+   * `bareTalkLabel` names where an unpinned `talk` lands for this purpose — the
+   * leading option the Talk picker needs and the web picker works out for
+   * itself. It is the only place that sentence appears: the surface dropdown
+   * beside it labels `talk` with the bare word (ISSUE-475). */
+  function roomOptionsFor(descriptor: string, bareTalkLabel: string): SelectOption[] {
     const surface = routeSurface(descriptor);
     const room = routeRoom(descriptor);
-    return surface === 'talk' ? talkRooms(room, talkLabel) : webRooms(room);
+    return surface === 'talk' ? talkRooms(room, bareTalkLabel) : webRooms(room);
   }
 
   function routeDescriptor(purpose: string): string {
@@ -754,9 +755,7 @@
           <div class="route-row">
             <Select
               value={routeSurface(routeDescriptor('alert'))}
-              options={routeOpts(routeSurface(routeDescriptor('alert')), {
-                talkLabel: 'talk (alerts channel)',
-              })}
+              options={routeOpts(routeSurface(routeDescriptor('alert')))}
               ariaLabel="Alert delivery destination"
               fullWidth
               onValueChange={(v) => setRouteSurface('alert', routeDescriptor('alert'), v)}
@@ -790,7 +789,6 @@
               options={routeOpts(routeSurface(logRouteValue()), {
                 emptyValue: 'none',
                 emptyLabel: '(off)',
-                talkLabel: 'talk (logs channel)',
                 omit: ['web'],
               })}
               ariaLabel="Execution log destination"
