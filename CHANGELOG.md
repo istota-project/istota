@@ -119,6 +119,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Fixed
 
+- Recall no longer spends part of its budget handing the model the same memory twice. A finished exchange is stored twice on purpose — once under you and once under the room, so that someone else in the room can recall it too — and a search of your own room saw both copies and returned both, byte for byte identical. Measured across ten queries it was 10 of 50 slots. Results that are the same text are now collapsed to the highest-ranked one before the result list is cut to size, so a repeat can no longer take a slot a different memory would have had.
+
 - A task that finishes now delivers its answer even when one of the follow-up steps behind it fails. Those steps — filing health records, saving notes, starting a subtask, sending a queued email — ran one after another with nothing between them, so anything unexpected in one skipped the rest and then skipped the reply too, leaving the task recorded as a success with nothing sent. Each step is contained on its own now: one that fails costs only its own work and is written to the task's log, and the answer goes out either way.
 
 - An accounting command that fails in a way nobody anticipated now says so instead of answering with nothing. Every other skill reports an unexpected failure as a readable error; the accounting one was the last that did not, so a sync or an invoice run that broke came back empty and the assistant had nothing to tell you beyond that it had not worked. Commands that were already reporting their errors are unchanged.

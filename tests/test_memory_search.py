@@ -691,6 +691,192 @@ class TestSearch:
         conn.close()
 
 
+class TestCrossNamespaceDedup:
+    """ISSUE-471 — the user- and channel-namespace copies of one exchange are one memory.
+
+    `scheduler` indexes a completed task under the user *and* under
+    `channel:<token>`, and `_recall_memories` searches both in one call, so for
+    the task's own author both rows are in scope for the same query. They are
+    byte-identical text, so they fuse to adjacent scores and both land in the
+    result — spending two slots of a small fixed recall budget on one memory.
+    """
+
+    def _index_both(self, conn, prompt, result, task_id="500"):
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            index_conversation(conn, "alice", task_id, prompt, result)
+            index_conversation(conn, "channel:room1", task_id, prompt, result)
+
+    def test_the_two_namespace_copies_collapse_to_one_result(self, tmp_path):
+        conn = _init_db(tmp_path / "test.db")
+        self._index_both(conn, "where is the permit filed", "in the cottonwood folder")
+
+        with patch("istota.memory.search._search_vec", return_value=[]):
+            results = search(
+                conn, "alice", "cottonwood permit",
+                limit=5, include_user_ids=["channel:room1"],
+            )
+
+        assert len(results) == 1, [r.content for r in results]
+        # Both rows are still in the store — the collapse is at read time.
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_chunks WHERE content_hash = ?",
+            (results[0].content_hash,),
+        ).fetchone()[0] == 2
+        conn.close()
+
+    def test_a_distinct_memory_still_comes_back_alongside(self, tmp_path):
+        """Guards the assertion above against being satisfied by returning nothing."""
+        conn = _init_db(tmp_path / "test.db")
+        self._index_both(conn, "where is the permit filed", "in the cottonwood folder")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "501",
+                           ["the cottonwood survey is due friday"], None)
+
+        with patch("istota.memory.search._search_vec", return_value=[]):
+            results = search(
+                conn, "alice", "cottonwood",
+                limit=5, include_user_ids=["channel:room1"],
+            )
+
+        assert len(results) == 2
+        assert len({r.content for r in results}) == 2
+        conn.close()
+
+    def test_distinct_content_is_never_collapsed(self, tmp_path):
+        """Same source, same namespace, different text — two memories, two slots.
+
+        Green before the fix as well as after: it is the over-dedup control,
+        not a regression test.
+        """
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1", ["heron sighting at dawn"], None)
+            _insert_chunks(conn, "alice", "conversation", "2", ["heron sighting at dusk"], None)
+
+        with patch("istota.memory.search._search_vec", return_value=[]):
+            results = search(conn, "alice", "heron sighting", limit=5)
+
+        assert len(results) == 2
+        conn.close()
+
+    def test_the_higher_ranked_copy_is_the_one_kept(self, tmp_path):
+        """Which namespace won is not information; the fused rank decides."""
+        conn = _init_db(tmp_path / "test.db")
+        self._index_both(conn, "where is the permit filed", "in the cottonwood folder")
+
+        channel_id, content, chash = conn.execute(
+            "SELECT id, content, content_hash FROM memory_chunks "
+            "WHERE user_id = 'channel:room1' LIMIT 1"
+        ).fetchone()
+
+        # Only the channel copy is in the vector pass, so it fuses strictly
+        # higher than its user-namespace twin whatever the BM25 order was.
+        vec_hit = SearchResult(
+            chunk_id=channel_id, content=content, score=0.99,
+            source_type="conversation", source_id="500", content_hash=chash,
+        )
+        with patch("istota.memory.search._search_vec", return_value=[vec_hit]):
+            results = search(
+                conn, "alice", "cottonwood permit",
+                limit=5, include_user_ids=["channel:room1"],
+            )
+
+        assert len(results) == 1
+        assert results[0].chunk_id == channel_id
+        conn.close()
+
+    def test_dedup_runs_before_the_limit_truncation(self, tmp_path):
+        """A duplicate must not consume a slot a third memory could have had.
+
+        Both copies are put in the vector pass so they fuse to ranks 1 and 2,
+        which is what makes `limit=2` discriminating: truncating first hands
+        back one memory in two slots.
+        """
+        conn = _init_db(tmp_path / "test.db")
+        self._index_both(conn, "where is the permit filed", "in the cottonwood folder")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "501",
+                           ["the cottonwood survey is due friday"], None)
+
+        pair = [
+            SearchResult(chunk_id=cid, content=content, score=0.99,
+                         source_type="conversation", source_id="500",
+                         content_hash=chash)
+            for cid, content, chash in conn.execute(
+                "SELECT id, content, content_hash FROM memory_chunks "
+                "WHERE source_id = '500'"
+            ).fetchall()
+        ]
+        assert len(pair) == 2
+
+        with patch("istota.memory.search._search_vec", return_value=pair):
+            results = search(
+                conn, "alice", "cottonwood",
+                limit=2, include_user_ids=["channel:room1"],
+            )
+
+        assert len(results) == 2
+        assert len({r.content for r in results}) == 2
+        conn.close()
+
+    def test_both_sql_paths_carry_the_content_hash(self, tmp_path):
+        """The dedup key is the stored column, so both readers must select it."""
+        conn = _init_db(tmp_path / "test.db")
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1", ["osprey nesting platform"], None)
+        stored = conn.execute("SELECT content_hash FROM memory_chunks").fetchone()[0]
+
+        bm25 = _search_bm25(conn, "alice", "osprey nesting", limit=5)
+        assert [r.content_hash for r in bm25] == [stored]
+
+        row = conn.execute(
+            "SELECT id, content, content_hash FROM memory_chunks"
+        ).fetchone()
+        vec_conn = MagicMock()
+        vec_conn.execute.return_value = iter([
+            (row[0], 0.1, row[1], "conversation", "1", None, "2026-01-01", row[2]),
+        ])
+        with patch("istota.memory.search.enable_vec_extension", return_value=True), \
+             patch("istota.memory.search.embed_text", return_value=[0.0] * 384):
+            vec = _search_vec(vec_conn, "alice", "osprey", limit=5)
+        # The row is hand-written, so it pins the index and not the column
+        # list. Assert the statement too, or dropping `mc.content_hash` from
+        # the SELECT leaves this green — and the real cost of that is not a
+        # lost dedup: `row[7]` would raise inside the fetch loop, which the
+        # surrounding `except Exception` swallows at debug level, so the whole
+        # vector pass returns [] and search silently degrades to BM25-only.
+        assert "mc.content_hash" in vec_conn.execute.call_args[0][0]
+        assert [r.content_hash for r in vec] == [stored]
+        conn.close()
+
+    def test_the_key_is_the_content_alone_not_content_per_source(self, tmp_path):
+        """Identical text indexed by two paths is one memory, whatever the source.
+
+        The key has no source component, so the collapse is wider than the
+        two-namespace case that motivated it — a line that reached the room's
+        notes and a conversation is still one thing to read. It is only ever
+        wider *across* namespaces: `UNIQUE(user_id, content_hash)` already
+        makes a second copy under one user impossible, which is why both rows
+        here are needed to make the case at all.
+        """
+        conn = _init_db(tmp_path / "test.db")
+        line = "the kestrel box needs a new lid"
+        with patch("istota.memory.search.ensure_vec_table", return_value=False):
+            _insert_chunks(conn, "alice", "conversation", "1", [line], None)
+            _insert_chunks(conn, "channel:room1", "channel_memory", "/notes.md",
+                           [line], None)
+        assert conn.execute("SELECT COUNT(*) FROM memory_chunks").fetchone()[0] == 2
+
+        with patch("istota.memory.search._search_vec", return_value=[]):
+            results = search(
+                conn, "alice", "kestrel box",
+                limit=5, include_user_ids=["channel:room1"],
+            )
+
+        assert len(results) == 1
+        conn.close()
+
+
 class TestGetStats:
     def test_stats_with_data(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
@@ -982,9 +1168,9 @@ class TestVecAdaptiveK:
 
     def _make_row(self, chunk_id, distance=0.1):
         # Matches the column order returned by _search_vec's SELECT
-        # (..., mc.metadata_json, mc.created_at).
+        # (..., mc.metadata_json, mc.created_at, mc.content_hash).
         return (chunk_id, distance, f"content {chunk_id}", "conversation",
-                str(chunk_id), None, "2026-01-01")
+                str(chunk_id), None, "2026-01-01", f"hash{chunk_id}")
 
     def _capture_execute(self, batches):
         """Build a fake conn.execute that yields one batch per call and records k."""

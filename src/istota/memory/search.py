@@ -47,6 +47,9 @@ class SearchResult:
     bm25_rank: int | None = None
     vec_rank: int | None = None
     created_at: str = ""
+    # Empty on a result built by hand rather than read out of a row; the
+    # dedup in `search()` falls back to the content itself there.
+    content_hash: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -932,7 +935,7 @@ def _search_bm25(
 
     sql = (
         "SELECT mc.id, mc.content, mc.source_type, mc.source_id, mc.metadata_json, "
-        "rank AS score, mc.created_at "
+        "rank AS score, mc.created_at, mc.content_hash "
         "FROM memory_chunks_fts fts "
         "JOIN memory_chunks mc ON mc.id = fts.rowid "
         f"WHERE fts.content MATCH ? AND {user_filter}"
@@ -980,6 +983,7 @@ def _search_bm25(
                 source_id=row[3],
                 metadata=meta,
                 created_at=row[6] or "",
+                content_hash=row[7] or "",
             ))
     except Exception as e:
         logger.debug("BM25 search failed: %s", e)
@@ -1029,7 +1033,7 @@ def _search_vec(
 
     base_sql = (
         "SELECT v.chunk_id, v.distance, mc.content, mc.source_type, mc.source_id, "
-        "mc.metadata_json, mc.created_at "
+        "mc.metadata_json, mc.created_at, mc.content_hash "
         "FROM memory_chunks_vec v "
         "JOIN memory_chunks mc ON mc.id = v.chunk_id "
         f"WHERE v.embedding MATCH ? AND k = ? "
@@ -1090,6 +1094,7 @@ def _search_vec(
                     source_id=row[4],
                     metadata=meta,
                     created_at=row[6] or "",
+                    content_hash=row[7] or "",
                 ))
         except Exception as e:
             logger.debug("Vector search failed: %s", e)
@@ -1186,6 +1191,44 @@ def _rrf_fusion(
     return fused
 
 
+def _dedup_by_content(results: list[SearchResult]) -> list[SearchResult]:
+    """Collapse results that are the same text, keeping the highest-ranked one.
+
+    A completed task is indexed under its user *and* under
+    `channel:<token>` (`scheduler`), so that a different user in the same room
+    can recall it. For the task's own author `_recall_memories` searches both
+    namespaces in one call, and `UNIQUE(user_id, content_hash)` makes the two
+    rows distinct — same text, two chunk ids. They fuse to near-identical
+    scores because they *are* the same text, so once either ranks at all the
+    other lands beside it and one memory takes two slots of a small fixed
+    recall budget. Measured at 10 of 50 slots across ten queries (ISSUE-471).
+
+    `results` is already in descending relevance order at every call site, so
+    the first occurrence is the highest-ranked one; which namespace it came
+    from is not information. Runs before the `[:limit]` truncation, or a
+    duplicate still consumes a slot a third memory could have had.
+
+    The key is the content alone, with no source component, so the collapse
+    is wider than the case above: identical text reaching two `source_type`s
+    is also one memory. That only arises across namespaces, since
+    `UNIQUE(user_id, content_hash)` already makes a second copy under one
+    user impossible.
+
+    Falls back to the content itself where `content_hash` is empty — a
+    `SearchResult` built by hand rather than read out of a row — so distinct
+    text is never collapsed for want of a key.
+    """
+    seen: set[str] = set()
+    deduped: list[SearchResult] = []
+    for r in results:
+        key = r.content_hash or r.content
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    return deduped
+
+
 def search(
     conn: sqlite3.Connection,
     user_id: str,
@@ -1279,7 +1322,7 @@ def search(
             if not (r.source_type == "conversation" and r.source_id in excluded)
         ]
 
-    return results[:limit]
+    return _dedup_by_content(results)[:limit]
 
 
 def get_stats(

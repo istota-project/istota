@@ -29,7 +29,7 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 7. **Channel memory**: `read_channel_memory()`, only if `conversation_token`
 8. **CalDAV discovery**: `get_calendars_for_user()`
 8b. **Dated memories**: `read_dated_memories()`, skip for briefings, controlled by `auto_load_dated_days`
-8c. **Memory recall**: `_recall_memories()`, BM25 search using `retrieval_query`, skip for briefings
+8c. **Memory recall**: `_recall_memories()`, BM25 search using `retrieval_query`, skip for briefings. It passes `include_user_ids=[channel:<token>]` beside the user's own id, and the scheduler indexes a completed task under both namespaces, so for the task's own author two byte-identical copies of one exchange are in scope for the same query — `search()` collapses results by `content_hash` before its `[:limit]` truncation, keeping the higher-ranked copy (ISSUE-471; measured at 10 of 50 slots before the fix)
 8d. **Knowledge facts**: load from `knowledge_graph`, relevance-filtered by `retrieval_query`, capped by `max_knowledge_facts`
 8d2. **Playbook recall**: `_recall_playbooks()`, BM25/vector over `source_type="playbook"` using `retrieval_query`, gated on `playbooks.enabled`, skipped for automated/`skip_memory` tasks (Part B). On a hit it `os.utime`s each recalled playbook file so retention keys on last-*use*, not last-write (ISSUE-174 Concern 3)
 8e. **Memory cap**: `_apply_memory_cap()`, truncates recalled → knowledge facts → dated → playbooks if `max_memory_chars` exceeded (playbooks truncated last — most protected; returns a 6-tuple)
