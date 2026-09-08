@@ -170,4 +170,44 @@ describe('webRoomOptions marks', () => {
       "logs (bot's own channel)",
     ]);
   });
+
+  it('tells two same-named rooms apart by a piece of their tokens', () => {
+    // Two rooms may legitimately carry one name — a promoted room and its Talk
+    // twin, or two the user simply called the same thing (ISSUE-474).
+    const twins = [
+      { token: 'web-alice-aaa111', name: 'notes', default: false, shared: false, channel: false },
+      { token: 'web-alice-bbb222', name: 'notes', default: false, shared: false, channel: false },
+    ];
+    expect(labels(webRoomOptions(twins, '')).slice(1)).toEqual([
+      'notes (aaa111)',
+      'notes (bbb222)',
+    ]);
+  });
+
+  it('leaves a name alone when its mark already tells the two apart', () => {
+    const twins = [
+      { token: 'web-alice-aaa111', name: 'notes', default: false, shared: false, channel: false },
+      { token: 'web-alice-bbb222', name: 'notes', default: false, shared: true, channel: false },
+    ];
+    expect(labels(webRoomOptions(twins, '')).slice(1)).toEqual(['notes', 'notes (shared)']);
+  });
+
+  it('disambiguates the default room too, since naming it is the whole point', () => {
+    const twins = [
+      { token: 'web-alice-aaa111', name: 'notes', default: true, shared: false, channel: false },
+      { token: 'web-alice-bbb222', name: 'notes', default: false, shared: false, channel: false },
+    ];
+    expect(labels(webRoomOptions(twins, ''))[0]).toBe('Default room (notes, aaa111)');
+  });
+
+  it('keeps the mark beside the token fragment when both are needed', () => {
+    const twins = [
+      { token: 'web-alice-aaa111', name: 'notes', default: false, shared: true, channel: false },
+      { token: 'web-alice-bbb222', name: 'notes', default: false, shared: true, channel: false },
+    ];
+    expect(labels(webRoomOptions(twins, '')).slice(1)).toEqual([
+      'notes (shared, aaa111)',
+      'notes (shared, bbb222)',
+    ]);
+  });
 });

@@ -4268,3 +4268,37 @@ class TestIsModelPrefix:
             assert is_model_prefix(content) is (
                 parse_model_prefix(content, brain) is not None
             ), content
+
+
+class TestResolveRoomNameOnWeb:
+    """`!export` titles and `!search` result headings name a room through this.
+
+    A web room's name lives in two places: `rooms.name`, which every rename
+    writes, and the per-user `web_chat_rooms` handle, which is a mint-time
+    snapshot nothing refreshes. Reading the handle first showed the stale
+    placeholder (ISSUE-474).
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_prefers_the_registry_name(self, make_config):
+        from istota.commands import resolve_room_name
+
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "talk-1", "alice", origin="talk", name=None)
+            db.ensure_web_chat_handle(conn, "alice", "talk-1", "Talk room")
+            db.rename_room(conn, "talk-1", "team")
+            ctx = _ctx(config, conn, conversation_token="talk-1", surface="web")
+            assert await resolve_room_name(ctx, "talk-1") == "team"
+
+    @pytest.mark.asyncio
+    async def test_it_falls_back_to_the_handle_then_the_token(self, make_config):
+        from istota.commands import resolve_room_name
+
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "talk-1", "alice", origin="talk", name=None)
+            db.ensure_web_chat_handle(conn, "alice", "talk-1", "Talk room")
+            ctx = _ctx(config, conn, conversation_token="talk-1", surface="web")
+            assert await resolve_room_name(ctx, "talk-1") == "Talk room"
+            assert await resolve_room_name(ctx, "unknown-1") == "unknown-1"

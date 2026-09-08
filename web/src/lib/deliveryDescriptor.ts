@@ -115,20 +115,60 @@ export function routeOptions(
  * and the mark is what makes it an informed one. A `current` the user can no
  * longer see (a room set from the CLI or config, since archived) is kept for the
  * same reason `routeOptions` keeps a withdrawn surface.
+ *
+ * Two rooms may legitimately carry one name — a promoted room and its Talk twin,
+ * or two the user simply called the same thing — so a label that would otherwise
+ * repeat gets a piece of its token (ISSUE-474). Only where it repeats: a token
+ * fragment beside every name is noise, and the marks already tell some pairs
+ * apart on their own.
  */
 export function webRoomOptions(rooms: WebRoom[], current: string): RouteOption[] {
-  const fallback = rooms.find((r) => r.default);
-  const out: RouteOption[] = [
-    { value: '', label: fallback ? `Default room (${fallback.name})` : 'Default room' },
-  ];
-  for (const r of rooms) out.push({ value: r.token, label: webRoomLabel(r) });
+  const out: RouteOption[] = [{ value: '', label: defaultRoomLabel(rooms) }];
+  const counts = new Map<string, number>();
+  for (const r of rooms) {
+    const label = webRoomLabel(r, roomMarks(r));
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  for (const r of rooms) {
+    const marks = roomMarks(r);
+    if ((counts.get(webRoomLabel(r, marks)) ?? 0) > 1) marks.push(tokenHint(r.token));
+    out.push({ value: r.token, label: webRoomLabel(r, marks) });
+  }
   if (current && !rooms.some((r) => r.token === current))
     out.push({ value: current, label: current });
   return out;
 }
 
-function webRoomLabel(room: WebRoom): string {
-  if (room.channel) return `${room.name} (bot's own channel)`;
-  if (room.shared) return `${room.name} (shared)`;
-  return room.name;
+/** The leading option: the room a bare `web` route lands in, named.
+ *
+ * It carries no mark — the server refuses a shared or machine-owned room as the
+ * *implicit* default — so the only thing that can make it ambiguous is another
+ * room of the same name, and the fragment goes beside the name rather than in a
+ * second bracket. */
+function defaultRoomLabel(rooms: WebRoom[]): string {
+  const fallback = rooms.find((r) => r.default);
+  if (!fallback) return 'Default room';
+  const twin = rooms.some((r) => r.token !== fallback.token && r.name === fallback.name);
+  const name = twin ? `${fallback.name}, ${tokenHint(fallback.token)}` : fallback.name;
+  return `Default room (${name})`;
+}
+
+/** What the room is, beyond its name. At most one — a channel room is the bot's
+ * whether or not anyone else is in it. */
+function roomMarks(room: WebRoom): string[] {
+  if (room.channel) return ["bot's own channel"];
+  if (room.shared) return ['shared'];
+  return [];
+}
+
+/** The tail of a room token. The tail rather than the head because a web room's
+ * token is `web-<user>-<random>` — the head is the same for every room the user
+ * has, and only the tail tells them apart. A Talk-backed room's token is an
+ * opaque Nextcloud id with no such structure, where any slice would do. */
+function tokenHint(token: string): string {
+  return token.slice(-6);
+}
+
+function webRoomLabel(room: WebRoom, marks: string[]): string {
+  return marks.length ? `${room.name} (${marks.join(', ')})` : room.name;
 }
