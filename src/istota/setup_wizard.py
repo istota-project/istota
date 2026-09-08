@@ -69,6 +69,9 @@ class Answers:
     #: Absolute path of the admins file, filled in by ``run_setup`` once the
     #: config directory is known. Named in the env file as ISTOTA_ADMINS_FILE.
     admins_file: str = ""
+    #: An explicit backup destination carried across a config rewrite. Fresh
+    #: installs leave this blank and use the consolidated path below.
+    db_backup_dir_override: Path | None = None
 
     @property
     def disabled_modules(self) -> list[str]:
@@ -99,7 +102,9 @@ class Answers:
 
     @property
     def db_backup_dir(self) -> Path:
-        return self.workspace / "db-backups"
+        if self.db_backup_dir_override is not None:
+            return self.db_backup_dir_override
+        return self.workspace / "Backups" / "db" / "snapshots"
 
     @property
     def temp_dir(self) -> Path:
@@ -630,6 +635,24 @@ def read_existing_caldav(config_path: Path, env_path: Path | None = None) -> dic
     return found
 
 
+def read_existing_db_backup_dir(config_path: Path) -> Path | None:
+    """Return an explicit backup destination before setup rewrites the config."""
+    import tomllib  # noqa: PLC0415 - only this path needs it
+
+    try:
+        with open(config_path, "rb") as config_file:
+            data = tomllib.load(config_file)
+    except (OSError, ValueError):
+        return None
+    scheduler = data.get("scheduler")
+    if not isinstance(scheduler, dict):
+        return None
+    value = scheduler.get("db_backup_dir")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return Path(value).expanduser()
+
+
 def _collect_caldav(a: Answers, prior, *, interactive, input_fn, getpass_fn, out) -> None:
     """Decide the ``[caldav]`` block: keep the existing one, set one up, or none.
 
@@ -1035,6 +1058,7 @@ def run_setup(args, *, input_fn=input, which_fn=None, out=print, getpass_fn=None
         args, input_fn=input_fn, which_fn=which_fn, out=out, getpass_fn=getpass_fn,
         prior_caldav=read_existing_caldav(config_path, env_path),
     )
+    a.db_backup_dir_override = read_existing_db_backup_dir(config_path)
     _validate(a)
 
     admins_path = config_path.parent / "admins"
@@ -1098,7 +1122,7 @@ def _bootstrap(a: Answers, config_path: Path):
     # directory exists, so the mode is set explicitly afterwards — but never
     # through a symlink. `mkdir(exist_ok=True)` succeeds on one pointing at a
     # directory and `Path.chmod` follows it, so a re-run over an install where
-    # the operator symlinked `db-backups` at a shared volume would silently
+    # the operator symlinked `Backups/db/snapshots` at a shared volume would silently
     # narrow that volume instead. The surrounding code is careful about this
     # in the same way (`_write_private`'s fchmod, `execute_task`'s O_NOFOLLOW).
     for directory in (a.temp_dir, a.db_backup_dir):

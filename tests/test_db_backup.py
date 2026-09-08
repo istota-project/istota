@@ -74,7 +74,9 @@ def _root(tmp_path: Path) -> Path:
 class TestBackupDestination:
     def test_defaults_under_mount(self, tmp_path):
         cfg = _config(tmp_path, db_backup_dir="")
-        assert db_backup.backup_destination(cfg) == (tmp_path / "mount" / "istota-db-backups")
+        assert db_backup.backup_destination(cfg) == (
+            tmp_path / "mount" / "Backups" / "db" / "snapshots"
+        )
 
     def test_explicit_dir_wins(self, tmp_path):
         cfg = _config(tmp_path, db_backup_dir=str(tmp_path / "elsewhere"))
@@ -344,7 +346,7 @@ class TestMountLiveness:
         results = db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert results == []
         # Nothing written, clock not advanced.
-        assert not (tmp_path / "mount" / "istota-db-backups").exists()
+        assert not (tmp_path / "mount" / "Backups" / "db" / "snapshots").exists()
         assert db_backup.last_backup_time(cfg) == 0.0
 
     def test_mount_derived_runs_when_mounted(self, tmp_path, monkeypatch):
@@ -354,7 +356,16 @@ class TestMountLiveness:
 
         results = db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert any(r["status"] == "ok" for r in results)
-        assert (tmp_path / "mount" / "istota-db-backups" / FIXED_DAY / "framework" / "istota.db").exists()
+        assert (
+            tmp_path
+            / "mount"
+            / "Backups"
+            / "db"
+            / "snapshots"
+            / FIXED_DAY
+            / "framework"
+            / "istota.db"
+        ).exists()
 
     def test_explicit_dir_outside_mount_is_trusted_without_ismount(self, tmp_path, monkeypatch):
         # A db_backup_dir the mount does not contain is the operator's claim
