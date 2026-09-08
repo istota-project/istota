@@ -641,15 +641,83 @@ def get_fact(conn: sqlite3.Connection, fact_id: int) -> KnowledgeFact | None:
 
 
 def get_fact_count(conn: sqlite3.Connection, user_id: str) -> dict:
-    """Get fact counts for a user."""
-    total = conn.execute(
-        "SELECT COUNT(*) FROM knowledge_facts WHERE user_id = ?", (user_id,)
-    ).fetchone()[0]
-    current = conn.execute(
-        "SELECT COUNT(*) FROM knowledge_facts WHERE user_id = ? AND valid_until IS NULL",
+    """Count a user's facts by state: current, expired, superseded.
+
+    `current` is counted by calling `get_current_facts` rather than by a
+    second query of its own. The two-query version is what let the two
+    definitions drift (ISSUE-472): this one asked `valid_until IS NULL`, so
+    every fact carrying an expiry set in the *future* — which the extraction
+    prompt sets routinely — was reported as historical, understating the live
+    graph by 30% on the deployment that found it.
+
+    The remainder splits on whether anything replaced the fact, which
+    `total - current` used to merge. Supersession only ever happens to a
+    non-temporary single-valued predicate, so a lapsed fact is superseded
+    when its (subject, predicate) still holds a live value and expired when
+    nothing does. That is derived from this table rather than from the
+    `supersede` op in `knowledge_facts_audit` deliberately: the audit is
+    retention-swept, so an audit-derived count would reclassify old
+    superseded facts as expired once their rows aged out, and a number that
+    moves because a log was pruned is the wrong shape for a health metric.
+
+    That rule is a health metric rather than an audit, and it is wrong in
+    two directions worth naming. `add_fact` only supersedes rows whose
+    `valid_until IS NULL`, so a fact ended by `invalidate_fact` and *then*
+    followed by a new value under the same (subject, predicate) reads as
+    superseded although nothing superseded it; and a genuinely superseded
+    fact whose replacement was later hard-deleted, or has since lapsed
+    itself, leaves no live key and reads as expired. Both need the audit
+    trail to tell apart, which is the thing this deliberately does not
+    depend on.
+
+    Every row is classified once, against one snapshot, so the three buckets
+    always sum to `total`. Reading the rows before the current set is what
+    makes that hold: the two queries sample the table at different moments,
+    and this way a fact written in between is absent from both rather than
+    counted in one. Deciding lapsed-ness by *absence from the current set*
+    rather than by a `valid_until <= today` query of its own is the same
+    argument as the paragraph above — a second `date.today()` here would
+    disagree with the one inside `get_current_facts` across a midnight
+    rollover, and a fact expiring the next day would land in two buckets.
+
+    Requires `conn.row_factory = sqlite3.Row`, as the module's other
+    row-indexing readers do.
+    """
+    rows = conn.execute(
+        "SELECT id, subject, predicate, temporary FROM knowledge_facts "
+        "WHERE user_id = ?",
         (user_id,),
-    ).fetchone()[0]
-    return {"total": total, "current": current, "historical": total - current}
+    ).fetchall()
+
+    current = get_current_facts(conn, user_id)
+    current_ids = {fact.id for fact in current}
+    live_keys = {
+        (fact.subject, fact.predicate)
+        for fact in current
+        if fact.predicate in SINGLE_VALUED_PREDICATES and not fact.temporary
+    }
+
+    current_count = 0
+    expired = 0
+    superseded = 0
+    for row in rows:
+        if row["id"] in current_ids:
+            current_count += 1
+        elif (
+            not row["temporary"]
+            and row["predicate"] in SINGLE_VALUED_PREDICATES
+            and (row["subject"], row["predicate"]) in live_keys
+        ):
+            superseded += 1
+        else:
+            expired += 1
+
+    return {
+        "total": len(rows),
+        "current": current_count,
+        "expired": expired,
+        "superseded": superseded,
+    }
 
 
 def _tokenize(text: str) -> set[str]:

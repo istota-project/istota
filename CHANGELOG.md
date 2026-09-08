@@ -119,6 +119,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Fixed
 
+- The knowledge graph's own fact counts no longer understate what it holds. Anything with an expiry date set at all was counted as expired, including one set months from now — and the memory extraction sets those routinely, so the count drifted further from reality the more that worked as intended: 144 facts reported against 206 actually live on one deployment. `!memory facts` reads the same number, so it labelled the list it printed with a smaller count than the list had, and a graph whose facts all carried a future expiry was reported as empty. The counts also split what used to be one "historical" figure into facts that expired and facts a newer value replaced, which are different things to see.
+
 - A task that finishes now delivers its answer even when one of the follow-up steps behind it fails. Those steps — filing health records, saving notes, starting a subtask, sending a queued email — ran one after another with nothing between them, so anything unexpected in one skipped the rest and then skipped the reply too, leaving the task recorded as a success with nothing sent. Each step is contained on its own now: one that fails costs only its own work and is written to the task's log, and the answer goes out either way.
 
 - An accounting command that fails in a way nobody anticipated now says so instead of answering with nothing. Every other skill reports an unexpected failure as a readable error; the accounting one was the last that did not, so a sync or an invoice run that broke came back empty and the assistant had nothing to tell you beyond that it had not worked. Commands that were already reporting their errors are unchanged.
