@@ -24,7 +24,7 @@
     usageOriginTitle,
   } from '$lib/usageFormat';
   import { formatBytes } from '$lib/format';
-  import { formatDuration as formatIsoDuration } from '$lib/dateFormat';
+  import { formatDuration as formatIsoDuration, formatRelative } from '$lib/dateFormat';
 
   let stats: AdminStats | null = $state(null);
   let loading = $state(true);
@@ -103,17 +103,11 @@
   // `—` rather than `0s` for an absent uptime: the figure is missing, not zero.
   const formatDuration = (seconds: number) => (seconds ? formatIsoDuration(seconds) : '—');
 
-  function formatTimestamp(ts: string | null): string {
-    if (!ts) return '—';
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return ts;
-    const diff = (Date.now() - d.getTime()) / 1000;
-    if (diff < 0) return 'just now';
-    if (diff < 60) return `${Math.floor(diff)}s ago`;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  }
+  // The seconds tier is this page and nowhere else: the panel refreshes on a
+  // timer and several of these figures are liveness readouts, where the coarse
+  // sub-minute rung and a count of seconds are different answers to the
+  // question being asked.
+  const formatTimestamp = (ts: string | null) => formatRelative(ts, { seconds: true, empty: '—' });
 
   /**
    * A plan tile's tint, by the operator's own thresholds and nothing else.
@@ -1361,6 +1355,25 @@
     width: 9rem;
   }
 
+  /* The two columns `formatTimestamp` writes into, and the only cells in either
+	   table whose content is a localized string of unbounded width: past thirty
+	   days it renders a date, and `5. Sept. 2026` is longer than the
+	   `Sep 5, 2026` these were sized against. Nothing sets `overflow` on a
+	   `.grid` cell, so without this a long locale paints over the column beside
+	   it rather than wrapping. The widths elsewhere still carry the common case;
+	   this is the backstop.
+
+	   `td` only. The header cells carry the same class, and `Last active` and
+	   `Last run` are two words that are *meant* to wrap to a second line at the
+	   narrow breakpoints — clipping those would cost more than it saves, and a
+	   header has no tooltip to fall back on. */
+  .users-grid td.col-active,
+  .jobs-grid td.col-lastrun {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .usage-sub {
     margin: var(--space-2) 0 var(--space-1);
     font-size: var(--text-sm);
@@ -1659,12 +1672,12 @@
 	   that column came out exactly 0px wide, with the headings painted over each
 	   other. `.table-scroll` scrolls instead. */
   @media (max-width: 768px) {
-    /* The 36.5rem of column widths below, plus 11rem for the auto 24h column —
+    /* The 37.5rem of column widths below, plus 11rem for the auto 24h column —
 		   a rem more than the desktop table leaves it, since the chips have a whole
 		   phone screen less to be legible in. Every column keeps a legible width and
 		   the surplus becomes horizontal scroll. */
     .users-grid {
-      min-width: 47.5rem;
+      min-width: 48.5rem;
     }
     /* Tighten the columns whose content has a known short bound, so that scroll
 		   stays as short as it can be, and leave the numeric ones at a width their
@@ -1683,10 +1696,12 @@
     .users-grid .col-failed {
       width: 3.5rem;
     }
-    /* "1234d ago" is the longest `formatTimestamp` produces — it has no upper
-		   branch, so a dormant account counts days indefinitely. */
+    /* A rem more than the 5rem "1234d ago" wanted. `formatTimestamp` no longer
+		   counts days indefinitely — past thirty it renders a date, and a dormant
+		   account is exactly the row that reaches it, so this column's longest
+		   string went from 9 characters to `Sep 5, 2026`. */
     .users-grid .col-active {
-      width: 5rem;
+      width: 6rem;
     }
     .users-grid .col-avg {
       width: 4rem;
