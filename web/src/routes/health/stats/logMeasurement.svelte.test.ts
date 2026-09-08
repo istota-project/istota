@@ -24,16 +24,13 @@
  * is what the resting-HR case here holds.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import type { HealthSettings, HealthStat } from '$lib/api';
 
-vi.mock('$lib/api', () => ({
-  createHealthStat: vi.fn(),
-  deleteHealthStat: vi.fn(),
-  getHealthSettings: vi.fn(),
-  healthStatsSeries: vi.fn(),
-  listHealthStats: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 // The page draws a sparkline per metric card. Chart.js wants a real 2d
 // context and jsdom has none, and the chart is not what is under test.

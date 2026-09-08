@@ -1,22 +1,11 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
-vi.mock('$lib/api', () => ({
-  uploadChatAttachment: vi.fn(),
-  fetchChatCommands: vi.fn(),
-  chatConfigOnce: vi.fn(),
-  // Not used by any test here, and it has to be on the mock all the same:
-  // `upload()`'s catch reads `e instanceof UploadUnreachableError` on every
-  // failed upload, and vitest throws on a missing export from a factory mock
-  // rather than answering undefined. That throw escapes into an unhandled
-  // rejection, which fails the run without failing a test.
-  // The double has to carry every class the product does `instanceof`
-  // against, or the property read throws inside the branch instead of
-  // answering it.
-  AuthError: class AuthError extends Error {},
-  UploadUnreachableError: class extends Error {},
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 // The pickers have their own unit tests (nativePicker.test.ts). Here the seam
 // is what matters: which one a row reaches for, and whether the menu is offered

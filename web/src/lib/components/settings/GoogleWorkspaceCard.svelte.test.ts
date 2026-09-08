@@ -5,17 +5,15 @@
  * longer matches what a reconnect would ask for.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import type { GoogleStatus } from '$lib/api';
 import { settingsSave } from '$lib/stores/settingsSave.svelte';
 
-const api = vi.hoisted(() => ({
-  getGoogleStatus: vi.fn(),
-  saveGoogleScopes: vi.fn(),
-  disconnectGoogle: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 import GoogleWorkspaceCard from './GoogleWorkspaceCard.svelte';
 

@@ -1,19 +1,20 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
 // Mock the API: attachment upload and limits (unused here) + the command
 // catalogue.
-vi.mock('$lib/api', () => ({
-  uploadChatAttachment: vi.fn(),
-  fetchChatCommands: vi.fn(),
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   chatConfigOnce: vi.fn(async () => ({
     max_prompt_chars: 32000,
     max_attachment_mb: 25,
     attachment_extensions: [],
     client_poll_interval_ms: 1500,
   })),
-}));
+});
 
 import { fetchChatCommands } from '$lib/api';
 import { resetCommandCatalogue } from './autocomplete/providers';

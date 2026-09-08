@@ -14,36 +14,15 @@
  * produces.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { get } from 'svelte/store';
 import type { ChatRoom, ChatAttachment } from '$lib/api';
 import type { ChatMessage } from './segments';
 import { MAX_QUEUED_PER_ROOM, SEND_QUEUE_STORAGE_KEY } from './sendQueue';
 
-const api = vi.hoisted(() => ({
-  getChatConfig: vi.fn(),
-  getChatRooms: vi.fn(),
-  getRoomMessages: vi.fn(),
-  getChatMessagesView: vi.fn(),
-  getRoomEvents: vi.fn(),
-  markRoomRead: vi.fn(),
-  markAllRoomsRead: vi.fn(),
-  getTaskEvents: vi.fn(),
-  sendChatMessage: vi.fn(),
-  createChatRoom: vi.fn(),
-  updateChatRoom: vi.fn(),
-  deleteChatRoom: vi.fn(),
-  promoteChatRoom: vi.fn(),
-  cancelChatTask: vi.fn(),
-  confirmChatTask: vi.fn(),
-  chatStreamUrl: vi.fn(),
-  chatRoomStreamUrl: vi.fn(),
-  listOutboundDrafts: vi.fn(),
-  fetchChatCommands: vi.fn(),
-  ChatRoomBusyError: class extends Error {},
-  ChatMessageBusyError: class extends Error {},
-}));
-
+const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 // Hoisted, so the same functions and the same backing store survive the
 // `vi.resetModules()` in `freshSession()` — a restore test has to seed storage
@@ -1191,7 +1170,7 @@ describe('chat store — the send queue', () => {
     it('keeps the queue when the delete is refused', async () => {
       const s = await streaming();
       await s.send('and another thing');
-      api.deleteChatRoom.mockRejectedValue(new api.ChatRoomBusyError('busy'));
+      api.deleteChatRoom.mockRejectedValue(new api.ChatRoomBusyError());
 
       await s.deleteRoom(1);
 

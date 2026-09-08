@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
 // Mock the API module the providers pull the catalogue from.
-vi.mock('$lib/api', () => ({
-  fetchChatCommands: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 import { fetchChatCommands } from '$lib/api';
 import {

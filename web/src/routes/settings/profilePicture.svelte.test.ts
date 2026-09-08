@@ -8,10 +8,12 @@
  * sentences the user has to read to know what to do differently.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/svelte';
 
-const api = vi.hoisted(() => ({
-  AuthError: class AuthError extends Error {},
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   getSettingsServices: vi.fn(async () => ({ services: [] })),
   getModules: vi.fn(async () => ({ modules: [] })),
   getProfile: vi.fn(async () => ({
@@ -45,9 +47,7 @@ const api = vi.hoisted(() => ({
     const path = kind === 'bot' ? '/api/avatars/bot' : `/api/avatars/user/${userId}`;
     return version ? `${path}?v=${version}` : path;
   }),
-  AVATAR_ACCEPT: 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif',
-}));
-vi.mock('$lib/api', () => api);
+});
 
 vi.mock('$lib/platform/native', () => ({
   isNativeShell: vi.fn(() => false),

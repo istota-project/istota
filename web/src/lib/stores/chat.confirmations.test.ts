@@ -18,35 +18,23 @@
  * `messages`, so both come back over the room stream. The ids it returns are
  * what stop that echo appending a second copy of each.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { get } from 'svelte/store';
 import type { ChatRoom } from '$lib/api';
 
-const api = vi.hoisted(() => ({
-  getChatConfig: vi.fn(),
-  getChatRooms: vi.fn(),
-  getRoomMessages: vi.fn(),
-  markRoomRead: vi.fn(),
-  getTaskEvents: vi.fn(),
-  sendChatMessage: vi.fn(),
-  createChatRoom: vi.fn(),
-  updateChatRoom: vi.fn(),
-  deleteChatRoom: vi.fn(),
-  promoteChatRoom: vi.fn(),
-  cancelChatTask: vi.fn(),
-  confirmChatTask: vi.fn(),
-  chatStreamUrl: vi.fn(),
+const api = vi.hoisted(() => ({}) as ApiDouble & { listPendingConfirmations: Mock });
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   // Deliberately still here, on a module that no longer exports it: the point
   // of the removal test is that the store never reaches for it, and a spy that
   // does not exist cannot record not being called.
   listPendingConfirmations: vi.fn(),
-  ChatRoomBusyError: class extends Error {},
-}));
+});
 
 /** The rooms reconciler's own interval, restated from `chat.ts`. */
 const ROOMS_REFRESH_MS = 30000;
 
-vi.mock('$lib/api', () => api);
 vi.mock('$lib/stores/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),

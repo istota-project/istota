@@ -9,30 +9,14 @@
  * markAllRead zeroing every room badge.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { get } from 'svelte/store';
 import type { ChatRoom, ChatHistory } from '$lib/api';
 
-const api = vi.hoisted(() => ({
-  getChatConfig: vi.fn(),
-  getChatRooms: vi.fn(),
-  getRoomMessages: vi.fn(),
-  getChatMessagesView: vi.fn(),
-  setChatMessageStarred: vi.fn(),
-  markAllRoomsRead: vi.fn(),
-  markRoomRead: vi.fn(),
-  getTaskEvents: vi.fn(),
-  sendChatMessage: vi.fn(),
-  createChatRoom: vi.fn(),
-  updateChatRoom: vi.fn(),
-  deleteChatRoom: vi.fn(),
-  promoteChatRoom: vi.fn(),
-  cancelChatTask: vi.fn(),
-  confirmChatTask: vi.fn(),
-  chatStreamUrl: vi.fn(),
-  ChatRoomBusyError: class extends Error {},
-}));
-
+const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
+
 // In-memory stand-in for localStorage so the selection round-trip (save on
 // select, read back on the next init) is exercised for real.
 const persisted = vi.hoisted(() => ({ map: new Map<string, unknown>() }));

@@ -7,19 +7,20 @@
  * citation instead of the menu the user was looking at.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
-vi.mock('$lib/api', () => ({
-  uploadChatAttachment: vi.fn(),
-  fetchChatCommands: vi.fn(),
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   chatConfigOnce: vi.fn(async () => ({
     max_prompt_chars: 32000,
     max_attachment_mb: 25,
     attachment_extensions: [],
     client_poll_interval_ms: 1500,
   })),
-}));
+});
 
 // The attach *menu* only exists where the native pickers do (the iOS shell);
 // off-shell the `+` opens a file input directly, so the Escape-ordering case
