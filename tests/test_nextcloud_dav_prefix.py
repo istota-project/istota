@@ -177,8 +177,7 @@ class TestTheAccountLevelCallers:
 
     def test_the_status_file_goes_to_the_account_root(self):
         """An in-Nextcloud app reads it through `getUserFolder`, which does not
-        look inside the mount — and a prefixed MKCOL would also leave a stray
-        `config/` on the shared volume beside `Users/` and `Channels/`."""
+        look inside the mount, so the prefix must not be applied here."""
         from istota import status_writer
 
         resp = MagicMock(status_code=201, text="")
@@ -187,8 +186,7 @@ class TestTheAccountLevelCallers:
 
         urls = [call[0][1] for call in request.call_args_list]
         assert urls == [
-            "https://cloud.example.com/remote.php/dav/files/istota/config",
-            "https://cloud.example.com/remote.php/dav/files/istota/config/status.json",
+            "https://cloud.example.com/remote.php/dav/files/istota/status.json",
         ]
 
 

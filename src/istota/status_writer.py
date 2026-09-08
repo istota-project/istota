@@ -22,16 +22,18 @@ def init_status_writer() -> None:
 def write_status(config: Config, active_workers: int, pending_fg: int, pending_bg: int) -> None:
     """Write a JSON status file to the bot user's Nextcloud storage via WebDAV.
 
-    The NC app reads ``config/status.json`` from the bot user's file tree
-    (via ``IRootFolder::getUserFolder``), so we PUT it there directly.
+    The NC app reads ``status.json`` from the root of the bot user's file tree
+    (via ``IRootFolder::getUserFolder``), so we PUT it there directly. The root
+    always exists, so there is no directory to create first.
 
     That is why it is one of the two callers passing ``prefixed=False``. The
     subject here is the *account* root, not the daemon's storage root, and on a
     deployment where those differ — one reaching its storage through an
     external-storage mount — the prefixed path lands on the mount, where
-    ``getUserFolder`` does not look, and ``MKCOL config`` leaves a stray
-    directory on the volume next to ``Users/`` and ``Channels/``. On the
-    rclone-mount deploy the two are the same directory and nothing changes.
+    ``getUserFolder`` does not look. On the rclone-mount deploy the two are the
+    same directory, so the prefix is empty and the URL is the same either way —
+    the file just sits in the mount root now, beside ``Users/``, ``Channels/``
+    and ``Talk/``, rather than in a ``config/`` directory of its own.
     """
     nc = config.nextcloud
     if not nc.url or not nc.username:
@@ -58,19 +60,10 @@ def write_status(config: Config, active_workers: int, pending_fg: int, pending_b
     }
 
     try:
-        # Ensure config/ exists. 405 means it already does, which is the
-        # steady state — dav_request accepts it rather than raising.
-        dav_request(
-            config,
-            "MKCOL",
-            dav_files_url(config, "config", prefixed=False),
-            timeout=10.0,
-            ok_statuses=(201, 405),
-        )
         dav_request(
             config,
             "PUT",
-            dav_files_url(config, "config/status.json", prefixed=False),
+            dav_files_url(config, "status.json", prefixed=False),
             content=json.dumps(status, indent=2),
             headers={"Content-Type": "application/json"},
             timeout=10.0,
