@@ -313,7 +313,12 @@
   // — which after ISSUE-477 is whatever this setting says, so naming it there
   // would be circular.
   const webRooms = (current: string, emptyLabel?: string) =>
-    webRoomOptions(profile?.web_rooms || [], current, emptyLabel);
+    webRoomOptions(
+      profile?.web_rooms || [],
+      current,
+      emptyLabel,
+      profile?.unavailable_web_rooms || [],
+    );
   const talkRooms = (current: string, emptyLabel: string) =>
     talkRoomOptions(profile?.talk_rooms || [], current, emptyLabel);
 

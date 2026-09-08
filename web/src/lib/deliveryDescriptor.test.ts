@@ -178,6 +178,38 @@ describe('webRoomOptions', () => {
   it('keeps a pinned room the user can no longer see', () => {
     expect(values(webRoomOptions(rooms, 'web-alice-archived'))).toContain('web-alice-archived');
   });
+
+  it('marks it unavailable when the server says that room is dead', () => {
+    // ISSUE-478: a delivery pinned to an archived, deleted or hidden room lands
+    // where nothing renders it and reports success. Keeping the value is right;
+    // letting it read like the named rooms above it is not.
+    const opts = webRoomOptions(rooms, 'web-alice-archived', undefined, ['web-alice-archived']);
+    expect(opts[opts.length - 1]).toEqual({
+      value: 'web-alice-archived',
+      label: 'web-alice-archived (unavailable)',
+    });
+  });
+
+  it('leaves a pin the server did not name as a bare token', () => {
+    // The load-bearing control. Absence from `rooms` is three states, not one:
+    // this list is handle-driven, so a room with no handle yet and one with a
+    // stale archived handle are both missing from it and both deliver — and an
+    // empty list is also what a failed lookup returns. Marking on absence would
+    // call a working route broken, which is what the Talk picker was spared.
+    expect(labels(webRoomOptions(rooms, 'web-alice-nohandle'))).toContain('web-alice-nohandle');
+    expect(labels(webRoomOptions([], 'web-alice-general'))).toEqual([
+      'Default room',
+      'web-alice-general',
+    ]);
+  });
+
+  it('marks nothing when the pinned room is one of the offered ones', () => {
+    // The other control: a room the server named cannot also be offered, so the
+    // mark must never reach an option built from `rooms`.
+    expect(
+      labels(webRoomOptions(rooms, 'web-alice-ideas', undefined, ['web-alice-ideas'])),
+    ).toEqual(['Default room (general)', 'general', 'ideas']);
+  });
 });
 
 describe('webRoomOptions marks', () => {
@@ -273,6 +305,15 @@ describe('talkRoomOptions', () => {
     // An operator-set token for a conversation the registry has not seen. The
     // save refuses a *new* one, but the row must still show what is stored.
     expect(values(talkRoomOptions(rooms, 'conv-old', 'Default'))).toContain('conv-old');
+  });
+
+  it('leaves it a bare token, since that conversation delivers perfectly well', () => {
+    // The other half of ISSUE-478's mark, and the reason it is the web
+    // picker's rather than `roomOptions`': here an absent conversation is the
+    // expected operator-set case, so the same mark would call a working route
+    // broken.
+    const opts = talkRoomOptions(rooms, 'conv-old', 'Default');
+    expect(opts[opts.length - 1]).toEqual({ value: 'conv-old', label: 'conv-old' });
   });
 
   it('tells two same-named conversations apart by a piece of their tokens', () => {

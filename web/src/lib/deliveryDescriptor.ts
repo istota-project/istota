@@ -151,9 +151,17 @@ export function routeOptions(
  * A shared or machine-owned room is offered and marked. The server refuses both
  * as the *implicit* default — an alert delivered into a room another person
  * reads is delivered in front of them — but pinning one is a deliberate choice,
- * and the mark is what makes it an informed one. A `current` the user can no
- * longer see (a room set from the CLI or config, since archived) is kept for the
- * same reason `routeOptions` keeps a withdrawn surface.
+ * and the mark is what makes it an informed one. A `current` that is not among
+ * them is kept for the same reason `routeOptions` keeps a withdrawn surface.
+ *
+ * `unavailable` is the server's list of this profile's own pins that will
+ * swallow a delivery, and a `current` on it is marked (ISSUE-478). It is a
+ * parameter rather than a test of `rooms`, because absence from `rooms` is not
+ * evidence: that list is handle-driven and degrades to `[]` on a database
+ * error, so a room with no handle yet, one with a stale archived handle, and a
+ * failed lookup all look identical to a missing room from here — and marking on
+ * absence would call two working routes broken, which is the thing the Talk
+ * picker was deliberately spared. See `_unavailable_web_room_pins`.
  *
  * Two rooms may legitimately carry one name — a promoted room and its Talk twin,
  * or two the user simply called the same thing — so a label that would otherwise
@@ -170,8 +178,11 @@ export function webRoomOptions(
   rooms: WebRoom[],
   current: string,
   emptyLabel?: string,
+  unavailable: string[] = [],
 ): RouteOption[] {
-  return roomOptions(rooms, current, emptyLabel ?? defaultRoomLabel(rooms), webRoomMarks);
+  const label = (token: string) =>
+    unavailable.includes(token) ? unavailableRoomLabel(token) : token;
+  return roomOptions(rooms, current, emptyLabel ?? defaultRoomLabel(rooms), webRoomMarks, label);
 }
 
 /**
@@ -215,6 +226,7 @@ function roomOptions<T extends { token: string; name: string }>(
   current: string,
   emptyLabel: string,
   marksOf: (room: T) => string[],
+  unknownLabel: (token: string) => string = (token) => token,
 ): RouteOption[] {
   const label = (r: T, extra?: string) => roomLabel(r, extra ? [...marksOf(r), extra] : marksOf(r));
 
@@ -229,8 +241,30 @@ function roomOptions<T extends { token: string; name: string }>(
     else out.push({ value: r.token, label: label(r, r.token) });
   }
   if (current && !rooms.some((r) => r.token === current))
-    out.push({ value: current, label: current });
+    out.push({ value: current, label: unknownLabel(current) });
   return out;
+}
+
+/** The label for a pinned web room the server has told us is dead — the user is
+ * a member and the room is archived, gone, or one they hid, so a delivery
+ * pinned there lands in a transcript no surface renders and reports success
+ * (ISSUE-478).
+ *
+ * The option is still kept and still editable, for the reason `routeOptions`
+ * keeps a withdrawn surface: dropping it would blank the field and rewrite the
+ * route on the next save, losing the only trace of where the alerts were going.
+ * What it must not do is read like the rooms above it — a bare token is what it
+ * said before, and a token is not a name, so it does not tell a user which room
+ * this is, let alone that it is broken. There is no name to offer instead: the
+ * room is not in `web_rooms` precisely because it is not offerable.
+ *
+ * Applied only to a token the server named, never to any `current` the offered
+ * list happens to lack — see `webRoomOptions`. Talk takes no equivalent: a
+ * conversation absent from its list is the expected operator-set case and
+ * delivers perfectly well (ISSUE-475), so the mark there would say something
+ * false about a working route. */
+function unavailableRoomLabel(token: string): string {
+  return `${token} (unavailable)`;
 }
 
 function tally(labels: string[]): Map<string, number> {

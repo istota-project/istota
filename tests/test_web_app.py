@@ -3646,6 +3646,233 @@ class TestProfileEndpoints:
         rooms = resp.json()["profile"]["web_rooms"]
         assert hidden.token not in {r["token"] for r in rooms}
 
+    async def test_web_rooms_omits_a_room_the_registry_archived(
+        self, tmp_path, client, app,
+    ):
+        """`archive_orphaned_talk_rooms` sets `rooms.archived` when the bot
+        leaves a Nextcloud conversation, and leaves the per-user handle and the
+        membership row alone — so a picker filtering on the handle alone kept
+        offering the room while the sidebar hid it. A route pinned to one
+        delivers into a transcript no surface renders, and reports success
+        (ISSUE-478)."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            for token, name in (("conv-live", "team"), ("conv-gone", "old crew")):
+                db.register_room(conn, token, "alice", origin="talk", name=name)
+                db.ensure_web_chat_handle(conn, "alice", token, name)
+            # The real producer, rather than a hand-written UPDATE: the bot is
+            # no longer in `conv-gone`.
+            assert db.archive_orphaned_talk_rooms(conn, {"conv-live"}) == 1
+        with db.get_db(self._db_path) as conn:
+            # The two rows the archiver deliberately leaves behind, which are
+            # the whole reason the handle-only filter went on offering it.
+            assert db.is_room_member(conn, "conv-gone", "alice")
+            assert "conv-gone" in {
+                h.token for h in db.list_web_chat_rooms(conn, "alice")
+            }
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        picker = {r["token"] for r in resp.json()["profile"]["web_rooms"]}
+        assert "conv-gone" not in picker
+        assert "conv-live" in picker
+
+        # The picker is a *subset* of the sidebar, not its equal: the sidebar is
+        # registry-driven and mints a missing handle as it lists, while this is
+        # handle-driven, so a member room with no handle yet is in one and not
+        # the other. Both rooms here have live handles, so the interesting half
+        # is that the archived one is in neither.
+        sidebar = {
+            r["token"]
+            for r in (await client.get("/istota/api/chat/rooms", cookies=cookies)).json()["rooms"]
+        }
+        assert "conv-gone" not in sidebar
+        assert picker <= sidebar
+
+    async def test_web_rooms_omits_a_room_whose_registry_row_is_gone(
+        self, tmp_path, client, app,
+    ):
+        """No shipped path produces this — `delete_room` takes every handle with
+        the row (ISSUE-134) — so the state is built by hand and the guard is
+        defence in depth. It is worth holding because `db.room_display_name`
+        papers over a missing row with the handle's own name, so such an option
+        would render as an ordinary room rather than as anything wrong."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-dead", "alice", origin="talk", name="gone")
+            db.ensure_web_chat_handle(conn, "alice", "conv-dead", "gone")
+            conn.execute("DELETE FROM rooms WHERE token = ?", ("conv-dead",))
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert "conv-dead" not in {
+            r["token"] for r in resp.json()["profile"]["web_rooms"]
+        }
+
+    async def test_web_rooms_omits_a_room_the_user_dismissed(
+        self, tmp_path, client, app,
+    ):
+        """The web hide action tombstones the room, and the poll-time backfill
+        re-adds membership — so membership alone cannot keep it hidden, and the
+        picker has to read the tombstone the sidebar reads."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-hid", "alice", origin="talk", name="noise")
+            db.ensure_web_chat_handle(conn, "alice", "conv-hid", "noise")
+            db.dismiss_room(conn, "conv-hid", "alice")
+            assert db.is_room_member(conn, "conv-hid", "alice")
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert "conv-hid" not in {
+            r["token"] for r in resp.json()["profile"]["web_rooms"]
+        }
+
+    async def test_web_rooms_keep_shared_and_channel_rooms_the_user_can_see(
+        self, tmp_path, client, app,
+    ):
+        """The control against reading the visibility filter as a licence to
+        drop the two classes the picker offers on purpose. Both are refused as
+        the *implicit* default and both stay pickable, marked."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "shared-1", "bob", origin="talk", name="team")
+            db.add_room_member(conn, "shared-1", "alice")
+            db.add_room_member(conn, "shared-1", "bob")
+            db.ensure_web_chat_handle(conn, "alice", "shared-1", "team")
+            db.register_room(conn, "chan-log", "alice", origin="talk", name="logs")
+            db.ensure_web_chat_handle(conn, "alice", "chan-log", "logs")
+            conn.execute(
+                "UPDATE user_profiles SET log_channel = ? WHERE user_id = ?",
+                ("chan-log", "alice"),
+            )
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        by_token = {r["token"]: r for r in resp.json()["profile"]["web_rooms"]}
+        assert by_token["shared-1"]["shared"] is True
+        assert by_token["chan-log"]["channel"] is True
+
+    async def test_web_rooms_keep_a_talk_room_the_bot_is_still_in(
+        self, tmp_path, client, app,
+    ):
+        """The control against filtering by origin. A Talk-origin room bound to
+        `web` is a legitimate `web:<token>` target — it is the room most users
+        would actually pin, being the one the bot provisioned for them — so what
+        is missing is a visibility filter, not an origin one (ISSUE-473)."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-gen", "alice", origin="talk", name="general")
+            db.ensure_web_chat_handle(conn, "alice", "conv-gen", "general")
+            assert db.archive_orphaned_talk_rooms(conn, {"conv-gen"}) == 0
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        by_token = {r["token"]: r for r in resp.json()["profile"]["web_rooms"]}
+        assert by_token["conv-gen"]["name"] == "general"
+
+    async def test_unavailable_web_rooms_names_a_dead_pin(
+        self, tmp_path, client, app,
+    ):
+        """The mark on the pinned option is the server's assertion, not the
+        client's inference (ISSUE-478). A route pinned to a room the archiver
+        has taken out still delivers, into a transcript nothing renders."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "conv-gone", "alice", origin="talk", name="old crew")
+            db.ensure_web_chat_handle(conn, "alice", "conv-gone", "old crew")
+        user_profiles.update_profile(
+            self._db_path, "alice", routing={"alert": "web:conv-gone"},
+        )
+        with db.get_db(self._db_path) as conn:
+            assert db.archive_orphaned_talk_rooms(conn, set()) == 1
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["unavailable_web_rooms"] == ["conv-gone"]
+        assert "conv-gone" not in {r["token"] for r in p["web_rooms"]}
+
+    async def test_unavailable_web_rooms_spares_a_room_with_no_handle(
+        self, tmp_path, client, app,
+    ):
+        """The control that decides the whole design. `_user_web_rooms` is
+        handle-driven, so a member room whose handle has not been minted yet —
+        a Talk room belonging to someone who has never opened /chat — is absent
+        from the picker and delivers perfectly well. Keying the mark on absence
+        would call that working route broken, which is exactly what the Talk
+        picker was spared."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            # Registered and joined, never listed — so no handle exists.
+            db.register_room(conn, "conv-fresh", "alice", origin="talk", name="team")
+            assert db.visible_room(conn, "alice", "conv-fresh") is not None
+        user_profiles.update_profile(
+            self._db_path, "alice", routing={"alert": "web:conv-fresh"},
+        )
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert "conv-fresh" not in {r["token"] for r in p["web_rooms"]}
+        assert p["unavailable_web_rooms"] == []
+
+    async def test_unavailable_web_rooms_says_nothing_about_a_stranger_s_room(
+        self, tmp_path, client, app,
+    ):
+        """Membership gates the answer, and that is security rather than
+        filtering: replying "unavailable" for somebody else's archived room
+        while staying silent about a token naming nothing would make this the
+        room-directory oracle `_validate_descriptor_rooms` refuses to be."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "bobs-room", "bob", origin="web", name="bob's")
+            db.set_room_archived(conn, "bobs-room", True)
+        user_profiles.update_profile(
+            self._db_path, "alice",
+            routing={"alert": "web:bobs-room", "log": "web:no-such-room"},
+        )
+
+        p = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert p["unavailable_web_rooms"] == []
+
     async def test_a_web_route_may_name_a_room(self, tmp_path, client, app):
         from istota import db, user_profiles
 
