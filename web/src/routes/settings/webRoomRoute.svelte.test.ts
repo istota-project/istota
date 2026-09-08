@@ -110,14 +110,31 @@ describe('the room a web route lands in', () => {
     expect(control('Alert delivery room')).toBeNull();
   });
 
-  it('offers one for each of the three routes once web is chosen', async () => {
+  it('offers one for each route that carries a room, but not the default destination', async () => {
+    // The default destination names a transport and nothing else (ISSUE-475).
+    // It is read in one place — `resolve_destinations`' third rung — and never
+    // by a task result, so a room pinned there answered for half the traffic it
+    // appeared to govern, and that half is what the alert route is for.
     currentProfile.value = profile({ alert: 'web', log: 'web' });
     currentProfile.value.default_destination = 'web';
     renderPage();
     await settled();
     expect(control('Alert delivery room')).toBeTruthy();
     expect(control('Execution log room')).toBeTruthy();
-    expect(control('Default delivery room')).toBeTruthy();
+    expect(control('Default delivery room')).toBeNull();
+  });
+
+  it('leaves an operator-set web destination whole rather than splitting it', async () => {
+    // With no room control on this row, the descriptor is read and written raw,
+    // so `destinationOptions` keeps it as its own option the way it already
+    // keeps an unrecognised value. Splitting it here would rewrite it to a bare
+    // surface on the next save.
+    currentProfile.value = profile();
+    currentProfile.value.default_destination = `web:${IDEAS}`;
+    renderPage();
+    await settled();
+    expect(control('Default delivery destination')).toHaveTextContent(`web:${IDEAS}`);
+    expect(control('Default delivery room')).toBeNull();
   });
 
   it('names the room a bare web route lands in, rather than leaving it unsaid', async () => {
@@ -150,13 +167,13 @@ describe('the room a web route lands in', () => {
     expect(control('Execution log room')).toHaveTextContent('ideas');
   });
 
-  it('keeps a talk descriptor whole, since nothing here could put the token back', async () => {
-    // A `talk:<token>` set from the CLI is offered back as its own option. If
-    // the surface control split it the token would be dropped on the next save.
-    currentProfile.value = profile({ alert: 'talk:9erk494s' });
+  it('keeps a comma list whole, since nothing here could put the other half back', async () => {
+    // `talk,email` is two destinations and the row offers one surface, so it is
+    // offered back as its own option rather than split.
+    currentProfile.value = profile({ alert: 'talk,email' });
     renderPage();
     await settled();
-    expect(control('Alert delivery destination')).toHaveTextContent('talk:9erk494s');
+    expect(control('Alert delivery destination')).toHaveTextContent('talk,email');
     expect(control('Alert delivery room')).toBeNull();
   });
 });

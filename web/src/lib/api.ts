@@ -1268,6 +1268,11 @@ export interface UserProfile {
   // marks the one a bare `web` route lands in, so the picker can say which room
   // that is rather than leaving it unnamed (ISSUE-473).
   web_rooms?: WebRoomOption[];
+  // Read-only: the Talk conversations a `talk:<token>` route can name — the two
+  // the bot provisioned, then every Talk-bound room the user is in. No
+  // `default` flag: a bare `talk` resolves per purpose, and each row says where
+  // in its own surface label (ISSUE-475).
+  talk_rooms?: TalkRoomOption[];
 }
 
 export interface WebRoomOption {
@@ -1278,6 +1283,13 @@ export interface WebRoomOption {
   /** Somebody else is in it — the picker marks it. */
   shared: boolean;
   /** The user's machine-owned log or alerts room. */
+  channel: boolean;
+}
+
+export interface TalkRoomOption {
+  token: string;
+  name: string;
+  /** One of the two the bot provisioned — the picker marks it. */
   channel: boolean;
 }
 
@@ -1321,10 +1333,10 @@ export interface UserBriefingRow {
   enabled: boolean;
 }
 
-export interface BriefingRoomOption {
-  token: string;
-  name: string;
-}
+// The same list the routing rows offer — `/settings/briefings` and
+// `/settings/profile` read one `_user_talk_rooms` rather than two answers to
+// "which Talk conversations" (ISSUE-475).
+export type BriefingRoomOption = TalkRoomOption;
 
 export async function getBriefings(): Promise<{
   briefings: UserBriefingRow[];

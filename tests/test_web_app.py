@@ -3243,9 +3243,16 @@ class TestProfileEndpoints:
         assert resp.status_code == 400
 
     async def test_update_profile_partial(self, tmp_path, client, app):
+        from istota import db, user_profiles
+
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.register_room(conn, "logs-room", "alice", origin="talk", name="logs")
+            db.add_room_member(conn, "logs-room", "alice")
+            db.add_room_binding(conn, "logs-room", "talk", "alice-logs")
+
         resp = await client.put(
             "/istota/api/settings/profile",
             json={"timezone": "America/Los_Angeles", "log_channel": "alice-logs"},
@@ -3253,11 +3260,120 @@ class TestProfileEndpoints:
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
-        from istota import user_profiles
         p = user_profiles.get_profile(self._db_path, "alice")
         assert p.timezone == "America/Los_Angeles"
         assert p.log_channel == "alice-logs"
         assert p.display_name == "Alice"  # untouched
+
+    async def test_a_channel_field_may_not_name_someone_elses_conversation(
+        self, tmp_path, client, app,
+    ):
+        """`alerts_channel` was the shortest way around the descriptor check and
+        a standing write on its own: `merge_into_user_config` copies the row onto
+        the runtime config and `resolve_destinations` returns it as the alert
+        destination, so one unchecked PUT redirected every alert (ISSUE-475)."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.register_room(conn, "bobs-room", "bob", origin="talk", name="bob's")
+            db.add_room_member(conn, "bobs-room", "bob")
+            db.add_room_binding(conn, "bobs-room", "talk", "conv-bob")
+
+        for field in ("alerts_channel", "log_channel"):
+            resp = await client.put(
+                "/istota/api/settings/profile",
+                json={field: "conv-bob"},
+                cookies=cookies,
+                headers={"origin": "https://example.com"},
+            )
+            assert resp.status_code == 400, field
+            assert "conversation" in resp.json()["detail"].lower(), field
+
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert not p.alerts_channel
+        assert not p.log_channel
+
+    async def test_a_channel_field_cannot_authorize_a_route_to_itself(
+        self, tmp_path, client, app,
+    ):
+        """The bypass the pair would otherwise make: set the channel to a
+        stranger's conversation, and the descriptor check — which counts the
+        user's own channels as authorized — then accepts a route to it. The
+        channel write is checked against the room registry alone, never against
+        the set it feeds."""
+        from istota import user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+
+        first = await client.put(
+            "/istota/api/settings/profile",
+            json={"alerts_channel": "conv-bob"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert first.status_code == 400
+
+        second = await client.put(
+            "/istota/api/settings/profile",
+            json={"routing": {"alert": "talk:conv-bob"}},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert second.status_code == 400
+
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert not p.alerts_channel
+        assert p.routing == {}
+
+    async def test_an_operator_set_route_survives_an_unrelated_save(
+        self, tmp_path, client, app,
+    ):
+        """`routing` is one field carrying every purpose and the client diffs
+        top-level keys, so editing the alert route resubmits the log route with
+        it. A descriptor identical to the stored one is not re-judged, or an
+        operator-set log route would refuse the user's own edit on a row the
+        page offers no way to correct."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.register_room(conn, "mine", "alice", origin="talk", name="mine")
+            db.add_room_member(conn, "mine", "alice")
+            db.add_room_binding(conn, "mine", "talk", "conv-mine")
+        # What `istota user ensure --route` leaves behind: a conversation the
+        # room registry has never heard of.
+        user_profiles.update_profile(
+            self._db_path, "alice",
+            routing={"log": "talk:conv-operator-set"},
+            default_destination="web:web-operator-set",
+        )
+
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={
+                "routing": {
+                    "log": "talk:conv-operator-set",
+                    "alert": "talk:conv-mine",
+                },
+                "default_destination": "web:web-operator-set",
+            },
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.routing == {
+            "log": "talk:conv-operator-set",
+            "alert": "talk:conv-mine",
+        }
+        assert p.default_destination == "web:web-operator-set"
 
     async def test_update_profile_lists(self, tmp_path, client, app):
         cfg = self._make_test_config(tmp_path)
@@ -3604,16 +3720,27 @@ class TestProfileEndpoints:
         p = user_profiles.get_profile(self._db_path, "alice")
         assert p.routing == {"alert": "web:shared-1"}
 
-    async def test_a_talk_route_is_not_checked_against_the_web_rooms(
+    async def test_a_talk_route_is_checked_against_the_talk_conversations(
         self, tmp_path, client, app,
     ):
-        # Only the `web` surface names a room in this registry. A Talk token is
-        # a Nextcloud conversation id and is resolved by the Talk ladder.
-        from istota import user_profiles
+        """A Talk token is a Nextcloud conversation id, not a row in the web
+        registry, so the two surfaces ask different questions of different
+        tables (ISSUE-475). Here the conversation is a valid Talk target and no
+        kind of web room at all, and it is accepted."""
+        from istota import db, user_profiles
 
         cfg = self._make_test_config(tmp_path)
         _patch_app(cfg)
         cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            # A web room of alice's, so the web list is non-empty and the
+            # assertion below is about the Talk ref being absent from it rather
+            # than about the list being empty.
+            db.ensure_default_web_chat_room(conn, "alice")
+            db.register_room(conn, "talk-1", "alice", origin="talk", name="team")
+            db.add_room_member(conn, "talk-1", "alice")
+            db.add_room_binding(conn, "talk-1", "talk", "9erk494s")
+
         resp = await client.put(
             "/istota/api/settings/profile",
             json={"routing": {"alert": "talk:9erk494s"}},
@@ -3623,6 +3750,120 @@ class TestProfileEndpoints:
         assert resp.status_code == 200
         p = user_profiles.get_profile(self._db_path, "alice")
         assert p.routing == {"alert": "talk:9erk494s"}
+
+        profile = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]
+        assert "9erk494s" in {r["token"] for r in profile["talk_rooms"]}
+        assert profile["web_rooms"]
+        assert "9erk494s" not in {r["token"] for r in profile["web_rooms"]}
+
+    async def test_talk_conversations_are_offered_as_route_targets(
+        self, tmp_path, client, app,
+    ):
+        """`talk:<token>` has been a valid descriptor everywhere and was offered
+        nowhere — pinning alerts to a particular conversation was CLI-only, the
+        same gap ISSUE-473 closed for web (ISSUE-475).
+
+        Two sources, because the provisioned channels are the most useful picks
+        and need not have registry rows: the user's own `alerts_channel` /
+        `log_channel`, then every Talk-bound room they are a member of.
+        """
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            conn.execute(
+                "UPDATE user_profiles SET alerts_channel = ?, log_channel = ? "
+                "WHERE user_id = ?",
+                ("alerts-tok", "logs-tok", "alice"),
+            )
+            db.register_room(conn, "talk-1", "alice", origin="talk", name="team")
+            db.add_room_member(conn, "talk-1", "alice")
+            db.add_room_binding(conn, "talk-1", "talk", "conv-team")
+            # bob's conversation: alice is not in it.
+            db.register_room(conn, "talk-2", "bob", origin="talk", name="bob's")
+            db.add_room_member(conn, "talk-2", "bob")
+            db.add_room_binding(conn, "talk-2", "talk", "conv-bob")
+
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        rooms = resp.json()["profile"]["talk_rooms"]
+        by_token = {r["token"]: r for r in rooms}
+        assert set(by_token) == {"alerts-tok", "logs-tok", "conv-team"}
+        assert by_token["alerts-tok"]["channel"] is True
+        assert by_token["logs-tok"]["channel"] is True
+        assert by_token["conv-team"]["channel"] is False
+        assert by_token["conv-team"]["name"] == "team"
+
+    async def test_an_alert_route_may_not_name_someone_elses_conversation(
+        self, tmp_path, client, app,
+    ):
+        """The hole ISSUE-473 closed for web, open on Talk: the bot is a
+        participant in every user's conversations, so a saved `talk:<token>`
+        naming somebody else's is a standing write into their transcript on
+        every alert. Membership, as on web."""
+        from istota import db, user_profiles
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            db.register_room(conn, "talk-2", "bob", origin="talk", name="bob's")
+            db.add_room_member(conn, "talk-2", "bob")
+            db.add_room_binding(conn, "talk-2", "talk", "conv-bob")
+
+        for field, payload in (
+            ("routing", {"routing": {"alert": "talk:conv-bob"}}),
+            ("default_destination", {"default_destination": "talk:conv-bob"}),
+        ):
+            resp = await client.put(
+                "/istota/api/settings/profile",
+                json=payload,
+                cookies=cookies,
+                headers={"origin": "https://example.com"},
+            )
+            assert resp.status_code == 400, field
+            assert "conversation" in resp.json()["detail"].lower(), field
+
+        p = user_profiles.get_profile(self._db_path, "alice")
+        assert p.routing == {}
+        assert "conv-bob" not in (p.default_destination or "")
+
+    async def test_the_offered_talk_list_and_the_save_agree(
+        self, tmp_path, client, app,
+    ):
+        """The assertion that catches a dropdown/save split: every conversation
+        the picker offers must be one the save accepts. `_user_talk_rooms` and
+        `_validate_descriptor_rooms` read one set for exactly this reason."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        with db.get_db(self._db_path) as conn:
+            conn.execute(
+                "UPDATE user_profiles SET alerts_channel = ?, log_channel = ? "
+                "WHERE user_id = ?",
+                ("alerts-tok", "logs-tok", "alice"),
+            )
+            db.register_room(conn, "talk-1", "alice", origin="talk", name="team")
+            db.add_room_member(conn, "talk-1", "alice")
+            db.add_room_binding(conn, "talk-1", "talk", "conv-team")
+
+        offered = (await client.get(
+            "/istota/api/settings/profile", cookies=cookies,
+        )).json()["profile"]["talk_rooms"]
+        assert offered
+        for room in offered:
+            resp = await client.put(
+                "/istota/api/settings/profile",
+                json={"routing": {"alert": f"talk:{room['token']}"}},
+                cookies=cookies,
+                headers={"origin": "https://example.com"},
+            )
+            assert resp.status_code == 200, room
 
     async def test_web_rooms_omits_a_room_the_user_is_no_longer_in(
         self, tmp_path, client, app,
@@ -3986,12 +4227,45 @@ class TestBriefingEndpoints:
             "/istota/api/settings/briefings",
             json={
                 "name": "legacy", "cron": "0 7 * * *",
-                "output": "both", "conversation_token": "room1",
+                "output": "both", "conversation_token": "logtoken",
             },
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
+
+    async def test_a_briefing_may_not_name_someone_elses_room(
+        self, tmp_path, client, app,
+    ):
+        """The same standing write the alert route was hardened against, one row
+        below it on the settings page and repeating on a cron schedule
+        (ISSUE-475). Both spellings are checked: the descriptor's own room leaf,
+        and the `conversation_token` beside a bare `talk`."""
+        from istota import db
+
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client)
+        with db.get_db(self._db_path) as conn:
+            bobs = db.create_web_chat_room(conn, "bob", "bob's room")
+            db.register_room(conn, "bobs-talk", "bob", origin="talk", name="bob's")
+            db.add_room_member(conn, "bobs-talk", "bob")
+            db.add_room_binding(conn, "bobs-talk", "talk", "conv-bob")
+
+        for label, payload in (
+            ("web descriptor", {"output": f"web:{bobs.token}"}),
+            ("talk descriptor", {"output": "talk:conv-bob",
+                                 "conversation_token": "logtoken"}),
+            ("bare talk plus token", {"output": "talk",
+                                      "conversation_token": "conv-bob"}),
+        ):
+            resp = await client.post(
+                "/istota/api/settings/briefings",
+                json={"name": "sneaky", "cron": "0 7 * * *", **payload},
+                cookies=cookies,
+                headers={"origin": "https://example.com"},
+            )
+            assert resp.status_code == 400, label
 
     async def test_delete_db_briefing(self, tmp_path, client, app):
         from istota import user_briefings

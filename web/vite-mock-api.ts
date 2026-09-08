@@ -3736,6 +3736,11 @@ const handlers: MockHandler[] = [
         },
         { token: 'web-alice-ideas', name: 'ideas', default: false, shared: false, channel: false },
       ],
+      talk_rooms: [
+        { token: 'alerts-tok', name: 'Alerts channel', channel: true },
+        { token: 'logs-tok', name: 'Logs channel', channel: true },
+        { token: 'conv-team', name: 'team', channel: false },
+      ],
     };
     let nextResourceId = 100;
     const mockDbResources: {
