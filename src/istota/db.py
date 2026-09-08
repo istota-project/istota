@@ -3434,12 +3434,55 @@ def channel_room_tokens(conn: sqlite3.Connection, user_id: str) -> set[str]:
     return channels
 
 
+def visible_room(
+    conn: sqlite3.Connection, user_id: str, token: str,
+) -> "Room | None":
+    """``token``'s registry row when ``user_id`` can still open the room, else
+    ``None``. Membership is the caller's question, not this one's.
+
+    The same three tests `list_member_rooms` — the sidebar's own query — applies
+    for a single token: the row exists (its `JOIN` on `rooms`), `archived = 0`,
+    and no `room_dismissals` tombstone. Two of the three have a live producer:
+
+    - **A room the registry has archived.** `archive_orphaned_talk_rooms` sets
+      `rooms.archived` when the bot leaves a Nextcloud conversation or the
+      conversation is deleted, and leaves the per-user handle and the
+      `room_members` row alone — so the room is invisible in web and dead on
+      Talk while every handle-shaped test still passes it, and `deliver` writes
+      into it perfectly happily. This is the one ISSUE-478 was filed on.
+    - **A room the user hid.** `dismiss_room`, and the poll-time backfill re-adds
+      membership, so membership alone cannot keep a dismissed room hidden.
+    - **A room that no longer exists** has no producer, and the guard is
+      defence in depth rather than a case anything reaches: `delete_room` takes
+      `room_members`, `room_dismissals` and *every* participant's handle with
+      the row, deliberately (ISSUE-134). It is kept because it is one comparison
+      on a row already fetched, and because `room_display_name` would otherwise
+      paper over the absence with the handle's own name.
+
+    Split out of `_usable_as_delivery_default` for `web_app._user_web_rooms`
+    (ISSUE-478), which needs exactly these three and must **not** have that
+    function's other two: a shared or machine-owned room is refused as the
+    *implicit* default and offered as a deliberate pin. Returning the `Room`
+    rather than a bool is what lets the picker take the name off the same
+    lookup instead of asking twice.
+    """
+    room = get_room(conn, token)
+    if room is None or room.archived:
+        return None
+    if is_room_dismissed(conn, token, user_id):
+        return None
+    return room
+
+
 def _usable_as_delivery_default(
     conn: sqlite3.Connection, user_id: str, token: str, channels: set[str],
 ) -> bool:
     """Whether ``token`` may be ``user_id``'s default delivery room.
 
-    Five exclusions, each about the room being written to unprompted:
+    Five exclusions, each about the room being written to unprompted. Three of
+    them are `visible_room`'s — the room exists, is not archived, and the user
+    has not hidden it — and are shared with the picker. The two here are the
+    ones that separate an *implicit* default from a room a user may pin:
 
     - **A room somebody else reads.** A shared Talk room is one other people are
       in, and a personal alert delivered there is delivered in front of them.
@@ -3449,21 +3492,10 @@ def _usable_as_delivery_default(
     - **A channel room.** `log_channel` and `alerts_channel` are machine-owned;
       the entrypoint even posts into `alerts` at boot, so activity alone would
       hand a user's default to whichever the daemon last wrote to.
-    - **A room the user hid.** `list_member_rooms` already drops a dismissed
-      room, so without this the two candidate lists disagree.
-    - **A room that no longer exists**, or one the registry has archived.
-      A handle with no `rooms` row is a deleted room, and
-      `archive_orphaned_talk_rooms` sets `rooms.archived` when the bot leaves a
-      Nextcloud conversation while leaving the per-user handle alone — so
-      without the archived test the default can be a room that is invisible in
-      web and dead on Talk, which `deliver` writes into perfectly happily.
     """
     if token in channels:
         return False
-    room = get_room(conn, token)
-    if room is None or room.archived:
-        return False
-    if is_room_dismissed(conn, token, user_id):
+    if visible_room(conn, user_id, token) is None:
         return False
     return not (set(list_room_members(conn, token)) - {user_id})
 

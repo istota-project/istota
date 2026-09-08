@@ -307,7 +307,8 @@
   // The room half of a `web` or `talk` route (ISSUE-473, ISSUE-475). Both are
   // surfaces whose destination is one room out of several the user has; email
   // and ntfy have no room at all, so their rows show the surface dropdown alone.
-  const webRooms = (current: string) => webRoomOptions(profile?.web_rooms || [], current);
+  const webRooms = (current: string) =>
+    webRoomOptions(profile?.web_rooms || [], current, profile?.unavailable_web_rooms || []);
   const talkRooms = (current: string, emptyLabel: string) =>
     talkRoomOptions(profile?.talk_rooms || [], current, emptyLabel);
 

@@ -9944,10 +9944,31 @@ def _user_web_rooms(user_id: str) -> list[dict]:
     what ISSUE-473 is about.
 
     Membership, not the handle, decides what is listed: a handle outlives
-    membership (a Talk-backed hide archives it rather than deleting it), and this
-    list has to agree with `_validate_descriptor_rooms`, or the dropdown offers a
-    room the save then refuses. Best-effort — delivery routing must still render
-    when the DB is unreachable.
+    membership (a Talk-backed hide archives it rather than deleting it). It has
+    to stay a *subset* of what `_validate_descriptor_rooms` accepts, or the
+    dropdown offers a room the save then refuses — a subset, not an equality,
+    since the visibility filter below narrows this list and deliberately not
+    that check. Best-effort — delivery routing must still render when the DB is
+    unreachable.
+
+    **And membership is not sufficient on its own** (ISSUE-478). A room the
+    registry has archived and one the user has dismissed both keep their handle
+    and their `room_members` row, so a membership test passes them while the
+    sidebar hides both — and `_validate_descriptor_rooms` accepts a pin onto
+    one, `deliver` writes into it, and the alert lands in a transcript no
+    surface renders. The filter that was missing is visibility, which is
+    `db.visible_room`; it is emphatically **not** origin, since a Talk-origin
+    room bound to `web` is the room most users would actually pin (ISSUE-473).
+
+    **This narrows the list toward the sidebar's without making the two equal,
+    and the residue matters to one caller.** The sidebar is registry-driven and
+    mints what it needs as it goes; this is handle-driven for the ordering
+    reason below, so a member room with no handle yet, or one whose handle
+    carries a stale `archived` flag that `_chat_list_rooms` would clear on its
+    next listing, is visible there and absent here. Both deliver perfectly well.
+    So absence from this list is not evidence of anything, which is why the
+    `(unavailable)` mark in the settings page is driven by
+    `_unavailable_web_room_pins` rather than by a token failing to appear here.
 
     The loop runs over handles rather than `db.list_member_rooms` because the
     order has to be the one `db.default_web_room` picks in — oldest handle first,
@@ -9969,12 +9990,15 @@ def _user_web_rooms(user_id: str) -> list[dict]:
             for r in db.list_web_chat_rooms(conn, user_id):
                 if not db.is_room_member(conn, r.token, user_id):
                     continue
+                room = db.visible_room(conn, user_id, r.token)
+                if room is None:
+                    continue
                 others = set(db.list_room_members(conn, r.token)) - {user_id}
                 out.append({
                     "token": r.token,
                     # `or r.token`: the helper answers "" when neither row has a
                     # name, and an option with an empty label is unpickable.
-                    "name": db.room_display_name(db.get_room(conn, r.token), r) or r.token,
+                    "name": db.room_display_name(room, r) or r.token,
                     "default": r.token == default_token,
                     "shared": bool(others),
                     "channel": r.token in channels,
@@ -9982,6 +10006,64 @@ def _user_web_rooms(user_id: str) -> list[dict]:
             return out
     except Exception as e:
         logger.warning("web room lookup failed for user %s: %s", user_id, e)
+        return []
+
+
+def _unavailable_web_room_pins(user_id: str, descriptors: list[str]) -> list[str]:
+    """Of the web rooms ``descriptors`` pin, the ones that will silently swallow
+    a delivery: ``user_id`` is a member, and `db.visible_room` refuses it.
+
+    **The picker cannot answer this by omission, which is what makes this a
+    server-side question** (ISSUE-478). `_user_web_rooms` is driven by the
+    per-user *handle* table while the sidebar is driven by the registry, so a
+    room can be perfectly visible and perfectly deliverable and still be absent
+    from the offered list: a Talk room whose owner has never opened `/chat` has
+    no handle yet — `ensure_web_chat_handle`'s only callers are the sidebar
+    listing and `ensure_default_web_chat_room` — and a room whose handle carries
+    a stale `archived` flag is dropped by `list_web_chat_rooms` while
+    `_chat_list_rooms` clears that flag and lists it. The list also degrades to
+    `[]` on any database error, since delivery routing has to render regardless.
+    So "not in the list" covers three states the client cannot tell apart, and
+    only one of them is a fault; a mark keyed on absence calls two working
+    routes broken, which is exactly the failure the Talk picker was spared.
+
+    **Membership is the gate, and it is doing security work rather than
+    filtering.** A token the user is not a member of gets no answer at all —
+    it stays merely unknown, and the dropdown falls back to the bare token. A
+    room token is not a secret but its *existence* is not ours to confirm, and
+    replying "unavailable" for a stranger's archived room while saying nothing
+    for one that does not exist turns this into the room-directory oracle
+    `_validate_descriptor_rooms` refuses to be (ISSUE-473). Membership is
+    already that check's own predicate, so nothing is disclosed here that the
+    save does not disclose anyway.
+
+    Best-effort, like the picker beside it: an unreachable database returns no
+    pins rather than every pin, since the mark is an assertion and a failed
+    lookup has established nothing.
+    """
+    from . import db
+    from .transport import parse_output_target
+
+    if _config is None or not _config.db_path:
+        return []
+    tokens: list[str] = []
+    for descriptor in descriptors:
+        if not descriptor:
+            continue
+        for dest in parse_output_target(descriptor):
+            if dest.surface == "web" and dest.channel and dest.channel not in tokens:
+                tokens.append(dest.channel)
+    if not tokens:
+        return []
+    try:
+        with db.get_db(_config.db_path) as conn:
+            return [
+                token for token in tokens
+                if db.is_room_member(conn, token, user_id)
+                and db.visible_room(conn, user_id, token) is None
+            ]
+    except Exception as e:
+        logger.warning("web room pin check failed for user %s: %s", user_id, e)
         return []
 
 
@@ -9993,8 +10075,19 @@ def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
     and `WebTransport.deliver` checks only that the room exists, so without this
     a saved route is a standing write into any transcript whose token the caller
     has seen, on every alert (ISSUE-473). Membership rather than ownership: a
-    shared room is a legitimate deliberate choice, and it is the predicate the
-    offered list is built on.
+    shared room is a legitimate deliberate choice.
+
+    **This is an authorization gate, and it is deliberately looser than the
+    offered list** (ISSUE-478). `_user_web_rooms` also drops a room that is
+    archived, deleted or dismissed; that is a liveness question rather than a
+    permission one, and a 400 out of this function would report it as the
+    latter. Nothing is lost by leaving it out: the picker can no longer offer
+    such a room, so a save cannot newly pin one from the UI, and an existing pin
+    is not re-judged either way — `_coerce_profile_value` validates a descriptor
+    only when it differs from the stored one, per purpose. What the user gets
+    instead is the `(unavailable)` mark on the pinned option, driven by
+    `_unavailable_web_room_pins`, which says the thing a 400 here would have
+    said at the point where it is true and where it can name the room.
 
     Talk is checked on the same footing since ISSUE-475, because promoting
     ``talk:<token>`` to a dropdown is what promoted it to a setting a user can
@@ -10285,6 +10378,13 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "external_turn_display": profile.external_turn_display or "collapsed",
         "delivery_surfaces": _registered_delivery_surfaces(),
         "web_rooms": _user_web_rooms(user["username"]),
+        # Which of this profile's own web pins are dead, asked of the server
+        # rather than inferred from the list above — see
+        # `_unavailable_web_room_pins` for why absence from it proves nothing.
+        "unavailable_web_rooms": _unavailable_web_room_pins(
+            user["username"],
+            [profile.default_destination or "", *profile.routing.values()],
+        ),
         "talk_rooms": _user_talk_rooms(user["username"]),
     }}
 

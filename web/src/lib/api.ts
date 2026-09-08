@@ -1268,6 +1268,12 @@ export interface UserProfile {
   // marks the one a bare `web` route lands in, so the picker can say which room
   // that is rather than leaving it unnamed (ISSUE-473).
   web_rooms?: WebRoomOption[];
+  // Read-only: which of this profile's own web pins will swallow a delivery —
+  // the user is a member and the room is archived, gone or hidden. Its own key
+  // rather than a test of `web_rooms`, because absence from that list also
+  // covers a room with no handle yet and a failed lookup, both of which deliver
+  // perfectly well (ISSUE-478).
+  unavailable_web_rooms?: string[];
   // Read-only: the Talk conversations a `talk:<token>` route can name — the two
   // the bot provisioned, then every Talk-bound room the user is in. No
   // `default` flag: a bare `talk` resolves per purpose, and each row says where
