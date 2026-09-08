@@ -14,7 +14,14 @@ import { join, relative, resolve } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { formatDate, formatDateTime, formatDuration, formatMinutes } from '$lib/dateFormat';
+import type { RelativeFormatOptions } from '$lib/dateFormat';
+import {
+  formatDate,
+  formatDateTime,
+  formatDuration,
+  formatMinutes,
+  formatRelative,
+} from '$lib/dateFormat';
 
 describe('formatDate', () => {
   it('renders a bare YYYY-MM-DD as that calendar day', () => {
@@ -144,6 +151,110 @@ describe('formatMinutes', () => {
 });
 
 /**
+ * The one ladder the four surfaces used to spell four ways.
+ *
+ * `now` is passed on every case rather than faking the clock: the assertions
+ * are about which rung a given age lands on, and a frozen `Date.now` would put
+ * the fixture's own arithmetic between the test and the thing under test.
+ */
+describe('formatRelative', () => {
+  const NOW = new Date('2026-09-05T12:00:00Z');
+  const at = (secondsAgo: number) => new Date(NOW.getTime() - secondsAgo * 1000).toISOString();
+  const rel = (secondsAgo: number, opts: RelativeFormatOptions = {}) =>
+    formatRelative(at(secondsAgo), { now: NOW, ...opts });
+
+  it('walks one ladder: just now, minutes, hours, days', () => {
+    expect(rel(0)).toBe('just now');
+    expect(rel(59)).toBe('just now');
+    expect(rel(60)).toBe('1m ago');
+    expect(rel(3599)).toBe('59m ago');
+    expect(rel(3600)).toBe('1h ago');
+    expect(rel(86399)).toBe('23h ago');
+    expect(rel(86400)).toBe('1d ago');
+    expect(rel(29 * 86400)).toBe('29d ago');
+  });
+
+  it('floors rather than rounds', () => {
+    // `DeviceTrackerCard` rounded, so 119 seconds read as "2 min ago" — a
+    // figure larger than the time that had actually elapsed. The other three
+    // floored.
+    expect(rel(119)).toBe('1m ago');
+    expect(rel(5400)).toBe('1h ago');
+    expect(rel(1.5 * 86400)).toBe('1d ago');
+  });
+
+  it('falls back to an absolute date at thirty days', () => {
+    // The unbounded day count `/admin`'s own CSS comment measured at "1234d
+    // ago". Compared against this module's `formatDate` rather than a literal,
+    // which would assert the machine's locale rather than the rule.
+    expect(rel(30 * 86400)).toBe(formatDate(at(30 * 86400)));
+    expect(rel(400 * 86400)).toBe(formatDate(at(400 * 86400)));
+    expect(rel(400 * 86400)).not.toContain('ago');
+    // The two lines above pin which branch was taken and nothing about what it
+    // renders, since they compare against the exact call that branch makes.
+    // A year is the one component of a date every locale spells the same way.
+    expect(rel(400 * 86400)).toMatch(/\d{4}/);
+    // And the rung below the boundary is still a count of days.
+    expect(rel(30 * 86400 - 1)).toBe('29d ago');
+  });
+
+  it('reads a future timestamp as just now rather than counting backwards', () => {
+    // `NotificationItem` and `/location` had no negative guard, so a row
+    // stamped by a clock a minute ahead of the reader's rendered `-1m ago`.
+    const future = new Date(NOW.getTime() + 90_000).toISOString();
+    expect(formatRelative(future, { now: NOW })).toBe('just now');
+    expect(formatRelative(future, { now: NOW, seconds: true })).toBe('just now');
+  });
+
+  it('renders seconds only where the caller asks for them', () => {
+    expect(rel(42)).toBe('just now');
+    expect(rel(42, { seconds: true })).toBe('42s ago');
+    // `/admin` refreshes on a timer and this is its scheduler liveness
+    // readout, so a figure written this instant reads as `0s ago` there — the
+    // behaviour that option exists to keep.
+    expect(rel(0, { seconds: true })).toBe('0s ago');
+    // It reaches the first rung and no further.
+    expect(rel(60, { seconds: true })).toBe('1m ago');
+  });
+
+  it('renders the caller fallback for a missing value', () => {
+    expect(formatRelative(null)).toBe('');
+    expect(formatRelative(undefined)).toBe('');
+    expect(formatRelative('')).toBe('');
+    expect(formatRelative(null, { empty: 'never' })).toBe('never');
+    expect(formatRelative(null, { empty: '—' })).toBe('—');
+  });
+
+  it('returns an unparseable value as it arrived, never NaNd ago', () => {
+    // `/location`'s copy had no guard at all. Every comparison against `NaN`
+    // is false, so it fell through the whole ladder and rendered `NaNd ago`.
+    expect(formatRelative('not a date', { now: NOW })).toBe('not a date');
+    expect(formatRelative('not a date', { now: NOW })).not.toContain('NaN');
+  });
+
+  it('takes a space-separated timestamp, like the rest of the module', () => {
+    // The separator rule, with the zone designator present so the instant is
+    // unambiguous. This is the shape the columns feeding these surfaces
+    // actually carry: `notifications.updated_at` goes through `db.iso_utc_now()`
+    // and `/admin` normalises through `_iso_utc()`, both of which append `Z`.
+    expect(formatRelative('2026-09-05 11:00:00Z', { now: NOW })).toBe('1h ago');
+  });
+
+  it('reads a zoneless timestamp as local time, which is what the platform does', () => {
+    // Pinned because it is a trap rather than because it is reached: a bare
+    // `datetime('now')` value carries no `Z`, and ES parses a zoneless
+    // date-time as *local*, so such a value would be misread by the reader's
+    // own UTC offset. Nothing on these four surfaces delivers that shape today
+    // — the case above is why — and this fails loudly if one ever does.
+    // An identity rather than a rung: which rung it lands on depends on the
+    // runner's zone, but that it agrees with local 11:00 does not.
+    expect(formatRelative('2026-09-05 11:00:00', { now: NOW })).toBe(
+      formatRelative(new Date(2026, 8, 5, 11, 0, 0).toISOString(), { now: NOW }),
+    );
+  });
+});
+
+/**
  * The pin: one implementation, not twenty.
  *
  * An exact expected set rather than a ceiling. A `<=` comparison is what round
@@ -194,6 +305,35 @@ describe('no second copy of the date coercion', () => {
     expect(filesMatching(/%\s*86400\s*\)?\s*\/\s*3600/)).toEqual(['lib/dateFormat.ts']);
   });
 
+  it('renders a relative time in exactly one file', () => {
+    // The rendered sentinel rather than the arithmetic. `86400` and `60000`
+    // both have honest non-relative uses in this tree — a poll interval, a
+    // trip duration, an age in years — so a guard on the division would carry
+    // an exemption list longer than the thing it guards.
+    //
+    // Not anchored on a closing quote: `'just now'` and a bare `just now` in
+    // Svelte markup are the same copy coming back, and requiring the quote
+    // would report the tree clean for the second. The cost is that a comment
+    // elsewhere using the phrase reads as a violation, which is the direction
+    // to be wrong in — it is one grep to confirm and a reword to clear.
+    expect(filesMatching(/\bjust now\b/)).toEqual(['lib/dateFormat.ts']);
+  });
+
+  it('renders an interpolated `ago` suffix in exactly one file', () => {
+    // The complement of the guard above, for a ladder written without a "just
+    // now" rung. It matches every spelling the four copies used — `}m ago`,
+    // `} min ago`, `} h ago`, `}s ago`, `}d ago` — and does not match the same
+    // words in a sentence of prose, since it anchors on the closing brace of
+    // an interpolation.
+    //
+    // The trailing quote is deliberately *not* required. Requiring it was the
+    // first spelling and it is defeated by anything after the word — a
+    // `${n}d ago · stale`, a `${n}m ago (${src})` — which is exactly the
+    // "quietly blind" shape the guard above this one was written against.
+    // `\s*` rather than `\s?` for the same reason.
+    expect(filesMatching(/\}\s*\w*\s*\bago\b/)).toEqual(['lib/dateFormat.ts']);
+  });
+
   it('formats a fixed two-decimal figure in exactly one file', () => {
     // The literal `2`, not the option name: `/admin`'s currency formatter and
     // the two portfolio pages take a variable digit count off their own data
@@ -221,8 +361,6 @@ describe('no second copy of the date coercion', () => {
       'lib/dateFormat.ts': 'the implementation',
       'lib/format.ts': 'formatDecimal, its number-side sibling',
       'lib/usageFormat.ts': 'formatNumber, which is a number rule and not a date one',
-      'lib/components/location/DeviceTrackerCard.svelte':
-        'the relative ladder, whose fallback past a day is an absolute timestamp',
       'routes/chat/+page.svelte':
         'dayLabel: Today / Yesterday / weekday / date, a relative rule of its own',
       'routes/money/portfolio/history/+page.svelte': 'a variable-digit money figure',

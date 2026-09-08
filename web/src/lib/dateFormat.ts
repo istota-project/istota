@@ -13,12 +13,13 @@
  * — the `Intl` option set, what an empty input renders as — is a parameter, so
  * converting a call site changes nothing it renders.
  *
- * What is deliberately **not** here: the four relative-time ladders
- * (`ui/NotificationItem`, `/admin`, `/location`, `DeviceTrackerCard`). They
- * render four different things — floor versus round, four different threshold
- * sets, and one of them falls back to an absolute timestamp past a day — so
- * folding them is a change to what three of the four surfaces show rather than
- * an extraction. `NotificationItem`'s own comment already says so.
+ * `formatRelative` arrived later and on different terms. The four ladders it
+ * replaced (`ui/NotificationItem`, `/admin`, `/location`, `DeviceTrackerCard`)
+ * rendered four different things — floor against round, four threshold sets,
+ * one falling back to an absolute timestamp past a day — so folding them was a
+ * decision about what a relative timestamp should say rather than an
+ * extraction, and it changes what three of the four surfaces show. What it
+ * settles is written at that function.
  */
 
 /**
@@ -117,6 +118,83 @@ export function formatDateTime(
   const d = new Date(separator(iso));
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString(locale, Object.keys(intl).length > 0 ? intl : undefined);
+}
+
+/** What a relative timestamp may vary by. Nothing else about it is a choice. */
+export type RelativeFormatOptions = {
+  /** Rendered for `null`, `undefined` and `''`. Defaults to `''`. */
+  empty?: string;
+  /**
+   * Render `42s ago` under a minute instead of `just now`.
+   *
+   * `/admin` and nothing else. That page refreshes on a timer and the figure
+   * is a liveness readout — whether the scheduler ran *just* now or fifty
+   * seconds ago is the question being asked of it, and `just now` answers
+   * neither. Every other surface is read once and the second is noise.
+   */
+  seconds?: boolean;
+  /** The clock, for tests. Defaults to now. */
+  now?: Date;
+};
+
+/**
+ * Past this the relative form stops being readable and an absolute date is
+ * more use. `/admin`'s own column CSS was sized for `1234d ago`, which is what
+ * an unbounded day count eventually produces.
+ */
+const ABSOLUTE_AFTER_DAYS = 30;
+
+/**
+ * How long ago something happened: `just now`, `5m ago`, `3h ago`, `12d ago`,
+ * and an absolute date past a month.
+ *
+ * One ladder for every surface, replacing four that disagreed on three axes.
+ * What each was decided as, since each was a real difference rather than
+ * drift:
+ *
+ * **Floor, never round.** `DeviceTrackerCard` rounded, so 119 seconds read as
+ * "2 min ago" — a figure larger than the time that had actually elapsed. A
+ * relative timestamp is a lower bound on an age; rounding up makes it a claim
+ * the data does not support.
+ *
+ * **A future timestamp reads as `just now`.** Only `/admin` guarded this. The
+ * others rendered `-1m ago` for a row stamped by a clock a minute ahead of the
+ * reader's, which is every deployment with two machines in it.
+ *
+ * **An unparseable value comes back as it arrived**, like `formatDate` and
+ * `formatDateTime` above. `/location` had no guard, and since every comparison
+ * against `NaN` is false its value fell through the whole ladder and rendered
+ * `NaNd ago`. `NotificationItem` returned `''`, which hides the value from the
+ * reader who would have to report it.
+ *
+ * The seconds tier is the one surviving per-surface difference and it is an
+ * option; see `RelativeFormatOptions.seconds`. `DeviceTrackerCard`'s fallback
+ * to an absolute timestamp past a *day* did not survive — the exact instant
+ * moved to that row's `title` instead, which is where a figure nobody reads at
+ * a glance belongs.
+ */
+export function formatRelative(
+  iso: string | null | undefined,
+  opts: RelativeFormatOptions = {},
+): string {
+  const { empty = '', seconds = false, now } = opts;
+  if (!iso) return empty;
+  // `coerce`, the same thing `formatDate` is handed, and that agreement is the
+  // point rather than an incidental choice: the branch below renders through
+  // `formatDate`, so parsing here by a different rule would pick the rung off
+  // one instant and print the date of another. The two differ only for a bare
+  // `YYYY-MM-DD` — UTC midnight against local — which no caller passes today
+  // and which would be a silent day-boundary error the first time one did.
+  // For a timestamp, which is what every caller holds, `coerce` *is*
+  // `separator`; it appends the midnight suffix only to an anchored bare date.
+  const d = new Date(coerce(iso));
+  if (Number.isNaN(d.getTime())) return iso;
+  const diff = ((now ?? new Date()).getTime() - d.getTime()) / 1000;
+  if (diff < 60) return seconds && diff >= 0 ? `${Math.floor(diff)}s ago` : 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  const days = Math.floor(diff / 86400);
+  return days < ABSOLUTE_AFTER_DAYS ? `${days}d ago` : formatDate(iso);
 }
 
 /**
