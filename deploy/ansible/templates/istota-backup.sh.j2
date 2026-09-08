@@ -11,7 +11,7 @@
 # in step with the code that decides where those files live.
 #
 # The framework DB is deliberately covered twice: here (gzipped, integrity
-# checked, weekly tier, every 6h, off-host copy) and by `db_backup.py` (dated
+# checked, weekly tier, every 12h, off-host copy) and by `db_backup.py` (dated
 # dirs with a row-count collapse guard, which `db_restore` reads). Different
 # artifacts with different failure modes, on the one DB whose loss loses
 # everything. That overlap is intentional; the module-DB overlap was not.

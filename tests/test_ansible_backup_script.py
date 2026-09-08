@@ -633,9 +633,9 @@ class TestTempFileSweep:
         assert not orphan.exists()
 
     def test_leaves_a_working_copy_from_a_concurrent_run(self, mounted):
-        """The backup cron runs every 6h and a large DB takes a while. A sweep
-        that deleted a temp file out from under a running backup would break the
-        thing it is tidying up after."""
+        """A large DB takes a while, and a manual run can overlap a scheduled
+        one. A sweep that deleted a temp file out from under the other backup
+        would break the thing it is tidying up after."""
         live = mounted.local / "istota-backup-ZyXwVu.db"
         live.write_bytes(b"x" * 4096)
 

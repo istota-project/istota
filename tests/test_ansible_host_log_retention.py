@@ -112,6 +112,12 @@ class TestDefaults:
         assert d["istota_backup_db_daily_retention"] < d["istota_backup_db_daily_retention_remote"]
         assert d["istota_backup_db_weekly_retention"] < d["istota_backup_db_weekly_retention_remote"]
 
+    def test_database_backup_runs_twice_daily_by_default(self):
+        cron = render("istota-backup.cron.j2")
+        db_line = next(line for line in cron.splitlines() if "-backup.sh db" in line)
+
+        assert db_line.startswith("0 */12 * * * ")
+
     def test_auditd_action_actually_deletes(self):
         """``keep_logs`` is the Debian default and it silently overrides
         ``num_logs``: auditd rotates forever and never reclaims. ROTATE is what

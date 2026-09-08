@@ -1263,7 +1263,8 @@ istota_backup_db_daily_retention: 5          # delete local dailies older than N
 istota_backup_db_weekly_retention: 3         # delete local weeklies older than N weeks
 istota_backup_db_daily_retention_remote: 7   # same, for the copies on the mount
 istota_backup_db_weekly_retention_remote: 4
-istota_backup_db_cron: "0 */6 * * *"
+# Two same-day restore points without four full copies of a growing database.
+istota_backup_db_cron: "0 */12 * * *"
 istota_backup_files_cron: "0 3 * * *"
 istota_backup_files_sources:
   - src: "Users"

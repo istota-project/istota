@@ -129,7 +129,9 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Fixed
 
-- The host backup script now keeps one weekly database copy per Sunday, even though it runs four times that day. The weekly retention windows now have one restore point per Sunday instead of four near-identical copies; local and off-host storage follow the same rule.
+- The bare-metal database backup now runs twice a day instead of four times. Each day still has two restore points, while the local and off-host daily tiers add half as many full copies of the growing framework database.
+
+- The host backup script now keeps one weekly database copy per Sunday, even when it runs twice that day. The weekly retention windows now have one restore point per Sunday instead of multiple near-identical copies; local and off-host storage follow the same rule.
 
 - Database snapshots now live under `Backups/db/snapshots`, beside the existing daily and weekly database backups, instead of in a second top-level directory that made each backup system look incomplete. A deploy moves the old dated snapshot directories into the new tree without copying them, refuses to combine two existing histories, and never moves them while the scheduler is running or the Nextcloud mount is down. New standalone installs use the same layout inside their workspace.
 
