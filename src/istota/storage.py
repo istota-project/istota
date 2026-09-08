@@ -1514,7 +1514,10 @@ def read_dated_memories(
     # Falling back to UTC matches the historical behavior for callers
     # without a configured user timezone.
     # Live DB timezone so the cutoff matches the user-local filenames the
-    # sleep cycle writes, even after a web-UI tz change (ISSUE-099).
+    # sleep cycle writes, even after a web-UI tz change (ISSUE-099). Those
+    # filenames name the day the memories are about rather than the day the
+    # run fired (ISSUE-470), so `max_days` counts days of content — one
+    # calendar day fewer than the stems used to reach back.
     tz_name = (
         config.resolve_user_timezone(user_id)
         if hasattr(config, "resolve_user_timezone")

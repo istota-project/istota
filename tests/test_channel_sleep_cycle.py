@@ -9,6 +9,7 @@ import pytest
 from istota import db
 from istota.config import Config, ChannelSleepCycleConfig, MemorySearchConfig
 from istota.memory.sleep_cycle import (
+    _task_timestamp,
     gather_channel_data,
     build_channel_memory_extraction_prompt,
     process_channel_sleep_cycle,
@@ -182,11 +183,12 @@ class TestProcessChannelSleepCycle:
 
         assert result is True
 
+        # The filename is TestChannelSleepCycleDating's business; this test
+        # only cares that the write happened.
         memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
-        date_str = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
-        memory_file = memories_dir / f"{date_str}.md"
-        assert memory_file.exists()
-        assert "GraphQL" in memory_file.read_text()
+        written = list(memories_dir.glob("*.md"))
+        assert len(written) == 1
+        assert "GraphQL" in written[0].read_text()
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
     def test_no_file_when_no_new_memories(self, mock_run, mount_config, db_path):
@@ -497,3 +499,101 @@ class TestCheckChannelSleepCycles:
                 result = check_channel_sleep_cycles(conn, mount_config)
 
         assert "room789" in result
+
+
+class TestChannelSleepCycleDating:
+    """The window date, not the run date (ISSUE-470)."""
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_memory_file_is_named_for_the_window_not_the_run(
+        self, mock_run, mount_config, db_path
+    ):
+        # A 48h lookback puts the midpoint a full day back whatever the clock
+        # says, so the assertion never depends on when the test runs.
+        mock_run.return_value = (True, "- Decided to use GraphQL (alice, 2026-02-07)\n")
+        mount_config.channel_sleep_cycle.lookback_hours = 48
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="Should we use GraphQL?", user_id="alice",
+                conversation_token="room123",
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Yes.")
+
+            assert process_channel_sleep_cycle(mount_config, conn, "room123") is True
+
+        expected = (
+            datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
+        ).strftime("%Y-%m-%d")
+        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
+        assert (memories_dir / f"{expected}.md").exists()
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_prompt_date_matches_the_window(self, mock_run, mount_config, db_path):
+        mock_run.return_value = (True, "- Something (alice, 2026-02-07)\n")
+        mount_config.channel_sleep_cycle.lookback_hours = 48
+
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="Anything?", user_id="alice",
+                conversation_token="room123",
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Sure.")
+
+            process_channel_sleep_cycle(mount_config, conn, "room123")
+
+        expected = (
+            datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
+        ).strftime("%Y-%m-%d")
+        prompt = mock_run.call_args[0][1]
+        assert f"Date: {expected}" in prompt
+
+    def test_task_timestamps_are_labelled_utc(self, mount_config, db_path):
+        with db.get_db(db_path) as conn:
+            t = db.create_task(
+                conn, prompt="Anything?", user_id="alice",
+                conversation_token="room123",
+            )
+            db.update_task_status(conn, t, "running")
+            db.update_task_status(conn, t, "completed", result="Sure.")
+            created_at = db.get_task(conn, t).created_at
+
+            result = gather_channel_data(mount_config, conn, "room123", 24, None)
+
+        stamp = _task_timestamp(created_at, ZoneInfo("UTC"))
+        assert stamp.endswith("UTC")
+        assert f"--- Task {t} (user: alice, cli, {stamp}) ---" in result
+
+    @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
+    def test_second_run_keeps_the_first_runs_bullets(
+        self, mock_run, mount_config, db_path
+    ):
+        mount_config.channel_sleep_cycle.lookback_hours = 48
+
+        with db.get_db(db_path) as conn:
+            t1 = db.create_task(
+                conn, prompt="First", user_id="alice", conversation_token="room123",
+            )
+            db.update_task_status(conn, t1, "running")
+            db.update_task_status(conn, t1, "completed", result="One.")
+
+            mock_run.return_value = (True, "- The first decision (alice, ref:1)\n")
+            assert process_channel_sleep_cycle(mount_config, conn, "room123") is True
+
+            t2 = db.create_task(
+                conn, prompt="Second", user_id="alice", conversation_token="room123",
+            )
+            db.update_task_status(conn, t2, "running")
+            db.update_task_status(conn, t2, "completed", result="Two.")
+
+            mock_run.return_value = (True, "- The second decision (alice, ref:2)\n")
+            assert process_channel_sleep_cycle(mount_config, conn, "room123") is True
+
+        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
+        written = list(memories_dir.glob("*.md"))
+        assert len(written) == 1, "both runs share one window date"
+        text = written[0].read_text()
+        assert "The first decision" in text
+        assert "The second decision" in text
