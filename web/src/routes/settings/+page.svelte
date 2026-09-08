@@ -316,11 +316,11 @@
       profile?.unavailable_web_rooms || [],
     );
 
-  // The "Default room" row asks a different question of a dead pin than a route
-  // row does, so it gets its own builder rather than a flag on the one above
-  // (ISSUE-479). Its leading option means "no room pinned" rather than "the room
-  // a bare `web` lands in" — which after ISSUE-477 is whatever this setting says,
-  // so naming it there would be circular. And `ignored_default_room` marks a pin
+  // The default room picker asks a different question of a dead pin than a
+  // route row does, so it gets its own builder rather than a flag on the one
+  // above (ISSUE-479). Its leading option means "no room pinned" rather than
+  // "the room a bare `web` lands in" — which after ISSUE-477 is whatever this
+  // setting says, so naming it there would be circular. And `ignored_default_room` marks a pin
   // the resolvers have stopped honouring, which is not the route rows'
   // `(unavailable)`: the delivery still arrives, just not where the user chose.
   //
@@ -766,7 +766,7 @@
         <SettingsField
           labelled={false}
           label="Default delivery destination"
-          hint="Which transport your results and notifications go out on. Where on that transport is the alert and log routes' business, below."
+          hint="Which transport your results and notifications go out on, and — on the two transports that have rooms — which room a delivery that names none of its own lands in. Leave the room automatic and the oldest room you are alone in is used, which changes if you archive that room."
         >
           <div class="route-row">
             <Select
@@ -776,29 +776,28 @@
               fullWidth
               onValueChange={setDestination}
             />
-          </div>
-        </SettingsField>
-        <!-- Beside `default_destination` because the two answer different
-             questions about one delivery: that row names the transport, this
-             one names the room on it. It stays off that row for the reason
-             ISSUE-475 gave — a room pinned there governs notifications only,
-             while this governs every destination that named no room, on both
-             surfaces at once. -->
-        <SettingsField
-          labelled={false}
-          label="Default room"
-          hint="Where a delivery that names no room of its own lands — both in web chat and, if the room is also on Talk, in Talk. Leave it automatic and the oldest room you are alone in is used, which changes if you archive that room."
-        >
-          <div class="route-row">
-            <Select
-              value={profile.default_room || ''}
-              options={defaultRoomOpts()}
-              ariaLabel="Default room"
-              fullWidth
-              onValueChange={(v) => {
-                if (profile) profile.default_room = v || '';
-              }}
-            />
+            <!-- The same shape as the alert and log rows: the room picker opens
+                 beside the transport when the transport has rooms, rather than
+                 standing as a row of its own that email and ntfy users have to
+                 read past. What it writes is unchanged — `default_room`, not a
+                 room on `default_destination`, which still names a transport and
+                 nothing else (ISSUE-475), because the pin governs every bare
+                 `web` and `talk` destination on both surfaces at once.
+                 Hiding it on email and ntfy can leave a pin set and unshown: it
+                 still answers a bare `web` or `talk` route from the rows below,
+                 and those rows carry their own room picker, so the room stays
+                 reachable where it is doing the work. -->
+            {#if hasRoom(profile.default_destination || 'talk')}
+              <Select
+                value={profile.default_room || ''}
+                options={defaultRoomOpts()}
+                ariaLabel="Default room"
+                fullWidth
+                onValueChange={(v) => {
+                  if (profile) profile.default_room = v || '';
+                }}
+              />
+            {/if}
           </div>
         </SettingsField>
         <SettingsField

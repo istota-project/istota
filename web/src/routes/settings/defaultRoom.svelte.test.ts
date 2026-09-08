@@ -1,12 +1,16 @@
 /**
- * The "Default room" row (ISSUE-477).
+ * The default room picker (ISSUE-477).
  *
  * A destination naming no room — a bare `web` or a bare `talk` — had to land
  * somewhere, and nothing the user set decided where: web guessed at their
  * oldest private room, and the guess moved when they archived it. This is the
- * control that makes it a setting, beside `default_destination` because the two
- * answer different halves of one delivery — that row names the transport, this
- * one names the room on it.
+ * control that makes it a setting.
+ *
+ * It sits inside the `default_destination` row and opens only when that
+ * transport has rooms, the same shape the alert and log rows use. It still
+ * writes `default_room` rather than a room on the descriptor: that value names
+ * a transport and nothing else (ISSUE-475), and the pin governs every bare
+ * `web` and `talk` destination on both surfaces at once.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
@@ -104,7 +108,7 @@ afterEach(() => {
 });
 
 describe('the default room', () => {
-  it('is a row of its own, beside the transport it is not part of', async () => {
+  it('opens beside the transport when the transport has rooms', async () => {
     renderPage();
     await settled();
     expect(control('Default room')).toBeTruthy();
@@ -113,6 +117,27 @@ describe('the default room', () => {
     expect(control('Default delivery destination')).toBeTruthy();
     expect(control('Default delivery room')).toBeNull();
   });
+
+  it('opens on web too, not just talk', async () => {
+    currentProfile.value = profile(IDEAS);
+    currentProfile.value.default_destination = 'web';
+    renderPage();
+    await settled();
+    expect(control('Default room')).toHaveTextContent('ideas');
+  });
+
+  for (const surface of ['email', 'ntfy']) {
+    it(`stays shut on ${surface}, which has no room to pick`, async () => {
+      // The row it used to be stood below every transport, asking email and
+      // ntfy users to read past a room they had no delivery landing in.
+      currentProfile.value = profile(IDEAS);
+      currentProfile.value.default_destination = surface;
+      renderPage();
+      await settled();
+      expect(control('Default delivery destination')).toHaveTextContent(surface);
+      expect(control('Default room')).toBeNull();
+    });
+  }
 
   it('reads "Automatic" when nothing is pinned', async () => {
     // Not "Default room (general)" — the web picker's leading option names the

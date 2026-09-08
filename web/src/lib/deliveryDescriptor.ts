@@ -170,11 +170,11 @@ export function routeOptions(
  * apart on their own.
  *
  * `emptyLabel` overrides the leading option, and one caller needs it: the
- * "Default room" row itself (ISSUE-477), where naming the default room as the
+ * default room picker itself (ISSUE-477), where naming the default room as the
  * way to leave the default room unset would be circular. Everywhere else the
  * default is what this function works out.
  *
- * `ignored` is that same row's pin when the server says it is not being
+ * `ignored` is that same picker's pin when the server says it is not being
  * honoured, and it takes a different mark from `unavailable` (ISSUE-479). Two
  * different things are being reported: an unavailable *route* swallows the
  * delivery, while an ignored `default_room` means the pin does nothing and the
@@ -184,7 +184,7 @@ export function routeOptions(
  * profile has one `default_room`.
  *
  * The two inputs are **mutually exclusive at today's call sites** — the route
- * rows pass `unavailable` and no `ignored`, the Default room row the reverse —
+ * rows pass `unavailable` and no `ignored`, the default room picker the reverse —
  * so the ordering below decides nothing yet. It is written `ignored` first
  * anyway, because that is the answer a caller passing both would want: the
  * field's own verdict on its own pin outranks a route's verdict on the same
