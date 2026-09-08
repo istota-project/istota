@@ -1258,6 +1258,34 @@ class TestCmdMemory:
         assert "tech_0" not in result
 
     @pytest.mark.asyncio
+    async def test_facts_counts_the_future_expiry_it_renders(self, make_config):
+        """ISSUE-472: a graph of only future-expiry facts read as empty.
+
+        The header used to come from `get_fact_count`, which treated any
+        `valid_until` as historical, while the body came from
+        `get_current_facts`, which does not — so the count disagreed with the
+        list it labelled, and reached "(no facts)" over a populated graph.
+        """
+        from datetime import date, timedelta
+
+        config = make_config()
+        from istota.memory.knowledge_graph import ensure_table, add_fact
+        future = (date.today() + timedelta(days=30)).isoformat()
+        with db.get_db(config.db_path) as conn:
+            ensure_table(conn)
+            add_fact(conn, "alice", "alice", "interested_in", "sailing",
+                     valid_until=future)
+            add_fact(conn, "alice", "alice", "interested_in", "pottery",
+                     valid_until=future)
+            conn.commit()
+            AsyncMock()
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
+        assert "no facts" not in result
+        assert "2 facts" in result
+        assert "sailing" in result
+        assert "pottery" in result
+
+    @pytest.mark.asyncio
     async def test_facts_entity_filter(self, make_config):
         """!memory facts <entity> shows facts for that entity only."""
         config = make_config()
