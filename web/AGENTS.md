@@ -308,6 +308,16 @@ npm run test           # vitest
 npm run format         # prettier (run before committing)
 ```
 
+**Mock `$lib/api` through `src/lib/test/apiDouble.ts`, never with a hand-written factory.** A `vi.mock('$lib/api', () => ({ ... }))` factory replaces the whole module, so every export it does not list is `undefined` at runtime and correct-looking in the editor — which is how twenty-odd files came to omit `AuthError` and sit one `e instanceof AuthError` away from a crash (ISSUE-468). The double reads its export list off the real module instead: functions become `vi.fn()`, the error classes and constants pass through as themselves, so `instanceof` in the component matches what a test throws.
+
+```ts
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, { getProfile: vi.fn(async () => ({ profile })) });
+```
+
+The second argument is how a file keeps control of its own mock — a default implementation, a canned return, or a spy for a name the module does not export. The other permitted shape is a factory built on the real module (`...(await importOriginal())`), which cannot omit an export either; `apiDouble.test.ts` fails on anything else.
+
 `lint:design` compares against `scripts/design-lint-baseline.json`, which records permitted violations per file. **The baseline is not empty**, and what is in it is deliberate: 60 files, `off-scale-space` 157 (entirely the two off-ramp bands — sub-`--space-1` hairline nudges, and the sparse tail above `1rem`), `redefined-primitive` 30, `raw-color` 23. Those figures are here so drift is visible; they should go down, not up. It is a list of known exceptions, not a licence — fix the violation, or mark it with an allow comment and a reason. Adding a baseline entry is the last resort and needs one too.
 
 The rules themselves are tested (`scripts/design-lint.test.ts`). A lint whose regex quietly stops matching reports a clean tree, which is exactly what happened while 87 color literals in `rgba()`/`hsla()` notation sat in the source — and while an `accept="image/*"` attribute opened a block comment that never closed, exempting four whole files from every rule.

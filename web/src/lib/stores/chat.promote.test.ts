@@ -9,30 +9,14 @@
  * that does nothing.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { get } from 'svelte/store';
 import type { ChatRoom } from '$lib/api';
 
-const api = vi.hoisted(() => ({
-  getChatConfig: vi.fn(),
-  getChatRooms: vi.fn(),
-  getRoomMessages: vi.fn(),
-  getChatMessagesView: vi.fn(),
-  setChatMessageStarred: vi.fn(),
-  markAllRoomsRead: vi.fn(),
-  markRoomRead: vi.fn(),
-  getTaskEvents: vi.fn(),
-  sendChatMessage: vi.fn(),
-  createChatRoom: vi.fn(),
-  updateChatRoom: vi.fn(),
-  deleteChatRoom: vi.fn(),
-  promoteChatRoom: vi.fn(),
-  cancelChatTask: vi.fn(),
-  confirmChatTask: vi.fn(),
-  chatStreamUrl: vi.fn(),
-  ChatRoomBusyError: class extends Error {},
-}));
-
+const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
+
 vi.mock('$lib/stores/persisted', () => ({
   loadSetting: vi.fn((_key: string, fallback: unknown) => fallback),
   saveSetting: vi.fn(),

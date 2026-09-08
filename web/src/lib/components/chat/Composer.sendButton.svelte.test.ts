@@ -1,14 +1,16 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
-vi.mock('$lib/api', () => ({
-  uploadChatAttachment: vi.fn(),
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   fetchChatCommands: vi.fn(async () => ({ commands: [], model_aliases: [] })),
   chatConfigOnce: vi.fn(() => new Promise(() => {})),
-}));
+});
 vi.mock('$lib/platform/nativePicker', () => ({
   nativePickersAvailable: vi.fn(() => false),
   takePhoto: vi.fn(),

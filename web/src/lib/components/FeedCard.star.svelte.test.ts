@@ -5,12 +5,14 @@
  * what routes it through the notice layer.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import type { FeedEntry } from '$lib/api';
 
-const api = vi.hoisted(() => ({ updateEntryStarred: vi.fn() }));
+const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 import FeedCard from './FeedCard.svelte';
 import { currentNotice, clearNotices } from '$lib/stores/notices';

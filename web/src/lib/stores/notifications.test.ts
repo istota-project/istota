@@ -8,17 +8,12 @@
  * failing five times, and coming back on focus.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { get } from 'svelte/store';
 
-const api = vi.hoisted(() => ({
-  AuthError: class AuthError extends Error {},
-  getNotificationCounts: vi.fn(),
-  listNotifications: vi.fn(),
-  markNotificationsSeen: vi.fn(),
-  runNotificationAction: vi.fn(),
-  dismissNotification: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 const notices = vi.hoisted(() => ({
   notifyError: vi.fn(),

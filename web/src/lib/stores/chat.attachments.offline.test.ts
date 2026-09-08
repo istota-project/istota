@@ -13,41 +13,18 @@
  * drives the real thing.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { get } from 'svelte/store';
 import type { ChatHistory, ChatRoom } from '$lib/api';
 import type { ChatSession } from './chat';
 import { SEND_QUEUE_STORAGE_KEY } from './sendQueue';
 
-const api = vi.hoisted(() => ({
-  getChatConfig: vi.fn(),
-  getChatRooms: vi.fn(),
-  getRoomMessages: vi.fn(),
-  getChatMessagesView: vi.fn(),
-  getRoomEvents: vi.fn(),
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   chatRoomStreamUrl: vi.fn(() => '/stream'),
   chatStreamUrl: vi.fn(() => '/task-stream'),
-  markRoomRead: vi.fn(),
-  markAllRoomsRead: vi.fn(),
-  setChatMessageStarred: vi.fn(),
-  deleteChatMessage: vi.fn(),
-  getTaskEvents: vi.fn(),
-  sendChatMessage: vi.fn(),
-  uploadChatAttachment: vi.fn(),
-  createChatRoom: vi.fn(),
-  updateChatRoom: vi.fn(),
-  deleteChatRoom: vi.fn(),
-  promoteChatRoom: vi.fn(),
-  cancelChatTask: vi.fn(),
-  confirmChatTask: vi.fn(),
-  getNotificationCounts: vi.fn(),
-  // The double has to carry every class the product does `instanceof`
-  // against, or the property read throws inside the branch instead of
-  // answering it.
-  AuthError: class AuthError extends Error {},
-  UploadUnreachableError: class UploadUnreachableError extends Error {},
-  ChatRoomBusyError: class extends Error {},
-  ChatMessageBusyError: class extends Error {},
-}));
+});
 
 const db = vi.hoisted(() => ({
   readTranscript: vi.fn(),
@@ -88,7 +65,6 @@ const conn = vi.hoisted(() => {
   };
 });
 
-vi.mock('$lib/api', () => api);
 vi.mock('$lib/offline/db', () => db);
 vi.mock('$lib/stores/connectivity', () => conn);
 

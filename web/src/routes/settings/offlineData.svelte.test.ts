@@ -10,9 +10,12 @@
  * on either.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
 
-const api = vi.hoisted(() => ({
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   getSettingsServices: vi.fn(async () => ({ services: [] })),
   getModules: vi.fn(async () => ({ modules: [] })),
   getProfile: vi.fn(async () => ({
@@ -32,15 +35,13 @@ const api = vi.hoisted(() => ({
   })),
   updateProfile: vi.fn(async () => ({})),
   disconnectNextcloudToken: vi.fn(async () => ({})),
-  // The Identity card's profile-picture control. The whole module is mocked,
-  // so anything the page (or a primitive it mounts) imports has to be here or
-  // the page throws on load and every assertion below reads as a missing row.
+  // The Identity card's profile-picture control, which the page mounts.
+  // `avatarUrl` is stubbed rather than left real so no `<img>` here points at
+  // an address jsdom would try to fetch.
   uploadAvatar: vi.fn(async () => ({ hash: 'h1', mime: 'image/webp', bytes: 1 })),
   deleteAvatar: vi.fn(async () => ({ deleted: true })),
   avatarUrl: vi.fn(() => '/api/avatars/user/alice'),
-  AVATAR_ACCEPT: 'image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif',
-}));
-vi.mock('$lib/api', () => api);
+});
 
 const native = vi.hoisted(() => ({
   isNativeShell: vi.fn(() => true),

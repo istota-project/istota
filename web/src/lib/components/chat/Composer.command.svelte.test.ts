@@ -21,14 +21,15 @@
  * catalogue to decide whether it may.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
-vi.mock('$lib/api', () => ({
-  uploadChatAttachment: vi.fn(),
-  fetchChatCommands: vi.fn(),
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   chatConfigOnce: vi.fn(() => new Promise(() => {})),
-}));
+});
 vi.mock('$lib/platform/nativePicker', () => ({
   nativePickersAvailable: vi.fn(() => false),
   takePhoto: vi.fn(),

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/svelte';
 
 /**
@@ -19,14 +20,11 @@ import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/sv
  * only looked for the modal could pass against a page still calling it.
  */
 
-vi.mock('$lib/api', () => ({
-  getFeedsConfig: vi.fn(),
-  putFeedsConfig: vi.fn(),
-  importOpml: vi.fn(),
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
   exportOpmlUrl: vi.fn(() => '/istota/api/feeds/opml'),
-  refreshFeeds: vi.fn(),
-  getModuleServices: vi.fn(),
-}));
+});
 
 import { get } from 'svelte/store';
 

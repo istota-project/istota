@@ -20,14 +20,13 @@
  * as empty.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 
-vi.mock('$lib/api', () => ({
-  getBriefingArchive: vi.fn(),
-  deleteBriefingArchiveItem: vi.fn(),
-  getBriefingArchiveItem: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 import { getBriefingArchive } from '$lib/api';
 import {

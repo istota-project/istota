@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen } from '@testing-library/svelte';
 
 import type { AdminStats, AdminSubscription } from '$lib/api';
@@ -28,20 +29,14 @@ import type { AdminStats, AdminSubscription } from '$lib/api';
  *   and carries it.
  */
 
-vi.mock('$lib/api', () => ({
-  getAdminStats: vi.fn(),
-  // The page's bot-icon control imports these; nothing here exercises it.
-  // `avatarUrl` is not the control's import — it is `Avatar.svelte`'s, reached
-  // through the page. It is only unused here because `person` below carries no
-  // `avatars.bot`, so the component short-circuits before calling it; give the
-  // fixture a hash and its absence throws. `web/AGENTS.md` names this hazard:
-  // a wholesale `vi.mock('$lib/api')` makes every function it does not list
-  // `undefined`, and the type system cannot see it.
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
+  // `Avatar.svelte`, reached through the page. `person` below carries no
+  // `avatars.bot`, so the component short-circuits before calling it — but a
+  // fixture that grew one would send the real builder's URL at jsdom.
   avatarUrl: vi.fn(() => 'about:blank'),
-  AVATAR_ACCEPT: 'image/png',
-  uploadBotAvatar: vi.fn(),
-  deleteBotAvatar: vi.fn(),
-}));
+});
 
 import { getAdminStats } from '$lib/api';
 import type { User } from '$lib/api';

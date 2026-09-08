@@ -9,10 +9,12 @@
  * So the tests are mostly "this input must NOT move the store".
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { get } from 'svelte/store';
 
-const api = vi.hoisted(() => ({ getChatConfig: vi.fn() }));
+const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 type Store = typeof import('./connectivity');
 

@@ -9,33 +9,17 @@
  * gap/recovery threshold, background badges, and `room` frames.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { get } from 'svelte/store';
 import type { ChatRoom, ChatHistory } from '$lib/api';
 
-const api = vi.hoisted(() => ({
-  getChatConfig: vi.fn(),
-  getChatRooms: vi.fn(),
-  getRoomMessages: vi.fn(),
-  getChatMessagesView: vi.fn(),
-  getRoomEvents: vi.fn(),
-  chatRoomStreamUrl: vi.fn(() => '/stream'),
-  setChatMessageStarred: vi.fn(),
-  markAllRoomsRead: vi.fn(),
-  markRoomRead: vi.fn(),
-  getTaskEvents: vi.fn(),
-  sendChatMessage: vi.fn(),
-  createChatRoom: vi.fn(),
-  updateChatRoom: vi.fn(),
-  deleteChatRoom: vi.fn(),
-  promoteChatRoom: vi.fn(),
-  cancelChatTask: vi.fn(),
-  confirmChatTask: vi.fn(),
-  chatStreamUrl: vi.fn(() => '/task-stream'),
-  getNotificationCounts: vi.fn(),
-  ChatRoomBusyError: class extends Error {},
-}));
-
+const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
+await fillApiDouble(api, {
+  chatRoomStreamUrl: vi.fn(() => '/stream'),
+  chatStreamUrl: vi.fn(() => '/task-stream'),
+});
+
 vi.mock('$lib/stores/persisted', () => ({
   loadSetting: vi.fn(() => null),
   saveSetting: vi.fn(),

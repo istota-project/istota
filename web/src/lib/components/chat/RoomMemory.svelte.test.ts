@@ -1,33 +1,16 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 
-// Hoisted with the `vi.mock` factory, so the component and the test share one
-// class object — `instanceof` in the component only matches if they do, and a
-// separately declared stub would send every failure down the generic branch.
-const mocks = vi.hoisted(() => {
-  class ChatMemoryConflictError extends Error {
-    constructor() {
-      super('channel memory changed since it was loaded');
-      this.name = 'ChatMemoryConflictError';
-    }
-  }
-  class ChatMemoryBusyError extends Error {
-    constructor(message: string) {
-      super(message);
-      this.name = 'ChatMemoryBusyError';
-    }
-  }
-  return {
-    getRoomMemory: vi.fn(),
-    saveRoomMemory: vi.fn(),
-    ChatMemoryConflictError,
-    ChatMemoryBusyError,
-  };
-});
+// The double passes the real error classes through, so the component and the
+// test share one class object — `instanceof` in the component only matches if
+// they do, and a separately declared stub would send every failure down the
+// generic branch.
+const mocks = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => mocks);
+await fillApiDouble(mocks);
 
 const { getRoomMemory, saveRoomMemory, ChatMemoryConflictError, ChatMemoryBusyError } = mocks;
-
-vi.mock('$lib/api', () => mocks);
 
 import RoomMemory from './RoomMemory.svelte';
 

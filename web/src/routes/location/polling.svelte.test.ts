@@ -1,12 +1,11 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import type { DaySummary, LocationPing } from '$lib/api';
 
-vi.mock('$lib/api', () => ({
-  getLocationCurrent: vi.fn(),
-  getLocationPings: vi.fn(),
-  getDaySummary: vi.fn(),
-}));
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+await fillApiDouble(api);
 
 vi.mock('$lib/components/location/LocationMap.svelte', () => ({
   default: () => ({ flyTo: vi.fn() }),
