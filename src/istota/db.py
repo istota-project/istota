@@ -488,6 +488,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # (everything → Talk).
         "routing": "TEXT NOT NULL DEFAULT '{}'",
         "default_destination": "TEXT NOT NULL DEFAULT 'talk'",
+        # The room a destination naming no room of its own lands in (ISSUE-477).
+        # A canonical room token; '' means unset and the per-surface heuristic
+        # answers instead. `_migrate_default_room` backfills existing rows with
+        # whatever that heuristic answers today, so nothing moves on upgrade.
+        "default_room": "TEXT NOT NULL DEFAULT ''",
         # Email-reply mirror policy: origin+thread (default) | origin | thread.
         "email_reply_routing": "TEXT NOT NULL DEFAULT 'origin+thread'",
         # Quiet email senders: fnmatch patterns whose mail is filed silently
@@ -975,6 +980,12 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_web_chat_rooms_peruser(conn)
     _migrate_room_read_state_peruser(conn)
     _migrate_room_members(conn)
+    # After `_migrate_room_members`, not before: the backfill reads
+    # `default_web_room`, whose "a room somebody else reads" arm asks
+    # `list_room_members` — so running it first would see an unfolded membership
+    # table, judge a shared room private, and pin exactly the room ISSUE-473
+    # exists to keep out.
+    _migrate_default_room(conn)
     # Last of the `messages` migrations, so it does not attribute rows the
     # cleanup passes above are about to delete. Ordering only — deliberately not
     # gated on their markers: those re-arm on failure, and blocking attribution
@@ -3363,28 +3374,49 @@ def ensure_default_web_chat_room(
     `general` beside the Talk one on a user's first web visit, since a Talk
     room's handle does not exist until that loop runs.
 
-    Two rules on the fallback, both about it being a delivery target:
-
-    - **A room the user is alone in.** A shared Talk room is one other people
-      read, and a personal alert delivered into it is delivered in front of
-      them.
-    - **Not a channel room.** `log_channel` and `alerts_channel` are
-      machine-owned; the entrypoint even posts into `alerts` at boot, so
-      activity order alone would hand a user's default to whichever the daemon
-      last wrote to. Worse, the pick sticks: the handle minted here becomes the
-      user's oldest, and the first branch returns it from then on.
+    `default_web_room` owns which room qualifies; this adds only the creation,
+    and one thing that lookup deliberately will not do. The lookup skips a room
+    the user hid, because preferring a hidden room over a visible one is not
+    what they asked for. The fallback may still **un-hide** one: an alert has to
+    go somewhere, and putting it back in the user's own room — where they can
+    see it — beats minting a second `general` beside the one they archived, and
+    beats dropping the alert. So a user with exactly one room, hidden, gets that
+    room back rather than a duplicate.
 
     A user whose only rooms are shared or machine-owned gets a private
     `general`, which is the old behaviour and the right answer for delivery.
     """
-    rooms = list_web_chat_rooms(conn, user_id, include_archived=False)
-    if rooms:
-        return rooms[0]
+    # The configured room first, and *before* `default_web_room` rather than
+    # through it. The lookup can only return a room the user already has a
+    # usable web view of, so asking it first would let the heuristic answer over
+    # a pinned Talk room the user has never opened in web — web delivering to
+    # `general` while Talk delivered to the pinned room, which is the one thing
+    # a surface-agnostic setting must not do. This is the entry point allowed to
+    # provision, so it makes the view instead.
+    configured = configured_default_room(conn, user_id)
+    if configured is not None:
+        room = get_room(conn, configured)
+        handle = ensure_web_chat_handle(
+            conn, user_id, configured, room_display_name(room, None) or "Talk room",
+        )
+        # Hiding a room you pinned is contradictory, in either of the two
+        # spellings a hide has. Both other answers are worse than undoing it:
+        # ignoring the pin is silent, and delivering into a hidden room puts the
+        # alert where the user cannot see it. Same reasoning as the un-hide in
+        # the candidate loop below, which is why `default_web_room` refuses a
+        # hidden view and leaves the recovery here, where writing is allowed.
+        if handle.archived:
+            handle = update_web_chat_room(conn, handle.id, archived=False) or handle
+        undismiss_room(conn, configured, user_id)
+        return handle
+    handle = default_web_room(conn, user_id)
+    if handle is not None:
+        return handle
     for room in _default_room_candidates(conn, user_id):
         handle = ensure_web_chat_handle(
             conn, user_id, room.token, room.name or "Talk room",
         )
-        # `list_member_rooms` filters `rooms.archived` while the branch above
+        # `list_member_rooms` filters `rooms.archived` while the lookup above
         # filters the per-user handle flag, so a room the user hid and was then
         # re-added to (ISSUE-134) arrives here with an archived handle. Clear
         # it, the same way the web listing does, or this returns a row the
@@ -3395,15 +3427,148 @@ def ensure_default_web_chat_room(
     return create_web_chat_room(conn, user_id, "general")
 
 
-def _default_room_candidates(
+def default_web_room(
     conn: sqlite3.Connection, user_id: str,
-) -> "list[Room]":
-    """Registry rooms usable as ``user_id``'s default delivery target.
+) -> WebChatRoom | None:
+    """The room a bare ``web`` route delivers into, or None when the user has no
+    room that qualifies. Creates nothing.
 
-    Activity-ordered, like `list_member_rooms`, minus the two classes that must
-    never become a delivery default: rooms with another member in them, and the
-    user's own log / alerts channels. See `ensure_default_web_chat_room`.
+    The user's configured `default_room` first, then the heuristic below it
+    (ISSUE-477). The rung goes on top here, unlike Talk's, because everything
+    under it is guesswork: there is no provisioned web delivery room the way
+    Talk has `alerts_channel`, so nothing above the setting has a better claim.
+
+    Oldest handle first, not activity order: a delivery target that moves when
+    you speak in a room is the surprise this is meant to remove, and the daemon
+    itself writes into these rooms.
+
+    Split out of `ensure_default_web_chat_room` for ISSUE-473. The rule was
+    stated in that function's docstring and applied by `_default_room_candidates`
+    on the branch that runs only when the user has no handles at all; the branch
+    that runs every other time returned the oldest handle unfiltered. That is the
+    `general` room right up until the user archives it, and from then on whatever
+    was minted next — a shared Talk room, or a machine-owned log / alerts
+    channel. `transport.routing._room_for_destination` had a third copy of the
+    same unfiltered rule, kept separate because it must not provision; it calls
+    this now.
     """
+    if configured_default_room(conn, user_id) is not None:
+        # A pinned room short-circuits the heuristic whether or not it has a
+        # usable view here, and `None` is the honest answer when it does not.
+        # Falling through would deliver into a room the user did not choose, and
+        # this function may not write, so it cannot make the view itself —
+        # `ensure_default_web_chat_room` does that. Same contract as
+        # `_room_for_destination`, which "answers None where delivery would
+        # invent or resurface a room".
+        token = configured_delivery_room(conn, user_id, "web")
+        if token is None:
+            return None
+        for handle in list_web_chat_rooms(conn, user_id, include_archived=False):
+            if handle.token == token:
+                return handle
+        return None
+
+    excluded = channel_room_tokens(conn, user_id)
+    for handle in list_web_chat_rooms(conn, user_id, include_archived=False):
+        if _usable_as_delivery_default(conn, user_id, handle.token, excluded):
+            return handle
+    return None
+
+
+def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | None:
+    """The canonical token of ``user_id``'s configured default room, or None
+    when unset, deleted, archived, or no longer theirs (ISSUE-477).
+
+    Surface-agnostic, and the raw read of the column. `configured_delivery_room`
+    is the surface-aware wrapper and the one the two resolvers call; this half
+    has exactly one other caller, `ensure_default_web_chat_room`, which needs
+    the token *before* the room has a view on web — the one case where minting
+    that view is the right answer rather than falling back.
+
+    Three of `_usable_as_delivery_default`'s five arms are dropped, for two
+    different reasons. **Unwise, so deliberately not applied:** a room somebody
+    else reads, and a machine-owned channel room. Those keep a *guess* out of
+    somewhere embarrassing, the picker offers both classes marked, and the whole
+    point of this setting is that the answer is no longer a guess. **A view
+    concern, so checked one level down:** a room the user hid. Whether the
+    user can see the room is a question about the surface's view of it, not
+    about the room, so `configured_delivery_room` asks it per surface and
+    `ensure_default_web_chat_room` undoes it — a pin and a hide on one room
+    contradict each other, and the pin is the more recent deliberate act.
+
+    What is left is the room being unusable: gone, archived, or not the user's.
+
+    A configured room that is gone falls back to the heuristic rather than being
+    recreated. The user pointed at a room, and inventing a different one under
+    the same setting is worse than falling back visibly.
+    """
+    try:
+        row = conn.execute(
+            "SELECT default_room FROM user_profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        # The column's ALTER can be skipped on a locked database — see the
+        # `_add_columns` block in `init_db`. Reading it as unset is the safe
+        # direction: the heuristic keeps answering, which is what every user had
+        # before this column existed. Blowing up here would take out delivery.
+        return None
+    token = ((row["default_room"] or "") if row else "").strip()
+    if not token:
+        return None
+    room = get_room(conn, token)
+    if room is None or room.archived:
+        return None
+    if not is_room_member(conn, token, user_id):
+        return None
+    return token
+
+
+def configured_delivery_room(
+    conn: sqlite3.Connection, user_id: str, surface: str,
+) -> str | None:
+    """The surface ref of ``user_id``'s configured default room on ``surface``,
+    or None when there is none that answers there (ISSUE-477).
+
+    **The one surface-aware reader of `user_profiles.default_room`**, called by
+    the two resolvers that already exist — `default_web_room` on web,
+    `notifications.resolve_conversation_token` on Talk — and by nothing else.
+    (`configured_default_room` beneath it is the raw read, with one further
+    caller; see its docstring.) A per-surface pair of columns would be two
+    settings for one question and would drift; a third resolver would be the
+    parallel path this issue exists to avoid.
+
+    Returns the ref the surface actually addresses, which is not the same string
+    on both: on web the canonical token *is* the room's id, while a `talk:` leaf
+    carries the Nextcloud conversation id held in the room's `talk` binding. A
+    room with no view on the surface asked for returns None and the caller's own
+    ladder carries on — so a web-only room does not answer a bare `talk`, and a
+    promoted room answers both.
+
+    "Has a view" is per surface because the two are stored differently: web's is
+    the user's own `web_chat_rooms` handle, Talk's is the room's binding. Web
+    additionally asks that the view be *usable* — a handle the user archived or
+    a room they dismissed is one they cannot see, and neither this nor
+    `default_web_room` may write, so the answer here is None and the recovery is
+    `ensure_default_web_chat_room`'s. Talk has no per-user view state to check.
+    """
+    token = configured_default_room(conn, user_id)
+    if token is None:
+        return None
+    if surface == "web":
+        if is_room_dismissed(conn, token, user_id):
+            return None
+        for handle in list_web_chat_rooms(conn, user_id, include_archived=False):
+            if handle.token == token:
+                return token
+        return None
+    if surface == "talk":
+        return talk_refs_for_member(conn, user_id).get(token) or None
+    return None
+
+
+def channel_room_tokens(conn: sqlite3.Connection, user_id: str) -> set[str]:
+    """The user's machine-owned channel room tokens (`log_channel` /
+    `alerts_channel`). Public because the settings payload flags them too."""
     row = conn.execute(
         "SELECT log_channel, alerts_channel FROM user_profiles WHERE user_id = ?",
         (user_id,),
@@ -3412,14 +3577,102 @@ def _default_room_candidates(
         (row["log_channel"] or ""), (row["alerts_channel"] or "")
     } if row else set()
     channels.discard("")
-    out: "list[Room]" = []
-    for room in list_member_rooms(conn, user_id, include_archived=False):
-        if room.token in channels:
-            continue
-        if len(list_room_members(conn, room.token)) > 1:
-            continue
-        out.append(room)
-    return out
+    return channels
+
+
+def visible_room(
+    conn: sqlite3.Connection, user_id: str, token: str,
+) -> "Room | None":
+    """``token``'s registry row when ``user_id`` can still open the room, else
+    ``None``. Membership is the caller's question, not this one's.
+
+    The same three tests `list_member_rooms` — the sidebar's own query — applies
+    for a single token: the row exists (its `JOIN` on `rooms`), `archived = 0`,
+    and no `room_dismissals` tombstone. Two of the three have a live producer:
+
+    - **A room the registry has archived.** `archive_orphaned_talk_rooms` sets
+      `rooms.archived` when the bot leaves a Nextcloud conversation or the
+      conversation is deleted, and leaves the per-user handle and the
+      `room_members` row alone — so the room is invisible in web and dead on
+      Talk while every handle-shaped test still passes it, and `deliver` writes
+      into it perfectly happily. This is the one ISSUE-478 was filed on.
+    - **A room the user hid.** `dismiss_room`, and the poll-time backfill re-adds
+      membership, so membership alone cannot keep a dismissed room hidden.
+    - **A room that no longer exists** has no producer, and the guard is
+      defence in depth rather than a case anything reaches: `delete_room` takes
+      `room_members`, `room_dismissals` and *every* participant's handle with
+      the row, deliberately (ISSUE-134). It is kept because it is one comparison
+      on a row already fetched, and because `room_display_name` would otherwise
+      paper over the absence with the handle's own name.
+
+    Split out of `_usable_as_delivery_default` for `web_app._user_web_rooms`
+    (ISSUE-478), which needs exactly these three and must **not** have that
+    function's other two: a shared or machine-owned room is refused as the
+    *implicit* default and offered as a deliberate pin. Returning the `Room`
+    rather than a bool is what lets the picker take the name off the same
+    lookup instead of asking twice.
+    """
+    room = get_room(conn, token)
+    if room is None or room.archived:
+        return None
+    if is_room_dismissed(conn, token, user_id):
+        return None
+    return room
+
+
+def _usable_as_delivery_default(
+    conn: sqlite3.Connection, user_id: str, token: str, channels: set[str],
+) -> bool:
+    """Whether ``token`` may be ``user_id``'s default delivery room.
+
+    Five exclusions, each about the room being written to unprompted. Three of
+    them are `visible_room`'s — the room exists, is not archived, and the user
+    has not hidden it — and are shared with the picker. The two here are the
+    ones that separate an *implicit* default from a room a user may pin:
+
+    - **A room somebody else reads.** A shared Talk room is one other people are
+      in, and a personal alert delivered there is delivered in front of them.
+      Tested as "no member but this user" rather than as a count: a handle can
+      outlive membership, so counting would admit a room whose one member is
+      somebody else.
+    - **A channel room.** `log_channel` and `alerts_channel` are machine-owned;
+      the entrypoint even posts into `alerts` at boot, so activity alone would
+      hand a user's default to whichever the daemon last wrote to.
+    """
+    if token in channels:
+        return False
+    if visible_room(conn, user_id, token) is None:
+        return False
+    return not (set(list_room_members(conn, token)) - {user_id})
+
+
+def _default_room_candidates(
+    conn: sqlite3.Connection, user_id: str,
+) -> "list[Room]":
+    """Registry rooms usable as ``user_id``'s default delivery target.
+
+    Oldest first, **not** `list_member_rooms`' activity order, and that
+    re-sort is the point: this feeds the branch that mints the handle a bare
+    `web` route then lands on for good, so taking the most recently active room
+    would make a permanent delivery target out of whichever room the user
+    happened to speak in last — the surprise `default_web_room` exists to
+    remove. `created_at` then `token`, so the order is total.
+
+    The exclusions are `_usable_as_delivery_default`'s, shared with
+    `default_web_room`. The two lists still differ on one axis, deliberately:
+    this one is drawn from the registry (`rooms.archived`) while the lookup is
+    drawn from the per-user handles (`web_chat_rooms.archived`), so a room the
+    user hid is absent from the lookup and present here. That is what lets the
+    fallback un-hide the user's own room rather than mint a second one — see
+    `ensure_default_web_chat_room`.
+    """
+    channels = channel_room_tokens(conn, user_id)
+    candidates = [
+        room
+        for room in list_member_rooms(conn, user_id, include_archived=False)
+        if _usable_as_delivery_default(conn, user_id, room.token, channels)
+    ]
+    return sorted(candidates, key=lambda r: (r.created_at, r.token))
 
 
 # The legacy `web_chat_messages` accessors (`add_web_chat_message` /
@@ -3955,7 +4208,35 @@ def archive_orphaned_talk_rooms(
 
 
 def rename_room(conn: sqlite3.Connection, token: str, name: str) -> None:
+    """Rename a room. Writes `rooms.name` only — see `room_display_name` for
+    why the per-user handle is not kept in step."""
     conn.execute("UPDATE rooms SET name = ? WHERE token = ?", (name, token))
+
+
+def room_display_name(room: Room | None, handle: WebChatRoom | None) -> str:
+    """The name to show for a room: the registry's, falling back to the handle's.
+
+    A room carries two names and only one of them is kept current. `rooms.name`
+    is canonical — the room PATCH, the Talk poller's title backfill and
+    `transport.ingest` (whenever Talk reports a different channel name) all write
+    it through `rename_room`. `web_chat_rooms.name` is a mint-time snapshot:
+    `ensure_web_chat_handle` is INSERT OR IGNORE, so a handle minted before its
+    room's name was known keeps the `"Talk room"` placeholder its caller passed,
+    for good. Every reader must therefore prefer the registry.
+
+    This is that rule, in one place. Seven readers needed it and four had it,
+    each spelled out by hand; the three without it are ISSUE-474. The visible
+    one was the settings room picker, listing a column of identical `Talk room`
+    entries while the sidebar, two hundred lines away in the same file, named
+    the same rooms correctly. `_CROSS_ROOM_COLUMNS` applies the same rule in
+    SQL, since a join is cheaper there than a lookup per row.
+
+    Both arguments are optional because the callers differ in what they hold —
+    a promoted room's registry row may not be there yet, and a Talk token
+    resolved from a command has no handle of its own. With neither name the
+    token is all a caller has left, so this returns `""` and they supply it.
+    """
+    return (room.name if room else None) or (handle.name if handle else "") or ""
 
 
 def set_room_model_effort(
@@ -5015,7 +5296,12 @@ def get_starred_message_ids(
 _CROSS_ROOM_COLUMNS = (
     "SELECT m.role AS role, m.body AS body, m.title AS title, "
     "  m.task_id AS task_id, m.id AS msg_id, m.created_at AS created_at, "
-    "  m.room_token AS room_token, r.name AS room_name, "
+    # `room_display_name`'s rule in SQL: the registry name, then the reader's
+    # own handle. A room registered before Talk reported a title has a NULL
+    # `rooms.name`, and the client hides the room chip on an empty one — so
+    # without the fallback a message in the All / Unread / Starred panes named
+    # no room at all (ISSUE-474).
+    "  m.room_token AS room_token, COALESCE(r.name, h.name) AS room_name, "
     "  m.attachments AS attachments, t.attachments AS task_attachments, "
     "  m.attachment_paths AS attachment_paths, "
     "  t.status AS status, t.actions_taken AS actions_taken, "
@@ -5050,6 +5336,11 @@ _CROSS_ROOM_FROM = (
     "JOIN rooms r ON r.token = m.room_token AND r.archived = 0 "
     "JOIN room_members mm ON mm.room_token = m.room_token "
     "  AND mm.user_id = :user "
+    # The reader's own handle, for the name fallback in the column list. LEFT,
+    # because membership does not imply a handle — the web listing is what mints
+    # one, and these views are reachable before it has run.
+    "LEFT JOIN web_chat_rooms h ON h.token = m.room_token "
+    "  AND h.user_id = :user "
     "LEFT JOIN message_stars s ON s.message_id = m.id "
     "  AND s.user_id = :user "
     "LEFT JOIN tasks t ON t.id = m.task_id "
@@ -5562,6 +5853,88 @@ def _migrate_room_members(conn: sqlite3.Connection) -> None:
 
     conn.execute(
         "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_members_v1')"
+    )
+
+
+def _migrate_default_room(conn: sqlite3.Connection) -> None:
+    """Pin every existing profile to the room its heuristic answers today, so
+    ISSUE-477's setting changes nothing on upgrade.
+
+    Leaving the column empty and letting the heuristic keep answering would be
+    quieter now and worse later: the first time a user archives their `general`,
+    delivery moves to whatever handle was minted next, silently — which is the
+    ISSUE-473 complaint arriving again through the setting meant to end it.
+
+    **A room with a `talk` binding is never backfilled, and that is the whole
+    reason this is not a one-line UPDATE.** The value computed here is the *web*
+    heuristic's answer, and the setting answers for both surfaces: pinning a
+    Talk-bound room would insert it into `resolve_conversation_token`'s ladder
+    above the briefing token and the auto-DM, so a user whose Talk alerts land
+    in a briefing conversation today would find them somewhere else after an
+    upgrade. That is precisely what this migration exists to prevent, arriving
+    through the migration itself. It cannot be decided more finely from here:
+    briefings live in TOML and this runs inside `init_db`, which has no
+    `Config`. So it freezes what it can prove — the web guess — and declines to
+    make a Talk decision it cannot check. Those accounts keep '' and both
+    surfaces keep behaving exactly as they did; the control is there to choose.
+
+    Markered (`default_room_v1`) rather than "backfill any empty column", and
+    that distinction is the point: '' is a real value a user can choose, so a
+    re-run must not re-pin a setting somebody deliberately cleared. One gap
+    survives, knowingly: the marker is written after the loop, so a user who
+    clears the setting between a failed boot and its retry is re-pinned. A
+    per-user sentinel would close it and is not worth a second column for one
+    boot's window.
+
+    Accounts with no qualifying room stay empty and keep the provisioning path —
+    `ensure_default_web_chat_room` still mints them a `general` on first
+    delivery, which is what they got before this column existed.
+
+    The loop is O(users x rooms) reads inside `init_db`'s single upgrade
+    transaction, which the auto-update cron runs against a live daemon. Fine at
+    this scale and worth knowing before anything expensive is added to
+    `default_web_room`.
+    """
+    try:
+        already = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'default_room_v1'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+    if already:
+        return
+
+    try:
+        user_ids = [
+            r["user_id"] for r in conn.execute("SELECT user_id FROM user_profiles")
+        ]
+        for user_id in user_ids:
+            room = default_web_room(conn, user_id)
+            if room is None:
+                continue
+            if get_room_binding(conn, room.token, "talk") is not None:
+                continue  # would move this user's Talk delivery — see above
+            conn.execute(
+                "UPDATE user_profiles SET default_room = ? "
+                "WHERE user_id = ? AND default_room = ''",
+                (room.token, user_id),
+            )
+    except sqlite3.OperationalError as e:
+        # Scoped to the one table whose absence means "fresh install"
+        # (schema.sql runs after the migrations), rather than to "no such table"
+        # at large: the loop below touches six others, and marking the migration
+        # done because one of *those* is missing — a half-restored snapshot, or
+        # an earlier migration that failed on the same boot — would leave every
+        # profile '' forever, which is the silent drift this exists to prevent.
+        if "user_profiles" not in str(e).lower():
+            logger.warning("default_room backfill failed, will retry: %s", e)
+            return  # leave the marker unset so the next boot retries
+        # Fresh install: no pre-existing rows to protect, so the backfill is
+        # done by definition. Same per-step contract as `_migrate_room_members`'
+        # `tasks` branch.
+
+    conn.execute(
+        "INSERT OR IGNORE INTO _migration_state (name) VALUES ('default_room_v1')"
     )
 
 

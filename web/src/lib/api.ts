@@ -1253,6 +1253,11 @@ export interface UserProfile {
   max_foreground_workers: number;
   max_background_workers: number;
   default_destination: string;
+  // The room a destination naming no room of its own lands in — a canonical
+  // room token, '' for unset, when the per-surface default is worked out
+  // instead. One token for both surfaces: a promoted room answers on web and on
+  // Talk without being named twice (ISSUE-477).
+  default_room: string;
   routing: Record<string, string>;
   briefing_email_html: boolean;
   // Opt-in: follow the GPS timezone on travel (ISSUE-096). Off by default —
@@ -1264,6 +1269,39 @@ export interface UserProfile {
   external_turn_display: ExternalTurnDisplay;
   // Read-only hint from the server: surfaces available for delivery routing.
   delivery_surfaces?: string[];
+  // Read-only: the rooms a `web:<token>` route can name, oldest first. `default`
+  // marks the one a bare `web` route lands in, so the picker can say which room
+  // that is rather than leaving it unnamed (ISSUE-473).
+  web_rooms?: WebRoomOption[];
+  // Read-only: which of this profile's own web pins will swallow a delivery —
+  // the user is a member and the room is archived, gone or hidden. Its own key
+  // rather than a test of `web_rooms`, because absence from that list also
+  // covers a room with no handle yet and a failed lookup, both of which deliver
+  // perfectly well (ISSUE-478).
+  unavailable_web_rooms?: string[];
+  // Read-only: the Talk conversations a `talk:<token>` route can name — the two
+  // the bot provisioned, then every Talk-bound room the user is in. No
+  // `default` flag: a bare `talk` resolves per purpose, and each row says where
+  // in its own surface label (ISSUE-475).
+  talk_rooms?: TalkRoomOption[];
+}
+
+export interface WebRoomOption {
+  token: string;
+  name: string;
+  /** A bare `web` route lands here. */
+  default: boolean;
+  /** Somebody else is in it — the picker marks it. */
+  shared: boolean;
+  /** The user's machine-owned log or alerts room. */
+  channel: boolean;
+}
+
+export interface TalkRoomOption {
+  token: string;
+  name: string;
+  /** One of the two the bot provisioned — the picker marks it. */
+  channel: boolean;
 }
 
 /**
@@ -1306,10 +1344,10 @@ export interface UserBriefingRow {
   enabled: boolean;
 }
 
-export interface BriefingRoomOption {
-  token: string;
-  name: string;
-}
+// The same list the routing rows offer — `/settings/briefings` and
+// `/settings/profile` read one `_user_talk_rooms` rather than two answers to
+// "which Talk conversations" (ISSUE-475).
+export type BriefingRoomOption = TalkRoomOption;
 
 export async function getBriefings(): Promise<{
   briefings: UserBriefingRow[];

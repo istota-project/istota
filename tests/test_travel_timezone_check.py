@@ -132,6 +132,10 @@ class TestCheckTravelTimezone:
         message = notify.call_args.args[2]
         assert "Europe/Warsaw" in message
         assert "America/Los_Angeles" in message
+        # On the alert route, not `notification`: the settings page can only
+        # point `alert` at a room, so anything else lands in the user's main
+        # room whatever they set (ISSUE-476).
+        assert notify.call_args.kwargs["purpose"] == "alert"
 
     def test_is_quiet_when_the_user_has_not_moved(self, tmp_path):
         config = _config(tmp_path, timezone_name="Europe/Warsaw")

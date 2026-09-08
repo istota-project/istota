@@ -1571,7 +1571,9 @@ def _process_deferred_garmin_import(
     sandbox), so it writes ``task_<id>_garmin_import.json`` and the
     scheduler runs the import here, in the daemon process where
     ``ISTOTA_SECRET_KEY`` is in scope. The result is pushed back to the user
-    as a notification. User id always comes from the task.
+    on the ``alert`` route, which is where every other daemon-raised notice
+    goes and the only one the settings page can point at a room. User id
+    always comes from the task.
     """
     loaded = _load_deferred_json(
         user_temp_dir, task.id, "garmin_import", expected_type=dict,
@@ -1613,7 +1615,7 @@ def _process_deferred_garmin_import(
             config, task.user_id,
             "🗺️ Garmin track import couldn't run — Garmin isn't connected. "
             "Connect it in Settings → Connected services.",
-            purpose="notification",
+            purpose="alert",
         )
         path.unlink(missing_ok=True)
         return 0
@@ -1621,7 +1623,7 @@ def _process_deferred_garmin_import(
         send_notification(
             config, task.user_id,
             "🗺️ Garmin track import was rate-limited by Garmin — try again later.",
-            purpose="notification",
+            purpose="alert",
         )
         path.unlink(missing_ok=True)
         return 0
@@ -1642,7 +1644,7 @@ def _process_deferred_garmin_import(
             "🗺️ Garmin track import: no new GPS activities found in the last "
             f"{days_back} days."
         )
-    send_notification(config, task.user_id, msg, purpose="notification")
+    send_notification(config, task.user_id, msg, purpose="alert")
     logger.info(
         "Deferred garmin import task %d: inserted=%d activities=%d",
         task.id, result.inserted_total, result.activities,

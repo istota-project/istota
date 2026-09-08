@@ -139,7 +139,7 @@ Blocks and sources are also editable from the CLI (`istota briefings blocks|sour
 
 ### Delivery routing
 
-Each user has a default delivery surface (`default_destination`, defaults to `talk`) plus an optional purpose-keyed `routing` table that overrides it per purpose. The purposes are `reply`, `alert`, `log`, `briefing`, and `notification`; each maps to an `output_target` descriptor (`talk`, `email`, `ntfy`, `web`, `surface:channel`, or a comma list). Routing notifications by purpose (e.g. `alert = "ntfy"`) is what reroutes heartbeat and security alerts off Talk; the `log` purpose drives the verbose per-task execution log to any user-routable surface (it supersedes the legacy `log_channel` shorthand). `web` is a routable delivery surface — alerts, the execution log, and notifications routed to it land in a web chat room as system messages.
+Each user has a default delivery surface (`default_destination`, defaults to `talk`) plus an optional purpose-keyed `routing` table that overrides it per purpose. The purposes are `reply`, `alert`, `log`, `briefing`, and `notification`; each maps to an `output_target` descriptor (`talk`, `email`, `ntfy`, `web`, `surface:channel`, or a comma list). Routing notifications by purpose (e.g. `alert = "ntfy"`) is what reroutes heartbeat and security alerts off Talk; the `log` purpose drives the verbose per-task execution log to any user-routable surface (it supersedes the legacy `log_channel` shorthand). `alert` carries everything Istota raises on its own — heartbeat and security alerts, a job disabled after repeated failures, a held outbound draft, the deferred Garmin import's result, the travel-timezone notice. Nothing is sent on `notification`; it decides where inbound mail that names no conversation of its own surfaces, and falls through to `default_destination` on purpose, since that mail belongs in the user's main room rather than their alerts channel. `web` is a routable delivery surface — alerts, the execution log, and notifications routed to it land in a web chat room as system messages.
 
 Provision via the CLI:
 
@@ -150,7 +150,13 @@ istota user ensure -u alice \
   --route log=web:<room-token>
 ```
 
-`--route` is repeatable and validates the purpose against the allowed set. The web Preferences card surfaces `default_destination`, the `alert` route, and the `log` route; CLI-set routes for the other purposes are preserved on round-trip.
+A bare `web` lands in the user's **default room**, which `db.default_web_room` picks: their oldest room that nobody else is in, that is not a machine-owned log or alerts channel, that they have not hidden, and that still exists and is not archived. A user with no room that qualifies gets a `general` created for the purpose — or, if their only room is one they hid, that room back rather than a duplicate. The exclusions are what keep a personal alert out of a shared room.
+
+`web:<room-token>` names a room outright and skips those exclusions, since choosing one is deliberate. It is still checked: the web settings API refuses a token naming a room the caller is not a member of, so a saved route cannot write into a transcript they have no part in. The CLI and `config.toml` are not checked, being operator-set.
+
+`--route` is repeatable and validates the purpose against the allowed set. The web Preferences card surfaces `default_destination`, the `alert` route, and the `log` route; CLI-set routes for the other purposes are preserved on round-trip. The first two grow a second dropdown when the surface is `web`, listing the user's rooms — marking the shared and machine-owned ones, and naming the default — so a room can be pinned without knowing its token. A token is minted when the room is created, so it exists only after the room does: inventory and the CLI can pin a room that is already there, not one a deploy expects to appear.
+
+**The execution log does not offer `web`**, though a route set elsewhere still works and is still editable. Web chat renders each task's tool calls in the turn itself, and the surface is non-edit, so `LogChannelSubscriber` skips its live stream and a `web` log route delivers one final summary — a second copy of what the room is already showing. Talk, email and ntfy have no such view.
 
 ## User workspace files
 

@@ -16,6 +16,16 @@
     type NextcloudTokenStatus,
   } from '$lib/api';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
+  import {
+    joinDescriptor,
+    routeOptions,
+    routeRoom,
+    routeSurface,
+    hasRoom,
+    talkRoomOptions,
+    webRoomOptions,
+    withSurface,
+  } from '$lib/deliveryDescriptor';
   import { changedProfileFields } from '$lib/profilePatch';
   import {
     AppShell,
@@ -210,6 +220,7 @@
         // Normalize optional routing fields so the bindings are safe.
         profile.routing = profile.routing || {};
         profile.default_destination = profile.default_destination || 'talk';
+        profile.default_room = profile.default_room || '';
       }
       initialProfileJson = profile ? JSON.stringify(profile) : '';
       allModules = modResp.modules;
@@ -248,24 +259,12 @@
     return s && s.length ? s : BUILTIN_SURFACES;
   }
 
-  // Per-purpose route dropdown. `emptyValue`/`emptyLabel` is the leading no-op
-  // option; `talkLabel` spells out where the bare `talk` surface resolves for
-  // this purpose (the logs room vs the alerts channel) so it isn't ambiguous.
-  // A saved descriptor that isn't one of the offered surfaces (e.g. a
-  // CLI-set "talk:<token>" or "talk,email") is kept as an extra option so it
-  // shows and isn't silently dropped on re-save.
-  function routeOptions(
-    current: string,
-    opts: { emptyValue?: string; emptyLabel?: string; talkLabel?: string } = {},
-  ): SelectOption[] {
-    const { emptyValue = '', emptyLabel = '(default)', talkLabel = 'talk' } = opts;
-    const surfaces = deliverySurfaces();
-    const out: SelectOption[] = [{ value: emptyValue, label: emptyLabel }];
-    for (const s of surfaces) out.push({ value: s, label: s === 'talk' ? talkLabel : s });
-    if (current && current !== emptyValue && !surfaces.includes(current))
-      out.push({ value: current, label: current });
-    return out;
-  }
+  // The option lists themselves are in `$lib/deliveryDescriptor` — plain
+  // functions over plain data, so the rules in them (which surface a purpose
+  // omits, keeping a value that is no longer offered) are unit-tested rather
+  // than reached through a portal-backed dropdown.
+  const routeOpts = (current: string, opts?: Parameters<typeof routeOptions>[2]) =>
+    routeOptions(deliverySurfaces(), current, opts);
 
   // Labelled by what the reader gets, not by the stored token: "collapsed"
   // names the mechanism, and the choice being made is about how much of a
@@ -304,6 +303,71 @@
     if (v) next[purpose] = v;
     else delete next[purpose];
     profile.routing = next;
+  }
+
+  // The room half of a `web` or `talk` route (ISSUE-473, ISSUE-475). Both are
+  // surfaces whose destination is one room out of several the user has; email
+  // and ntfy have no room at all, so their rows show the surface dropdown alone.
+  // `emptyLabel` is passed only by the "Default room" row, where the leading
+  // option means "no room pinned" rather than "the room a bare `web` lands in"
+  // — which after ISSUE-477 is whatever this setting says, so naming it there
+  // would be circular.
+  const webRooms = (current: string, emptyLabel?: string) =>
+    webRoomOptions(
+      profile?.web_rooms || [],
+      current,
+      emptyLabel,
+      profile?.unavailable_web_rooms || [],
+    );
+  const talkRooms = (current: string, emptyLabel: string) =>
+    talkRoomOptions(profile?.talk_rooms || [], current, emptyLabel);
+
+  /** The room dropdown's options for whichever roomed surface the route is on.
+   * `bareTalkLabel` names where an unpinned `talk` lands for this purpose — the
+   * leading option the Talk picker needs and the web picker works out for
+   * itself. It is the only place that sentence appears: the surface dropdown
+   * beside it labels `talk` with the bare word (ISSUE-475). */
+  function roomOptionsFor(descriptor: string, bareTalkLabel: string): SelectOption[] {
+    const surface = routeSurface(descriptor);
+    const room = routeRoom(descriptor);
+    return surface === 'talk' ? talkRooms(room, bareTalkLabel) : webRooms(room);
+  }
+
+  function routeDescriptor(purpose: string): string {
+    return (profile?.routing || {})[purpose] || '';
+  }
+
+  // Both setters take `current` — the descriptor the row is *displaying*, not
+  // `routing[purpose]`. The two differ on the log row, where `logRouteValue`
+  // reads `talk` off a provisioned `log_channel` with no routing key behind it:
+  // deriving from the key there would join onto an empty surface and clear the
+  // route instead of pinning a conversation. Only `setRouteRoom` can reach that
+  // today, since the displayed fallback carries no room for `withSurface` to
+  // drop — but the two rows reading one value is what keeps it that way.
+  function setRouteSurface(purpose: string, current: string, value: string) {
+    setRoute(purpose, withSurface(current, value));
+  }
+
+  // The surface is read rather than hardcoded: the picker beside a `talk` route
+  // must write `talk:<token>`, not `web:<token>`.
+  function setRouteRoom(purpose: string, current: string, room: string) {
+    setRoute(purpose, joinDescriptor(routeSurface(current), room));
+  }
+
+  // The default destination names a transport and nothing else (ISSUE-475), so
+  // unlike the three routes it is read and written raw: `destinationOptions`
+  // keeps an operator-set `web:<token>` as its own option, and splitting it
+  // here would rewrite it to a bare surface on the next save.
+  //
+  // A room pinned here would be half-inert anyway. `default_destination` is the
+  // third rung of `resolve_destinations` and nothing else reads it — a task
+  // result takes its plan from `task.output_target` or the source-type default
+  // — so it governs notifications only, and *those* are what the alert route is
+  // for. It differs from the routes in one more way: there is always one, so
+  // clearing it falls back to `talk` rather than deleting a key.
+  function setDestination(value: string) {
+    if (!profile) return;
+    profile.default_destination = value || 'talk';
   }
 
   // A full page navigation, not `goto`: `/reconnect` is a server auth route that
@@ -394,6 +458,7 @@
         disabled_skills: profile.disabled_skills,
         disabled_modules: profile.disabled_modules,
         default_destination: profile.default_destination || 'talk',
+        default_room: profile.default_room || '',
         routing: profile.routing || {},
         timezone_follow_location: profile.timezone_follow_location,
         external_turn_display: profile.external_turn_display || 'collapsed',
@@ -675,49 +740,106 @@
             }}
           />
         </SettingsField>
+        <!-- `labelled={false}` on all three: the slot holds a Select, whose
+             bits-ui trigger is a <button> and so becomes a <label>'s implicit
+             control — and where a room dropdown sits beside it there are two of
+             them, so the caption would act on whichever came first. -->
         <SettingsField
+          labelled={false}
           label="Default delivery destination"
-          hint="Where your results and notifications go. Alerts can use a separate channel below."
+          hint="Which transport your results and notifications go out on. Where on that transport is the alert and log routes' business, below."
         >
-          <Select
-            value={profile.default_destination || 'talk'}
-            options={destinationOptions(profile.default_destination || 'talk')}
-            ariaLabel="Default delivery destination"
-            fullWidth
-            onValueChange={(v) => {
-              if (profile) profile.default_destination = v || 'talk';
-            }}
-          />
+          <div class="route-row">
+            <Select
+              value={profile.default_destination || 'talk'}
+              options={destinationOptions(profile.default_destination || 'talk')}
+              ariaLabel="Default delivery destination"
+              fullWidth
+              onValueChange={setDestination}
+            />
+          </div>
+        </SettingsField>
+        <!-- Beside `default_destination` because the two answer different
+             questions about one delivery: that row names the transport, this
+             one names the room on it. It stays off that row for the reason
+             ISSUE-475 gave — a room pinned there governs notifications only,
+             while this governs every destination that named no room, on both
+             surfaces at once. -->
+        <SettingsField
+          labelled={false}
+          label="Default room"
+          hint="Where a delivery that names no room of its own lands — both in web chat and, if the room is also on Talk, in Talk. Leave it automatic and the oldest room you are alone in is used, which changes if you archive that room."
+        >
+          <div class="route-row">
+            <Select
+              value={profile.default_room || ''}
+              options={webRooms(profile.default_room || '', 'Automatic')}
+              ariaLabel="Default room"
+              fullWidth
+              onValueChange={(v) => {
+                if (profile) profile.default_room = v || '';
+              }}
+            />
+          </div>
         </SettingsField>
         <SettingsField
+          labelled={false}
           label="Send alerts to"
-          hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. 'talk' uses your alerts channel; leave on (default) to use the default destination."
+          hint="Optional. Route alerts (heartbeat failures, security and policy notices) to a louder or separate channel, e.g. ntfy for push. 'talk' and 'web' both deliver into a room, which you can pick beside them. Leave on (default) to use the default destination."
         >
-          <Select
-            value={(profile.routing || {})['alert'] || ''}
-            options={routeOptions((profile.routing || {})['alert'] || '', {
-              talkLabel: 'talk (alerts channel)',
-            })}
-            ariaLabel="Alert delivery destination"
-            fullWidth
-            onValueChange={(v) => setRoute('alert', v)}
-          />
+          <div class="route-row">
+            <Select
+              value={routeSurface(routeDescriptor('alert'))}
+              options={routeOpts(routeSurface(routeDescriptor('alert')))}
+              ariaLabel="Alert delivery destination"
+              fullWidth
+              onValueChange={(v) => setRouteSurface('alert', routeDescriptor('alert'), v)}
+            />
+            {#if hasRoom(routeDescriptor('alert'))}
+              <Select
+                value={routeRoom(routeDescriptor('alert'))}
+                options={roomOptionsFor(routeDescriptor('alert'), 'Alerts channel (default)')}
+                ariaLabel="Alert delivery room"
+                fullWidth
+                onValueChange={(v) => setRouteRoom('alert', routeDescriptor('alert'), v)}
+              />
+            {/if}
+          </div>
         </SettingsField>
+        <!-- `web` is not offered here. Web chat already shows every task's tool
+             calls inline in the turn itself, so a log route to `web` posts a
+             second copy of what the room is displaying — and only the final
+             summary, since the surface is non-edit and the live stream is
+             skipped for it. The other three surfaces have no such view. An
+             existing `web` log route still shows and stays editable: it falls
+             through `routeOptions`' keep-the-current-value branch. -->
         <SettingsField
+          labelled={false}
           label="Send execution log to"
-          hint="Optional. The verbose per-task execution log — every tool call plus a final summary. 'talk' uses your logs channel; email and ntfy get a single final summary. (off) disables it."
+          hint="Optional. The verbose per-task execution log — every tool call plus a final summary. 'talk' delivers into a conversation, which you can pick beside it; email and ntfy get a single final summary. Web chat is not offered: it already shows each task's tool calls in the turn itself. (off) disables it."
         >
-          <Select
-            value={logRouteValue()}
-            options={routeOptions(logRouteValue(), {
-              emptyValue: 'none',
-              emptyLabel: '(off)',
-              talkLabel: 'talk (logs channel)',
-            })}
-            ariaLabel="Execution log destination"
-            fullWidth
-            onValueChange={(v) => setRoute('log', v)}
-          />
+          <div class="route-row">
+            <Select
+              value={routeSurface(logRouteValue())}
+              options={routeOpts(routeSurface(logRouteValue()), {
+                emptyValue: 'none',
+                emptyLabel: '(off)',
+                omit: ['web'],
+              })}
+              ariaLabel="Execution log destination"
+              fullWidth
+              onValueChange={(v) => setRouteSurface('log', logRouteValue(), v)}
+            />
+            {#if hasRoom(logRouteValue())}
+              <Select
+                value={routeRoom(logRouteValue())}
+                options={roomOptionsFor(logRouteValue(), 'Logs channel (default)')}
+                ariaLabel="Execution log room"
+                fullWidth
+                onValueChange={(v) => setRouteRoom('log', logRouteValue(), v)}
+              />
+            {/if}
+          </div>
         </SettingsField>
       </SettingsCard>
     {/if}
@@ -826,6 +948,19 @@
   .oauth-actions {
     display: flex;
     gap: var(--space-2);
+  }
+
+  /* A delivery route: the surface, and for `web` the room beside it. Wraps
+	     rather than shrinking, so the room name stays readable on a phone. */
+  .route-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .route-row > :global(*) {
+    flex: 1 1 12rem;
+    min-width: 0;
   }
 
   .module-toggles {

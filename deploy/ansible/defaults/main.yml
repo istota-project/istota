@@ -615,9 +615,16 @@ istota_experimental_features: []
 #     disabled_skills: []           # per-user skill exclusion list
 #     disabled_modules: []          # feeds, money, location
 #     # Delivery routing by purpose (reply, alert, log, briefing, notification).
-#     # Each maps to an output_target: talk / email / ntfy / all / talk:<room> /
-#     # comma list. Listed purposes REPLACE the stored table on each deploy; omit
-#     # `routing:` entirely to leave a web-set table alone (ISSUE-102).
+#     # Each maps to an output_target: talk / email / ntfy / web / all /
+#     # talk:<room> / web:<room> / comma list. Listed purposes REPLACE the stored
+#     # table on each deploy; omit `routing:` entirely to leave a web-set table
+#     # alone (ISSUE-102).
+#     #
+#     # A `web:<room>` token is minted when the room is created, so it does not
+#     # exist before the user's first visit and inventory can only name a room
+#     # that is already there. Settings → Delivery is the ordinary way to pin
+#     # one. A bare `web` needs no token: it lands in the user's default room,
+#     # which that same dropdown names.
 #     routing:
 #       alert: "ntfy"
 #       log: "talk:room123"         # Talk streams live; email/ntfy get one summary

@@ -3720,12 +3720,29 @@ const handlers: MockHandler[] = [
       max_foreground_workers: 0,
       max_background_workers: 0,
       default_destination: 'talk',
+      default_room: '',
       routing: {},
       briefing_email_html: true,
       timezone_follow_location: false,
       external_turn_display: 'collapsed',
       purposes: ['reply', 'alert', 'log', 'briefing', 'notification'],
-      delivery_surfaces: ['email', 'ntfy', 'talk'],
+      delivery_surfaces: ['email', 'ntfy', 'talk', 'web'],
+      web_rooms: [
+        {
+          token: 'web-alice-general',
+          name: 'general',
+          default: true,
+          shared: false,
+          channel: false,
+        },
+        { token: 'web-alice-ideas', name: 'ideas', default: false, shared: false, channel: false },
+      ],
+      unavailable_web_rooms: [],
+      talk_rooms: [
+        { token: 'alerts-tok', name: 'Alerts channel', channel: true },
+        { token: 'logs-tok', name: 'Logs channel', channel: true },
+        { token: 'conv-team', name: 'team', channel: false },
+      ],
     };
     let nextResourceId = 100;
     const mockDbResources: {

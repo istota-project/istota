@@ -1258,6 +1258,34 @@ class TestCmdMemory:
         assert "tech_0" not in result
 
     @pytest.mark.asyncio
+    async def test_facts_counts_the_future_expiry_it_renders(self, make_config):
+        """ISSUE-472: a graph of only future-expiry facts read as empty.
+
+        The header used to come from `get_fact_count`, which treated any
+        `valid_until` as historical, while the body came from
+        `get_current_facts`, which does not — so the count disagreed with the
+        list it labelled, and reached "(no facts)" over a populated graph.
+        """
+        from datetime import date, timedelta
+
+        config = make_config()
+        from istota.memory.knowledge_graph import ensure_table, add_fact
+        future = (date.today() + timedelta(days=30)).isoformat()
+        with db.get_db(config.db_path) as conn:
+            ensure_table(conn)
+            add_fact(conn, "alice", "alice", "interested_in", "sailing",
+                     valid_until=future)
+            add_fact(conn, "alice", "alice", "interested_in", "pottery",
+                     valid_until=future)
+            conn.commit()
+            AsyncMock()
+            result = await cmd_memory(_ctx(config, conn, "alice", "room1", "facts"))
+        assert "no facts" not in result
+        assert "2 facts" in result
+        assert "sailing" in result
+        assert "pottery" in result
+
+    @pytest.mark.asyncio
     async def test_facts_entity_filter(self, make_config):
         """!memory facts <entity> shows facts for that entity only."""
         config = make_config()
@@ -4240,3 +4268,37 @@ class TestIsModelPrefix:
             assert is_model_prefix(content) is (
                 parse_model_prefix(content, brain) is not None
             ), content
+
+
+class TestResolveRoomNameOnWeb:
+    """`!export` titles and `!search` result headings name a room through this.
+
+    A web room's name lives in two places: `rooms.name`, which every rename
+    writes, and the per-user `web_chat_rooms` handle, which is a mint-time
+    snapshot nothing refreshes. Reading the handle first showed the stale
+    placeholder (ISSUE-474).
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_prefers_the_registry_name(self, make_config):
+        from istota.commands import resolve_room_name
+
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "talk-1", "alice", origin="talk", name=None)
+            db.ensure_web_chat_handle(conn, "alice", "talk-1", "Talk room")
+            db.rename_room(conn, "talk-1", "team")
+            ctx = _ctx(config, conn, conversation_token="talk-1", surface="web")
+            assert await resolve_room_name(ctx, "talk-1") == "team"
+
+    @pytest.mark.asyncio
+    async def test_it_falls_back_to_the_handle_then_the_token(self, make_config):
+        from istota.commands import resolve_room_name
+
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "talk-1", "alice", origin="talk", name=None)
+            db.ensure_web_chat_handle(conn, "alice", "talk-1", "Talk room")
+            ctx = _ctx(config, conn, conversation_token="talk-1", surface="web")
+            assert await resolve_room_name(ctx, "talk-1") == "Talk room"
+            assert await resolve_room_name(ctx, "unknown-1") == "unknown-1"

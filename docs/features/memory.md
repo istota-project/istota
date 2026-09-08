@@ -51,6 +51,8 @@ Nightly extracts produced by the user sleep cycle, written to `/Users/{user_id}/
 - Prefers email summaries limited to 5 bullet points (2026-01-28, ref:1235)
 ```
 
+The date in the filename is the day the interactions happened, not the day the run fired. The cycle runs at the tail of its own lookback window (2am local, 3am UTC for channels), so `now` would name a day the window barely reaches into; the date comes from the window's midpoint instead (`_window_date_str`). A default 24-hour lookback therefore writes yesterday's date, in the user's timezone for the user cycle and in UTC for the channel one.
+
 Auto-loaded into prompts for the last `auto_load_dated_days` days (default 3, set 0 to disable). Files are skipped for briefings. Channel sleep cycle writes the same shape under `/Channels/{conversation_token}/memories/`.
 
 Files are pruned by age via `cleanup_old_memory_files()` using `[sleep_cycle] memory_retention_days` (0 = unlimited). The corresponding `memory_chunks` rows are pruned by the unified retention sweep described below.
@@ -125,7 +127,7 @@ The user sleep cycle (`process_user_sleep_cycle()` in `memory/sleep_cycle.py`) r
 3. **Build extraction prompt.** Includes the gathered data, the current USER.md (so Sonnet skips already-known facts), and a list of suggested predicates with usage hints. The prompt asks for three sections — `MEMORIES:` (bullets), `FACTS:` (JSON triples), `TOPICS:` (JSON map of `ref:N → category`).
 4. **Invoke** the configured brain (`make_brain(config.brain).execute`) text-only — no tools, no streaming, no sandbox; not via the task queue. The model defaults to the `extraction_model` role (`"general"`).
 5. **Parse the structured output.** A regex-based parser extracts the three sections; missing or malformed sections degrade gracefully (treat the whole response as memories, empty facts, empty topics). Personal attributes and relationships are routed to FACTS only — they're not duplicated as MEMORY bullets.
-6. **Write the dated memory file** to `memories/YYYY-MM-DD.md`. The sentinel `NO_NEW_MEMORIES` skips the write but still advances state.
+6. **Write the dated memory file** to `memories/YYYY-MM-DD.md`. The sentinel `NO_NEW_MEMORIES` skips the write but still advances state. An existing file for that date is appended to, not replaced — a catch-up run and the next scheduled run can share a window date, and each holds only the tasks the other didn't.
 7. **Insert facts** into `knowledge_facts` via `add_fact()` (with fuzzy dedup).
 8. **Pick a dominant topic** from the TOPICS map (most common across refs) and pass it to `index_file()` so the dated chunks inherit a topic.
 9. **Index** the dated memory file under `source_type = "memory_file"`.

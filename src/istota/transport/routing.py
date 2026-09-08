@@ -674,21 +674,30 @@ def _room_for_destination(
         candidate = channel
     elif surface == "talk":
         from ..notifications import resolve_conversation_token
+        # `conn` is passed, not left to be reopened: since ISSUE-477 that
+        # resolver reads the user's configured default room, and the web branch
+        # below states the rule — resolving a transcript room must not take a
+        # second connection on a database this caller already holds.
         candidate = (
             channel
             or talk_delivery_token
-            or resolve_conversation_token(config, user_id)
+            or resolve_conversation_token(config, user_id, conn)
         )
     elif surface == "web":
-        # Deliberately *not* `default_web_room_token`, which provisions a
-        # `general` room when the user has none and opens its own connection to
-        # do it. Resolving a transcript room must neither create one nor take a
-        # second write lock on a database this caller already holds.
+        # `db.default_web_room` rather than `default_web_room_token`, which
+        # provisions a `general` room when the user has none and opens its own
+        # connection to do it. Resolving a transcript room must neither create
+        # one nor take a second write lock on a database this caller already
+        # holds. Since ISSUE-473 the two agree on which rooms *qualify* — this
+        # used to keep an unfiltered copy of the rule and could name a room the
+        # delivery resolver would refuse — but only on that. Having no fallback,
+        # this answers None where delivery would invent or resurface a room, so
+        # a user with no qualifying room gets no transcript room here.
         if channel:
             candidate = channel
         else:
-            rooms = db.list_web_chat_rooms(conn, user_id, include_archived=False)
-            candidate = rooms[0].token if rooms else None
+            room = db.default_web_room(conn, user_id)
+            candidate = room.token if room else None
     else:
         return None
     if not candidate:

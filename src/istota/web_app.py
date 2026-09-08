@@ -3181,7 +3181,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
             out[r.token] = {
                 "id": handle.id,
                 "token": r.token,
-                "name": r.name or handle.name,
+                "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
                 "model": r.model,
@@ -4083,7 +4083,7 @@ def _chat_list_rooms(username: str) -> list[dict]:
                 handle = db.update_web_chat_room(conn, handle.id, archived=False) or handle
             db.add_room_binding(conn, r.token, "web", r.token)
             d = _room_to_dict(handle)
-            d["name"] = r.name or handle.name
+            d["name"] = db.room_display_name(r, handle)
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
             # Standing per-room model/effort default lives on the shared registry
@@ -4419,6 +4419,12 @@ def _chat_update_room(
             return None
         d = _room_to_dict(updated)
         reg = db.get_room(conn, updated.token)
+        # Registry first, for the reason `_promoted_room_dict` gives: the client
+        # spreads this response over its room record, so a colour-only or
+        # archive-only PATCH answering with the handle's mint-time name would
+        # overwrite a correct sidebar entry with the stale one (ISSUE-474). A
+        # rename is unaffected either way — it writes both rows.
+        d["name"] = db.room_display_name(reg, updated)
         d["model"] = reg.model if reg else None
         d["effort"] = reg.effort if reg else None
         d["brain"] = reg.brain if reg else None
@@ -4787,7 +4793,7 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
         if reg is None or reg.origin != "web":
             return "not_found", None  # only web-origin rooms promote
         existing = db.get_room_binding(conn, token, "talk")
-        name = reg.name or handle.name
+        name = db.room_display_name(reg, handle)
     if not _config.nextcloud.url:
         return "not_found", None
 
@@ -4919,15 +4925,14 @@ def _promoted_room_dict(room_id: int, token: str, talk_token: str) -> dict | Non
     """The room as the client should now see it, re-read so a change that landed
     during the OCS calls is not rolled back by the answer.
 
-    **The name comes from the registry first, as the listing builds it.**
-    `_room_to_dict` reads the `web_chat_rooms` handle, but `db.rename_room`
-    writes `rooms.name` only — and `transport.ingest` calls it whenever Talk
-    reports a different channel name — so a Talk-side rename landing during the
-    OCS calls would come back as the stale handle name and be adopted by the
-    client's spread-merge. `model` and `effort` ride along for the reason the
-    room PATCH carries them (ISSUE-342): this dict is merged into the client's
-    record, so a key the listing sends and this omits reads as absent to any
-    consumer that replaces rather than spreads.
+    **The name comes from the registry first**, through `db.room_display_name`,
+    as the listing builds it — `_room_to_dict` reads the `web_chat_rooms` handle,
+    so a Talk-side rename landing during the OCS calls would otherwise come back
+    as the stale handle name and be adopted by the client's spread-merge. That
+    helper's docstring has the rest. `model` and `effort` ride along for the
+    reason the room PATCH carries them (ISSUE-342): this dict is merged into the
+    client's record, so a key the listing sends and this omits reads as absent
+    to any consumer that replaces rather than spreads.
     """
     from . import db
     with db.get_db(_config.db_path) as conn:
@@ -4937,7 +4942,7 @@ def _promoted_room_dict(room_id: int, token: str, talk_token: str) -> dict | Non
         return None
     d = _room_to_dict(handle)
     if reg is not None:
-        d["name"] = reg.name or handle.name
+        d["name"] = db.room_display_name(reg, handle)
         d["model"] = reg.model
         d["effort"] = reg.effort
         d["brain"] = reg.brain
@@ -9728,8 +9733,11 @@ async def settings_delete_secret(
 _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "display_name":           {"type": "str"},
     "timezone":               {"type": "str"},
-    "log_channel":            {"type": "str"},
-    "alerts_channel":         {"type": "str"},
+    # `talk_channel`, not `str`: both are delivery targets the runtime config
+    # reads straight out of the row, so an unchecked write here is a standing
+    # post into any conversation whose token the caller has seen (ISSUE-475).
+    "log_channel":            {"type": "talk_channel"},
+    "alerts_channel":         {"type": "talk_channel"},
     "email_addresses":        {"type": "list[str]"},
     "trusted_email_senders":  {"type": "list[str]"},
     "quiet_email_senders":    {"type": "list[str]"},
@@ -9738,6 +9746,9 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "max_foreground_workers": {"type": "int"},
     "max_background_workers": {"type": "int"},
     "default_destination":    {"type": "descriptor"},
+    # A canonical room token, not a descriptor: it names where a destination
+    # that named no room lands, on whichever surface asks (ISSUE-477).
+    "default_room":           {"type": "room"},
     "routing":                {"type": "routing"},
     "briefing_email_html":    {"type": "bool"},
     "timezone_follow_location": {"type": "bool"},
@@ -9752,8 +9763,8 @@ def _registered_delivery_surfaces() -> list[str]:
     default destination, alert route).
 
     Only ``user_routable`` registered transports — ``talk`` / ``email`` /
-    ``ntfy``. Self-routing surfaces (``istota_file`` delivers back to its own
-    TASKS.md line; ``repl`` is the inline terminal) and the events-only
+    ``ntfy`` / ``web``. Self-routing surfaces (``istota_file`` delivers back to
+    its own TASKS.md line; ``repl`` is the inline terminal) and the events-only
     ``stream`` surface are held back from the UI; all still validate on the wire
     via ``_validate_descriptor_surfaces`` so programmatic / CLI descriptors keep
     working."""
@@ -9763,23 +9774,438 @@ def _registered_delivery_surfaces() -> list[str]:
     return sorted(make_registry(_config).routable_names())
 
 
-def _user_rooms(uc) -> list[dict]:
-    """Best-effort list of Talk room tokens the UI can offer as a specific
-    ``talk:<token>`` destination — the user's auto-provisioned ``log_channel`` /
-    ``alerts_channel`` rooms. Shared by the briefings and profile endpoints so a
-    routing dropdown can pin a concrete room instead of only the bare ``talk``
-    surface (which resolves to the user's default channel / DM)."""
-    rooms: list[dict] = []
+def _user_talk_channels(user_id: str) -> list[tuple[str, str]]:
+    """The user's two provisioned Talk channels as ``(label, token)``, in the
+    order the picker lists them.
+
+    The profile row first: it is what a save writes, so reading ``_config.users``
+    alone would offer a channel one save out of date. The config user is the
+    fallback for a user who has one from config.toml and no row yet.
+
+    A caveat that belongs to the whole pair rather than to this function.
+    ``_config.users`` is a snapshot rebuilt at startup and on SIGHUP, so a
+    channel changed through the web API is live here and stale in
+    ``notifications.resolve_destinations`` until a reload — the same staleness
+    `.claude/rules/web-chat.md` records for ``outbound_approval``. Reading the
+    row is still the right answer for a picker, which must show what the user
+    just saved; it means the "Alerts channel" option can name a conversation a
+    bare ``talk`` has not started resolving to yet. A pinned ``talk:<token>``
+    goes through the descriptor path and is unaffected.
+    """
+    from . import user_profiles
+
+    uc = _config.users.get(user_id) if _config else None
+    profile = None
+    if _config and _config.db_path:
+        try:
+            profile = user_profiles.get_profile(_config.db_path, user_id)
+        except Exception as e:  # pragma: no cover - defensive, mirrors the list
+            logger.warning("profile lookup failed for user %s: %s", user_id, e)
+
+    def pick(field: str) -> str:
+        return (getattr(profile, field, "") or getattr(uc, field, "") or "").strip()
+
+    out: list[tuple[str, str]] = []
     seen: set[str] = set()
-    if uc:
-        for label, token in (
-            ("Log channel", uc.log_channel),
-            ("Alerts channel", uc.alerts_channel),
-        ):
-            if token and token not in seen:
-                rooms.append({"token": token, "name": label})
-                seen.add(token)
-    return rooms
+    for label, field in (
+        ("Alerts channel", "alerts_channel"),
+        ("Logs channel", "log_channel"),
+    ):
+        token = pick(field)
+        if token and token not in seen:
+            out.append((label, token))
+            seen.add(token)
+    return out
+
+
+def _talk_member_refs(conn, user_id: str) -> dict[str, str]:
+    """Talk conversation ref -> display name, for the Talk-bound rooms
+    ``user_id`` is a member of.
+
+    **Raises rather than swallowing.** This is the query the authorization check
+    reads, and a lookup that fails has not established that a conversation is
+    somebody else's — returning a short list there would refuse a legitimate
+    save with a 400 blaming the user for a database problem. The rendering
+    wrapper `_user_talk_rooms` is the one that degrades, which is the opposite
+    policy and deliberately so.
+
+    Keyed by the ``talk`` binding's ``surface_ref`` rather than by the canonical
+    room token, because that ref is the Nextcloud conversation id a ``talk:``
+    leaf carries; on a promoted room the two differ.
+
+    An archived room is dropped, mirroring the web list — `archive_orphaned_talk_rooms`
+    sets that flag when the bot leaves a conversation, so its binding names a
+    room that is dead on Talk and every delivery to it would 404.
+    """
+    from . import db
+
+    out: dict[str, str] = {}
+    for room_token, talk_ref in db.talk_refs_for_member(conn, user_id).items():
+        if not talk_ref:
+            continue
+        room = db.get_room(conn, room_token)
+        if room is not None and room.archived:
+            continue
+        out.setdefault(talk_ref, db.room_display_name(room, None) or talk_ref)
+    return out
+
+
+def _talk_route_tokens(user_id: str) -> set[str]:
+    """The Talk conversations a ``talk:<token>`` route may name — the
+    authorization set behind `_validate_descriptor_rooms`.
+
+    The user's own provisioned channels plus `_talk_member_refs`. Including the
+    channels is only safe because writing them through the web API is itself
+    checked against the *registry* set alone (`_validate_talk_channel`): were it
+    not, a caller could `PUT {"alerts_channel": "<somebody else's token>"}` and
+    then pin a route to it, which is the whole check bypassed in two requests.
+    That is also why the channel write does not consult this function — the two
+    would authorize each other.
+    """
+    from . import db
+
+    tokens = {token for _, token in _user_talk_channels(user_id)}
+    if _config is None or not _config.db_path:
+        return tokens
+    with db.get_db(_config.db_path) as conn:
+        tokens |= set(_talk_member_refs(conn, user_id))
+    return tokens
+
+
+def _user_talk_rooms(user_id: str) -> list[dict]:
+    """The Talk conversations a ``talk:<token>`` route can name.
+
+    ``talk:<token>`` has been a valid descriptor everywhere and was offered
+    nowhere: the `talk (alerts channel)` / `talk (logs channel)` labels in the
+    routing rows are not picks, they are the bare `talk` value labelled with
+    where it resolves for that purpose. Wanting alerts in a different
+    conversation was CLI-or-config.toml only, which is the gap ISSUE-473 closed
+    for web and left open on the surface that has more rooms in it (ISSUE-475).
+
+    Two sources, in this order:
+
+    1. The user's provisioned ``alerts_channel`` / ``log_channel``. They are the
+       most useful picks and need not have registry rows at all, since
+       `provision_user_rooms` creates them on Nextcloud rather than here.
+    2. Every Talk-bound room the user is a member of, keyed by the room's
+       ``talk`` binding — a Nextcloud conversation id, which is what a
+       ``talk:`` leaf carries, rather than the canonical room token.
+
+    ``channel`` marks the first group, mirroring the flag `_user_web_rooms`
+    puts on the machine-owned web rooms.
+
+    **The picker's view of `_talk_route_tokens`,** which is the authorization
+    set — one rule rendered and enforced, so the dropdown cannot offer a
+    conversation the save then refuses (the split ISSUE-473 had to fix once
+    already for web). The two differ only in what they do when the lookup
+    fails: this one degrades so the routing rows still render, the other raises
+    so a database problem is a 500 rather than a 400 blaming the user.
+
+    The bot's 1:1 DM is deliberately absent. It is the last rung of the bare
+    `talk` ladder, so leaving a route bare still reaches it, and the only handle
+    on it is `transport.talk.inbound`'s in-memory poller cache — which is empty
+    until the poller has run. Listing it would make an authorization check
+    depend on process state, so a save that worked before a restart could fail
+    after one.
+    """
+    from . import db
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for label, token in _user_talk_channels(user_id):
+        out.append({"token": token, "name": label, "channel": True})
+        seen.add(token)
+
+    if _config is None or not _config.db_path:
+        return out
+    try:
+        with db.get_db(_config.db_path) as conn:
+            refs = _talk_member_refs(conn, user_id)
+    except Exception as e:
+        logger.warning("talk room lookup failed for user %s: %s", user_id, e)
+        return out
+
+    # `talk_refs_for_member` has no ORDER BY and the picker needs a stable one;
+    # by name, since that is what the reader scans.
+    for token, name in sorted(refs.items(), key=lambda kv: (kv[1], kv[0])):
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append({"token": token, "name": name, "channel": False})
+    return out
+
+
+def _user_web_rooms(user_id: str) -> list[dict]:
+    """The web chat rooms a ``web:<token>`` route can name, oldest first.
+
+    Each carries three flags: ``default`` (a bare ``web`` route lands here),
+    ``shared`` (somebody else is in it) and ``channel`` (it is the user's
+    machine-owned log or alerts room). The last two are the two classes
+    `db.default_web_room` refuses, and the picker offers them anyway — pinning
+    one is a deliberate choice, unlike the implicit default — but says which is
+    which, since delivering a personal alert into a room another person reads is
+    what ISSUE-473 is about.
+
+    Membership, not the handle, decides what is listed: a handle outlives
+    membership (a Talk-backed hide archives it rather than deleting it). It has
+    to stay a *subset* of what `_validate_descriptor_rooms` accepts, or the
+    dropdown offers a room the save then refuses — a subset, not an equality,
+    since the visibility filter below narrows this list and deliberately not
+    that check. Best-effort — delivery routing must still render when the DB is
+    unreachable.
+
+    **And membership is not sufficient on its own** (ISSUE-478). A room the
+    registry has archived and one the user has dismissed both keep their handle
+    and their `room_members` row, so a membership test passes them while the
+    sidebar hides both — and `_validate_descriptor_rooms` accepts a pin onto
+    one, `deliver` writes into it, and the alert lands in a transcript no
+    surface renders. The filter that was missing is visibility, which is
+    `db.visible_room`; it is emphatically **not** origin, since a Talk-origin
+    room bound to `web` is the room most users would actually pin (ISSUE-473).
+
+    **This narrows the list toward the sidebar's without making the two equal,
+    and the residue matters to one caller.** The sidebar is registry-driven and
+    mints what it needs as it goes; this is handle-driven for the ordering
+    reason below, so a member room with no handle yet, or one whose handle
+    carries a stale `archived` flag that `_chat_list_rooms` would clear on its
+    next listing, is visible there and absent here. Both deliver perfectly well.
+    So absence from this list is not evidence of anything, which is why the
+    `(unavailable)` mark in the settings page is driven by
+    `_unavailable_web_room_pins` rather than by a token failing to appear here.
+
+    The loop runs over handles rather than `db.list_member_rooms` because the
+    order has to be the one `db.default_web_room` picks in — oldest handle first,
+    not the registry's activity order — so the room flagged `default` here is the
+    room a bare `web` route actually lands in. The name still comes from the
+    registry, through `db.room_display_name`: reading the handle's own name here
+    is ISSUE-474.
+    """
+    from . import db
+
+    if _config is None or not _config.db_path:
+        return []
+    try:
+        with db.get_db(_config.db_path) as conn:
+            default = db.default_web_room(conn, user_id)
+            default_token = default.token if default else None
+            channels = db.channel_room_tokens(conn, user_id)
+            out: list[dict] = []
+            for r in db.list_web_chat_rooms(conn, user_id):
+                if not db.is_room_member(conn, r.token, user_id):
+                    continue
+                room = db.visible_room(conn, user_id, r.token)
+                if room is None:
+                    continue
+                others = set(db.list_room_members(conn, r.token)) - {user_id}
+                out.append({
+                    "token": r.token,
+                    # `or r.token`: the helper answers "" when neither row has a
+                    # name, and an option with an empty label is unpickable.
+                    "name": db.room_display_name(room, r) or r.token,
+                    "default": r.token == default_token,
+                    "shared": bool(others),
+                    "channel": r.token in channels,
+                })
+            return out
+    except Exception as e:
+        logger.warning("web room lookup failed for user %s: %s", user_id, e)
+        return []
+
+
+def _unavailable_web_room_pins(user_id: str, descriptors: list[str]) -> list[str]:
+    """Of the web rooms ``descriptors`` pin, the ones that will silently swallow
+    a delivery: ``user_id`` is a member, and `db.visible_room` refuses it.
+
+    **The picker cannot answer this by omission, which is what makes this a
+    server-side question** (ISSUE-478). `_user_web_rooms` is driven by the
+    per-user *handle* table while the sidebar is driven by the registry, so a
+    room can be perfectly visible and perfectly deliverable and still be absent
+    from the offered list: a Talk room whose owner has never opened `/chat` has
+    no handle yet — `ensure_web_chat_handle`'s only callers are the sidebar
+    listing and `ensure_default_web_chat_room` — and a room whose handle carries
+    a stale `archived` flag is dropped by `list_web_chat_rooms` while
+    `_chat_list_rooms` clears that flag and lists it. The list also degrades to
+    `[]` on any database error, since delivery routing has to render regardless.
+    So "not in the list" covers three states the client cannot tell apart, and
+    only one of them is a fault; a mark keyed on absence calls two working
+    routes broken, which is exactly the failure the Talk picker was spared.
+
+    **Membership is the gate, and it is doing security work rather than
+    filtering.** A token the user is not a member of gets no answer at all —
+    it stays merely unknown, and the dropdown falls back to the bare token. A
+    room token is not a secret but its *existence* is not ours to confirm, and
+    replying "unavailable" for a stranger's archived room while saying nothing
+    for one that does not exist turns this into the room-directory oracle
+    `_validate_descriptor_rooms` refuses to be (ISSUE-473). Membership is
+    already that check's own predicate, so nothing is disclosed here that the
+    save does not disclose anyway.
+
+    Best-effort, like the picker beside it: an unreachable database returns no
+    pins rather than every pin, since the mark is an assertion and a failed
+    lookup has established nothing.
+    """
+    from . import db
+    from .transport import parse_output_target
+
+    if _config is None or not _config.db_path:
+        return []
+    tokens: list[str] = []
+    for descriptor in descriptors:
+        if not descriptor:
+            continue
+        for dest in parse_output_target(descriptor):
+            if dest.surface == "web" and dest.channel and dest.channel not in tokens:
+                tokens.append(dest.channel)
+    if not tokens:
+        return []
+    try:
+        with db.get_db(_config.db_path) as conn:
+            return [
+                token for token in tokens
+                if db.is_room_member(conn, token, user_id)
+                and db.visible_room(conn, user_id, token) is None
+            ]
+    except Exception as e:
+        logger.warning("web room pin check failed for user %s: %s", user_id, e)
+        return []
+
+
+def _validate_descriptor_rooms(descriptor: str, user_id: str) -> None:
+    """Raise ValueError if a ``web:`` or ``talk:`` leaf names a room ``user_id``
+    is not a member of.
+
+    A room token is not a secret — the room settings pane offers a copy button —
+    and `WebTransport.deliver` checks only that the room exists, so without this
+    a saved route is a standing write into any transcript whose token the caller
+    has seen, on every alert (ISSUE-473). Membership rather than ownership: a
+    shared room is a legitimate deliberate choice.
+
+    **This is an authorization gate, and it is deliberately looser than the
+    offered list** (ISSUE-478). `_user_web_rooms` also drops a room that is
+    archived, deleted or dismissed; that is a liveness question rather than a
+    permission one, and a 400 out of this function would report it as the
+    latter. Nothing is lost by leaving it out: the picker can no longer offer
+    such a room, so a save cannot newly pin one from the UI, and an existing pin
+    is not re-judged either way — `_coerce_profile_value` validates a descriptor
+    only when it differs from the stored one, per purpose. What the user gets
+    instead is the `(unavailable)` mark on the pinned option, driven by
+    `_unavailable_web_room_pins`, which says the thing a 400 here would have
+    said at the point where it is true and where it can name the room.
+
+    Talk is checked on the same footing since ISSUE-475, because promoting
+    ``talk:<token>`` to a dropdown is what promoted it to a setting a user can
+    reach. The bot is a participant in every user's conversations, so a Talk
+    token names a transcript the bot can post to whether or not the caller has
+    any part in it — the same standing write, on the surface with more rooms in
+    it. What differs is the registry consulted: a ``web`` token is a row in the
+    room table, a ``talk`` one is a Nextcloud conversation id reached through a
+    room's ``talk`` binding, which is why the two ask different questions rather
+    than sharing one. ``ntfy`` / ``email`` carry no room at all.
+
+    The Talk set comes from `_talk_route_tokens`, which `_user_talk_rooms`
+    renders, so the offered list and the accepted set cannot drift.
+
+    The check is on the *web API* rather than in the descriptor grammar: an
+    operator setting a token through ``istota user ensure`` or config.toml is
+    trusted, and is also the one who would be repairing a room the user cannot
+    reach. That trust is preserved on the way through by the caller rather than
+    here — `_coerce_profile_value` skips a descriptor identical to the stored
+    one, so a value only an operator could have set is never re-judged by a save
+    that did not touch it. It has to be the caller's job because ``routing`` is
+    one field carrying three descriptors: the settings page diffs top-level
+    keys, so editing the alert route ships the log route with it, and without
+    that skip an operator-set log route would refuse the user's own unrelated
+    edit with no way to clear it from the UI.
+    """
+    from . import db
+    from .transport import parse_output_target
+
+    dests = parse_output_target(descriptor)
+    web_tokens = [d.channel for d in dests if d.surface == "web" and d.channel]
+    talk_tokens = [d.channel for d in dests if d.surface == "talk" and d.channel]
+    if _config is None or not _config.db_path:
+        return
+
+    for token in talk_tokens:
+        _validate_talk_route_token(token, user_id)
+
+    if not web_tokens:
+        return
+    with db.get_db(_config.db_path) as conn:
+        for token in web_tokens:
+            if not db.is_room_member(conn, token, user_id):
+                raise ValueError(f"web room {token!r} is not one of your rooms")
+
+
+def _validate_default_room(token: str, user_id: str) -> None:
+    """Raise ValueError if ``token`` is not a room ``user_id`` is a member of.
+
+    `default_room` is one canonical room token answering for both surfaces
+    (ISSUE-477), so the question it asks is the registry's — "is this one of
+    your rooms" — rather than either surface's. That is the same question the
+    ``web:`` leaf of a route asks, and the same predicate `_user_web_rooms`
+    builds the picker on, so the dropdown cannot offer a room the save refuses.
+
+    Not `_validate_talk_route_token`'s question, even though the setting answers
+    for Talk too: a `talk:` leaf carries a Nextcloud conversation id, and this
+    carries the room token that id is *bound to*. Checking the room the user is
+    in covers the binding by construction.
+    """
+    from . import db
+
+    if not token or _config is None or not _config.db_path:
+        return
+    with db.get_db(_config.db_path) as conn:
+        if not db.is_room_member(conn, token, user_id):
+            raise ValueError(f"room {token!r} is not one of your rooms")
+
+
+def _validate_talk_route_token(token: str, user_id: str) -> None:
+    """Raise ValueError if ``token`` is not a Talk conversation ``user_id`` may
+    deliver to.
+
+    The check behind a ``talk:<token>`` descriptor leaf and behind a briefing's
+    ``conversation_token``, which are two spellings of one question — where on
+    Talk this delivery lands — and so read one set, `_talk_route_tokens`.
+    """
+    if _config is None or not _config.db_path or not token:
+        return
+    if token not in _talk_route_tokens(user_id):
+        raise ValueError(
+            f"Talk conversation {token!r} is not one of your conversations"
+        )
+
+
+def _validate_talk_channel(token: str, user_id: str) -> None:
+    """Raise ValueError if ``token`` is not a Talk conversation ``user_id`` is in.
+
+    ``alerts_channel`` and ``log_channel`` are editable through this endpoint and
+    were plain strings, which made them the shortest path to the very thing
+    ISSUE-473 closed for web: `notifications.resolve_destinations` returns
+    ``Destination("talk", uc.alerts_channel)`` for the alert purpose, and
+    `user_profiles.merge_into_user_config` copies the row's value onto that
+    runtime config — so ``PUT {"alerts_channel": "<somebody else's token>"}``
+    redirected every alert into a transcript the caller has no part in, with no
+    descriptor involved at all. It also undercut the descriptor check, since
+    `_talk_route_tokens` counts these two as authorized.
+
+    Checked against `_talk_member_refs` alone, never `_talk_route_tokens`: the
+    stored channels are in the latter, so consulting it would let a bad value
+    re-authorize itself on every subsequent save.
+
+    Provisioning is unaffected — `provision_user_rooms` and ``istota user ensure``
+    write the row directly rather than through this endpoint, the same operator
+    exemption `_validate_descriptor_rooms` documents.
+    """
+    from . import db
+
+    if not token or _config is None or not _config.db_path:
+        return
+    with db.get_db(_config.db_path) as conn:
+        if token not in _talk_member_refs(conn, user_id):
+            raise ValueError(
+                f"Talk conversation {token!r} is not one of your conversations"
+            )
 
 
 _BUILTIN_DELIVERY_SURFACES = frozenset({
@@ -9804,8 +10230,25 @@ def _validate_descriptor_surfaces(descriptor: str) -> None:
             raise ValueError(f"unknown delivery surface: {dest.surface}")
 
 
-def _coerce_profile_value(field: str, value: object) -> object:
-    """Validate + coerce a profile field. Raises ValueError on bad input."""
+def _coerce_profile_value(
+    field: str, value: object, user_id: str, stored: object = None,
+) -> object:
+    """Validate + coerce a profile field. Raises ValueError on bad input.
+
+    ``stored`` is the value already on the profile row, and it decides one thing
+    only: whether a room-bearing value is *re-judged*. A descriptor identical to
+    the stored one is left alone, because the only writers that can reach a
+    conversation this API would refuse are the trusted ones — the CLI, config.toml,
+    provisioning — and a save that did not change the value is not the place to
+    overturn them. A *changed* value is always checked, so the hole stays shut in
+    the direction that matters.
+
+    Without it the check fires on values nobody edited. ``routing`` is a single
+    field carrying every purpose, and `changedProfileFields` diffs top-level keys,
+    so editing the alert route re-submits the log route unchanged — and an
+    operator-set log route would then 400 the user's own edit, on a row the
+    settings page offers no way to correct.
+    """
     spec = _PROFILE_EDITABLE_FIELDS.get(field)
     if spec is None:
         raise ValueError(f"unknown profile field: {field}")
@@ -9867,6 +10310,28 @@ def _coerce_profile_value(field: str, value: object) -> object:
                 f"{field} must be one of: {', '.join(allowed)}",
             )
         return value
+    if t == "talk_channel":
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+        value = value.strip()
+        if value and value != ((stored or "") if isinstance(stored, str) else ""):
+            _validate_talk_channel(value, user_id)
+        return value
+    if t == "room":
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+        value = value.strip()
+        # Same membership check the `web:` leaf of a route gets, and the same
+        # skip when the value did not change: an operator-set room the registry
+        # cannot vouch for must not refuse the user's own unrelated edit, on a
+        # row the page offers no way to correct. See `_validate_descriptor_rooms`.
+        if value and value != ((stored or "") if isinstance(stored, str) else ""):
+            _validate_default_room(value, user_id)
+        return value
     if t == "descriptor":
         from .transport import parse_output_target
         if value is None or value == "":
@@ -9879,6 +10344,8 @@ def _coerce_profile_value(field: str, value: object) -> object:
         if not parse_output_target(value):
             raise ValueError(f"{field} is not a valid delivery descriptor")
         _validate_descriptor_surfaces(value)
+        if value != stored:
+            _validate_descriptor_rooms(value, user_id)
         return value
     if t == "routing":
         from .notifications import PURPOSES
@@ -9887,6 +10354,7 @@ def _coerce_profile_value(field: str, value: object) -> object:
             return {}
         if not isinstance(value, dict):
             raise ValueError(f"{field} must be an object")
+        prior = stored if isinstance(stored, dict) else {}
         out: dict[str, str] = {}
         for purpose, descriptor in value.items():
             if purpose not in PURPOSES:
@@ -9907,6 +10375,8 @@ def _coerce_profile_value(field: str, value: object) -> object:
             if not parse_output_target(descriptor):
                 raise ValueError(f"route {purpose} is not a valid descriptor")
             _validate_descriptor_surfaces(descriptor)
+            if descriptor != prior.get(purpose):
+                _validate_descriptor_rooms(descriptor, user_id)
             out[purpose] = descriptor
         return out
     raise ValueError(f"unsupported field type: {t}")  # pragma: no cover
@@ -9941,11 +10411,21 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "max_foreground_workers": profile.max_foreground_workers,
         "max_background_workers": profile.max_background_workers,
         "default_destination": profile.default_destination,
+        "default_room": profile.default_room,
         "routing": profile.routing,
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,
         "external_turn_display": profile.external_turn_display or "collapsed",
         "delivery_surfaces": _registered_delivery_surfaces(),
+        "web_rooms": _user_web_rooms(user["username"]),
+        # Which of this profile's own web pins are dead, asked of the server
+        # rather than inferred from the list above — see
+        # `_unavailable_web_room_pins` for why absence from it proves nothing.
+        "unavailable_web_rooms": _unavailable_web_room_pins(
+            user["username"],
+            [profile.default_destination or "", *profile.routing.values()],
+        ),
+        "talk_rooms": _user_talk_rooms(user["username"]),
     }}
 
 
@@ -9966,12 +10446,21 @@ async def settings_update_profile(
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be an object")
 
+    # Read once, before coercion: a room-bearing value identical to the stored
+    # one is not re-judged, so an operator-set descriptor survives a save that
+    # merely resubmitted it (see `_coerce_profile_value`).
+    current = None
+    if _config is not None and _config.db_path:
+        current = user_profiles.get_profile(_config.db_path, user["username"])
+
     coerced: dict[str, object] = {}
     for field, value in payload.items():
         if field not in _PROFILE_EDITABLE_FIELDS:
             raise HTTPException(status_code=400, detail=f"unknown field: {field}")
         try:
-            coerced[field] = _coerce_profile_value(field, value)
+            coerced[field] = _coerce_profile_value(
+                field, value, user["username"], getattr(current, field, None),
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -10027,13 +10516,13 @@ def _briefing_to_dict(b, *, managed: str) -> dict:
 async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
     """List the current user's briefings, merged from TOML + DB.
 
-    Response: ``{"briefings": [{...}], "rooms": [{token, name}]}``.
+    Response: ``{"briefings": [{...}], "rooms": [{token, name, channel}]}``.
     Each entry carries ``managed: "config" | "db"`` so the UI can render
-    TOML rows as read-only. ``rooms`` is a best-effort list of Talk room
-    tokens the bot can use as the briefing destination — currently
-    populated from the user's auto-provisioned ``log_channel`` /
-    ``alerts_channel`` (Phase 1) so the UI can offer them as picks
-    without exposing every Talk room the bot can see.
+    TOML rows as read-only. ``rooms`` is the Talk conversations a briefing can
+    be delivered to — the same `_user_talk_rooms` list the routing rows offer,
+    rather than a second answer to the same question (ISSUE-475). The briefings
+    form still asks for the token as free text; pointing it at this list is the
+    obvious follow-on and is not part of that change.
     """
     if _config is None:
         return {"briefings": [], "rooms": []}
@@ -10064,15 +10553,23 @@ async def settings_briefings(user: dict = Depends(_require_api_auth)) -> dict:
 
     return {
         "briefings": out,
-        "rooms": _user_rooms(uc),
+        "rooms": _user_talk_rooms(user["username"]),
         "outputs": _registered_delivery_surfaces(),
     }
 
 
-def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
+def _validate_briefing_payload(
+    payload: dict, *, name_required: bool, user_id: str,
+) -> dict:
     """Common shape check for POST/PUT briefing endpoints.
 
     Returns the cleaned dict. Raises HTTPException on bad input.
+
+    ``user_id`` is here for the room checks. A briefing is a delivery route on a
+    cron schedule, so an unchecked ``output`` or ``conversation_token`` is the
+    same standing write ISSUE-473 closed for the alert route, repeating on a
+    timer — and it sits one row below it on the same settings page, which is
+    where the asymmetry would have been most visible (ISSUE-475).
     """
     from fastapi import HTTPException
 
@@ -10100,6 +10597,7 @@ def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
     # while the UI offers only ``_registered_delivery_surfaces()``.
     try:
         _validate_descriptor_surfaces(output)
+        _validate_descriptor_rooms(output, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -10111,6 +10609,13 @@ def _validate_briefing_payload(payload: dict, *, name_required: bool) -> dict:
             status_code=400,
             detail=f"conversation_token is required when output is {output!r}",
         )
+    # The token is a second way to name the room, so it takes the same check the
+    # descriptor's own `talk:<token>` leaf takes — otherwise a bare `talk`
+    # output plus a token is the unguarded path around it.
+    try:
+        _validate_talk_route_token(token, user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     enabled = payload.get("enabled", True)
     if not isinstance(enabled, bool):
@@ -10143,7 +10648,9 @@ async def settings_add_briefing(
     if _config is None:
         raise HTTPException(status_code=503, detail="config not loaded")
 
-    cleaned = _validate_briefing_payload(payload, name_required=True)
+    cleaned = _validate_briefing_payload(
+        payload, name_required=True, user_id=user["username"],
+    )
     try:
         briefing, state = _ub.ensure_briefing(
             _config.db_path,

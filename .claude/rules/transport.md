@@ -1346,8 +1346,9 @@ of them.
   order: **(0)** `tasks.talk_delivery_token`
   when set, absolutely; **(1)** the task's room's `talk` binding; **(2)**
   `conversation_token` itself, when the task has one and is not email-sourced;
-  **(3)** `notifications.resolve_conversation_token` (alerts → briefing →
-  auto-DM) for an email task whose token is a synthetic 16-char hex thread hash
+  **(3)** `notifications.resolve_conversation_token` (alerts → configured
+  `default_room` → briefing → auto-DM) for an email task whose token is a
+  synthetic 16-char hex thread hash
   naming no Talk room. No token and no room gives `None`, deliberately *not* the
   alerts ladder — a task with nothing to deliver to is not an email thread hash
   needing redirection. A synthetic token that resolves to nothing is returned
@@ -1399,10 +1400,15 @@ Distinct from `resolve_delivery_plan` (which routes task *results* by
 - **`send_notification(..., surface=None, purpose=None)`** — an explicit
   `surface` wins (e.g. a heartbeat check's own channel, push.py's `ntfy`); else
   `purpose` resolves through the routing table; else bare `talk`. This is what
-  makes `routing={"alert": "ntfy"}` actually reroute alerts. Wired purposes:
-  heartbeat alerts (`effective_alert_surface` — a check with no explicit
-  `channel` defers to `routing["alert"]`), policy-refusal + deferred
-  security/action alerts (`alert`), email-sent notices (`notification`).
+  makes `routing={"alert": "ntfy"}` actually reroute alerts. Every
+  daemon-raised notice sends on `alert`: heartbeat alerts
+  (`effective_alert_surface` — a check with no explicit `channel` defers to
+  `routing["alert"]`), policy-refusal and deferred security/action alerts, a
+  stored notification's delivery (`notification_sources.DEFAULT_PURPOSE`), the
+  deferred Garmin import's result and the travel-timezone notice. Anything the
+  bot pushes at a user unprompted belongs there — it is the only route the
+  settings page can point at a room, so a purpose no UI surfaces is a message
+  the user cannot move.
 - Set via `istota user ensure --route purpose=descriptor` (validated against
   `PURPOSES`) or the web `/settings` Preferences card; both go through the same
   `user_profiles.routing` JSON column. The CLI can set any purpose. The web card
@@ -1414,9 +1420,12 @@ Distinct from `resolve_delivery_plan` (which routes task *results* by
   it supersedes). The remaining purposes are still UI-dead — `briefing`
   duplicates each briefing's own `conversation_token`, `reply` is vestigial
   (result delivery routes via `resolve_delivery_plan`/`output_target`, not the
-  routing table), and `notification` falls to the default. The web card
-  preserves any CLI-set non-surfaced routes on round-trip rather than stripping
-  them.
+  routing table), and nothing sends on `notification` any more (ISSUE-476).
+  Its one remaining reader is `routing.routed_notification_room`, which asks it
+  where inbound mail naming no conversation of its own should surface; that
+  falls through to `default_destination` on purpose — such mail belongs in the
+  user's main room, not their alerts channel. The web card preserves any
+  CLI-set non-surfaced routes on round-trip rather than stripping them.
 
 ## Deliberate residuals (ISSUE-113, closed)
 

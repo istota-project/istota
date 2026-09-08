@@ -1,0 +1,157 @@
+/**
+ * The "Default room" row (ISSUE-477).
+ *
+ * A destination naming no room — a bare `web` or a bare `talk` — had to land
+ * somewhere, and nothing the user set decided where: web guessed at their
+ * oldest private room, and the guess moved when they archived it. This is the
+ * control that makes it a setting, beside `default_destination` because the two
+ * answer different halves of one delivery — that row names the transport, this
+ * one names the room on it.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
+import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
+import type { User, UserProfile } from '$lib/api';
+
+const GENERAL = 'web-alice-general';
+const IDEAS = 'web-alice-ideas';
+
+function profile(defaultRoom = ''): UserProfile {
+  return {
+    user_id: 'alice',
+    display_name: 'Alice',
+    timezone: 'UTC',
+    email_addresses: [],
+    trusted_email_senders: [],
+    quiet_email_senders: [],
+    log_channel: '',
+    alerts_channel: '',
+    disabled_skills: [],
+    disabled_modules: [],
+    max_foreground_workers: 0,
+    max_background_workers: 0,
+    routing: {},
+    default_destination: 'talk',
+    default_room: defaultRoom,
+    briefing_email_html: true,
+    timezone_follow_location: false,
+    external_turn_display: 'collapsed',
+    delivery_surfaces: ['talk', 'email', 'ntfy', 'web'],
+    web_rooms: [
+      { token: GENERAL, name: 'general', default: true, shared: false, channel: false },
+      { token: IDEAS, name: 'ideas', default: false, shared: false, channel: false },
+    ],
+  };
+}
+
+const api = vi.hoisted(() => ({}) as ApiDouble);
+vi.mock('$lib/api', () => api);
+const currentProfile = vi.hoisted(() => ({ value: null as UserProfile | null }));
+await fillApiDouble(api, {
+  getSettingsServices: vi.fn(async () => ({ services: [] })),
+  getModules: vi.fn(async () => ({ modules: [] })),
+  getProfile: vi.fn(async () => ({ profile: currentProfile.value })),
+  updateProfile: vi.fn(async () => ({})),
+  disconnectNextcloudToken: vi.fn(async () => ({})),
+  uploadAvatar: vi.fn(async () => ({ hash: 'h1', mime: 'image/webp', bytes: 1 })),
+  deleteAvatar: vi.fn(async () => ({ deleted: true })),
+  avatarUrl: vi.fn(() => '/api/avatars/user/alice'),
+});
+
+vi.mock('$lib/platform/native', () => ({
+  isNativeShell: vi.fn(() => false),
+  shellVersion: vi.fn(() => null),
+  shellAtLeast: vi.fn(() => false),
+  onKeyboardGeometry: vi.fn(() => () => {}),
+}));
+
+import Page from './+page.svelte';
+import Harness from '$lib/currentUserHarness.test.svelte';
+
+const person: User = {
+  username: 'alice',
+  display_name: 'Alice',
+  bot_name: 'Istota',
+  is_admin: false,
+  features: {
+    chat: true,
+    feeds: false,
+    location: false,
+    money: false,
+    health: false,
+    briefings: false,
+    google_workspace: false,
+    google_workspace_enabled: false,
+    admin: false,
+  },
+};
+
+const renderPage = () => render(Harness, { component: Page, user: person });
+
+/** The bits-ui trigger renders as a button carrying the control's aria-label. */
+const control = (label: string) => screen.queryByRole('button', { name: label });
+
+async function settled() {
+  await waitFor(() => expect(screen.getByText('Appearance')).toBeInTheDocument());
+}
+
+beforeEach(() => {
+  currentProfile.value = profile();
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+describe('the default room', () => {
+  it('is a row of its own, beside the transport it is not part of', async () => {
+    renderPage();
+    await settled();
+    expect(control('Default room')).toBeTruthy();
+    // `default_destination` still names a transport and nothing else
+    // (ISSUE-475), so this control did not reintroduce a room on that row.
+    expect(control('Default delivery destination')).toBeTruthy();
+    expect(control('Default delivery room')).toBeNull();
+  });
+
+  it('reads "Automatic" when nothing is pinned', async () => {
+    // Not "Default room (general)" — the web picker's leading option names the
+    // room a bare `web` lands in, and here that room is whatever this control
+    // says, so naming it would be circular.
+    renderPage();
+    await settled();
+    expect(control('Default room')).toHaveTextContent('Automatic');
+  });
+
+  it('shows the pinned room when one is set', async () => {
+    currentProfile.value = profile(IDEAS);
+    renderPage();
+    await settled();
+    expect(control('Default room')).toHaveTextContent('ideas');
+  });
+
+  it('keeps an operator-set room the list does not carry', async () => {
+    // Same reason `routeOptions` keeps a withdrawn surface: a room pinned from
+    // the CLI, or one since archived, must stay visible and editable rather
+    // than rendering blank and being cleared by the next save.
+    currentProfile.value = profile('room-set-by-operator');
+    renderPage();
+    await settled();
+    expect(control('Default room')).toHaveTextContent('room-set-by-operator');
+  });
+
+  it('offers a shared room, marked, rather than withholding it', async () => {
+    // The exclusions on the heuristic are about keeping a *guess* out of a room
+    // somebody else reads. Pinning one deliberately is allowed, and the mark is
+    // what makes it an informed choice.
+    currentProfile.value = profile();
+    currentProfile.value.web_rooms = [
+      { token: GENERAL, name: 'general', default: true, shared: false, channel: false },
+      { token: 'shared-1', name: 'team', default: false, shared: true, channel: false },
+    ];
+    renderPage();
+    await settled();
+    expect(control('Default room')).toBeTruthy();
+    expect(screen.getByLabelText('Default room')).toBeTruthy();
+  });
+});

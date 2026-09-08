@@ -336,8 +336,10 @@ async def resolve_room_name(ctx: CommandContext, token: str) -> str:
     """Resolve a channel token to a human-readable name, surface-agnostically.
 
     Talk goes through the registered transport's ``resolve_channel_name`` (an OCS
-    read); web chat reads the room's stored name; any other surface falls back to
-    the opaque token.
+    read); web chat reads the room's stored name, registry first — the per-user
+    handle is a mint-time snapshot and can still hold the ``"Talk room"``
+    placeholder long after the room has a real title (ISSUE-474). Any other
+    surface falls back to the opaque token.
     """
     if not token:
         return token
@@ -351,9 +353,12 @@ async def resolve_room_name(ctx: CommandContext, token: str) -> str:
                 return token
     if ctx.surface == "web":
         try:
-            room = db.get_web_chat_room_by_token(ctx.conn, token)
-            if room is not None and room.name:
-                return room.name
+            name = db.room_display_name(
+                db.get_room(ctx.conn, token),
+                db.get_web_chat_room_by_token(ctx.conn, token),
+            )
+            if name:
+                return name
         except Exception:
             pass
     return token
@@ -1806,13 +1811,15 @@ async def cmd_memory(ctx: CommandContext):
 
     if target == "facts":
         try:
-            from .memory.knowledge_graph import ensure_table, get_current_facts, get_fact_count, format_facts_for_prompt
+            from .memory.knowledge_graph import ensure_table, get_current_facts, format_facts_for_prompt
             ensure_table(conn)
-            counts = get_fact_count(conn, user_id)
-            total = counts["current"]
+            # Count the list this renders rather than asking a counter for the
+            # same number — that split is what let the header disagree with the
+            # body it labels (ISSUE-472).
+            facts = get_current_facts(conn, user_id)
+            total = len(facts)
             if total == 0:
                 return "**Knowledge graph:** (no facts)"
-            facts = get_current_facts(conn, user_id)
             text = format_facts_for_prompt(facts)
             if total <= 20:
                 return f"**Knowledge graph** ({total} facts):\n\n{text}"

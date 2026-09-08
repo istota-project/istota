@@ -417,3 +417,34 @@ class TestCrossRoomViewExpansion:
             assert db.set_message_starred(conn, mid, "u", True) is True
             starred = db.list_messages_across_rooms(conn, "u", view="starred", limit=50)
             assert [r["body"] for r in starred] == ["cross-room block"]
+
+    def test_a_nameless_room_still_names_itself_from_the_handle(self, db_path):
+        """The client hides the room chip on an empty name, so a room registered
+        before Talk reported a title showed no room at all in these panes. Same
+        registry-first rule as `db.room_display_name`, in SQL (ISSUE-474)."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "r", "u", origin="talk", name=None)
+            db.add_room_member(conn, "r", "u")
+            db.ensure_web_chat_handle(conn, "u", "r", "Talk room")
+            _store(conn, _task("r"), "a message")
+
+            rows = db.list_messages_across_rooms(conn, "u", view="all", limit=50)
+            assert [r["room_name"] for r in rows] == ["Talk room"]
+
+            # And the registry still wins once the backfill lands.
+            db.rename_room(conn, "r", "team")
+            rows = db.list_messages_across_rooms(conn, "u", view="all", limit=50)
+            assert [r["room_name"] for r in rows] == ["team"]
+
+    def test_a_nameless_room_with_no_handle_reports_no_name(self, db_path):
+        """The negative control: the fallback is the reader's own handle, not
+        somebody else's. Membership does not imply a handle."""
+        with db.get_db(db_path) as conn:
+            db.register_room(conn, "r", "u", origin="talk", name=None)
+            db.add_room_member(conn, "r", "u")
+            db.add_room_member(conn, "r", "other")
+            db.ensure_web_chat_handle(conn, "other", "r", "other's label")
+            _store(conn, _task("r"), "a message")
+
+            rows = db.list_messages_across_rooms(conn, "u", view="all", limit=50)
+            assert [r["room_name"] for r in rows] == [None]
