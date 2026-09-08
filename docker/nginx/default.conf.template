@@ -103,7 +103,16 @@ server {
     #
     # Buffering off and a long read timeout because `/spreed` is a websocket
     # that stays open for the life of a client's session.
+    #
+    # `absolute_redirect off` for the reason the Host comment above gives: a
+    # request for the prefix without its trailing slash gets nginx's own 301,
+    # and nginx builds that `Location` from `$host` and `$scheme` — the port
+    # stripped, and http even behind TLS termination. Nothing Talk does hits
+    # it, since both clients append `/spreed` or `/api/v1/...`, but an operator
+    # pasting the registered URL into a browser does. A relative `Location`
+    # cannot be wrong about either.
     location /standalone-signaling/ {
+        absolute_redirect off;
         rewrite ^/standalone-signaling/(.*)$ /$1 break;
         proxy_pass http://$upstream_signaling;
         proxy_http_version 1.1;
