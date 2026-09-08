@@ -95,6 +95,8 @@ Two changes worth knowing about because they change what is stored. Feeds no lon
 
 ### Changed
 
+- The retired `BRIEFINGS.md` example is gone from your workspace. `{bot_dir}/examples/BRIEFINGS.md` was a note saying the file was no longer read and could be deleted; that has been on every workspace since the retirement and now lives in the briefings docs instead. It is removed on the next refresh rather than left behind, since `examples/` is rewritten by Istota on every task and a file it has stopped writing has nothing keeping it current. Your own `config/BRIEFINGS.md`, if you have one, is untouched — it is your file, and it is still inert.
+
 - Relative timestamps read the same everywhere in the web UI. The notification bell, the admin dashboard, the location page and the device tracker card each carried their own version, and the four disagreed: one rounded up, so 90 seconds read as "2 min ago"; two counted backwards for a row stamped by a clock slightly ahead of yours; and one rendered `NaNd ago` for a timestamp it could not read. All four now round down, read a future timestamp as `just now`, and show an unreadable one as it arrived. Past thirty days they stop counting days and show a date instead, which is what a dormant account or a long-idle scheduled job reaches; the admin dashboard keeps its seconds under a minute, since that page refreshes on a timer and its liveness figures are being asked exactly that.
 
 - The admin dashboard's file-size and uptime figures now match the ones shown elsewhere in the app. Its size rounding disagreed with the health document list, so the same number read as `1.5 KB` on one screen and `2 KB` on the other. Uptime now pads its minutes, so it reads `1h 05m` like every other duration the app and the CLI show.
