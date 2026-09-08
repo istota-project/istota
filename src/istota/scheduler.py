@@ -2242,28 +2242,121 @@ def _execute_command_task(
         return False, error
 
 
+def _record_deferred_handler_failure(
+    config: Config, task: db.Task, name: str, exc: BaseException,
+) -> None:
+    """Record a deferred-op handler that raised, on the daemon log and on the
+    task row. Called from inside the drain's own except, so it must not raise.
+
+    **The task stays `completed`.** It produced its answer and the row was
+    written before the drain ran, so failing it here would put a task that
+    already succeeded back on the retry ladder and re-execute the whole thing
+    — and anything reading the row has been told it succeeded already. This
+    record is what stands in for the status change: without it the only trace
+    was the worker's own catch at the bottom of `UserWorker.run`, one line
+    with no stack, for a drain that had silently been cut short.
+    """
+    logger.error(
+        "Deferred %s handler failed for task %d (%s); the task stays completed",
+        name, task.id, type(exc).__name__, exc_info=True,
+    )
+    try:
+        # A bounded lock wait, not `get_db`'s 30s default. This is a
+        # best-effort audit write on a path whose whole point is to cost the
+        # task nothing, and it runs once per failing handler — at the default
+        # a framework DB locked by something long (the sleep cycle holds one
+        # write transaction per half, across LLM calls) would stall the worker
+        # 30s per handler, between the `completed` row and the delivery this
+        # guard exists to protect. Same argument the dispatch loop's own reads
+        # make for `main_loop_read_timeout_ms`.
+        with db.get_db(
+            config.db_path,
+            busy_timeout_ms=config.scheduler.main_loop_read_timeout_ms or 2000,
+        ) as conn:
+            # The type, not the message: an exception from these handlers can
+            # carry model-authored file contents and host paths, and task_logs
+            # is a cross-user admin surface. The name is enough to tell a
+            # locked DB from a bad op file; the stack is in the journal.
+            db.log_task(
+                conn, task.id, "error",
+                f"Deferred {name} handler failed ({type(exc).__name__}); "
+                "see the daemon log for the stack",
+            )
+    except Exception:
+        logger.debug(
+            "Could not record the deferred %s failure on task %d",
+            name, task.id, exc_info=True,
+        )
+
+
 def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     """Replay a completed task's deferred-op files (memory / kv / KG / health /
     subtasks / sent-emails / email-output), discard any file whose handler has
     been retired, and warn on unconsumed files. The single source of truth for
     the post-success drain — shared by ``process_one_task`` and
     ``run_task_inline`` so the two can't drift.
+
+    **No ``Exception`` escapes this function** (ISSUE-469). Each handler is
+    guarded on its own, so one that raises costs its own files and nothing
+    else — the behaviour every per-handler guard was individually reaching
+    for, arrived at once instead of one enumerated exception tuple at a time
+    (ISSUE-135, ISSUE-451, both closed by hardening a single handler).
+    Whole-sequence containment would have been the smaller diff and still
+    skipped the eight handlers after the failure.
+
+    The guard is what protects the answer, not just the ops: in
+    ``process_one_task`` this drain runs *ahead* of result delivery, so an
+    escape used to take the briefing archive, the log-channel finalization and
+    the whole Talk / email / web send with it — for a task whose row already
+    said `completed`, which nothing retries. Delivery is therefore left where
+    it is rather than reordered ahead of the drain.
+
+    **A ``BaseException`` is recorded and then re-raised**, deliberately. The
+    one that reaches here is ``asyncio.CancelledError``: two handlers notify
+    through ``run_coro``, and ``AsyncRuntime.stop`` cancels in-flight
+    coroutines, so a worker still draining when ``pool.shutdown``'s join
+    expires takes one. Swallowing it would keep the drain running against a
+    cancelled runtime, which is worse than losing the delivery a shutdown was
+    going to lose anyway — but the breadcrumb is worth the same as any other,
+    so it is written before the re-raise.
     """
     from .executor import get_user_temp_dir
     user_temp_dir = get_user_temp_dir(config, task.user_id)
-    # First, not merely before the warn: the handlers below run in a bare
-    # sequence with no guard between them, so anything raising in one of them
-    # would otherwise leave a retired file on disk until the temp sweep.
-    _process_retired_deferred_files(config, task, user_temp_dir)
-    _process_deferred_subtasks(config, task, user_temp_dir)
-    _process_deferred_sent_emails(config, task, user_temp_dir)
-    _process_deferred_kv_ops(config, task, user_temp_dir)
-    _process_deferred_kg_ops(config, task, user_temp_dir)
-    _process_deferred_health_ops(config, task, user_temp_dir)
-    _process_deferred_garmin_import(config, task, user_temp_dir)
-    _process_deferred_user_alerts(config, task, user_temp_dir)
-    _deliver_deferred_email_output(config, task, user_temp_dir)
-    _warn_unconsumed_deferred_files(task, user_temp_dir)
+    # One end of the order is load-bearing: `_warn_unconsumed_deferred_files`
+    # runs last so it reports only what the handlers genuinely left behind.
+    # The retired-file sweep leads because it depends on nothing, which is a
+    # convenience rather than a constraint — it used to be a constraint, and
+    # the per-handler guard is what took that over. Built per call, not at
+    # import, so the names resolve off this module at call time and a test
+    # can patch one.
+    handlers = (
+        ("retired_files", _process_retired_deferred_files),
+        ("subtasks", _process_deferred_subtasks),
+        ("sent_emails", _process_deferred_sent_emails),
+        ("kv_ops", _process_deferred_kv_ops),
+        ("kg_ops", _process_deferred_kg_ops),
+        ("health_ops", _process_deferred_health_ops),
+        ("garmin_import", _process_deferred_garmin_import),
+        ("user_alerts", _process_deferred_user_alerts),
+        ("email_output", _deliver_deferred_email_output),
+    )
+    for name, handler in handlers:
+        try:
+            handler(config, task, user_temp_dir)
+        except Exception as exc:
+            _record_deferred_handler_failure(config, task, name, exc)
+        except BaseException as exc:
+            _record_deferred_handler_failure(config, task, name, exc)
+            raise
+
+    # Out of the table only because it takes no `config`.
+    try:
+        _warn_unconsumed_deferred_files(task, user_temp_dir)
+    except Exception as exc:
+        _record_deferred_handler_failure(config, task, "unconsumed_scan", exc)
+    except BaseException as exc:
+        _record_deferred_handler_failure(config, task, "unconsumed_scan", exc)
+        raise
 
 
 def run_task_inline(

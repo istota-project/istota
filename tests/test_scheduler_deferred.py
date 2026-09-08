@@ -574,9 +574,9 @@ class TestDeferredDrainSurvivesANonDictEntry:
     `_load_deferred_json` type-checks the outer list only. The health and KG
     loops skip a non-dict entry; the KV and sent-email loops read `.get` off
     it before their own `try`, so one bare string in a model-written file
-    raised an AttributeError that escaped the handler — and
-    `_drain_deferred_ops` calls its handlers in a bare sequence, so that also
-    skipped every handler after it.
+    raised an AttributeError that escaped the handler — costing the rest of
+    that file, and (until ISSUE-469 guarded the sequence) every handler after
+    it as well.
     """
 
     def _task(self, db_path, user_id="alice"):
@@ -629,11 +629,12 @@ class TestDeferredDrainSurvivesANonDictEntry:
 class TestDrainSurvivesOneHandlersBadOp(_HealthOpsReplay):
     """The seam, not the handler: what a bad health op used to cost.
 
-    `_drain_deferred_ops` calls its handlers in a bare sequence with no guard
-    between them, so an exception escaping the health loop did not stop at
-    the end of that file — the Garmin import, the user alerts and the
-    deferred email output for that task were all skipped behind it. The
-    handler-level tests above cannot see that; this one runs the real drain.
+    An exception escaping the health loop did not stop at the end of that
+    file — the Garmin import, the user alerts and the deferred email output
+    for that task were all skipped behind it. The handler-level tests above
+    cannot see that; this one runs the real drain. It passes because the
+    health guard catches, which is why ISSUE-469 needed the class below: a
+    control for the *sequence* has to defeat the handler's own guard.
     """
 
     def test_a_bad_health_op_no_longer_costs_the_later_handlers(
@@ -719,4 +720,198 @@ class TestLoaderSurvivesUnparseableJson:
         assert any(
             "Bad deferred health_ops file" in r.getMessage()
             for r in caplog.records
+        )
+
+
+class TestDrainContainsAHandlerThatRaises:
+    """The sequence itself, not any one handler (ISSUE-469).
+
+    `_drain_deferred_ops` used to call its nine handlers in a bare sequence,
+    so anything escaping one of them skipped the eight after it — and in
+    `process_one_task`, where the drain sits ahead of result delivery, also
+    the briefing archive, the log-channel finalization and the whole Talk /
+    email / web delivery of an answer whose row already said `completed`.
+
+    Two issues were closed by hardening one handler and leaving the sequence
+    alone (ISSUE-135, ISSUE-451), so the control here has to defeat a
+    handler's own guard: these patch the handler to raise outright rather
+    than feeding it a bad op file it might now catch.
+    """
+
+    def _setup(self, db_path, tmp_path):
+        config = Config(db_path=db_path, temp_dir=tmp_path / "temp")
+        with db.get_db(db_path) as conn:
+            task = db.get_task(
+                conn, db.create_task(conn, prompt="t", user_id="alice"),
+            )
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        return config, task, user_temp
+
+    def _alerts(self, user_temp, task):
+        (user_temp / f"task_{task.id}_user_alerts.json").write_text(
+            json.dumps([{"type": "note", "message": "something looked odd"}]),
+            encoding="utf-8",
+        )
+
+    def _notification_count(self, db_path):
+        with db.get_db(db_path) as conn:
+            return conn.execute(
+                "SELECT COUNT(*) FROM notifications WHERE user_id = ?",
+                ("alice",),
+            ).fetchone()[0]
+
+    @staticmethod
+    def _boom(*args, **kwargs):
+        raise RuntimeError("no guard catches this")
+
+    def test_the_handlers_after_it_still_run(self, db_path, tmp_path, monkeypatch):
+        from istota import scheduler
+
+        config, task, user_temp = self._setup(db_path, tmp_path)
+        self._alerts(user_temp, task)
+
+        # KG runs fifth in the sequence; user alerts eighth.
+        monkeypatch.setattr(scheduler, "_process_deferred_kg_ops", self._boom)
+        scheduler._drain_deferred_ops(config, task, "done")
+
+        assert self._notification_count(db_path) == 1
+
+    def test_the_first_handler_raising_still_leaves_the_rest(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """The retired-file sweep runs first by design, so its escape is the
+        one that used to cost every other handler."""
+        from istota import scheduler
+
+        config, task, user_temp = self._setup(db_path, tmp_path)
+        self._alerts(user_temp, task)
+
+        monkeypatch.setattr(scheduler, "_process_retired_deferred_files", self._boom)
+        scheduler._drain_deferred_ops(config, task, "done")
+
+        assert self._notification_count(db_path) == 1
+
+    def test_the_failure_is_recorded_against_the_task(
+        self, db_path, tmp_path, monkeypatch, caplog,
+    ):
+        from istota import scheduler
+
+        config, task, _ = self._setup(db_path, tmp_path)
+
+        monkeypatch.setattr(scheduler, "_process_deferred_kg_ops", self._boom)
+        with caplog.at_level(logging.ERROR, logger="istota.scheduler"):
+            scheduler._drain_deferred_ops(config, task, "done")
+
+        # With a stack, because the worker's own catch logs one line without
+        # `exc_info` and that was the only trace an escape left anywhere.
+        record = next(
+            r for r in caplog.records
+            if "kg_ops" in r.getMessage() and r.levelno >= logging.ERROR
+        )
+        assert record.exc_info is not None
+
+        # And on the row, so the failure is visible to anything reading the
+        # task rather than only in the daemon's journal.
+        with db.get_db(db_path) as conn:
+            logs = db.get_task_logs(conn, task.id)
+        assert any(
+            entry["level"] == "error" and "kg_ops" in entry["message"]
+            for entry in logs
+        )
+
+    def test_the_unconsumed_scan_is_guarded_too(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """The last step sits outside the handler table — it takes no
+        `config` — so it carries its own `try` and needs its own control."""
+        from istota import scheduler
+
+        config, task, _ = self._setup(db_path, tmp_path)
+
+        monkeypatch.setattr(scheduler, "_warn_unconsumed_deferred_files", self._boom)
+        scheduler._drain_deferred_ops(config, task, "done")
+
+        with db.get_db(db_path) as conn:
+            logs = db.get_task_logs(conn, task.id)
+        assert any("unconsumed_scan" in entry["message"] for entry in logs)
+
+    def test_the_recorder_itself_never_raises(
+        self, db_path, tmp_path, monkeypatch, caplog,
+    ):
+        """The recorder runs inside the drain's own except, where the drain's
+        guard is no second layer: an exception from *it* would escape and skip
+        delivery, which is the original bug arrived at from the other side."""
+        from istota import scheduler
+
+        config, task, user_temp = self._setup(db_path, tmp_path)
+        self._alerts(user_temp, task)
+
+        monkeypatch.setattr(scheduler, "_process_deferred_kg_ops", self._boom)
+        monkeypatch.setattr(
+            scheduler.db, "log_task",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("db is locked")),
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="istota.scheduler"):
+            scheduler._drain_deferred_ops(config, task, "done")
+
+        # The drain ran on past both failures.
+        assert self._notification_count(db_path) == 1
+        assert any(
+            "Could not record the deferred kg_ops failure" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_a_failing_handler_does_not_cost_the_delivery(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """The seam that matters: `run_task_inline` drains before it returns
+        and `process_one_task` drains before it delivers, so neither may see
+        an exception come out of the drain."""
+        from istota import scheduler
+
+        config, task, _ = self._setup(db_path, tmp_path)
+
+        monkeypatch.setattr(scheduler, "_process_deferred_kv_ops", self._boom)
+        monkeypatch.setattr(
+            scheduler, "execute_task",
+            lambda *a, **kw: (True, "the answer", None, None),
+        )
+
+        success, result = scheduler.run_task_inline(config, task)
+
+        # The return is what the drain sits in front of; the status is written
+        # before the drain runs, so asserting on it here would pass either way.
+        assert (success, result) == (True, "the answer")
+
+    def test_a_cancelled_drain_is_recorded_and_re_raised(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        """`CancelledError` is a `BaseException`, and it is the one that
+        actually reaches here: two handlers notify through `run_coro`, and
+        `AsyncRuntime.stop` cancels in-flight coroutines on shutdown.
+
+        Swallowing it would keep the drain running against a cancelled
+        runtime, so it propagates — but the breadcrumb is written first.
+        """
+        import asyncio
+
+        from istota import scheduler
+
+        config, task, _ = self._setup(db_path, tmp_path)
+
+        def _cancelled(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(scheduler, "_process_deferred_kg_ops", _cancelled)
+
+        with pytest.raises(asyncio.CancelledError):
+            scheduler._drain_deferred_ops(config, task, "done")
+
+        with db.get_db(db_path) as conn:
+            logs = db.get_task_logs(conn, task.id)
+        assert any(
+            entry["level"] == "error" and "CancelledError" in entry["message"]
+            for entry in logs
         )

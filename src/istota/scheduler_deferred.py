@@ -105,8 +105,10 @@ def _load_deferred_json(
     CLI, or the model's own shell heredoc for the subtask idiom) whose env was
     rebuilt from scratch, so it may not share the daemon's locale — and an
     undecodable file must land here as a warning, not as an exception escaping
-    into ``_drain_deferred_ops``, which runs its handlers in sequence with no
-    guard between them and would silently skip every one after this.
+    into ``_drain_deferred_ops``. That escape used to skip every handler after
+    this one; since ISSUE-469 the drain guards each handler and it costs only
+    this one's remaining files — but a warning naming the file still beats an
+    ERROR with a stack for a case whose whole cause is a locale mismatch.
 
     ``RecursionError`` is caught for that same reason: the file is
     model-authored, and deeply nested JSON makes ``json.loads`` raise it
@@ -177,9 +179,10 @@ def _inherited_model(
     would announce a consequence for a file the depth gate, a malformed entry or
     a per-entry ``model`` override may mean never has one.
 
-    The routing read is guarded because this runs inside the scheduler's
-    deferred drain, which calls its handlers in sequence with no guard between
-    them, so a read that raised would cost every later handler for this task.
+    The routing read is guarded because a read that raised would cost the rest
+    of this handler's own file — the subtasks after the one being resolved.
+    (Before ISSUE-469 it cost every later handler in the drain too; that half
+    is now the drain's own guard.)
     Its residue is a drop, not a carry: an origin that could not be established
     is exactly what the crossing rule refuses to treat as a match.
     """
@@ -233,9 +236,9 @@ def _process_deferred_subtasks(
 
     # `task.user_id` is pinned onto every subtask below and does not vary
     # across the loop, so an id `db.create_task` refuses fails all of them
-    # identically — and would escape into `_drain_deferred_ops`, which calls
-    # its handlers in sequence with no guard between them and so would skip
-    # every later handler for this task (ISSUE-402). Refused once, here.
+    # identically — and would escape into `_drain_deferred_ops` (ISSUE-402),
+    # which since ISSUE-469 contains it but still records an ERROR per task
+    # for a condition the row itself already settles. Refused once, here.
     if not is_scopable_user_id(task.user_id):
         logger.warning(
             "Task %d deferred subtasks ignored: user id %r cannot name a "
@@ -717,11 +720,12 @@ def _process_deferred_user_alerts(
     recorded = not by_type
     if by_type:
         # Guarded as a whole. `write_notification` and `deliver_pending` never
-        # raise, but `db.get_db` can — and `_drain_deferred_ops` calls its nine
-        # handlers in sequence with nothing between them, so an exception
-        # escaping here would silently skip `_deliver_deferred_email_output` and
-        # the unconsumed-file warning. The same reasoning `_load_deferred_json`
-        # records for its `UnicodeDecodeError` catch.
+        # raise, but `db.get_db` can. The drain's own per-handler guard
+        # (ISSUE-469) would catch that too, and containment is not what this
+        # one is for: the except below *recovers*, sending the alert directly
+        # with no row. Letting it reach the drain instead would contain the
+        # exception and lose the alert, which is the outcome the fallback
+        # exists to prevent.
         try:
             results = []
             # A connection of this function's own, and that is safe here rather
@@ -785,8 +789,10 @@ def _process_deferred_user_alerts(
         # Nothing holds this alert now: no row was written and no destination
         # accepted the fallback push. Deleting the file here is exactly the
         # "the model raised an alert and the evidence was deleted" failure the
-        # inbox exists to end, so the file stays and the unconsumed-file warning
-        # at the end of the drain reports it.
+        # inbox exists to end, so the file stays. The ERROR below is its only
+        # report — `_warn_unconsumed_deferred_files` will *not* mention it,
+        # because `user_alerts` is a known suffix and the scan skips those by
+        # construction. The file is left for a human, not for the scan.
         logger.error(
             "Deferred user alerts for task %d were neither recorded nor "
             "delivered; leaving %s in place",
@@ -1495,9 +1501,11 @@ def _process_deferred_health_ops(
                 # `TypeError` for `Path(123)` and `float([1])`, and adding it
                 # still left `OverflowError` for `int(Infinity)`, which
                 # `json.loads` accepts by default (ISSUE-451). Anything
-                # escaping here aborts the whole drain — not just the rest of
-                # this file, but every later handler in
-                # `_drain_deferred_ops`, which calls them in a bare sequence.
+                # escaping here costs every later op in this file — and used to
+                # cost every later handler as well, until `_drain_deferred_ops`
+                # started guarding each of them (ISSUE-469). The half this
+                # guard owns is the one the drain's cannot reach: the ops after
+                # the failing one, in the batch it is halfway through.
                 # The two neighbouring loops, `_process_deferred_kv_ops` and
                 # `_process_deferred_kg_ops`, are `except Exception` for the
                 # same reason; this one journals a failure far better than
