@@ -3622,7 +3622,7 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
         forbidden.append(Path(__file__).resolve().parents[2])
     except IndexError:
         pass
-    # Nextcloud mount root (other users' data live under here).
+    # Workspace root (other users' data live under here).
     if config.workspace_path:
         forbidden.append(Path(config.workspace_path).resolve())
     # The framework DB directory and the per-user module-DB root. Skipped when
@@ -4599,7 +4599,7 @@ def native_fs_roots(
     ``security.sandbox_ro_paths`` is bound verbatim and now warns at config
     load (``config._warn_ro_paths_over_control_tree``). The **per-resource
     mounts** below are not: a ``user_resources`` row is ``mount /
-    resource_path``, bounded by the Nextcloud mount root and nothing else, so
+    resource_path``, bounded by the workspace root and nothing else, so
     on a layout where ``config.temp_dir`` sits *under*
     ``workspace_path`` a row naming the control tree would bind it
     read-write and neither entry here would cover a sibling task's directory.
@@ -6749,8 +6749,8 @@ def execute_task(
         # It must NOT clobber the `workspace_dir` parameter — that one is the
         # REPL `--workspace cwd` bind path (None for normal tasks) and gets
         # blocklist-validated by build_bwrap_cmd (`_validate_workspace_dir`),
-        # which forbids anything under the Nextcloud mount root. The per-user
-        # workspace lives under the mount, so reusing the variable made every
+        # which forbids anything under the workspace root. The per-user
+        # workspace lives under that root, so reusing the variable made every
         # sandboxed task fail with "overlaps a protected path".
         ws_root = config.workspace_root(task.user_id)
         workspace_display = str(ws_root) if ws_root is not None else f"{config.rclone_remote}:/Users/{task.user_id}"

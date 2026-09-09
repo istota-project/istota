@@ -47,7 +47,7 @@ nextcloud_url = "https://nextcloud.example.com"
 nextcloud_username = "istota"
 nextcloud_app_password = "xxxxx-xxxxx-xxxxx-xxxxx-xxxxx"
 use_nextcloud_mount = true
-nextcloud_mount_path = "/srv/mount/nextcloud/content"
+workspace_path = "/srv/mount/nextcloud/content"
 use_environment_file = true
 
 [users.alice]

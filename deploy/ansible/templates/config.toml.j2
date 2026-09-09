@@ -26,9 +26,10 @@ db_path = "{{ istota_home | istota_toml_escape }}/data/istota.db"
 module_data_dir = "{{ istota_module_data_dir | istota_toml_escape }}"
 
 # File access configuration
+workspace_path = "{{ istota_workspace_path | istota_toml_escape }}"
 {% if istota_use_nextcloud_mount %}
 # Nextcloud mount path (direct filesystem access)
-nextcloud_mount_path = "{{ istota_nextcloud_mount_path | istota_toml_escape }}"
+nextcloud_mount_path = "{{ istota_workspace_path | istota_toml_escape }}"
 {% endif %}
 # rclone remote name for Nextcloud files (used when mount_path not set, or for owner detection)
 rclone_remote = "{{ istota_rclone_remote | istota_toml_escape }}"

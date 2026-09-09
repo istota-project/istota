@@ -1018,7 +1018,7 @@ nextcloud_username = "$_WIZ_NC_USERNAME"
 nextcloud_app_password = "$_WIZ_NC_APP_PASSWORD"
 
 use_nextcloud_mount = $_WIZ_USE_MOUNT
-nextcloud_mount_path = "$_WIZ_MOUNT_PATH"
+workspace_path = "$_WIZ_MOUNT_PATH"
 rclone_password_obscured = "$_WIZ_RCLONE_PASS_OBSCURED"
 
 $_WIZ_ADMIN_BLOCK

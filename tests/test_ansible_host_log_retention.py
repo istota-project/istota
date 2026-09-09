@@ -47,7 +47,7 @@ BASE_VARS = {
     "istota_home": "/srv/app/istota",
     "istota_repo_dir": "/srv/app/istota",
     "istota_use_nextcloud_mount": True,
-    "istota_nextcloud_mount_path": "/srv/mnt/workspace",
+    "istota_workspace_path": "/srv/mnt/workspace",
     "istota_rclone_remote": "nextcloud",
     "istota_whisper_enabled": False,
     "istota_web_enabled": False,

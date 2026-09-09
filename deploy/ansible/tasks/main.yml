@@ -1155,7 +1155,7 @@
 # rclone mount — inlined (replace with a dedicated role if you prefer)
 - name: Create Nextcloud mount point
   file:
-    path: "{{ istota_nextcloud_mount_path }}"
+    path: "{{ istota_workspace_path }}"
     state: directory
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"
@@ -1203,8 +1203,8 @@
       Group={{ istota_group }}
       # Self-heal a dead endpoint ("Transport endpoint is not connected") before
       # (re)mounting. Non-fatal ('-') so it's a no-op when nothing is mounted.
-      ExecStartPre=-/bin/fusermount3 -uz {{ istota_nextcloud_mount_path }}
-      ExecStartPre=/bin/mkdir -p {{ istota_nextcloud_mount_path }}
+      ExecStartPre=-/bin/fusermount3 -uz {{ istota_workspace_path }}
+      ExecStartPre=/bin/mkdir -p {{ istota_workspace_path }}
       ExecStart=/usr/bin/rclone mount \
         --config {{ istota_home }}/.config/rclone/rclone.conf \
         --allow-other \
@@ -1215,8 +1215,8 @@
         --timeout 30s \
         --contimeout 15s \
         --low-level-retries 3 \
-        {{ istota_rclone_remote }}: {{ istota_nextcloud_mount_path }}
-      ExecStop=/bin/fusermount3 -u {{ istota_nextcloud_mount_path }}
+        {{ istota_rclone_remote }}: {{ istota_workspace_path }}
+      ExecStop=/bin/fusermount3 -u {{ istota_workspace_path }}
       Restart=on-failure
       RestartSec=5
 
@@ -1644,7 +1644,7 @@
     label: "{{ item.key }}"
   vars:
     _money_resource: "{{ (item.value.resources | selectattr('type', 'in', ['money', 'moneyman']) | list | first | default(none)) }}"
-    _money_data_dir: "{{ _money_resource.data_dir | default(istota_nextcloud_mount_path + '/Users/' + item.key + '/' + istota_namespace + '/money') }}"
+    _money_data_dir: "{{ _money_resource.data_dir | default(istota_workspace_path + '/Users/' + item.key + '/' + istota_namespace + '/money') }}"
   when:
     - istota_use_nextcloud_mount
     - not istota_web_only
@@ -1662,7 +1662,7 @@
     label: "{{ item.0.key }}: {{ item.1 }}"
   vars:
     _money_resource: "{{ (item.0.value.resources | selectattr('type', 'in', ['money', 'moneyman']) | list | first | default(none)) }}"
-    _money_data_dir: "{{ _money_resource.data_dir | default(istota_nextcloud_mount_path + '/Users/' + item.0.key + '/' + istota_namespace + '/money') }}"
+    _money_data_dir: "{{ _money_resource.data_dir | default(istota_workspace_path + '/Users/' + item.0.key + '/' + istota_namespace + '/money') }}"
   when:
     - istota_use_nextcloud_mount
     - not istota_web_only
@@ -1677,7 +1677,7 @@
       {%- for u in (_istota_money_users | default([])) -%}
       {%- set mr = u.value.resources | selectattr('type', 'in', ['money', 'moneyman']) | list | first | default(none) -%}
       {%- if mr -%}
-      {%- set ddir = mr.data_dir | default(istota_nextcloud_mount_path + '/Users/' + u.key + '/' + istota_namespace + '/money') -%}
+      {%- set ddir = mr.data_dir | default(istota_workspace_path + '/Users/' + u.key + '/' + istota_namespace + '/money') -%}
       {%- for l in mr.ledgers | default([]) -%}
       {%- set lname = l if l is string else l.name -%}
       {%- set _ = ns.out.append({'user': u.key, 'name': lname, 'path': ddir + '/ledgers/' + lname + '.beancount'}) -%}
@@ -2244,7 +2244,7 @@
 # service back even when a collision needs operator attention.
 - name: Detect legacy database snapshot directories
   find:
-    paths: "{{ istota_nextcloud_mount_path }}/istota-db-backups"
+    paths: "{{ istota_workspace_path }}/istota-db-backups"
     patterns: "????-??-??"
     recurse: false
     file_type: directory
@@ -2583,7 +2583,7 @@
 # is therefore skipped on re-runs once every module DB has been relocated.
 - name: Detect legacy on-mount module DBs
   find:
-    paths: "{{ istota_nextcloud_mount_path }}/Users"
+    paths: "{{ istota_workspace_path }}/Users"
     patterns: "feeds.db,health.db,location.db,money.db"
     recurse: true
     file_type: file
@@ -3833,7 +3833,7 @@
 
 - name: Create ledger backup directories
   file:
-    path: "{{ (istota_nextcloud_mount_path + '/' + item.1.path | regex_replace('^/', '')) | dirname }}/backups"
+    path: "{{ (istota_workspace_path + '/' + item.1.path | regex_replace('^/', '')) | dirname }}/backups"
     state: directory
     owner: "{{ istota_user }}"
     group: "{{ istota_group }}"

@@ -33,7 +33,8 @@ Two variables belong to the daemon's own environment (`build_stripped_env`) rath
 | `NC_URL` | `config.nextcloud.url` |
 | `NC_USER` | `config.nextcloud.username` |
 | `NC_PASS` | `config.nextcloud.app_password` |
-| `NEXTCLOUD_MOUNT_PATH` | `config.nextcloud_mount_path` (scoped to user dir for non-admin) |
+| `ISTOTA_WORKSPACE_PATH` | `config.workspace_path` (scoped to user dir for non-admin) |
+| `NEXTCLOUD_MOUNT_PATH` | `config.workspace_path` (compatibility alias) |
 
 ## CalDAV
 

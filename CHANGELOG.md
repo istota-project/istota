@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Generated configurations now distinguish the bot's file workspace from a FUSE mount. Docker and standalone installs no longer treat their ordinary workspace directories as mounts, so adding a Nextcloud URL cannot make mount-liveness checks gate local files or database backups.
+
 ### Fixed
 
 - The GitHub Release for a large release is published again. A release body is capped at 125,000 characters there and the API refuses one over it outright, so 0.41's changeset — 312,000 characters across 511 entries — produced no release page at all until the tag was republished by hand. The body is now cut to fit: the announcement goes in whole, what is left is divided between the sections in proportion to their size so the longest one cannot crowd the others out, each section that was cut says how many entries it is missing, and a footer links `CHANGELOG.md` at the tag, which carries everything. A release under the cap is unchanged.

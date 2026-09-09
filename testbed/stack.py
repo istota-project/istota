@@ -1613,7 +1613,7 @@ class Stack:
 
         **`/mnt/shared` is knowingly outside this**, and the omission is a
         decision rather than an oversight. `render-config.sh` renders
-        `nextcloud_mount_path` as that literal on every profile, so memory
+        `workspace_path` as that literal on every profile, so memory
         files, `TASKS.md` and per-user directories accumulate there for a whole
         session — and the tasks-file poller reads one of them every 30 seconds.
         No scenario in this tier writes there yet, and emptying it wholesale

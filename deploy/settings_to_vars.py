@@ -139,7 +139,7 @@ _DIRECT_KEYS = {
     "rclone_remote": "istota_rclone_remote",
     "rclone_password_obscured": "istota_rclone_password_obscured",
     "use_nextcloud_mount": "istota_use_nextcloud_mount",
-    "nextcloud_mount_path": "istota_nextcloud_mount_path",
+    "workspace_path": "istota_workspace_path",
     "nextcloud_url": "istota_nextcloud_url",
     "nextcloud_username": "istota_nextcloud_username",
     "nextcloud_app_password": "istota_nextcloud_app_password",

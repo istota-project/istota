@@ -6690,8 +6690,8 @@ class TestTaskControlDir:
     ):
         # The gap Stage 3's review recorded and `native_fs_roots`' docstring
         # names: a `user_resources` row resolves to `mount / resource_path`,
-        # bounded by the Nextcloud mount and nothing else, so on a layout where
-        # `temp_dir` sits under the mount a row is a second route into the
+        # bounded by the workspace root and nothing else, so on a layout where
+        # `temp_dir` sits under it a row is a second route into the
         # whole tree that neither guard covers. No shipped shape produces the
         # layout; this is what would say so if one did.
         from istota.config import ResourceConfig, SecurityConfig, UserConfig

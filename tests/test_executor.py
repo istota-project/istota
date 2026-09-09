@@ -4384,7 +4384,7 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
     Commit f3ab4b6 ("Storage-agnostic prompt/skill vocabulary") reassigned the
     `workspace_dir` parameter to the user's on-mount workspace root just to fill
     the {workspace} placeholder. That value flowed into build_bwrap_cmd, where
-    _validate_workspace_dir rejects anything under the Nextcloud mount root — so
+    _validate_workspace_dir rejects anything under the workspace root — so
     every sandboxed LLM task on the server failed with
     "workspace ... overlaps a protected path". The fix uses a separate local for
     the display string; the parameter stays None for a normal task.

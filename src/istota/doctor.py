@@ -1448,7 +1448,7 @@ def _control_overlap_findings(
       per conversation token and doctor has no task to take one from.
     - the **per-resource mounts**, which are the reason this axis reports more
       than the guards themselves cover. A ``user_resources`` row resolves to
-      ``mount / resource_path``, bounded by the Nextcloud mount root and
+      ``mount / resource_path``, bounded by the workspace root and
       nothing else, so on a layout where ``temp_dir`` sits under the mount a
       row naming the tree binds it — read-write or read-only — and neither
       ``native_fs_roots`` entry nor the ``extra_ro_binds`` bind covers a

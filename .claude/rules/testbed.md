@@ -120,7 +120,7 @@ One consequence runs the other way from expectation, and the mechanism is worth 
 
 `Config.storage_is_nextcloud` is `bool(self.nextcloud.url)`, and both values are shipped install shapes — `local` is what the single-user install runs, not a test convenience. The roadmap is to make Nextcloud optional rather than assumed, so a decoupling change that breaks the Nextcloud-free install has to go red somewhere.
 
-It costs no stack. `storage.py` branches on `use_mount`, not on the backend, and `render-config.sh` writes `nextcloud_mount_path` as the literal `/mnt/shared` on every profile, so briefings, memory and the tasks file take the identical path under both. Exactly three things differ, and all three are pure functions of a `Config`:
+It costs no stack. `storage.py` branches on `use_mount`, not on the backend, and `render-config.sh` writes `workspace_path` as the literal `/mnt/shared` on every profile, so briefings, memory and the tasks file take the identical path under both. `nextcloud_mount_path` stays unset because the Docker volume is not a FUSE mount. Exactly two things differ, and both are pure functions of a `Config`:
 
 | What differs | Witness |
 |---|---|
