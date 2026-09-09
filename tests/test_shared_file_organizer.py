@@ -55,7 +55,7 @@ def make_config(tmp_path, db_path):
                 app_password="secret",
             ),
             users={"alice": UserConfig(display_name="Alice")},
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
         )
         for key, val in overrides.items():
             setattr(cfg, key, val)

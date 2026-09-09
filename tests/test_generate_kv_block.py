@@ -13,7 +13,7 @@ from istota.config import Config, UserConfig
 def _config(tmp_path) -> Config:
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(timezone="UTC")},
     )
 

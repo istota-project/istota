@@ -86,7 +86,7 @@ def _config(tmp_path, **overrides) -> Config:
         bundled_skills_dir=tmp_path / "_empty_bundled",
         temp_dir=tmp_path / "temp",
         nextcloud=NextcloudConfig(url="https://nc.example.test"),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         users={"alice": UserConfig(timezone="UTC")},
     )
     for key, value in overrides.items():

@@ -647,7 +647,7 @@ class TestTheModeDecidesTheRoots:
 
 @pytest.fixture
 def mountless(tmp_path, monkeypatch) -> Path:
-    """The rclone-CLI shape: `nextcloud_mount_path` unset, a deferred dir set.
+    """The rclone-CLI shape: `workspace_path` unset, a deferred dir set.
 
     `task_env` exports `NEXTCLOUD_MOUNT_PATH=""` on a deployment with no
     mount configured, so the only root a task has is its own deferred
@@ -749,7 +749,7 @@ class TestTheVerbsTheDaemonReplays:
         from istota.skill_host_paths import path_under_roots
         from istota.skills._hostpath import _roots_for
 
-        config = SimpleNamespace(nextcloud_mount_path=str(mount.link))
+        config = SimpleNamespace(workspace_path=str(mount.link))
         roots = _roots_for(resolving_stamps()[key], writable=False)
         candidates = {
             "own workspace": mount.own("labs.csv"),

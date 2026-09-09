@@ -7,7 +7,7 @@ and the location skill's ``setup_env`` hook. Mirrors
 Location is a "module" in the modules/connected-services taxonomy: on by
 default for every configured user, gated by
 ``Config.is_module_enabled(user_id, "location")``. The user's workspace
-path is derived from ``nextcloud_mount_path`` + ``get_user_bot_path``.
+path is derived from ``workspace_path`` + ``get_user_bot_path``.
 """
 
 from __future__ import annotations

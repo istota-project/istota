@@ -75,6 +75,9 @@ module_data_dir = "data/modules"
 # =============================================================================
 # File Access Configuration
 # =============================================================================
+# Root of the bot's on-disk file tree. Defaults to nextcloud_mount_path.
+# workspace_path = "/srv/mount/nextcloud/content"
+
 # Choose ONE of the following options:
 
 # Option 1: rclone CLI (default, works without systemd mount)

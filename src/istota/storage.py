@@ -1145,7 +1145,7 @@ def upload_file_to_inbox(
 
 def _get_mount_path(config: "Config", path: str) -> Path:
     """Get the local mount path for a Nextcloud path."""
-    return config.nextcloud_mount_path / path.lstrip("/")
+    return config.workspace_path / path.lstrip("/")
 
 
 def _migrate_old_layout(user_base: Path) -> None:

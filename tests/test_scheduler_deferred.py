@@ -296,10 +296,10 @@ class _HealthOpsReplay:
         import istota.health as _health
 
         # A real Config, not a stand-in: the guard derives its roots from
-        # `nextcloud_mount_path` and the task's user id, so a fake answering
+        # `workspace_path` and the task's user id, so a fake answering
         # one hand-written question would not exercise the derivation the
         # deployment runs.
-        config = Config(nextcloud_mount_path=ctx.workspace_root.parent.parent.parent)
+        config = Config(workspace_path=ctx.workspace_root.parent.parent.parent)
 
         original = _health.resolve_for_user
         try:
@@ -436,7 +436,7 @@ class TestDeferredImportCsvSourcePath(_HealthOpsReplay):
         from istota.skill_host_paths import path_under_roots
         from istota.scheduler_deferred import _source_path_allowed
 
-        config = Config(nextcloud_mount_path=tmp_path / "mount")
+        config = Config(workspace_path=tmp_path / "mount")
         assert config.workspace_root("alice") == tmp_path / "mount" / "Users" / "alice"
 
         deferred = tmp_path / "deferred"
@@ -647,7 +647,7 @@ class TestDrainSurvivesOneHandlersBadOp(_HealthOpsReplay):
         config = Config(
             db_path=db_path,
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=ctx.workspace_root.parent.parent.parent,
+            workspace_path=ctx.workspace_root.parent.parent.parent,
         )
         user_temp = tmp_path / "temp" / "alice"
         user_temp.mkdir(parents=True)

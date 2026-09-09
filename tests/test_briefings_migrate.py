@@ -227,7 +227,7 @@ class TestNormalizeBlockSpecs:
 def _config(tmp_path: Path, briefings) -> Config:
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(briefings=briefings)},
     )
 
@@ -424,7 +424,7 @@ class TestConfigAuthoredBlocksSeeding:
         cfg_path.write_text(
             f'db_path = "{tmp_path / "istota.db"}"\n'
             f'temp_dir = "{tmp_path / "tmp"}"\n'
-            f'nextcloud_mount_path = "{tmp_path / "mount"}"\n'
+            f'workspace_path = "{tmp_path / "mount"}"\n'
             "\n[users.dana]\n"
             'display_name = "Dana"\n'
             "\n[[users.dana.briefings]]\n"

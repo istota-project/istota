@@ -1784,7 +1784,7 @@ def _usage_age(seconds: float) -> str:
 async def cmd_memory(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
     user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_path
     target = args.strip().lower()
 
     if target == "user":
@@ -2261,7 +2261,7 @@ def _format_history_text(
 async def cmd_export(ctx: CommandContext):
     config, conn = ctx.config, ctx.conn
     user_id, conversation_token, args = ctx.user_id, ctx.conversation_token, ctx.args
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_path
     if mount is None:
         return "Nextcloud mount not configured — cannot write export file."
 

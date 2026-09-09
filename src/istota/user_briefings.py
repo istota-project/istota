@@ -564,7 +564,7 @@ def import_from_workspace_files(db_path: Path, config: "Any") -> int:
     if config is None or not Path(db_path).exists():
         return 0
 
-    mount = getattr(config, "nextcloud_mount_path", None)
+    mount = getattr(config, "workspace_path", None)
     if not getattr(config, "use_mount", False) or mount is None:
         return 0
 

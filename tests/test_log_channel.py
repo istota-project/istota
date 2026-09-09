@@ -488,7 +488,7 @@ class TestProcessOneTaskLogChannel:
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="istota", app_password="secret"),
             talk=TalkConfig(enabled=True, bot_username="istota"),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
             users=users or {},
         )

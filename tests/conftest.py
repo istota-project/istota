@@ -399,6 +399,7 @@ def make_config(tmp_path):
             "db_path": tmp_path / "test.db",
             "temp_dir": tmp_path / "temp",
             "skills_dir": skills_dir,
+            "workspace_path": mount_path,
             "nextcloud_mount_path": mount_path,
         }
         defaults.update(overrides)

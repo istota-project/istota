@@ -123,7 +123,7 @@ def backup_destination(config) -> Path | None:
     explicit = (getattr(config.scheduler, "db_backup_dir", "") or "").strip()
     if explicit:
         return Path(explicit)
-    mount = getattr(config, "nextcloud_mount_path", None)
+    mount = getattr(config, "workspace_path", None)
     if mount:
         return Path(mount) / "Backups" / "db" / "snapshots"
     return None

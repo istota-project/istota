@@ -43,7 +43,7 @@ def mount_config(tmp_path):
     return Config(
         db_path=tmp_path / "test.db",
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         sleep_cycle=SleepCycleConfig(
             enabled=True,
             cron="0 2 * * *",
@@ -463,7 +463,7 @@ class TestProcessUserSleepCycle:
 
         # Verify a file was written. What it is named is TestSleepCycleDating's
         # business; this test only cares that the write happened.
-        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         written = list(context_dir.glob("*.md"))
         assert len(written) == 1
         assert "project Alpha" in written[0].read_text()
@@ -480,7 +480,7 @@ class TestProcessUserSleepCycle:
             result = process_user_sleep_cycle(mount_config, conn, "alice")
 
         assert result is False
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         assert not memories_dir.exists() or not any(
             f.name.endswith(".md")
             for f in memories_dir.iterdir()
@@ -565,7 +565,7 @@ class TestProcessUserSleepCycle:
             result = process_user_sleep_cycle(mount_config, conn, "alice")
 
         assert result is False
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         date_str = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
         assert not (memories_dir / f"{date_str}.md").exists() if memories_dir.exists() else True
 
@@ -634,7 +634,7 @@ class TestProcessUserSleepCycle:
 
             process_user_sleep_cycle(mount_config, conn, "alice")
 
-        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         # The window midpoint, in the user's zone — half a 24h lookback back
         # from now (ISSUE-470).
         expected_date = (
@@ -645,7 +645,7 @@ class TestProcessUserSleepCycle:
 
 class TestCleanupOldMemoryFiles:
     def test_deletes_old_files(self, mount_config):
-        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         context_dir.mkdir(parents=True)
 
         # Create old file
@@ -663,7 +663,7 @@ class TestCleanupOldMemoryFiles:
         assert (context_dir / f"{recent_date}.md").exists()
 
     def test_preserves_non_dated_files(self, mount_config):
-        memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         memories_dir.mkdir(parents=True)
 
         (memories_dir / "readme.md").write_text("not a dated file")
@@ -680,7 +680,7 @@ class TestCleanupOldMemoryFiles:
         assert deleted == 0
 
     def test_skips_cleanup_when_retention_zero(self, mount_config):
-        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         context_dir.mkdir(parents=True)
 
         old_date = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
@@ -696,7 +696,7 @@ class TestCleanupOldMemoryFiles:
         # the same tz when computing the cutoff or the boundary day can
         # be evicted ~1 day too early/late.
         mount_config.users["alice"] = UserConfig(timezone="Pacific/Kiritimati")
-        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         context_dir.mkdir(parents=True)
 
         user_tz = ZoneInfo("Pacific/Kiritimati")
@@ -888,11 +888,11 @@ class TestMemoryProvenance:
 
 def _setup_curation_fixture(mount_config, *, existing_user_md: str | None = None) -> tuple:
     """Create dated memories + (optionally) an existing USER.md. Returns (config_dir, memories_dir)."""
-    memories_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+    memories_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
     memories_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now().strftime("%Y-%m-%d")
     (memories_dir / f"{today}.md").write_text("- Prefers Python over JS\n")
-    config_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+    config_dir = mount_config.workspace_path / "Users" / "alice" / "istota" / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     if existing_user_md is not None:
         (config_dir / "USER.md").write_text(existing_user_md)
@@ -1723,7 +1723,7 @@ class TestSleepCycleDating:
         expected = (
             datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
         ).strftime("%Y-%m-%d")
-        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         assert (context_dir / f"{expected}.md").exists()
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
@@ -1800,7 +1800,7 @@ class TestDatedFileCollision:
             mock_run.return_value = (True, "- The second thing (ref:2)\n")
             assert process_user_sleep_cycle(mount_config, conn, "alice") is True
 
-        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         written = list(context_dir.glob("*.md"))
         assert len(written) == 1, "both runs share one window date"
         text = written[0].read_text()
@@ -1816,7 +1816,7 @@ class TestDatedFileCollision:
         mock_run.return_value = (True, "- Written tonight (ref:1)\n")
         mount_config.sleep_cycle.lookback_hours = 48
 
-        context_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        context_dir = mount_config.workspace_path / "Users" / "alice" / "memories"
         context_dir.mkdir(parents=True)
         stamp = (datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)).strftime("%Y-%m-%d")
         (context_dir / f"{stamp}.md").write_text("- Written last night (ref:0)\n")

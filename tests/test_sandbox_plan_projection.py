@@ -42,7 +42,7 @@ def config(tmp_path):
     return Config(
         db_path=db_file,
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         skills_dir=tmp_path / "skills",
         security=SecurityConfig(sandbox_enabled=True),
     )
@@ -202,7 +202,7 @@ class TestReadOnlyNestedInsideReadWrite:
     def test_a_read_only_resource_inside_the_channel_bind_is_write_denied(
         self, config, task, user_temp,
     ):
-        nested = config.nextcloud_mount_path / "Channels" / "room123" / "ref"
+        nested = config.workspace_path / "Channels" / "room123" / "ref"
         nested.mkdir()
 
         read, write, denied = native_fs_roots(
@@ -218,9 +218,9 @@ class TestReadOnlyNestedInsideReadWrite:
     def test_the_argv_agrees(self, config, task, user_temp):
         """The claim is that the projection now matches the binds, so the
         assertion has to name the binds."""
-        nested = config.nextcloud_mount_path / "Channels" / "room123" / "ref"
+        nested = config.workspace_path / "Channels" / "room123" / "ref"
         nested.mkdir()
-        channel = (config.nextcloud_mount_path / "Channels" / "room123").resolve()
+        channel = (config.workspace_path / "Channels" / "room123").resolve()
 
         with patch("istota.executor._bwrap_available", return_value=True):
             argv = build_bwrap_cmd(
@@ -239,7 +239,7 @@ class TestReadOnlyNestedInsideReadWrite:
         self, config, task, user_temp,
     ):
         """The control. Containment must not swallow every read-only entry."""
-        outside = config.nextcloud_mount_path / "Reference"
+        outside = config.workspace_path / "Reference"
         outside.mkdir()
 
         read, _write, denied = native_fs_roots(
@@ -269,7 +269,7 @@ class TestARejectedWorkspaceCostsOnlyTheWorkspace:
 
         assert any("rejected by blocklist" in r.message for r in caplog.records)
         assert user_temp.resolve() in write
-        assert (config.nextcloud_mount_path / "Users" / "alice").resolve() in write
+        assert (config.workspace_path / "Users" / "alice").resolve() in write
         assert forbidden.resolve() not in write
         assert forbidden.resolve() not in read
         assert denied == [user_temp.resolve() / ".developer"]

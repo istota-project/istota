@@ -85,7 +85,7 @@ def config(db_path, tmp_path):
             host_pressure_alert_cooldown_seconds=900,
             host_pressure_shmem_unaccounted_alert_mb=1024,
         ),
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         temp_dir=tmp_path / "temp",
     )
 

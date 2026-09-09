@@ -40,7 +40,7 @@ def _make_config(tmp_path):
     db.init_db(db_path)
     return Config(
         db_path=db_path,
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         # Keep the flock anchor inside the test's tmp dir rather than the
         # /tmp/istota default, so parallel workers don't share one.
         temp_dir=tmp_path / "temp",
@@ -90,7 +90,7 @@ async def _first_room(client, cookies):
 
 
 def _memory_file(config, token):
-    return config.nextcloud_mount_path / "Channels" / token / "CHANNEL.md"
+    return config.workspace_path / "Channels" / token / "CHANNEL.md"
 
 
 class TestRoomMemoryRead:
@@ -473,7 +473,7 @@ class TestChannelMemoryStorage:
         from istota import storage
         config = _make_config(tmp_path)
         assert storage.write_channel_memory(config, "web-alice-abc", "hello\n")
-        path = config.nextcloud_mount_path / "Channels" / "web-alice-abc" / "CHANNEL.md"
+        path = config.workspace_path / "Channels" / "web-alice-abc" / "CHANNEL.md"
         assert path.read_text() == "hello\n"
         # No staging sibling left behind — os.replace, not a copy. Every
         # entry rather than a `*.tmp` glob, which the staging name no longer
@@ -523,7 +523,7 @@ class TestChannelMemoryStorage:
     ):
         from istota import storage
         config = _make_config(tmp_path)
-        target = config.nextcloud_mount_path / "Channels" / "web-alice-abc"
+        target = config.workspace_path / "Channels" / "web-alice-abc"
 
         def _boom(*a, **kw):
             raise OSError("no space left on device")

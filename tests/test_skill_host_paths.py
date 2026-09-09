@@ -73,6 +73,17 @@ def repos(tmp_path, monkeypatch):
 
 
 class TestAllowedHostRoots:
+    def test_workspace_name_wins_over_the_legacy_name(self, tmp_path, monkeypatch):
+        workspace = tmp_path / "workspace"
+        legacy = tmp_path / "legacy"
+        (workspace / "Users" / "alice").mkdir(parents=True)
+        (legacy / "Users" / "alice").mkdir(parents=True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_PATH", str(workspace))
+        monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(legacy))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+        assert user_workspace_root() == workspace / "Users" / "alice"
+
     def test_scopes_the_mount_to_the_calling_user(self, mount, monkeypatch):
         roots = allowed_host_roots()
         assert mount / "Users" / "alice" in roots
@@ -1470,7 +1481,7 @@ class TestTheFourCallersRootSets:
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
 
         def allowed(p):
             p.write_text("x")
@@ -1496,7 +1507,7 @@ class TestTheFourCallersRootSets:
         victim.write_text("x")
         deferred = tmp_path / "deferred"
         deferred.mkdir()
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
 
         assert not _source_path_allowed(victim, deferred, config, user_id)
 
@@ -1509,7 +1520,7 @@ class TestTheFourCallersRootSets:
         mount = tmp_path / "mount"
         for sub in ("Users/alice", "Users/bob", "Channels/tok1", "Talk"):
             (mount / sub).mkdir(parents=True)
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         draft = SimpleNamespace(id=1, user_id="alice")
 
         ok = mount / "Users" / "alice" / "report.pdf"
@@ -1538,7 +1549,7 @@ class TestTheFourCallersRootSets:
         target.write_text("x")
         link = mount / "Users" / "alice" / "link.pdf"
         link.symlink_to(target)
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
 
         with pytest.raises(outbound_drafts.DraftError, match="symlink"):
             outbound_drafts._confined_attachment(
@@ -1643,7 +1654,7 @@ class TestTheConsolidationNeverWidens:
         from istota.config import Config
 
         mount, _deferred = bed
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         assert [Path(config.workspace_root("alice")).resolve()] == (
             _legacy_draft_roots(mount, None, "alice", "tok1")
         )

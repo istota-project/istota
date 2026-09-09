@@ -351,7 +351,7 @@ def _make_world(root: Path, case: Case) -> dict[str, Path]:
     the product does not resolve before binding — which is what makes a bind's
     source and destination differ. The keys below are split on exactly that:
     ``spelled`` for a path the product binds as written, ``base`` for one it
-    resolves first (``nextcloud_mount_path``, ``user_temp_dir``, the workspace)
+    resolves first (``workspace_path``, ``user_temp_dir``, the workspace)
     or never binds (``src``, ``venv``).
     """
     base = root / "real" if case.symlinked_root else root
@@ -453,6 +453,7 @@ def _make_config(case: Case, world: dict[str, Path]) -> Config:
     return Config(
         db_path=world["db_dir"] / "istota.db",
         temp_dir=world["base"] / "temp",
+        workspace_path=world["mount"] if case.mount else None,
         nextcloud_mount_path=world["mount"] if case.mount else None,
         skills_dir=world["config"] / "skills",
         module_data_dir=module_data_dir,

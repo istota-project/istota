@@ -52,6 +52,7 @@ def iso_config(tmp_path):
         db_path=db_file,
         module_data_dir=data / "modules",
         temp_dir=tmp_path / "temp",
+        workspace_path=mount,
         nextcloud_mount_path=mount,
         skills_dir=tmp_path / "skills",
         security=SecurityConfig(sandbox_enabled=True),
@@ -330,7 +331,7 @@ class TestMasksAreReadOnly:
 
     def test_a_refused_mask_is_not_remounted(self, iso_config, iso_task, tmp_path):
         """No tmpfs was mounted there, so remounting would hit the real dir."""
-        workspace = iso_config.nextcloud_mount_path
+        workspace = iso_config.workspace_path
         iso_config.db_path = workspace / "istota.db"
         iso_config.module_data_dir = tmp_path / "modules"
         (tmp_path / "modules").mkdir(parents=True, exist_ok=True)
@@ -441,7 +442,7 @@ class TestMaskDoesNotShadowNeededPaths:
         """The standalone layout puts db_path beside the workspace root."""
         workspace = tmp_path / "standalone"
         (workspace / "Users" / "alice").mkdir(parents=True)
-        iso_config.nextcloud_mount_path = workspace
+        iso_config.workspace_path = workspace
         iso_config.db_path = workspace / "istota.db"
         iso_config.module_data_dir = workspace / "modules"
 
@@ -480,7 +481,7 @@ class TestMisconfiguredModuleRoot:
         """module_db_root() raises for a root under the mount; masking is not
         the place that failure should surface — it would turn one broken module
         into "no task runs at all"."""
-        iso_config.module_data_dir = iso_config.nextcloud_mount_path / "modules"
+        iso_config.module_data_dir = iso_config.workspace_path / "modules"
         with caplog.at_level("WARNING"):
             argv = _bwrap(iso_config, iso_task, True)
         assert argv[0] == "bwrap"
@@ -490,7 +491,7 @@ class TestMisconfiguredModuleRoot:
 
     def test_module_resolution_still_raises(self, iso_config):
         """The misconfiguration keeps failing loudly where it matters."""
-        iso_config.module_data_dir = iso_config.nextcloud_mount_path / "modules"
+        iso_config.module_data_dir = iso_config.workspace_path / "modules"
         with pytest.raises(ValueError, match="local disk"):
             iso_config.module_db_path("alice", "health")
 
@@ -1036,6 +1037,7 @@ class TestModuleDbRoot:
         config = Config(
             db_path=tmp_path / "data" / "istota.db",
             module_data_dir=mount / "modules",
+            workspace_path=mount,
             nextcloud_mount_path=mount,
         )
         with pytest.raises(ValueError, match="local disk"):

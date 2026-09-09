@@ -26,7 +26,7 @@ def _standalone_config(tmp_path, *, init=True, with_user=True):
     workspace = tmp_path / "workspace"
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=workspace,
+        workspace_path=workspace,
         users={"alice": UserConfig(display_name="Alice")} if with_user else {},
         talk=TalkConfig(enabled=False),
         security=SecurityConfig(sandbox_enabled=False),
@@ -183,7 +183,7 @@ class TestBootstrapChecks:
         from istota import serve
         cfg = _standalone_config(tmp_path)
         serve.bootstrap_checks(cfg)
-        base = cfg.nextcloud_mount_path / "Users" / "alice"
+        base = cfg.workspace_path / "Users" / "alice"
         assert base.is_dir()
 
 

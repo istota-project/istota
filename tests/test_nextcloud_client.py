@@ -33,7 +33,7 @@ PROPFIND_XML_NO_OWNER = """<?xml version="1.0"?>
 @pytest.fixture
 def nc_config(tmp_path):
     return Config(
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         nextcloud=NextcloudConfig(
             url="https://cloud.example.com",
             username="istota",

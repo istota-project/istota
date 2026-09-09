@@ -74,7 +74,7 @@ class CheckResult:
 
 def _get_mount_path(config: "Config", path: str) -> Path:
     """Get the local mount path for a Nextcloud path."""
-    return config.nextcloud_mount_path / path.lstrip("/")
+    return config.workspace_path / path.lstrip("/")
 
 
 def load_heartbeat_config(

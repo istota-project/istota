@@ -115,7 +115,7 @@ def _resolve_env_spec_primary(spec: EnvSpec, ctx: EnvContext) -> str | None:
 
     elif spec.source == "template_file":
         # Auto-create from template if missing, return path
-        mount = getattr(ctx.config, "nextcloud_mount_path", None)
+        mount = getattr(ctx.config, "workspace_path", None)
         if not mount:
             return None
 

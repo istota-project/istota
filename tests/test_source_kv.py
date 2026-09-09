@@ -20,7 +20,7 @@ def conn(db_path):
 def _ctx(db_path, conn, *, now=None, shared_blocks=None):
     cfg = Config(
         db_path=db_path,
-        nextcloud_mount_path=db_path.parent / "mount",
+        workspace_path=db_path.parent / "mount",
         users={"alice": UserConfig(timezone="UTC")},
     )
     if shared_blocks is not None:

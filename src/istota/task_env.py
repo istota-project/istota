@@ -132,7 +132,7 @@ def build_task_runtime(
         "ISTOTA_EXPERIMENTAL_FEATURES": ",".join(config.experimental.features),
     })
 
-    # NEXTCLOUD_MOUNT_PATH is the real mount root for everyone. Every
+    # Both names carry the real workspace root for everyone. Every
     # consumer (the memory / memory_search skill CLIs, the schedules /
     # reminders skill docs) builds paths as `$NEXTCLOUD_MOUNT_PATH/Users/
     # <uid>/…`, so a "scoped" non-admin value (real/Users/<uid>) doubled the
@@ -143,9 +143,9 @@ def build_task_runtime(
     # Users/<uid> dir, for admin and non-admin alike) and the CLIs self-scope
     # by ISTOTA_USER_ID, so the real root is safe here; the prompt still
     # shows non-admins their scoped path.
-    env["NEXTCLOUD_MOUNT_PATH"] = (
-        str(config.nextcloud_mount_path) if config.nextcloud_mount_path else ""
-    )
+    workspace_path = str(config.workspace_path) if config.workspace_path else ""
+    env["ISTOTA_WORKSPACE_PATH"] = workspace_path
+    env["NEXTCLOUD_MOUNT_PATH"] = workspace_path
     # Set for every user, admin or not, and then split out of Claude's env
     # into the proxy's below. It used to be admin-gated, which was never a
     # real boundary — the path is fixed and derivable from

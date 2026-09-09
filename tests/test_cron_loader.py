@@ -41,7 +41,7 @@ def make_config_with_mount(tmp_path, mount_path):
         db_path = overrides.pop("db_path", tmp_path / "test.db")
         return Config(
             db_path=db_path,
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
             temp_dir=tmp_path / "temp",
             **overrides,
         )
@@ -3073,7 +3073,7 @@ class TestATemplateIsNotAnEmptyList:
         config = make_config_with_mount()
         # The real bytes the seeder writes, rather than a hand-written fence.
         _write_cron_md(
-            config.nextcloud_mount_path, "alice",
+            config.workspace_path, "alice",
             CRON_TEMPLATE.format(conversation_token="room1"),
         )
         doc = load_cron_document(config, "alice")

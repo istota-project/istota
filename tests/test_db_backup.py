@@ -33,13 +33,14 @@ def _config(tmp_path: Path, *, nextcloud_url: str = "", **sched) -> Config:
     sched.setdefault("db_backup_dir", str(tmp_path / "backups"))
     # The mount-liveness gate only applies where a Nextcloud backs the workspace
     # (`storage_is_nextcloud`); a URL-less config is a standalone install whose
-    # `nextcloud_mount_path` is a plain directory. TestMountLiveness passes one.
+    # `workspace_path` is a plain directory. TestMountLiveness passes one.
     return Config(
         db_path=tmp_path / "istota.db",
         nextcloud=NextcloudConfig(url=nextcloud_url),
         talk=TalkConfig(),
         email=EmailConfig(),
         scheduler=SchedulerConfig(**sched),
+        workspace_path=mount,
         nextcloud_mount_path=mount,
         module_data_dir=tmp_path / "local",
         users={"alice": UserConfig()},
@@ -84,7 +85,7 @@ class TestBackupDestination:
 
     def test_none_without_mount_or_dir(self, tmp_path):
         cfg = _config(tmp_path, db_backup_dir="")
-        cfg.nextcloud_mount_path = None
+        cfg.workspace_path = None
         assert db_backup.backup_destination(cfg) is None
 
 
@@ -129,7 +130,7 @@ class TestBackupDatabases:
 
     def test_no_destination_is_noop(self, tmp_path):
         cfg = _config(tmp_path, db_backup_dir="")
-        cfg.nextcloud_mount_path = None
+        cfg.workspace_path = None
         db.init_db(cfg.db_path)
         assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
 
@@ -163,7 +164,7 @@ class TestBackupClockPersistence:
 
     def test_noop_does_not_persist_last_run(self, tmp_path):
         cfg = _config(tmp_path, db_backup_dir="")
-        cfg.nextcloud_mount_path = None
+        cfg.workspace_path = None
         db.init_db(cfg.db_path)
         db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert db_backup.last_backup_time(cfg) == 0.0
@@ -429,6 +430,7 @@ class TestMountLiveness:
             db_backup_dir=str(real_mount / "Backups"),
             nextcloud_url=self.NC,
         )
+        cfg.workspace_path = link_mount
         cfg.nextcloud_mount_path = link_mount
         db.init_db(cfg.db_path)
         return cfg, real_mount
@@ -514,7 +516,7 @@ class TestMountLiveness:
 
 
 class TestStandaloneInstallIsNotGated:
-    """A standalone install points ``nextcloud_mount_path`` at its plain local
+    """A standalone install points ``workspace_path`` at its plain local
     workspace, which is never a mountpoint. Gating on the resolved path alone
     would refuse every backup there — including the one ``istota setup`` writes,
     which lives inside that workspace by design."""

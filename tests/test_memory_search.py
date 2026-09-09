@@ -454,7 +454,7 @@ class TestOneSpellingPerFile:
 
     def _config(self, mount):
         config = MagicMock()
-        config.nextcloud_mount_path = mount
+        config.workspace_path = mount
         # Overlays have their own pass, their own path rule and their own
         # tests; this is about the two callers that disagreed.
         config.use_mount = False
@@ -915,7 +915,7 @@ class TestReindexAll:
         conn.commit()
 
         config = MagicMock()
-        config.nextcloud_mount_path = None
+        config.workspace_path = None
 
         with patch("istota.memory.search.ensure_vec_table", return_value=False):
             stats = reindex_all(conn, config, "alice", lookback_days=1)
@@ -933,7 +933,7 @@ class TestReindexAll:
         (memories_dir / "2026-02-01.md").write_text("Learned about Python decorators today.")
 
         config = MagicMock()
-        config.nextcloud_mount_path = tmp_path / "mount"
+        config.workspace_path = tmp_path / "mount"
 
         with patch("istota.memory.search.ensure_vec_table", return_value=False), \
              patch("istota.memory.search.enable_vec_extension", return_value=False):
@@ -951,7 +951,7 @@ class TestReindexAll:
         (channel_memories / "2026-02-07.md").write_text("- Decided to use GraphQL (alice)")
 
         config = MagicMock()
-        config.nextcloud_mount_path = tmp_path / "mount"
+        config.workspace_path = tmp_path / "mount"
 
         with patch("istota.memory.search.ensure_vec_table", return_value=False), \
              patch("istota.memory.search.enable_vec_extension", return_value=False):
@@ -1650,7 +1650,7 @@ class TestReindexSkillOverlays:
         return Config(
             db_path=tmp_path / "istota.db",
             temp_dir=tmp_path / "tmp",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             bundled_skills_dir=bundled,
             skills_dir=ops,
             users={"alice": UserConfig()},
@@ -1660,7 +1660,7 @@ class TestReindexSkillOverlays:
     @staticmethod
     def _overlays(config):
         d = (
-            config.nextcloud_mount_path
+            config.workspace_path
             / "Users" / "alice" / config.bot_dir_name / "config" / "skills"
         )
         d.mkdir(parents=True, exist_ok=True)
@@ -1697,7 +1697,7 @@ class TestReindexSkillOverlays:
     def test_a_missing_directory_indexes_nothing_and_does_not_raise(self, tmp_path):
         conn = _init_db(tmp_path / "test.db")
         config = self._config(tmp_path)
-        (config.nextcloud_mount_path).mkdir(exist_ok=True)
+        (config.workspace_path).mkdir(exist_ok=True)
         assert self._reindex(conn, config)["skill_overlays"] == 0
         conn.close()
 
@@ -1780,7 +1780,7 @@ class TestReindexSkillOverlays:
         elsewhere.mkdir()
         (elsewhere / "developer.md").write_text("- CONSTITUTIONAL SECRET TEXT\n")
         user_config = (
-            config.nextcloud_mount_path
+            config.workspace_path
             / "Users" / "alice" / config.bot_dir_name / "config"
         )
         user_config.mkdir(parents=True)

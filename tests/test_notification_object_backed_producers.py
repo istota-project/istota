@@ -58,7 +58,7 @@ def _secret_key(monkeypatch):
 def config(tmp_path):
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(display_name="Alice")},
     )
     db.init_db(cfg.db_path)
@@ -157,7 +157,7 @@ class _LateAuthFailAdapter:
 
 def _ctx(config, user_id="alice"):
     ctx = synthesize_health_context(
-        user_id, Path(config.nextcloud_mount_path) / "workspace",
+        user_id, Path(config.workspace_path) / "workspace",
     )
     ensure_initialised(ctx)
     return ctx

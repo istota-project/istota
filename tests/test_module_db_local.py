@@ -23,6 +23,7 @@ def _config(tmp_path: Path, *, users: dict[str, UserConfig]) -> Config:
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
     return Config(
+        workspace_path=mount,
         nextcloud_mount_path=mount,
         module_data_dir=tmp_path / "local",
         users=users,
@@ -50,6 +51,7 @@ class TestModuleDbPath:
         mount = tmp_path / "mount"
         mount.mkdir(exist_ok=True)
         cfg = Config(
+            workspace_path=mount,
             nextcloud_mount_path=mount,
             module_data_dir=mount / "modules",  # footgun: under the mount
             users={"alice": UserConfig()},
@@ -68,7 +70,8 @@ class TestModuleDbPath:
         # even when db_path's dir coincides with the mount (a degenerate layout).
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path,  # == db_path.parent
+            workspace_path=tmp_path,  # == db_path.parent
+            nextcloud_mount_path=tmp_path,
             users={"alice": UserConfig()},
         )
         assert cfg.module_data_dir is None

@@ -86,7 +86,7 @@ def config(tmp_path):
     cfg.db_path = tmp_path / "istota.db"
     cfg.temp_dir = tmp_path / "temp"
     cfg.temp_dir.mkdir()
-    cfg.nextcloud_mount_path = tmp_path / "mount"
+    cfg.workspace_path = tmp_path / "mount"
     cfg.email = AppEmailConfig(
         enabled=True,
         imap_host="imap.test", imap_port=993,

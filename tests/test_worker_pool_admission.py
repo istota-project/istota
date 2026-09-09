@@ -75,7 +75,7 @@ def _config(db_path, tmp_path, **scheduler_kwargs):
     return Config(
         db_path=db_path,
         scheduler=SchedulerConfig(**kwargs),
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         temp_dir=tmp_path / "temp",
     )
 

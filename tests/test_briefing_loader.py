@@ -98,7 +98,7 @@ class TestParseBriefingsMd:
 
 class TestGetBriefingsForUser:
     def test_no_user_config(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path, users={})
+        config = Config(workspace_path=tmp_path, users={})
         result = get_briefings_for_user(config, "nobody")
         assert result == []
 
@@ -110,7 +110,7 @@ class TestGetBriefingsForUser:
             conversation_token="room1", components={"calendar": True},
         )
         user = UserConfig(briefings=[briefing])
-        config = Config(nextcloud_mount_path=mount, users={"alice": user})
+        config = Config(workspace_path=mount, users={"alice": user})
         result = get_briefings_for_user(config, "alice")
         assert len(result) == 1
         assert result[0].name == "morning"
@@ -125,7 +125,7 @@ class TestGetBriefingsForUser:
             conversation_token="room1", components={"markets": True},
         )
         user = UserConfig(briefings=[admin_briefing])
-        config = Config(nextcloud_mount_path=mount, users={"alice": user})
+        config = Config(workspace_path=mount, users={"alice": user})
 
         result = get_briefings_for_user(config, "alice")
         assert len(result) == 1
@@ -139,7 +139,7 @@ class TestGetBriefingsForUser:
         user = UserConfig(briefings=[
             BriefingConfig(name="morning", cron="0 6 * * *"),
         ])
-        config = Config(nextcloud_mount_path=mount, users={"alice": user})
+        config = Config(workspace_path=mount, users={"alice": user})
 
         get_briefings_for_user(config, "alice").clear()
         assert len(config.users["alice"].briefings) == 1

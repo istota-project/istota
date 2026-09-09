@@ -618,7 +618,7 @@ def build_mount_plan(
     # because no socket is bound at any path and no `DOCKER_HOST` is exported.
 
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_path
     user_dir: Path | None = None
     if mount:
         mount = mount.resolve()

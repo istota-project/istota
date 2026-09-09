@@ -29,7 +29,7 @@ def mount_config(tmp_path):
     mount_dir = tmp_path / "mount"
     mount_dir.mkdir()
     return Config(
-        nextcloud_mount_path=mount_dir,
+        workspace_path=mount_dir,
         rclone_remote="nextcloud",
     )
 
@@ -39,7 +39,7 @@ def mount_config(tmp_path):
 
 class TestMountFileOps:
     def test_list_files(self, mount_config):
-        mount = mount_config.nextcloud_mount_path
+        mount = mount_config.workspace_path
         (mount / "subdir").mkdir()
         (mount / "subdir" / "a.txt").write_text("hello")
         (mount / "subdir" / "b.txt").write_text("world")
@@ -62,7 +62,7 @@ class TestMountFileOps:
             list_files(mount_config, "nonexistent")
 
     def test_read_text(self, mount_config):
-        mount = mount_config.nextcloud_mount_path
+        mount = mount_config.workspace_path
         (mount / "doc.txt").write_text("file content here")
 
         content = read_text(mount_config, "doc.txt")
@@ -75,23 +75,23 @@ class TestMountFileOps:
     def test_write_text(self, mount_config):
         write_text(mount_config, "output/result.txt", "test output")
 
-        mount = mount_config.nextcloud_mount_path
+        mount = mount_config.workspace_path
         assert (mount / "output" / "result.txt").read_text() == "test output"
 
     def test_write_text_creates_parents(self, mount_config):
         write_text(mount_config, "deep/nested/dir/file.txt", "content")
 
-        mount = mount_config.nextcloud_mount_path
+        mount = mount_config.workspace_path
         assert (mount / "deep" / "nested" / "dir" / "file.txt").exists()
 
     def test_mkdir(self, mount_config):
         result = mkdir(mount_config, "new_folder/sub")
 
         assert result is True
-        assert (mount_config.nextcloud_mount_path / "new_folder" / "sub").is_dir()
+        assert (mount_config.workspace_path / "new_folder" / "sub").is_dir()
 
     def test_path_exists_true(self, mount_config):
-        mount = mount_config.nextcloud_mount_path
+        mount = mount_config.workspace_path
         (mount / "exists.txt").write_text("yes")
 
         assert path_exists(mount_config, "exists.txt") is True
@@ -100,7 +100,7 @@ class TestMountFileOps:
         assert path_exists(mount_config, "nope.txt") is False
 
     def test_move_file(self, mount_config):
-        mount = mount_config.nextcloud_mount_path
+        mount = mount_config.workspace_path
         (mount / "source.txt").write_text("data")
 
         result = move_file(mount_config, "source.txt", "dest/moved.txt")
@@ -111,11 +111,11 @@ class TestMountFileOps:
 
     def test_get_local_path(self, mount_config):
         result = get_local_path(mount_config, "/alice/TODO.txt")
-        expected = mount_config.nextcloud_mount_path / "alice" / "TODO.txt"
+        expected = mount_config.workspace_path / "alice" / "TODO.txt"
         assert result == expected
 
     def test_get_local_path_no_mount(self):
-        config = Config(nextcloud_mount_path=None)
+        config = Config(workspace_path=None)
         result = get_local_path(config, "/alice/TODO.txt")
         assert result is None
 

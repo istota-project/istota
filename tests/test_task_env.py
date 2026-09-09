@@ -47,7 +47,7 @@ def _config(tmp_path, **security):
     return Config(
         db_path=tmp_path / "db" / "test.db",
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         security=SecurityConfig(**sec),
         devbox=DevboxConfig(enabled=False),
     )
@@ -769,6 +769,18 @@ class TestTheRestOfTheReturnedRuntime:
         assert "ISTOTA_TASK_ATTEMPT" not in runtime.env
         assert runtime.proxy_ctx is not None
         assert runtime.proxy_ctx.base_env["ISTOTA_TASK_ATTEMPT"] == "3"
+
+    def test_both_workspace_names_carry_the_workspace_path(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path)
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        expected = str(config.workspace_path)
+        assert runtime.env["ISTOTA_WORKSPACE_PATH"] == expected
+        assert runtime.env["NEXTCLOUD_MOUNT_PATH"] == expected
 
     def test_the_database_path_never_reaches_the_model(
         self, tmp_path, runtime_inputs, monkeypatch,

@@ -1888,7 +1888,7 @@ def _admin_runtime_section() -> dict:
     })
 
     if not _config.nextcloud.url:
-        workspace = str(_config.nextcloud_mount_path or "a local folder")
+        workspace = str(_config.workspace_path or "a local folder")
         caveats.append({
             "title": "No Nextcloud",
             "detail": (
@@ -2607,7 +2607,7 @@ def _admin_modules_section() -> dict:
 
 def _admin_module_feeds() -> dict | None:
     # Count users with the feeds module enabled even if we can't resolve
-    # their workspace (e.g. ``nextcloud_mount_path`` unset on docker-compose
+    # their workspace (e.g. ``workspace_path`` unset on docker-compose
     # deploys). Returning ``None`` would silently hide a configured-but-
     # unreachable subsystem from admins.
     configured = sum(
@@ -4484,8 +4484,8 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         token = room.token
     # Best-effort: drop the channel's CHANNEL.md directory. Outside the DB
     # transaction; a filesystem failure leaves the dir but doesn't fail the API.
-    if _config.nextcloud_mount_path:
-        channel_dir = _config.nextcloud_mount_path / "Channels" / token
+    if _config.workspace_path:
+        channel_dir = _config.workspace_path / "Channels" / token
         try:
             shutil.rmtree(channel_dir, ignore_errors=True)
         except Exception as exc:  # pragma: no cover - defensive
@@ -4617,7 +4617,7 @@ def _chat_save_room_memory(
         if db.count_active_room_tasks(conn, room.token) > 0:
             return "busy", None
     if _config.use_mount:
-        memory_path = _config.nextcloud_mount_path / "Channels" / room.token / "CHANNEL.md"
+        memory_path = _config.workspace_path / "Channels" / room.token / "CHANNEL.md"
     else:
         # No local file exists on an rclone deployment, so the anchor is keyed on
         # a synthetic absolute path. Absolute deliberately: `lock_path_for` hashes
@@ -5801,9 +5801,9 @@ def _chat_upload_roots(username: str) -> list[Path]:
     (mount inbox + temp fallback). Both are listed regardless of mount config so
     a path saved under either still validates."""
     return [
-        _config.nextcloud_mount_path / "Users" / username / "inbox" / "web-chat",
+        _config.workspace_path / "Users" / username / "inbox" / "web-chat",
         _config.temp_dir / username / "web-chat-uploads",
-    ] if _config.nextcloud_mount_path else [
+    ] if _config.workspace_path else [
         _config.temp_dir / username / "web-chat-uploads",
     ]
 

@@ -1294,7 +1294,7 @@ class TestDownloadTalkAttachments:
         talk_dir.mkdir()
         (talk_dir / "photo.jpg").write_bytes(b"fake image")
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         result = download_talk_attachments(config, ["Talk/photo.jpg"])
         assert len(result) == 1
         assert result[0] == str(mount / "Talk" / "photo.jpg")
@@ -1303,7 +1303,7 @@ class TestDownloadTalkAttachments:
         mount = tmp_path / "mount"
         mount.mkdir()
         # No Talk/file.jpg on disk
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         result = download_talk_attachments(config, ["Talk/missing.jpg"])
         assert len(result) == 1
         # Falls back to original path
@@ -1318,7 +1318,7 @@ class TestDownloadTalkAttachments:
         mock_run.return_value = MagicMock(returncode=0)
 
         config = Config(
-            nextcloud_mount_path=None,
+            workspace_path=None,
             rclone_remote="nc",
             temp_dir=temp_dir,
         )
@@ -1328,12 +1328,12 @@ class TestDownloadTalkAttachments:
         mock_run.assert_called_once()
 
     def test_non_talk_path_unchanged(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         result = download_talk_attachments(config, ["/some/other/path.txt"])
         assert result == ["/some/other/path.txt"]
 
     def test_empty_list(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         result = download_talk_attachments(config, [])
         assert result == []
 
@@ -2196,14 +2196,14 @@ class TestSyncCronFiles:
             timezone="UTC", disabled_modules=["feeds", "money", "location"],
         )
         return Config(
-            db_path=db_path, users={"alice": user}, nextcloud_mount_path=mount,
+            db_path=db_path, users={"alice": user}, workspace_path=mount,
         )
 
     @staticmethod
     def _cron_path(config):
         from istota.storage import get_user_cron_path
 
-        path = config.nextcloud_mount_path / get_user_cron_path(
+        path = config.workspace_path / get_user_cron_path(
             "alice", "istota"
         ).lstrip("/")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2413,7 +2413,7 @@ prompt_file = "Users/alice/istota/scripts/prompts/gone.txt"
         user = UserConfig(timezone="UTC", disabled_modules=["feeds", "money", "location"])
         config = Config(
             db_path=db_path, users={"alice": user},
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
         )
 
         from istota.storage import get_user_cron_path
@@ -2443,7 +2443,7 @@ class TestProcessOneTask:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
             **kwargs,
         )
@@ -3531,7 +3531,7 @@ class TestWorkerPool:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(worker_idle_timeout=1, poll_interval=1),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -3552,7 +3552,7 @@ class TestWorkerPool:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(max_foreground_workers=1, worker_idle_timeout=1, poll_interval=1),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -3573,7 +3573,7 @@ class TestWorkerPool:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -3586,7 +3586,7 @@ class TestWorkerPool:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(user_max_foreground_workers=1, worker_idle_timeout=2, poll_interval=1),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -3620,7 +3620,7 @@ class TestProcessHeartbeatTask:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
             **kwargs,
         )
@@ -3735,7 +3735,7 @@ class TestSilentScheduledJob:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
             **kwargs,
         )
@@ -3831,7 +3831,7 @@ class TestAutoIndexGate:
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
             memory_search=MemorySearchConfig(enabled=True, auto_index_conversations=True),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         defaults.update(kwargs)
@@ -3949,7 +3949,7 @@ class TestScheduledJobFailureTracking:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(scheduled_job_max_consecutive_failures=max_failures),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 
@@ -4072,7 +4072,7 @@ class TestScheduledJobFailureTracking:
         config = self._make_config(db_path, tmp_path, max_failures=2)
         config.users = {"alice": UserConfig()}
         cron_path = (
-            config.nextcloud_mount_path
+            config.workspace_path
             / get_user_cron_path("alice", "istota").lstrip("/")
         )
         cron_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4233,7 +4233,7 @@ class TestWorkerPoolIsolation:
                 max_foreground_workers=3,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -4259,7 +4259,7 @@ class TestWorkerPoolIsolation:
                 max_background_workers=1,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -4285,7 +4285,7 @@ class TestWorkerPoolIsolation:
                 max_foreground_workers=3, max_background_workers=1,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -4324,7 +4324,7 @@ class TestFailAncientNotification:
             email=EmailConfig(),
             scheduler=SchedulerConfig(),
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig()},
         )
 
@@ -4367,7 +4367,7 @@ class TestExecuteCommandTask:
         temp.mkdir(exist_ok=True)
         return Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=temp,
             scheduler=SchedulerConfig(task_timeout_minutes=1),
         )
@@ -4401,7 +4401,7 @@ class TestExecuteCommandTask:
 
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
             scheduler=SchedulerConfig(task_timeout_minutes=0),  # 0s deadline
         )
@@ -4466,7 +4466,7 @@ class TestExecuteCommandTask:
         config = self._make_config(db_path, tmp_path)
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
             scheduler=SchedulerConfig(task_timeout_minutes=0),  # 0 seconds
         )
@@ -4692,7 +4692,7 @@ class TestExecuteCommandTask:
         config = Config(
             db_path=db_path,
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="ncuser", app_password="ncpass"),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
             scheduler=SchedulerConfig(task_timeout_minutes=1),
         )
@@ -4728,7 +4728,7 @@ class TestExecuteCommandTask:
         config = Config(
             db_path=db_path,
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="ncuser", app_password="ncpass"),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
             scheduler=SchedulerConfig(task_timeout_minutes=1),
         )
@@ -4909,7 +4909,7 @@ class _TaskPathEnvHarness:
         temp.mkdir(exist_ok=True)
         return Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=temp,
             admin_users={"alice"},
             scheduler=SchedulerConfig(task_timeout_minutes=1),
@@ -4963,6 +4963,27 @@ class TestDeferredDirContract(_TaskPathEnvHarness):
 
         assert cmd_env["ISTOTA_DEFERRED_DIR"] == expected
         assert skill_env["ISTOTA_DEFERRED_DIR"] == expected
+
+    def test_command_and_skill_paths_export_both_workspace_names(
+        self, db_path, tmp_path, monkeypatch,
+    ):
+        config = self._config(db_path, tmp_path)
+        expected = str(config.workspace_path)
+
+        cmd_env = self._captured_env(
+            monkeypatch,
+            lambda: _execute_command_task(self._task(command="true"), config),
+        )
+        skill_env = self._captured_env(
+            monkeypatch,
+            lambda: _execute_skill_task(
+                self._task(skill="kv", skill_args='["namespaces"]'), config,
+            ),
+        )
+
+        for env in (cmd_env, skill_env):
+            assert env["ISTOTA_WORKSPACE_PATH"] == expected
+            assert env["NEXTCLOUD_MOUNT_PATH"] == expected
 
     @patch("istota.executor.subprocess.run")
     def test_brain_path_agrees(self, mock_run, db_path, tmp_path):
@@ -5177,7 +5198,7 @@ class TestExecuteSkillTask:
         temp.mkdir(exist_ok=True)
         return Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=temp,
             scheduler=SchedulerConfig(task_timeout_minutes=1),
             users={"alice": UserConfig()},
@@ -5241,7 +5262,7 @@ class TestExecuteSkillTask:
                 username="ncuser",
                 app_password="ncpass",
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
             scheduler=SchedulerConfig(task_timeout_minutes=1),
             users={"alice": UserConfig()},
@@ -5304,7 +5325,7 @@ class TestExecuteSkillTask:
                 username="ncuser",
                 app_password="ncpass",
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
             scheduler=SchedulerConfig(task_timeout_minutes=1),
             users={"alice": UserConfig()},
@@ -5342,7 +5363,7 @@ class TestExecuteSkillTask:
                 username="ncuser",
                 app_password="ncpass",
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
             scheduler=SchedulerConfig(task_timeout_minutes=1),
             users={"alice": UserConfig()},
@@ -5456,7 +5477,7 @@ class TestGarminSyncInProcess:
         temp.mkdir(exist_ok=True)
         return Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=temp,
             scheduler=SchedulerConfig(task_timeout_minutes=1),
             users={"alice": UserConfig(timezone=timezone)},
@@ -5671,7 +5692,7 @@ class TestDualWorkerQueue:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -5693,7 +5714,7 @@ class TestDualWorkerQueue:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -5713,7 +5734,7 @@ class TestDualWorkerQueue:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, worker_idle_timeout=1, poll_interval=1),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -5733,7 +5754,7 @@ class TestDualWorkerQueue:
         config = Config(
             db_path=db_path,
             scheduler=SchedulerConfig(max_foreground_workers=6, max_background_workers=6, user_max_foreground_workers=1, worker_idle_timeout=2, poll_interval=1),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -5758,7 +5779,7 @@ class TestDualWorkerQueue:
                 max_foreground_workers=2, max_background_workers=1,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -5789,7 +5810,7 @@ class TestDualWorkerQueue:
                 max_foreground_workers=2, max_background_workers=0,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -5816,7 +5837,7 @@ class TestDualWorkerQueue:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -5855,7 +5876,7 @@ class TestDeferredOperations:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 
@@ -7150,7 +7171,7 @@ class TestPurgeDeferredFilesForRetry:
             talk=TalkConfig(enabled=True, bot_username="i"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         user_temp = tmp_path / "temp" / "alice"
@@ -7283,7 +7304,7 @@ class TestOnceJobAutoRemoval:
             nextcloud=NextcloudConfig(url="https://nc.example.com", username="istota", app_password="secret"),
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 
@@ -7356,7 +7377,7 @@ class TestOnceJobAutoRemoval:
         from istota.storage import get_user_cron_path
 
         config = self._make_config(db_path, tmp_path)
-        mount = config.nextcloud_mount_path
+        mount = config.workspace_path
 
         # Write CRON.md with the once job and a regular job
         cron_path = mount / get_user_cron_path("alice", "istota").lstrip("/")
@@ -7422,7 +7443,7 @@ once = true
         from istota.storage import get_user_cron_path
 
         config = self._make_config(db_path, tmp_path)
-        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+        cron_path = config.workspace_path / get_user_cron_path(
             "alice", "istota"
         ).lstrip("/")
         cron_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7481,7 +7502,7 @@ prompt = "daily check"
         from istota.storage import get_user_cron_path
 
         config = self._make_config(db_path, tmp_path)
-        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+        cron_path = config.workspace_path / get_user_cron_path(
             "alice", "istota"
         ).lstrip("/")
         cron_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7575,7 +7596,7 @@ once = true
         from istota.storage import get_user_cron_path
 
         config = self._make_config(db_path, tmp_path)
-        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+        cron_path = config.workspace_path / get_user_cron_path(
             "alice", "istota"
         ).lstrip("/")
         cron_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7661,7 +7682,7 @@ once = true
         from istota.storage import get_user_cron_path
 
         config = self._make_config(db_path, tmp_path)
-        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+        cron_path = config.workspace_path / get_user_cron_path(
             "alice", "istota"
         ).lstrip("/")
         cron_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7741,7 +7762,7 @@ once = true
         from istota.storage import get_user_cron_path
 
         config = self._make_config(db_path, tmp_path)
-        cron_path = config.nextcloud_mount_path / get_user_cron_path(
+        cron_path = config.workspace_path / get_user_cron_path(
             "alice", "istota"
         ).lstrip("/")
         cron_path.parent.mkdir(parents=True, exist_ok=True)
@@ -8070,7 +8091,7 @@ class TestWorkerPoolConcurrencyCaps:
                 max_foreground_workers=2, max_background_workers=3,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8097,7 +8118,7 @@ class TestWorkerPoolConcurrencyCaps:
                 max_foreground_workers=5, max_background_workers=1,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8122,7 +8143,7 @@ class TestWorkerPoolConcurrencyCaps:
                 max_foreground_workers=4, max_background_workers=3,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8151,7 +8172,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=2,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8178,7 +8199,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=2,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8208,7 +8229,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=2,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8239,7 +8260,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=2,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8265,7 +8286,7 @@ class TestMultiWorkerPerUser:
                 user_max_background_workers=2,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8291,7 +8312,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=3,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8317,7 +8338,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=3,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8341,7 +8362,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=2,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8369,7 +8390,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=2,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8397,7 +8418,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=2,
                 worker_idle_timeout=2, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8429,7 +8450,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=2,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8462,7 +8483,7 @@ class TestMultiWorkerPerUser:
                 user_max_foreground_workers=3,
                 worker_idle_timeout=1, poll_interval=1,
             ),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "mount").mkdir(exist_ok=True)
@@ -8505,7 +8526,7 @@ class TestApiErrorInSuccessResult:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 
@@ -8616,7 +8637,7 @@ class TestBriefingFailureSuppression:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 
@@ -8709,7 +8730,7 @@ class TestBriefingJsonDelivery:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 
@@ -8807,7 +8828,7 @@ class TestMalformedResultGuard:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 
@@ -8943,7 +8964,7 @@ class TestTaskIdInProgress:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 
@@ -9043,7 +9064,7 @@ class TestCheckDbHealth:
             email=EmailConfig(),
             scheduler=SchedulerConfig(),
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             module_data_dir=tmp_path / "local",
             users={"alice": UserConfig(), "bob": UserConfig()},
         )
@@ -9086,7 +9107,7 @@ class TestCheckDbHealth:
             email=EmailConfig(),
             scheduler=SchedulerConfig(),
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=None,
+            workspace_path=None,
             module_data_dir=tmp_path / "local",
             users={"alice": UserConfig()},
         )
@@ -9118,7 +9139,7 @@ class TestReconcileVisitsMissingDb:
             email=EmailConfig(),
             scheduler=SchedulerConfig(),
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             location=LocationReceiverConfig(reconcile_enabled=True),
             users={"frank": UserConfig()},
         )

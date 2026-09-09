@@ -49,7 +49,7 @@ class NextcloudConfig:
     #: Where the daemon's storage root sits inside the bot account's own
     #: Nextcloud file tree. Empty on bare metal, where they are the same
     #: directory: the rclone remote points at `remote.php/dav/files/<bot>/` and
-    #: is mounted at `nextcloud_mount_path`, so `/Users/alice` on disk is
+    #: is mounted at `workspace_path`, so `/Users/alice` on disk is
     #: `/Users/alice` over DAV. On the Docker shape `/mnt/shared` is an ordinary
     #: volume that Nextcloud serves through a `files_external` mount, so the
     #: same directory is `/<mount point>/Users/alice` to the bot and every
@@ -1823,6 +1823,7 @@ class Config:
     briefing_shared_blocks: list[BriefingSharedBlock] = field(default_factory=list)
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     rclone_remote: str = "nextcloud"  # rclone remote name
+    workspace_path: Path | None = None  # On-disk root of the bot's file tree
     nextcloud_mount_path: Path | None = None  # If set, use mount instead of rclone CLI
     skills_dir: Path = field(default_factory=lambda: Path("config/skills"))
     bundled_skills_dir: Path | None = None  # Override bundled skills dir (for testing)
@@ -1838,6 +1839,10 @@ class Config:
     # already local. Set explicitly to override (guarded against the mount).
     module_data_dir: Path | None = None
     config_path: Path | None = None  # Set by load_config() to the file actually loaded
+
+    def __post_init__(self) -> None:
+        if self.workspace_path is None:
+            self.workspace_path = self.nextcloud_mount_path
 
     @property
     def bot_dir_name(self) -> str:
@@ -1855,7 +1860,7 @@ class Config:
     @property
     def use_mount(self) -> bool:
         """Whether to use local mount instead of rclone CLI."""
-        return self.nextcloud_mount_path is not None
+        return self.workspace_path is not None
 
     @property
     def storage_is_nextcloud(self) -> bool:
@@ -1883,17 +1888,17 @@ class Config:
         return "Nextcloud" if self.storage_is_nextcloud else "your workspace"
 
     def workspace_root(self, user_id: str | None = None) -> Path | None:
-        """On-disk root of the workspace (mount mode only; ``None`` under rclone).
+        """On-disk root of the workspace (``None`` when no local tree exists).
 
         Scoped to the user's ``/Users/{user_id}`` subtree when ``user_id`` is
-        given, else the bare mount root. A de-duplication of the
-        ``mount / "Users" / uid`` idiom inlined across the codebase — not a
+        given, else the bare workspace root. A de-duplication of the
+        ``workspace / "Users" / uid`` idiom inlined across the codebase — not a
         storage abstraction (no backend switch).
 
         **Scoped through :func:`~istota.user_scope.scoped_user_dir`, not
         joined.** The join is not the check it reads as: ``.`` is discarded,
         an absolute component replaces the root and ``..`` is a child by name
-        and the parent on disk, so ``{mount}/Users`` — every user's directory
+        and the parent on disk, so ``{workspace}/Users`` — every user's directory
         at once — was one bad ``user_id`` away (ISSUE-402). That matters here
         rather than only cosmetically because this is the root
         ``outbound_drafts._confined_attachment`` confines a held draft's
@@ -1903,9 +1908,9 @@ class Config:
         which every caller already handles as "no local workspace" — refusing
         rather than falling back, since the fallback is the exposure.
         """
-        if self.nextcloud_mount_path is None:
+        if self.workspace_path is None:
             return None
-        root = self.nextcloud_mount_path
+        root = self.workspace_path
         if not user_id:
             return root
         return scoped_user_dir(root / "Users", user_id)
@@ -3469,6 +3474,8 @@ def load_config(config_path: Path | None = None) -> Config:
         config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )
+    if config.workspace_path is None:
+        config.workspace_path = config.nextcloud_mount_path
     _apply_renamed_keys(data, config)
     # After the walk, so a `[brain.claude_code] model` in the same file wins
     # over the top-level key it replaces, and before anything reads a brain

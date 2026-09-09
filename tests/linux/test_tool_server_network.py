@@ -116,7 +116,7 @@ def layout(tmp_path, make_config):
     return make_config(
         db_path=db_dir / "istota.db",
         module_data_dir=tmp_path / "app" / "moduledbs",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
         security=SecurityConfig(sandbox_enabled=True),
     )

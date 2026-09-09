@@ -51,7 +51,7 @@ class RelocationReport:
 
 
 def _paths(config) -> tuple[Path | None, Path | None, Path | None]:
-    mount_value = getattr(config, "nextcloud_mount_path", None)
+    mount_value = getattr(config, "workspace_path", None)
     if not mount_value:
         return None, None, None
     mount = Path(mount_value)

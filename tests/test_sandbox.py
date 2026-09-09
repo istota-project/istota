@@ -38,7 +38,7 @@ def sandbox_config(tmp_path):
     return Config(
         db_path=db_file,
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         skills_dir=tmp_path / "skills",
         security=SecurityConfig(
             sandbox_enabled=True,
@@ -210,7 +210,7 @@ class TestBuildBwrapCmdNonAdmin:
     def test_user_dir_mounted_rw(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, False)
-        mount = sandbox_config.nextcloud_mount_path.resolve()
+        mount = sandbox_config.workspace_path.resolve()
         user_dir = str(mount / "Users" / "alice")
         bind_pairs = _get_bind_pairs(result, "--bind")
         assert any(src == user_dir for src, _ in bind_pairs), \
@@ -219,7 +219,7 @@ class TestBuildBwrapCmdNonAdmin:
     def test_channel_dir_mounted_rw(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, False)
-        mount = sandbox_config.nextcloud_mount_path.resolve()
+        mount = sandbox_config.workspace_path.resolve()
         channel_dir = str(mount / "Channels" / "room123")
         bind_pairs = _get_bind_pairs(result, "--bind")
         assert any(src == channel_dir for src, _ in bind_pairs)
@@ -227,7 +227,7 @@ class TestBuildBwrapCmdNonAdmin:
     def test_no_channel_mount_without_token(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task(conversation_token=None)
         result = _run_bwrap(sandbox_config, task, False)
-        mount = sandbox_config.nextcloud_mount_path.resolve()
+        mount = sandbox_config.workspace_path.resolve()
         result_str = " ".join(result)
         assert str(mount / "Channels") not in result_str
 
@@ -244,7 +244,7 @@ class TestBuildBwrapCmdNonAdmin:
 
     def test_resource_extra_mount_ro(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
-        shared_path = sandbox_config.nextcloud_mount_path / "Shared" / "data.csv"
+        shared_path = sandbox_config.workspace_path / "Shared" / "data.csv"
         shared_path.parent.mkdir(parents=True, exist_ok=True)
         shared_path.touch()
         resource = db.UserResource(
@@ -259,7 +259,7 @@ class TestBuildBwrapCmdNonAdmin:
 
     def test_resource_extra_mount_rw(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
-        shared_path = sandbox_config.nextcloud_mount_path / "Shared" / "data.csv"
+        shared_path = sandbox_config.workspace_path / "Shared" / "data.csv"
         shared_path.parent.mkdir(parents=True, exist_ok=True)
         shared_path.touch()
         resource = db.UserResource(
@@ -279,7 +279,7 @@ class TestBuildBwrapCmdNonAdmin:
             resource_path="/Users/alice/tasks.md", display_name="Tasks",
             permissions="read",
         )
-        f = sandbox_config.nextcloud_mount_path / "Users" / "alice" / "tasks.md"
+        f = sandbox_config.workspace_path / "Users" / "alice" / "tasks.md"
         f.touch()
         result = _run_bwrap(sandbox_config, task, False, resources=[resource])
         resolved = str(f.resolve())
@@ -294,7 +294,7 @@ class TestBuildBwrapCmdAdmin:
         """Admin gets scoped user dir, not the full Nextcloud mount."""
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, True)
-        mount = sandbox_config.nextcloud_mount_path.resolve()
+        mount = sandbox_config.workspace_path.resolve()
         full_mount = str(mount)
         user_dir = str(mount / "Users" / "alice")
         bind_pairs = _get_bind_pairs(result, "--bind")
@@ -306,7 +306,7 @@ class TestBuildBwrapCmdAdmin:
     def test_admin_channel_dir_mounted_rw(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
         result = _run_bwrap(sandbox_config, task, True)
-        mount = sandbox_config.nextcloud_mount_path.resolve()
+        mount = sandbox_config.workspace_path.resolve()
         channel_dir = str(mount / "Channels" / "room123")
         bind_pairs = _get_bind_pairs(result, "--bind")
         assert any(src == channel_dir for src, _ in bind_pairs)
@@ -314,7 +314,7 @@ class TestBuildBwrapCmdAdmin:
     def test_admin_resource_mount_ro(self, sandbox_config, make_sandbox_task):
         """Admin per-resource mounts work (previously only non-admin had them)."""
         task = make_sandbox_task()
-        shared_path = sandbox_config.nextcloud_mount_path / "Shared" / "report.csv"
+        shared_path = sandbox_config.workspace_path / "Shared" / "report.csv"
         shared_path.parent.mkdir(parents=True, exist_ok=True)
         shared_path.touch()
         resource = db.UserResource(
@@ -329,7 +329,7 @@ class TestBuildBwrapCmdAdmin:
 
     def test_admin_resource_mount_rw(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
-        shared_path = sandbox_config.nextcloud_mount_path / "Shared" / "data.csv"
+        shared_path = sandbox_config.workspace_path / "Shared" / "data.csv"
         shared_path.parent.mkdir(parents=True, exist_ok=True)
         shared_path.touch()
         resource = db.UserResource(
@@ -1375,15 +1375,15 @@ class TestNativeFsRoots:
     def test_user_mount_and_channel_writable(self, sandbox_config, make_sandbox_task):
         task = make_sandbox_task()
         _, write, _ = self._roots(sandbox_config, task, False)
-        mount = sandbox_config.nextcloud_mount_path.resolve()
+        mount = sandbox_config.workspace_path.resolve()
         assert (mount / "Users" / "alice").resolve() in write
         assert (mount / "Channels" / "room123").resolve() in write
 
     def test_talk_is_read_only(self, sandbox_config, make_sandbox_task):
-        (sandbox_config.nextcloud_mount_path / "Talk").mkdir()
+        (sandbox_config.workspace_path / "Talk").mkdir()
         task = make_sandbox_task()
         read, write, _ = self._roots(sandbox_config, task, False)
-        talk = (sandbox_config.nextcloud_mount_path / "Talk").resolve()
+        talk = (sandbox_config.workspace_path / "Talk").resolve()
         assert talk in read
         assert talk not in write
 
@@ -1494,7 +1494,7 @@ class TestPerUserReposDir:
         self, sandbox_config, make_sandbox_task, tmp_path,
     ):
         repos = self._setup(sandbox_config, tmp_path)
-        (sandbox_config.nextcloud_mount_path / "Users" / "bob").mkdir(parents=True)
+        (sandbox_config.workspace_path / "Users" / "bob").mkdir(parents=True)
 
         alice = _run_bwrap(sandbox_config, make_sandbox_task(), True)
         bob = _run_bwrap(sandbox_config, make_sandbox_task(user_id="bob"), True)
@@ -1999,10 +1999,10 @@ class TestSandboxCacheDirCannotOvermountABind:
 
     def test_the_nextcloud_mount_root_is_refused(self, sandbox_config, make_sandbox_task):
         result = self._argv(
-            sandbox_config, make_sandbox_task(), sandbox_config.nextcloud_mount_path,
+            sandbox_config, make_sandbox_task(), sandbox_config.workspace_path,
         )
         pairs = _get_bind_pairs(result, "--bind")
-        mount = str(sandbox_config.nextcloud_mount_path)
+        mount = str(sandbox_config.workspace_path)
         assert (mount, mount) not in pairs
 
 
@@ -2602,7 +2602,7 @@ class TestSessionLogContainment:
         return Config(
             db_path=home / "data" / "istota.db",
             temp_dir=temp,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             skills_dir=tmp_path / "skills",
             security=SecurityConfig(sandbox_enabled=True),
         )
@@ -2618,7 +2618,7 @@ class TestSessionLogContainment:
         return Config(
             db_path=workspace / "istota.db",
             temp_dir=workspace / "tmp",
-            nextcloud_mount_path=workspace,
+            workspace_path=workspace,
             skills_dir=tmp_path / "skills",
             security=SecurityConfig(sandbox_enabled=True),
         )
@@ -2641,7 +2641,7 @@ class TestSessionLogContainment:
         return Config(
             db_path=data / "db" / "istota.db",
             temp_dir=temp,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             skills_dir=tmp_path / "skills",
             security=SecurityConfig(sandbox_enabled=True),
         )

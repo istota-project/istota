@@ -684,8 +684,8 @@ def check_writable_dirs(config: "Config", probe: bool) -> list[CheckResult]:
         module_root_error = str(exc)
     else:
         module_root_error = ""
-    if config.nextcloud_mount_path is not None:
-        candidates.append(("mount", Path(config.nextcloud_mount_path)))
+    if config.workspace_path is not None:
+        candidates.append(("mount", Path(config.workspace_path)))
 
     results: list[CheckResult] = []
     for label, path in candidates:
@@ -1532,7 +1532,7 @@ def _control_overlap_findings(
             except Exception:  # noqa: BLE001 - a diagnostic must not raise
                 continue
 
-    mount = getattr(config, "nextcloud_mount_path", None)
+    mount = getattr(config, "workspace_path", None)
     if not mount:
         return out
     try:
@@ -5969,7 +5969,7 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
         return CheckResult(
             name, SKIP, "no workspace mount configured, so overlays are not read"
         )
-    mount = Path(config.nextcloud_mount_path)
+    mount = Path(config.workspace_path)
     if not (mount / "Users").is_dir():
         return CheckResult(name, SKIP, f"{mount}/Users does not exist yet")
 

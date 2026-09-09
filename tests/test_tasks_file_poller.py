@@ -36,7 +36,7 @@ def make_config(tmp_path, db_path):
     def _make(**overrides):
         defaults = dict(
             db_path=db_path,
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig(display_name="Alice", email_addresses=["alice@example.com"])},
             email=EmailConfig(enabled=False),
         )

@@ -170,7 +170,7 @@ def layout(tmp_path, make_config):
     return make_config(
         db_path=db_dir / "istota.db",
         module_data_dir=app / "moduledbs",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=temp,
         security=SecurityConfig(sandbox_enabled=True),
     )
@@ -365,7 +365,7 @@ class TestAnotherUsersDataIsAbsentRatherThanRefused:
         cfg = make_config(
             db_path=layout.db_path,
             module_data_dir=layout.module_data_dir,
-            nextcloud_mount_path=layout.nextcloud_mount_path,
+            workspace_path=layout.workspace_path,
             temp_dir=layout.temp_dir,
             security=SecurityConfig(sandbox_enabled=True),
             developer=DeveloperConfig(enabled=True, repos_dir=str(repos)),

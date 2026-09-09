@@ -11,7 +11,7 @@ def _ctx(tmp_path, *, conn=None, now=None, browser=False, users=("alice",),
          briefings=None):
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         browser=BrowserConfig(enabled=browser, api_url="http://browser:9223"),
         users={u: UserConfig(timezone="UTC") for u in users},
     )
@@ -56,7 +56,7 @@ class TestRss:
         # Feeds module disabled for the user → soft-degrade.
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig(disabled_modules=["feeds"])},
         )
         ctx = SourceContext(app_config=cfg, user_id="alice")
@@ -71,7 +71,7 @@ class TestRss:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig()},
         )
         fctx_db = cfg.module_db_path("alice", "feeds")
@@ -109,7 +109,7 @@ class TestRss:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig()},
         )
         fctx_db = cfg.module_db_path("alice", "feeds")
@@ -149,7 +149,7 @@ class TestRss:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig()},
         )
         fdb.init_db(cfg.module_db_path("alice", "feeds"))
@@ -197,7 +197,7 @@ class TestEmail:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             email=EmailConfig(enabled=True, imap_host="imap.x", bot_email="bot@x.com"),
             users={"alice": UserConfig(email_addresses=["alice@x.com"])},
         )
@@ -233,7 +233,7 @@ class TestEmail:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             email=EmailConfig(enabled=True, imap_host="imap.x", bot_email="bot@x.com"),
             users={"alice": UserConfig()},
         )
@@ -269,7 +269,7 @@ class TestEmail:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             email=EmailConfig(enabled=True, imap_host="imap.x", bot_email="bot@x.com"),
             users={"alice": UserConfig()},
         )
@@ -306,7 +306,7 @@ class TestEmail:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             email=EmailConfig(enabled=True, imap_host="imap.x", bot_email="bot@x.com"),
             users={"alice": UserConfig()},
         )
@@ -674,7 +674,7 @@ class TestBrowse:
 
 def _write_user_file(ctx, rel: str, content: str):
     """Write a file relative to the user's own /Users/<uid>/ folder."""
-    path = ctx.app_config.nextcloud_mount_path / "Users" / ctx.user_id / rel.lstrip("/")
+    path = ctx.app_config.workspace_path / "Users" / ctx.user_id / rel.lstrip("/")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
 
@@ -1368,7 +1368,7 @@ class TestCleanBody:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             email=EmailConfig(enabled=True, imap_host="imap.x", bot_email="bot@x.com"),
             users={"alice": UserConfig()},
         )

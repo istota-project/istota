@@ -71,8 +71,8 @@ class TestValueRendering:
 
     def test_none_path_renders_as_null(self):
         cfg = Config()
-        cfg.nextcloud_mount_path = None
-        field = _fields(view.build_config_view(cfg), "general")["nextcloud_mount_path"]
+        cfg.workspace_path = None
+        field = _fields(view.build_config_view(cfg), "general")["workspace_path"]
         assert field["value"] is None
 
     def test_bools_and_ints_keep_their_type(self):

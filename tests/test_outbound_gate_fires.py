@@ -48,7 +48,7 @@ def config(tmp_path, workspace, monkeypatch):
             bot_email=BOT,
             outbound_approval_floor="untrusted",
         ),
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={
             "alice": UserConfig(
                 display_name="Alice",

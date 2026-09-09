@@ -183,7 +183,7 @@ class TestPromptDropsSubject:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig(timezone="UTC")},
         )
         ctx = resolve_for_user("alice", cfg)

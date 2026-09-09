@@ -29,7 +29,7 @@ def _config(tmp_path: Path, **sched) -> Config:
         talk=TalkConfig(),
         email=EmailConfig(),
         scheduler=SchedulerConfig(**sched),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         module_data_dir=tmp_path / "local",
         users={"alice": UserConfig()},
     )

@@ -90,7 +90,7 @@ def _make_app_config(
     return Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         users={uid: UserConfig() for uid in users},
     )
 

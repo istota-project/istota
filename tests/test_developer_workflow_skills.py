@@ -581,7 +581,7 @@ class TestBodiesDoNotContradict:
         config = Config(
             db_path=tmp_path / "istota.db",
             temp_dir=tmp_path / "tmp",
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             bundled_skills_dir=_BUNDLED_SKILLS_DIR,
             skills_dir=tmp_path / "operator_skills",
             users={user: UserConfig()},

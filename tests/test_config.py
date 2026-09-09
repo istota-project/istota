@@ -90,6 +90,7 @@ class TestConfigDefaults:
 
     def test_use_mount_false_by_default(self):
         cfg = Config()
+        assert cfg.workspace_path is None
         assert cfg.nextcloud_mount_path is None
         assert cfg.use_mount is False
 
@@ -472,7 +473,9 @@ class TestConfigLoading:
         p = tmp_path / "config.toml"
         p.write_text('nextcloud_mount_path = "/srv/mount/nextcloud/content"\n')
         cfg = load_config(p)
-        assert cfg.nextcloud_mount_path == Path("/srv/mount/nextcloud/content")
+        mount = Path("/srv/mount/nextcloud/content")
+        assert cfg.nextcloud_mount_path == mount
+        assert cfg.workspace_path == mount
 
     def test_load_skills_dir(self, tmp_path):
         p = tmp_path / "config.toml"
@@ -796,8 +799,21 @@ class TestConfigMethods:
         assert cfg.get_user("nobody") is None
 
     def test_use_mount_true(self):
-        cfg = Config(nextcloud_mount_path=Path("/mnt/nc"))
+        cfg = Config(workspace_path=Path("/mnt/nc"))
         assert cfg.use_mount is True
+
+    def test_workspace_path_derives_from_nextcloud_mount_path(self):
+        mount = Path("/mnt/nc")
+        cfg = Config(nextcloud_mount_path=mount)
+        assert cfg.workspace_path == mount
+
+    def test_explicit_workspace_path_wins(self):
+        workspace = Path("/srv/app/istota/workspace")
+        cfg = Config(
+            workspace_path=workspace,
+            nextcloud_mount_path=Path("/mnt/nc"),
+        )
+        assert cfg.workspace_path == workspace
 
 
 class TestResolveUserTimezone:
@@ -2803,7 +2819,7 @@ class TestConfigAuthoredBriefingBlocks:
         )
         config = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig(briefings=[briefing])},
         )
         result = get_briefings_for_user(config, "alice")

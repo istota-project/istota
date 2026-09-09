@@ -70,7 +70,7 @@ class TestTheReadPathIgnoresTheFile:
             'output = "talk"\n',
         )
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[
             BriefingConfig(
                 name="morning",
@@ -99,7 +99,7 @@ class TestTheReadPathIgnoresTheFile:
             '[[briefings]]\nname = "extra"\ncron = "0 6 * * *"\n',
         )
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         assert get_briefings_for_user(config, "alice") == []
@@ -122,7 +122,7 @@ class TestTheOneShotImport:
             'conversation_token = "room1"\n'
             'output = "talk,email"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         assert user_briefings.import_from_workspace_files(db_path, config) == 1
@@ -155,7 +155,7 @@ class TestTheOneShotImport:
             'conversation_token = "old-room"\n'
             'output = "talk"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         user_briefings.import_from_workspace_files(db_path, config)
@@ -173,7 +173,7 @@ class TestTheOneShotImport:
             mount, "alice",
             '[[briefings]]\nname = "morning"\ncron = "0 6 * * *"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         assert user_briefings.import_from_workspace_files(db_path, config) == 1
@@ -189,7 +189,7 @@ class TestTheOneShotImport:
             mount, "alice",
             '[[briefings]]\nname = "morning"\ncron = "0 6 * * *"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         user_briefings.import_from_workspace_files(db_path, config)
@@ -218,7 +218,7 @@ class TestTheOneShotImport:
             'markets = true\n'
             'news = true\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         user_briefings.import_from_workspace_files(db_path, config)
@@ -227,7 +227,7 @@ class TestTheOneShotImport:
         assert row is not None and row.components == {}
 
     def test_no_mount_is_a_noop(self, db_path):
-        config = Config(db_path=db_path, nextcloud_mount_path=None)
+        config = Config(db_path=db_path, workspace_path=None)
         config.users["alice"] = UserConfig(briefings=[])
         assert user_briefings.import_from_workspace_files(db_path, config) == 0
 
@@ -237,7 +237,7 @@ class TestTheOneShotImport:
         """The user genuinely had no file. Nothing will appear later."""
         mount = tmp_path / "mount"
         (mount / "Users" / "alice" / "istota" / "config").mkdir(parents=True)
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         assert user_briefings.import_from_workspace_files(db_path, config) == 0
@@ -254,7 +254,7 @@ class TestTheOneShotImport:
         """
         mount = tmp_path / "mount"
         mount.mkdir()
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         assert user_briefings.import_from_workspace_files(db_path, config) == 0
@@ -273,13 +273,13 @@ class TestTheOneShotImport:
         ``ensure_user_directories_v2`` runs earlier in the same boot and will
         create the workspace on the underlying disk of a dropped mount, so the
         directory existing is not evidence on its own. The local single-user
-        install points ``nextcloud_mount_path`` at a plain directory nothing
+        install points ``workspace_path`` at a plain directory nothing
         ever mounts, which is why the check is gated on ``storage_is_nextcloud``
         — the test above covers that shape.
         """
         mount = tmp_path / "mount"
         (mount / "Users" / "alice" / "istota" / "config").mkdir(parents=True)
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.nextcloud.url = "https://cloud.example.com"
         config.users["alice"] = UserConfig(briefings=[])
         assert config.storage_is_nextcloud is True
@@ -295,7 +295,7 @@ class TestTheOneShotImport:
         """
         mount = tmp_path / "mount"
         path = _write_briefings_md(mount, "alice", "this is not [[[ valid toml\n")
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         assert user_briefings.import_from_workspace_files(db_path, config) == 0
@@ -314,7 +314,7 @@ class TestTheOneShotImport:
             '[[briefings]]\nname = "morning"\n\n'
             '[[briefings]]\nname = "evening"\ncron = "0 18 * * *"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         assert user_briefings.import_from_workspace_files(db_path, config) == 1
@@ -329,7 +329,7 @@ class TestNothingSeedsTheFileAnyMore:
 
         mount = tmp_path / "mount"
         mount.mkdir()
-        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+        config = Config(workspace_path=mount, bot_name="Istota")
 
         assert ensure_user_directories_v2(config, "alice") is True
         config_dir = mount / "Users" / "alice" / "istota" / "config"
@@ -354,7 +354,7 @@ class TestNothingSeedsTheFileAnyMore:
 
         mount = tmp_path / "mount"
         mount.mkdir()
-        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+        config = Config(workspace_path=mount, bot_name="Istota")
 
         assert ensure_user_directories_v2(config, "alice") is True
         examples = mount / "Users" / "alice" / "istota" / "examples"
@@ -366,7 +366,7 @@ class TestNothingSeedsTheFileAnyMore:
 
         mount = tmp_path / "mount"
         mount.mkdir()
-        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+        config = Config(workspace_path=mount, bot_name="Istota")
 
         ensure_user_directories_v2(config, "alice")
         examples = mount / "Users" / "alice" / "istota" / "examples"
@@ -410,7 +410,7 @@ class TestTheRetiredExampleIsSweptFromTheWorkspace:
 
         mount = tmp_path / "mount"
         mount.mkdir(exist_ok=True)
-        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+        config = Config(workspace_path=mount, bot_name="Istota")
         ensure_user_directories_v2(config, "alice")
         return mount / "Users" / "alice" / "istota"
 
@@ -529,7 +529,7 @@ class TestTheRetiredExampleIsSweptFromTheWorkspace:
         victim = outside / "BRIEFINGS.md"
         victim.write_text("not in the user's tree")
 
-        config = Config(nextcloud_mount_path=mount, bot_name="Istota")
+        config = Config(workspace_path=mount, bot_name="Istota")
         ensure_user_directories_v2(config, "alice")
 
         bot_dir = mount / "Users" / "alice" / "istota"
@@ -572,7 +572,7 @@ class TestWhatTheFileDoesNotWin:
             mount, "alice",
             '[[briefings]]\nname = "morning"\ncron = "0 6 * * *"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         user_briefings.import_from_workspace_files(db_path, config)
@@ -594,7 +594,7 @@ class TestWhatTheFileDoesNotWin:
             mount, "alice",
             '[[briefings]]\nname = "morning"\ncron = "0 6 * * *"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         user_briefings.import_from_workspace_files(db_path, config)
@@ -625,7 +625,7 @@ class TestWhatTheFileDoesNotWin:
         _write_briefings_md(
             mount, "alice", '[[briefings]]\nname = "morning"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         with caplog.at_level(logging.WARNING, logger="istota.user_briefings"):
@@ -659,7 +659,7 @@ class TestHostileAndOddFiles:
             '[[briefings]]\nname = "morning"\ncron = "0 6 * * *"\n'
             "```\n".encode("latin-1")
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         assert user_briefings.import_from_workspace_files(db_path, config) == 1
@@ -677,7 +677,7 @@ class TestHostileAndOddFiles:
             '[[briefings]]\nname = "morning"\ncron = "0 6 * * *"\n'
             'output = "none"\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         user_briefings.import_from_workspace_files(db_path, config)
@@ -695,7 +695,7 @@ class TestHostileAndOddFiles:
             '[[briefings]]\nname = "evening"\ncron = "0 18 * * *"\n'
             'output = ["talk", "email"]\n',
         )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
 
         user_briefings.import_from_workspace_files(db_path, config)
@@ -723,7 +723,7 @@ class TestTheBootPath:
                 mount, user,
                 f'[[briefings]]\nname = "{user}-am"\ncron = "0 6 * * *"\n',
             )
-        config = Config(db_path=db_path, nextcloud_mount_path=mount)
+        config = Config(db_path=db_path, workspace_path=mount)
         config.users["alice"] = UserConfig(briefings=[])
         config.users["bob"] = UserConfig(briefings=[])
 

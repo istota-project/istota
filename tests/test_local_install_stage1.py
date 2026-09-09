@@ -280,7 +280,7 @@ def _standalone_config(tmp_path):
     # Mirrors the lean local defaults: no Nextcloud, Talk + email off, no-auth.
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "workspace",
+        workspace_path=tmp_path / "workspace",
         users={"alice": UserConfig(display_name="Alice")},
         talk=TalkConfig(enabled=False),
         web=WebConfig(enabled=True, port=8766, auth="none"),
@@ -368,7 +368,7 @@ class TestNextcloudAuthRegression:
     def app(self, tmp_path):
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "workspace",
+            workspace_path=tmp_path / "workspace",
             site=SiteConfig(hostname="example.com"),
             users={"alice": UserConfig(display_name="Alice")},
             web=WebConfig(
@@ -548,6 +548,7 @@ class TestAdminStorageSection:
         cfg = Config(
             db_path=tmp_path / "istota.db",
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
+            workspace_path=tmp_path / "mount",
             nextcloud_mount_path=tmp_path / "mount",
         )
         out = self._run(cfg)

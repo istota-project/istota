@@ -2,7 +2,7 @@
 
 The bot's storage root and the root of its Nextcloud file tree are the same
 directory on bare metal — the rclone remote points at
-``remote.php/dav/files/<bot>/`` and is mounted at ``nextcloud_mount_path``, so
+``remote.php/dav/files/<bot>/`` and is mounted at ``workspace_path``, so
 ``/Users/alice`` on disk is ``/Users/alice`` over DAV. On the Docker shape they
 are not: ``/mnt/shared`` is an ordinary volume that Nextcloud serves through a
 ``files_external`` mount named ``Shared Files``, so the same directory is
@@ -480,7 +480,7 @@ class TestWhatThePrefixMustNotTouch:
         from istota import storage
 
         config = _config(PREFIX)
-        config.nextcloud_mount_path = Path("/mnt/shared")
+        config.workspace_path = Path("/mnt/shared")
 
         assert storage._get_mount_path(
             config, storage.get_user_base_path("alice")
@@ -543,7 +543,7 @@ class TestTheAutoShareGuard:
     def _seeded(self, tmp_path, *, auto_share: bool) -> Config:
         config = _config()
         config.nextcloud.auto_share_bot_dir = auto_share
-        config.nextcloud_mount_path = tmp_path
+        config.workspace_path = tmp_path
         return config
 
     def test_the_share_is_made_when_the_key_is_left_alone(self, tmp_path):

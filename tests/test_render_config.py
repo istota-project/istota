@@ -718,6 +718,7 @@ class TestTheStorageBackend:
         # on it. This is why `doctor.check_mount_liveness` gates on the backend
         # rather than on the path being configured.
         assert config.nextcloud_mount_path == Path("/mnt/shared")
+        assert config.workspace_path == Path("/mnt/shared")
         assert config.use_mount is True
 
     def test_the_local_backend_drops_the_nextcloud_capability(self, tmp_path):

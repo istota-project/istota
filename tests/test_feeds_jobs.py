@@ -38,7 +38,7 @@ def _make_app_config(
     return Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
-        nextcloud_mount_path=nextcloud_mount or tmp_path,
+        workspace_path=nextcloud_mount or tmp_path,
         users={
             uid: UserConfig(disabled_modules=disabled_modules.get(uid, []))
             for uid in user_ids

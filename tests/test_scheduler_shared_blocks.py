@@ -10,7 +10,7 @@ from istota.config import BriefingSharedBlock, Config, UserConfig
 def _config(tmp_path, blocks) -> Config:
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(timezone="UTC")},
     )
     cfg.briefing_shared_blocks = blocks

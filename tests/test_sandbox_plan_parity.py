@@ -661,7 +661,7 @@ DELIBERATELY_BROADER: dict[str, str] = {
         "{repos_dir}/{user_id}, and the root is the stricter test on purpose: "
         "a cache at or above it would cover every user's subtree at once"
     ),
-    "nextcloud_mount_path": (
+    "workspace_path": (
         "the mount root. The plan binds Users/{user_id}, Talk and "
         "Channels/{token} beneath it, never the root"
     ),
@@ -689,8 +689,8 @@ def _expected_labels(config) -> set[str]:
     expected = set(ALWAYS_LABELLED)
     if config.developer.repos_dir:
         expected.add("developer.repos_dir")
-    if config.nextcloud_mount_path:
-        expected.add("nextcloud_mount_path")
+    if config.workspace_path:
+        expected.add("workspace_path")
     if config.security.sandbox_ro_paths:
         expected.add("sandbox_ro_paths")
     if custom_system_prompt_path(config) is not None:
@@ -711,8 +711,8 @@ def _labelled_targets(config, home: Path) -> dict[Path, str]:
     }
     if config.developer.repos_dir:
         labels[Path(config.developer.repos_dir)] = "developer.repos_dir"
-    if config.nextcloud_mount_path:
-        labels[Path(config.nextcloud_mount_path)] = "nextcloud_mount_path"
+    if config.workspace_path:
+        labels[Path(config.workspace_path)] = "workspace_path"
     for ro_path in config.security.sandbox_ro_paths:
         labels[Path(ro_path)] = "sandbox_ro_paths"
     sp_path = custom_system_prompt_path(config)

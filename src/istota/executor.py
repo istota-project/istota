@@ -469,7 +469,7 @@ def image_bind_roots(
         roots.append(user_temp_dir)
     if control_dir is not None:
         roots.append(control_dir)
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_path
     if mount:
         mount = Path(mount)
         # Scoped, not joined: an unscoped id collapses to `{mount}/Users` and
@@ -3623,8 +3623,8 @@ def _validate_workspace_dir(config: Config, workspace_dir: Path) -> Path:
     except IndexError:
         pass
     # Nextcloud mount root (other users' data live under here).
-    if config.nextcloud_mount_path:
-        forbidden.append(Path(config.nextcloud_mount_path).resolve())
+    if config.workspace_path:
+        forbidden.append(Path(config.workspace_path).resolve())
     # The framework DB directory and the per-user module-DB root. Skipped when
     # db_path is relative (the `data/istota.db` default): it would resolve
     # against the *current* cwd, so `istota repl --workspace ~/proj` launched
@@ -3755,8 +3755,8 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
         # `{repos_dir}/{user_id}` permitted; that one lands *inside* the repos
         # bind for that user, at the same host directory, which covers nothing.
         targets.append(Path(config.developer.repos_dir))
-    if config.nextcloud_mount_path:
-        targets.append(Path(config.nextcloud_mount_path))
+    if config.workspace_path:
+        targets.append(Path(config.workspace_path))
     for ro_path in config.security.sandbox_ro_paths:
         targets.append(Path(ro_path))
     sp_path = custom_system_prompt_path(config)
@@ -4017,7 +4017,7 @@ def mask_protected_paths(
         protected.extend(python_base_prefix_binds())
         if workspace_dir is not None:
             protected.append(Path(workspace_dir))
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_path
     if mount:
         protected.append(Path(mount).resolve())
     return protected
@@ -4601,7 +4601,7 @@ def native_fs_roots(
     mounts** below are not: a ``user_resources`` row is ``mount /
     resource_path``, bounded by the Nextcloud mount root and nothing else, so
     on a layout where ``config.temp_dir`` sits *under*
-    ``nextcloud_mount_path`` a row naming the control tree would bind it
+    ``workspace_path`` a row naming the control tree would bind it
     read-write and neither entry here would cover a sibling task's directory.
     That is the same residual ``.claude/rules/brain.md`` records for the
     session-log directory, and it is out of scope on the same grounds: no
@@ -6000,17 +6000,17 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         # built from it, so a line break survives `Path` joining into the
         # system half.
         ws_root = _one_line(
-            str(config.workspace_root(task.user_id) or config.nextcloud_mount_path)
+            str(config.workspace_root(task.user_id) or config.workspace_path)
         )
         file_tools = f"""- Your files live in your workspace at '{ws_root}'. Use standard file tools (Read, Write, Edit, ls, cat).
   - The workspace is the area you manage for the user (memory, notes, inbox, shared files). It is a normal local folder.
   - This install runs locally without a sandbox, so you also have ordinary access to the rest of the machine's filesystem (the user's home, Downloads, etc.). The workspace is your managed area, not the limit of what you can read — stay within what the user asked for."""
     elif config.use_mount:
         if is_admin:
-            mount_display = _one_line(str(config.nextcloud_mount_path))
+            mount_display = _one_line(str(config.workspace_path))
         else:
             mount_display = _one_line(
-                str(config.nextcloud_mount_path / "Users" / task.user_id)
+                str(config.workspace_path / "Users" / task.user_id)
             )
         file_tools = f"""- Nextcloud files are mounted at '{mount_display}'
   - List: ls {mount_display}/path/
@@ -6159,7 +6159,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     db_tool_line = ""  # DB writes handled via deferred JSON files
 
-    scoped_path = str(config.nextcloud_mount_path / "Users" / task.user_id) if config.use_mount else f"{config.rclone_remote}:/Users/{task.user_id}"
+    scoped_path = str(config.workspace_path / "Users" / task.user_id) if config.use_mount else f"{config.rclone_remote}:/Users/{task.user_id}"
     rules_section = build_rules_section(
         is_admin=is_admin,
         user_id=task.user_id,
@@ -6502,13 +6502,13 @@ def execute_task(
     enriched_prompt = _pre_transcribe_attachments(
         task.attachments, task.prompt, cancel_check=_cancel_check,
         # The child is a skill CLI and scopes its path argument against these
-        # (ISSUE-447). `config.nextcloud_mount_path` is None on the mountless
+        # (ISSUE-447). `config.workspace_path` is None on the mountless
         # shapes, where a web-chat upload lands under the per-user temp dir
         # instead — which is why the deferred dir goes too, and why
         # `_audio_in_reach` stages into it. Not the conversation token: see
         # `out_of_process._identity_env` for why that root is withheld.
         user_id=task.user_id,
-        mount_path=config.nextcloud_mount_path,
+        mount_path=config.workspace_path,
         deferred_dir=user_temp_dir,
     )
     if enriched_prompt != task.prompt:
@@ -6739,7 +6739,7 @@ def execute_task(
         # Resolve per-user scripts directory
         scripts_nc_path = get_user_scripts_path(task.user_id, config.bot_dir_name)
         if config.use_mount:
-            scripts_dir = str(config.nextcloud_mount_path / scripts_nc_path.lstrip("/"))
+            scripts_dir = str(config.workspace_path / scripts_nc_path.lstrip("/"))
         else:
             scripts_dir = f"{config.rclone_remote}:{scripts_nc_path}"
         skills_doc = skills_doc.replace("{scripts_dir}", scripts_dir)

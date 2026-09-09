@@ -112,7 +112,7 @@ class TestStaticCacheControl:
 def _local_config(tmp_path, nc_url=""):
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "workspace",
+        workspace_path=tmp_path / "workspace",
         nextcloud=NextcloudConfig(url=nc_url),
         users={"alice": UserConfig(display_name="Alice")},
         bot_name="Istota",
@@ -124,7 +124,7 @@ class TestWorkspaceLocalFolder:
         from istota.storage import ensure_user_directories_v2
         cfg = _local_config(tmp_path)
         ensure_user_directories_v2(cfg, "alice")
-        base = cfg.nextcloud_mount_path / "Users" / "alice"
+        base = cfg.workspace_path / "Users" / "alice"
         assert (base / "inbox").is_dir()
         assert (base / "memories").is_dir()
         assert (base / "shared").is_dir()

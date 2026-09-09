@@ -1028,7 +1028,7 @@ def cmd_user_init(args):
 
     print(f"Initializing directories for user '{user_id}'...")
     if config.use_mount:
-        print(f"Mount: {config.nextcloud_mount_path}")
+        print(f"Mount: {config.workspace_path}")
     else:
         print(f"Remote: {config.rclone_remote}")
     print(f"Base path: {get_user_base_path(user_id)}")
@@ -1056,7 +1056,7 @@ def cmd_user_status(args):
 
     print(f"User: {user_id}")
     if config.use_mount:
-        print(f"Mount: {config.nextcloud_mount_path}")
+        print(f"Mount: {config.workspace_path}")
     else:
         print(f"Remote: {config.rclone_remote}")
     print(f"Base path: {get_user_base_path(user_id)}")

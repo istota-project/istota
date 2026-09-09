@@ -48,7 +48,7 @@ def _make_config(tmp_path, users=None, mount_path=None, web=None):
         }
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=Path(mount_path) if mount_path else tmp_path / "mount",
+        workspace_path=Path(mount_path) if mount_path else tmp_path / "mount",
         site=SiteConfig(hostname="example.com"),
         users=users,
         web=web or WebConfig(
@@ -1370,7 +1370,7 @@ class TestAdminStats:
         """Native feeds users without resolvable mount must not vanish."""
         config = self._config_with_admin(tmp_path)
         config.users["alice"] = UserConfig(display_name="Alice")
-        config.nextcloud_mount_path = None  # docker-compose-style deploy
+        config.workspace_path = None  # docker-compose-style deploy
 
         app = _patch_app(config)
         transport = ASGITransport(app=app)

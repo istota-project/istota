@@ -547,7 +547,7 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
                     name, user_id,
                 )
                 continue
-            file_path = config.nextcloud_mount_path / prompt_file.lstrip("/")
+            file_path = config.workspace_path / prompt_file.lstrip("/")
             try:
                 prompt = file_path.read_text().strip()
             except OSError as e:
@@ -801,7 +801,7 @@ def _write_generated_prompt(path, prompt: str) -> None:
 def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) -> None:
     """Move inline multiline prompts into files before CRON.md is rewritten."""
     prompts_dir_ref = f"{get_user_scripts_path(user_id, config.bot_dir_name)}/prompts"
-    prompts_dir = config.nextcloud_mount_path / prompts_dir_ref.lstrip("/")
+    prompts_dir = config.workspace_path / prompts_dir_ref.lstrip("/")
     assigned_names: dict[str, str] = {}
 
     for job in jobs:

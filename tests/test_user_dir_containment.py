@@ -54,7 +54,7 @@ def config(tmp_path):
     return Config(
         db_path=db_file,
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         skills_dir=tmp_path / "skills",
         security=SecurityConfig(sandbox_enabled=True),
     )
@@ -305,7 +305,7 @@ class TestTheMountJoinIsGuardedSeparately:
     """
 
     def _relocated(self, config, tmp_path):
-        users = config.nextcloud_mount_path / "Users"
+        users = config.workspace_path / "Users"
         (users / "alice").rmdir()
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
@@ -318,7 +318,7 @@ class TestTheMountJoinIsGuardedSeparately:
             _argv(config, _task("alice"), user_temp=_user_temp_for(config, "alice"))
         )
         assert elsewhere.resolve() not in sources
-        assert (config.nextcloud_mount_path / "Users").resolve() not in sources
+        assert (config.workspace_path / "Users").resolve() not in sources
 
     def test_the_workspace_is_still_bound(self, config, tmp_path):
         """The control: the plan was built, so the assertion above is the mount
@@ -338,7 +338,7 @@ class TestTheMountJoinIsGuardedSeparately:
             read, write, _denied = native_fs_roots(
                 config, task, False, [], _user_temp_for(config, "alice"),
             )
-        users_root = (config.nextcloud_mount_path / "Users").resolve()
+        users_root = (config.workspace_path / "Users").resolve()
         assert elsewhere.resolve() not in write
         assert users_root not in write and users_root not in read
 
@@ -354,7 +354,7 @@ class TestTheMountJoinIsGuardedSeparately:
         directory means nothing is covered by one.
         """
         self._relocated(config, tmp_path)
-        (config.nextcloud_mount_path / "Users" / "bob" / "docs").mkdir()
+        (config.workspace_path / "Users" / "bob" / "docs").mkdir()
         resource = db.UserResource(
             id=1, user_id="alice", resource_type="folder",
             resource_path="Users/bob/docs", display_name=None,
@@ -379,7 +379,7 @@ class TestTheProjectionForAnOrdinaryId:
             _read, write, _denied = native_fs_roots(
                 config, task, False, [], _user_temp(config, task),
             )
-        assert (config.nextcloud_mount_path / "Users" / "alice").resolve() in write
+        assert (config.workspace_path / "Users" / "alice").resolve() in write
 
 
 class TestTheImageAttachmentRoots:
@@ -390,7 +390,7 @@ class TestTheImageAttachmentRoots:
     def test_the_users_root_is_not_a_root(self, config, user_id):
         task = _task(user_id)
         roots = image_bind_roots(config, task, _user_temp(config, task))
-        users_root = (config.nextcloud_mount_path / "Users").resolve()
+        users_root = (config.workspace_path / "Users").resolve()
         assert users_root not in roots
 
     @pytest.mark.parametrize("user_id", BAD_IDS)
@@ -400,14 +400,14 @@ class TestTheImageAttachmentRoots:
         neither of the two paths the test above compares against."""
         task = _task(user_id)
         roots = image_bind_roots(config, task, _user_temp(config, task))
-        bob = (config.nextcloud_mount_path / "Users" / "bob").resolve()
+        bob = (config.workspace_path / "Users" / "bob").resolve()
         exposed = [r for r in roots if bob == r or bob.is_relative_to(r)]
         assert exposed == [], f"user_id={user_id!r} exposes bob's tree: {exposed}"
 
     def test_an_ordinary_user_id_still_gets_its_own_root(self, config):
         task = _task("alice")
         roots = image_bind_roots(config, task, _user_temp(config, task))
-        assert (config.nextcloud_mount_path / "Users" / "alice").resolve() in roots
+        assert (config.workspace_path / "Users" / "alice").resolve() in roots
 
 
 class TestTheHostPathAllowlist:
@@ -421,7 +421,7 @@ class TestTheHostPathAllowlist:
     ):
         from istota import skill_host_paths
 
-        mount = config.nextcloud_mount_path
+        mount = config.workspace_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
         monkeypatch.setenv("ISTOTA_USER_ID", user_id)
         monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
@@ -437,7 +437,7 @@ class TestTheHostPathAllowlist:
     def test_an_ordinary_user_id_still_gets_its_own_root(self, config, monkeypatch):
         from istota import skill_host_paths
 
-        mount = config.nextcloud_mount_path
+        mount = config.workspace_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
         monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
@@ -511,7 +511,7 @@ class TestTheMemorySkillRoots:
     def test_index_file_roots_drop_the_users_root(self, config, monkeypatch, user_id):
         from istota.skill_host_paths import env_host_roots
 
-        mount = config.nextcloud_mount_path
+        mount = config.workspace_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
         monkeypatch.setenv("ISTOTA_USER_ID", user_id)
         monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
@@ -527,7 +527,7 @@ class TestTheMemorySkillRoots:
     def test_index_file_roots_keep_an_ordinary_users_own(self, config, monkeypatch):
         from istota.skill_host_paths import env_host_roots
 
-        mount = config.nextcloud_mount_path
+        mount = config.workspace_path
         monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
         monkeypatch.setenv("ISTOTA_USER_ID", "alice")
         monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)

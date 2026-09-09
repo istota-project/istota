@@ -811,7 +811,7 @@ def download_talk_attachments(config: Config, attachments: list[str]) -> list[st
         if att.startswith("Talk/"):
             if config.use_mount:
                 # Use mount path directly - no download needed
-                mount_path = config.nextcloud_mount_path / att
+                mount_path = config.workspace_path / att
                 if mount_path.exists():
                     local_paths.append(str(mount_path))
                     logger.debug(f"Talk attachment via mount: {att} -> {mount_path}")
@@ -2055,8 +2055,9 @@ def _execute_skill_task(
         env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
     if config.db_path:
         env["ISTOTA_DB_PATH"] = str(config.db_path)
-    if config.nextcloud_mount_path:
-        env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path)
+    if config.workspace_path:
+        env["ISTOTA_WORKSPACE_PATH"] = str(config.workspace_path)
+        env["NEXTCLOUD_MOUNT_PATH"] = str(config.workspace_path)
     if task.conversation_token:
         env["ISTOTA_CONVERSATION_TOKEN"] = task.conversation_token
 
@@ -2162,8 +2163,9 @@ def _execute_command_task(
         env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
     if config.db_path:
         env["ISTOTA_DB_PATH"] = str(config.db_path)
-    if config.nextcloud_mount_path:
-        env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path)
+    if config.workspace_path:
+        env["ISTOTA_WORKSPACE_PATH"] = str(config.workspace_path)
+        env["NEXTCLOUD_MOUNT_PATH"] = str(config.workspace_path)
     if task.conversation_token:
         env["ISTOTA_CONVERSATION_TOKEN"] = task.conversation_token
 
