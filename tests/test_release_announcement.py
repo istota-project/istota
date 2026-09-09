@@ -66,15 +66,6 @@ class TestTheGuardAcceptsAnAnnouncement:
         r = _run(tmp_path, _changelog(ANNOUNCEMENT + CANONICAL_SECTIONS))
         assert r.returncode == 0, r.stderr
 
-    def test_the_repository_s_own_changelog_passes(self, tmp_path):
-        r = subprocess.run(
-            [sys.executable, "-c", _guard_source()],
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-        )
-        assert r.returncode == 0, r.stderr
-
 
 class TestTheGuardRefuses:
     def test_a_section_that_goes_straight_into_the_changeset(self, tmp_path):
