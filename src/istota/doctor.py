@@ -739,22 +739,12 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     every path check above happily reports as fine while every read returns
     nothing. ``ismount`` is the only cheap way to tell the two apart.
 
-    Gated on the workspace actually being Nextcloud-backed, not merely on a path
-    being configured. The local single-user install sets
-    ``nextcloud_mount_path`` to a plain directory under ``~`` and nothing ever
-    mounts it — asserting ``ismount`` there reports a healthy install as broken.
-    ``storage_is_nextcloud`` is the existing distinction between the two shapes.
+    ``nextcloud_mount_path`` is set only when the workspace uses a real mount.
     """
     mount = config.nextcloud_mount_path
     if mount is None:
         return CheckResult(
             "runtime.mount_liveness", SKIP, "no nextcloud_mount_path configured"
-        )
-    if not config.storage_is_nextcloud:
-        return CheckResult(
-            "runtime.mount_liveness",
-            SKIP,
-            f"{mount} is a local workspace folder, not a mount (no Nextcloud URL configured)",
         )
     path = Path(mount)
     if os.path.ismount(path):

@@ -23,7 +23,10 @@ from istota.config import (
 FIXED_DAY = "2026-07-12"
 
 
-def _config(tmp_path: Path, *, nextcloud_url: str = "", **sched) -> Config:
+def _config(
+    tmp_path: Path, *, nextcloud_url: str = "", mount_configured: bool = True,
+    **sched,
+) -> Config:
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
     # Default to an explicit db_backup_dir *outside* the mount so integration
@@ -31,9 +34,6 @@ def _config(tmp_path: Path, *, nextcloud_url: str = "", **sched) -> Config:
     # the mount-liveness guard (a tmp dir isn't a real OS mountpoint). Pass
     # db_backup_dir="" to exercise the mount-derived default resolution.
     sched.setdefault("db_backup_dir", str(tmp_path / "backups"))
-    # The mount-liveness gate only applies where a Nextcloud backs the workspace
-    # (`storage_is_nextcloud`); a URL-less config is a standalone install whose
-    # `workspace_path` is a plain directory. TestMountLiveness passes one.
     return Config(
         db_path=tmp_path / "istota.db",
         nextcloud=NextcloudConfig(url=nextcloud_url),
@@ -41,7 +41,7 @@ def _config(tmp_path: Path, *, nextcloud_url: str = "", **sched) -> Config:
         email=EmailConfig(),
         scheduler=SchedulerConfig(**sched),
         workspace_path=mount,
-        nextcloud_mount_path=mount,
+        nextcloud_mount_path=mount if mount_configured else None,
         module_data_dir=tmp_path / "local",
         users={"alice": UserConfig()},
     )
@@ -522,11 +522,12 @@ class TestStandaloneInstallIsNotGated:
     which lives inside that workspace by design."""
 
     def _standalone(self, tmp_path, **kw):
-        # Mirrors setup_wizard.render_config_toml: no Nextcloud URL, mount path
-        # is the workspace, backups sit inside it.
+        # Mirrors setup_wizard.render_config_toml: the workspace is local,
+        # there is no mount field, and backups sit inside the workspace.
         return _config(
             tmp_path,
             db_backup_dir=str(tmp_path / "mount" / "db-backups"),
+            mount_configured=False,
             **kw,
         )
 
@@ -541,25 +542,22 @@ class TestStandaloneInstallIsNotGated:
         assert (tmp_path / "mount" / "db-backups" / FIXED_DAY / "framework" / "istota.db").exists()
 
     def test_derived_destination_runs_without_ismount(self, tmp_path, monkeypatch):
-        cfg = _config(tmp_path, db_backup_dir="")  # no URL: standalone
+        cfg = _config(tmp_path, db_backup_dir="", mount_configured=False)
         db.init_db(cfg.db_path)
         monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
 
         results = db_backup.backup_databases(cfg, today=FIXED_DAY)
         assert any(r["status"] == "ok" for r in results)
 
-    def test_adding_a_nextcloud_url_arms_the_gate(self, tmp_path, monkeypatch):
-        # The accepted consequence of keying the gate on `storage_is_nextcloud`:
-        # the same layout with a URL is a Nextcloud deployment as far as this
-        # module can tell, so its ordinary directory gets ismount-tested and the
-        # run is refused. Documented in docs/configuration/reference.md; pinned
-        # here so it is a decision rather than a surprise.
+    def test_adding_a_nextcloud_url_does_not_arm_the_gate(self, tmp_path, monkeypatch):
         cfg = self._standalone(tmp_path, nextcloud_url="https://cloud.example.com")
         assert cfg.storage_is_nextcloud
+        assert cfg.nextcloud_mount_path is None
         db.init_db(cfg.db_path)
         monkeypatch.setattr(db_backup.os.path, "ismount", lambda p: False)
 
-        assert db_backup.backup_databases(cfg, today=FIXED_DAY) == []
+        results = db_backup.backup_databases(cfg, today=FIXED_DAY)
+        assert any(r["status"] == "ok" for r in results)
 
 
 class TestClockOnlyAdvancesOnOk:

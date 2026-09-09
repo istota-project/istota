@@ -1946,9 +1946,12 @@ def _admin_storage_section(db_path: Path) -> dict:
     except OSError:
         db_size = 0
     mount_healthy = False
-    if _config and _config.nextcloud_mount_path:
+    if _config:
         try:
-            mount_healthy = Path(_config.nextcloud_mount_path).is_dir()
+            if _config.nextcloud_mount_path is not None:
+                mount_healthy = os.path.ismount(_config.nextcloud_mount_path)
+            elif _config.workspace_path is not None:
+                mount_healthy = Path(_config.workspace_path).is_dir()
         except OSError:
             mount_healthy = False
     backups_count, last_backup = _scan_db_backups(db_path.parent / "backups")

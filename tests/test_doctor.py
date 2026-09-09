@@ -1828,18 +1828,18 @@ class TestMountLiveness:
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == SKIP
 
-    def test_skips_for_a_local_workspace_folder(self, make_config):
-        """The local single-user install points this at a plain directory under
-        `~` that nothing ever mounts. Asserting ismount there reports a healthy
-        install as broken."""
-        r = run_checks(make_config(), only=("runtime.mount_liveness",))[0]
+    def test_nextcloud_url_without_mount_still_skips(self, make_config):
+        config = self._nextcloud_backed(make_config, nextcloud_mount_path=None)
+        r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == SKIP
-        assert "local workspace folder" in r.detail
 
-    def test_configured_but_not_mounted_fails(self, make_config, tmp_path):
+    def test_configured_but_not_mounted_fails_without_nextcloud_url(
+        self, make_config, tmp_path,
+    ):
         # `make_config` points nextcloud_mount_path at a plain tmp_path dir,
         # which is on the same filesystem as its parent and so is not a mount.
-        config = self._nextcloud_backed(make_config)
+        config = make_config()
+        assert config.storage_is_nextcloud is False
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == FAIL
         assert r.remedy

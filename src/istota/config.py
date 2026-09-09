@@ -1824,7 +1824,7 @@ class Config:
     admin_users: set[str] = field(default_factory=set)  # users with full system access
     rclone_remote: str = "nextcloud"  # rclone remote name
     workspace_path: Path | None = None  # On-disk root of the bot's file tree
-    nextcloud_mount_path: Path | None = None  # If set, use mount instead of rclone CLI
+    nextcloud_mount_path: Path | None = None  # FUSE mountpoint, when one exists
     skills_dir: Path = field(default_factory=lambda: Path("config/skills"))
     bundled_skills_dir: Path | None = None  # Override bundled skills dir (for testing)
     disabled_skills: list[str] = field(default_factory=list)  # instance-wide skills to exclude
@@ -1866,6 +1866,7 @@ class Config:
     def storage_is_nextcloud(self) -> bool:
         """Whether a Nextcloud server backs the file workspace.
 
+        This selects storage vocabulary, not whether the workspace is mounted.
         Keyed on the presence of a Nextcloud URL — deliberately NOT
         ``is_standalone`` (which folds in web auth, an axis orthogonal to file
         storage). A URL means the files are Nextcloud whether reached via mount
@@ -1921,9 +1922,10 @@ class Config:
         When ``module_data_dir`` is unset (None) the root derives as
         ``{db_path.parent}/modules`` — alongside the framework DB, which is
         already local, so it needs no guard. An *explicitly* configured
-        ``module_data_dir`` is refused if it resolves under
-        ``nextcloud_mount_path`` — a WAL DB there would SIGBUS the process, so
-        a misconfigured value fails loud rather than at runtime.
+        ``module_data_dir`` is refused if it resolves under a configured
+        ``nextcloud_mount_path``. That field names a real FUSE mountpoint, and
+        a WAL DB there would SIGBUS the process, so a misconfigured value fails
+        loud rather than at runtime.
 
         Split out of ``module_db_path`` because the sandbox needs the root on
         its own: ``build_bwrap_cmd`` masks it, and ``_validate_workspace_dir``
@@ -3143,6 +3145,25 @@ def _apply_renamed_keys(data: dict, config: "Config") -> None:
             setattr(target, new, value)
 
 
+def _migrate_workspace_fields(data: dict, config: "Config") -> None:
+    """Give a pre-split config the same storage meaning it had before.
+
+    A config naming ``workspace_path`` already uses the split fields. Without
+    that key, ``nextcloud_mount_path`` used to mean the workspace root and only
+    named a real mount when the Nextcloud URL heuristic said it did.
+    """
+    if "workspace_path" in data or config.nextcloud_mount_path is None:
+        return
+    config.workspace_path = config.nextcloud_mount_path
+    if not config.storage_is_nextcloud:
+        config.nextcloud_mount_path = None
+    logger.warning(
+        "nextcloud_mount_path now means the FUSE mountpoint only. Set "
+        "workspace_path to the workspace root; keep nextcloud_mount_path only "
+        "if that path is a real mount."
+    )
+
+
 _LEGACY_BRAIN_DEFAULT_TARGETS = ("claude_code", "tmux")
 """The blocks the retired top-level ``model`` / ``effort`` migrate onto.
 
@@ -3474,6 +3495,7 @@ def load_config(config_path: Path | None = None) -> Config:
         config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )
+    _migrate_workspace_fields(data, config)
     if config.workspace_path is None:
         config.workspace_path = config.nextcloud_mount_path
     _apply_renamed_keys(data, config)

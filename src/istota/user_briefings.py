@@ -384,14 +384,12 @@ def _workspace_is_live(config: "Any", mount: Path, user_id: str, bot_dir: str) -
     runs earlier in the same boot and will happily create the workspace on the
     underlying disk, so even the directory's existence is not enough on its own.
 
-    ``ismount`` is the cheap discriminator, and it is gated on
-    ``storage_is_nextcloud`` for the same reason ``doctor.check_mount_liveness``
-    gates it: the local single-user install points ``nextcloud_mount_path`` at a
-    plain directory under the user's home that nothing ever mounts, so requiring
-    a mount point there would mean the import never converged.
+    ``ismount`` is the cheap discriminator when ``nextcloud_mount_path`` names
+    a mount. A workspace with no mount field is an ordinary directory.
     """
     try:
-        if getattr(config, "storage_is_nextcloud", False) and not os.path.ismount(mount):
+        configured_mount = getattr(config, "nextcloud_mount_path", None)
+        if configured_mount is not None and not os.path.ismount(configured_mount):
             return False
         from .storage import get_user_config_path
         return (mount / get_user_config_path(user_id, bot_dir).lstrip("/")).is_dir()

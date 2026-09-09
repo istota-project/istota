@@ -553,3 +553,29 @@ class TestAdminStorageSection:
         )
         out = self._run(cfg)
         assert out["nextcloud_configured"] is True
+
+    def test_configured_mount_health_uses_ismount(self, tmp_path, monkeypatch):
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            workspace_path=mount,
+            nextcloud_mount_path=mount,
+        )
+        monkeypatch.setattr("istota.web_app.os.path.ismount", lambda path: False)
+
+        out = self._run(cfg)
+        assert out["nextcloud_mount_healthy"] is False
+
+    def test_mountless_nextcloud_health_uses_workspace_directory(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            nextcloud=NextcloudConfig(url="https://cloud.example.com"),
+            workspace_path=workspace,
+        )
+
+        out = self._run(cfg)
+        assert out["nextcloud_configured"] is True
+        assert out["nextcloud_mount_healthy"] is True

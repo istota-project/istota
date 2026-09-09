@@ -267,25 +267,36 @@ class TestTheOneShotImport:
         )
         assert user_briefings.import_from_workspace_files(db_path, config) == 1
 
-    def test_a_nextcloud_shape_requires_a_real_mount_point(self, db_path, tmp_path):
-        """``ismount`` is the discriminator, but only where something mounts.
+    def test_a_configured_mount_requires_a_real_mount_point(self, db_path, tmp_path):
+        """``ismount`` is the discriminator when the mount field is set.
 
         ``ensure_user_directories_v2`` runs earlier in the same boot and will
         create the workspace on the underlying disk of a dropped mount, so the
-        directory existing is not evidence on its own. The local single-user
-        install points ``workspace_path`` at a plain directory nothing
-        ever mounts, which is why the check is gated on ``storage_is_nextcloud``
-        — the test above covers that shape.
+        directory existing is not evidence on its own.
         """
+        mount = tmp_path / "mount"
+        (mount / "Users" / "alice" / "istota" / "config").mkdir(parents=True)
+        config = Config(
+            db_path=db_path,
+            workspace_path=mount,
+            nextcloud_mount_path=mount,
+        )
+        config.users["alice"] = UserConfig(briefings=[])
+
+        assert user_briefings.import_from_workspace_files(db_path, config) == 0
+        assert _sentinel_set_for(db_path, "alice") is False
+
+    def test_nextcloud_url_without_mount_treats_workspace_as_live(
+        self, db_path, tmp_path,
+    ):
         mount = tmp_path / "mount"
         (mount / "Users" / "alice" / "istota" / "config").mkdir(parents=True)
         config = Config(db_path=db_path, workspace_path=mount)
         config.nextcloud.url = "https://cloud.example.com"
         config.users["alice"] = UserConfig(briefings=[])
-        assert config.storage_is_nextcloud is True
 
         assert user_briefings.import_from_workspace_files(db_path, config) == 0
-        assert _sentinel_set_for(db_path, "alice") is False
+        assert _sentinel_set_for(db_path, "alice") is True
 
     def test_an_unparseable_file_does_not_burn_the_sentinel(self, db_path, tmp_path):
         """A transient read failure must not cost the user their schedule.

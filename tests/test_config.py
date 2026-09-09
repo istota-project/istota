@@ -469,13 +469,74 @@ class TestConfigLoading:
         assert evening.output == "talk"
         assert evening.components == {}
 
-    def test_load_mount_path(self, tmp_path):
+    def test_pre_split_nextcloud_mount_populates_workspace_and_stays_a_mount(
+        self, tmp_path, caplog,
+    ):
         p = tmp_path / "config.toml"
-        p.write_text('nextcloud_mount_path = "/srv/mount/nextcloud/content"\n')
-        cfg = load_config(p)
+        p.write_text(
+            'nextcloud_mount_path = "/srv/mount/nextcloud/content"\n'
+            '[nextcloud]\n'
+            'url = "https://cloud.example.com"\n'
+        )
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            cfg = load_config(p)
         mount = Path("/srv/mount/nextcloud/content")
         assert cfg.nextcloud_mount_path == mount
         assert cfg.workspace_path == mount
+        assert any(
+            "nextcloud_mount_path now means the FUSE mountpoint only"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_pre_split_standalone_mount_becomes_workspace_only(
+        self, tmp_path, caplog,
+    ):
+        p = tmp_path / "config.toml"
+        p.write_text('nextcloud_mount_path = "/srv/app/istota/workspace"\n')
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            cfg = load_config(p)
+        assert cfg.workspace_path == Path("/srv/app/istota/workspace")
+        assert cfg.nextcloud_mount_path is None
+        assert any(
+            "nextcloud_mount_path now means the FUSE mountpoint only"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_new_workspace_field_suppresses_mount_migration(self, tmp_path, caplog):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'workspace_path = "/srv/app/istota/workspace"\n'
+            'nextcloud_mount_path = "/mnt/nextcloud"\n'
+        )
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            cfg = load_config(p)
+        assert cfg.workspace_path == Path("/srv/app/istota/workspace")
+        assert cfg.nextcloud_mount_path == Path("/mnt/nextcloud")
+        assert not any(
+            "nextcloud_mount_path now means the FUSE mountpoint only"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_module_data_dir_distinguishes_workspace_from_mount(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'nextcloud_mount_path = "{workspace}"\n'
+            f'module_data_dir = "{workspace / "modules"}"\n'
+        )
+        standalone = load_config(p)
+        assert standalone.module_db_root() == (workspace / "modules").resolve()
+
+        mounted = Config(
+            workspace_path=workspace,
+            nextcloud_mount_path=workspace,
+            module_data_dir=workspace / "modules",
+        )
+        with pytest.raises(ValueError, match="under nextcloud_mount_path"):
+            mounted.module_db_root()
 
     def test_load_skills_dir(self, tmp_path):
         p = tmp_path / "config.toml"
