@@ -162,7 +162,7 @@ class TestTheTaskIdentityReachesTheChild:
     refuses every path.
 
     `whisper transcribe`'s path argument is scoped since ISSUE-447 and the
-    scoping reads `ISTOTA_USER_ID` and `NEXTCLOUD_MOUNT_PATH` out of the
+    scoping reads `ISTOTA_USER_ID` and `ISTOTA_WORKSPACE_PATH` out of the
     *child's* environment, which is how the skill proxy hands a task its
     allowlist. The daemon carries neither, so a runner spawning with
     `os.environ` alone would give the child an empty allowlist — every path
@@ -187,6 +187,7 @@ class TestTheTaskIdentityReachesTheChild:
 
         env = popen.call_args.kwargs["env"]
         assert env["ISTOTA_USER_ID"] == "alice"
+        assert env["ISTOTA_WORKSPACE_PATH"] == str(tmp_path / "mount")
         assert env["NEXTCLOUD_MOUNT_PATH"] == str(tmp_path / "mount")
         assert env["ISTOTA_DEFERRED_DIR"] == str(tmp_path / "deferred")
 
@@ -206,6 +207,7 @@ class TestTheTaskIdentityReachesTheChild:
         """
         ambient = {
             "ISTOTA_USER_ID": "someone-else",
+            "ISTOTA_WORKSPACE_PATH": "/mnt/stale",
             "NEXTCLOUD_MOUNT_PATH": "/mnt/shared",
             "ISTOTA_DEFERRED_DIR": "/tmp/another-task",
         }
@@ -215,19 +217,29 @@ class TestTheTaskIdentityReachesTheChild:
 
         env = popen.call_args.kwargs["env"]
         assert "ISTOTA_USER_ID" not in env
+        assert "ISTOTA_WORKSPACE_PATH" not in env
         assert "NEXTCLOUD_MOUNT_PATH" not in env
         assert "ISTOTA_DEFERRED_DIR" not in env
 
     def test_a_supplied_identity_overrides_the_daemons_own(self, tmp_path):
         """The other direction, which a merge gets right and a leak does not."""
-        ambient = {"ISTOTA_USER_ID": "someone-else"}
+        ambient = {
+            "ISTOTA_USER_ID": "someone-else",
+            "ISTOTA_WORKSPACE_PATH": "/mnt/stale",
+            "NEXTCLOUD_MOUNT_PATH": "/mnt/shared",
+        }
         with patch.dict(os.environ, ambient), patch(_POPEN) as popen:
             popen.return_value = _fake_proc(stdout=_ok_payload())
             transcribe_audio_out_of_process(
-                str(tmp_path / "voice.mp3"), user_id="alice",
+                str(tmp_path / "voice.mp3"),
+                user_id="alice",
+                mount_path=tmp_path / "mount",
             )
 
-        assert popen.call_args.kwargs["env"]["ISTOTA_USER_ID"] == "alice"
+        env = popen.call_args.kwargs["env"]
+        assert env["ISTOTA_USER_ID"] == "alice"
+        assert env["ISTOTA_WORKSPACE_PATH"] == str(tmp_path / "mount")
+        assert env["NEXTCLOUD_MOUNT_PATH"] == str(tmp_path / "mount")
 
     def test_a_partial_identity_still_exports_what_it_has(self, tmp_path):
         """The standalone shape: a deferred dir and no mount at all.
