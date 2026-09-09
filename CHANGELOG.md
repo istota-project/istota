@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-09-08
+
 This release is much larger than the ones before it: 980 commits over four weeks, against 88 in 0.39 and 36 in 0.40. Two things account for most of it. The first is a run of checks written to ask whether the deployment is actually what it claims to be, which came back with a series of no's. The second is that web chat now works on a phone with no connection.
 
 Most of the security work has one shape: a boundary that was reported as working and was not. Tasks in the Docker deployment ran with no sandbox at all — bubblewrap's own probe failed because the container runs as root, the sandbox switched itself off for the whole process, and every health surface went on calling it fine. Running the sandbox under Docker needs two container settings the shipped compose file deliberately does not grant, so a Docker deployment stays unsandboxed and now says so at every start rather than reporting a boundary it does not have. The supported production shape is the bare-metal install, where none of this arises.
@@ -2605,7 +2607,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.40.1...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.41.0...main
+[0.41.0]: https://gitlab.com/cynium/istota/-/releases/v0.41.0
 [0.40.1]: https://gitlab.com/cynium/istota/-/releases/v0.40.1
 [0.40.0]: https://gitlab.com/cynium/istota/-/releases/v0.40.0
 [0.39.0]: https://gitlab.com/cynium/istota/-/releases/v0.39.0
