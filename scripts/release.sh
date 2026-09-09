@@ -167,6 +167,16 @@ if [ -z "$(printf '%s' "$NOTES" | tr -d '[:space:]')" ]; then
   exit 1
 fi
 
+# The tag annotation is not capped, but the GitHub Release body is: over
+# 125,000 characters the API refuses it outright. release.yml cuts a larger
+# section down to fit; say so here so a partial release body is expected.
+NOTES_CHARS=$(printf '%s' "$NOTES" | wc -c | tr -d ' ')
+if [ "$NOTES_CHARS" -gt 125000 ]; then
+  echo "note: the $TAG section is $NOTES_CHARS characters; the GitHub Release body"
+  echo "      is capped at 125,000, so release.yml will publish a cut-down changeset"
+  echo "      with a link to CHANGELOG.md. The tag annotation carries all of it."
+fi
+
 git add CHANGELOG.md pyproject.toml
 # Stage the reconciled lockfile too (only changes when uv is present).
 [ -f uv.lock ] && git add uv.lock || true

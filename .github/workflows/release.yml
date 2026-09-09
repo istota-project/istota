@@ -35,15 +35,26 @@ jobs:
       - name: Extract release notes from CHANGELOG.md
         env:
           VERSION: ${{ steps.tag.outputs.version }}
+          CHANGELOG_URL: ${{ github.server_url }}/${{ github.repository }}/blob/${{ steps.tag.outputs.tag }}/CHANGELOG.md
         run: |
           # Extract the version's section and consolidate duplicate ###
           # subsections (Added/Changed/Fixed/...) into one of each in
           # Keep-a-Changelog order. Mirrors the logic in scripts/release.sh
           # so the GitHub Release body matches the consolidated tag annotation
-          # rather than the chronological CHANGELOG.md layout.
+          # rather than the chronological CHANGELOG.md layout — with one
+          # difference the tag annotation does not need: GitHub caps a release
+          # body at 125,000 characters, so a section larger than that is cut
+          # down here rather than refused by the API.
           python3 - <<'PY' > /tmp/release-notes.md
           import os, re, sys, pathlib
+
           version = os.environ["VERSION"]
+          changelog_url = os.environ["CHANGELOG_URL"]
+          # GitHub answers 422 on a release body over 125,000 characters, and a
+          # refused body publishes nothing at all. Stop short of the cap: the
+          # announcement, the per-section notes and the footer all still fit.
+          BUDGET = int(os.environ.get("BODY_BUDGET", "120000"))
+
           text = pathlib.Path("CHANGELOG.md").read_text()
 
           m = re.search(rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
@@ -71,23 +82,77 @@ jobs:
           CANONICAL = ["### Added", "### Changed", "### Deprecated", "### Removed", "### Fixed", "### Security"]
           ordered_keys = [None] + [h for h in CANONICAL if h in buckets] + [k for k in order if k not in CANONICAL and k is not None]
 
-          out = []
+          # One flat list of entries per bucket, so a bucket that does not fit
+          # whole is cut between entries rather than mid-sentence.
+          entries: dict[str | None, list[str]] = {}
           for key in ordered_keys:
               if key not in buckets:
                   continue
-              if key is not None:
-                  out.append(key)
-                  out.append("")
-              out.append("\n\n".join(buckets[key]))
-              out.append("")
-          print("\n".join(out).strip("\n"))
+              flat = []
+              for body in buckets[key]:
+                  flat.extend(e for e in re.split(r"\n\n+", body) if e.strip())
+              entries[key] = flat
+
+          def cost(entry):
+              return len(entry) + 2  # the blank line that separates entries
+
+          # The announcement is what the body is for; it goes in whole.
+          announcement = entries.pop(None, [])
+          out = list(announcement)
+          spent = sum(cost(e) for e in announcement)
+
+          # What is left goes to the sections in proportion to their size, so a
+          # long "Fixed" cannot crowd "Security" out of the body entirely. What
+          # a section does not use passes to the next one.
+          FOOTER_RESERVE = 600
+          remaining = BUDGET - spent - FOOTER_RESERVE
+          pending = sum(cost(e) for flat in entries.values() for e in flat)
+          omitted = 0
+
+          for key, flat in entries.items():
+              size = sum(cost(e) for e in flat)
+              share = remaining * size // pending if pending else 0
+              pending -= size
+              used = cost(key)
+              kept = []
+              for i, entry in enumerate(flat):
+                  if used + cost(entry) > share:
+                      omitted += len(flat) - i
+                      break
+                  kept.append(entry)
+                  used += cost(entry)
+              if not kept:
+                  continue
+              out.append(key)
+              out.extend(kept)
+              dropped = len(flat) - len(kept)
+              if dropped:
+                  out.append(f"_{dropped} further entries in this section are in [CHANGELOG.md]({changelog_url})._")
+                  used += cost(out[-1])
+              remaining -= used
+
+          body = "\n\n".join(out).strip("\n")
+          if omitted:
+              body += (
+                  f"\n\n---\n\nA GitHub Release body is capped at 125,000 characters, and this "
+                  f"release's changeset is larger than that: {omitted} of its entries are not "
+                  f"shown above. The complete changeset is in [CHANGELOG.md]({changelog_url})."
+              )
+          print(body)
           PY
           if [ ! -s /tmp/release-notes.md ]; then
             echo "::error::No section for [${VERSION}] in CHANGELOG.md"
             exit 1
           fi
+          SIZE=$(wc -c < /tmp/release-notes.md)
+          echo "Release notes: $SIZE characters"
+          if [ "$SIZE" -gt 125000 ]; then
+            echo "::error::release notes are $SIZE characters; GitHub rejects a body over 125000"
+            exit 1
+          fi
           echo "----- Release notes -----"
-          cat /tmp/release-notes.md
+          head -c 20000 /tmp/release-notes.md
+          echo
           echo "-------------------------"
 
       - name: Create or update GitHub Release
