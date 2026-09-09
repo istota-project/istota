@@ -62,6 +62,19 @@ if len(preamble) < 200:
         "that genuinely needs none."
     )
 
+# The prose is two paragraphs at most, whatever the size of the release. Only
+# the "Before you upgrade" list grows with it, because each entry there is an
+# action somebody has to take.
+prose = re.split(r"^\*\*Before you upgrade\.\*\*", preamble, maxsplit=1, flags=re.M)[0]
+paragraphs = [p for p in re.split(r"\n\s*\n", prose) if p.strip()]
+if len(paragraphs) > 2:
+    sys.exit(
+        f"the announcement is {len(paragraphs)} paragraphs; it is two at most.\n"
+        "The first opens on a feature, the second carries the rest and one clause\n"
+        "for the scale of the release. Everything else belongs in the changeset or\n"
+        "in the 'Before you upgrade' list. How: .claude/rules/releases.md."
+    )
+
 # A heading inside the announcement does not stay inside it. Both extractors
 # split the section on '### ', so one is read as a changeset subsection and
 # emitted after the real ones; a '#' or '##' stays put and outranks the

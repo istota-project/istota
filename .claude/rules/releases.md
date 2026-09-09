@@ -18,15 +18,15 @@ Read the entire `[Unreleased]` section first. Not the headings, not the first se
 
 Then, in order:
 
-1. **A lede that measures the release.** Commit count against the two previous releases (`git log --oneline --no-merges vPREV..HEAD | wc -l`) and the one or two things that account for most of it. A number a reader can check beats an adjective.
-2. **One paragraph per theme**, four to eight of them, ordered by how many people it reaches — what changed, what it was before, and what a person now sees. Group across buckets. A theme carrying real weight gets its own paragraph even where the changeset spread it over thirty bullets.
+1. **Open with a feature.** The first sentence is something new a person can now do, in their words — "web chat works on a phone with no connection", not a count and not a problem. Never open with what was broken. A release whose real weight is security or bug fixing still opens on its best feature; the fixing is named in a clause near the end and carried by the changeset, which is where a reader goes for it.
+2. **Two paragraphs of prose, and no more.** The first is the features that reach the most people, the second is the rest plus one closing clause for the scale of the release and what the remainder was — the commit count against the two previous releases (`git log --oneline --no-merges vPREV..HEAD | wc -l`) belongs there, not in the opening. Group across buckets: a feature is usually spread over `Added`, `Changed` and `Fixed`. A theme that will not fit is not a third paragraph; it is a clause, or it is left to the changeset.
 3. **`**Before you upgrade.**` last**, as a list. One entry per thing that wants a decision or an action: a credential to reissue or rotate, a setting that is gone or has changed meaning, a migration a deploy performs and its refusal conditions, a default that flipped, a new alert to expect. Say what to do, not only what changed. Every `**Upgrade note:**` bullet in the section is a candidate; a bullet that merely says something is fixed is not, however large the fix.
 
 What to leave out: anything with no reader outside this repository (a refactor, a test-only change, a rule file), and the enumeration itself — the changeset is directly below and the announcement does not summarise all of it. An entry that matters and did not make a paragraph is not lost; it is one screen down.
 
 Voice is the changelog's own: second person, plain, specific, what it does rather than what it enables. Bold is for the `Before you upgrade` lead-ins and nothing else. The full checklist is the `writing-style` skill, which is worth invoking before drafting rather than after.
 
-Length tracks the release. 873 commits earned eleven paragraphs and a twelve-item upgrade list — about 1,250 words of prose and 550 of list; 36 commits earn three sentences and no list at all. The worked example is the announcement opening the most recent release in `CHANGELOG.md` (0.41's, written under `[Unreleased]` before its cut) — read it beside the section it opens.
+The prose is capped at two paragraphs whatever the release: 980 commits earned about 350 words of it, and 36 commits earn three sentences and no upgrade list at all. Only the list grows with the release, because every entry in it is an action somebody has to take. The worked example is the announcement opening the most recent release in `CHANGELOG.md` — read it beside the section it opens.
 
 ## Two gotchas that have already cost a release
 
