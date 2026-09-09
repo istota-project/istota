@@ -457,7 +457,7 @@ class TestOneSpellingPerFile:
         config.workspace_path = mount
         # Overlays have their own pass, their own path rule and their own
         # tests; this is about the two callers that disagreed.
-        config.use_mount = False
+        config.has_workspace = False
         return config
 
     def _sources(self, conn, source_type="memory_file"):

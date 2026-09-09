@@ -88,11 +88,11 @@ class TestConfigDefaults:
         cfg = Config()
         assert cfg.users == {}
 
-    def test_use_mount_false_by_default(self):
+    def test_has_workspace_false_by_default(self):
         cfg = Config()
         assert cfg.workspace_path is None
         assert cfg.nextcloud_mount_path is None
-        assert cfg.use_mount is False
+        assert cfg.has_workspace is False
 
     def test_default_bot_name(self):
         cfg = Config()
@@ -859,9 +859,9 @@ class TestConfigMethods:
         cfg = Config()
         assert cfg.get_user("nobody") is None
 
-    def test_use_mount_true(self):
+    def test_has_workspace_true(self):
         cfg = Config(workspace_path=Path("/mnt/nc"))
-        assert cfg.use_mount is True
+        assert cfg.has_workspace is True
 
     def test_workspace_path_derives_from_nextcloud_mount_path(self):
         mount = Path("/mnt/nc")

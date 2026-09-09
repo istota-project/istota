@@ -410,7 +410,7 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
     wants and must not write anything back on the strength of it; the
     previous definitions stay in force.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return None
 
     # Hardened like every other host-side read of `{bot_dir}/config/`
@@ -1263,7 +1263,7 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     Returns True if a file was written — which now includes the write
     itself having succeeded, not just having been attempted.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return False
 
     from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
@@ -1335,7 +1335,7 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     or failed write is False, so a caller that reports success is reporting
     the file's state rather than its own intention (ISSUE-369).
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return False
 
     doc = load_cron_document(config, user_id)
@@ -1381,7 +1381,7 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     (ISSUE-387), so an exception here would leave the task recorded complete
     and its answer undelivered.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return False
 
     doc = load_cron_document(config, user_id)

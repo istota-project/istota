@@ -201,7 +201,7 @@ class TestTheGates:
         nowhere, so it is guarded rather than caught."""
         config = _config(tmp_path)
         config.workspace_path = None
-        assert config.use_mount is False
+        assert config.has_workspace is False
         assert _run(config) == []
 
     def test_one_users_failure_does_not_cost_the_others(self, tmp_path):

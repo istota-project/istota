@@ -5186,7 +5186,7 @@ def load_persona(config: Config, user_id: str | None = None) -> str | None:
     into no sandbox at any path.
     """
     # Try user workspace persona first
-    if user_id and config.use_mount:
+    if user_id and config.has_workspace:
         content = read_user_config_file(config, user_id, "PERSONA.md")
         if content and content.strip():
             return _apply_bot_name(content.strip(), config)
@@ -5838,7 +5838,7 @@ def build_prompt(
 
     resource_sections = []
 
-    if config.use_mount:
+    if config.has_workspace:
         resource_sections.append(
             f"Your workspace is at Users/{display_user_id}/, containing "
             f"shared/, inbox/, memories/, and your bot dir "
@@ -6005,7 +6005,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
         file_tools = f"""- Your files live in your workspace at '{ws_root}'. Use standard file tools (Read, Write, Edit, ls, cat).
   - The workspace is the area you manage for the user (memory, notes, inbox, shared files). It is a normal local folder.
   - This install runs locally without a sandbox, so you also have ordinary access to the rest of the machine's filesystem (the user's home, Downloads, etc.). The workspace is your managed area, not the limit of what you can read — stay within what the user asked for."""
-    elif config.use_mount:
+    elif config.has_workspace:
         if is_admin:
             mount_display = _one_line(str(config.workspace_path))
         else:
@@ -6159,7 +6159,7 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
 
     db_tool_line = ""  # DB writes handled via deferred JSON files
 
-    scoped_path = str(config.workspace_path / "Users" / task.user_id) if config.use_mount else f"{config.rclone_remote}:/Users/{task.user_id}"
+    scoped_path = str(config.workspace_path / "Users" / task.user_id) if config.has_workspace else f"{config.rclone_remote}:/Users/{task.user_id}"
     rules_section = build_rules_section(
         is_admin=is_admin,
         user_id=task.user_id,
@@ -6738,7 +6738,7 @@ def execute_task(
     if skills_doc:
         # Resolve per-user scripts directory
         scripts_nc_path = get_user_scripts_path(task.user_id, config.bot_dir_name)
-        if config.use_mount:
+        if config.has_workspace:
             scripts_dir = str(config.workspace_path / scripts_nc_path.lstrip("/"))
         else:
             scripts_dir = f"{config.rclone_remote}:{scripts_nc_path}"

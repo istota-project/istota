@@ -282,10 +282,10 @@ CASES: list[Case] = [
     Case("sandbox_ro_paths", ro_paths=("ro",)),
     Case("users_config_dir_masked", users_config_dir=True),
     Case("module_root_outside_the_db_dir", module_data_dir="modules"),
-    Case("module_root_under_the_mount", module_data_dir="mount/modules"),
+    Case("module_root_under_the_workspace", module_data_dir="mount/modules"),
     Case("db_mask_refused_above_the_workspace", db_dir="temp"),
     Case("no_developer_dir", developer_dir=False),
-    Case("no_nextcloud_mount", mount=False, resources=(("Docs", _RW),)),
+    Case("no_workspace", mount=False, resources=(("Docs", _RW),)),
     # The one case where a bind's source and destination are different
     # strings, and the only one where `_mask_dir` emits both of its
     # candidates. `_ro_bind`/`_bind` resolve the source and keep the path *as

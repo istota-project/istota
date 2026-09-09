@@ -1027,7 +1027,7 @@ def cmd_user_init(args):
         print(f"Warning: User '{user_id}' not found in config, but proceeding anyway")
 
     print(f"Initializing directories for user '{user_id}'...")
-    if config.use_mount:
+    if config.has_workspace:
         print(f"Mount: {config.workspace_path}")
     else:
         print(f"Remote: {config.rclone_remote}")
@@ -1055,7 +1055,7 @@ def cmd_user_status(args):
     user_id = args.username
 
     print(f"User: {user_id}")
-    if config.use_mount:
+    if config.has_workspace:
         print(f"Mount: {config.workspace_path}")
     else:
         print(f"Remote: {config.rclone_remote}")

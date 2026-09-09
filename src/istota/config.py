@@ -1858,8 +1858,8 @@ class Config:
         return name or "istota"
 
     @property
-    def use_mount(self) -> bool:
-        """Whether to use local mount instead of rclone CLI."""
+    def has_workspace(self) -> bool:
+        """Whether a local workspace tree is configured."""
         return self.workspace_path is not None
 
     @property
@@ -1889,7 +1889,7 @@ class Config:
         return "Nextcloud" if self.storage_is_nextcloud else "your workspace"
 
     def workspace_root(self, user_id: str | None = None) -> Path | None:
-        """On-disk root of the workspace (``None`` when no local tree exists).
+        """Root of the local workspace tree (``None`` when none exists).
 
         Scoped to the user's ``/Users/{user_id}`` subtree when ``user_id`` is
         given, else the bare workspace root. A de-duplication of the

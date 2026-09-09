@@ -178,7 +178,7 @@ class TestItRendersSomethingTheLoaderAccepts:
 
         assert "workspace_path" not in without_mount
         assert "nextcloud_mount_path" not in without_mount
-        assert load_config_from(without_mount_render).use_mount is False
+        assert load_config_from(without_mount_render).has_workspace is False
 
     def test_the_per_skill_proxy_timeouts_survive_the_round_trip(self, tmp_path):
         """A sub-table ends the scalar section it follows, so one emitted above

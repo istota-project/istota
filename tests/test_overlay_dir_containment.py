@@ -652,7 +652,7 @@ class TestTheExecutorPromptPath:
     guard is `read_user_memory_v2` falling through to `ensure_user_directories_v2`
     and an OCS share POST, which is the Nextcloud backend's branch. `nextcloud.url`
     is empty here, so `storage_backend` is `local` and that branch is never
-    taken, while `use_mount` — and so the overlay directory — stays. The socket
+    taken, while `has_workspace` — and so the overlay directory — stays. The socket
     guard below asserts it rather than assuming it, because the whole point of
     that golden-file lesson is that a path reaching the network silently is
     exactly what a green test looks like.

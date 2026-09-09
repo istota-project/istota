@@ -563,7 +563,7 @@ def import_from_workspace_files(db_path: Path, config: "Any") -> int:
         return 0
 
     mount = getattr(config, "workspace_path", None)
-    if not getattr(config, "use_mount", False) or mount is None:
+    if not getattr(config, "has_workspace", False) or mount is None:
         return 0
 
     bot_dir = getattr(config, "bot_dir_name", "istota")

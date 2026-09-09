@@ -4619,7 +4619,7 @@ def _chat_save_room_memory(
     with db.get_db(_config.db_path) as conn:
         if db.count_active_room_tasks(conn, room.token) > 0:
             return "busy", None
-    if _config.use_mount:
+    if _config.has_workspace:
         memory_path = _config.workspace_path / "Channels" / room.token / "CHANNEL.md"
     else:
         # No local file exists on an rclone deployment, so the anchor is keyed on

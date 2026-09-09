@@ -1068,7 +1068,7 @@ def process_user_sleep_cycle(
         return False
 
     # Write dated memory file (only the human-readable memories)
-    if not config.use_mount:
+    if not config.has_workspace:
         logger.warning("Sleep cycle requires mount mode, skipping file write for %s", user_id)
         _update_state(config, conn, user_id, last_task_id)
         return False
@@ -1261,7 +1261,7 @@ def _skill_overlay_dir_state(config: Config, user_id: str) -> str:
     """
     from ..storage import resolve_user_skill_overlays_dir  # noqa: PLC0415
 
-    if not getattr(config, "use_mount", False):
+    if not getattr(config, "has_workspace", False):
         return "absent"
     try:
         d = resolve_user_skill_overlays_dir(config, user_id)
@@ -1507,7 +1507,7 @@ def curate_user_memory(
         prepend_agents_header_if_missing,
     )
 
-    if not config.use_mount:
+    if not config.has_workspace:
         logger.warning("USER.md curation requires mount mode, skipping for %s", user_id)
         return False
 
@@ -1822,7 +1822,7 @@ def cleanup_old_memory_files(
     if retention_days <= 0:
         return 0
 
-    if not config.use_mount:
+    if not config.has_workspace:
         return 0
 
     context_dir = _get_mount_path(config, get_user_memories_path(user_id))
@@ -1980,7 +1980,7 @@ def _process_extracted_playbooks(
     sleep cycle clobbering the human edit (ISSUE-174 Concern 1). Requires mount
     mode.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         logger.warning("Playbooks require mount mode, skipping writes for %s", user_id)
         return
 
@@ -2055,7 +2055,7 @@ def cleanup_old_playbooks(
     """
     if retention_days <= 0:
         return 0
-    if not config.use_mount:
+    if not config.has_workspace:
         return 0
 
     pb_dir = _get_mount_path(config, get_user_playbooks_path(user_id, config.bot_dir_name))
@@ -2402,7 +2402,7 @@ def process_channel_sleep_cycle(
         return False
 
     # Write dated memory file
-    if not config.use_mount:
+    if not config.has_workspace:
         logger.warning(
             "Channel sleep cycle requires mount mode, skipping file write for %s",
             conversation_token,
@@ -2495,7 +2495,7 @@ def _reindex_channel_durable(
     """
     if not (config.memory_search.enabled and config.memory_search.auto_index_memory_files):
         return
-    if not config.use_mount:
+    if not config.has_workspace:
         return
     try:
         channel_md = _get_mount_path(config, get_channel_memory_path(conversation_token))
@@ -2560,7 +2560,7 @@ def cleanup_old_channel_memory_files(
     if retention_days <= 0:
         return 0
 
-    if not config.use_mount:
+    if not config.has_workspace:
         return 0
 
     memories_dir = _get_mount_path(

@@ -716,7 +716,7 @@ class TestTheStorageBackend:
         assert config.storage_backend == "local"
         assert config.workspace_path == Path("/mnt/shared")
         assert config.nextcloud_mount_path is None
-        assert config.use_mount is True
+        assert config.has_workspace is True
 
     def test_the_local_backend_drops_the_nextcloud_capability(self, tmp_path):
         """The prompt-visible half, at the point the render produces it.

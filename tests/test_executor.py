@@ -1913,12 +1913,12 @@ class TestUserIdSubstitution:
 
 
 class TestLoadPersona:
-    def _make_config(self, tmp_path, use_mount=True):
+    def _make_config(self, tmp_path, has_workspace=True):
         config_dir = tmp_path / "config"
         skills_dir = config_dir / "skills"
         skills_dir.mkdir(parents=True)
         kwargs = dict(skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled")
-        if use_mount:
+        if has_workspace:
             mount = tmp_path / "mount"
             mount.mkdir()
             kwargs["workspace_path"] = mount
@@ -1954,7 +1954,7 @@ class TestLoadPersona:
         assert result == "Global persona"
 
     def test_no_mount_falls_back_to_global(self, tmp_path):
-        config = self._make_config(tmp_path, use_mount=False)
+        config = self._make_config(tmp_path, has_workspace=False)
         (tmp_path / "config" / "persona.md").write_text("Global persona")
 
         result = load_persona(config, user_id="alice")

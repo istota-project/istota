@@ -163,7 +163,7 @@ class TestPromptStorageFramingRclone:
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
         )
         assert config.storage_backend == "nextcloud"
-        assert config.use_mount is False
+        assert config.has_workspace is False
         prompt = build_prompt(_task(), [], config).system
         assert "rclone" in prompt
         assert "Nextcloud" in prompt

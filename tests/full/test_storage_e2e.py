@@ -10,7 +10,7 @@ container, against the server the shipped `provision-nc.sh` set up.
 
 **The one thing to understand before reading any assertion below.** On this
 shape `storage.py` never speaks WebDAV. `render-config.sh:119` writes
-`workspace_path = "/mnt/shared"` unconditionally, so `Config.use_mount` is
+`workspace_path = "/mnt/shared"` unconditionally, so `Config.has_workspace` is
 true and every write is an ordinary POSIX write onto a Docker volume. Nextcloud
 reaches the same bytes through two `files_external` *local* mounts that
 `provision-nc.sh:56-79` creates: the whole volume to the bot at `Shared Files/`,

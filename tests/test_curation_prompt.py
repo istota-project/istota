@@ -263,7 +263,7 @@ class TestOverlayInventoryFromDisk:
         config = self._config(tmp_path)
         (self._overlays(config) / "developer.md").write_text("- a rule\n")
         remote = self._config(tmp_path, workspace_path=None)
-        assert remote.use_mount is False
+        assert remote.has_workspace is False
         assert self._load(remote) == []
 
     def test_a_file_that_will_never_bind_is_not_listed(self, tmp_path):

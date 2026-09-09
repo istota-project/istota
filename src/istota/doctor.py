@@ -5955,7 +5955,7 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
     changed is which one alerts.
     """
     name = "config.skill_overlays"
-    if not config.use_mount:
+    if not config.has_workspace:
         return CheckResult(
             name, SKIP, "no workspace mount configured, so overlays are not read"
         )
