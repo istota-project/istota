@@ -200,7 +200,7 @@ class TestOverlayInventoryFromDisk:
             )
         ops = tmp_path / "ops_skills"
         ops.mkdir(exist_ok=True)
-        overrides.setdefault("nextcloud_mount_path", tmp_path / "mount")
+        overrides.setdefault("workspace_path", tmp_path / "mount")
         overrides.setdefault("users", {"alice": UserConfig()})
         return Config(
             db_path=tmp_path / "istota.db",
@@ -213,7 +213,7 @@ class TestOverlayInventoryFromDisk:
     @staticmethod
     def _overlays(config, user_id="alice"):
         d = (
-            config.nextcloud_mount_path
+            config.workspace_path
             / "Users" / user_id / config.bot_dir_name / "config" / "skills"
         )
         d.mkdir(parents=True, exist_ok=True)
@@ -262,8 +262,8 @@ class TestOverlayInventoryFromDisk:
         none — the condition `load_persona` already applies to `PERSONA.md`."""
         config = self._config(tmp_path)
         (self._overlays(config) / "developer.md").write_text("- a rule\n")
-        remote = self._config(tmp_path, nextcloud_mount_path=None)
-        assert remote.use_mount is False
+        remote = self._config(tmp_path, workspace_path=None)
+        assert remote.has_workspace is False
         assert self._load(remote) == []
 
     def test_a_file_that_will_never_bind_is_not_listed(self, tmp_path):
@@ -341,7 +341,7 @@ class TestOverlayInventoryFromDisk:
         elsewhere.mkdir()
         (elsewhere / "developer.md").write_text("- CONSTITUTIONAL SECRET TEXT\n")
         user_config = (
-            config.nextcloud_mount_path
+            config.workspace_path
             / "Users" / "alice" / config.bot_dir_name / "config"
         )
         user_config.mkdir(parents=True)

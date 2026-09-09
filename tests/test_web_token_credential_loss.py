@@ -55,7 +55,7 @@ def keyed(monkeypatch):
 def config(tmp_path):
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(display_name="Alice")},
         web=WebConfig(
             enabled=True,

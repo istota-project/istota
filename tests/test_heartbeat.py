@@ -94,12 +94,12 @@ class TestIsQuietHours:
 
 class TestLoadHeartbeatConfig:
     def test_no_mount(self, tmp_path):
-        config = Config(nextcloud_mount_path=None)
+        config = Config(workspace_path=None)
         result = load_heartbeat_config(config, "alice")
         assert result is None
 
     def test_file_not_exists(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         result = load_heartbeat_config(config, "alice")
         assert result is None
 
@@ -110,7 +110,7 @@ class TestLoadHeartbeatConfig:
         users_dir.mkdir(parents=True)
         (users_dir / "HEARTBEAT.md").write_text("")
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         result = load_heartbeat_config(config, "alice")
         assert result is None
 
@@ -121,7 +121,7 @@ class TestLoadHeartbeatConfig:
         users_dir.mkdir(parents=True)
         (users_dir / "HEARTBEAT.md").write_text("# Just markdown, no TOML")
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         result = load_heartbeat_config(config, "alice")
         assert result is None
 
@@ -139,7 +139,7 @@ class TestLoadHeartbeatConfig:
 ```
 """)
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         result = load_heartbeat_config(config, "alice")
         assert result is None
 
@@ -166,7 +166,7 @@ cooldown_minutes = 60
 ```
 """)
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         result = load_heartbeat_config(config, "alice")
 
         assert result is not None
@@ -202,7 +202,7 @@ execution_test = false
 ```
 """)
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         result = load_heartbeat_config(config, "alice")
 
         assert result is not None
@@ -220,14 +220,14 @@ execution_test = false
 
 class TestCheckFileWatch:
     def test_no_path(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(name="test", type="file-watch", config={})
         result = _check_file_watch(check, config)
         assert result.healthy is False
         assert "No path configured" in result.message
 
     def test_file_not_found(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="file-watch",
@@ -243,7 +243,7 @@ class TestCheckFileWatch:
         test_file = mount / "test.txt"
         test_file.write_text("content")
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         check = HeartbeatCheck(
             name="test",
             type="file-watch",
@@ -263,7 +263,7 @@ class TestCheckFileWatch:
         old_time = datetime.now().timestamp() - (48 * 3600)
         os.utime(test_file, (old_time, old_time))
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         check = HeartbeatCheck(
             name="test",
             type="file-watch",
@@ -279,7 +279,7 @@ class TestCheckFileWatch:
         test_file = mount / "test.txt"
         test_file.write_text("content")  # Fresh file
 
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         check = HeartbeatCheck(
             name="test",
             type="file-watch",
@@ -296,14 +296,14 @@ class TestCheckFileWatch:
 
 class TestCheckShellCommand:
     def test_no_command(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(name="test", type="shell-command", config={})
         result = _check_shell_command(check, config)
         assert result.healthy is False
         assert "No command configured" in result.message
 
     def test_command_success_no_condition(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -319,7 +319,7 @@ class TestCheckShellCommand:
         paths."""
         from istota.config import ExperimentalConfig
         config = Config(
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             experimental=ExperimentalConfig(features=["money_tax", "money_wash_sales"]),
         )
         check = HeartbeatCheck(
@@ -334,7 +334,7 @@ class TestCheckShellCommand:
         assert result.healthy is True
 
     def test_command_failure_no_condition(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -347,7 +347,7 @@ class TestCheckShellCommand:
         """`shell=True` is `/bin/sh -c`, which starts with `pipefail` off, so a
         probe ending in a pipe reported the last stage and a broken check read
         as healthy forever. The counterpart of ISSUE-307 on this surface."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -364,7 +364,7 @@ class TestCheckShellCommand:
         one would decide health from stdout alone and pass identically against
         the pre-pipefail code — proving nothing about the change it guards.
         """
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -377,7 +377,7 @@ class TestCheckShellCommand:
         """The message reaches an operator through an alert, with no stderr
         beside it — a SIGPIPE'd producer writes none. A bare `exit 141` on a
         correct probe is the kind of thing someone debugs at 3am."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -389,7 +389,7 @@ class TestCheckShellCommand:
         assert "SIGPIPE" in result.message, result.message
 
     def test_less_than_condition_pass(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -399,7 +399,7 @@ class TestCheckShellCommand:
         assert result.healthy is True
 
     def test_less_than_condition_fail(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -414,7 +414,7 @@ class TestCheckShellCommand:
         assert "Value is 95" in result.message
 
     def test_greater_than_condition(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -424,7 +424,7 @@ class TestCheckShellCommand:
         assert result.healthy is True
 
     def test_equals_condition(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -434,7 +434,7 @@ class TestCheckShellCommand:
         assert result.healthy is True
 
     def test_contains_condition(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -444,7 +444,7 @@ class TestCheckShellCommand:
         assert result.healthy is True
 
     def test_not_contains_condition(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -454,7 +454,7 @@ class TestCheckShellCommand:
         assert result.healthy is True
 
     def test_timeout(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -469,7 +469,7 @@ class TestCheckShellCommand:
         daemon's config from ISTOTA_CONFIG_PATH. Without it they fall back
         to a default Config() with empty users and exit with a JSON error
         envelope, while the shell exit 0 makes the heartbeat look healthy."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         config.config_path = tmp_path / "config.toml"
         check = HeartbeatCheck(
             name="test",
@@ -481,7 +481,7 @@ class TestCheckShellCommand:
         assert str(config.config_path) in result.details["value"]
 
     def test_user_id_propagated(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -492,7 +492,7 @@ class TestCheckShellCommand:
         assert "alice" in result.details["value"]
 
     def test_db_path_propagated(self, tmp_path):
-        config = Config(db_path=tmp_path / "istota.db", nextcloud_mount_path=tmp_path)
+        config = Config(db_path=tmp_path / "istota.db", workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -513,7 +513,7 @@ class TestCheckShellCommand:
         from unittest.mock import patch
         config = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "temp").mkdir(exist_ok=True)
@@ -540,7 +540,7 @@ class TestCheckShellCommand:
         """No user_id means we can't resolve per-user paths — fall back
         cleanly without invoking the hook dispatcher."""
         from unittest.mock import patch
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test", type="shell-command", config={"command": "echo ok"},
         )
@@ -558,7 +558,7 @@ class TestCheckShellCommand:
         from unittest.mock import patch
         config = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             temp_dir=tmp_path / "temp",
         )
         (tmp_path / "temp").mkdir(exist_ok=True)
@@ -579,7 +579,7 @@ class TestCheckShellCommand:
         they catch their own errors. The no-condition path used to treat
         that as healthy — masking exactly the failure mode the setup_env
         hook fix is supposed to eliminate."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -595,7 +595,7 @@ class TestCheckShellCommand:
 
     def test_json_error_envelope_without_error_field(self, tmp_path):
         """Fallback message when the envelope omits ``error``."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -607,7 +607,7 @@ class TestCheckShellCommand:
 
     def test_json_ok_envelope_stays_healthy(self, tmp_path):
         """Positive envelope is the normal success shape — don't flag it."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -619,7 +619,7 @@ class TestCheckShellCommand:
     def test_malformed_json_stdout_unaffected(self, tmp_path):
         """Output starting with ``{`` but not valid JSON shouldn't break
         the envelope check — treat as opaque success."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -630,7 +630,7 @@ class TestCheckShellCommand:
 
     def test_non_json_stdout_unaffected(self, tmp_path):
         """Plain-text heartbeats (the original shape) keep working."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="shell-command",
@@ -650,7 +650,7 @@ class TestRunCheckAdminGate:
     inherits ISTOTA_SECRET_KEY (the master Fernet key for the secrets table)."""
 
     def test_admin_shell_command_runs(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path, admin_users={"alice"})
+        config = Config(workspace_path=tmp_path, admin_users={"alice"})
         check = HeartbeatCheck(
             name="t", type="shell-command", config={"command": "echo ok"},
         )
@@ -658,7 +658,7 @@ class TestRunCheckAdminGate:
         assert result.healthy is True
 
     def test_non_admin_shell_command_rejected(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path, admin_users={"root"})
+        config = Config(workspace_path=tmp_path, admin_users={"root"})
         check = HeartbeatCheck(
             name="t", type="shell-command", config={"command": "echo PWNED"},
         )
@@ -667,7 +667,7 @@ class TestRunCheckAdminGate:
         assert "admin-only" in result.message
 
     def test_non_admin_other_check_types_unaffected(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path, admin_users={"root"})
+        config = Config(workspace_path=tmp_path, admin_users={"root"})
         url_check = HeartbeatCheck(
             name="t", type="url-health", config={"url": ""},
         )
@@ -677,7 +677,7 @@ class TestRunCheckAdminGate:
 
     def test_empty_admin_users_treats_all_as_admin(self, tmp_path):
         """Back-compat: empty admin_users = all users admin (Config.is_admin)."""
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="t", type="shell-command", config={"command": "echo ok"},
         )
@@ -692,7 +692,7 @@ class TestRunCheckAdminGate:
 
 class TestCheckUrlHealth:
     def test_no_url(self, tmp_path):
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(name="test", type="url-health", config={})
         result = _check_url_health(check, config)
         assert result.healthy is False
@@ -704,7 +704,7 @@ class TestCheckUrlHealth:
         mock_response.status_code = 200
         mock_get.return_value = mock_response
 
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="url-health",
@@ -719,7 +719,7 @@ class TestCheckUrlHealth:
         mock_response.status_code = 503
         mock_get.return_value = mock_response
 
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="url-health",
@@ -734,7 +734,7 @@ class TestCheckUrlHealth:
         import httpx
         mock_get.side_effect = httpx.TimeoutException("timeout")
 
-        config = Config(nextcloud_mount_path=tmp_path)
+        config = Config(workspace_path=tmp_path)
         check = HeartbeatCheck(
             name="test",
             type="url-health",
@@ -803,7 +803,7 @@ class TestShouldAlert:
 
 class TestCheckHeartbeats:
     def test_no_users(self, db_path, tmp_path):
-        config = Config(db_path=db_path, nextcloud_mount_path=tmp_path, users={})
+        config = Config(db_path=db_path, workspace_path=tmp_path, users={})
         with db.get_db(db_path) as conn:
             result = check_heartbeats(conn, config)
         assert result == []
@@ -814,7 +814,7 @@ class TestCheckHeartbeats:
 
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             users={"alice": UserConfig(timezone="UTC")},
         )
         with db.get_db(db_path) as conn:
@@ -848,7 +848,7 @@ path = "/test.txt"
 
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             users={"alice": UserConfig(timezone="UTC")},
         )
 
@@ -890,7 +890,7 @@ path = "/nonexistent.txt"
 
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig(timezone="UTC")},
         )
@@ -939,7 +939,7 @@ channel = "ntfy"
         # Config has no ntfy secret → ntfy channel is "not configured".
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             nextcloud=NextcloudConfig(url="https://nc.example.com"),
             users={"alice": UserConfig(timezone="UTC")},
         )
@@ -977,7 +977,7 @@ interval_minutes = 30
 
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             users={"alice": UserConfig(timezone="UTC")},
         )
 
@@ -1013,7 +1013,7 @@ interval_minutes = 30
 
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             users={"alice": UserConfig(timezone="UTC")},
         )
 
@@ -1058,7 +1058,7 @@ path = "/test.txt"
 
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             users={"alice": UserConfig(timezone="UTC")},
         )
 
@@ -1506,14 +1506,14 @@ class TestHeartbeatPlantedPaths:
         secret.write_text('```toml\n[[checks]]\nname = "planted"\ntype = "url-health"\nurl = "http://x"\n```\n')
         (d / "HEARTBEAT.md").symlink_to(secret)
 
-        assert load_heartbeat_config(Config(nextcloud_mount_path=mount), "alice") is None
+        assert load_heartbeat_config(Config(workspace_path=mount), "alice") is None
 
     def test_a_fifo_at_heartbeat_md_does_not_block_the_scheduler(self, tmp_path):
         from .support.blocking import fails_if_it_blocks
 
         mount, d = self._config_dir(tmp_path)
         os.mkfifo(d / "HEARTBEAT.md")
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
         with fails_if_it_blocks(what="load_heartbeat_config"):
             assert load_heartbeat_config(config, "alice") is None
 
@@ -1522,7 +1522,7 @@ class TestHeartbeatPlantedPaths:
         (d / "HEARTBEAT.md").write_text(
             '```toml\n[[checks]]\nname = "site"\ntype = "url-health"\nurl = "http://x"\n```\n'
         )
-        result = load_heartbeat_config(Config(nextcloud_mount_path=mount), "alice")
+        result = load_heartbeat_config(Config(workspace_path=mount), "alice")
         assert result is not None
         _settings, checks = result
         assert [c.name for c in checks] == ["site"]

@@ -89,4 +89,4 @@ password = ""    # or via the encrypted secrets store
 | `caldav_url` | `[caldav] url` if set, else `nextcloud.url + /remote.php/dav` |
 | `caldav_username` | `[caldav] username` if set, else `nextcloud.username` |
 | `caldav_password` | `[caldav] password` if set, else `nextcloud.app_password` |
-| `use_mount` | `True` if `nextcloud_mount_path` is set |
+| `has_workspace` | `True` if `workspace_path` is set |

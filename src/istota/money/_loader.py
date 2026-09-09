@@ -5,7 +5,7 @@ Single entry point for both web routes and the in-process skill.
 Money is a "module" in the modules/connected-services taxonomy: on by
 default for every configured user, gated by
 ``Config.is_module_enabled(user_id, "money")``. The user's workspace path is
-derived from ``nextcloud_mount_path`` + ``get_user_bot_path``, and Monarch
+derived from ``workspace_path`` + ``get_user_bot_path``, and Monarch
 credentials come from the encrypted secrets table. Legacy mode (the
 ``[[resources]] type = "money" config_path = …``-driven branch) was removed
 when modules took over module gating.

@@ -37,7 +37,7 @@ def config(tmp_path, workspace):
             smtp_host="smtp.test", smtp_port=587,
             bot_email="bot@test.invalid",
         ),
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(display_name="Alice")},
     )
 
@@ -417,7 +417,7 @@ class TestRelease:
         bare = Config(
             db_path=tmp_path / "test.db",
             email=email_config,
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig()},
         )
         draft_id = _hold(conn)

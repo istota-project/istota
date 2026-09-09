@@ -137,7 +137,7 @@ def _make_config(db_path, tmp_path):
         talk=TalkConfig(enabled=True, bot_username="istota"),
         email=EmailConfig(enabled=False),
         scheduler=SchedulerConfig(),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
         admin_users={"alice"},
     )

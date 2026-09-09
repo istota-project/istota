@@ -34,7 +34,7 @@ def istota_config(tmp_path):
     """Minimal Config that resolves to a workspace under tmp_path."""
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path,
+        workspace_path=tmp_path,
         users={"alice": UserConfig(), "bob": UserConfig()},
     )
 
@@ -308,7 +308,7 @@ class TestLoader:
     def test_resolve_for_user_gates_module_disabled(self, tmp_path):
         config = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             users={"alice": UserConfig(disabled_modules=["location"])},
         )
         with pytest.raises(UserNotFoundError):
@@ -317,7 +317,7 @@ class TestLoader:
     def test_resolve_for_user_gates_no_mount(self, tmp_path):
         config = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=None,
+            workspace_path=None,
             users={"alice": UserConfig()},
         )
         with pytest.raises(UserNotFoundError):
@@ -334,7 +334,7 @@ class TestLoader:
     def test_list_users_filters_disabled(self, tmp_path):
         config = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             users={
                 "alice": UserConfig(),
                 "bob": UserConfig(disabled_modules=["location"]),
@@ -385,7 +385,7 @@ class TestSkillSetupEnv:
 
         config = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             users={"alice": UserConfig(disabled_modules=["location"])},
         )
         env = setup_env(self._ctx(config))

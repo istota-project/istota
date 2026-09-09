@@ -71,7 +71,7 @@ def _base_config(tmp_path: Path, *, bundled: Path | None = None) -> Config:
         # Nextcloud) and a test that opens a socket is a test that lies about
         # what it runs against; `_no_sockets` below keeps it that way.
         nextcloud=NextcloudConfig(),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         skills_dir=overrides,
         bundled_skills_dir=bundled,
         temp_dir=tmp_path / "temp",

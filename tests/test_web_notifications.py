@@ -59,7 +59,7 @@ def _make_config(tmp_path):
     db.init_db(db_path)
     return Config(
         db_path=db_path,
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         site=SiteConfig(hostname="example.com"),
         users={"alice": UserConfig(display_name="Alice"),
                "bob": UserConfig(display_name="Bob")},

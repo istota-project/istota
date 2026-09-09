@@ -357,7 +357,7 @@ class TestTheEnablingConditions:
                 memory_search=MemorySearchConfig(
                     enabled=enabled, auto_index_memory_files=auto
                 ),
-                nextcloud_mount_path=(tmp_path / "mount") if mount else None,
+                workspace_path=(tmp_path / "mount") if mount else None,
                 scheduler=SchedulerConfig(skill_overlay_reindex_interval=60),
             )
 
@@ -907,7 +907,7 @@ class TestTheBodiesCloseOverTheDaemonsState:
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        config = Config(db_path=db_path, nextcloud_mount_path=tmp_path / "mount")
+        config = Config(db_path=db_path, workspace_path=tmp_path / "mount")
         return config, build_interval_gates(config, **state)
 
     def _row(self, gates, name):
@@ -1054,7 +1054,7 @@ class TestTheOneShotPathTouchesNoDaemonState:
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        config = Config(db_path=db_path, nextcloud_mount_path=tmp_path / "mount")
+        config = Config(db_path=db_path, workspace_path=tmp_path / "mount")
         config.location.enabled = True
         config.email.enabled = True
 
@@ -1105,7 +1105,7 @@ class TestTheOneShotErrorPolicyIsObservedNotJustDeclared:
 
         db_path = tmp_path / "istota.db"
         db.init_db(db_path)
-        return Config(db_path=db_path, nextcloud_mount_path=tmp_path / "mount")
+        return Config(db_path=db_path, workspace_path=tmp_path / "mount")
 
     def test_a_failing_briefing_sweep_aborts_the_pass(self, tmp_path, monkeypatch):
         config = self._config(tmp_path)

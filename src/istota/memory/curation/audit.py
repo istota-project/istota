@@ -444,7 +444,7 @@ def migrate_user_md_sidecars(config: "Config", user_id: str) -> dict[str, str]:
     completed import of that specific file, one file at a time. Never raises.
     """
     outcomes: dict[str, str] = {}
-    if not getattr(config, "use_mount", False):
+    if not getattr(config, "has_workspace", False):
         return outcomes
 
     try:

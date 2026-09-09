@@ -38,7 +38,7 @@ def _config(tmp_path, **overrides):
     return Config(
         db_path=tmp_path / "test.db",
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         bundled_skills_dir=bundled,
         skills_dir=ops,
         users={"alice": UserConfig()},
@@ -49,7 +49,7 @@ def _config(tmp_path, **overrides):
 
 def _overlays(config, user_id="alice"):
     d = (
-        config.nextcloud_mount_path
+        config.workspace_path
         / "Users" / user_id / config.bot_dir_name / "config" / "skills"
     )
     d.mkdir(parents=True, exist_ok=True)
@@ -195,13 +195,13 @@ class TestTheGates:
         assert _rows(config) == []
 
     def test_a_mountless_deployment_is_a_no_op_not_a_crash(self, tmp_path):
-        """`nextcloud_mount_path` is None on an rclone-remote deployment, and
+        """`workspace_path` is None on an rclone-remote deployment, and
         `None / "Users/…"` is a TypeError. On a scheduler cadence that raise
         would be swallowed by the pass's own `except Exception` and reported
         nowhere, so it is guarded rather than caught."""
         config = _config(tmp_path)
-        config.nextcloud_mount_path = None
-        assert config.use_mount is False
+        config.workspace_path = None
+        assert config.has_workspace is False
         assert _run(config) == []
 
     def test_one_users_failure_does_not_cost_the_others(self, tmp_path):

@@ -63,11 +63,11 @@ def make_config(db_path, tmp_path):
         )
         config.users = {"alice": UserConfig()}
         config.scheduler = SchedulerConfig()
-        config.nextcloud_mount_path = tmp_path / "mount"
-        (config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config").mkdir(
+        config.workspace_path = tmp_path / "mount"
+        (config.workspace_path / "Users" / "alice" / "istota" / "config").mkdir(
             parents=True, exist_ok=True
         )
-        (config.nextcloud_mount_path / "Channels" / "room1").mkdir(
+        (config.workspace_path / "Channels" / "room1").mkdir(
             parents=True, exist_ok=True
         )
         for key, val in overrides.items():
@@ -818,7 +818,7 @@ class TestCmdCron:
         """
         config = make_config()
         cron_path = (
-            config.nextcloud_mount_path / "Users" / "alice" / "istota"
+            config.workspace_path / "Users" / "alice" / "istota"
             / "config" / "CRON.md"
         )
         cron_path.parent.mkdir(parents=True, exist_ok=True)
@@ -950,7 +950,7 @@ class TestCmdCron:
     async def test_enable_job_updates_file_and_db(self, make_config):
         config = make_config()
         # Write CRON.md with disabled job
-        cron_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron_path = config.workspace_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
         cron_path.write_text("""\
 # Scheduled Jobs
 
@@ -987,7 +987,7 @@ enabled = false
     async def test_enable_job_resets_last_run_at(self, make_config):
         """Enabling a job resets last_run_at so it won't fire immediately as catch-up."""
         config = make_config()
-        cron_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron_path = config.workspace_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
         cron_path.write_text("""\
 # Scheduled Jobs
 
@@ -1021,7 +1021,7 @@ enabled = false
     async def test_disable_job_updates_file_and_db(self, make_config):
         config = make_config()
         # Write CRON.md with enabled job
-        cron_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
+        cron_path = config.workspace_path / "Users" / "alice" / "istota" / "config" / "CRON.md"
         cron_path.write_text("""\
 # Scheduled Jobs
 
@@ -1085,7 +1085,7 @@ prompt = "stuff"
         permission bit and root walks through it.
         """
         config = make_config()
-        config_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        config_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
         cron_path = config_dir / "CRON.md"
         cron_path.write_text("""\
 # Scheduled Jobs
@@ -1157,7 +1157,7 @@ class TestCmdMemory:
     async def test_user_memory_with_content(self, make_config):
         config = make_config()
         user_mem_path = (
-            config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "USER.md"
+            config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
         )
         user_mem_path.write_text("Alice likes coffee")
 
@@ -1171,7 +1171,7 @@ class TestCmdMemory:
     async def test_user_memory_not_truncated(self, make_config):
         config = make_config()
         user_mem_path = (
-            config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "USER.md"
+            config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
         )
         long_content = "A" * 5000
         user_mem_path.write_text(long_content)
@@ -1194,7 +1194,7 @@ class TestCmdMemory:
     async def test_channel_memory_with_content(self, make_config):
         config = make_config()
         channel_mem_path = (
-            config.nextcloud_mount_path / "Channels" / "room1" / "CHANNEL.md"
+            config.workspace_path / "Channels" / "room1" / "CHANNEL.md"
         )
         channel_mem_path.write_text("This is the dev channel")
 
@@ -1207,7 +1207,7 @@ class TestCmdMemory:
     @pytest.mark.asyncio
     async def test_no_mount_configured(self, make_config):
         config = make_config()
-        config.nextcloud_mount_path = None
+        config.workspace_path = None
 
         with db.get_db(config.db_path) as conn:
             AsyncMock()
@@ -1315,7 +1315,7 @@ class TestCmdMemory:
     async def test_facts_no_mount_required(self, make_config):
         """Facts come from DB, not filesystem — works without mount."""
         config = make_config()
-        config.nextcloud_mount_path = None
+        config.workspace_path = None
         from istota.memory.knowledge_graph import ensure_table, add_fact
         with db.get_db(config.db_path) as conn:
             ensure_table(conn)
@@ -1915,7 +1915,7 @@ class TestCmdExport:
     @pytest.mark.asyncio
     async def test_no_mount_configured(self, make_config):
         config = make_config()
-        config.nextcloud_mount_path = None
+        config.workspace_path = None
         with db.get_db(config.db_path) as conn:
             result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
         assert "mount not configured" in result
@@ -1930,7 +1930,7 @@ class TestCmdExport:
         assert "Exported 3 messages" in result
         assert "room1.md" in result
 
-        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
         assert export_path.exists()
         content = export_path.read_text()
         assert "<!-- export:token=room1" in content
@@ -1948,7 +1948,7 @@ class TestCmdExport:
             result = await cmd_export(_ctx(config, conn, "alice", "room1", "text"))
 
         assert "Exported 2 messages" in result
-        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
         assert export_path.exists()
         content = export_path.read_text()
         assert "# export:token=room1" in content
@@ -1982,12 +1982,12 @@ class TestCmdExport:
             tid = db.create_task(conn, prompt="web question", user_id="alice",
                                  conversation_token="webroom", source_type="web")
             db.update_task_status(conn, tid, "completed", result="web answer")
-            (config.nextcloud_mount_path / "Channels" / "webroom").mkdir(parents=True, exist_ok=True)
+            (config.workspace_path / "Channels" / "webroom").mkdir(parents=True, exist_ok=True)
             result = await cmd_export(
                 _ctx(config, conn, "alice", "webroom", "", surface="web"),
             )
         assert "Exported 1 messages" in result
-        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "webroom.md"
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "webroom.md"
         content = export_path.read_text()
         assert "web question" in content
         assert "web answer" in content
@@ -1999,7 +1999,7 @@ class TestCmdExport:
             _seed_conversation(conn, count=2, start=1)
             await cmd_export(_ctx(config, conn, "alice", "room1", ""))
 
-        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
 
         with db.get_db(config.db_path) as conn:
             new_ids = _seed_conversation(conn, count=2, start=3)
@@ -2020,7 +2020,7 @@ class TestCmdExport:
         config = make_config()
 
         # Existing export file with a last_id higher than any seeded task.
-        export_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations"
+        export_dir = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations"
         export_dir.mkdir(parents=True, exist_ok=True)
         export_path = export_dir / "room1.md"
         export_path.write_text("<!-- export:token=room1,last_id=100000,updated=2026-02-25T00:00:00Z -->\n\n# Room\n")
@@ -2038,7 +2038,7 @@ class TestCmdExport:
         with db.get_db(config.db_path) as conn:
             _seed_conversation(conn, count=1)
 
-        export_path = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.txt"
         for fmt_arg in ("txt", "plaintext", "text"):
             if export_path.exists():
                 export_path.unlink()
@@ -2058,7 +2058,7 @@ class TestCmdExport:
         """If existing export is .md but user asks for text, it creates .txt (new export)."""
         config = make_config()
 
-        export_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "exports" / "conversations"
+        export_dir = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations"
         export_dir.mkdir(parents=True, exist_ok=True)
         (export_dir / "room1.md").write_text("<!-- export:token=room1,last_id=10,updated=2026-02-25T00:00:00Z -->\n")
 

@@ -20,7 +20,7 @@ def _make_app(tmp_path: Path, *, username="alice", admins=("alice",)) -> FastAPI
     db.init_db(db_path)
     cfg = Config(
         db_path=db_path,
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(timezone="UTC"), "bob": UserConfig()},
         admin_users=set(admins),
     )

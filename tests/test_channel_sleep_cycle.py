@@ -27,7 +27,7 @@ def mount_config(tmp_path):
     return Config(
         db_path=tmp_path / "test.db",
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         channel_sleep_cycle=ChannelSleepCycleConfig(
             enabled=True,
             cron="0 3 * * *",
@@ -185,7 +185,7 @@ class TestProcessChannelSleepCycle:
 
         # The filename is TestChannelSleepCycleDating's business; this test
         # only cares that the write happened.
-        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
+        memories_dir = mount_config.workspace_path / "Channels" / "room123" / "memories"
         written = list(memories_dir.glob("*.md"))
         assert len(written) == 1
         assert "GraphQL" in written[0].read_text()
@@ -257,7 +257,7 @@ class TestProcessChannelSleepCycle:
             auto_index_memory_files=True,
         )
         # Seed a CHANNEL.md so the durable indexer has something to write.
-        channel_dir = mount_config.nextcloud_mount_path / "Channels" / "room123"
+        channel_dir = mount_config.workspace_path / "Channels" / "room123"
         channel_dir.mkdir(parents=True, exist_ok=True)
         (channel_dir / "CHANNEL.md").write_text("# Project status\n- using GraphQL\n")
 
@@ -328,7 +328,7 @@ class TestProcessChannelSleepCycle:
 
 class TestCleanupOldChannelMemoryFiles:
     def test_deletes_old_files(self, mount_config):
-        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
+        memories_dir = mount_config.workspace_path / "Channels" / "room123" / "memories"
         memories_dir.mkdir(parents=True)
 
         old_date = (datetime.now() - timedelta(days=100)).strftime("%Y-%m-%d")
@@ -344,7 +344,7 @@ class TestCleanupOldChannelMemoryFiles:
         assert (memories_dir / f"{recent_date}.md").exists()
 
     def test_keeps_recent_files(self, mount_config):
-        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
+        memories_dir = mount_config.workspace_path / "Channels" / "room123" / "memories"
         memories_dir.mkdir(parents=True)
 
         recent_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
@@ -359,7 +359,7 @@ class TestCleanupOldChannelMemoryFiles:
         assert deleted == 0
 
     def test_skips_cleanup_when_retention_zero(self, mount_config):
-        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
+        memories_dir = mount_config.workspace_path / "Channels" / "room123" / "memories"
         memories_dir.mkdir(parents=True)
 
         old_date = (datetime.now() - timedelta(days=200)).strftime("%Y-%m-%d")
@@ -526,7 +526,7 @@ class TestChannelSleepCycleDating:
         expected = (
             datetime.now(ZoneInfo("UTC")) - timedelta(hours=24)
         ).strftime("%Y-%m-%d")
-        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
+        memories_dir = mount_config.workspace_path / "Channels" / "room123" / "memories"
         assert (memories_dir / f"{expected}.md").exists()
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
@@ -591,7 +591,7 @@ class TestChannelSleepCycleDating:
             mock_run.return_value = (True, "- The second decision (alice, ref:2)\n")
             assert process_channel_sleep_cycle(mount_config, conn, "room123") is True
 
-        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room123" / "memories"
+        memories_dir = mount_config.workspace_path / "Channels" / "room123" / "memories"
         written = list(memories_dir.glob("*.md"))
         assert len(written) == 1, "both runs share one window date"
         text = written[0].read_text()

@@ -14,7 +14,7 @@ def _config(tmp_path: Path) -> Config:
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
     return Config(
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         module_data_dir=tmp_path / "local",
         users={"alice": UserConfig()},
         bot_name="Istota",

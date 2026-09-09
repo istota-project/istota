@@ -48,7 +48,7 @@ class TestCronLoaderModel:
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         _write_cron_md(mount, "alice", """\
@@ -69,7 +69,7 @@ model = "claude-sonnet-4-6"
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         _write_cron_md(mount, "alice", """\
@@ -98,7 +98,7 @@ prompt = "test"
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         original = [CronJob(name="j", cron="0 9 * * *", prompt="t", model="claude-sonnet-4-6")]
@@ -154,7 +154,7 @@ class TestSyncModelToDb:
         mount.mkdir()
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         with db.get_db(db_path) as conn:
@@ -352,7 +352,7 @@ class TestCronLoaderEffort:
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         _write_cron_md(mount, "alice", """\
@@ -377,7 +377,7 @@ effort = "low"
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         original = [CronJob(name="j", cron="0 9 * * *", prompt="t",
@@ -402,7 +402,7 @@ class TestSyncEffortToDb:
         mount = tmp_path / "mount"
         mount.mkdir()
         config = Config(
-            db_path=db_path, nextcloud_mount_path=mount, temp_dir=tmp_path / "temp",
+            db_path=db_path, workspace_path=mount, temp_dir=tmp_path / "temp",
         )
         with db.get_db(db_path) as conn:
             conn.execute(
@@ -1078,7 +1078,7 @@ class TestModelEffortValidation:
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         # Missing "claude-" prefix — likely a typo
@@ -1104,7 +1104,7 @@ model = "sonnet-4-6"
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         _write_cron_md(mount, "alice", """\
@@ -1127,7 +1127,7 @@ model = "claude sonnet 4-6"
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         _write_cron_md(mount, "alice", """\
@@ -1152,7 +1152,7 @@ effort = "extreme"
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         _write_cron_md(mount, "alice", """\
@@ -1178,7 +1178,7 @@ effort = "low"
         mount.mkdir()
         config = Config(
             db_path=tmp_path / "test.db",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         _write_cron_md(mount, "alice", """\

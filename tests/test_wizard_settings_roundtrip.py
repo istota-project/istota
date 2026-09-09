@@ -762,6 +762,18 @@ def test_the_brain_keys_the_wizard_writes_are_mapped(stv):
     )
 
 
+def test_the_legacy_mount_setting_maps_to_the_workspace_variable(stv):
+    assert stv.convert({"nextcloud_mount_path": "/srv/legacy"})[
+        "istota_workspace_path"
+    ] == "/srv/legacy"
+    assert stv.convert(
+        {
+            "nextcloud_mount_path": "/srv/legacy",
+            "workspace_path": "/srv/current",
+        }
+    )["istota_workspace_path"] == "/srv/current"
+
+
 #: Mapped by the converter and deliberately absent from `defaults/main.yml`.
 #: `secrets.env.j2` both gates and writes the line as
 #: `istota_email_smtp_password | default(istota_email_imap_password)`, with no

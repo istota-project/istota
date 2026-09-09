@@ -87,7 +87,7 @@ def resolve_module_workspace(
     if user_id not in (getattr(istota_config, "users", None) or {}):
         raise error(f"user '{user_id}' not in istota config")
 
-    mount = getattr(istota_config, "nextcloud_mount_path", None)
+    mount = getattr(istota_config, "workspace_path", None)
     if not mount:
         raise error(
             f"{module} module for '{user_id}' has no nextcloud mount configured"

@@ -30,7 +30,7 @@ def _config(db_path, tmp_path):
         talk=TalkConfig(enabled=False),
         email=EmailConfig(enabled=False),
         scheduler=SchedulerConfig(),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
     )
 

@@ -62,7 +62,7 @@ def config(tmp_path, db_path):
         talk=TalkConfig(enabled=True, bot_username="istota"),
         email=EmailConfig(enabled=False),
         scheduler=SchedulerConfig(),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
         users={"testuser": UserConfig(display_name="Alice")},
     )

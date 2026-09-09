@@ -37,7 +37,7 @@ def _make_config(tmp_path, *, admins=("alice",), log_output="both") -> Config:
     logdir.mkdir(exist_ok=True)
     config = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         site=SiteConfig(hostname="example.com"),
         users={"alice": UserConfig(display_name="Alice"), "bob": UserConfig()},
         web=WebConfig(

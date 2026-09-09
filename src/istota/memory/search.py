@@ -640,17 +640,17 @@ def reindex_skill_overlays(
         read_overlay_bytes,
     )
 
-    # `use_mount` before the join, not after: `nextcloud_mount_path` is None on
+    # `has_workspace` before the join, not after: `workspace_path` is None on
     # an rclone-remote deployment and `None / "Users/…"` is a TypeError. This
     # was survivable while the only caller was a hand-run `memory_search
     # reindex`; it is now on a scheduler cadence, where the raise would be
     # swallowed by the caller's own `except Exception` and reported nowhere.
-    if not getattr(config, "use_mount", False):
+    if not getattr(config, "has_workspace", False):
         return 0, 0
     bot_dir = getattr(config, "bot_dir_name", "")
     if not bot_dir:
         return 0, 0
-    user_root = config.nextcloud_mount_path / f"Users/{user_id}"
+    user_root = config.workspace_path / f"Users/{user_id}"
     overlay_dir = contained_overlay_dir(
         user_root / bot_dir / "config" / "skills", user_root
     )
@@ -802,8 +802,8 @@ def reindex_all(
                 stats["chunks"] += n
 
     # Reindex memory files if mount available
-    if config.nextcloud_mount_path:
-        memories_dir = config.nextcloud_mount_path / f"Users/{user_id}/memories"
+    if config.workspace_path:
+        memories_dir = config.workspace_path / f"Users/{user_id}/memories"
         if memories_dir.is_dir():
             for path in sorted(memories_dir.glob("*.md")):
                 content = path.read_text()
@@ -814,7 +814,7 @@ def reindex_all(
                         stats["chunks"] += n
 
         # Index USER.md
-        user_md = config.nextcloud_mount_path / f"Users/{user_id}/{config.bot_dir_name}/config/USER.md"
+        user_md = config.workspace_path / f"Users/{user_id}/{config.bot_dir_name}/config/USER.md"
         if user_md.is_file():
             content = user_md.read_text()
             if content.strip():
@@ -827,8 +827,8 @@ def reindex_all(
         stats["chunks"] += n_chunks
 
     # Reindex channel memory files (dated + durable CHANNEL.md)
-    if config.nextcloud_mount_path:
-        channels_dir = config.nextcloud_mount_path / "Channels"
+    if config.workspace_path:
+        channels_dir = config.workspace_path / "Channels"
         if channels_dir.is_dir():
             stats["channel_memories"] = 0
             stats["channel_durable"] = 0

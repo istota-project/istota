@@ -487,9 +487,9 @@ class TestDeferredAttachOps:
         import istota.health as _health
 
         # A real Config: the replay's source-path guard derives its roots
-        # from `nextcloud_mount_path` plus the task's user id.
+        # from `workspace_path` plus the task's user id.
         default_config = Config(
-            nextcloud_mount_path=ctx.workspace_root.parent.parent.parent,
+            workspace_path=ctx.workspace_root.parent.parent.parent,
         )
 
         original = _health.resolve_for_user
@@ -855,7 +855,7 @@ class TestDeferredAttachOps:
             class health:
                 max_document_bytes = 100
 
-            nextcloud_mount_path = ctx.workspace_root.parent.parent.parent
+            workspace_path = ctx.workspace_root.parent.parent.parent
 
         assert self._replay(ctx, deferred, [{
             "op": "attach_document", "source_path": str(src),
@@ -884,7 +884,7 @@ class TestDeferredAttachOps:
             class health:
                 max_document_bytes = 0
 
-            nextcloud_mount_path = ctx.workspace_root.parent.parent.parent
+            workspace_path = ctx.workspace_root.parent.parent.parent
 
         assert self._replay(ctx, deferred, [{
             "op": "attach_document", "source_path": str(src),

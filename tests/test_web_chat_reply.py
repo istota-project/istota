@@ -35,7 +35,7 @@ def _make_config(tmp_path):
     db.init_db(db_path)
     return Config(
         db_path=db_path,
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         nextcloud=NextcloudConfig(
             url="https://cloud.example.com", username="bot", app_password="p",
         ),

@@ -162,7 +162,7 @@ def config(tmp_path, monkeypatch):
     cfg = Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         email=_email_config(),
         users={"alice": UserConfig(display_name="Alice", email_addresses=[OWN])},
     )

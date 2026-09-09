@@ -88,10 +88,11 @@ class TestConfigDefaults:
         cfg = Config()
         assert cfg.users == {}
 
-    def test_use_mount_false_by_default(self):
+    def test_has_workspace_false_by_default(self):
         cfg = Config()
+        assert cfg.workspace_path is None
         assert cfg.nextcloud_mount_path is None
-        assert cfg.use_mount is False
+        assert cfg.has_workspace is False
 
     def test_default_bot_name(self):
         cfg = Config()
@@ -468,11 +469,74 @@ class TestConfigLoading:
         assert evening.output == "talk"
         assert evening.components == {}
 
-    def test_load_mount_path(self, tmp_path):
+    def test_pre_split_nextcloud_mount_populates_workspace_and_stays_a_mount(
+        self, tmp_path, caplog,
+    ):
         p = tmp_path / "config.toml"
-        p.write_text('nextcloud_mount_path = "/srv/mount/nextcloud/content"\n')
-        cfg = load_config(p)
-        assert cfg.nextcloud_mount_path == Path("/srv/mount/nextcloud/content")
+        p.write_text(
+            'nextcloud_mount_path = "/srv/mount/nextcloud/content"\n'
+            '[nextcloud]\n'
+            'url = "https://cloud.example.com"\n'
+        )
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            cfg = load_config(p)
+        mount = Path("/srv/mount/nextcloud/content")
+        assert cfg.nextcloud_mount_path == mount
+        assert cfg.workspace_path == mount
+        assert any(
+            "nextcloud_mount_path now means the FUSE mountpoint only"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_pre_split_standalone_mount_becomes_workspace_only(
+        self, tmp_path, caplog,
+    ):
+        p = tmp_path / "config.toml"
+        p.write_text('nextcloud_mount_path = "/srv/app/istota/workspace"\n')
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            cfg = load_config(p)
+        assert cfg.workspace_path == Path("/srv/app/istota/workspace")
+        assert cfg.nextcloud_mount_path is None
+        assert any(
+            "nextcloud_mount_path now means the FUSE mountpoint only"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_new_workspace_field_suppresses_mount_migration(self, tmp_path, caplog):
+        p = tmp_path / "config.toml"
+        p.write_text(
+            'workspace_path = "/srv/app/istota/workspace"\n'
+            'nextcloud_mount_path = "/mnt/nextcloud"\n'
+        )
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            cfg = load_config(p)
+        assert cfg.workspace_path == Path("/srv/app/istota/workspace")
+        assert cfg.nextcloud_mount_path == Path("/mnt/nextcloud")
+        assert not any(
+            "nextcloud_mount_path now means the FUSE mountpoint only"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_module_data_dir_distinguishes_workspace_from_mount(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        p = tmp_path / "config.toml"
+        p.write_text(
+            f'nextcloud_mount_path = "{workspace}"\n'
+            f'module_data_dir = "{workspace / "modules"}"\n'
+        )
+        standalone = load_config(p)
+        assert standalone.module_db_root() == (workspace / "modules").resolve()
+
+        mounted = Config(
+            workspace_path=workspace,
+            nextcloud_mount_path=workspace,
+            module_data_dir=workspace / "modules",
+        )
+        with pytest.raises(ValueError, match="under nextcloud_mount_path"):
+            mounted.module_db_root()
 
     def test_load_skills_dir(self, tmp_path):
         p = tmp_path / "config.toml"
@@ -795,9 +859,22 @@ class TestConfigMethods:
         cfg = Config()
         assert cfg.get_user("nobody") is None
 
-    def test_use_mount_true(self):
-        cfg = Config(nextcloud_mount_path=Path("/mnt/nc"))
-        assert cfg.use_mount is True
+    def test_has_workspace_true(self):
+        cfg = Config(workspace_path=Path("/mnt/nc"))
+        assert cfg.has_workspace is True
+
+    def test_workspace_path_derives_from_nextcloud_mount_path(self):
+        mount = Path("/mnt/nc")
+        cfg = Config(nextcloud_mount_path=mount)
+        assert cfg.workspace_path == mount
+
+    def test_explicit_workspace_path_wins(self):
+        workspace = Path("/srv/app/istota/workspace")
+        cfg = Config(
+            workspace_path=workspace,
+            nextcloud_mount_path=Path("/mnt/nc"),
+        )
+        assert cfg.workspace_path == workspace
 
 
 class TestResolveUserTimezone:
@@ -2803,7 +2880,7 @@ class TestConfigAuthoredBriefingBlocks:
         )
         config = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig(briefings=[briefing])},
         )
         result = get_briefings_for_user(config, "alice")

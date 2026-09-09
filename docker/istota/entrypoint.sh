@@ -577,7 +577,7 @@ PY
 #
 # {workspace} = /mnt/shared/Users/${USER_NAME}/${BOT_DIR}
 # Module loaders (feeds/_loader.py, money/_loader.py) compute this path
-# from nextcloud_mount_path + user_id + config.bot_dir_name.
+# from workspace_path + user_id + config.bot_dir_name.
 BOT_DIR_NAME=$(python3 -c '
 import re, sys, os
 name = os.environ.get("ISTOTA_BOT_NAME", "Istota").lower().strip()

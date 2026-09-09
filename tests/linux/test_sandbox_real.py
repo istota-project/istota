@@ -138,7 +138,7 @@ def layout(tmp_path, make_config):
     config = make_config(
         db_path=db_dir / "istota.db",
         module_data_dir=module_dir,
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
         security=SecurityConfig(sandbox_enabled=True, sandbox_ro_paths=[str(app)]),
     )
@@ -267,7 +267,7 @@ class TestReadOnlyPaths:
 
 class TestMountScoping:
     def test_another_users_directory_is_not_in_the_namespace(self, layout, task, user_temp):
-        mount = layout.nextcloud_mount_path
+        mount = layout.workspace_path
         users = _q(f"{mount}/Users")
         result = run_probe(
             f'cat {_q(f"{mount}/Users/alice/mine.txt")}; '

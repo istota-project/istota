@@ -1201,7 +1201,7 @@ class TestWebsiteEnvVars:
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
             site=SiteConfig(hostname="istota.example.com"),
             users={"alice": UserConfig()},
         )
@@ -1248,7 +1248,7 @@ class TestKarakeepEnvVars:
             # Real bundled skills dir so the bookmarks manifest is loaded.
             bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
             users=users,
             security=SecurityConfig(skill_proxy_enabled=False),
         )
@@ -1339,7 +1339,7 @@ class TestWebsitePromptSection:
         mount_path.mkdir(parents=True)
         config = Config(
             db_path=db_path,
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
             site=SiteConfig(hostname="istota.example.com"),
             users={"alice": UserConfig()},
         )
@@ -1368,7 +1368,7 @@ class TestAdminPromptIsolation:
             # Admin vs non-admin mount-path scoping is a Nextcloud multi-user
             # feature — the "mounted at" wording requires a Nextcloud backend.
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
             admin_users=admin_users or set(),
         )
 
@@ -1474,14 +1474,14 @@ class TestAdminPromptIsolation:
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
         prompt = build_prompt(task, [], config, is_admin=True).system
-        assert f"mounted at '{config.nextcloud_mount_path}'" in prompt
+        assert f"mounted at '{config.workspace_path}'" in prompt
 
     def test_non_admin_prompt_has_scoped_mount_path(self, tmp_path):
         config = self._make_config(tmp_path, admin_users={"bob"})
         db.init_db(config.db_path)
         with db.get_db(config.db_path) as conn:
             task = self._make_task(conn)
-        scoped = str(config.nextcloud_mount_path / "Users" / "alice")
+        scoped = str(config.workspace_path / "Users" / "alice")
         prompt = build_prompt(task, [], config, is_admin=False).system
         assert f"mounted at '{scoped}'" in prompt
 
@@ -1538,7 +1538,7 @@ class TestAdminEnvVarIsolation:
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
             admin_users=admin_users or set(),
         )
 
@@ -1593,7 +1593,7 @@ class TestAdminEnvVarIsolation:
             execute_task(task, config, [], conn=conn)
 
         env = mock_run.call_args[1]["env"]
-        assert env["NEXTCLOUD_MOUNT_PATH"] == str(config.nextcloud_mount_path)
+        assert env["NEXTCLOUD_MOUNT_PATH"] == str(config.workspace_path)
 
     @patch("istota.executor.subprocess.run")
     def test_non_admin_gets_real_root_mount_path_env(self, mock_run, tmp_path):
@@ -1614,10 +1614,10 @@ class TestAdminEnvVarIsolation:
             execute_task(task, config, [], conn=conn)
 
         env = mock_run.call_args[1]["env"]
-        assert env["NEXTCLOUD_MOUNT_PATH"] == str(config.nextcloud_mount_path)
+        assert env["NEXTCLOUD_MOUNT_PATH"] == str(config.workspace_path)
         # Specifically NOT the doubled/scoped form.
         assert env["NEXTCLOUD_MOUNT_PATH"] != str(
-            config.nextcloud_mount_path / "Users" / "alice"
+            config.workspace_path / "Users" / "alice"
         )
 
     @patch("istota.executor.subprocess.run")
@@ -1680,7 +1680,7 @@ class TestDeferredDirEnvVar:
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
             admin_users=admin_users or set(),
         )
 
@@ -1781,7 +1781,7 @@ class TestCalDAVCredentialScoping:
             # gate_has_discovered_calendars CALDAV_* specs are loaded.
             bundled_skills_dir=None,
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
             nextcloud=NextcloudConfig(
                 url="https://nc.example.com",
                 username="bot",
@@ -1882,7 +1882,7 @@ class TestUserIdSubstitution:
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount_path,
+            workspace_path=mount_path,
         )
 
     def _make_task(self, conn, user_id="alice"):
@@ -1913,15 +1913,15 @@ class TestUserIdSubstitution:
 
 
 class TestLoadPersona:
-    def _make_config(self, tmp_path, use_mount=True):
+    def _make_config(self, tmp_path, has_workspace=True):
         config_dir = tmp_path / "config"
         skills_dir = config_dir / "skills"
         skills_dir.mkdir(parents=True)
         kwargs = dict(skills_dir=skills_dir, bundled_skills_dir=tmp_path / "_empty_bundled")
-        if use_mount:
+        if has_workspace:
             mount = tmp_path / "mount"
             mount.mkdir()
-            kwargs["nextcloud_mount_path"] = mount
+            kwargs["workspace_path"] = mount
         return Config(**kwargs)
 
     def test_user_persona_overrides_global(self, tmp_path):
@@ -1929,7 +1929,7 @@ class TestLoadPersona:
         # Create global persona
         (tmp_path / "config" / "persona.md").write_text("Global persona")
         # Create user workspace persona
-        user_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
         user_dir.mkdir(parents=True)
         (user_dir / "PERSONA.md").write_text("Custom persona for Alice")
 
@@ -1939,7 +1939,7 @@ class TestLoadPersona:
     def test_empty_user_persona_falls_back_to_global(self, tmp_path):
         config = self._make_config(tmp_path)
         (tmp_path / "config" / "persona.md").write_text("Global persona")
-        user_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
         user_dir.mkdir(parents=True)
         (user_dir / "PERSONA.md").write_text("   ")
 
@@ -1954,7 +1954,7 @@ class TestLoadPersona:
         assert result == "Global persona"
 
     def test_no_mount_falls_back_to_global(self, tmp_path):
-        config = self._make_config(tmp_path, use_mount=False)
+        config = self._make_config(tmp_path, has_workspace=False)
         (tmp_path / "config" / "persona.md").write_text("Global persona")
 
         result = load_persona(config, user_id="alice")
@@ -1970,7 +1970,7 @@ class TestLoadPersona:
     def test_bot_name_substituted_in_user_persona(self, tmp_path):
         config = self._make_config(tmp_path)
         config.bot_name = "Jarvis"
-        user_dir = config.nextcloud_mount_path / "Users" / "alice" / "jarvis" / "config"
+        user_dir = config.workspace_path / "Users" / "alice" / "jarvis" / "config"
         user_dir.mkdir(parents=True)
         (user_dir / "PERSONA.md").write_text("You are {BOT_NAME}, a helpful bot.")
 
@@ -1997,7 +1997,7 @@ class TestLoadPersonaPlantedPaths(TestLoadPersona):
         self._plant_global(tmp_path)
         secret = tmp_path / "credentials.json"
         secret.write_text("TOP SECRET TOKEN")
-        user_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
         user_dir.mkdir(parents=True)
         (user_dir / "PERSONA.md").symlink_to(secret)
 
@@ -2010,7 +2010,7 @@ class TestLoadPersonaPlantedPaths(TestLoadPersona):
 
         config = self._make_config(tmp_path)
         self._plant_global(tmp_path)
-        user_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config"
+        user_dir = config.workspace_path / "Users" / "alice" / "istota" / "config"
         user_dir.mkdir(parents=True)
         os.mkfifo(user_dir / "PERSONA.md")
 
@@ -2023,7 +2023,7 @@ class TestLoadPersonaPlantedPaths(TestLoadPersona):
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         (elsewhere / "PERSONA.md").write_text("TOP SECRET TOKEN")
-        bot_dir = config.nextcloud_mount_path / "Users" / "alice" / "istota"
+        bot_dir = config.workspace_path / "Users" / "alice" / "istota"
         bot_dir.mkdir(parents=True)
         (bot_dir / "config").symlink_to(elsewhere, target_is_directory=True)
 
@@ -2032,7 +2032,7 @@ class TestLoadPersonaPlantedPaths(TestLoadPersona):
     def test_an_ancestor_symlink_inside_the_users_own_tree_is_allowed(self, tmp_path):
         config = self._make_config(tmp_path)
         self._plant_global(tmp_path)
-        base = config.nextcloud_mount_path / "Users" / "alice"
+        base = config.workspace_path / "Users" / "alice"
         real = base / "istota" / "real_config"
         real.mkdir(parents=True)
         (real / "PERSONA.md").write_text("Custom persona for Alice")
@@ -3283,7 +3283,7 @@ class TestDatedMemoriesAutoLoad:
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             sleep_cycle=SleepCycleConfig(
                 enabled=sleep_enabled,
                 auto_load_dated_days=auto_load_days,
@@ -3302,7 +3302,7 @@ class TestDatedMemoriesAutoLoad:
 
         # Create a dated memory file
         from datetime import datetime
-        memories_dir = config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir = config.workspace_path / "Users" / "alice" / "memories"
         memories_dir.mkdir(parents=True)
         today = datetime.now().strftime("%Y-%m-%d")
         (memories_dir / f"{today}.md").write_text("- User prefers dark mode")
@@ -3329,7 +3329,7 @@ class TestDatedMemoriesAutoLoad:
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
         from datetime import datetime
-        memories_dir = config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir = config.workspace_path / "Users" / "alice" / "memories"
         memories_dir.mkdir(parents=True)
         today = datetime.now().strftime("%Y-%m-%d")
         (memories_dir / f"{today}.md").write_text("- Should not appear")
@@ -3349,7 +3349,7 @@ class TestDatedMemoriesAutoLoad:
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
 
         from datetime import datetime
-        memories_dir = config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories_dir = config.workspace_path / "Users" / "alice" / "memories"
         memories_dir.mkdir(parents=True)
         today = datetime.now().strftime("%Y-%m-%d")
         (memories_dir / f"{today}.md").write_text("- Should not appear")
@@ -4384,7 +4384,7 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
     Commit f3ab4b6 ("Storage-agnostic prompt/skill vocabulary") reassigned the
     `workspace_dir` parameter to the user's on-mount workspace root just to fill
     the {workspace} placeholder. That value flowed into build_bwrap_cmd, where
-    _validate_workspace_dir rejects anything under the Nextcloud mount root — so
+    _validate_workspace_dir rejects anything under the workspace root — so
     every sandboxed LLM task on the server failed with
     "workspace ... overlaps a protected path". The fix uses a separate local for
     the display string; the parameter stays None for a normal task.
@@ -4409,7 +4409,7 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             security=SecurityConfig(sandbox_enabled=True, skill_proxy_enabled=False),
         )
 
@@ -4450,7 +4450,7 @@ class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
         prompt_text = mock_run.call_args.kwargs["input"]
         assert "{workspace}" not in composed
         assert "{workspace}" not in prompt_text
-        assert str((config.nextcloud_mount_path / "Users" / "alice")) in composed
+        assert str((config.workspace_path / "Users" / "alice")) in composed
 
 
 class TestImagePreparationWritesIntoTheControlDirectory:

@@ -287,12 +287,12 @@ class TestExportCsv:
         try:
             fake_task = MagicMock(id=task_id, user_id="alice")
 
-            # A real Config. A MagicMock here answers `nextcloud_mount_path`
+            # A real Config. A MagicMock here answers `workspace_path`
             # with a mock whose `__fspath__` is "", which resolves to the cwd
             # and puts every real path out of roots — reported as a refusal
             # that looks exactly like the guard working.
             count = scheduler_deferred._process_deferred_health_ops(
-                Config(nextcloud_mount_path=tmp_path), fake_task, user_temp,
+                Config(workspace_path=tmp_path), fake_task, user_temp,
             )
         finally:
             health_pkg.resolve_for_user = original_resolve

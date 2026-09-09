@@ -374,7 +374,7 @@ def resolve_user_skill_overlays_dir(config: "Config", user_id: str) -> Path | No
     The **resolved** path is what comes back, so a caller cannot re-walk by the
     unresolved name after the check.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return None
     from .skills._loader import contained_overlay_dir  # noqa: PLC0415 - import cycle
 
@@ -458,7 +458,7 @@ def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:
     None without a mount — an rclone-remote deployment has no such directory,
     the condition ``load_persona`` already applies to a per-user PERSONA.md.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return None
     return _contained_under_user_root(
         config,
@@ -515,7 +515,7 @@ def read_user_config_file(
     """
     config_dir = resolve_user_config_dir(config, user_id)
     if config_dir is None:
-        if config.use_mount:
+        if config.has_workspace:
             logger.warning(
                 "user_config_dir_outside_user_tree user=%s file=%s", user_id, filename,
             )
@@ -1145,7 +1145,7 @@ def upload_file_to_inbox(
 
 def _get_mount_path(config: "Config", path: str) -> Path:
     """Get the local mount path for a Nextcloud path."""
-    return config.nextcloud_mount_path / path.lstrip("/")
+    return config.workspace_path / path.lstrip("/")
 
 
 def _migrate_old_layout(user_base: Path) -> None:
@@ -1257,7 +1257,7 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
     Returns True if all directories were created or already exist.
     """
     bot_dir = config.bot_dir_name
-    if config.use_mount:
+    if config.has_workspace:
         base = _get_mount_path(config, get_user_base_path(user_id))
 
         # Containment runs **first**, before the migrations (ISSUE-339).
@@ -1459,7 +1459,7 @@ def user_directories_exist_v2(config: "Config", user_id: str) -> dict[str, bool]
 
     Returns dict mapping directory name to existence status.
     """
-    if config.use_mount:
+    if config.has_workspace:
         base = _get_mount_path(config, get_user_base_path(user_id))
         subdirs = ["inbox", "memories", config.bot_dir_name, "shared"]
         return {subdir: (base / subdir).exists() for subdir in subdirs}
@@ -1477,7 +1477,7 @@ def read_user_memory_v2(config: "Config", user_id: str) -> str | None:
     read-write into that user's sandbox, so the read is hardened rather than a
     plain ``read_text`` — see ``read_user_config_file`` (ISSUE-339).
     """
-    if config.use_mount:
+    if config.has_workspace:
         content = read_user_config_file(config, user_id, "USER.md")
         if content is None or not content.strip():
             return None
@@ -1497,7 +1497,7 @@ def init_user_memory_v2(config: "Config", user_id: str) -> bool:
     reaches here precisely when the file reads as absent, and a *dangling*
     symlink is what that looks like (ISSUE-339).
     """
-    if config.use_mount:
+    if config.has_workspace:
         config_dir = resolve_user_config_dir(config, user_id)
         if config_dir is None:
             logger.warning("init_user_memory_refused user=%s reason=config_dir", user_id)
@@ -1559,7 +1559,7 @@ def upload_file_to_inbox_v2(
     inbox_path = get_user_inbox_path(user_id)
     remote_path = f"{inbox_path}/{filename}"
 
-    if config.use_mount:
+    if config.has_workspace:
         dst = _get_mount_path(config, remote_path)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(local_path), str(dst))
@@ -1586,7 +1586,7 @@ def read_dated_memories(
 
     Returns concatenated content, or None if no dated files found.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return None  # Only supported with mount
 
     context_dir = _get_mount_path(config, get_user_memories_path(user_id))
@@ -1717,7 +1717,7 @@ def ensure_channel_directories(config: "Config", conversation_token: str) -> boo
 
     Returns True if directory was created or already exists.
     """
-    if config.use_mount:
+    if config.has_workspace:
         base = _get_mount_path(config, get_channel_base_path(conversation_token))
         memories_dir = base / "memories"
         memories_dir.mkdir(parents=True, exist_ok=True)
@@ -1760,7 +1760,7 @@ def read_channel_memory(config: "Config", conversation_token: str) -> str | None
     here would make the same bytes hash two ways and every save read as a
     conflict.
     """
-    if config.use_mount:
+    if config.has_workspace:
         channel_dir = _contained_channel_dir(config, conversation_token)
         if channel_dir is None:
             logger.warning(
@@ -1816,7 +1816,7 @@ def write_channel_memory(
     through there, and the caller's lock does not help because a remote is
     shared across hosts.
     """
-    if config.use_mount:
+    if config.has_workspace:
         memory_path = _get_mount_path(config, get_channel_memory_path(conversation_token))
         try:
             memory_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1843,7 +1843,7 @@ def init_channel_memory(config: "Config", conversation_token: str) -> bool:
 
     Returns True on success.
     """
-    if config.use_mount:
+    if config.has_workspace:
         memory_path = _get_mount_path(config, get_channel_memory_path(conversation_token))
         memory_path.parent.mkdir(parents=True, exist_ok=True)
         memory_path.write_text(CHANNEL_MEMORY_TEMPLATE)

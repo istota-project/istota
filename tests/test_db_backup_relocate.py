@@ -19,13 +19,13 @@ def _config(tmp_path: Path, *, nextcloud_url: str = "") -> Config:
         db_path=tmp_path / "istota.db",
         nextcloud=NextcloudConfig(url=nextcloud_url),
         scheduler=SchedulerConfig(db_backup_dir=""),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
     )
 
 
 def _legacy_snapshot(config: Config, day: str, payload: bytes = b"db") -> Path:
     path = (
-        Path(config.nextcloud_mount_path)
+        Path(config.workspace_path)
         / "istota-db-backups"
         / day
         / "framework"
@@ -38,7 +38,7 @@ def _legacy_snapshot(config: Config, day: str, payload: bytes = b"db") -> Path:
 
 def _destination(config: Config) -> Path:
     return (
-        Path(config.nextcloud_mount_path)
+        Path(config.workspace_path)
         / "Backups"
         / "db"
         / "snapshots"
@@ -60,7 +60,7 @@ class TestRelocateSnapshots:
         assert (_destination(config) / "2026-09-01" / "framework" / "istota.db").read_bytes() == b"one"
         assert (_destination(config) / "2026-09-02" / "framework" / "istota.db").read_bytes() == b"two"
         assert (_destination(config) / db_backup_relocate.MARKER_NAME).read_text().strip() == db_backup_relocate.LAYOUT_VERSION
-        assert not (Path(config.nextcloud_mount_path) / "istota-db-backups").exists()
+        assert not (Path(config.workspace_path) / "istota-db-backups").exists()
 
     def test_refuses_when_destination_already_has_dated_directories(self, tmp_path):
         config = _config(tmp_path)
@@ -137,7 +137,7 @@ class TestRelocateSnapshots:
         config = _config(tmp_path)
         old = _legacy_snapshot(config, "2026-09-01")
         config.scheduler.db_backup_dir = str(
-            Path(config.nextcloud_mount_path) / "istota-db-backups"
+            Path(config.workspace_path) / "istota-db-backups"
         )
 
         report = db_backup_relocate.relocate_snapshots(
@@ -174,7 +174,7 @@ class TestRelocateSnapshots:
     def test_non_dated_entries_are_reported_and_left_in_place(self, tmp_path):
         config = _config(tmp_path)
         _legacy_snapshot(config, "2026-09-01")
-        legacy = Path(config.nextcloud_mount_path) / "istota-db-backups"
+        legacy = Path(config.workspace_path) / "istota-db-backups"
         note = legacy / "README.txt"
         note.write_text("operator note")
 
@@ -217,11 +217,11 @@ class TestCommand:
         config_path = tmp_path / "config.toml"
         config_path.write_text(
             f'db_path = "{tmp_path / "istota.db"}"\n'
-            f'nextcloud_mount_path = "{mount}"\n'
+            f'workspace_path = "{mount}"\n'
         )
         (tmp_path / "fixture").mkdir()
         config = _config(tmp_path / "fixture")
-        config.nextcloud_mount_path = mount
+        config.workspace_path = mount
         _legacy_snapshot(config, "2026-09-01")
         monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(config_path))
         monkeypatch.setattr(

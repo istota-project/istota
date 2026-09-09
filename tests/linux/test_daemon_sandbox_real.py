@@ -77,7 +77,7 @@ def layout(tmp_path, make_config):
     return make_config(
         db_path=db_dir / "istota.db",
         module_data_dir=module_dir,
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
         security=SecurityConfig(sandbox_enabled=True, sandbox_ro_paths=[str(app)]),
     )
@@ -87,7 +87,7 @@ def layout(tmp_path, make_config):
 def panel_upload(layout):
     """A bloodwork panel's upload, where `resolve_for_user` really puts one."""
     doc = (
-        Path(layout.nextcloud_mount_path)
+        Path(layout.workspace_path)
         / "Users" / "alice" / "Istota" / "health" / "uploads" / "7" / "original.txt"
     )
     doc.parent.mkdir(parents=True)
@@ -170,7 +170,7 @@ class TestTheOcrNamespace:
         sandbox = build_daemon_sandbox(
             layout, "alice", extra_ro_binds=[panel_upload]
         )
-        other = Path(layout.nextcloud_mount_path) / "Users" / "bob" / "secret.txt"
+        other = Path(layout.workspace_path) / "Users" / "bob" / "secret.txt"
         result = run_in_wrap(
             f'cat {_q(other)} 2>/dev/null && echo OTHER_READ_OK || echo OTHER_READ_FAIL',
             sandbox,

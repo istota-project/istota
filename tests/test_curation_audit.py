@@ -34,7 +34,7 @@ def config(tmp_path):
     return Config(
         db_path=db_path,
         nextcloud=NextcloudConfig(),
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         bot_name="Istota",
     )
 
@@ -301,7 +301,7 @@ class TestSidecarMigration:
         assert path.exists()
 
     def test_skipped_without_a_mount(self, config):
-        config.nextcloud_mount_path = None
+        config.workspace_path = None
         assert migrate_user_md_sidecars(config, "alice") == {}
 
 

@@ -328,7 +328,7 @@ class TestTheOcrRequestRunsInANamespace:
         bind, and the flag assertion above passed anyway.
         """
         config = make_config()
-        user_dir = config.nextcloud_mount_path / "Users" / "alice"
+        user_dir = config.workspace_path / "Users" / "alice"
         document = user_dir / "health" / "uploads" / "7" / "original.png"
         document.parent.mkdir(parents=True)
         document.write_bytes(b"\x89PNG\r\n\x1a\n")

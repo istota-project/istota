@@ -56,7 +56,7 @@ def _config(tmp_path, **overrides) -> Config:
         )
     ops = tmp_path / "ops_skills"
     ops.mkdir(exist_ok=True)
-    overrides.setdefault("nextcloud_mount_path", tmp_path / "mount")
+    overrides.setdefault("workspace_path", tmp_path / "mount")
     overrides.setdefault("users", {"alice": UserConfig()})
     return Config(
         db_path=tmp_path / "istota.db",
@@ -68,7 +68,7 @@ def _config(tmp_path, **overrides) -> Config:
 
 
 def _user_root(config: Config, user_id: str = "alice") -> Path:
-    return Path(config.nextcloud_mount_path) / "Users" / user_id
+    return Path(config.workspace_path) / "Users" / user_id
 
 
 def _overlays(config: Config, user_id: str = "alice") -> Path:
@@ -204,7 +204,7 @@ class TestTheSharedHelper:
     def test_no_mount_gets_neither(self, tmp_path):
         from istota.storage import open_user_skill_overlays
 
-        config = _config(tmp_path, nextcloud_mount_path=None)
+        config = _config(tmp_path, workspace_path=None)
         assert open_user_skill_overlays(config, "alice") == (None, None)
 
     def test_a_missing_directory_gets_neither(self, tmp_path):
@@ -652,7 +652,7 @@ class TestTheExecutorPromptPath:
     guard is `read_user_memory_v2` falling through to `ensure_user_directories_v2`
     and an OCS share POST, which is the Nextcloud backend's branch. `nextcloud.url`
     is empty here, so `storage_backend` is `local` and that branch is never
-    taken, while `use_mount` — and so the overlay directory — stays. The socket
+    taken, while `has_workspace` — and so the overlay directory — stays. The socket
     guard below asserts it rather than assuming it, because the whole point of
     that golden-file lesson is that a path reaching the network silently is
     exactly what a green test looks like.

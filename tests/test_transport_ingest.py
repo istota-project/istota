@@ -124,14 +124,14 @@ class TestWorkspaceAttachmentPaths:
     def _config(self, tmp_path, db_path):
         cfg = Config()
         cfg.db_path = db_path
-        cfg.nextcloud_mount_path = tmp_path / "mount"
+        cfg.workspace_path = tmp_path / "mount"
         return cfg
 
     def test_maps_a_workspace_file_to_its_workspace_path(self, tmp_path, db_path):
         from istota.transport.ingest import workspace_attachment_paths
 
         cfg = self._config(tmp_path, db_path)
-        host = str(cfg.nextcloud_mount_path / "Users" / "alice" / "inbox" / "web-chat" / "n-1.txt")
+        host = str(cfg.workspace_path / "Users" / "alice" / "inbox" / "web-chat" / "n-1.txt")
         assert workspace_attachment_paths(cfg, "alice", [host]) == [
             "/Users/alice/inbox/web-chat/n-1.txt"
         ]
@@ -143,8 +143,8 @@ class TestWorkspaceAttachmentPaths:
         from istota.transport.ingest import workspace_attachment_paths
 
         cfg = self._config(tmp_path, db_path)
-        outside = str(cfg.nextcloud_mount_path / "Talk" / "shared.png")
-        own = str(cfg.nextcloud_mount_path / "Users" / "alice" / "b.png")
+        outside = str(cfg.workspace_path / "Talk" / "shared.png")
+        own = str(cfg.workspace_path / "Users" / "alice" / "b.png")
         assert workspace_attachment_paths(cfg, "alice", [outside, own]) == [
             None, "/Users/alice/b.png",
         ]
@@ -153,8 +153,8 @@ class TestWorkspaceAttachmentPaths:
         from istota.transport.ingest import workspace_attachment_paths
 
         cfg = self._config(tmp_path, db_path)
-        host = str(cfg.nextcloud_mount_path / "Users" / "bob" / "inbox" / "x.txt")
-        own = str(cfg.nextcloud_mount_path / "Users" / "alice" / "b.png")
+        host = str(cfg.workspace_path / "Users" / "bob" / "inbox" / "x.txt")
+        own = str(cfg.workspace_path / "Users" / "alice" / "b.png")
         assert workspace_attachment_paths(cfg, "alice", [host, own]) == [
             None, "/Users/alice/b.png",
         ]
@@ -165,8 +165,8 @@ class TestWorkspaceAttachmentPaths:
         from istota.transport.ingest import workspace_attachment_paths
 
         cfg = self._config(tmp_path, db_path)
-        root = cfg.nextcloud_mount_path / "Users" / "alice"
-        paths = [str(cfg.nextcloud_mount_path / "Talk" / "a.png"), str(root / "b.png")]
+        root = cfg.workspace_path / "Users" / "alice"
+        paths = [str(cfg.workspace_path / "Talk" / "a.png"), str(root / "b.png")]
         assert workspace_attachment_paths(cfg, "alice", paths) == [
             None, "/Users/alice/b.png",
         ]
@@ -175,7 +175,7 @@ class TestWorkspaceAttachmentPaths:
         from istota.transport.ingest import workspace_attachment_paths
 
         cfg = self._config(tmp_path, db_path)
-        outside = str(cfg.nextcloud_mount_path / "Talk" / "a.png")
+        outside = str(cfg.workspace_path / "Talk" / "a.png")
         assert workspace_attachment_paths(cfg, "alice", [outside]) is None
 
     def test_no_attachments_returns_none(self, tmp_path, db_path):
@@ -190,5 +190,5 @@ class TestWorkspaceAttachmentPaths:
 
         cfg = Config()
         cfg.db_path = db_path
-        cfg.nextcloud_mount_path = None
+        cfg.workspace_path = None
         assert workspace_attachment_paths(cfg, "alice", ["/tmp/x.png"]) is None

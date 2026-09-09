@@ -41,7 +41,7 @@ def overlay_env(tmp_path, monkeypatch):
     config = Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         bundled_skills_dir=bundled,
         skills_dir=tmp_path / "ops_skills",
         users={"alice": UserConfig()},
@@ -310,19 +310,19 @@ class TestUnreadableFiles:
 
 
 class TestNoMountDeployment:
-    """`nextcloud_mount_path = None` is the rclone-remote shape. There are no
+    """`workspace_path = None` is the rclone-remote shape. There are no
     overlays for anyone, which is a different answer from "this skill has none"
     and must not be rendered as one."""
 
     def test_the_inventory_reports_no_directory(self, overlay_env, capsys):
-        overlay_env.config.nextcloud_mount_path = None
+        overlay_env.config.workspace_path = None
         _overlays()
         payload = _rows(capsys)
         assert payload["dir"] is None
         assert payload["skills"] == []
 
     def test_reading_one_is_an_error_not_an_empty_body(self, overlay_env, capsys):
-        overlay_env.config.nextcloud_mount_path = None
+        overlay_env.config.workspace_path = None
         with pytest.raises(SystemExit):
             _overlay()
         assert json.loads(capsys.readouterr().out)["error"] == "no_overlay_storage"

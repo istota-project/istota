@@ -43,7 +43,7 @@ class _MockDeveloper:
 
 @dataclass
 class _MockConfig:
-    nextcloud_mount_path: Path | None = None
+    workspace_path: Path | None = None
     bot_dir_name: str = "istota"
     browser: _MockBrowser = field(default_factory=_MockBrowser)
     developer: _MockDeveloper = field(default_factory=_MockDeveloper)
@@ -53,7 +53,7 @@ def _make_config(tmp_path: Path, mount: bool = True) -> _MockConfig:
     mount_path = tmp_path / "mount" if mount else None
     if mount_path:
         mount_path.mkdir(parents=True, exist_ok=True)
-    return _MockConfig(nextcloud_mount_path=mount_path)
+    return _MockConfig(workspace_path=mount_path)
 
 
 class TestBuildSkillEnvConfig:

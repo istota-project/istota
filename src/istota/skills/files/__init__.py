@@ -25,8 +25,8 @@ def list_files(config: "Config", path: str) -> list[dict]:
     List files at a path (mount-aware).
     Returns list of dicts with 'name', 'size', 'mod_time', 'is_dir'.
     """
-    if config.use_mount:
-        mount_path = config.nextcloud_mount_path / path.lstrip("/")
+    if config.has_workspace:
+        mount_path = config.workspace_path / path.lstrip("/")
         if not mount_path.exists():
             raise RuntimeError(f"Path not found: {mount_path}")
         return [
@@ -44,8 +44,8 @@ def list_files(config: "Config", path: str) -> list[dict]:
 
 def read_text(config: "Config", path: str) -> str:
     """Read a text file (mount-aware)."""
-    if config.use_mount:
-        mount_path = config.nextcloud_mount_path / path.lstrip("/")
+    if config.has_workspace:
+        mount_path = config.workspace_path / path.lstrip("/")
         if not mount_path.exists():
             raise RuntimeError(f"File not found: {mount_path}")
         return mount_path.read_text()
@@ -55,8 +55,8 @@ def read_text(config: "Config", path: str) -> str:
 
 def write_text(config: "Config", path: str, content: str) -> None:
     """Write text content to a file (mount-aware)."""
-    if config.use_mount:
-        mount_path = config.nextcloud_mount_path / path.lstrip("/")
+    if config.has_workspace:
+        mount_path = config.workspace_path / path.lstrip("/")
         mount_path.parent.mkdir(parents=True, exist_ok=True)
         mount_path.write_text(content)
     else:
@@ -65,8 +65,8 @@ def write_text(config: "Config", path: str, content: str) -> None:
 
 def mkdir(config: "Config", path: str) -> bool:
     """Create a directory (mount-aware). Returns True on success."""
-    if config.use_mount:
-        mount_path = config.nextcloud_mount_path / path.lstrip("/")
+    if config.has_workspace:
+        mount_path = config.workspace_path / path.lstrip("/")
         mount_path.mkdir(parents=True, exist_ok=True)
         return True
     else:
@@ -75,8 +75,8 @@ def mkdir(config: "Config", path: str) -> bool:
 
 def path_exists(config: "Config", path: str) -> bool:
     """Check if a path exists (mount-aware)."""
-    if config.use_mount:
-        mount_path = config.nextcloud_mount_path / path.lstrip("/")
+    if config.has_workspace:
+        mount_path = config.workspace_path / path.lstrip("/")
         return mount_path.exists()
     else:
         return rclone_path_exists(config.rclone_remote, path)
@@ -84,9 +84,9 @@ def path_exists(config: "Config", path: str) -> bool:
 
 def move_file(config: "Config", src_path: str, dst_path: str) -> bool:
     """Move a file or directory (mount-aware). Returns True on success."""
-    if config.use_mount:
-        src = config.nextcloud_mount_path / src_path.lstrip("/")
-        dst = config.nextcloud_mount_path / dst_path.lstrip("/")
+    if config.has_workspace:
+        src = config.workspace_path / src_path.lstrip("/")
+        dst = config.workspace_path / dst_path.lstrip("/")
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
         return True
@@ -96,8 +96,8 @@ def move_file(config: "Config", src_path: str, dst_path: str) -> bool:
 
 def copy_to_local(config: "Config", remote_path: str, local_path: Path) -> None:
     """Copy a file from Nextcloud to local filesystem (mount-aware)."""
-    if config.use_mount:
-        src = config.nextcloud_mount_path / remote_path.lstrip("/")
+    if config.has_workspace:
+        src = config.workspace_path / remote_path.lstrip("/")
         if not src.exists():
             raise RuntimeError(f"Source file not found: {src}")
         local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,8 +108,8 @@ def copy_to_local(config: "Config", remote_path: str, local_path: Path) -> None:
 
 def copy_to_remote(config: "Config", local_path: Path, remote_path: str) -> None:
     """Copy a file from local filesystem to Nextcloud (mount-aware)."""
-    if config.use_mount:
-        dst = config.nextcloud_mount_path / remote_path.lstrip("/")
+    if config.has_workspace:
+        dst = config.workspace_path / remote_path.lstrip("/")
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(local_path), str(dst))
     else:
@@ -123,8 +123,8 @@ def get_local_path(config: "Config", remote_path: str) -> Path | None:
     If using mount, returns the mount path directly.
     If using rclone, returns None (caller should download).
     """
-    if config.use_mount:
-        return config.nextcloud_mount_path / remote_path.lstrip("/")
+    if config.has_workspace:
+        return config.workspace_path / remote_path.lstrip("/")
     return None
 
 

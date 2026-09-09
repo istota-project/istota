@@ -140,7 +140,7 @@ PrivateTmp=true
 ReadWritePaths={{ istota_home }}
 ReadWritePaths=/var/log/{{ istota_namespace }}
 {% if istota_use_nextcloud_mount %}
-ReadWritePaths={{ istota_nextcloud_mount_path }}
+ReadWritePaths={{ istota_workspace_path }}
 {% endif %}
 
 [Install]

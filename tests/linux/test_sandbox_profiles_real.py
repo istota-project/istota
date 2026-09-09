@@ -95,7 +95,7 @@ def layout(tmp_path, make_config):
     return make_config(
         db_path=db_dir / "istota.db",
         module_data_dir=tmp_path / "app" / "moduledbs",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
         security=SecurityConfig(sandbox_enabled=True),
     )
@@ -215,7 +215,7 @@ class TestTheNativeProfileHasNoneOfIt:
         produces the same empty stdout. So: something the NATIVE namespace does
         contain has to come back on the same run.
         """
-        alice = Path(layout.nextcloud_mount_path) / "Users" / "alice"
+        alice = Path(layout.workspace_path) / "Users" / "alice"
         (alice / "mine.txt").write_text("alice-can-read-this\n")
         result = run_probe(
             f"{_sentinel_probe(claude_home)}; cat {_q(alice / 'mine.txt')}",
@@ -284,7 +284,7 @@ class TestTheGenericPlanIsIdenticalUnderBothProfiles:
     def test_the_users_own_directory_is_writable_under_both(
         self, layout, task, user_temp, claude_home,
     ):
-        alice = Path(layout.nextcloud_mount_path) / "Users" / "alice"
+        alice = Path(layout.workspace_path) / "Users" / "alice"
         for profile in SandboxProfile:
             result = run_probe(
                 f'touch {_q(alice / f"probe-{profile.value}")} 2>/dev/null '
@@ -296,7 +296,7 @@ class TestTheGenericPlanIsIdenticalUnderBothProfiles:
     def test_another_users_directory_is_absent_under_both(
         self, layout, task, user_temp, claude_home,
     ):
-        bob = Path(layout.nextcloud_mount_path) / "Users" / "bob"
+        bob = Path(layout.workspace_path) / "Users" / "bob"
         bob.mkdir(parents=True)
         (bob / "secret.txt").write_text("bobs-private-bytes")
         for profile in SandboxProfile:

@@ -465,7 +465,7 @@ def _make_config(tmp_path):
     db.init_db(db_path)
     return Config(
         db_path=db_path,
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         site=SiteConfig(hostname="example.com"),
         users={"alice": UserConfig(display_name="Alice"),
                "bob": UserConfig(display_name="Bob")},
@@ -2130,8 +2130,8 @@ class TestChatFileDownload:
         """An rclone deployment has no local workspace; the refusal has to name
         the alternative instead of surfacing as a crash."""
         import istota.web_app as mod
-        saved = mod._config.nextcloud_mount_path
-        mod._config.nextcloud_mount_path = None
+        saved = mod._config.workspace_path
+        mod._config.workspace_path = None
         try:
             cookies = await _login(chat_client, "alice")
             resp = await chat_client.get(
@@ -2141,7 +2141,7 @@ class TestChatFileDownload:
             assert resp.status_code == 503
             assert "share link" in resp.json()["error"]
         finally:
-            mod._config.nextcloud_mount_path = saved
+            mod._config.workspace_path = saved
 
     async def test_filename_survives_spaces(self, chat_client, tmp_path):
         nc_path = _workspace_file(tmp_path, "alice", "Q3 report.csv", "x\n")

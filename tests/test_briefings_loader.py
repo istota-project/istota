@@ -34,7 +34,7 @@ def _config(tmp_path: Path, *, users, disabled=None) -> Config:
     disabled = disabled or {}
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={
             uid: UserConfig(disabled_modules=disabled.get(uid, []))
             for uid in users

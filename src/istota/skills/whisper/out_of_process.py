@@ -57,9 +57,14 @@ _REAP_TIMEOUT_SECONDS = 10.0
 _ERROR_DETAIL_MAX_CHARS = 500
 
 
-#: The three the child's allowlist is derived from. Cleared before the
+#: The four names the child's allowlist is derived from. Cleared before the
 #: identity is applied, so an unsupplied one is absent rather than inherited.
-_IDENTITY_VARS = ("ISTOTA_USER_ID", "NEXTCLOUD_MOUNT_PATH", "ISTOTA_DEFERRED_DIR")
+_IDENTITY_VARS = (
+    "ISTOTA_USER_ID",
+    "ISTOTA_WORKSPACE_PATH",
+    "NEXTCLOUD_MOUNT_PATH",
+    "ISTOTA_DEFERRED_DIR",
+)
 
 
 def _identity_env(
@@ -69,7 +74,7 @@ def _identity_env(
 ) -> dict[str, str]:
     """The task identity the child derives its allowlist from.
 
-    Three of the four variables `build_task_runtime` exports;
+    Four of the five workspace identity variables `build_task_runtime` exports;
     `ISTOTA_CONVERSATION_TOKEN` is deliberately not among them, so the child
     gets no `{mount}/Channels/{token}` root. Nothing writes an audio
     attachment there — Talk shares land in `{mount}/Talk`, web-chat uploads
@@ -96,7 +101,7 @@ def _identity_env(
     empty string reads to `env_host_roots` exactly as an unset variable does,
     and inventing one would only obscure which caller failed to say.
 
-    **The caller has to clear the three names first**, which `_child_env`
+    **The caller has to clear the four names first**, which `_child_env`
     does, and that is not tidiness. The child inherits `os.environ`, so a
     name omitted here would otherwise fall through to whatever the daemon's
     own environment holds — and the daemon has no task, so any value it
@@ -107,6 +112,7 @@ def _identity_env(
     if user_id:
         out["ISTOTA_USER_ID"] = str(user_id)
     if mount_path:
+        out["ISTOTA_WORKSPACE_PATH"] = str(mount_path)
         out["NEXTCLOUD_MOUNT_PATH"] = str(mount_path)
     if deferred_dir:
         out["ISTOTA_DEFERRED_DIR"] = str(deferred_dir)

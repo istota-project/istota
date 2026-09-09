@@ -92,8 +92,8 @@ def _scripts_dir(config, user_id: str) -> str:
     from istota.storage import get_user_scripts_path
 
     scripts_nc_path = get_user_scripts_path(user_id, config.bot_dir_name)
-    if config.use_mount and config.nextcloud_mount_path is not None:
-        return str(config.nextcloud_mount_path / scripts_nc_path.lstrip("/"))
+    if config.has_workspace and config.workspace_path is not None:
+        return str(config.workspace_path / scripts_nc_path.lstrip("/"))
     return f"{config.rclone_remote}:{scripts_nc_path}"
 
 
@@ -101,8 +101,8 @@ def _workspace_dir(config, user_id: str) -> str:
     from istota.storage import get_user_base_path
 
     base = get_user_base_path(user_id)
-    if config.use_mount and config.nextcloud_mount_path is not None:
-        return str(config.nextcloud_mount_path / base.lstrip("/"))
+    if config.has_workspace and config.workspace_path is not None:
+        return str(config.workspace_path / base.lstrip("/"))
     return f"{config.rclone_remote}:{base}"
 
 
@@ -245,7 +245,7 @@ def _mount_relative(ctx, path):
     """
     if path is None:
         return None
-    mount = getattr(ctx["config"], "nextcloud_mount_path", None)
+    mount = getattr(ctx["config"], "workspace_path", None)
     if mount is None:
         return str(path)
     # Both sides resolved: `path` arrives resolved from `contained_overlay_dir`,
@@ -291,7 +291,7 @@ def _resolve_overlay_dir(ctx):
     go through the descriptor.
     """
     config = ctx["config"]
-    if not config.use_mount:
+    if not config.has_workspace:
         return None, None
     d, fd = _overlay_dir(config, ctx["user_id"])
     if fd is not None:

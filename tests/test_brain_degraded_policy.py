@@ -142,7 +142,7 @@ def _sleep_config(tmp_path, *, cooldown=900, cron="* * * * *"):
     cfg = Config(
         db_path=tmp_path / "test.db",
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         sleep_cycle=SleepCycleConfig(enabled=True, cron=cron, lookback_hours=24),
         channel_sleep_cycle=ChannelSleepCycleConfig(
             enabled=True, cron=cron, lookback_hours=24
@@ -305,7 +305,7 @@ def _shared_block_config(tmp_path, *, cooldown=900):
 
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"bob": UserConfig(timezone="UTC")},
     )
     cfg.brain = BrainConfig(kind="claude_code", fallback_cooldown_seconds=cooldown)

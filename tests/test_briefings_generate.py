@@ -13,7 +13,7 @@ from istota.config import Config, UserConfig
 def _config(tmp_path) -> Config:
     return Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(timezone="UTC")},
     )
 
@@ -21,7 +21,7 @@ def _config(tmp_path) -> Config:
 def _write_workspace_file(cfg: Config, filename: str, content: str) -> str:
     from istota.storage import get_user_bot_path
     rel = f"{get_user_bot_path('alice', cfg.bot_dir_name)}/{filename}".lstrip("/")
-    p = cfg.nextcloud_mount_path / rel
+    p = cfg.workspace_path / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(content)
     return rel

@@ -24,7 +24,7 @@ class TestServeWebhookMount:
         return Config(
             db_path=tmp_path / "istota.db",
             location=LocationReceiverConfig(enabled=enabled),
-            nextcloud_mount_path=tmp_path / "workspace",
+            workspace_path=tmp_path / "workspace",
         )
 
     def test_receiver_answers_at_the_documented_path(self, tmp_path, monkeypatch):

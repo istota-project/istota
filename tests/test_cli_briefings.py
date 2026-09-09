@@ -15,7 +15,7 @@ from istota.config import Config, UserConfig
 def config(tmp_path):
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(timezone="UTC")},
     )
     db.init_db(cfg.db_path)
@@ -149,7 +149,7 @@ class TestBlocksSources:
     def test_disabled_module_errors(self, tmp_path, capsys):
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig(disabled_modules=["briefings"])},
         )
         db.init_db(cfg.db_path)

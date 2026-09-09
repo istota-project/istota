@@ -35,7 +35,7 @@ def _config(tmp_path: Path, *, users: dict[str, UserConfig], mount=True) -> Conf
     root = tmp_path / "mount"
     root.mkdir(exist_ok=True)
     return Config(
-        nextcloud_mount_path=root if mount else None,
+        workspace_path=root if mount else None,
         users=users,
         bot_name="Istota",
         db_path=tmp_path / "no.db",  # not exercised — keeps best-effort paths quiet
@@ -146,7 +146,7 @@ class TestTheReviewFindings:
         """
         class Bare:
             bot_dir_name = "Istota"
-            nextcloud_mount_path = None
+            workspace_path = None
 
             def is_module_enabled(self, user_id, module, conn=None):
                 return True

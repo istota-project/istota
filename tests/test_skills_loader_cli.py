@@ -42,7 +42,7 @@ def ctx(tmp_path, monkeypatch):
     config = Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
-        nextcloud_mount_path=tmp_path,
+        workspace_path=tmp_path,
         bundled_skills_dir=bundled,
         skills_dir=tmp_path / "ops_skills",
         users={"alice": UserConfig()},
@@ -215,7 +215,7 @@ class TestShowCompanions:
         config = Config(
             db_path=tmp_path / "istota.db",
             temp_dir=tmp_path / "tmp",
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             bundled_skills_dir=bundled,
             skills_dir=tmp_path / "ops_skills",
             users={"alice": UserConfig()},
@@ -290,7 +290,7 @@ class TestShowOverlays:
         config = Config(
             db_path=tmp_path / "istota.db",
             temp_dir=tmp_path / "tmp",
-            nextcloud_mount_path=mount_root if mount else None,
+            workspace_path=mount_root if mount else None,
             bundled_skills_dir=bundled,
             skills_dir=tmp_path / "ops_skills",
             users={"alice": UserConfig()},
@@ -383,7 +383,7 @@ class TestShowOverlays:
             assert d == resolve_user_skill_overlays_dir(config, "alice")
             # And it is the documented layout, not merely two equal wrong answers.
             assert d == (
-                config.nextcloud_mount_path / "Users/alice/istota/config/skills"
+                config.workspace_path / "Users/alice/istota/config/skills"
             )
         finally:
             if fd is not None:
@@ -425,7 +425,7 @@ class TestShowOverlays:
         from istota.storage import resolve_user_skill_overlays_dir
 
         config = load_config()
-        inside = config.nextcloud_mount_path / "Users/alice/skills-real"
+        inside = config.workspace_path / "Users/alice/skills-real"
         inside.mkdir(parents=True)
         import shutil
 

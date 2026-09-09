@@ -169,6 +169,17 @@ class TestItRendersSomethingTheLoaderAccepts:
         assert isinstance(config, Config)
         assert config.bot_name
 
+    def test_workspace_and_mount_paths_are_gated_together(self, parsed):
+        assert parsed["workspace_path"] == "/srv/mount/nextcloud/content"
+        assert parsed["nextcloud_mount_path"] == "/srv/mount/nextcloud/content"
+
+        without_mount_render = render(istota_use_nextcloud_mount=False)
+        without_mount = tomllib.loads(without_mount_render)
+
+        assert "workspace_path" not in without_mount
+        assert "nextcloud_mount_path" not in without_mount
+        assert load_config_from(without_mount_render).has_workspace is False
+
     def test_the_per_skill_proxy_timeouts_survive_the_round_trip(self, tmp_path):
         """A sub-table ends the scalar section it follows, so one emitted above
         `[security]`'s remaining keys silently reparents them: the loader then

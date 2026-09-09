@@ -811,11 +811,10 @@ istota_rclone_remote: "nextcloud"
 # Generate with: rclone obscure "your-app-password"
 istota_rclone_password_obscured: ""
 
-# Nextcloud mount (alternative to rclone CLI)
-# When enabled, Nextcloud is mounted at istota_nextcloud_mount_path and istota uses
-# direct filesystem access instead of rclone subprocess calls
+# Workspace root. When the mount is enabled, Nextcloud is mounted here and Istota
+# uses direct filesystem access instead of rclone subprocess calls.
 istota_use_nextcloud_mount: true
-istota_nextcloud_mount_path: "/srv/mount/nextcloud/content"
+istota_workspace_path: "/srv/mount/nextcloud/content"
 
 # Money integration is in-process (no separate service). Per-user Monarch
 # credentials live in the encrypted secrets table (see istota_user_secrets).
@@ -1253,7 +1252,7 @@ istota_web_root_file_mode: "0644"
 # Backup settings
 istota_backup_enabled: true
 istota_backup_local_dir: "{{ istota_home }}/data/backups"
-istota_backup_remote_dir: "{{ istota_nextcloud_mount_path }}/Backups"
+istota_backup_remote_dir: "{{ istota_workspace_path }}/Backups"
 # Local snapshots are the fast-restore working set; the copies on the mount are
 # the durable tail and keep the longer window. Don't cut the local window to the
 # bone — the remote copy is gated on the mount being available and there is no

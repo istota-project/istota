@@ -6,7 +6,7 @@ briefings needs only paths.
 
 Briefings is a "module": on by default for every configured user, gated by
 ``Config.is_module_enabled(user_id, "briefings")``. The workspace path derives
-from ``nextcloud_mount_path`` + ``get_user_bot_path``; the DB relocates to
+from ``workspace_path`` + ``get_user_bot_path``; the DB relocates to
 local disk via ``Config.module_db_path``. Both of those, and the four refusals
 in front of them, live in :mod:`istota.module_loader` — what is here is the part
 briefings owns, which is the configured briefing names.

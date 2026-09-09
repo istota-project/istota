@@ -123,7 +123,7 @@ def backup_destination(config) -> Path | None:
     explicit = (getattr(config.scheduler, "db_backup_dir", "") or "").strip()
     if explicit:
         return Path(explicit)
-    mount = getattr(config, "nextcloud_mount_path", None)
+    mount = getattr(config, "workspace_path", None)
     if mount:
         return Path(mount) / "Backups" / "db" / "snapshots"
     return None
@@ -185,25 +185,12 @@ def _destination_is_durable(config) -> bool:
     explicit ``/mnt/backup-nas/...`` asserts a durability this module has no way
     to check, and the ismount test would be asking about the wrong filesystem.
 
-    **The gate needs a Nextcloud to be gating.** ``nextcloud_mount_path`` is only
-    a FUSE mountpoint when a Nextcloud server backs the file workspace; a
-    standalone install points the same field at its plain local workspace
-    directory (``setup_wizard.render_config_toml``), which is never a mountpoint
-    and never will be. ``storage_is_nextcloud`` is the existing predicate for
-    that distinction — "no URL means a plain local folder" — and without it,
-    keying the gate on the resolved path would refuse every backup on every
-    standalone install, whose ``db_backup_dir`` sits inside that workspace by
-    design.
     """
     dest = backup_destination(config)
     if dest is None:
         return False
     mount = getattr(config, "nextcloud_mount_path", None)
     if not mount:
-        return True
-    # Defaults True, unlike the other reads in this module: an unknown config
-    # shape should keep the guard, not silently drop it.
-    if not getattr(config, "storage_is_nextcloud", True):
         return True
     # Resolved once, then used for both the containment test and the liveness
     # test — see _destination_is_under_mount for why splitting them breaks a

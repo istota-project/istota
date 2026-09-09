@@ -43,7 +43,7 @@ def _registry():
 def config(tmp_path):
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         temp_dir=tmp_path / "temp",
         users={"alice": UserConfig(display_name="Alice", alerts_channel="alerts")},
     )

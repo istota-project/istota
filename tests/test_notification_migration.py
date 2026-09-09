@@ -319,7 +319,7 @@ def held_db(tmp_path):
 def config(held_db, tmp_path):
     return Config(
         db_path=held_db,
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(display_name="Alice")},
     )
 

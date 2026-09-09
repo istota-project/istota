@@ -72,7 +72,7 @@ def env_config(tmp_path):
         nextcloud=NextcloudConfig(
             url="https://nc.example.com", username="bot", app_password="nc_secret",
         ),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         skills_dir=skills_dir,
         bundled_skills_dir=empty_bundled,
         temp_dir=tmp_path / "temp",

@@ -34,7 +34,7 @@ def _config(tmp_path, *, user="alice", follow=True, timezone_name="America/Los_A
 
     config = Config(
         db_path=db_path,
-        nextcloud_mount_path=tmp_path,
+        workspace_path=tmp_path,
         users={user: UserConfig()},
     )
 

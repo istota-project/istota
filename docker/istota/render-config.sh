@@ -172,7 +172,7 @@ bot_name = "${ISTOTA_BOT_NAME:-Istota}"
 emissaries_enabled = ${ISTOTA_EMISSARIES_ENABLED:-true}
 
 db_path = "/data/db/istota.db"
-nextcloud_mount_path = "/mnt/shared"
+workspace_path = "/mnt/shared"
 skills_dir = "/app/config/skills"
 temp_dir = "/data/tmp"
 max_memory_chars = ${ISTOTA_MAX_MEMORY_CHARS:-0}

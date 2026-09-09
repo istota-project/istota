@@ -20,7 +20,7 @@ def istota_config(tmp_path, monkeypatch):
     config = Config(
         db_path=tmp_path / "istota.db",
         temp_dir=tmp_path / "tmp",
-        nextcloud_mount_path=tmp_path,
+        workspace_path=tmp_path,
         users={"alice": UserConfig()},
     )
 

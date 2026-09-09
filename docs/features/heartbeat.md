@@ -2,7 +2,7 @@
 
 User-defined health checks evaluated on a schedule. Configure checks in `/Users/{user_id}/{bot_dir}/config/HEARTBEAT.md`.
 
-Heartbeat needs the Nextcloud mount — the config file lives on it, so `load_heartbeat_config` returns nothing and the whole subsystem is inert on a deployment without one.
+Heartbeat needs a configured on-disk workspace. The config file lives there, so `load_heartbeat_config` returns nothing and the whole subsystem is inert when `workspace_path` is unset.
 
 ## Check types
 

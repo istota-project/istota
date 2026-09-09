@@ -52,7 +52,7 @@ def config(tmp_path):
         talk=TalkConfig(enabled=False),
         email=EmailConfig(enabled=False),
         scheduler=SchedulerConfig(confirmation_timeout_minutes=1),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
         users={"alice": UserConfig(display_name="Alice", alerts_channel="alerts")},
     )

@@ -460,7 +460,7 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
         temp_dir=tmp_path / "temp",
         skills_dir=skills_dir,
         bundled_skills_dir=bundled,
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         nextcloud=NextcloudConfig(
             url=url,
             username="istota",

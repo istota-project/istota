@@ -526,7 +526,7 @@ class TestSetTrimDeferred:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
         assert _process_deferred_kv_ops(config, task, user_temp) == 2
@@ -551,7 +551,7 @@ class TestProcessDeferredSetTrim:
             talk=TalkConfig(enabled=True, bot_username="istota"),
             email=EmailConfig(enabled=False),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             temp_dir=tmp_path / "temp",
         )
 

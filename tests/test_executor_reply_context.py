@@ -25,7 +25,7 @@ def conn(tmp_path):
 def _config(tmp_path, db_path):
     return Config(
         db_path=db_path,
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(display_name="Alice")},
     )
 

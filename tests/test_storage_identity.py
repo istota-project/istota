@@ -39,7 +39,7 @@ class TestStorageIdentity:
         # A Nextcloud URL means Nextcloud whether via mount or rclone.
         mounted = Config(
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            nextcloud_mount_path=Path("/srv/mount/nc"),
+            workspace_path=Path("/srv/mount/nc"),
         )
         rclone = Config(nextcloud=NextcloudConfig(url="https://cloud.example.com"))
         assert mounted.storage_backend == "nextcloud"
@@ -48,20 +48,20 @@ class TestStorageIdentity:
 
 class TestWorkspaceRoot:
     def test_scoped_user_root_on_mount(self):
-        cfg = Config(nextcloud_mount_path=Path("/srv/mount/nc"))
+        cfg = Config(workspace_path=Path("/srv/mount/nc"))
         assert cfg.workspace_root("alice") == Path("/srv/mount/nc/Users/alice")
 
     def test_unscoped_root_on_mount(self):
-        cfg = Config(nextcloud_mount_path=Path("/srv/mount/nc"))
+        cfg = Config(workspace_path=Path("/srv/mount/nc"))
         assert cfg.workspace_root() == Path("/srv/mount/nc")
 
     def test_none_under_rclone(self):
         cfg = Config(nextcloud=NextcloudConfig(url="https://cloud.example.com"))
-        assert cfg.nextcloud_mount_path is None
+        assert cfg.workspace_path is None
         assert cfg.workspace_root("alice") is None
 
     def test_local_workspace_root(self):
-        cfg = Config(nextcloud_mount_path=Path("/home/me/.istota"))
+        cfg = Config(workspace_path=Path("/home/me/.istota"))
         assert cfg.workspace_root("me") == Path("/home/me/.istota/Users/me")
 
 
@@ -98,7 +98,7 @@ class TestPromptStorageFramingLocal:
     def _prompt(self, tmp_path, **task_kw):
         config = _base_config(
             tmp_path,
-            nextcloud_mount_path=tmp_path / "workspace",
+            workspace_path=tmp_path / "workspace",
         )
         assert config.storage_backend == "local"
         return build_prompt(_task(**task_kw), [], config).system
@@ -112,7 +112,7 @@ class TestPromptStorageFramingLocal:
         see the one piece of storage vocabulary that crossed the boundary,
         which is exactly the string this test exists to rule out.
         """
-        config = _base_config(tmp_path, nextcloud_mount_path=tmp_path / "workspace")
+        config = _base_config(tmp_path, workspace_path=tmp_path / "workspace")
         assert config.storage_backend == "local"
         composed = build_prompt(_task(attachments=["inbox/scan.pdf"]), [], config)
         # Strip environment paths (pytest's tmp_path embeds the method name,
@@ -141,7 +141,7 @@ class TestPromptStorageFramingNextcloud:
         config = _base_config(
             tmp_path,
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
-            nextcloud_mount_path=tmp_path / "mnt",
+            workspace_path=tmp_path / "mnt",
         )
         assert config.storage_backend == "nextcloud"
         return build_prompt(_task(), [], config).system
@@ -163,7 +163,7 @@ class TestPromptStorageFramingRclone:
             nextcloud=NextcloudConfig(url="https://cloud.example.com"),
         )
         assert config.storage_backend == "nextcloud"
-        assert config.use_mount is False
+        assert config.has_workspace is False
         prompt = build_prompt(_task(), [], config).system
         assert "rclone" in prompt
         assert "Nextcloud" in prompt
@@ -220,21 +220,21 @@ class TestSkillPlaceholderSubstitution:
         )
 
     def test_workspace_placeholder_resolves_local(self, tmp_path):
-        config = _base_config(tmp_path, nextcloud_mount_path=tmp_path / "ws")
+        config = _base_config(tmp_path, workspace_path=tmp_path / "ws")
         rendered = self._render_eager(tmp_path, ["files"], config)
         assert "{workspace}" not in rendered
         assert "/srv/mount" not in rendered
         assert str(tmp_path / "ws" / "Users" / "alice") in rendered
 
     def test_files_skill_no_nextcloud_examples_local(self, tmp_path):
-        config = _base_config(tmp_path, nextcloud_mount_path=tmp_path / "ws")
+        config = _base_config(tmp_path, workspace_path=tmp_path / "ws")
         rendered = self._render_eager(tmp_path, ["files"], config)
         # The command examples are storage-neutral now; only the gated
         # deployment note may mention Nextcloud.
         assert "files are mounted at" not in rendered
 
     def test_workspace_dir_helper_scoped(self, tmp_path):
-        config = _base_config(tmp_path, nextcloud_mount_path=tmp_path / "ws")
+        config = _base_config(tmp_path, workspace_path=tmp_path / "ws")
         assert _workspace_dir(config, "alice") == str(tmp_path / "ws" / "Users" / "alice")
 
     def test_workspace_dir_helper_rclone(self, tmp_path):

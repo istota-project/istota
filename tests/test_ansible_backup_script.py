@@ -140,7 +140,7 @@ class Fixture:
             istota_home=str(self.home),
             istota_backup_local_dir=str(self.local),
             istota_backup_remote_dir=str(self.remote),
-            istota_nextcloud_mount_path=str(self.mount),
+            istota_workspace_path=str(self.mount),
             istota_backup_alert_command=alert,
             **overrides,
         )

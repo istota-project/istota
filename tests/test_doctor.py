@@ -405,7 +405,7 @@ class TestConfigLoadPathStaysCheap:
             "repos = tmp / 'repos'; repos.mkdir(exist_ok=True)\n"
             "config = Config(\n"
             "    db_path=tmp / 'test.db', temp_dir=tmp / 'temp',\n"
-            "    skills_dir=skills, nextcloud_mount_path=mount,\n"
+            "    skills_dir=skills, workspace_path=mount,\n"
             "    developer=DeveloperConfig(\n"
             "        enabled=True, repos_dir=str(repos), gitlab_token='t' * 20,\n"
             "        gh_bin_path=str(tmp / 'bin' / 'gh'),\n"
@@ -1828,18 +1828,18 @@ class TestMountLiveness:
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == SKIP
 
-    def test_skips_for_a_local_workspace_folder(self, make_config):
-        """The local single-user install points this at a plain directory under
-        `~` that nothing ever mounts. Asserting ismount there reports a healthy
-        install as broken."""
-        r = run_checks(make_config(), only=("runtime.mount_liveness",))[0]
+    def test_nextcloud_url_without_mount_still_skips(self, make_config):
+        config = self._nextcloud_backed(make_config, nextcloud_mount_path=None)
+        r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == SKIP
-        assert "local workspace folder" in r.detail
 
-    def test_configured_but_not_mounted_fails(self, make_config, tmp_path):
+    def test_configured_but_not_mounted_fails_without_nextcloud_url(
+        self, make_config, tmp_path,
+    ):
         # `make_config` points nextcloud_mount_path at a plain tmp_path dir,
         # which is on the same filesystem as its parent and so is not a mount.
-        config = self._nextcloud_backed(make_config)
+        config = make_config()
+        assert config.storage_is_nextcloud is False
         r = run_checks(config, only=("runtime.mount_liveness",))[0]
         assert r.status == FAIL
         assert r.remedy
@@ -5089,7 +5089,7 @@ class TestSkillOverlays:
     @staticmethod
     def _overlays(config, user_id="alice"):
         d = (
-            Path(config.nextcloud_mount_path)
+            Path(config.workspace_path)
             / "Users" / user_id / config.bot_dir_name / "config" / "skills"
         )
         d.mkdir(parents=True, exist_ok=True)
@@ -5103,7 +5103,7 @@ class TestSkillOverlays:
     # ------------------------------------------------------------ the gates
 
     def test_it_skips_without_a_mount(self, make_config, tmp_path):
-        config = self._config(make_config, tmp_path, nextcloud_mount_path=None)
+        config = self._config(make_config, tmp_path, workspace_path=None)
         r = self._run(config)
         assert r.status == SKIP
         assert "mount" in r.detail
@@ -5114,7 +5114,7 @@ class TestSkillOverlays:
 
     def test_no_overlays_anywhere_is_ok_and_not_a_skip(self, make_config, tmp_path):
         config = self._config(make_config, tmp_path)
-        (Path(config.nextcloud_mount_path) / "Users" / "alice").mkdir(parents=True)
+        (Path(config.workspace_path) / "Users" / "alice").mkdir(parents=True)
         r = self._run(config)
         assert r.status == OK
         assert r.status != SKIP
@@ -5266,7 +5266,7 @@ class TestSkillOverlays:
         and report a file against the wrong user."""
         config = self._config(make_config, tmp_path)
         (self._overlays(config, "alice") / "develper.md").write_text("- broken\n")
-        users = Path(config.nextcloud_mount_path) / "Users"
+        users = Path(config.workspace_path) / "Users"
         (users / "mallory").symlink_to(users / "alice", target_is_directory=True)
 
         r = self._run(config)
@@ -5294,7 +5294,7 @@ class TestSkillOverlays:
         elsewhere.mkdir()
         (elsewhere / "develper.md").write_text("- planted\n")
         user_config = (
-            Path(config.nextcloud_mount_path)
+            Path(config.workspace_path)
             / "Users" / "alice" / config.bot_dir_name / "config"
         )
         user_config.mkdir(parents=True)
@@ -6068,7 +6068,7 @@ class TestSessionLogDir:
         return make_config(
             db_path=workspace / "istota.db",
             temp_dir=workspace / "tmp",
-            nextcloud_mount_path=workspace,
+            workspace_path=workspace,
             security=SecurityConfig(sandbox_enabled=sandbox_enabled),
             brain=BrainConfig(
                 kind="native",
@@ -6690,8 +6690,8 @@ class TestTaskControlDir:
     ):
         # The gap Stage 3's review recorded and `native_fs_roots`' docstring
         # names: a `user_resources` row resolves to `mount / resource_path`,
-        # bounded by the Nextcloud mount and nothing else, so on a layout where
-        # `temp_dir` sits under the mount a row is a second route into the
+        # bounded by the workspace root and nothing else, so on a layout where
+        # `temp_dir` sits under it a row is a second route into the
         # whole tree that neither guard covers. No shipped shape produces the
         # layout; this is what would say so if one did.
         from istota.config import ResourceConfig, SecurityConfig, UserConfig
@@ -6702,7 +6702,7 @@ class TestTaskControlDir:
         config = self._config(
             make_config, tmp_path,
             temp_dir=temp,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             security=SecurityConfig(sandbox_enabled=True),
             users={
                 "alice": UserConfig(
@@ -6735,7 +6735,7 @@ class TestTaskControlDir:
         config = self._config(
             make_config, tmp_path,
             temp_dir=temp,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             security=SecurityConfig(sandbox_enabled=True),
             users={
                 "alice": UserConfig(
@@ -6764,7 +6764,7 @@ class TestTaskControlDir:
         config = self._config(
             make_config, tmp_path,
             temp_dir=temp,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             security=SecurityConfig(sandbox_enabled=False),
             users={
                 "alice": UserConfig(
@@ -6791,7 +6791,7 @@ class TestTaskControlDir:
         config = self._config(
             make_config, tmp_path,
             temp_dir=temp,
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             security=SecurityConfig(sandbox_enabled=True),
             users={
                 "alice": UserConfig(
@@ -6935,7 +6935,7 @@ class TestTaskControlDir:
         config = make_config(
             db_path=workspace / "istota.db",
             temp_dir=workspace / "tmp",
-            nextcloud_mount_path=workspace,
+            workspace_path=workspace,
             users={"alice": UserConfig()},
         )
         r = self._run(config)
@@ -7022,7 +7022,7 @@ class TestTaskControlDir:
     ):
         config = self._config(make_config, tmp_path)
         config.db_path = Path("")
-        config.nextcloud_mount_path = None
+        config.workspace_path = None
         r = doctor.check_task_control_dir(config, True)
         assert r.status in (OK, WARN, FAIL, SKIP)
 

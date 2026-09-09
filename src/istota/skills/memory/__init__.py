@@ -266,14 +266,14 @@ def _config_for_audit():
 
     Importing the real Config is heavy and pulls in TOML parsing for a CLI that
     runs hundreds of milliseconds end to end, which is why this is a shim
-    rather than a load. `use_mount` is False so the shim can never be handed to
+    rather than a load. `has_workspace` is False so the shim can never be handed to
     `migrate_user_md_sidecars` and have it try to resolve mount paths that are
     not on it; the migration is the nightly daemon's job, with a real Config.
     """
     db_path = os.environ.get("ISTOTA_DB_PATH", "")
 
     class _Shim:
-        use_mount = False
+        has_workspace = False
 
     _Shim.db_path = Path(db_path) if db_path else None
     return _Shim()

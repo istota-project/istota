@@ -1033,7 +1033,7 @@ def _source_path_allowed(
     ingredients are this caller's.
     """
     roots = workspace_roots(
-        mount=getattr(config, "nextcloud_mount_path", None),
+        mount=getattr(config, "workspace_path", None),
         user_id=user_id,
         deferred_dir=user_temp_dir,
     )

@@ -282,10 +282,10 @@ CASES: list[Case] = [
     Case("sandbox_ro_paths", ro_paths=("ro",)),
     Case("users_config_dir_masked", users_config_dir=True),
     Case("module_root_outside_the_db_dir", module_data_dir="modules"),
-    Case("module_root_under_the_mount", module_data_dir="mount/modules"),
+    Case("module_root_under_the_workspace", module_data_dir="mount/modules"),
     Case("db_mask_refused_above_the_workspace", db_dir="temp"),
     Case("no_developer_dir", developer_dir=False),
-    Case("no_nextcloud_mount", mount=False, resources=(("Docs", _RW),)),
+    Case("no_workspace", mount=False, resources=(("Docs", _RW),)),
     # The one case where a bind's source and destination are different
     # strings, and the only one where `_mask_dir` emits both of its
     # candidates. `_ro_bind`/`_bind` resolve the source and keep the path *as
@@ -351,7 +351,7 @@ def _make_world(root: Path, case: Case) -> dict[str, Path]:
     the product does not resolve before binding — which is what makes a bind's
     source and destination differ. The keys below are split on exactly that:
     ``spelled`` for a path the product binds as written, ``base`` for one it
-    resolves first (``nextcloud_mount_path``, ``user_temp_dir``, the workspace)
+    resolves first (``workspace_path``, ``user_temp_dir``, the workspace)
     or never binds (``src``, ``venv``).
     """
     base = root / "real" if case.symlinked_root else root
@@ -453,6 +453,7 @@ def _make_config(case: Case, world: dict[str, Path]) -> Config:
     return Config(
         db_path=world["db_dir"] / "istota.db",
         temp_dir=world["base"] / "temp",
+        workspace_path=world["mount"] if case.mount else None,
         nextcloud_mount_path=world["mount"] if case.mount else None,
         skills_dir=world["config"] / "skills",
         module_data_dir=module_data_dir,

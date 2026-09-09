@@ -139,7 +139,7 @@ _DIRECT_KEYS = {
     "rclone_remote": "istota_rclone_remote",
     "rclone_password_obscured": "istota_rclone_password_obscured",
     "use_nextcloud_mount": "istota_use_nextcloud_mount",
-    "nextcloud_mount_path": "istota_nextcloud_mount_path",
+    "workspace_path": "istota_workspace_path",
     "nextcloud_url": "istota_nextcloud_url",
     "nextcloud_username": "istota_nextcloud_username",
     "nextcloud_app_password": "istota_nextcloud_app_password",
@@ -403,6 +403,12 @@ def convert(settings: dict) -> dict:
             if ansible_key in _SKIP_WHEN_EMPTY and not value:
                 continue
             result[ansible_key] = value
+
+    # Settings written before the workspace/mount split used the mount key for
+    # the workspace root. Keep it as a fallback so an update does not replace a
+    # custom path with the role default. A new-shape workspace key wins.
+    if "workspace_path" not in settings and "nextcloud_mount_path" in settings:
+        result["istota_workspace_path"] = settings["nextcloud_mount_path"]
 
     # Flat section keys
     for section_name, key_map in _SECTION_FLAT_KEYS.items():

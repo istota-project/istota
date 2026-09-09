@@ -51,7 +51,7 @@ There is no `type` field. The loader infers the kind from which of `prompt`, `pr
 
 **Prompt jobs** (default): Run through the brain like any other task. The prompt is sent to the executor with full skill and context support.
 
-**Prompt file jobs**: Like prompt jobs, but the prompt is loaded from an external file. Paths are relative to the Nextcloud mount root. `prompt_file` cannot be combined with `prompt` or `command`.
+**Prompt file jobs**: Like prompt jobs, but the prompt is loaded from an external file. Paths are relative to the workspace root. `prompt_file` cannot be combined with `prompt` or `command`.
 
 A multiline `prompt` becomes one of these the first time anything rewrites the file — `!cron enable` / `!cron disable`, the removal of a `once` job, or a schedule migration (ISSUE-330). The text is written to `{bot_dir}/scripts/prompts/<job-name>.txt` and the job is left pointing at it. This is not tidiness: the rewriter used to re-serialize a multiline prompt as a TOML block, where a single stray backslash made *every* job in the file fail to load. A `prompt_file` you set yourself is never touched, and an existing file is only reused when its contents already match.
 
@@ -66,7 +66,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `name` | yes | Job identifier |
 | `cron` | yes | Cron expression (evaluated in user's timezone) |
 | `prompt` | for prompt jobs | The prompt to send to Claude |
-| `prompt_file` | for prompt_file jobs | Path to prompt file (relative to mount root) |
+| `prompt_file` | for prompt_file jobs | Path to prompt file (relative to workspace root) |
 | `command` | for command jobs | Shell command to execute |
 | `room` | no | Talk room token for output |
 | `target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor |

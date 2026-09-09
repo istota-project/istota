@@ -37,7 +37,7 @@ def setup_env(ctx) -> dict[str, str]:
 
     Self-gates on ``Config.is_module_enabled(user_id, "location")``.
     Returns ``{}`` (no env contribution) when the module is disabled
-    for the user, when nextcloud_mount_path is unset, or when any
+    for the user, when workspace_path is unset, or when any
     other resolution gate fails.
     """
     from istota import location as _location  # noqa: PLC0415

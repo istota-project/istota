@@ -74,7 +74,7 @@ class CheckResult:
 
 def _get_mount_path(config: "Config", path: str) -> Path:
     """Get the local mount path for a Nextcloud path."""
-    return config.nextcloud_mount_path / path.lstrip("/")
+    return config.workspace_path / path.lstrip("/")
 
 
 def load_heartbeat_config(
@@ -86,7 +86,7 @@ def load_heartbeat_config(
 
     Returns (settings, checks) tuple, or None if no config found.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         logger.debug("Heartbeat requires mount; skipping user %s", user_id)
         return None
 
@@ -222,7 +222,7 @@ def _check_file_watch(check: HeartbeatCheck, config: "Config") -> CheckResult:
     if not file_path:
         return CheckResult(healthy=False, message="No path configured")
 
-    if not config.use_mount:
+    if not config.has_workspace:
         return CheckResult(healthy=False, message="File watch requires mount")
 
     local_path = _get_mount_path(config, file_path)
@@ -587,7 +587,7 @@ def _check_task_deadline(check: HeartbeatCheck, config: "Config", user_id: str) 
     """
     warn_hours_before = check.config.get("warn_hours_before", 24)
 
-    if not config.use_mount:
+    if not config.has_workspace:
         return CheckResult(healthy=False, message="Task deadline check requires mount")
 
 

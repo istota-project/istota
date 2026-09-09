@@ -19,7 +19,7 @@ def _config(tmp_path: Path, *, users: dict[str, UserConfig]) -> Config:
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
     return Config(
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         users=users,
         bot_name="Istota",
         db_path=tmp_path / "no.db",  # not exercised — keeps best-effort paths quiet

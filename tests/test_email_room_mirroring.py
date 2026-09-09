@@ -60,7 +60,7 @@ def config(db_path, tmp_path):
         talk=TalkConfig(enabled=True, bot_username="istota"),
         email=EmailConfig(enabled=False),
         scheduler=SchedulerConfig(),
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         temp_dir=tmp_path / "temp",
         users={"testuser": UserConfig(display_name="Alice")},
     )
@@ -403,11 +403,11 @@ class TestConfirmationGate:
                 confirm_sender_match="gate",
             ),
             scheduler=SchedulerConfig(),
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             temp_dir=tmp_path / "temp",
             users={"testuser": UserConfig(email_addresses=["testuser@test.com"])},
         )
-        config.nextcloud_mount_path.mkdir(exist_ok=True)
+        config.workspace_path.mkdir(exist_ok=True)
 
         envelope = EmailEnvelope(
             id="m1", subject="Hi", sender="testuser@test.com",

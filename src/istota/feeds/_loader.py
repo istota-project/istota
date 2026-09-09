@@ -6,7 +6,7 @@ facade. Mirrors :mod:`istota.money._loader`.
 Feeds is a "module" in the modules/connected-services taxonomy: on by
 default for every configured user, gated by
 ``Config.is_module_enabled(user_id, "feeds")``. The user's workspace path is
-derived from ``nextcloud_mount_path`` + ``get_user_bot_path``; per-user
+derived from ``workspace_path`` + ``get_user_bot_path``; per-user
 overrides (``data_dir``, ``db_path``, …) and the Tumblr API key live in the
 encrypted secrets table once Phase 2 of the refactor lands. For now the
 loader still consults the secrets table as the only source of

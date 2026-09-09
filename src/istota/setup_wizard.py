@@ -152,7 +152,7 @@ def render_config_toml(a: Answers) -> str:
         "bot_name = \"Istota\"",
         "emissaries_enabled = false  # constitutional principles doc; off for local single-user",
         f"db_path = {_toml_str(str(a.db_path))}",
-        f"nextcloud_mount_path = {_toml_str(str(a.workspace))}",
+        f"workspace_path = {_toml_str(str(a.workspace))}",
         f"temp_dir = {_toml_str(str(a.temp_dir))}",
         "",
         "[web]",

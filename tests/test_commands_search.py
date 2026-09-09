@@ -29,7 +29,7 @@ def config(db_path, tmp_path):
     cfg.talk = TalkConfig(enabled=True, bot_username="istota")
     cfg.nextcloud = NextcloudConfig(url="https://nc.test", username="istota", app_password="pw")
     cfg.users = {"alice": UserConfig()}
-    cfg.nextcloud_mount_path = tmp_path / "mount"
+    cfg.workspace_path = tmp_path / "mount"
     return cfg
 
 

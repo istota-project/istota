@@ -108,13 +108,13 @@ class TestMountOperations:
     def mount_config(self, tmp_path):
         mount = tmp_path / "mount"
         mount.mkdir()
-        return Config(nextcloud_mount_path=mount)
+        return Config(workspace_path=mount)
 
     def test_ensure_dirs_creates_all(self, mount_config):
         result = ensure_user_directories_v2(mount_config, "alice")
         assert result is True
 
-        base = mount_config.nextcloud_mount_path / "Users" / "alice"
+        base = mount_config.workspace_path / "Users" / "alice"
         for subdir in ["inbox", "memories", "istota", "shared"]:
             assert (base / subdir).is_dir()
         # istota subdirectories
@@ -127,7 +127,7 @@ class TestMountOperations:
         result = ensure_user_directories_v2(mount_config, "alice")
         assert result is True
 
-        base = mount_config.nextcloud_mount_path / "Users" / "alice"
+        base = mount_config.workspace_path / "Users" / "alice"
         for subdir in ["inbox", "memories", "istota", "shared"]:
             assert (base / subdir).is_dir()
 
@@ -146,14 +146,14 @@ class TestMountOperations:
 
     def test_read_memory_empty(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        mem_path = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "USER.md"
+        mem_path = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
         mem_path.write_text("")
         result = read_user_memory_v2(mount_config, "alice")
         assert result is None
 
     def test_read_memory_content(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        mem_path = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "USER.md"
+        mem_path = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
         mem_path.write_text("Remember: likes coffee")
         result = read_user_memory_v2(mount_config, "alice")
         assert result == "Remember: likes coffee"
@@ -163,7 +163,7 @@ class TestMountOperations:
         result = init_user_memory_v2(mount_config, "alice")
         assert result is True
 
-        mem_path = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "USER.md"
+        mem_path = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
         assert mem_path.exists()
         assert mem_path.read_text() == MEMORY_TEMPLATE
 
@@ -172,12 +172,12 @@ class TestMountOperations:
         result = init_user_memory_v2(mount_config, "alice")
         assert result is True
 
-        mem_path = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "USER.md"
+        mem_path = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
         assert mem_path.exists()
 
     def test_memory_line_count(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        mem_path = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "USER.md"
+        mem_path = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "USER.md"
         mem_path.write_text("line1\nline2\nline3\n")
         result = get_memory_line_count_v2(mount_config, "alice")
         assert result == 3  # "line1\nline2\nline3\n".splitlines() == ['line1', 'line2', 'line3']
@@ -196,7 +196,7 @@ class TestMountOperations:
         result = upload_file_to_inbox_v2(mount_config, "alice", src)
         assert result == "/Users/alice/inbox/doc.txt"
 
-        dest = mount_config.nextcloud_mount_path / "Users" / "alice" / "inbox" / "doc.txt"
+        dest = mount_config.workspace_path / "Users" / "alice" / "inbox" / "doc.txt"
         assert dest.exists()
         assert dest.read_text() == "file contents"
 
@@ -206,19 +206,19 @@ class TestMountOperations:
 
     def test_istota_readme_created(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        readme = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "README.md"
+        readme = mount_config.workspace_path / "Users" / "alice" / "istota" / "README.md"
         assert readme.exists()
         assert readme.read_text() == WORKSPACE_README
 
     def test_tasks_file_created(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        tasks_file = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "TASKS.md"
+        tasks_file = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "TASKS.md"
         assert tasks_file.exists()
         assert tasks_file.read_text() == TASKS_FILE_TEMPLATE
 
     def test_tasks_file_not_overwritten(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        tasks_file = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "TASKS.md"
+        tasks_file = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "TASKS.md"
         tasks_file.write_text("- [ ] my task")
 
         ensure_user_directories_v2(mount_config, "alice")
@@ -226,7 +226,7 @@ class TestMountOperations:
 
     def test_istota_readme_not_overwritten(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        readme = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "README.md"
+        readme = mount_config.workspace_path / "Users" / "alice" / "istota" / "README.md"
         readme.write_text("custom content")
 
         ensure_user_directories_v2(mount_config, "alice")
@@ -235,13 +235,13 @@ class TestMountOperations:
     def test_no_briefings_file_is_seeded(self, mount_config):
         """The file is retired as an input, so nothing writes a new one."""
         ensure_user_directories_v2(mount_config, "alice")
-        bf = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "BRIEFINGS.md"
+        bf = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "BRIEFINGS.md"
         assert not bf.exists()
 
     def test_an_existing_briefings_file_is_left_alone(self, mount_config):
         """It is the user's own file; the retirement does not delete it."""
         ensure_user_directories_v2(mount_config, "alice")
-        bf = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "config" / "BRIEFINGS.md"
+        bf = mount_config.workspace_path / "Users" / "alice" / "istota" / "config" / "BRIEFINGS.md"
         bf.write_text("# my custom config")
 
         ensure_user_directories_v2(mount_config, "alice")
@@ -249,14 +249,14 @@ class TestMountOperations:
 
     def test_examples_directory_created(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        examples_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+        examples_dir = mount_config.workspace_path / "Users" / "alice" / "istota" / "examples"
         assert examples_dir.is_dir()
         for filename in ["README.md", "TASKS.md", "HEARTBEAT.md", "WORKFLOW.md"]:
             assert (examples_dir / filename).exists()
 
     def test_examples_contain_documentation(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        examples_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+        examples_dir = mount_config.workspace_path / "Users" / "alice" / "istota" / "examples"
         assert (examples_dir / "README.md").read_text() == WORKSPACE_README_EXAMPLE
         assert (examples_dir / "TASKS.md").read_text() == TASKS_FILE_EXAMPLE
         assert (examples_dir / "HEARTBEAT.md").read_text() == HEARTBEAT_EXAMPLE
@@ -264,7 +264,7 @@ class TestMountOperations:
 
     def test_examples_always_overwritten(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        examples_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+        examples_dir = mount_config.workspace_path / "Users" / "alice" / "istota" / "examples"
         (examples_dir / "README.md").write_text("old content")
 
         ensure_user_directories_v2(mount_config, "alice")
@@ -272,7 +272,7 @@ class TestMountOperations:
 
     def test_istota_readme_mentions_examples(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
-        readme = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "README.md"
+        readme = mount_config.workspace_path / "Users" / "alice" / "istota" / "README.md"
         assert "examples/" in readme.read_text()
 
     def test_persona_seeded_from_global(self, tmp_path):
@@ -281,7 +281,7 @@ class TestMountOperations:
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
         (tmp_path / "config" / "persona.md").write_text("You are {BOT_NAME}, a helpful bot.")
-        config = Config(nextcloud_mount_path=mount, skills_dir=skills_dir)
+        config = Config(workspace_path=mount, skills_dir=skills_dir)
         ensure_user_directories_v2(config, "alice")
         persona = mount / "Users" / "alice" / "istota" / "config" / "PERSONA.md"
         assert persona.exists()
@@ -293,7 +293,7 @@ class TestMountOperations:
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
         (tmp_path / "config" / "persona.md").write_text("Global persona")
-        config = Config(nextcloud_mount_path=mount, skills_dir=skills_dir)
+        config = Config(workspace_path=mount, skills_dir=skills_dir)
         # Pre-create user persona
         persona_dir = mount / "Users" / "alice" / "istota" / "config"
         persona_dir.mkdir(parents=True)
@@ -307,14 +307,14 @@ class TestMountOperations:
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
         # No istota.md created in tmp_path/config/
-        config = Config(nextcloud_mount_path=mount, skills_dir=skills_dir)
+        config = Config(workspace_path=mount, skills_dir=skills_dir)
         ensure_user_directories_v2(config, "alice")
         persona = mount / "Users" / "alice" / "istota" / "config" / "PERSONA.md"
         assert not persona.exists()
 
     def test_notes_migrated_to_istota(self, mount_config):
         """Old notes/ directory is renamed to workspace/ then to istota/."""
-        base = mount_config.nextcloud_mount_path / "Users" / "alice"
+        base = mount_config.workspace_path / "Users" / "alice"
         notes_dir = base / "notes"
         notes_dir.mkdir(parents=True)
         (notes_dir / "README.md").write_text("old readme")
@@ -329,7 +329,7 @@ class TestMountOperations:
 
     def test_notes_migration_skips_if_workspace_exists(self, mount_config):
         """Migration does not overwrite existing workspace/."""
-        base = mount_config.nextcloud_mount_path / "Users" / "alice"
+        base = mount_config.workspace_path / "Users" / "alice"
         notes_dir = base / "notes"
         notes_dir.mkdir(parents=True)
         (notes_dir / "old.md").write_text("old content")
@@ -429,7 +429,7 @@ class TestRcloneOperations:
     def test_ensure_dirs_via_rclone(self, mock_run):
         """ensure_user_directories calls rclone mkdir for each subdir + istota/exports."""
         mock_run.return_value = self._mock_run(returncode=0)
-        Config(nextcloud_mount_path=None, rclone_remote="nc")
+        Config(workspace_path=None, rclone_remote="nc")
 
         result = ensure_user_directories("nc", "alice", "istota")
         assert result is True
@@ -465,10 +465,10 @@ class TestDatedMemories:
     def mount_config(self, tmp_path):
         mount = tmp_path / "mount"
         mount.mkdir()
-        return Config(nextcloud_mount_path=mount)
+        return Config(workspace_path=mount)
 
     def _make_memories_dir(self, config, user_id="alice"):
-        memories_dir = config.nextcloud_mount_path / "Users" / user_id / "memories"
+        memories_dir = config.workspace_path / "Users" / user_id / "memories"
         memories_dir.mkdir(parents=True)
         return memories_dir
 
@@ -548,7 +548,7 @@ class TestDatedMemories:
         assert "Dated memory" in result
 
     def test_returns_none_without_mount(self):
-        config = Config(nextcloud_mount_path=None)
+        config = Config(workspace_path=None)
         result = read_dated_memories(config, "alice")
         assert result is None
 
@@ -576,7 +576,7 @@ class TestChannelMemory:
     def mount_config(self, tmp_path):
         mount = tmp_path / "mount"
         mount.mkdir()
-        return Config(nextcloud_mount_path=mount)
+        return Config(workspace_path=mount)
 
     def test_get_channel_base_path(self):
         assert get_channel_base_path("abc123") == "/Channels/abc123"
@@ -609,7 +609,7 @@ class TestChannelMemory:
     def test_ensure_channel_directories(self, mount_config):
         result = ensure_channel_directories(mount_config, "room42")
         assert result is True
-        memories_dir = mount_config.nextcloud_mount_path / "Channels" / "room42" / "memories"
+        memories_dir = mount_config.workspace_path / "Channels" / "room42" / "memories"
         assert memories_dir.is_dir()
 
     def test_ensure_channel_directories_idempotent(self, mount_config):
@@ -623,21 +623,21 @@ class TestChannelMemory:
 
     def test_read_channel_memory_exists(self, mount_config):
         ensure_channel_directories(mount_config, "room42")
-        mem_path = mount_config.nextcloud_mount_path / "Channels" / "room42" / "CHANNEL.md"
+        mem_path = mount_config.workspace_path / "Channels" / "room42" / "CHANNEL.md"
         mem_path.write_text("- Project uses Python 3.12")
         result = read_channel_memory(mount_config, "room42")
         assert result == "- Project uses Python 3.12"
 
     def test_read_channel_memory_empty(self, mount_config):
         ensure_channel_directories(mount_config, "room42")
-        mem_path = mount_config.nextcloud_mount_path / "Channels" / "room42" / "CHANNEL.md"
+        mem_path = mount_config.workspace_path / "Channels" / "room42" / "CHANNEL.md"
         mem_path.write_text("")
         result = read_channel_memory(mount_config, "room42")
         assert result is None
 
     def test_read_channel_memory_whitespace_only(self, mount_config):
         ensure_channel_directories(mount_config, "room42")
-        mem_path = mount_config.nextcloud_mount_path / "Channels" / "room42" / "CHANNEL.md"
+        mem_path = mount_config.workspace_path / "Channels" / "room42" / "CHANNEL.md"
         mem_path.write_text("   \n  \n  ")
         result = read_channel_memory(mount_config, "room42")
         assert result is None
@@ -645,14 +645,14 @@ class TestChannelMemory:
     def test_init_channel_memory(self, mount_config):
         result = init_channel_memory(mount_config, "room42")
         assert result is True
-        mem_path = mount_config.nextcloud_mount_path / "Channels" / "room42" / "CHANNEL.md"
+        mem_path = mount_config.workspace_path / "Channels" / "room42" / "CHANNEL.md"
         assert mem_path.exists()
         assert mem_path.read_text() == CHANNEL_MEMORY_TEMPLATE
         assert "Channel Memory" in mem_path.read_text()
 
     def test_ensure_channel_directories_migrates_old_layout(self, mount_config):
         """Old context/memory.md is migrated to CHANNEL.md."""
-        base = mount_config.nextcloud_mount_path / "Channels" / "room42"
+        base = mount_config.workspace_path / "Channels" / "room42"
         old_dir = base / "context"
         old_dir.mkdir(parents=True)
         (old_dir / "memory.md").write_text("- Old channel notes")
@@ -665,7 +665,7 @@ class TestChannelMemory:
 
     def test_ensure_channel_directories_migration_skips_existing(self, mount_config):
         """Migration does not overwrite existing CHANNEL.md."""
-        base = mount_config.nextcloud_mount_path / "Channels" / "room42"
+        base = mount_config.workspace_path / "Channels" / "room42"
         old_dir = base / "context"
         old_dir.mkdir(parents=True)
         (old_dir / "memory.md").write_text("- Old content")
@@ -686,7 +686,7 @@ class TestShareFolderWithUser:
         mount = tmp_path / "mount"
         mount.mkdir()
         return Config(
-            nextcloud_mount_path=mount,
+            workspace_path=mount,
             nextcloud=NextcloudConfig(
                 url="https://nc.example.com",
                 username="istota",
@@ -696,7 +696,7 @@ class TestShareFolderWithUser:
 
     def test_returns_false_without_nextcloud_config(self, tmp_path):
         config = Config(
-            nextcloud_mount_path=tmp_path,
+            workspace_path=tmp_path,
             nextcloud=NextcloudConfig(url="", username="", app_password=""),
         )
         result = share_folder_with_user(config, "/Users/alice/notes", "alice")
@@ -954,7 +954,7 @@ class TestMigrateWorkspaceFiles:
         """
         mount = tmp_path / "mount"
         mount.mkdir()
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
 
         # Place files at old location (user root) with workspace/ present
         base = mount / "Users" / "alice"
@@ -1033,7 +1033,7 @@ class TestMigrateWorkspaceToBotDir:
         """Full migration via ensure_user_directories_v2."""
         mount = tmp_path / "mount"
         mount.mkdir()
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
 
         base = mount / "Users" / "alice"
         workspace = base / "workspace"
@@ -1054,7 +1054,7 @@ class TestMigrateWorkspaceToBotDir:
         """Old exports/ directory contents migrate to istota/exports/."""
         mount = tmp_path / "mount"
         mount.mkdir()
-        config = Config(nextcloud_mount_path=mount)
+        config = Config(workspace_path=mount)
 
         base = mount / "Users" / "alice"
         old_exports = base / "exports"
@@ -1081,11 +1081,11 @@ class TestUserConfigPlantedPaths:
     def mount_config(self, tmp_path):
         mount = tmp_path / "mount"
         mount.mkdir()
-        return Config(nextcloud_mount_path=mount)
+        return Config(workspace_path=mount)
 
     def _config_dir(self, config, user_id="alice"):
         return (
-            config.nextcloud_mount_path / "Users" / user_id / "istota" / "config"
+            config.workspace_path / "Users" / user_id / "istota" / "config"
         )
 
     def test_a_symlink_at_user_md_is_not_followed(self, mount_config, tmp_path):
@@ -1119,7 +1119,7 @@ class TestUserConfigPlantedPaths:
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
         (elsewhere / "USER.md").write_text("TOP SECRET TOKEN")
-        bot_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota"
+        bot_dir = mount_config.workspace_path / "Users" / "alice" / "istota"
         bot_dir.mkdir(parents=True)
         (bot_dir / "config").symlink_to(elsewhere, target_is_directory=True)
 
@@ -1131,7 +1131,7 @@ class TestUserConfigPlantedPaths:
         # Containment, not "no symlinks": a link that stays inside the user's
         # own tree leads nowhere they could not already reach, and refusing it
         # would break someone who reorganised their own workspace.
-        base = mount_config.nextcloud_mount_path / "Users" / "alice"
+        base = mount_config.workspace_path / "Users" / "alice"
         real = base / "istota" / "real_config"
         real.mkdir(parents=True)
         (real / "USER.md").write_text("Remember: likes coffee")
@@ -1267,7 +1267,7 @@ class TestSeedingContainment:
     def mount_config(self, tmp_path):
         mount = tmp_path / "mount"
         mount.mkdir()
-        return Config(nextcloud_mount_path=mount)
+        return Config(workspace_path=mount)
 
     def test_a_symlinked_config_dir_redirects_nothing(self, mount_config, tmp_path):
         # Measured before the fix: CRON.md, HEARTBEAT.md, PERSONA.md and
@@ -1276,7 +1276,7 @@ class TestSeedingContainment:
         # O_NOFOLLOW never sees an ancestor.
         outside = tmp_path / "outside"
         outside.mkdir()
-        bot_dir = mount_config.nextcloud_mount_path / "Users" / "alice" / "istota"
+        bot_dir = mount_config.workspace_path / "Users" / "alice" / "istota"
         bot_dir.mkdir(parents=True)
         (bot_dir / "config").symlink_to(outside, target_is_directory=True)
 
@@ -1286,7 +1286,7 @@ class TestSeedingContainment:
     def test_a_symlinked_bot_dir_redirects_nothing(self, mount_config, tmp_path):
         outside = tmp_path / "outside"
         outside.mkdir()
-        base = mount_config.nextcloud_mount_path / "Users" / "alice"
+        base = mount_config.workspace_path / "Users" / "alice"
         base.mkdir(parents=True)
         (base / "istota").symlink_to(outside, target_is_directory=True)
 
@@ -1301,7 +1301,7 @@ class TestSeedingContainment:
         victim = tmp_path / "victim.md"
         victim.write_text("untouched")
         examples = (
-            mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+            mount_config.workspace_path / "Users" / "alice" / "istota" / "examples"
         )
         examples.mkdir(parents=True)
         (examples / "CRON.md").symlink_to(victim)
@@ -1318,7 +1318,7 @@ class TestSeedingContainment:
         from .support.blocking import fails_if_it_blocks
 
         examples = (
-            mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+            mount_config.workspace_path / "Users" / "alice" / "istota" / "examples"
         )
         examples.mkdir(parents=True)
         os.mkfifo(examples / "CRON.md")
@@ -1331,7 +1331,7 @@ class TestSeedingContainment:
         # a guard that refused everything could not pass this class.
         ensure_user_directories_v2(mount_config, "alice")
         examples = (
-            mount_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "examples"
+            mount_config.workspace_path / "Users" / "alice" / "istota" / "examples"
         )
         assert (examples / "CRON.md").read_text() == CRON_EXAMPLE
         # And it overwrites on the next call, which is the point of the block.
@@ -1348,12 +1348,12 @@ class TestChannelAndDatedMemoryReads:
     def mount_config(self, tmp_path):
         mount = tmp_path / "mount"
         mount.mkdir()
-        return Config(nextcloud_mount_path=mount)
+        return Config(workspace_path=mount)
 
     def test_a_symlink_at_channel_md_is_not_followed(self, mount_config, tmp_path):
         secret = tmp_path / "secret"
         secret.write_text("TOP SECRET TOKEN")
-        d = mount_config.nextcloud_mount_path / "Channels" / "room1"
+        d = mount_config.workspace_path / "Channels" / "room1"
         d.mkdir(parents=True)
         (d / "CHANNEL.md").symlink_to(secret)
         assert read_channel_memory(mount_config, "room1") is None
@@ -1361,7 +1361,7 @@ class TestChannelAndDatedMemoryReads:
     def test_a_fifo_at_channel_md_does_not_block(self, mount_config):
         from .support.blocking import fails_if_it_blocks
 
-        d = mount_config.nextcloud_mount_path / "Channels" / "room1"
+        d = mount_config.workspace_path / "Channels" / "room1"
         d.mkdir(parents=True)
         os.mkfifo(d / "CHANNEL.md")
         with fails_if_it_blocks(what="read_channel_memory"):
@@ -1371,7 +1371,7 @@ class TestChannelAndDatedMemoryReads:
         outside = tmp_path / "outside"
         outside.mkdir()
         (outside / "CHANNEL.md").write_text("TOP SECRET TOKEN")
-        channels = mount_config.nextcloud_mount_path / "Channels"
+        channels = mount_config.workspace_path / "Channels"
         channels.mkdir(parents=True)
         (channels / "room1").symlink_to(outside, target_is_directory=True)
         assert read_channel_memory(mount_config, "room1") is None
@@ -1384,7 +1384,7 @@ class TestChannelAndDatedMemoryReads:
         `Channels/{token}` pointing at another room and put that room's
         CHANNEL.md into this room's prompt.
         """
-        channels = mount_config.nextcloud_mount_path / "Channels"
+        channels = mount_config.workspace_path / "Channels"
         other = channels / "room2"
         other.mkdir(parents=True)
         (other / "CHANNEL.md").write_text("other room's business")
@@ -1393,7 +1393,7 @@ class TestChannelAndDatedMemoryReads:
         assert read_channel_memory(mount_config, "room1") is None
 
     def test_an_ordinary_channel_memory_still_reads(self, mount_config):
-        d = mount_config.nextcloud_mount_path / "Channels" / "room1"
+        d = mount_config.workspace_path / "Channels" / "room1"
         d.mkdir(parents=True)
         (d / "CHANNEL.md").write_text("room notes")
         assert read_channel_memory(mount_config, "room1") == "room notes"
@@ -1401,14 +1401,14 @@ class TestChannelAndDatedMemoryReads:
     def test_a_symlinked_dated_memory_is_skipped(self, mount_config, tmp_path):
         secret = tmp_path / "secret"
         secret.write_text("TOP SECRET TOKEN")
-        memories = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories = mount_config.workspace_path / "Users" / "alice" / "memories"
         memories.mkdir(parents=True)
         today = datetime.now().strftime("%Y-%m-%d")
         (memories / f"{today}.md").symlink_to(secret)
         assert read_dated_memories(mount_config, "alice") is None
 
     def test_an_ordinary_dated_memory_still_reads(self, mount_config):
-        memories = mount_config.nextcloud_mount_path / "Users" / "alice" / "memories"
+        memories = mount_config.workspace_path / "Users" / "alice" / "memories"
         memories.mkdir(parents=True)
         today = datetime.now().strftime("%Y-%m-%d")
         (memories / f"{today}.md").write_text("- had coffee")

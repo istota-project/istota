@@ -75,6 +75,9 @@ module_data_dir = "data/modules"
 # =============================================================================
 # File Access Configuration
 # =============================================================================
+# Root of the bot's on-disk file tree. Defaults to nextcloud_mount_path.
+# workspace_path = "/srv/mount/nextcloud/content"
+
 # Choose ONE of the following options:
 
 # Option 1: rclone CLI (default, works without systemd mount)
@@ -979,18 +982,15 @@ worker_idle_poll_interval = 0.5
 # 30s default. Defense-in-depth on top of WAL — leave at 2000 unless you have a
 # reason to change it.
 main_loop_read_timeout_ms = 2000
-# Snapshot local DBs (framework + per-user modules) to the Nextcloud mount for
-# off-host durability — they left the Nextcloud-synced workspaces when they
-# moved to local disk. Uses SQLite's online backup API (consistent live copy).
+# Snapshot local DBs (framework + per-user modules) for off-host durability.
+# Uses SQLite's online backup API (consistent live copy).
 db_backup_enabled = true
 db_backup_interval = 86400          # seconds between snapshots (daily)
-# db_backup_dir = ""                # empty = {nextcloud_mount}/Backups/db/snapshots
-# Where a [nextcloud] url is set, a destination at or under nextcloud_mount_path
-# is skipped while that mount is down, however it is spelled — a stale mountpoint
-# would take the copies to local disk and lose them when the mount returns.
-# Naming a path off the mount instead is trusted as-is; nothing here can check
-# it. With no [nextcloud] url the mount path is a plain local folder and the
-# check does not apply.
+# db_backup_dir = ""                # empty = {workspace_path}/Backups/db/snapshots
+# A destination at or under nextcloud_mount_path is skipped while that mount is
+# down, however it is spelled. A stale mountpoint would take the copies to local
+# disk and lose them when the mount returns. A destination outside the mount is
+# trusted as-is; nothing here can check it.
 
 # Runtime self-check re-run. The auto-update cron changes what is installed
 # under a config the daemon already loaded, so a boot-only check is blind to it.

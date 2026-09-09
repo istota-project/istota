@@ -410,7 +410,7 @@ def load_cron_document(config, user_id: str) -> "CronDocument | None":
     wants and must not write anything back on the strength of it; the
     previous definitions stay in force.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return None
 
     # Hardened like every other host-side read of `{bot_dir}/config/`
@@ -547,7 +547,7 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
                     name, user_id,
                 )
                 continue
-            file_path = config.nextcloud_mount_path / prompt_file.lstrip("/")
+            file_path = config.workspace_path / prompt_file.lstrip("/")
             try:
                 prompt = file_path.read_text().strip()
             except OSError as e:
@@ -801,7 +801,7 @@ def _write_generated_prompt(path, prompt: str) -> None:
 def _externalize_multiline_prompts(config, user_id: str, jobs: list[CronJob]) -> None:
     """Move inline multiline prompts into files before CRON.md is rewritten."""
     prompts_dir_ref = f"{get_user_scripts_path(user_id, config.bot_dir_name)}/prompts"
-    prompts_dir = config.nextcloud_mount_path / prompts_dir_ref.lstrip("/")
+    prompts_dir = config.workspace_path / prompts_dir_ref.lstrip("/")
     assigned_names: dict[str, str] = {}
 
     for job in jobs:
@@ -1263,7 +1263,7 @@ def migrate_db_jobs_to_file(conn, config, user_id: str, overwrite: bool = False)
     Returns True if a file was written — which now includes the write
     itself having succeeded, not just having been attempted.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return False
 
     from .storage import resolve_user_config_dir  # noqa: PLC0415 - import cycle
@@ -1335,7 +1335,7 @@ def update_job_enabled_in_cron_md(config, user_id: str, job_name: str, enabled: 
     or failed write is False, so a caller that reports success is reporting
     the file's state rather than its own intention (ISSUE-369).
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return False
 
     doc = load_cron_document(config, user_id)
@@ -1381,7 +1381,7 @@ def remove_job_from_cron_md(config, user_id: str, job_name: str) -> bool:
     (ISSUE-387), so an exception here would leave the task recorded complete
     and its answer undelivered.
     """
-    if not config.use_mount:
+    if not config.has_workspace:
         return False
 
     doc = load_cron_document(config, user_id)

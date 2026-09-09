@@ -28,7 +28,7 @@ def pb_config(tmp_path):
     return Config(
         db_path=tmp_path / "test.db",
         temp_dir=tmp_path / "temp",
-        nextcloud_mount_path=mount,
+        workspace_path=mount,
         sleep_cycle=SleepCycleConfig(enabled=True, lookback_hours=24),
         playbooks=PlaybooksConfig(enabled=True, min_tool_calls=4),
         memory_search=MemorySearchConfig(enabled=True, auto_index_memory_files=True),
@@ -203,7 +203,7 @@ class TestProcessWritesPlaybooks:
             )
             assert process_user_sleep_cycle(pb_config, conn, "alice") is True
 
-            pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+            pb_dir = pb_config.workspace_path / "Users" / "alice" / "istota" / "playbooks"
             files = list(pb_dir.glob("*.md"))
             assert len(files) == 1
             text = files[0].read_text()
@@ -227,7 +227,7 @@ class TestProcessWritesPlaybooks:
             db.update_task_status(conn, t, "running")
             db.update_task_status(conn, t, "completed", result="PR opened", execution_trace=_trace("⚙️ a"))
             process_user_sleep_cycle(pb_config, conn, "alice")
-        pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+        pb_dir = pb_config.workspace_path / "Users" / "alice" / "istota" / "playbooks"
         assert not pb_dir.exists()
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
@@ -242,7 +242,7 @@ class TestProcessWritesPlaybooks:
                     execution_trace=_trace("⚙️ a", "⚙️ b", "📄 c", "📝 d"),
                 )
                 process_user_sleep_cycle(pb_config, conn, "alice")
-        pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+        pb_dir = pb_config.workspace_path / "Users" / "alice" / "istota" / "playbooks"
         assert len(list(pb_dir.glob("*.md"))) == 1
 
     @patch("istota.memory.sleep_cycle._run_sleep_cycle_brain")
@@ -250,7 +250,7 @@ class TestProcessWritesPlaybooks:
         """ISSUE-174 Concern 1: a hand-corrected `pinned: true` playbook survives
         the next same-title re-derivation instead of being clobbered."""
         mock_run.return_value = (True, _PB_OUTPUT)
-        pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+        pb_dir = pb_config.workspace_path / "Users" / "alice" / "istota" / "playbooks"
         pb_dir.mkdir(parents=True)
         # Slug of the _PB_OUTPUT title.
         slug = _playbook_slug("Open a GitHub PR via developer skill")
@@ -282,7 +282,7 @@ class TestProcessWritesPlaybooks:
         model keeps getting the stale chunk. The pin skips the write but
         refreshes the index from the human-corrected file."""
         mock_run.return_value = (True, _PB_OUTPUT)
-        pb_dir = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+        pb_dir = pb_config.workspace_path / "Users" / "alice" / "istota" / "playbooks"
         pb_dir.mkdir(parents=True)
         slug = _playbook_slug("Open a GitHub PR via developer skill")
         pinned = pb_dir / f"{slug}.md"
@@ -364,7 +364,7 @@ _RETENTION_SENTINEL = ".retention_initialized"
 
 
 def _pb_dir(pb_config):
-    d = pb_config.nextcloud_mount_path / "Users" / "alice" / "istota" / "playbooks"
+    d = pb_config.workspace_path / "Users" / "alice" / "istota" / "playbooks"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -469,7 +469,7 @@ class TestCleanupPlaybooks:
         config = Config(
             db_path=tmp_path / "test.db",
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             sleep_cycle=SleepCycleConfig(enabled=True, lookback_hours=24),
             playbooks=PlaybooksConfig(enabled=True, min_tool_calls=4),
             memory_search=MemorySearchConfig(enabled=True, auto_index_memory_files=True),
@@ -504,7 +504,7 @@ class TestCleanupPlaybooks:
         config = Config(
             db_path=tmp_path / "test.db",
             temp_dir=tmp_path / "temp",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             sleep_cycle=SleepCycleConfig(enabled=True, lookback_hours=24),
             playbooks=PlaybooksConfig(enabled=True, min_tool_calls=4),
             memory_search=MemorySearchConfig(enabled=True, auto_index_memory_files=True),

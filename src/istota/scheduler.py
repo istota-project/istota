@@ -809,9 +809,9 @@ def download_talk_attachments(config: Config, attachments: list[str]) -> list[st
     local_paths = []
     for att in attachments:
         if att.startswith("Talk/"):
-            if config.use_mount:
+            if config.has_workspace:
                 # Use mount path directly - no download needed
-                mount_path = config.nextcloud_mount_path / att
+                mount_path = config.workspace_path / att
                 if mount_path.exists():
                     local_paths.append(str(mount_path))
                     logger.debug(f"Talk attachment via mount: {att} -> {mount_path}")
@@ -2055,8 +2055,9 @@ def _execute_skill_task(
         env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
     if config.db_path:
         env["ISTOTA_DB_PATH"] = str(config.db_path)
-    if config.nextcloud_mount_path:
-        env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path)
+    if config.workspace_path:
+        env["ISTOTA_WORKSPACE_PATH"] = str(config.workspace_path)
+        env["NEXTCLOUD_MOUNT_PATH"] = str(config.workspace_path)
     if task.conversation_token:
         env["ISTOTA_CONVERSATION_TOKEN"] = task.conversation_token
 
@@ -2162,8 +2163,9 @@ def _execute_command_task(
         env["ISTOTA_CONFIG_PATH"] = str(config.config_path)
     if config.db_path:
         env["ISTOTA_DB_PATH"] = str(config.db_path)
-    if config.nextcloud_mount_path:
-        env["NEXTCLOUD_MOUNT_PATH"] = str(config.nextcloud_mount_path)
+    if config.workspace_path:
+        env["ISTOTA_WORKSPACE_PATH"] = str(config.workspace_path)
+        env["NEXTCLOUD_MOUNT_PATH"] = str(config.workspace_path)
     if task.conversation_token:
         env["ISTOTA_CONVERSATION_TOKEN"] = task.conversation_token
 
@@ -2589,12 +2591,12 @@ def _remove_once_job_from_cron_md(config: Config, user_id: str, job_name: str) -
                         "again (user=%s job_id=%d)",
                         job_name, user_id, resurrected.id,
                     )
-        elif config.use_mount:
+        elif config.has_workspace:
             # The table row is already gone, so if the job is still in the
             # file it is now the only definition and the next sync re-inserts
             # it — a `once = true` job that runs a second time. Unchanged
             # behaviour, but until ISSUE-369 the writer could not report a
-            # refused write at all, so nothing said so. Guarded on `use_mount`
+            # refused write at all, so nothing said so. Guarded on `has_workspace`
             # because CRON.md is not the source of truth without one and False
             # there is the ordinary answer rather than a failure.
             logger.warning(
@@ -5170,7 +5172,7 @@ def check_skill_overlay_reindex(config: Config) -> list:
         config.memory_search.enabled and config.memory_search.auto_index_memory_files
     ):
         return []
-    if not config.use_mount:
+    if not config.has_workspace:
         return []
 
     touched: list[str] = []
@@ -8375,7 +8377,7 @@ def build_interval_gates(
             enabled=lambda c: bool(
                 c.memory_search.enabled
                 and c.memory_search.auto_index_memory_files
-                and c.use_mount
+                and c.has_workspace
                 and c.scheduler.skill_overlay_reindex_interval
             ),
             background=True,

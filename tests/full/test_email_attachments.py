@@ -7,8 +7,8 @@ Nextcloud by `tests/testbed/test_email_wire.py` and
 
 **What "uploaded to Nextcloud" turns out to mean on this deployment**, because
 the spec's phrasing assumed a WebDAV write and there is not one.
-`upload_file_to_inbox_v2` branches on `config.use_mount`, and
-`render-config.sh` writes `nextcloud_mount_path` as the literal `/mnt/shared` on
+`upload_file_to_inbox_v2` branches on `config.has_workspace`, and
+`render-config.sh` writes `workspace_path` as the literal `/mnt/shared` on
 every profile — so the write is an ordinary `shutil.copy2` onto a Docker volume.
 Nextcloud reaches the same bytes through the `files_external` *local* mount
 `provision-nc.sh` creates for the bot, which is why the WebDAV path carries a

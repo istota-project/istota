@@ -618,7 +618,7 @@ def build_mount_plan(
     # because no socket is bound at any path and no `DOCKER_HOST` is exported.
 
     # --- Nextcloud mounts (scoped per-user for both admin and non-admin) ---
-    mount = config.nextcloud_mount_path
+    mount = config.workspace_path
     user_dir: Path | None = None
     if mount:
         mount = mount.resolve()
@@ -874,7 +874,7 @@ def build_mount_plan(
     # second derivation beside them: this call used to name the workspace, the
     # source tree, the venv and the REPL workspace over again, four paths that
     # are all binds emitted above. Passing the mounts is what makes the two
-    # agree by construction. The Nextcloud mount root is the one protected path
+    # agree by construction. The workspace root is the one protected path
     # that is not a bind, and `mask_protected_paths` adds it from the config.
     protected = executor.mask_protected_paths(config, plan_mounts=tuple(mounts))
     masks, refused = plan_masks(config, protected)

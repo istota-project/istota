@@ -2003,7 +2003,7 @@ defect wearing a flag.
 `security.sandbox_ro_paths` defaults to `[]` and is bound verbatim when it is
 not — the same setting whose old `/srv/app` default is how every database got
 exposed once before. On the standalone shape there is a second route, because
-`nextcloud_mount_path` and `db_path.parent` are the same directory there: a
+`workspace_path` and `db_path.parent` are the same directory there: a
 `user_resources` row with `resource_path = "logs"` resolves to exactly the
 transcript directory, which both `build_bwrap_cmd` and `native_fs_roots` bind as
 a per-resource mount. `tests/test_sandbox.py::TestSessionLogContainment` pins the

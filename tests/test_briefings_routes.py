@@ -231,10 +231,10 @@ class TestPathPicker:
 
         cfg = Config(
             db_path=tmp_path / "istota.db",
-            nextcloud_mount_path=tmp_path / "mount",
+            workspace_path=tmp_path / "mount",
             users={"alice": UserConfig(timezone="UTC")},
         )
-        user_root = cfg.nextcloud_mount_path / "Users" / "alice"
+        user_root = cfg.workspace_path / "Users" / "alice"
         (user_root / "shared").mkdir(parents=True, exist_ok=True)
         (user_root / "istota" / "config").mkdir(parents=True, exist_ok=True)
         (user_root / "shared" / "team-todo.md").write_text("- [ ] x\n")

@@ -65,7 +65,7 @@ def _init_funcs() -> dict:
 
 def legacy_db_path(config, user_id: str, module: str) -> Path | None:
     """The old on-mount path for a module DB, or None if no mount is configured."""
-    mount = getattr(config, "nextcloud_mount_path", None)
+    mount = getattr(config, "workspace_path", None)
     if not mount:
         return None
     from istota.storage import get_user_bot_path

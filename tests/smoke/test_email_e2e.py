@@ -269,12 +269,12 @@ class TestAttachmentsWithoutNextcloud:
     """An attachment lands in the user's inbox tree, with no Nextcloud running.
 
     **The spec expected the fallback branch here and that is not what happens.**
-    `upload_file_to_inbox_v2` branches on `config.use_mount`, not on the storage
-    backend, and `render-config.sh` writes `nextcloud_mount_path` as the literal
+    `upload_file_to_inbox_v2` branches on `config.has_workspace`, not on the storage
+    backend, and `render-config.sh` writes `workspace_path` as the literal
     `/mnt/shared` on every profile — so the "upload" is a `shutil.copy2` onto a
     directory, and it succeeds whether or not a Nextcloud exists to serve it.
     The local-path fallback is only reached when that copy *fails*, which on
-    this shape would take breaking the mount.
+    this shape would take breaking the workspace directory.
 
     So the honest lean claim is the one below: the file is written under the
     user's inbox path and the prompt names it there. What the full shape adds is

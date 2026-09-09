@@ -40,7 +40,7 @@ ORIGIN = {"origin": "https://example.com"}
 def _make_config(tmp_path, db_path, *, floor="untrusted", user_setting=""):
     return Config(
         db_path=db_path,
-        nextcloud_mount_path=tmp_path / "mount",
+        workspace_path=tmp_path / "mount",
         site=SiteConfig(hostname="example.com"),
         email=EmailConfig(
             enabled=True,

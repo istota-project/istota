@@ -286,7 +286,7 @@ class TestRunDbBackup:
 def _daemon_config(tmp_path):
     cfg = Config(
         db_path=tmp_path / "istota.db",
-        nextcloud_mount_path=tmp_path / "workspace",
+        workspace_path=tmp_path / "workspace",
         users={"bob": UserConfig(display_name="Bob")},
         talk=TalkConfig(enabled=False),
         security=SecurityConfig(sandbox_enabled=False),

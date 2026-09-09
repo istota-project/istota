@@ -684,8 +684,8 @@ def check_writable_dirs(config: "Config", probe: bool) -> list[CheckResult]:
         module_root_error = str(exc)
     else:
         module_root_error = ""
-    if config.nextcloud_mount_path is not None:
-        candidates.append(("mount", Path(config.nextcloud_mount_path)))
+    if config.workspace_path is not None:
+        candidates.append(("mount", Path(config.workspace_path)))
 
     results: list[CheckResult] = []
     for label, path in candidates:
@@ -739,22 +739,12 @@ def check_mount_liveness(config: "Config", probe: bool) -> CheckResult:
     every path check above happily reports as fine while every read returns
     nothing. ``ismount`` is the only cheap way to tell the two apart.
 
-    Gated on the workspace actually being Nextcloud-backed, not merely on a path
-    being configured. The local single-user install sets
-    ``nextcloud_mount_path`` to a plain directory under ``~`` and nothing ever
-    mounts it — asserting ``ismount`` there reports a healthy install as broken.
-    ``storage_is_nextcloud`` is the existing distinction between the two shapes.
+    ``nextcloud_mount_path`` is set only when the workspace uses a real mount.
     """
     mount = config.nextcloud_mount_path
     if mount is None:
         return CheckResult(
             "runtime.mount_liveness", SKIP, "no nextcloud_mount_path configured"
-        )
-    if not config.storage_is_nextcloud:
-        return CheckResult(
-            "runtime.mount_liveness",
-            SKIP,
-            f"{mount} is a local workspace folder, not a mount (no Nextcloud URL configured)",
         )
     path = Path(mount)
     if os.path.ismount(path):
@@ -1458,7 +1448,7 @@ def _control_overlap_findings(
       per conversation token and doctor has no task to take one from.
     - the **per-resource mounts**, which are the reason this axis reports more
       than the guards themselves cover. A ``user_resources`` row resolves to
-      ``mount / resource_path``, bounded by the Nextcloud mount root and
+      ``mount / resource_path``, bounded by the workspace root and
       nothing else, so on a layout where ``temp_dir`` sits under the mount a
       row naming the tree binds it — read-write or read-only — and neither
       ``native_fs_roots`` entry nor the ``extra_ro_binds`` bind covers a
@@ -1532,7 +1522,7 @@ def _control_overlap_findings(
             except Exception:  # noqa: BLE001 - a diagnostic must not raise
                 continue
 
-    mount = getattr(config, "nextcloud_mount_path", None)
+    mount = getattr(config, "workspace_path", None)
     if not mount:
         return out
     try:
@@ -5965,11 +5955,11 @@ def check_skill_overlays(config: "Config", probe: bool) -> CheckResult:
     changed is which one alerts.
     """
     name = "config.skill_overlays"
-    if not config.use_mount:
+    if not config.has_workspace:
         return CheckResult(
             name, SKIP, "no workspace mount configured, so overlays are not read"
         )
-    mount = Path(config.nextcloud_mount_path)
+    mount = Path(config.workspace_path)
     if not (mount / "Users").is_dir():
         return CheckResult(name, SKIP, f"{mount}/Users does not exist yet")
 

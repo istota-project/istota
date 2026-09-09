@@ -212,7 +212,7 @@ class TestShutdownReleasesSignalKilledTasks:
         cfg.db_path = tmp_path / "istota.db"
         cfg.temp_dir = tmp_path / "temp"
         cfg.temp_dir.mkdir(parents=True, exist_ok=True)
-        cfg.nextcloud_mount_path = tmp_path / "mount"
+        cfg.workspace_path = tmp_path / "mount"
         cfg.talk.enabled = False
         db.init_db(cfg.db_path)
         return cfg
