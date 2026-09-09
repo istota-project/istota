@@ -404,6 +404,12 @@ def convert(settings: dict) -> dict:
                 continue
             result[ansible_key] = value
 
+    # Settings written before the workspace/mount split used the mount key for
+    # the workspace root. Keep it as a fallback so an update does not replace a
+    # custom path with the role default. A new-shape workspace key wins.
+    if "workspace_path" not in settings and "nextcloud_mount_path" in settings:
+        result["istota_workspace_path"] = settings["nextcloud_mount_path"]
+
     # Flat section keys
     for section_name, key_map in _SECTION_FLAT_KEYS.items():
         section = settings.get(section_name, {})

@@ -986,7 +986,7 @@ main_loop_read_timeout_ms = 2000
 # Uses SQLite's online backup API (consistent live copy).
 db_backup_enabled = true
 db_backup_interval = 86400          # seconds between snapshots (daily)
-# db_backup_dir = ""                # empty = {nextcloud_mount}/Backups/db/snapshots
+# db_backup_dir = ""                # empty = {workspace_path}/Backups/db/snapshots
 # A destination at or under nextcloud_mount_path is skipped while that mount is
 # down, however it is spelled. A stale mountpoint would take the copies to local
 # disk and lose them when the mount returns. A destination outside the mount is

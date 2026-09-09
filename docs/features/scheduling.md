@@ -66,7 +66,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `name` | yes | Job identifier |
 | `cron` | yes | Cron expression (evaluated in user's timezone) |
 | `prompt` | for prompt jobs | The prompt to send to Claude |
-| `prompt_file` | for prompt_file jobs | Path to prompt file (relative to mount root) |
+| `prompt_file` | for prompt_file jobs | Path to prompt file (relative to workspace root) |
 | `command` | for command jobs | Shell command to execute |
 | `room` | no | Talk room token for output |
 | `target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor |
