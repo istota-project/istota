@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-09-09
+
 You can now use the project page as a complete guide to Istota: what the personal system does, how its modules connect, where each deployment shape draws its security boundary, and how to install and develop it. The repository now uses the EUPL v1.2, with the package metadata and full license text in agreement.
 
 Generated configurations now keep ordinary workspaces separate from FUSE mounts, and GitHub Releases are published again when a full changeset exceeds the platform's body limit. This patch contains 13 commits after the 50-commit 0.41.0 release.
@@ -2607,7 +2609,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.41.0...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.41.1...main
+[0.41.1]: https://gitlab.com/cynium/istota/-/releases/v0.41.1
 [0.41.0]: https://gitlab.com/cynium/istota/-/releases/v0.41.0
 [0.40.1]: https://gitlab.com/cynium/istota/-/releases/v0.40.1
 [0.40.0]: https://gitlab.com/cynium/istota/-/releases/v0.40.0
