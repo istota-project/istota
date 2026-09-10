@@ -357,6 +357,26 @@ class TestSmsProviderContract:
         assert registry.active() is built
         assert registry.names() == ("twilio",)
 
+    def test_disabled_sms_keeps_complete_adapters_for_late_callbacks(self):
+        from istota.transport.sms.providers._types import SmsProviderAdapter
+        from istota.transport.sms.providers.registry import make_provider_registry
+
+        cfg = Config()
+        cfg.sms.twilio.account_sid = "account"
+        cfg.sms.twilio.auth_token = "auth"
+        cfg.sms.twilio.api_key_sid = "key"
+        cfg.sms.twilio.api_key_secret = "secret"
+        cfg.sms.twilio.messaging_service_sid = "service"
+        built = SmsProviderAdapter("twilio", lambda request: request, lambda request: request)
+
+        registry = make_provider_registry(
+            cfg, builders={"twilio": lambda config: built},
+        )
+
+        assert registry.active() is None
+        assert registry.get("twilio") is built
+        assert registry.callback_only_names() == ("twilio",)
+
 
 class TestSmsDoctorReadiness:
     def _results(self, cfg):
@@ -398,3 +418,15 @@ class TestSmsDoctorReadiness:
 
         assert results["sms.telnyx"].status == doctor.FAIL
         assert "SMS-SENTINEL-SECRET" not in str(results["sms.telnyx"])
+
+    def test_disabled_sms_reports_complete_provider_as_callback_only(self):
+        cfg = Config()
+        cfg.sms.telnyx.api_key = "telnyx-secret"
+        cfg.sms.telnyx.public_key = "public-key"
+        cfg.sms.telnyx.messaging_profile_id = "profile-id"
+
+        results = {result.name: result for result in self._results(cfg)}
+
+        assert results["sms.common"].status == doctor.SKIP
+        assert results["sms.telnyx"].status == doctor.OK
+        assert "callback-only" in results["sms.telnyx"].detail

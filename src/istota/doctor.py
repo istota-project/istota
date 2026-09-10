@@ -6918,9 +6918,11 @@ def _check_sms_provider(config: "Config", provider: str) -> CheckResult:
             "provider block is incomplete; missing " + ", ".join(missing),
             remedy=f"Complete [{name}] or clear every value in that block.",
         )
-    if not config.sms.enabled:
-        return CheckResult(name, SKIP, "provider is configured but [sms] is disabled")
-    role = "active" if config.sms.provider == provider else "callback-only"
+    role = (
+        "active"
+        if config.sms.enabled and config.sms.provider == provider
+        else "callback-only"
+    )
     return CheckResult(
         name,
         OK,
