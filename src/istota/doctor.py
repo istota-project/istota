@@ -6877,6 +6877,65 @@ def check_signaling_watchers(config: "Config", probe: bool) -> CheckResult:
 # The registry
 # ---------------------------------------------------------------------------
 
+
+def check_sms_common(config: "Config", probe: bool) -> CheckResult:
+    """Local SMS readiness without a provider or carrier network claim."""
+    if not config.sms.enabled:
+        return CheckResult("sms.common", SKIP, "[sms] enabled = false")
+
+    from .config import sms_config_errors
+
+    errors = [
+        error for error in sms_config_errors(config)
+        if "provider block" not in error
+    ]
+    if errors:
+        return CheckResult(
+            "sms.common",
+            FAIL,
+            "; ".join(errors),
+            remedy="Correct the local [sms] values and reload the configuration.",
+        )
+    return CheckResult(
+        "sms.common",
+        OK,
+        f"local configuration is ready with {config.sms.provider} active",
+    )
+
+
+def _check_sms_provider(config: "Config", provider: str) -> CheckResult:
+    from .config import sms_provider_has_values, sms_provider_missing_fields
+
+    name = f"sms.{provider}"
+    has_values = sms_provider_has_values(config, provider)
+    missing = sms_provider_missing_fields(config, provider)
+    if not has_values:
+        return CheckResult(name, SKIP, f"[{name}] is not configured")
+    if missing:
+        return CheckResult(
+            name,
+            FAIL,
+            "provider block is incomplete; missing " + ", ".join(missing),
+            remedy=f"Complete [{name}] or clear every value in that block.",
+        )
+    if not config.sms.enabled:
+        return CheckResult(name, SKIP, "provider is configured but [sms] is disabled")
+    role = "active" if config.sms.provider == provider else "callback-only"
+    return CheckResult(
+        name,
+        OK,
+        f"local {role} adapter configuration is complete; provider reachability "
+        "and handset delivery were not tested",
+    )
+
+
+def check_sms_twilio(config: "Config", probe: bool) -> CheckResult:
+    return _check_sms_provider(config, "twilio")
+
+
+def check_sms_telnyx(config: "Config", probe: bool) -> CheckResult:
+    return _check_sms_provider(config, "telnyx")
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -6913,6 +6972,9 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("talk.signaling_chat_relay", check_signaling_chat_relay),
     ("talk.signaling_auth", check_signaling_auth),
     ("talk.signaling_watchers", check_signaling_watchers),
+    ("sms.common", check_sms_common),
+    ("sms.twilio", check_sms_twilio),
+    ("sms.telnyx", check_sms_telnyx),
     ("web.static", check_web_static),
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
@@ -7012,6 +7074,9 @@ CHECK_SCOPES: dict[str, str] = {
     "talk.signaling_chat_relay": DEPLOYMENT,
     "talk.signaling_auth": DEPLOYMENT,
     "talk.signaling_watchers": DEPLOYMENT,
+    "sms.common": DEPLOYMENT,
+    "sms.twilio": DEPLOYMENT,
+    "sms.telnyx": DEPLOYMENT,
     "web.static": IMAGE,
     # Deployment, not image: it compares the bundle against the checkout it
     # was built from, and a bare `docker run` has no checkout.

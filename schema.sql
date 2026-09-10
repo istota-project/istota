@@ -770,6 +770,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     user_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL DEFAULT '',
     email_addresses TEXT NOT NULL DEFAULT '[]',          -- JSON array
+    sms_phone_number TEXT NOT NULL DEFAULT '',            -- unique operator-bound E.164 identity; empty means unbound
     timezone TEXT NOT NULL DEFAULT 'UTC',
     log_channel TEXT NOT NULL DEFAULT '',                -- Talk room token
     alerts_channel TEXT NOT NULL DEFAULT '',             -- Talk room token
@@ -792,6 +793,68 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profiles_sms_phone_number
+ON user_profiles(sms_phone_number)
+WHERE sms_phone_number <> '';
+
+-- Provider-neutral inbound SMS deduplication. The authenticated body remains
+-- on the task row when a request becomes a task; raw provider payloads are not
+-- retained here.
+CREATE TABLE IF NOT EXISTS processed_sms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    provider_message_id TEXT NOT NULL,
+    provider_event_id TEXT,
+    user_id TEXT NOT NULL,
+    task_id INTEGER,
+    from_number TEXT NOT NULL,
+    to_number TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    opt_out_action TEXT,
+    received_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    UNIQUE(provider, provider_message_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_sms_provider_event
+ON processed_sms(provider, provider_event_id)
+WHERE provider_event_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_processed_sms_task_id ON processed_sms(task_id);
+CREATE INDEX IF NOT EXISTS idx_processed_sms_received_at ON processed_sms(received_at);
+
+CREATE TABLE IF NOT EXISTS sms_opt_outs (
+    phone_number TEXT PRIMARY KEY,
+    opted_out_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- One row per logical outbound response. The body hash supports audit and
+-- idempotency without retaining another copy of the private message text.
+CREATE TABLE IF NOT EXISTS sent_sms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    logical_key TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL,
+    provider_message_id TEXT,
+    provider_event_id TEXT,
+    user_id TEXT NOT NULL,
+    task_id INTEGER,
+    to_number TEXT NOT NULL,
+    from_number TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    estimated_segments INTEGER NOT NULL,
+    reported_segments INTEGER,
+    body_chars INTEGER NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    claimed_at TEXT,
+    attempted_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    UNIQUE(provider, provider_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sent_sms_task_id ON sent_sms(task_id);
+CREATE INDEX IF NOT EXISTS idx_sent_sms_status ON sent_sms(status);
 
 -- Web chat rooms (in-app chat surface). Each room owns a per-user channel
 -- token used as the task's conversation_token, so every room gets its own

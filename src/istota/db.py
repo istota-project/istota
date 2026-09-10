@@ -482,6 +482,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # what `_add_columns` passes for this file; `outbound_drafts.reply_to` below
     # is the site where it is not safe and does not.
     _add_columns(conn, "user_profiles", {
+        # One operator-bound E.164 identity per user. The schema creates the
+        # partial unique index only after this migration has added the column
+        # on an upgraded database.
+        "sms_phone_number": "TEXT NOT NULL DEFAULT ''",
         # Purpose-keyed delivery routing. `routing` is a JSON object
         # {purpose -> output_target descriptor}; `default_destination` is the
         # fallback descriptor. Defaults reproduce current behaviour

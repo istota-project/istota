@@ -172,6 +172,10 @@ test = [
     "istota[garmin]",
     "istota[signaling]",
 ]
+sms = [
+    "telnyx>=4.178.0",
+    "twilio>=9.11.1",
+]
 
 [project.scripts]
 istota = "istota.cli:main"
