@@ -18,6 +18,8 @@ Emissaries define how the agent reasons about:
 
 Based on the [Emissaries](https://github.com/istota-project/emissaries) framework.
 
+The framework also shares the humanist premise of [Common Task](https://commontask.org/): people are ends rather than inputs to a system, and technology should be judged by how it affects their agency and well-being.
+
 Controlled by `emissaries_enabled` (default `true`). Skipped for briefings.
 
 ## Persona

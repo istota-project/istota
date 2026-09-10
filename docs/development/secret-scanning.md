@@ -115,11 +115,7 @@ the terms you want redacted *is* the leak — it tells a reader exactly what to
 search the history for. Start from `.private-data-local.example`, which is
 comments only.
 
-Runtime derivation covers the two terms nobody should have to configure: an
-absolute path into your home directory, and your personal address. The git user
-*name* and the mail *domain* are deliberately **not** derived — this project puts
-both in `LICENSE` and `README.md` on purpose, so denylisting them would block
-every commit.
+Runtime derivation covers the two terms nobody should have to configure: an absolute path into your home directory, and your personal address. The git user *name* and the mail *domain* are deliberately **not** derived. Both are public project metadata, and `README.md` names them on purpose, so denylisting them would block every commit.
 
 Patterns are POSIX extended regexes, one per line; a plain literal is a valid
 regex. The comment heading above a block becomes the label a hit reports under.

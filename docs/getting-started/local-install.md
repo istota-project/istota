@@ -1,6 +1,6 @@
 # Local single-user install
 
-Istota's default shape is a multi-user server deployment backed by Nextcloud (files, Talk chat, CalDAV, OAuth login), isolated per-user with bubblewrap — see the [bare metal](quickstart-bare-metal.md) and [Docker](quickstart-docker.md) quickstarts. This page covers the other shape: a slimmed-down **local, single-user install** you run on your own mac or Linux box, like a locally-installed agent harness. No Nextcloud, no server, no sandbox, no login.
+Istota has three deployment shapes. The recommended persistent, multi-user shape is the [bare-metal server](quickstart-bare-metal.md), which connects to an existing Nextcloud and isolates each user's tasks with bubblewrap. The [Docker server](quickstart-docker.md) bundles its own Nextcloud but runs agent tasks unsandboxed. This page covers the **local, single-user install** for your own mac or Linux machine: no Nextcloud, no server, no sandbox, and no login.
 
 The workspace is a plain local folder (default `~/.istota`). The web UI runs on loopback with authentication bypassed. It is always single-user and always trusted.
 

@@ -5,64 +5,78 @@
 [![Last commit](https://img.shields.io/github/last-commit/istota-project/istota?logo=github)](https://github.com/istota-project/istota/commits/main)
 [![License](https://img.shields.io/github/license/istota-project/istota)](https://github.com/istota-project/istota/blob/main/LICENSE)
 
-**Istota** is a self-hosted personal AI assistant with its own web UI. It runs on your own server and works with any model — use Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI, or point it at any OpenAI-compatible endpoint like OpenRouter or a local model. Talk to it over the built-in web chat, email, or Nextcloud Talk. Nextcloud is a first-class integration (files, calendars, contacts and Talk, over standard protocols with the bot as an ordinary user), but it is an integration rather than a foundation: file storage is a backend choice, and the local single-user install runs with no Nextcloud at all.
+**Istota is a self-hosted personal AI operating system.** It runs on your own server or laptop and brings calendars, email, files, location, health, money, feeds, conversations, and memory into one command layer. You can use all of those sources or only the ones you choose.
 
-It ships with a set of skills the agent loads on demand — calendar, email, web browsing, git, accounting, transcription, and more — plus native web modules: multi-room chat, an RSS reader, location tracking with travel history and saved places, and health and accounting dashboards. It is multi-user out of the box, with per-user memory, filesystem sandboxing, and resource permissions.
+The native modules remain useful without a model. They have their own storage, command-line interfaces, and web pages. The agent adds a shared language interface and can reason across the records a task is allowed to read.
 
+Istota works with Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI or with any OpenAI-compatible endpoint, including OpenRouter and local model servers. You can talk to it through the built-in web app, email, Nextcloud Talk, a watched `TASKS.md` file, the terminal REPL, or the CLI.
+
+One server can host several separate personal systems. Each user has their own memory, files, credentials, module data, rooms, and task queues. Shared rooms and files are explicit.
+
+> **Istota is pre-1.0 software under active development.** Interfaces, configuration, and database schemas may change between releases. Pin a release and read the [changelog](https://github.com/istota-project/istota/blob/main/CHANGELOG.md) before upgrading.
+
+## A personal agent on rails
+
+A dependable personal agent needs more than a model loop. Istota gives it known ways to act, boundaries around those actions, durable state, and background execution.
+
+| Part | What it does |
+| --- | --- |
+| **Curated skills** | A maintained set of skills exposes structured commands for calendars, email, files, memory, health, money, feeds, and connected services. |
+| **Durable execution** | Every request enters a queue with a task identity, status, brain, permissions, retries, streamed events, and usage records. |
+| **Structured personal data** | Health, location, money, feeds, and briefings have schemas, per-user storage, command-line interfaces, and web pages. |
+| **Durable memory** | Per-user and per-room memory, hybrid search, a temporal knowledge graph, and learned playbooks carry facts and decisions across sessions. |
+| **Proactive work** | Scheduled jobs, reminders, briefings, and heartbeat checks run beyond a single chat turn. Deterministic jobs can run without a model. |
+| **Human control** | Confirmations, notifications, audit logs, explicit resource grants, and administrator-only operations keep consequential actions visible. |
+
+```text
+Web chat ──────────┐
+Nextcloud Talk ────┤
+Email ─────────────┤
+TASKS.md ──────────┼──> durable task queue ──> prompt + relevant data ──> Brain
+CLI / REPL ────────┤                                  │              │
+Scheduled jobs ────┤                                  │              ├──> skills and connected services
+Heartbeat checks ──┘                                  │              ├──> native modules
+                                                      │              └──> streamed response
+                                                      └──> memory, resources, room history
 ```
-Talk message ──>┐
-Web chat ──────>│
-Email ─────────>├──> SQLite queue -> Scheduler -> Brain -> Response
-TASKS.md ──────>│
-CLI / REPL ────>┘
-```
 
-Messages arrive through Talk polling, the in-app web chat, IMAP, TASKS.md file watching, the interactive REPL, or the CLI. The scheduler claims tasks from a SQLite queue, builds a prompt with the user's resources, skills, memory, and conversation context, then hands it to a **Brain** in a sandbox. Responses go back through the same channel.
+Read the [architecture overview](architecture/overview.md) for the full task path and module map.
 
-## What is it?
+## Personal data stays under your control
 
-Istota runs on your own server and handles the plumbing around a language model: input channels, task queuing, context assembly, prompt construction, skill loading, memory, scheduling, multi-user isolation, and response delivery. The reasoning comes from whichever model you point it at.
+Location, health, financial, calendar, email, and conversation records form an unusually complete account of a person. Istota is self-hosted so that record can remain on infrastructure you administer. Its data lives in SQLite and plain formats such as Markdown, TOML, CSV, JSON, and Beancount.
 
-It is not tied to a single vendor. A pluggable **Brain** sits at the model seam: the default brain delegates to the Claude Code CLI, while the native brain runs Istota's own in-process agentic loop — tool dispatch, context compaction, retries — against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model). So Istota can run fully standalone on open models.
+Self-hosting does not make connected services disappear. A hosted model provider receives the prompts and tool results sent to it, and every service you connect receives the traffic needed to use it. Istota also supports a local OpenAI-compatible model endpoint. Those connections are operator choices rather than requirements of an Istota account or control plane.
 
-When you connect it to Nextcloud, it integrates as a regular Nextcloud user: file sharing, calendars, contacts, and Talk messaging all work through standard Nextcloud protocols. No webhooks, no OAuth apps, no server plugins.
+The supported bare-metal deployment confines tasks with bubblewrap, credential isolation, scoped files, an outbound network proxy, and optional confirmation gates. The standalone install and shipped Docker stack run tasks unsandboxed. Read the [security model](deployment/security.md) before exposing an instance or giving it sensitive resources.
 
-## Features at a glance
+## Nextcloud is optional
 
-- **Messaging** -- In-app web chat (always-on rooms with live streaming), Nextcloud Talk (DMs and group rooms), email (IMAP/SMTP with threading), TASKS.md file polling, interactive REPL, CLI
-- **Skills** -- 36 built-in skills loaded on demand: calendar, email, web browsing, git/GitLab/GitHub, Beancount accounting, GPS tracking, bookmarks, voice transcription, OCR, RSS feeds, health tracking, and more
-- **Memory** -- Per-user persistent memory (with op-based nightly curation), per-channel memory, dated memory files, BM25 + vector search, temporal knowledge graph
-- **Scheduling** -- Cron jobs via CRON.md, natural-language reminders, scheduled briefings with calendar/markets/headlines/news/todos
-- **Multi-user** -- Per-user config, resource permissions, worker pools, filesystem sandboxing, admin/non-admin isolation
-- **Security** -- Bubblewrap sandbox, credential stripping, network isolation via CONNECT proxy, deferred DB writes
-- **Spend visibility** -- Per-attempt token and cost accounting across every brain, on the CLI and the admin dashboard, covering the daemon's own model calls as well as user tasks
-- **Constitution** -- [Emissaries](https://github.com/istota-project/emissaries) layer defining how the agent handles data, privacy, and responsibility
+Nextcloud is a first-class integration, not the foundation of the system. When connected, it provides files, calendars, contacts, OAuth login, notifications, and Talk while Istota acts as an ordinary Nextcloud user over standard protocols.
 
-## Quick links
+Without Nextcloud, the workspace is an ordinary local directory, web chat handles conversations, and CalDAV and IMAP can point at other providers. The [standalone install](getting-started/local-install.md) uses this shape. Read the [Nextcloud guide](features/nextcloud.md) for the integration itself.
 
-- [Docker quickstart](getting-started/quickstart-docker.md) -- evaluate with a full stack in Docker Compose
-- [Bare metal install](getting-started/quickstart-bare-metal.md) -- production deployment on Debian/Ubuntu
-- [Architecture overview](architecture/overview.md) -- how the system works
-- [Configuration reference](configuration/reference.md) -- all config options
-- [Credentials](configuration/credentials.md) -- global and per-user credential architecture
-- [Skills index](reference/skills-index.md) -- every built-in skill
+## Principles
 
-## Why Nextcloud?
+Istota ships with an [Emissaries](https://github.com/istota-project/emissaries) layer that defines what a personal agent owes to its user and to people it encounters on that user's behalf. It separates private counsel from public action, treats access to private data as power, and keeps outward commitments answerable to a person. Structural security remains separate: sandboxing, credential isolation, and confirmation gates enforce boundaries that a prompt cannot.
 
-Most AI assistant projects treat infrastructure as someone else's problem, connecting to third-party APIs for storage, calendars, and messaging. Istota takes a different approach: it runs on its own server and, when you connect it to Nextcloud, integrates as a regular user.
+This view shares the humanist premise of [Common Task](https://commontask.org/): people are ends rather than inputs to a system, and technology should be judged by how it affects their agency and well-being.
 
-- **Zero Nextcloud configuration.** Create a user account, invite it to a chat.
-- **File sharing is native.** Users share files with the bot like they share with colleagues.
-- **Multi-user comes free.** Nextcloud handles user isolation, file ownership, and access control.
-- **Self-hosted end to end.** Your data stays on your server. The only external dependency is a model provider — Claude, any OpenAI-compatible API, or a model you host yourself.
-- **User self-service.** Config files live in the user's Nextcloud folder. Edit with any text editor.
+## Choose an installation
 
-None of it is required. With no Nextcloud configured the workspace is a plain folder on disk, the built-in web chat carries messaging, and CalDAV and IMAP point wherever you like — that is the shape the [local single-user install](getting-started/local-install.md) ships. What you give up is Talk, native file sharing, and web login: web auth is either Nextcloud OAuth2 or none at all, and no-auth is permitted only on a loopback bind.
+- [Bare-metal server](getting-started/quickstart-bare-metal.md): the recommended persistent, multi-user deployment on Debian or Ubuntu. It connects to an existing Nextcloud and supports bubblewrap and cgroups.
+- [Docker server](getting-started/quickstart-docker.md): a self-contained stack with Nextcloud, PostgreSQL, Redis, nginx, and the Istota web app. Agent tasks are unsandboxed in the shipped Compose configuration.
+- [Local standalone](getting-started/local-install.md): a trusted single-user installation with a local workspace, loopback-only web app, and no required Nextcloud or login screen. It is unsandboxed by design.
+
+## Explore the documentation
+
+- [Architecture overview](architecture/overview.md)
+- [Web interface](features/web-interface.md)
+- [Skills index](reference/skills-index.md)
+- [Configuration reference](configuration/reference.md)
+- [Command reference](reference/commands.md)
+- [Development setup](development/setup.md)
 
 ## License
 
-[MIT](https://github.com/istota-project/istota/blob/main/LICENSE).
-
----
-
-*This documentation is written and updated by Istota, and reviewed regularly by contributors for accuracy.*
+Istota is released under the [European Union Public Licence 1.2](https://github.com/istota-project/istota/blob/main/LICENSE) (EUPL v1.2). It permits commercial use, but modified versions distributed or provided to the public as a network service must keep their source available under the license terms.

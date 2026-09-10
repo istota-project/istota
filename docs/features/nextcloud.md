@@ -1,6 +1,8 @@
 # Nextcloud
 
-Istota depends on Nextcloud for file storage, sharing, chat transport and (via CalDAV) calendars. The `nextcloud` skill is the agent's control surface over that server: what it supports, who is on it, what is shared with whom, and the file operations the mounted filesystem cannot express.
+Istota does not require Nextcloud. When configured, it can use Nextcloud for file storage, sharing, contacts, OAuth login, notifications, Talk, and calendars through CalDAV. The standalone shape instead uses a local workspace, built-in web chat, and an optional external CalDAV server.
+
+The `nextcloud` skill is the agent's control surface over a connected server: what it supports, who is on it, what is shared with whom, and the file operations the mounted filesystem cannot express.
 
 Everything runs as the bot's own Nextcloud account (`nextcloud.username` / `nextcloud.app_password`). That is the accurate identity for the operations in scope: the workspace layout lives in the bot's storage and is shared out to each user, and the bot is the Talk participant. There is no `--as-user` mode — Istota does hold per-user Nextcloud OAuth tokens, but their encryption key is delivered to the web unit only and deliberately never reaches a task environment.
 

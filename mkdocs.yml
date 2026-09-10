@@ -1,5 +1,5 @@
 site_name: Istota
-site_description: A self-hosted personal AI assistant that works with any model and integrates with Nextcloud
+site_description: Self-hosted personal AI operating system
 site_url: https://istota.cynium.com/docs
 
 repo_url: https://github.com/istota-project/istota
