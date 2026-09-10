@@ -54,7 +54,7 @@ Words and patterns to avoid — they read as machine-generated:
 - No "not just X, but also Y" balancing acts
 - No formulaic rule-of-three lists — not just triple adjectives but any three-part parallel run, especially the punchy negative kind (*No webhooks, no OAuth apps, no server plugins.*). Two items or four are fine; it's the reflexive three, cadenced for rhythm, that reads as machine-generated. List the items that actually apply, in plain form.
 - No vague attributions (*experts argue*, *some critics say*) — name the source or drop it
-- Limit em dash use. Commas, colons, or parentheses are often more natural.
+- No em dashes. Commas, colons, or parentheses are often more natural.
 - No excessive bold. No title case in headings.
 
 ## Boundaries
