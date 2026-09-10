@@ -17,7 +17,7 @@ Istota (ee-stoh-tah, Polish for *being* or *entity*) is a self-hosted personal A
 
 It runs on your own server (or laptop) and unifies your calendar, email, files, location, health, finances, feeds, conversations, and memory — or whatever subset of these you choose — across a single command layer.
 
-Each source makes the others more useful. Istota can reconstruct a day from appointments, places, and purchases; prepare you for a meeting from mail, documents, and past decisions; or turn unread feeds and newsletters into a briefing delivered every morning.
+Istota can reconstruct a day from appointments, places, and purchases; prepare you for a meeting from mail, documents, and past decisions; or turn unread feeds and newsletters into a briefing delivered every morning.
 
 It has a curated skillset, durable tasks, schedules, persistent memory, human approvals, and secure defaults. A full web app gives chat, health, location, money, feeds, briefings, notifications, and administration proper interfaces of their own. Talk to the agent there, over email, or in Nextcloud Talk.
 
@@ -304,8 +304,7 @@ The default Python suite omits tests that need live services, Linux sandboxing, 
 
 ## License
 
-Istota is released under the [European Union Public Licence 1.2](LICENSE) (EUPL v1.2), the European Commission's reciprocal open-source license. It permits commercial use, but modified versions distributed or provided to the public as a network service must keep their source available under the license terms. The EUPL was written for EU and Member State law, and its official language versions have equal legal value.
-
+Istota is released under the [European Union Public Licence 1.2](LICENSE) (EUPL v1.2), the European Commission's reciprocal open-source license. It permits commercial use, but modified versions distributed or provided to the public as a network service must keep their source available under the license terms.
 ---
 
 © 2026 [Stefan Kubicki](https://kubicki.org) · A [CYNIUM Lamplight](https://lamplight.cynium.com) release
