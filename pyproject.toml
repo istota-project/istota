@@ -143,6 +143,7 @@ all = [
     "istota[feeds]",
     "istota[garmin]",
     "istota[signaling]",
+    "istota[sms]",
 ]
 # What the test suite needs: `all` minus the two heavy ML extras. Not a
 # deployment shape — nobody should install `istota[test]` to run the bot; it
@@ -171,6 +172,7 @@ test = [
     "istota[feeds]",
     "istota[garmin]",
     "istota[signaling]",
+    "istota[sms]",
 ]
 sms = [
     "telnyx>=4.178.0",
