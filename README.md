@@ -304,7 +304,8 @@ The default Python suite omits tests that need live services, Linux sandboxing, 
 
 ## License
 
-Istota is released under the [European Union Public Licence 1.2](LICENSE) (EUPL v1.2), the European Commission's reciprocal open-source license. It permits commercial use, but modified versions distributed or provided to the public as a network service must keep their source available under the license terms.
+Istota is released under the [European Union Public Licence 1.2](LICENSE) (EUPL v1.2), the European Commission's reciprocal open-source license.
+
 ---
 
 © 2026 [Stefan Kubicki](https://kubicki.org) · A [CYNIUM Lamplight](https://lamplight.cynium.com) release
