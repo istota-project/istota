@@ -1,8 +1,8 @@
 [project]
 name = "istota"
 version = "0.41.0"
-description = "Personal AI agent integrated with Nextcloud"
-license = "MIT"
+description = "Self-hosted personal AI operating system"
+license = "EUPL-1.2"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

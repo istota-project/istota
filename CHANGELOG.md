@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+You can now use the project page as a complete guide to Istota: what the personal system does, how its modules connect, where each deployment shape draws its security boundary, and how to install and develop it. The repository now uses the EUPL v1.2, with the package metadata and full license text in agreement.
+
+Generated configurations now keep ordinary workspaces separate from FUSE mounts, and GitHub Releases are published again when a full changeset exceeds the platform's body limit. This patch contains 13 commits after the 50-commit 0.41.0 release.
+
+**Before you upgrade.**
+
+- Review the move from MIT to EUPL v1.2 if you distribute Istota, publish a modified version, or provide access to its essential functionality over a network. The license requires the corresponding source to remain easily and freely available in those cases.
+
 ### Changed
+
+- Istota is now released under the European Union Public Licence v1.2. The package metadata and repository license text now state the same license, and the project README explains the terms that affect distribution and network use.
+
+- The project README now describes the connected personal-data modules, task runtime, security boundaries, deployment shapes, and development workflow in one guide.
 
 - Generated configurations now distinguish the bot's file workspace from a FUSE mount. Docker and standalone installs no longer treat their ordinary workspace directories as mounts, so adding a Nextcloud URL cannot make mount-liveness checks gate local files or database backups.
 
