@@ -175,7 +175,7 @@ test = [
     "istota[sms]",
 ]
 sms = [
-    "telnyx>=4.178.0",
+    "telnyx[webhooks]>=4.178.0",
     "twilio>=9.11.1",
 ]
 

@@ -347,6 +347,57 @@ async def receive_twilio_sms(request: Request, background: BackgroundTasks):
     )
 
 
+@sms_router.post("/telnyx")
+async def receive_telnyx_sms(request: Request, background: BackgroundTasks):
+    """Authenticate and persist one Telnyx message or delivery callback."""
+    from . import db  # noqa: PLC0415
+    from .transport.sms.providers._types import SmsWebhookRequest  # noqa: PLC0415
+    from .transport.sms.providers.telnyx import TelnyxWebhookError  # noqa: PLC0415
+    from .transport.sms.webhook import (  # noqa: PLC0415
+        deliver_event_response,
+        handle_provider_event,
+    )
+
+    config = _config
+    providers = _sms_providers
+    if config is None or providers is None or not config.sms.enabled:
+        return Response(status_code=404)
+    adapter = providers.get("telnyx")
+    if adapter is None:
+        return Response(status_code=404)
+    raw_body = await _bounded_body(request)
+    if raw_body is None:
+        return Response(status_code=413)
+    public_url = f"https://{config.site.hostname}/webhooks/sms/telnyx"
+    try:
+        parsed = adapter.parse_webhook(SmsWebhookRequest(
+            raw_body=raw_body,
+            headers=request.headers,
+            public_url=public_url,
+        ))
+    except TelnyxWebhookError as exc:
+        logger.info("sms.inbound.rejected provider=telnyx reason=%s", str(exc))
+        return Response(status_code=exc.status_code)
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(
+                conn,
+                config,
+                parsed.event,
+                active_provider_ready=providers.active() is not None,
+            )
+    except sqlite3.Error:
+        logger.warning("sms.inbound.database_unavailable provider=telnyx", exc_info=True)
+        return Response(status_code=503)
+    background.add_task(deliver_event_response, config, providers, result)
+    return Response(
+        content=parsed.response_body,
+        status_code=parsed.response_status,
+        media_type=parsed.response_content_type,
+    )
+
+
 @location_router.post("")
 async def receive_location(
     request: Request,

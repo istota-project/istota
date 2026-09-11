@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Istota can now authenticate inbound Twilio SMS messages and delivery callbacks at its fixed webhook address, and send replies through a configured Twilio Messaging Service. Provider failures retain only a public error code and a safe delivery result; credentials, message bodies, and phone numbers are not copied from SDK exceptions.
+- Istota can now authenticate inbound SMS messages and delivery callbacks through either Twilio or Telnyx at fixed webhook addresses. Replies use the configured Twilio Messaging Service or Telnyx Messaging Profile, and Telnyx sends use the encoding selected by Istota's segment budget. Provider failures retain only a public error code and a safe delivery result; credentials, message bodies, and phone numbers are not copied from SDK exceptions.
 
 ## [0.41.1] - 2026-09-09
 
