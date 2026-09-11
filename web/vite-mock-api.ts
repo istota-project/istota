@@ -3166,6 +3166,66 @@ function mockLogPage(source: string, params: URLSearchParams) {
   };
 }
 
+// `GET /admin/doctor`. There was no mock for this at all, so the Health pane
+// rendered against nothing in dev. The rows below are copied from what
+// `istota.doctor` actually emits, including the SMS trio: `skip` for an
+// unconfigured provider is a normal single-provider deployment, not a fault.
+function mockAdminDoctor(deep: boolean) {
+  const checks = [
+    {
+      name: 'runtime.framework_db',
+      status: 'ok',
+      detail: 'database opens and passes a quick check',
+      remedy: '',
+      scope: 'deployment',
+    },
+    {
+      name: 'sms.common',
+      status: 'ok',
+      detail: 'local configuration is ready with twilio active',
+      remedy: '',
+      scope: 'deployment',
+    },
+    {
+      name: 'sms.twilio',
+      status: 'ok',
+      detail:
+        'local active adapter configuration is complete; provider reachability and handset delivery were not tested',
+      remedy: '',
+      scope: 'deployment',
+    },
+    {
+      name: 'sms.telnyx',
+      status: 'skip',
+      detail: '[sms.telnyx] is not configured',
+      remedy: '',
+      scope: 'deployment',
+    },
+    {
+      name: 'web.static',
+      status: 'ok',
+      detail: 'built frontend present',
+      remedy: '',
+      scope: 'image',
+    },
+    {
+      name: 'talk.signaling',
+      status: 'warn',
+      detail: 'no signaling server configured; Talk falls back to long polling',
+      remedy: 'Set [talk.signaling] url to a standalone signaling server.',
+      scope: 'deployment',
+    },
+  ];
+  const summary = { ok: 0, warn: 0, fail: 0, skip: 0 };
+  for (const c of checks) summary[c.status as keyof typeof summary] += 1;
+  return {
+    status: summary.fail ? 'fail' : summary.warn ? 'warn' : 'ok',
+    summary,
+    deep,
+    checks,
+  };
+}
+
 function mockAdminConfig() {
   const f = (
     key: string,
@@ -3195,6 +3255,41 @@ function mockAdminConfig() {
           f('model', 'claude-opus-4-8', 'str'),
           f('namespace', 'istota', 'str'),
           f('users', 2, 'count'),
+        ],
+      },
+      {
+        key: 'sms',
+        label: '[sms]',
+        fields: [
+          f('sms.enabled', true, 'bool'),
+          f('sms.provider', 'twilio', 'str'),
+          f('sms.service_numbers', ['+15550001111'], 'list'),
+          f('sms.default_sender_number', '+15550001111', 'str'),
+          f('sms.max_segments', 6, 'int'),
+          f('sms.request_timeout_seconds', 10, 'int'),
+        ],
+      },
+      {
+        key: 'sms.twilio',
+        label: '[sms.twilio]',
+        fields: [
+          f('sms.twilio.account_sid', 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'str'),
+          f('sms.twilio.auth_token', null, 'secret', { secret: true, set: true }),
+          f('sms.twilio.api_key_sid', null, 'secret', { secret: true, set: true }),
+          f('sms.twilio.api_key_secret', null, 'secret', { secret: true, set: true }),
+          f('sms.twilio.messaging_service_sid', 'MGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'str'),
+        ],
+      },
+      {
+        // The inactive provider, left blank: this is what a single-provider
+        // deployment looks like, and it is the shape the pane has to render
+        // without implying anything is wrong.
+        key: 'sms.telnyx',
+        label: '[sms.telnyx]',
+        fields: [
+          f('sms.telnyx.api_key', null, 'secret', { secret: true, set: false }),
+          f('sms.telnyx.public_key', '', 'str'),
+          f('sms.telnyx.messaging_profile_id', '', 'str'),
         ],
       },
       {
@@ -3561,6 +3656,10 @@ const handlers: MockHandler[] = [
   // Admin logs + configuration (ISSUE-203)
   ({ url }) => (url === '/istota/api/admin/logs/sources' ? mockLogSources : undefined),
   ({ url }) => (url === '/istota/api/admin/config' ? mockAdminConfig() : undefined),
+  ({ url }) =>
+    url.startsWith('/istota/api/admin/doctor')
+      ? mockAdminDoctor(url.includes('deep=1'))
+      : undefined,
   // The live tail is SSE, which this mock layer cannot serve. Answer with an
   // empty 200 rather than letting it 404: an EventSource retries a failed
   // connection forever, so a missing handler turns Follow into a reconnect loop
