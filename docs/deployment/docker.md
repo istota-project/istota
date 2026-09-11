@@ -17,7 +17,7 @@
 | `web` | SvelteKit + FastAPI web UI |
 | `nginx` | Reverse proxy (single entry port) |
 | `browser` (profile) | Chrome + VNC container for web browsing |
-| `webhooks` (profile) | GPS webhook receiver |
+| `webhooks` (`location` or `sms` profile) | GPS and SMS webhook receiver |
 
 ## Configuration
 
@@ -28,7 +28,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-The `.env` file exposes most settings available in the Ansible role: scheduler intervals, conversation tuning, progress updates, sleep cycle, memory search, email, ntfy, developer skill, and per-user overrides.
+The `.env` file exposes most settings available in the Ansible role: scheduler intervals, conversation tuning, progress updates, sleep cycle, memory search, email, SMS, ntfy, developer skill, and per-user overrides. See [SMS](../features/sms.md) for the provider blocks and webhook setup.
 
 ### Forge binaries
 
@@ -45,7 +45,7 @@ A container still running from before its upgrade keeps the `[developer]` block 
 ```bash
 $EDITOR docker/.env
 docker compose restart istota
-docker compose restart web webhooks   # webhooks only if you run the location profile
+docker compose restart web webhooks nginx   # webhooks for the location or sms profile
 ```
 
 The boot logs every key that changed, so `docker compose logs istota` is where you confirm an edit landed. The outgoing file is kept as `/data/config/config.toml.prev`.
@@ -114,15 +114,18 @@ It refuses rather than guessing when it cannot tell whose clones are whose, and 
 
 ## Optional profiles
 
-There are three: `browser`, `location` and `signaling`.
+There are four: `browser`, `location`, `sms` and `signaling`.
 
 ```bash
 docker compose --profile browser up -d              # Web browsing
 docker compose --profile location up -d             # GPS tracking
+docker compose --profile sms up -d                  # SMS webhooks
 docker compose --profile browser --profile location up -d  # Combine as needed
 ```
 
 Rather than naming them per command, set `COMPOSE_PROFILES` in `.env` — a comma-separated list every `docker compose` in that directory then picks up. `docker/init.sh` writes it from the answers you give it; a hand-copied `.env.example` leaves it empty, which means the core stack only.
+
+The `location` and `sms` profiles select the same `webhooks` service. Set the matching `ISTOTA_LOCATION_ENABLED` or `ISTOTA_SMS_ENABLED` value in `.env`; the profile starts the shared process, while the setting controls which feature accepts work. Nginx is the public endpoint for `/webhooks/`; the receiver port is exposed only inside the Compose network. Enabling both profiles still runs one receiver.
 
 The browser container requires x86-64 (Chrome has no ARM packages).
 
@@ -249,6 +252,7 @@ The Ansible shape has the actor: a cron watchdog reads `.State.Health.Status` ev
 | `USER_NAME` / `USER_PASSWORD` | Your Nextcloud account |
 | `BOT_PASSWORD` | Bot's Nextcloud account |
 | `POSTGRES_PASSWORD` | Database |
+| `ISTOTA_SMS_*` | Common and provider-qualified SMS settings; see [SMS](../features/sms.md) |
 
 ## Upload limits
 

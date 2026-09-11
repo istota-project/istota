@@ -62,18 +62,21 @@ transport/
 │   ├── __init__.py  # EmailTransport (seam: poll/deliver/resolve)
 │   ├── inbound.py   # poll_emails + routing precedence + confirmation gate
 │   └── outbound.py  # deliver_email_result + structured-output parse + sent-email record
+├── sms/          # provider-neutral push surface; Twilio and Telnyx adapters
 ├── ntfy/         # ntfy push surface (push) — NtfyTransport + send_ntfy_async (the single ntfy POST)
 ├── istota_file/  # TASKS.md result write-back (push) — IstotaFileTransport
 ├── repl/         # terminal REPL (stream) — ReplTransport (deliver is a no-op; outbound is task_events)
 └── web/          # web chat delivery surface (stream, user_routable) — WebTransport + default_web_room_token; deliver appends a role='system' messages row
 ```
 
-Both surfaces are subpackages because both directions live together. For Talk:
+Talk, email, and SMS are subpackages because both directions live together. For Talk:
 `TalkTransport` (the seam) in `__init__.py`, the inbound poll body in
 `inbound.py`. For email: `EmailTransport` in `__init__.py`, the inbound poll
 body in `inbound.py`, the send body in `outbound.py`. The low-level clients stay
 shared and outside the seam — Talk's HTTP/OCS `TalkClient` in `istota.talk`,
-email's IMAP/SMTP client in `istota.skills.email`.
+email's IMAP/SMTP client in `istota.skills.email`. SMS keeps its common inbound,
+outbound, ledger, and provider adapters together under `transport/sms/`; the
+full contract is in `.claude/rules/sms.md`.
 
 Email's genuinely-shared, non-transport plumbing (`get_email_config`,
 `is_synthetic_email_thread_token`, `normalize_subject`, `compute_thread_id`,
@@ -159,13 +162,13 @@ amputating email's needs.)
 `make_registry(config)` does **no I/O on construction** (`TalkClient.__init__`
 only stores credentials), so callers without a registry in scope — notably
 `notifications.send_notification`, called from heartbeat / scheduled jobs — can
-build one on demand. Talk is registered when `talk.enabled` and email when
-`email.enabled`; `ntfy`, `istota_file`, `repl`, and `web` are registered
+build one on demand. Talk is registered when `talk.enabled`, email when
+`email.enabled`, and SMS when `sms.enabled`; `ntfy`, `istota_file`, `repl`, and `web` are registered
 unconditionally (per-user / per-task gating happens in their `resolve_target` /
 `deliver`, not at construction).
 
 `_surface_for_source_type` (the *inbound* source_type → primary surface map):
-`email` → `"email"`; `repl` → `"repl"`; `web` → `"web"` (a stream surface with
+`email` → `"email"`; `sms` → `"sms"`; `repl` → `"repl"`; `web` → `"web"` (a stream surface with
 no push transport, so `for_task` resolves it to `None` — the `task_events` log
 is the delivery, exactly as for REPL); everything else (talk, briefing,
 scheduled, subtask, heartbeat, cli, istota_file, unknown) → `"talk"`, the

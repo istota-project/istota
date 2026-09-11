@@ -4,6 +4,7 @@ Run as: uvicorn istota.webhook_receiver:app --host 127.0.0.1 --port 8765
 
 Currently handles:
 - /webhooks/location — Overland GPS location data
+- /webhooks/sms/twilio and /webhooks/sms/telnyx — SMS callbacks
 """
 
 import logging
@@ -311,7 +312,7 @@ async def receive_twilio_sms(request: Request, background: BackgroundTasks):
 
     config = _config
     providers = _sms_providers
-    if config is None or providers is None or not config.sms.enabled:
+    if config is None or providers is None:
         return Response(status_code=404)
     adapter = providers.get("twilio")
     if adapter is None:
@@ -364,7 +365,7 @@ async def receive_telnyx_sms(request: Request, background: BackgroundTasks):
 
     config = _config
     providers = _sms_providers
-    if config is None or providers is None or not config.sms.enabled:
+    if config is None or providers is None:
         return Response(status_code=404)
     adapter = providers.get("telnyx")
     if adapter is None:

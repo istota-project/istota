@@ -39,6 +39,7 @@ server {
     set $upstream_web      web:${WEB_PORT};
     set $upstream_nextcloud nextcloud:80;
     set $upstream_signaling signaling:8080;
+    set $upstream_webhooks webhooks:${WEBHOOKS_PORT};
 
     # Every location below forwards `Host: $http_host`, not `$host`. The two
     # differ in exactly one way that matters here: `$host` is normalized with
@@ -84,6 +85,18 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
+    }
+
+    # Provider callbacks and location pings share one receiver. The variable
+    # upstream lets nginx start when neither optional webhook profile is on.
+    location /webhooks/ {
+        proxy_pass http://$upstream_webhooks;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 10m;
     }
 
     # Nextcloud Talk's standalone signaling server (the "high-performance

@@ -9,7 +9,7 @@
 
 The native modules remain useful without a model. They have their own storage, command-line interfaces, and web pages. The agent adds a shared language interface and can reason across the records a task is allowed to read.
 
-Istota works with Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI or with any OpenAI-compatible endpoint, including OpenRouter and local model servers. You can talk to it through the built-in web app, email, Nextcloud Talk, a watched `TASKS.md` file, the terminal REPL, or the CLI.
+Istota works with Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI or with any OpenAI-compatible endpoint, including OpenRouter and local model servers. You can talk to it through the built-in web app, SMS, email, Nextcloud Talk, a watched `TASKS.md` file, the terminal REPL, or the CLI.
 
 One server can host several separate personal systems. Each user has their own memory, files, credentials, module data, rooms, and task queues. Shared rooms and files are explicit.
 
@@ -31,6 +31,7 @@ A dependable personal agent needs more than a model loop. Istota gives it known 
 ```text
 Web chat ──────────┐
 Nextcloud Talk ────┤
+SMS ───────────────┤
 Email ─────────────┤
 TASKS.md ──────────┼──> durable task queue ──> prompt + relevant data ──> Brain
 CLI / REPL ────────┤                                  │              │
@@ -72,6 +73,7 @@ This view shares the humanist premise of [Common Task](https://commontask.org/):
 
 - [Architecture overview](architecture/overview.md)
 - [Web interface](features/web-interface.md)
+- [SMS](features/sms.md)
 - [Skills index](reference/skills-index.md)
 - [Configuration reference](configuration/reference.md)
 - [Command reference](reference/commands.md)

@@ -48,6 +48,38 @@ messaging_profile_id = ""
 
 
 class TestSmsConfig:
+    def test_nested_provider_fields_load_from_environment(self, tmp_path, monkeypatch):
+        for name, value in {
+            "ISTOTA_SMS_TWILIO_ACCOUNT_SID": "AC-env",
+            "ISTOTA_SMS_TWILIO_AUTH_TOKEN": "auth-env",
+            "ISTOTA_SMS_TWILIO_API_KEY_SID": "SK-env",
+            "ISTOTA_SMS_TWILIO_API_KEY_SECRET": "secret-env",
+            "ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID": "MG-env",
+            "ISTOTA_SMS_TELNYX_API_KEY": "telnyx-api-env",
+            "ISTOTA_SMS_TELNYX_PUBLIC_KEY": "telnyx-public-env",
+            "ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID": "telnyx-profile-env",
+        }.items():
+            monkeypatch.setenv(name, value)
+        body = _valid_sms_config().replace(
+            'account_sid = "AC00000000000000000000000000000000"\n'
+            'auth_token = "twilio-auth-secret"\n'
+            'api_key_sid = "SK00000000000000000000000000000000"\n'
+            'api_key_secret = "twilio-api-secret"\n'
+            'messaging_service_sid = "MG00000000000000000000000000000000"',
+            "",
+        )
+
+        cfg = load_config(_write_config(tmp_path, body))
+
+        assert cfg.sms.twilio.account_sid == "AC-env"
+        assert cfg.sms.twilio.auth_token == "auth-env"
+        assert cfg.sms.twilio.api_key_sid == "SK-env"
+        assert cfg.sms.twilio.api_key_secret == "secret-env"
+        assert cfg.sms.twilio.messaging_service_sid == "MG-env"
+        assert cfg.sms.telnyx.api_key == "telnyx-api-env"
+        assert cfg.sms.telnyx.public_key == "telnyx-public-env"
+        assert cfg.sms.telnyx.messaging_profile_id == "telnyx-profile-env"
+
     def test_complete_twilio_config_loads(self, tmp_path):
         cfg = load_config(_write_config(tmp_path, _valid_sms_config()))
 

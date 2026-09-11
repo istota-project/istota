@@ -3,7 +3,7 @@
 Per-user data lives in three DB tables and (optionally) the user's Nextcloud workspace:
 
 1. **DB tables** (authoritative)
-   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, trusted senders, quiet senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table), `default_briefings`, `briefing_email_html`, `timezone_follow_location`, `outbound_approval`, `external_turn_display`
+   - `user_profiles` — display_name, timezone, channels, worker overrides, email lists, SMS phone binding, trusted senders, quiet senders, disabled_skills, **disabled_modules**, **delivery routing** (`default_destination` + a purpose-keyed `routing` table), `default_briefings`, `briefing_email_html`, `timezone_follow_location`, `outbound_approval`, `external_turn_display`
    - `user_resources` — folder mounts (`folder`) and internal `shared_file` organizer state. Only `folder` is declarable after the Resources sunset; the other path-shaped types were retired (calendars are CalDAV-discovered, todo/reminders/notes are workspace-convention files).
    - `briefing_configs` — briefing schedules. `enabled=0` mutes a briefing without deletion.
    - `secrets` — Fernet-encrypted credentials (Karakeep, Monarch, Tumblr, Overland ingest token, ntfy, etc.). See [credentials](credentials.md) for the full per-user inventory.
@@ -26,6 +26,7 @@ The DB rows are populated four ways:
 display_name = "Alice"
 email_addresses = ["alice@example.com", "alice.work@company.com"]
 timezone = "America/New_York"
+sms_phone_number = "+15551234567"
 
 # Per-user worker limits (0 = use global default)
 max_foreground_workers = 2
@@ -61,7 +62,7 @@ external_turn_display = "collapsed"
 disabled_modules = ["money"]
 
 # Default delivery surface for results/notifications when nothing else applies
-default_destination = "talk"   # talk | email | ntfy | web | surface:channel | comma list
+default_destination = "talk"   # talk | email | sms | ntfy | web | surface:channel | comma list
 
 # Where replies to inbound email threads are delivered
 email_reply_routing = "origin+thread"   # origin+thread (default) | origin | thread
@@ -74,6 +75,8 @@ log = "web:<room-token>"       # verbose execution log streamed to a web chat ro
 ```
 
 > ntfy push notifications are **not** a profile field. They live in the encrypted `secrets` table — provision via the web UI (`/istota/settings` → Connected services → ntfy push) or `istota secret ensure --user alice --service ntfy --key topic --value …`.
+
+The SMS number is an identity binding, not a delivery address alone. A message from it can create tasks and answer pending SMS confirmations as this user. Set or clear it with `istota user ensure --name alice --sms-number +15551234567` or `--clear-sms-number`; assignments must be exact E.164 numbers and unique across users. See [SMS](../features/sms.md).
 
 ### Resources (folder mounts)
 
@@ -139,7 +142,7 @@ Blocks and sources are also editable from the CLI (`istota briefings blocks|sour
 
 ### Delivery routing
 
-Each user has a default delivery surface (`default_destination`, defaults to `talk`) plus an optional purpose-keyed `routing` table that overrides it per purpose. The purposes are `reply`, `alert`, `log`, `briefing`, and `notification`; each maps to an `output_target` descriptor (`talk`, `email`, `ntfy`, `web`, `surface:channel`, or a comma list). Routing notifications by purpose (e.g. `alert = "ntfy"`) is what reroutes heartbeat and security alerts off Talk; the `log` purpose drives the verbose per-task execution log to any user-routable surface (it supersedes the legacy `log_channel` shorthand). `alert` carries everything Istota raises on its own — heartbeat and security alerts, a job disabled after repeated failures, a held outbound draft, the deferred Garmin import's result, the travel-timezone notice. Nothing is sent on `notification`; it decides where inbound mail that names no conversation of its own surfaces, and falls through to `default_destination` on purpose, since that mail belongs in the user's main room rather than their alerts channel. `web` is a routable delivery surface — alerts, the execution log, and notifications routed to it land in a web chat room as system messages.
+Each user has a default delivery surface (`default_destination`, defaults to `talk`) plus an optional purpose-keyed `routing` table that overrides it per purpose. The purposes are `reply`, `alert`, `log`, `briefing`, and `notification`; each maps to an `output_target` descriptor (`talk`, `email`, `sms`, `ntfy`, `web`, `surface:channel`, or a comma list). Routing notifications by purpose (e.g. `alert = "ntfy"`) is what reroutes heartbeat and security alerts off Talk; the `log` purpose drives the verbose per-task execution log to any user-routable surface (it supersedes the legacy `log_channel` shorthand). `alert` carries everything Istota raises on its own — heartbeat and security alerts, a job disabled after repeated failures, a held outbound draft, the deferred Garmin import's result, the travel-timezone notice. Nothing is sent on `notification`; it decides where inbound mail that names no conversation of its own surfaces, and falls through to `default_destination` on purpose, since that mail belongs in the user's main room rather than their alerts channel. `web` is a routable delivery surface — alerts, the execution log, and notifications routed to it land in a web chat room as system messages.
 
 Provision via the CLI:
 

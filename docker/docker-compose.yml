@@ -414,9 +414,25 @@ services:
       # Location tracking (optional). LOCATION_INGEST_TOKEN auto-generates
       # if blank; the entrypoint persists the chosen token to the API
       # provisioning flag so it survives restarts.
-      ISTOTA_LOCATION_ENABLED: ${ISTOTA_LOCATION_ENABLED:-true}
+      ISTOTA_LOCATION_ENABLED: ${ISTOTA_LOCATION_ENABLED:-false}
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       LOCATION_INGEST_TOKEN: ${LOCATION_INGEST_TOKEN:-}
+      # SMS (optional). Provider-qualified names keep callback authentication
+      # and outbound API credentials separate during a provider switch.
+      ISTOTA_SMS_ENABLED: ${ISTOTA_SMS_ENABLED:-false}
+      ISTOTA_SMS_PROVIDER: ${ISTOTA_SMS_PROVIDER:-twilio}
+      ISTOTA_SMS_SERVICE_NUMBERS: ${ISTOTA_SMS_SERVICE_NUMBERS:-}
+      ISTOTA_SMS_DEFAULT_SENDER_NUMBER: ${ISTOTA_SMS_DEFAULT_SENDER_NUMBER:-}
+      ISTOTA_SMS_MAX_SEGMENTS: ${ISTOTA_SMS_MAX_SEGMENTS:-6}
+      ISTOTA_SMS_REQUEST_TIMEOUT_SECONDS: ${ISTOTA_SMS_REQUEST_TIMEOUT_SECONDS:-10}
+      ISTOTA_SMS_TWILIO_ACCOUNT_SID: ${ISTOTA_SMS_TWILIO_ACCOUNT_SID:-}
+      ISTOTA_SMS_TWILIO_AUTH_TOKEN: ${ISTOTA_SMS_TWILIO_AUTH_TOKEN:-}
+      ISTOTA_SMS_TWILIO_API_KEY_SID: ${ISTOTA_SMS_TWILIO_API_KEY_SID:-}
+      ISTOTA_SMS_TWILIO_API_KEY_SECRET: ${ISTOTA_SMS_TWILIO_API_KEY_SECRET:-}
+      ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID: ${ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID:-}
+      ISTOTA_SMS_TELNYX_API_KEY: ${ISTOTA_SMS_TELNYX_API_KEY:-}
+      ISTOTA_SMS_TELNYX_PUBLIC_KEY: ${ISTOTA_SMS_TELNYX_PUBLIC_KEY:-}
+      ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID: ${ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID:-}
       # Feeds (RSS / Atom / Tumblr / Are.na — native, in-process)
       ISTOTA_FEEDS_ENABLED: ${ISTOTA_FEEDS_ENABLED:-true}
       # Money / accounting (beancount). Monarch creds optional; only
@@ -615,12 +631,13 @@ services:
     environment:
       DOMAIN: ${DOMAIN:-localhost}
       WEB_PORT: ${WEB_PORT:-8766}
+      WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-512M}
-      # Limit envsubst to the three template knobs above. Without this filter,
+      # Limit envsubst to the four template knobs above. Without this filter,
       # the nginx:alpine entrypoint would substitute every container env var
       # — including ones whose names happen to match nginx runtime variables
       # ($host, $remote_addr, $scheme, $proxy_add_x_forwarded_for, etc.).
-      NGINX_ENVSUBST_FILTER: '^(DOMAIN|WEB_PORT|NGINX_CLIENT_MAX_BODY_SIZE)$$'
+      NGINX_ENVSUBST_FILTER: '^(DOMAIN|WEB_PORT|WEBHOOKS_PORT|NGINX_CLIENT_MAX_BODY_SIZE)$$'
     restart: unless-stopped
 
   browser:
@@ -795,11 +812,12 @@ services:
       dockerfile: docker/istota/Dockerfile
     profiles:
       - location
+      - sms
     depends_on:
       nextcloud:
         condition: service_healthy
-    ports:
-      - "${ISTOTA_WEBHOOKS_PORT:-8765}:${ISTOTA_WEBHOOKS_PORT:-8765}"
+    expose:
+      - "${ISTOTA_WEBHOOKS_PORT:-8765}"
     volumes:
       - shared_files:/mnt/shared
       - istota_data:/data

@@ -3751,11 +3751,30 @@ def load_config(config_path: Path | None = None) -> Config:
         ("ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET", "google_workspace", "client_secret"),
         ("ISTOTA_WEB_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
         ("ISTOTA_WEB_SESSION_SECRET_KEY", "web", "session_secret_key"),
+        ("ISTOTA_SMS_TWILIO_ACCOUNT_SID", "sms.twilio", "account_sid"),
+        ("ISTOTA_SMS_TWILIO_AUTH_TOKEN", "sms.twilio", "auth_token"),
+        ("ISTOTA_SMS_TWILIO_API_KEY_SID", "sms.twilio", "api_key_sid"),
+        ("ISTOTA_SMS_TWILIO_API_KEY_SECRET", "sms.twilio", "api_key_secret"),
+        (
+            "ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID",
+            "sms.twilio",
+            "messaging_service_sid",
+        ),
+        ("ISTOTA_SMS_TELNYX_API_KEY", "sms.telnyx", "api_key"),
+        ("ISTOTA_SMS_TELNYX_PUBLIC_KEY", "sms.telnyx", "public_key"),
+        (
+            "ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID",
+            "sms.telnyx",
+            "messaging_profile_id",
+        ),
     ]
-    for env_var, section, field_name in _env_secret_overrides:
+    for env_var, section_path, field_name in _env_secret_overrides:
         val = os.environ.get(env_var)
         if val:
-            setattr(getattr(config, section), field_name, val)
+            section = config
+            for part in section_path.split("."):
+                section = getattr(section, part)
+            setattr(section, field_name, val)
 
     # Docker-path override for the web token-storage mode (not a secret, but it
     # rides the same env channel as the other web knobs so the compose file can
@@ -3927,6 +3946,17 @@ def sms_provider_has_values(config: Config, provider: str) -> bool:
     if fields is None or block is None:
         return False
     return any(bool(getattr(block, name, "")) for name in fields)
+
+
+def sms_webhooks_enabled(config: Config) -> bool:
+    """Whether active SMS or a complete callback-only adapter needs routes."""
+    if config.sms.enabled:
+        return True
+    return any(
+        sms_provider_has_values(config, provider)
+        and not sms_provider_missing_fields(config, provider)
+        for provider in SMS_PROVIDER_NAMES
+    )
 
 
 def sms_config_errors(config: Config) -> list[str]:

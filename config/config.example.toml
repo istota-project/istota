@@ -732,6 +732,28 @@ bot_email = "istota@example.com"  # bot's email address (to skip own messages)
 # logged when it happens, but narrow the pattern rather than relying on that.
 # outbound_approval_floor = "untrusted"
 
+# SMS uses one active provider. A complete inactive provider block remains
+# available for signed delivery callbacks after a provider switch.
+[sms]
+enabled = false
+provider = "twilio"  # twilio | telnyx
+service_numbers = []
+default_sender_number = ""
+max_segments = 6
+request_timeout_seconds = 10
+
+[sms.twilio]
+account_sid = ""
+auth_token = ""
+api_key_sid = ""
+api_key_secret = ""
+messaging_service_sid = ""
+
+[sms.telnyx]
+api_key = ""
+public_key = ""
+messaging_profile_id = ""
+
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)
 enabled = true

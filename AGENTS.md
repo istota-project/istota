@@ -15,6 +15,7 @@ Subsystems:
 - `config.md` — every dataclass field + TOML mapping
 - `skills.md` — skill metadata, single-axis selection (eager vs menu), per-skill user overlays, CLI modules
 - `transport.md` — Transport seam over messaging surfaces (Talk + email; Matrix / web chat designed-for), plus the room model
+- `sms.md` — provider-neutral SMS surface, Twilio and Telnyx adapters, delivery states, and switching
 - `web-chat.md` — web chat surface: rooms, composer, drafts, send durability, message replies, room-event stream
 - `web-ui.md` — web UI backend: route/endpoint map, admin Logs + Configuration panes, settings/module-services split
 - `notifications.md` — the notifications table, the resolver seam, and the six shipped sources
@@ -64,7 +65,7 @@ src/istota/
 ├── events.py             # Task event streaming: TaskEvent, EventWriter, EventSubscriber + task_events log
 ├── consumers/            # Event consumers: TalkEventSubscriber, LogChannelSubscriber, PushNotificationSubscriber
 ├── scheduler.py          # Task processor, briefings, all polling
-├── transport/            # Transport seam: IncomingMessage, registry, ingest, routing, talk/ email/ ntfy/ istota_file/ repl/ web/
+├── transport/            # Transport seam: IncomingMessage, registry, ingest, routing, talk/ email/ sms/ ntfy/ istota_file/ repl/ web/
 ├── surfaces.py           # What role each surface plays in the room model, in one table → leaf-modules.md
 ├── email_support.py      # Shared non-transport email plumbing (get_email_config, thread helpers, cleanup)
 ├── tasks_file_poller.py  # TASKS.md monitoring

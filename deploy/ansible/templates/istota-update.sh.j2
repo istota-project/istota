@@ -236,7 +236,7 @@ systemctl restart "${NAMESPACE}-scheduler"
 log "Restarting ${NAMESPACE}-web"
 systemctl restart "${NAMESPACE}-web"
 {% endif %}
-{% if istota_location_enabled | default(false) %}
+{% if istota_webhooks_enabled | default(false) %}
 log "Restarting ${NAMESPACE}-webhooks"
 systemctl restart "${NAMESPACE}-webhooks"
 {% endif %}

@@ -44,6 +44,20 @@
       without the skill, set istota_google_workspace_enabled=false.
   when: istota_google_workspace_enabled | bool
 
+- name: Resolve webhook receiver need
+  set_fact:
+    istota_webhooks_enabled: >-
+      {{ (istota_location_enabled | bool)
+         or (istota_sms_enabled | bool)
+         or ((istota_sms_twilio_account_sid | length > 0)
+             and (istota_sms_twilio_auth_token | length > 0)
+             and (istota_sms_twilio_api_key_sid | length > 0)
+             and (istota_sms_twilio_api_key_secret | length > 0)
+             and (istota_sms_twilio_messaging_service_sid | length > 0))
+         or ((istota_sms_telnyx_api_key | length > 0)
+             and (istota_sms_telnyx_public_key | length > 0)
+             and (istota_sms_telnyx_messaging_profile_id | length > 0)) }}
+
 # ============================================================
 # FULL INSTALL TASKS (skipped when istota_update_only=true)
 # ============================================================
@@ -1718,6 +1732,7 @@
   notify:
     - "restart istota-scheduler"
     - "restart istota-web"
+    - "restart istota-webhooks"
 
 - name: Remove secrets environment file when not using environment file
   file:
@@ -1849,6 +1864,7 @@
   notify:
     - "restart istota-scheduler"
     - "restart istota-web"
+    - "restart istota-webhooks"
 
 # One-time migration for deploys that pre-date the istota.db rename.
 # The codebase standardized on `istota.db` and `istota_*` table names; the
@@ -3645,7 +3661,7 @@
     src: istota-webhooks.service.j2
     dest: "/etc/systemd/system/{{ istota_namespace }}-webhooks.service"
     mode: '0644'
-  when: istota_location_enabled | default(false) and not istota_web_only
+  when: istota_webhooks_enabled | bool and not istota_web_only
   notify:
     - reload systemd
     - "restart istota-webhooks"
@@ -3656,27 +3672,27 @@
     enabled: yes
     state: started
     daemon_reload: yes
-  when: istota_location_enabled | default(false) and not istota_web_only
+  when: istota_webhooks_enabled | bool and not istota_web_only
 
 - name: Find existing webhooks service
   stat:
     path: "/etc/systemd/system/{{ istota_namespace }}-webhooks.service"
   register: webhooks_service_file
-  when: not (istota_location_enabled | default(false)) and not istota_web_only
+  when: not (istota_webhooks_enabled | bool) and not istota_web_only
 
 - name: Stop and disable webhook receiver when disabled
   systemd:
     name: "{{ istota_namespace }}-webhooks"
     enabled: no
     state: stopped
-  when: not (istota_location_enabled | default(false)) and not istota_web_only and (webhooks_service_file.stat.exists | default(false))
+  when: not (istota_webhooks_enabled | bool) and not istota_web_only and (webhooks_service_file.stat.exists | default(false))
   failed_when: false
 
 - name: Remove webhooks service file when disabled
   file:
     path: "/etc/systemd/system/{{ istota_namespace }}-webhooks.service"
     state: absent
-  when: not (istota_location_enabled | default(false)) and not istota_web_only and (webhooks_service_file.stat.exists | default(false))
+  when: not (istota_webhooks_enabled | bool) and not istota_web_only and (webhooks_service_file.stat.exists | default(false))
   notify:
     - reload systemd
 
@@ -3857,7 +3873,7 @@
   apt:
     name: nginx
     state: present
-  when: (istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_update_only and not istota_web_only
+  when: (istota_webhooks_enabled | bool or istota_web_enabled | default(false)) and not istota_update_only and not istota_web_only
 
 # The web root is operator territory: root-owned, group-readable by nginx, and
 # outside istota_home so no sandbox bind or istota-user write path reaches it.
@@ -3870,7 +3886,7 @@
     mode: "{{ istota_web_root_dir_mode }}"
   when:
     - istota_web_root_enabled | default(true)
-    - istota_location_enabled | default(false) or istota_web_enabled | default(false)
+    - istota_webhooks_enabled | bool or istota_web_enabled | default(false)
     - not istota_web_only
 
 # force: no — the placeholder seeds an empty root once; operator content wins
@@ -3885,7 +3901,7 @@
     force: no
   when:
     - istota_web_root_enabled | default(true)
-    - istota_location_enabled | default(false) or istota_web_enabled | default(false)
+    - istota_webhooks_enabled | bool or istota_web_enabled | default(false)
     - not istota_web_only
 
 - name: Deploy nginx config
@@ -3895,7 +3911,7 @@
     owner: root
     group: root
     mode: "0644"
-  when: (istota_location_enabled | default(false) or istota_web_enabled | default(false)) and not istota_web_only
+  when: (istota_webhooks_enabled | bool or istota_web_enabled | default(false)) and not istota_web_only
   notify:
     - reload nginx
 
@@ -3903,7 +3919,7 @@
   file:
     path: "/etc/nginx/conf.d/{{ istota_hostname }}.conf"
     state: absent
-  when: not (istota_location_enabled | default(false)) and not (istota_web_enabled | default(false)) and not istota_web_only
+  when: not (istota_webhooks_enabled | bool) and not (istota_web_enabled | default(false)) and not istota_web_only
   notify:
     - reload nginx
 
@@ -3931,7 +3947,7 @@
   loop:
     - { name: "{{ istota_namespace }}-scheduler", enabled: true }
     - { name: "{{ istota_namespace }}-web", enabled: "{{ istota_web_enabled | default(false) }}" }
-    - { name: "{{ istota_namespace }}-webhooks", enabled: "{{ istota_location_enabled | default(false) }}" }
+    - { name: "{{ istota_namespace }}-webhooks", enabled: "{{ istota_webhooks_enabled | bool }}" }
   when: istota_update_only and (item.enabled | bool)
 
 # ISSUE-428: the auto-update cron's early exit compares against this marker

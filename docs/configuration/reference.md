@@ -82,6 +82,39 @@ While watching, istota holds an active Talk session in every room it watches, so
 | `dmarc_canary_warn_on_missing` | `false` | Also warn when your MTA's stamp carries no DMARC verdict at all. Off by default because a path that stamps nothing would warn on every message |
 | `authserv_id` | `""` | Your receiving MTA's authserv-id — the first field of the `Authentication-Results` header it stamps. Set it and headers from any other authserv-id are discarded rather than read; blank keeps the older topmost-header-only read, which a sender can forge once the MTA stops stamping. Setting it also makes mail arriving without your stamp warn on its own — see [the DMARC canary](../features/email.md#the-dmarc-canary) |
 
+## `[sms]`
+
+One provider-neutral SMS surface backed by Twilio or Telnyx. See the [SMS setup guide](../features/sms.md) for provider portal steps, phone-number authority, opt-outs, and switching.
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Accept inbound SMS work and send new messages through the active provider |
+| `provider` | `"twilio"` | Active provider: `twilio` or `telnyx` |
+| `service_numbers` | `[]` | Exact E.164 numbers allowed to receive inbound messages |
+| `default_sender_number` | `""` | Default outbound E.164 number; must be in `service_numbers` |
+| `max_segments` | `6` | Per-message segment ceiling, from 1 through 10 |
+| `request_timeout_seconds` | `10` | Provider API timeout, from 1 through 30 seconds |
+
+### `[sms.twilio]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `account_sid` | `""` | Account checked on signed inbound events |
+| `auth_token` | `""` | Secret used only for Twilio webhook validation |
+| `api_key_sid` | `""` | Restricted API key SID used for outbound sends |
+| `api_key_secret` | `""` | Restricted API key secret used for outbound sends |
+| `messaging_service_sid` | `""` | Messaging Service whose sender pool carries outbound messages |
+
+### `[sms.telnyx]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `api_key` | `""` | API secret used for outbound sends |
+| `public_key` | `""` | Ed25519 public signing key used for webhook validation |
+| `messaging_profile_id` | `""` | Messaging Profile checked on inbound events and used for sends |
+
+When SMS is enabled, the common block and active provider block must be complete. A provider block with any value must also be complete when inactive. This lets its adapter authenticate late delivery callbacks after a switch without accepting new inbound tasks.
+
 ## `[conversation]`
 
 | Setting | Default | Description |

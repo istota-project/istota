@@ -66,6 +66,7 @@ ln -s /path/to/istota/deploy/ansible /path/to/roles/istota
 | Bubblewrap sandbox | `istota_security_sandbox_enabled` | `true` |
 | Web interface | `istota_web_enabled` | `true` |
 | GPS location | `istota_location_enabled` | `false` |
+| SMS | `istota_sms_enabled` | `false` |
 
 ## Variables
 
@@ -78,6 +79,7 @@ All variables with defaults are in `deploy/ansible/defaults/main.yml`. Key group
 - **Scheduler**: `istota_scheduler_*` (poll intervals, worker limits, timeouts)
 - **Web**: `istota_web_enabled`, `istota_web_port`, `istota_web_chat_max_attachment_mb`, `istota_web_graceful_shutdown_seconds`, `istota_web_stop_timeout_seconds`
 - **Email**: `istota_email_enabled`, `istota_email_outbound_approval_floor`, plus per-user `outbound_approval` and `external_turn_display` keys inside `istota_users`
+- **SMS**: `istota_sms_*`; provider credentials belong in Ansible Vault. See [SMS](../features/sms.md) for both providers and switching.
 
 `istota_email_outbound_approval_floor` (default **`"untrusted"`**) is the [outbound approval gate](../features/email.md#the-outbound-approval-gate)'s floor, and the role is the only supported place to change it — a hand edit to `config.toml` is overwritten on the next run. **Quote the value.** `off` unquoted is a YAML boolean: it renders `outbound_approval_floor = "False"`, which the daemon refuses to load. The play asserts the floor and each per-user `outbound_approval` before templating, so a bad value fails naming the variable rather than leaving an unloadable config on disk for the next restart to find.
 
@@ -239,7 +241,7 @@ External role dependencies are inlined as tasks:
 - **Docker**: `apt-get install docker.io docker-compose-plugin` (when browser enabled)
 - **rclone**: install + config (when rclone configured)
 - **rclone mount**: systemd unit for FUSE mount (when mount enabled)
-- **nginx**: install + config (when location or web enabled)
+- **nginx**: install + config (when location, SMS callbacks, or web is enabled)
 - **Node.js**: NodeSource 20.x (when Node.js enabled)
 
 ## Update mode
