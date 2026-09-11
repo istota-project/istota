@@ -30,6 +30,7 @@ from istota.transport.sms.providers._types import (
     SmsSendRequest,
     SmsWebhookRequest,
 )
+from tests.support.drift import source_of
 
 
 SERVICE_NUMBER = "+15551230000"
@@ -207,6 +208,19 @@ def test_sms_adapter_conformance_normalizes_delivery(provider, tmp_path):
     assert event.reported_segments == 2
     assert event.error_code is None
     assert event.opted_out is False
+
+
+def test_webhook_receiver_depends_only_on_common_provider_contract():
+    from istota import webhook_receiver
+
+    source = (
+        source_of(webhook_receiver.receive_twilio_sms)
+        + source_of(webhook_receiver.receive_telnyx_sms)
+    )
+
+    assert ".providers.twilio" not in source
+    assert ".providers.telnyx" not in source
+    assert ".providers._types" in source
 
 
 def _provider_failure(provider: str, kind: str):

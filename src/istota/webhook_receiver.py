@@ -300,8 +300,10 @@ async def _bounded_body(request: Request, limit: int = 64 * 1024) -> bytes | Non
 async def receive_twilio_sms(request: Request, background: BackgroundTasks):
     """Authenticate and persist one Twilio message or delivery callback."""
     from . import db  # noqa: PLC0415
-    from .transport.sms.providers._types import SmsWebhookRequest  # noqa: PLC0415
-    from .transport.sms.providers.twilio import TwilioWebhookError  # noqa: PLC0415
+    from .transport.sms.providers._types import (  # noqa: PLC0415
+        SmsWebhookError,
+        SmsWebhookRequest,
+    )
     from .transport.sms.webhook import (  # noqa: PLC0415
         deliver_event_response,
         handle_provider_event,
@@ -324,7 +326,7 @@ async def receive_twilio_sms(request: Request, background: BackgroundTasks):
             headers=request.headers,
             public_url=public_url,
         ))
-    except TwilioWebhookError as exc:
+    except SmsWebhookError as exc:
         logger.info("sms.inbound.rejected provider=twilio reason=%s", str(exc))
         return Response(status_code=exc.status_code)
 
@@ -351,8 +353,10 @@ async def receive_twilio_sms(request: Request, background: BackgroundTasks):
 async def receive_telnyx_sms(request: Request, background: BackgroundTasks):
     """Authenticate and persist one Telnyx message or delivery callback."""
     from . import db  # noqa: PLC0415
-    from .transport.sms.providers._types import SmsWebhookRequest  # noqa: PLC0415
-    from .transport.sms.providers.telnyx import TelnyxWebhookError  # noqa: PLC0415
+    from .transport.sms.providers._types import (  # noqa: PLC0415
+        SmsWebhookError,
+        SmsWebhookRequest,
+    )
     from .transport.sms.webhook import (  # noqa: PLC0415
         deliver_event_response,
         handle_provider_event,
@@ -375,7 +379,7 @@ async def receive_telnyx_sms(request: Request, background: BackgroundTasks):
             headers=request.headers,
             public_url=public_url,
         ))
-    except TelnyxWebhookError as exc:
+    except SmsWebhookError as exc:
         logger.info("sms.inbound.rejected provider=telnyx reason=%s", str(exc))
         return Response(status_code=exc.status_code)
 

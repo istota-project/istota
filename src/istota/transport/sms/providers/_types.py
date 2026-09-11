@@ -87,6 +87,14 @@ class SmsSendFailure:
 SmsSendOutcome: TypeAlias = SmsSendResult | SmsSendFailure
 
 
+class SmsWebhookError(ValueError):
+    """A safe HTTP-facing provider webhook rejection."""
+
+    def __init__(self, reason: str, status_code: int = 403) -> None:
+        super().__init__(reason)
+        self.status_code = status_code
+
+
 @dataclass(frozen=True)
 class SmsProviderAdapter:
     name: SmsProviderName

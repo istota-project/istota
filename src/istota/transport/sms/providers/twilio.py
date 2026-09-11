@@ -21,6 +21,7 @@ from ._types import (
     SmsSendFailure,
     SmsSendRequest,
     SmsSendResult,
+    SmsWebhookError,
     SmsWebhookRequest,
     SmsWebhookResult,
 )
@@ -49,12 +50,7 @@ _START_KEYWORDS = frozenset({"START", "UNSTOP"})
 _HELP_KEYWORDS = frozenset({"HELP", "INFO"})
 
 
-class TwilioWebhookError(ValueError):
-    """A safe HTTP-facing rejection of a Twilio webhook."""
-
-    def __init__(self, reason: str, status_code: int = 403) -> None:
-        super().__init__(reason)
-        self.status_code = status_code
+TwilioWebhookError = SmsWebhookError
 
 
 class _FormFields:

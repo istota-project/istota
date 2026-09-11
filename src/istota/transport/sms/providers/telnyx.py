@@ -20,6 +20,7 @@ from ._types import (
     SmsSendFailure,
     SmsSendRequest,
     SmsSendResult,
+    SmsWebhookError,
     SmsWebhookRequest,
     SmsWebhookResult,
 )
@@ -47,12 +48,7 @@ _HELP_KEYWORDS = frozenset({"HELP", "INFO"})
 _PUBLIC_ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
 
 
-class TelnyxWebhookError(ValueError):
-    """A safe HTTP-facing rejection of a Telnyx webhook."""
-
-    def __init__(self, reason: str, status_code: int = 403) -> None:
-        super().__init__(reason)
-        self.status_code = status_code
+TelnyxWebhookError = SmsWebhookError
 
 
 def _header(headers: Mapping[str, str], name: str) -> str:
