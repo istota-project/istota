@@ -8,10 +8,10 @@ import logging
 import math
 import re
 import sqlite3
-from datetime import datetime, timezone
 
 from ... import db
 from ...config import Config
+from ...timestamps import iso_now as _now
 from ._types import RenderedSms, SmsDeliveryRecord
 from .providers._types import SmsSendFailure, SmsSendRequest, SmsSendResult
 from .providers.registry import SmsProviderRegistry
@@ -119,11 +119,6 @@ def render_sms(text: str, max_segments: int) -> RenderedSms:
         cleaned = _truncate(cleaned, encoding, budget)
         units = _units(cleaned, encoding)
     return RenderedSms(cleaned, encoding, _segment_count(units, encoding))
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 def _record(row) -> SmsDeliveryRecord:
     return SmsDeliveryRecord(
