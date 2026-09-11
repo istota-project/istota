@@ -425,6 +425,7 @@ def deliver_pending(config: "Config", results: Iterable[RaiseResult | None]) -> 
                         result.text,
                         purpose=result.purpose,
                         title=result.title,
+                        reference_id=f"notification:{result.notification_id}",
                     )
                 except Exception:
                     logger.warning(

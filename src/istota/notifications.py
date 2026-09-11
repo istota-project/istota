@@ -617,6 +617,7 @@ def _dispatch(
     title: str | None = None,
     priority: int | None = None,
     tags: str | None = None,
+    reference_id: str | None = None,
 ) -> tuple[bool, int | None]:
     """Deliver ``message`` to every resolved destination.
 
@@ -685,8 +686,8 @@ def _dispatch(
             from .transport.sms.providers.registry import make_provider_registry
             result = run_coro(deliver_sms(
                 config, make_provider_registry(config),
-                logical_key=f"notification:{uuid.uuid4()}",
-                user_id=user_id, text=body,
+                logical_key=reference_id or f"notification:{uuid.uuid4()}",
+                user_id=user_id, text=message or title or "",
             ))
             if result.status in {"accepted", "queued", "sent", "delivered"}:
                 sent = True
@@ -709,6 +710,7 @@ def send_notification(
     title: str | None = None,
     priority: int | None = None,
     tags: str | None = None,
+    reference_id: str | None = None,
 ) -> bool:
     """Send a notification via an explicit surface or the user's routing table.
 
@@ -738,7 +740,7 @@ def send_notification(
     sent, _talk_msg_id = _dispatch(
         config, user_id, message, dests,
         conversation_token=conversation_token,
-        title=title, priority=priority, tags=tags,
+        title=title, priority=priority, tags=tags, reference_id=reference_id,
     )
 
     if not sent:

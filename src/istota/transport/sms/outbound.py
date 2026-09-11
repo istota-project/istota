@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import math
 import re
 import sqlite3
@@ -14,6 +15,8 @@ from ...config import Config
 from ._types import RenderedSms, SmsDeliveryRecord
 from .providers._types import SmsSendFailure, SmsSendRequest, SmsSendResult
 from .providers.registry import SmsProviderRegistry
+
+logger = logging.getLogger(__name__)
 
 _TRUNCATION_SUFFIX = "\n\n[Reply shortened. Send a narrower follow-up.]"
 _GSM7_BASIC = frozenset(
@@ -26,6 +29,17 @@ _TERMINAL_STATUSES = frozenset({
     "delivered", "delivery_unconfirmed", "failed", "blocked_opt_out",
     "unconfigured", "unknown",
 })
+_TASK_LOG_MESSAGES = {
+    "accepted": "SMS accepted by provider",
+    "queued": "SMS queued by provider",
+    "sent": "SMS sent by provider",
+    "delivered": "SMS delivered",
+    "delivery_unconfirmed": "SMS delivery unconfirmed",
+    "failed": "SMS delivery failed",
+    "blocked_opt_out": "SMS blocked by opt-out",
+    "unconfigured": "SMS delivery unconfigured",
+    "unknown": "SMS delivery unknown",
+}
 
 
 def _clean_text(text: str) -> str:
@@ -196,35 +210,37 @@ async def deliver_sms(
         else:
             blocked_record = None
     if blocked_record is not None:
-        _raise_failure_alert(config, blocked_record, user_id, task_id)
+        _log_transition(config, blocked_record, task_id)
+        await _alert_failure(config, blocked_record, user_id, task_id)
         return blocked_record
 
     with db.get_db(config.db_path) as conn:
+        claimed = conn.execute(
+            "UPDATE sent_sms SET provider = ?, to_number = ?, from_number = ?, "
+            "claimed_at = ?, updated_at = ? "
+            "WHERE logical_key = ? AND status = 'pending' "
+            "AND claimed_at IS NULL AND attempted_at IS NULL",
+            (provider_name, number, sender, now, now, logical_key),
+        ).rowcount
         row = conn.execute(
             "SELECT * FROM sent_sms WHERE logical_key = ?", (logical_key,),
         ).fetchone()
-        claimed = conn.execute(
-            "UPDATE sent_sms SET claimed_at = ?, updated_at = ? "
-            "WHERE logical_key = ? AND status = 'pending' "
-            "AND claimed_at IS NULL AND attempted_at IS NULL",
-            (now, now, logical_key),
-        ).rowcount
     if not claimed:
         return _record(row)
 
     adapter = providers.get(row["provider"])
     if adapter is None:
         record = _set_outcome(config, logical_key, "unknown")
-        _raise_failure_alert(config, record, user_id, task_id)
+        await _alert_failure(config, record, user_id, task_id)
         return record
     number = config.sms_phone_number_for(user_id)
     if not number:
         record = _set_outcome(config, logical_key, "unconfigured")
-        _raise_failure_alert(config, record, user_id, task_id)
+        await _alert_failure(config, record, user_id, task_id)
         return record
     if is_opted_out(config, number):
         record = _set_outcome(config, logical_key, "blocked_opt_out")
-        _raise_failure_alert(config, record, user_id, task_id)
+        await _alert_failure(config, record, user_id, task_id)
         return record
     sender = (
         preferred_from_number
@@ -250,22 +266,70 @@ async def deliver_sms(
     except Exception:
         outcome = SmsSendFailure(False, None, False, "delivery outcome unknown")
     if isinstance(outcome, SmsSendResult):
-        record = _set_outcome(
+        record = _persist_outcome_or_unknown(
             config, logical_key, outcome.status,
             provider_message_id=outcome.provider_message_id,
             reported_segments=outcome.reported_segments,
         )
-        if record.status == "failed":
-            _raise_failure_alert(config, record, user_id, task_id)
+        if record.status in {"failed", "unknown"}:
+            await _alert_failure(config, record, user_id, task_id)
         return record
     if outcome.opted_out and number:
         set_opt_out(config, number, True)
-    record = _set_outcome(
+    record = _persist_outcome_or_unknown(
         config, logical_key, "failed" if outcome.definite else "unknown",
         error_code=outcome.error_code,
     )
-    _raise_failure_alert(config, record, user_id, task_id)
+    await _alert_failure(config, record, user_id, task_id)
     return record
+
+
+async def _alert_failure(
+    config: Config,
+    record: SmsDeliveryRecord,
+    user_id: str,
+    task_id: int | None,
+) -> None:
+    try:
+        await asyncio.to_thread(
+            _raise_failure_alert, config, record, user_id, task_id,
+        )
+    except Exception:
+        logger.warning(
+            "sms.outbound.alert_failed logical_key_hash=%s task_id=%s",
+            hashlib.sha256(record.logical_key.encode()).hexdigest()[:16], task_id,
+            exc_info=True,
+        )
+
+
+def _persist_outcome_or_unknown(
+    config: Config,
+    logical_key: str,
+    status: str,
+    **values,
+) -> SmsDeliveryRecord:
+    try:
+        return _set_outcome(config, logical_key, status, **values)
+    except Exception:
+        logger.warning(
+            "sms.outbound.unknown logical_key_hash=%s",
+            hashlib.sha256(logical_key.encode()).hexdigest()[:16],
+            exc_info=True,
+        )
+        try:
+            return _set_outcome(config, logical_key, "unknown")
+        except Exception:
+            previous = _existing(config, logical_key)
+            if previous is not None:
+                return SmsDeliveryRecord(
+                    logical_key=logical_key, provider=previous["provider"],
+                    status="unknown",
+                    provider_message_id=previous["provider_message_id"],
+                    error_code=previous["error_code"],
+                    estimated_segments=previous["estimated_segments"],
+                    reported_segments=previous["reported_segments"],
+                )
+            raise
 
 
 def _set_outcome(
@@ -279,6 +343,9 @@ def _set_outcome(
 ) -> SmsDeliveryRecord:
     now = _now()
     with db.get_db(config.db_path) as conn:
+        previous = conn.execute(
+            "SELECT status, task_id FROM sent_sms WHERE logical_key = ?", (logical_key,),
+        ).fetchone()
         conn.execute(
             "UPDATE sent_sms SET status = ?, provider_message_id = COALESCE(?, provider_message_id), "
             "error_code = ?, reported_segments = COALESCE(?, reported_segments), updated_at = ? "
@@ -288,7 +355,25 @@ def _set_outcome(
         row = conn.execute(
             "SELECT * FROM sent_sms WHERE logical_key = ?", (logical_key,),
         ).fetchone()
+        if previous is not None and previous["status"] != status:
+            _log_transition_on_connection(conn, _record(row), previous["task_id"])
     return _record(row)
+
+
+def _log_transition_on_connection(conn, record: SmsDeliveryRecord, task_id) -> None:
+    message = _TASK_LOG_MESSAGES.get(record.status)
+    if task_id is not None and message is not None:
+        db.log_task(conn, task_id, "error" if record.status == "failed" else "info", message)
+    logger.info(
+        "sms.outbound.%s provider=%s task_id=%s provider_message_id=%s error_code=%s",
+        record.status, record.provider, task_id,
+        record.provider_message_id, record.error_code,
+    )
+
+
+def _log_transition(config: Config, record: SmsDeliveryRecord, task_id) -> None:
+    with db.get_db(config.db_path) as conn:
+        _log_transition_on_connection(conn, record, task_id)
 
 
 def is_opted_out(config: Config, phone_number: str) -> bool:
@@ -338,6 +423,7 @@ def _raise_failure_alert(
         return
     if notifications.send_notification(
         config, user_id, raised.text, surface=descriptor, title=raised.title,
+        reference_id=f"sms-failure:{raised.notification_id}",
     ):
         with db.get_db(config.db_path) as conn:
             mark_delivered(conn, [raised.notification_id])
@@ -419,6 +505,13 @@ def apply_delivery_event(conn, event) -> tuple[str, SmsDeliveryRecord | None]:
             (updated["to_number"], now, now),
         )
     record = _record(updated)
+    _log_transition_on_connection(conn, record, updated["task_id"])
+    logger.info(
+        "sms.delivery.updated provider=%s task_id=%s provider_message_id=%s "
+        "provider_event_id=%s status=%s error_code=%s",
+        event.provider, updated["task_id"], event.provider_message_id,
+        event.provider_event_id, event.status, event.error_code,
+    )
     if entered_failed:
         _write_failure_alert(conn, record, updated["user_id"], updated["task_id"])
     return "delivery_updated", record

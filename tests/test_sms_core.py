@@ -60,6 +60,11 @@ def _adapter(send):
     return SmsProviderAdapter(name="twilio", parse_webhook=parse, send=send)
 
 
+def _named_adapter(name, send):
+    adapter = _adapter(send)
+    return SmsProviderAdapter(name=name, parse_webhook=adapter.parse_webhook, send=send)
+
+
 def _providers(adapter: SmsProviderAdapter) -> SmsProviderRegistry:
     return SmsProviderRegistry(active_name="twilio", adapters={"twilio": adapter})
 
@@ -277,7 +282,10 @@ class TestInboundDomainHandling:
             assert db.get_task(conn, held).status == "pending"
             assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 0
 
-    def test_inactive_provider_and_unknown_number_are_acknowledged_without_rows(self, tmp_path):
+    def test_inactive_provider_and_unknown_number_are_acknowledged_without_rows(
+        self, tmp_path, caplog
+    ):
+        caplog.set_level("INFO")
         config = _config(tmp_path)
         providers = _providers(_adapter(lambda _req: SmsSendResult("opaque", "accepted", 1)))
 
@@ -290,6 +298,10 @@ class TestInboundDomainHandling:
 
         assert inactive.disposition == "inactive_provider"
         assert unknown.disposition == "unknown_sender"
+        assert "sms.inbound.rejected" in caplog.text
+        assert USER_NUMBER not in caplog.text
+        assert "+15559876543" not in caplog.text
+        assert "6543" in caplog.text
         with db.get_db(config.db_path) as conn:
             assert conn.execute("SELECT count(*) FROM processed_sms").fetchone()[0] == 0
 
@@ -399,6 +411,63 @@ class TestOutboundLedger:
         assert result.status == "accepted"
         assert calls == 1
 
+    def test_unclaimed_pending_row_moves_to_active_provider(self, tmp_path):
+        calls = []
+        config = _config(tmp_path)
+        config.sms.provider = "telnyx"
+        adapter = _named_adapter(
+            "telnyx",
+            lambda req: calls.append(req) or SmsSendResult("opaque-new", "accepted", 1),
+        )
+        providers = SmsProviderRegistry(
+            active_name="telnyx", adapters={"telnyx": adapter},
+        )
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO sent_sms (logical_key, provider, user_id, to_number, "
+                "from_number, status, estimated_segments, body_chars, body_sha256, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'pending', 1, 4, ?, "
+                "datetime('now'), datetime('now'))",
+                ("task-result:1", "twilio", "alice", USER_NUMBER, SERVICE_NUMBER, "hash"),
+            )
+
+        result = asyncio.run(deliver_sms(
+            config, providers, logical_key="task-result:1", user_id="alice", text="done"
+        ))
+
+        assert result.provider == "telnyx"
+        assert len(calls) == 1
+
+    def test_post_acceptance_database_failure_becomes_unknown(
+        self, tmp_path, monkeypatch
+    ):
+        from istota.transport.sms import outbound
+
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda _req: SmsSendResult("opaque-accepted", "accepted", 1)
+        ))
+        original = outbound._set_outcome
+        failed_once = False
+
+        def fail_once(*args, **kwargs):
+            nonlocal failed_once
+            if not failed_once and args[2] == "accepted":
+                failed_once = True
+                raise OSError("one-shot database failure")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(outbound, "_set_outcome", fail_once)
+        result = asyncio.run(deliver_sms(
+            config, providers, logical_key="task-result:1", user_id="alice", text="done"
+        ))
+
+        assert result.status == "unknown"
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute("SELECT status, attempted_at FROM sent_sms").fetchone()
+            assert row["status"] == "unknown"
+            assert row["attempted_at"] is not None
+
     @pytest.mark.parametrize(
         "failure, status",
         [
@@ -503,6 +572,34 @@ class TestDeliveryEvents:
                 "SELECT count(*) FROM notifications WHERE source = 'task_alert'"
             ).fetchone()[0] == 1
 
+    def test_task_log_distinguishes_acceptance_from_delivery(self, tmp_path, caplog):
+        caplog.set_level("INFO")
+        config = _config(tmp_path)
+        providers = _providers(_adapter(lambda _req: SmsSendResult("opaque-1", "accepted", 1)))
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="check", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"), output_target="sms",
+            )
+        asyncio.run(deliver_sms(
+            config, providers, logical_key=f"task-result:{task_id}",
+            user_id="alice", text="done", task_id=task_id,
+        ))
+        asyncio.run(_handle(
+            config, providers,
+            SmsDeliveryEvent("twilio", "event-delivered", "opaque-1", "delivered", None, 1),
+        ))
+
+        with db.get_db(config.db_path) as conn:
+            messages = [
+                row[0] for row in conn.execute(
+                    "SELECT message FROM task_logs WHERE task_id = ? ORDER BY id", (task_id,)
+                )
+            ]
+        assert messages == ["SMS accepted by provider", "SMS delivered"]
+        assert "sms.outbound.accepted" in caplog.text
+        assert "sms.delivery.updated" in caplog.text
+
 
 class TestNotificationsAndIsolation:
     def test_sms_configuration_probe_checks_binding_and_opt_out(
@@ -557,6 +654,70 @@ class TestNotificationsAndIsolation:
             assert conn.execute(
                 "SELECT count(*) FROM notifications WHERE source = 'task_alert'"
             ).fetchone()[0] == 1
+
+    def test_sms_notification_keeps_title_and_stable_reference_blocks_retry(
+        self, tmp_path, monkeypatch
+    ):
+        calls = []
+        outcomes = [
+            SmsSendFailure(False, None, False, "delivery outcome unknown"),
+            SmsSendResult("must-not-send", "accepted", 1),
+        ]
+        config = _config(tmp_path)
+        config.users["alice"].routing = {"alert": "sms"}
+        providers = _providers(_adapter(lambda req: calls.append(req.text) or outcomes.pop(0)))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+
+        first = notifications.send_notification(
+            config, "alice", "Title\n\nBody", surface="sms", title="Title",
+            reference_id="notification:17",
+        )
+        second = notifications.send_notification(
+            config, "alice", "Title\n\nBody", surface="sms", title="Title",
+            reference_id="notification:17",
+        )
+        title_only = notifications.send_notification(
+            config, "alice", "", surface="sms", title="Title only",
+            reference_id="notification:18",
+        )
+
+        assert first is second is False
+        assert title_only is True
+        assert calls == ["Title\n\nBody", "Title only"]
+        with db.get_db(config.db_path) as conn:
+            rows = conn.execute("SELECT logical_key, status FROM sent_sms").fetchall()
+            assert [tuple(row) for row in rows] == [
+                ("notification:17", "unknown"),
+                ("notification:18", "accepted"),
+            ]
+
+    def test_failure_alert_dispatches_off_the_persistent_runtime_loop(
+        self, tmp_path, monkeypatch
+    ):
+        from istota.async_runtime import run_coro
+
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda _req: SmsSendFailure(True, "rejected", False, "request rejected")
+        ))
+
+        async def sent_talk(*_args, **_kwargs):
+            return 7
+
+        monkeypatch.setattr(notifications, "_send_talk", sent_talk)
+        monkeypatch.setattr(
+            notifications, "resolve_conversation_token", lambda *_args: "talk-token",
+        )
+
+        result = run_coro(deliver_sms(
+            config, providers, logical_key="task-result:1",
+            user_id="alice", text="done",
+        ))
+
+        assert result.status == "failed"
 
     def test_common_modules_do_not_name_provider_payload_or_credentials(self):
         from tests.support.drift import source_of

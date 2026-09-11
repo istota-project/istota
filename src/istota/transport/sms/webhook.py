@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 import sqlite3
 
@@ -18,6 +20,12 @@ from .providers.registry import SmsProviderRegistry
 
 _MMS_REPLY = "MMS is not supported. Please resend the request as text."
 _E164_RE = re.compile(r"\+[1-9][0-9]{7,14}\Z")
+logger = logging.getLogger(__name__)
+
+
+def _number_fingerprint(number: str) -> str:
+    value = f"istota-sms-number-v1\0{number}".encode()
+    return hashlib.sha256(value).hexdigest()[:16]
 
 
 def _claim_inbound(conn, event: InboundSmsEvent, user_id: str) -> bool:
@@ -66,6 +74,11 @@ def handle_provider_event(
         return SmsEventResult("invalid_sender")
     user_id = config.find_user_by_sms_number(event.from_number)
     if user_id is None:
+        logger.info(
+            "sms.inbound.rejected provider=%s reason=unknown_sender "
+            "number_fingerprint=%s number_suffix=%s",
+            event.provider, _number_fingerprint(event.from_number), event.from_number[-4:],
+        )
         return SmsEventResult("unknown_sender")
     token = sms_conversation_token(user_id)
     conn.execute("BEGIN IMMEDIATE")
