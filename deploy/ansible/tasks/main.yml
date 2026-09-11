@@ -1985,6 +1985,7 @@
     --name {{ user_id }}
     {% if (user_item.value.display_name | default('')) %}--display-name "{{ user_item.value.display_name }}"{% endif %}
     {% for email in user_item.value.email_addresses | default([]) %}--email "{{ email }}" {% endfor %}
+    {% if user_item.value.sms_phone_number is defined and user_item.value.sms_phone_number is not none %}{{ '--sms-number "%s"' % user_item.value.sms_phone_number if user_item.value.sms_phone_number else '--clear-sms-number' }}{% endif %}
     {% for sender in user_item.value.trusted_email_senders | default([]) %}--trusted-sender "{{ sender }}" {% endfor %}
     {% for sender in user_item.value.quiet_email_senders | default([]) %}--quiet-sender "{{ sender }}" {% endfor %}
     {% if (user_item.value.log_channel | default('')) %}--log-channel "{{ user_item.value.log_channel }}"{% endif %}

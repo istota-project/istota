@@ -605,6 +605,16 @@ istota_experimental_features: []
 #                                   # istota_provision_talk_rooms fill it in.
 #     alerts_channel: ""            # Talk room for confirmations and security
 #                                   # alerts; empty auto-provisions #alerts.
+#     # An exact E.164 number bound to this user for the SMS surface. This is a
+#     # CREDENTIAL, not a contact detail: whoever holds the number can create
+#     # tasks as the user and answer that user's pending SMS confirmations, and
+#     # a provider signature proves only which provider sent the webhook, never
+#     # that the same person still controls the SIM. Inventory is version
+#     # control, so weigh that before putting one here. Omit the key to leave a
+#     # CLI-set binding alone; `""` revokes it, which is how a lost, transferred
+#     # or recycled number is taken out of service from a deploy. One number per
+#     # user — two users sharing one fails the deploy on a unique index.
+#     sms_phone_number: "+15551234567"
 #     trusted_email_senders:        # skips the inbound gate and the outbound
 #       - "*@example.com"           # approval hold. Domain wildcard or exact
 #       - "bob@example.net"         # match.

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - You can now text Istota. SMS is a task and notification surface through either Twilio or Telnyx: a phone number is bound to one user, replies stay outside Talk and web rooms, and each result is capped to one provider message within a segment budget you set. Opt-out state is keyed by number, so it survives a provider change.
 - Signed provider callbacks are served through the shared webhook receiver on Docker, the combined local server, and the Ansible deployment. `docs/features/sms.md` covers both providers and how to switch between them.
+- The Ansible role binds phone numbers: `sms_phone_number` under `istota_users` sets a user's SMS identity, and `""` revokes it. The deployment-level `[sms]` settings were already in the role, so a number had to be bound by hand over SSH and a rebuilt host came back with none.
 
 ### Changed
 

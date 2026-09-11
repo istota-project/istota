@@ -79,9 +79,11 @@ All variables with defaults are in `deploy/ansible/defaults/main.yml`. Key group
 - **Scheduler**: `istota_scheduler_*` (poll intervals, worker limits, timeouts)
 - **Web**: `istota_web_enabled`, `istota_web_port`, `istota_web_chat_max_attachment_mb`, `istota_web_graceful_shutdown_seconds`, `istota_web_stop_timeout_seconds`
 - **Email**: `istota_email_enabled`, `istota_email_outbound_approval_floor`, plus per-user `outbound_approval` and `external_turn_display` keys inside `istota_users`
-- **SMS**: `istota_sms_*`; provider credentials belong in Ansible Vault. See [SMS](../features/sms.md) for both providers and switching.
+- **SMS**: `istota_sms_*`; provider credentials belong in Ansible Vault. Per-user `sms_phone_number` inside `istota_users` binds a number to a user. See [SMS](../features/sms.md) for both providers and switching.
 
 `istota_email_outbound_approval_floor` (default **`"untrusted"`**) is the [outbound approval gate](../features/email.md#the-outbound-approval-gate)'s floor, and the role is the only supported place to change it — a hand edit to `config.toml` is overwritten on the next run. **Quote the value.** `off` unquoted is a YAML boolean: it renders `outbound_approval_floor = "False"`, which the daemon refuses to load. The play asserts the floor and each per-user `outbound_approval` before templating, so a bad value fails naming the variable rather than leaving an unloadable config on disk for the next restart to find.
+
+A per-user `sms_phone_number` is passed to `istota user ensure` the same way, and it is a **credential rather than a contact detail**: whoever holds the number can create tasks as that user and answer that user's pending SMS confirmations, and a provider signature proves only which provider sent the webhook, never that the same person still holds the SIM. Inventory is version control, so decide deliberately whether the binding belongs there. Omitting the key leaves a CLI-set binding alone; `sms_phone_number: ""` revokes it, which is how a lost, transferred, or recycled number is taken out of service from a deploy rather than by hand. Numbers must be exact E.164 and unique across users — two users sharing one fails the deploy on the profile table's unique index.
 
 Per-user `outbound_approval` / `external_turn_display` under `istota_users` are passed to `istota user ensure`, not templated into `[users.X]` — the TOML keys seed only a user with no profile row yet, while the CLI flags update an existing one.
 

@@ -24,6 +24,7 @@ from jinja2 import Environment
 
 REPO = Path(__file__).resolve().parent.parent
 TASKS_FILE = REPO / "deploy" / "ansible" / "tasks" / "main.yml"
+DEFAULTS_FILE = REPO / "deploy" / "ansible" / "defaults" / "main.yml"
 
 
 def _ensure_profiles_command() -> str:
@@ -595,3 +596,94 @@ class TestNothingChownsToTheUserBeforeItExists:
         assert [name for _, name, _, _ in offenders] == [
             "An FQCN task nobody reordered"
         ]
+
+
+class TestAnsibleSmsNumberBinding:
+    """The per-user half of the SMS surface, reachable from inventory.
+
+    The role had every deployment-level `[sms]` setting and no way to bind a
+    number to a user, so an operator declared the whole transport in inventory
+    and then had to SSH in and run `istota user ... --sms-number` by hand. A
+    rebuilt host came back with no bindings and nothing said so: every inbound
+    message reads as `unknown_sender` and every outbound records
+    `unconfigured`, both silently.
+    """
+
+    def test_a_number_is_threaded_to_the_cli(self):
+        rendered = _render(
+            _ensure_profiles_command(),
+            {"display_name": "Alice", "sms_phone_number": "+15551234567"},
+        )
+        assert '--sms-number "+15551234567"' in rendered
+        assert "--clear-sms-number" not in rendered
+
+    def test_an_empty_number_revokes_the_binding(self):
+        """`""` is a value, not an omission — and the action it names is
+        revocation, which is the whole reason it has to be reachable from
+        inventory: a lost, transferred or recycled number has to be taken out
+        of service by the same mechanism that put it in. `--sms-number ""`
+        would not do it; the CLI rejects an empty string as not-E.164 and exits
+        1, so the empty case maps to the separate clearing flag.
+        """
+        rendered = _render(
+            _ensure_profiles_command(),
+            {"display_name": "Alice", "sms_phone_number": ""},
+        )
+        assert "--clear-sms-number" in rendered
+        assert "--sms-number" not in rendered.replace("--clear-sms-number", "")
+
+    def test_an_absent_key_leaves_a_cli_set_binding_alone(self):
+        rendered = _render(
+            _ensure_profiles_command(), {"display_name": "Alice"},
+        )
+        assert "sms-number" not in rendered
+
+    def test_a_null_key_is_treated_as_absent(self):
+        """`sms_phone_number:` with nothing after it is a dangling key, not a
+        request to revoke. It passes `is defined`, hence the `is not none` —
+        and guessing wrong here silently cuts a user off from the surface.
+        """
+        rendered = _render(
+            _ensure_profiles_command(),
+            {"display_name": "Alice", "sms_phone_number": None},
+        )
+        assert "sms-number" not in rendered
+
+    def test_the_documented_example_key_matches_what_the_task_reads(self):
+        """The inventory block is the only place an operator learns the key
+        exists, and it is hand-maintained beside a template that reads a
+        different string just as happily."""
+        defaults = DEFAULTS_FILE.read_text()
+        assert "sms_phone_number:" in defaults, (
+            "istota_users documents no sms_phone_number key"
+        )
+        assert "user_item.value.sms_phone_number" in _ensure_profiles_command()
+
+    def test_every_rendered_sms_flag_is_one_the_cli_declares(self):
+        """The template and the parser are in different languages and nothing
+        else holds them together: a flag renamed on one side still renders,
+        then fails at deploy time inside a `command:` whose output nobody
+        reads. Read through `source_of` so testmon sees the dependency — a
+        guard that reads lines without executing them is otherwise selected by
+        nothing and goes green unrun (ISSUE-459).
+        """
+        import re
+        import shlex
+
+        from istota import cli
+
+        from tests.support.drift import source_of
+
+        declared = source_of(cli.main)
+        for user_value in ({"sms_phone_number": "+15551234567"},
+                           {"sms_phone_number": ""}):
+            rendered = _render(_ensure_profiles_command(), user_value)
+            flags = [
+                token for token in shlex.split(rendered)
+                if re.fullmatch(r"--(clear-)?sms-number", token)
+            ]
+            assert flags, f"no SMS flag rendered for {user_value!r}"
+            for flag in flags:
+                assert f'"{flag}"' in declared, (
+                    f"the role renders {flag}, which istota.cli declares nowhere"
+                )
