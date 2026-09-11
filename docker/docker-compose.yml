@@ -414,7 +414,7 @@ services:
       # Location tracking (optional). LOCATION_INGEST_TOKEN auto-generates
       # if blank; the entrypoint persists the chosen token to the API
       # provisioning flag so it survives restarts.
-      ISTOTA_LOCATION_ENABLED: ${ISTOTA_LOCATION_ENABLED:-false}
+      ISTOTA_LOCATION_ENABLED: ${ISTOTA_LOCATION_ENABLED:-true}
       ISTOTA_WEBHOOKS_PORT: ${ISTOTA_WEBHOOKS_PORT:-8765}
       LOCATION_INGEST_TOKEN: ${LOCATION_INGEST_TOKEN:-}
       # SMS (optional). Provider-qualified names keep callback authentication

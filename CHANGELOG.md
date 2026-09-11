@@ -9,7 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Istota can now use SMS as a private task and notification surface through Twilio or Telnyx. A phone number is bound to one user, replies stay outside Talk and web rooms, STOP state survives provider changes, and each result is capped to one provider message within an operator-set segment budget. Docker, the combined local server, and the Ansible deployment expose the signed provider callbacks through one shared webhook receiver; the setup guide covers both providers and safe switching. Provider failures retain only a public error code and a safe delivery result; credentials, message bodies, and phone numbers are not copied from SDK exceptions.
+- You can now text Istota. SMS is a task and notification surface through either Twilio or Telnyx: a phone number is bound to one user, replies stay outside Talk and web rooms, and each result is capped to one provider message within a segment budget you set. Opt-out state is keyed by number, so it survives a provider change.
+- Signed provider callbacks are served through the shared webhook receiver on Docker, the combined local server, and the Ansible deployment. `docs/features/sms.md` covers both providers and how to switch between them.
+
+### Changed
+
+- **Upgrade note:** the Docker webhook receiver is now reached through nginx at `/webhooks/` instead of binding its own host port. An Overland client pointed at `http://<host>:8765/webhooks/location` needs repointing to `https://<your-domain>/webhooks/location`.
 
 ## [0.41.1] - 2026-09-09
 
