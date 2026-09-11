@@ -930,6 +930,7 @@ istota_devbox_proxy_audit_log: ""
 
 # Location tracking (Overland GPS receiver)
 istota_location_enabled: false
+istota_webhooks_enabled: false
 istota_webhooks_port: 8765
 istota_location_accuracy_threshold_m: 100.0
 istota_location_visit_exit_minutes: 5.0
@@ -939,6 +940,23 @@ istota_location_reconcile_buffer_minutes: 10.0
 istota_location_reconcile_grace_minutes: 10.0
 istota_location_reconcile_min_pings: 3
 istota_location_reconcile_min_dwell_sec: 60
+
+# SMS transport. One provider is active for inbound work and sends. A complete
+# inactive block keeps its signed delivery callback route alive during a switch.
+istota_sms_enabled: false
+istota_sms_provider: "twilio"
+istota_sms_service_numbers: []
+istota_sms_default_sender_number: ""
+istota_sms_max_segments: 6
+istota_sms_request_timeout_seconds: 10
+istota_sms_twilio_account_sid: ""
+istota_sms_twilio_auth_token: ""
+istota_sms_twilio_api_key_sid: ""
+istota_sms_twilio_api_key_secret: ""
+istota_sms_twilio_messaging_service_sid: ""
+istota_sms_telnyx_api_key: ""
+istota_sms_telnyx_public_key: ""
+istota_sms_telnyx_messaging_profile_id: ""
 
 # Authenticated web interface (Nextcloud built-in OAuth2). Set up the client in
 # NC Settings → Security → OAuth 2.0 clients, then put the client_id/secret below

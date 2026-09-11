@@ -375,6 +375,7 @@ CASES: tuple[Case, ...] = (
     # channel guidelines and their own output target.
     Case("source_talk", source_type="talk", conversation_token="room-token"),
     Case("source_email", source_type="email"),
+    Case("source_sms", source_type="sms"),
     # Memory is seeded here on purpose and must NOT appear: the eager `digest`
     # skill carries `exclude_memory`, which is the other half of the pair the
     # briefing case exists to witness. Without the seed, its absence would

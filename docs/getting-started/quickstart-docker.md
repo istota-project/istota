@@ -61,15 +61,16 @@ docker compose up -d
 
 ## Optional services
 
-Three run as Docker Compose profiles: `browser` (Chrome with bot-detection countermeasures), `location` (the GPS webhook receiver) and `signaling` (Talk over a WebSocket instead of polling).
+Four run as Docker Compose profiles: `browser` (Chrome with bot-detection countermeasures), `location` (the shared webhook receiver for GPS), `sms` (the same receiver for SMS), and `signaling` (Talk over a WebSocket instead of polling).
 
 ```bash
 docker compose --profile browser up -d              # Web browsing
 docker compose --profile location up -d             # GPS webhook receiver
+docker compose --profile sms up -d                  # SMS webhook receiver
 docker compose --profile browser --profile location up -d  # Combine as needed
 ```
 
-Setting `COMPOSE_PROFILES` in `.env` is the alternative to naming them per command; `init.sh` writes it from your answers. The browser container requires an x86-64 host, since Chrome has no ARM packages. `signaling` needs its registration in place before the first boot -- see above.
+Setting `COMPOSE_PROFILES` in `.env` is the alternative to naming them per command; `init.sh` writes it from your answers. The `location` and `sms` profiles share one receiver, so set the matching `ISTOTA_LOCATION_ENABLED` or `ISTOTA_SMS_ENABLED` value in `.env` as well; the wizard does this for location. The browser container requires an x86-64 host, since Chrome has no ARM packages. `signaling` needs its registration in place before the first boot -- see above.
 
 ## Configuration after first start
 
@@ -78,7 +79,7 @@ Setting `COMPOSE_PROFILES` in `.env` is the alternative to naming them per comma
 ```bash
 $EDITOR docker/.env
 docker compose restart istota
-docker compose restart web webhooks   # webhooks only if you run the location profile
+docker compose restart web webhooks nginx   # webhooks for location or SMS
 ```
 
 The boot logs every key that changed, so `docker compose logs istota` is where you confirm an edit landed, and the outgoing file is kept as `config.toml.prev`. This is also what makes a release that adds or renames a config key land on an existing install: restarting `istota` is the patch. Values provisioning derives once -- the OAuth2 client, the Talk room tokens, the location ingest token, the web session key -- persist and are fed back into each render.

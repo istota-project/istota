@@ -36,6 +36,8 @@ def _surface_for_source_type(source_type: str) -> str:
         return "repl"
     if source_type == "web":
         return "web"
+    if source_type == "sms":
+        return "sms"
     return "talk"
 
 
@@ -99,6 +101,7 @@ def make_registry(config: "Config") -> TransportRegistry:
     from .istota_file import IstotaFileTransport
     from .ntfy import NtfyTransport
     from .repl import ReplTransport
+    from .sms import SmsTransport
     from .talk import TalkTransport
     from .web import WebTransport
 
@@ -107,6 +110,8 @@ def make_registry(config: "Config") -> TransportRegistry:
         transports["talk"] = TalkTransport(config)
     if config.email.enabled:
         transports["email"] = EmailTransport(config)
+    if config.sms.enabled:
+        transports["sms"] = SmsTransport(config)
     transports["ntfy"] = NtfyTransport(config)
     transports["istota_file"] = IstotaFileTransport(config)
     transports["repl"] = ReplTransport(config)

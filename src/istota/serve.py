@@ -241,12 +241,13 @@ def install_force_quit(server) -> None:
 
 
 def _maybe_mount_webhooks(web_app) -> None:
-    """Serve the GPS webhook receiver from the web app when location is on.
+    """Serve configured webhook routes from the combined web process.
 
-    Off by default in the lean footprint (``[location] enabled = false``).
+    Off by default in the lean footprint. Location or a complete SMS provider
+    configuration enables it.
     Running it on the same uvicorn server is what keeps the local install a
-    single port. No-op (and never imports the webhook module) when location
-    is disabled or already attached.
+    single port. SMS also needs these routes while disabled when a complete
+    provider block remains configured for late delivery callbacks.
 
     The receiver's **router** is included rather than its FastAPI app being
     mounted, because mounting got both halves wrong. The router already
@@ -265,22 +266,31 @@ def _maybe_mount_webhooks(web_app) -> None:
     """
     from .web_app import _config as web_config
 
-    if not web_config or not getattr(web_config, "location", None):
+    if not web_config:
         return
-    if not web_config.location.enabled:
-        return
-    # Avoid a double attach on a serve restart in the same process.
-    if any(
-        getattr(r, "path", "").startswith("/webhooks/location")
-        for r in web_app.routes
-    ):
+    from .config import sms_webhooks_enabled
+
+    location_enabled = bool(
+        getattr(web_config, "location", None) and web_config.location.enabled
+    )
+    sms_enabled = sms_webhooks_enabled(web_config)
+    if not location_enabled and not sms_enabled:
         return
     try:
         from . import webhook_receiver
 
-        web_app.include_router(webhook_receiver.location_router)
-        web_app.add_event_handler("startup", webhook_receiver.reload_config)
-        logger.info("Serving GPS webhook receiver at /webhooks/location")
+        paths = {getattr(route, "path", "") for route in web_app.routes}
+        attached = False
+        if location_enabled and "/webhooks/location" not in paths:
+            web_app.include_router(webhook_receiver.location_router)
+            logger.info("Serving GPS webhook receiver at /webhooks/location")
+            attached = True
+        if sms_enabled and not any(path.startswith("/webhooks/sms/") for path in paths):
+            web_app.include_router(webhook_receiver.sms_router)
+            logger.info("Serving SMS webhook receivers at /webhooks/sms")
+            attached = True
+        if attached:
+            web_app.add_event_handler("startup", webhook_receiver.reload_config)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not attach webhook receiver: %s", exc)
 

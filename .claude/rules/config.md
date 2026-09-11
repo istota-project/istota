@@ -69,6 +69,12 @@ Properties: `effective_smtp_user` (L53), `effective_smtp_password` (L57) — fal
 
 `authserv_id` (default **blank**, ISSUE-249) scopes which `Authentication-Results` headers the canary reads to the ones carrying the receiving MTA's own RFC 8601 authserv-id. Blank keeps the topmost-header-only read, which is a proxy for "ours" that inverts exactly when the MTA stops stamping — the drift the canary exists to catch. Setting it is also the operator's assertion that their MTA stamps, so "no header of ours" (`unstamped`) warns without `dmarc_canary_warn_on_missing`; that flag stays scoped to "our stamp is there and carries no DMARC verdict" (`unevaluated`). Ansible `istota_email_authserv_id`, Docker `ISTOTA_EMAIL_AUTHSERV_ID`.
 
+### `SmsConfig`, `TwilioSmsConfig`, `TelnyxSmsConfig`
+
+`SmsConfig` is the provider-neutral `[sms]` block: `enabled`, `provider`, `service_numbers`, `default_sender_number`, `max_segments`, and `request_timeout_seconds`. The nested blocks hold provider contracts, never aliases: Twilio has the Account SID and Auth Token for inbound verification plus the API key and Messaging Service for sends; Telnyx has the API key, Ed25519 public key, and Messaging Profile.
+
+An enabled block requires a public `site.hostname`, exact E.164 service numbers, a default sender from that list, bounded segment and timeout values, and one complete active provider. Any inactive provider block containing a value must also be complete. That rule is what makes it safe to keep an old adapter for signed delivery callbacks during a switch. Ansible loads nested provider fields from provider-qualified `ISTOTA_SMS_*` entries in `secrets.env`; Docker renders the same names into the generated config. See `.claude/rules/sms.md` and `docs/features/sms.md`.
+
 ### ntfy push notifications
 
 ntfy is a per-user connected service — there is no global `[ntfy]` block or

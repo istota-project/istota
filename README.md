@@ -156,7 +156,7 @@ Istota does not hand the model a pile of unrelated integrations. A task receives
 
 - **Proactive work.** A conversation can become a reminder, a recurring prompt, or a deterministic scheduled command. Heartbeat checks watch files, URLs, deadlines, calendar conflicts, commands, and Istota itself. Cooldowns, quiet hours, failure tracking, notifications, and delivery rules let Istota act again when something changes or comes due.
 
-- **Several ways to talk.** The same task system accepts web chat, Nextcloud Talk, threaded email, watched `TASKS.md` files, a terminal REPL, and direct CLI requests. Web chat and Talk share a room model, so a conversation can move between them without losing its history.
+- **Several ways to talk.** The same task system accepts web chat, Nextcloud Talk, SMS, threaded email, watched `TASKS.md` files, a terminal REPL, and direct CLI requests. Web chat and Talk share a room model, while SMS remains a separate external conversation.
 
 - **Durable execution.** Every request enters a SQLite queue before it runs. Foreground and background worker pools are separate for each user, so a long report or overnight job does not block an active conversation. Retries, confirmations, streamed events, cancellations, and usage records follow the task through one lifecycle.
 
@@ -197,6 +197,7 @@ These controls depend on the deployment shape. Bubblewrap on Linux is the suppor
 ```text
 Web chat ──────────┐
 Nextcloud Talk ────┤
+SMS ───────────────┤
 Email ─────────────┤
 TASKS.md ──────────┼──> durable task queue ──> prompt + relevant data ──> Brain
 CLI / REPL ────────┤                                  │              │
@@ -297,6 +298,7 @@ The default Python suite omits tests that need live services, Linux sandboxing, 
 
 - [Documentation](https://istota.cynium.com/docs)
 - [Web interface](https://istota.cynium.com/docs/features/web-interface/)
+- [SMS](https://istota.cynium.com/docs/features/sms/)
 - [Architecture overview](https://istota.cynium.com/docs/architecture/overview/)
 - [Skills index](https://istota.cynium.com/docs/reference/skills-index/)
 - [Command reference](https://istota.cynium.com/docs/reference/commands/)

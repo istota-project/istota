@@ -382,6 +382,30 @@ authserv_id = "{{ istota_email_authserv_id | istota_toml_escape }}"
 outbound_approval_floor = "{{ istota_email_outbound_approval_floor | istota_toml_escape }}"
 {% endif %}
 
+[sms]
+enabled = {{ istota_sms_enabled | lower }}
+provider = "{{ istota_sms_provider | istota_toml_escape }}"
+service_numbers = {{ istota_sms_service_numbers | to_json }}
+default_sender_number = "{{ istota_sms_default_sender_number | istota_toml_escape }}"
+max_segments = {{ istota_sms_max_segments }}
+request_timeout_seconds = {{ istota_sms_request_timeout_seconds }}
+
+[sms.twilio]
+{% if not istota_use_environment_file %}
+account_sid = "{{ istota_sms_twilio_account_sid | istota_toml_escape }}"
+auth_token = "{{ istota_sms_twilio_auth_token | istota_toml_escape }}"
+api_key_sid = "{{ istota_sms_twilio_api_key_sid | istota_toml_escape }}"
+api_key_secret = "{{ istota_sms_twilio_api_key_secret | istota_toml_escape }}"
+messaging_service_sid = "{{ istota_sms_twilio_messaging_service_sid | istota_toml_escape }}"
+{% endif %}
+
+[sms.telnyx]
+{% if not istota_use_environment_file %}
+api_key = "{{ istota_sms_telnyx_api_key | istota_toml_escape }}"
+public_key = "{{ istota_sms_telnyx_public_key | istota_toml_escape }}"
+messaging_profile_id = "{{ istota_sms_telnyx_messaging_profile_id | istota_toml_escape }}"
+{% endif %}
+
 {# Model alias registry ([models.aliases]) — tiers (fast/general/smart) and
    shortcuts (opus/sonnet/haiku), overlaying the code-shipped defaults, resolved
    per active brain. istota_models_aliases is authoritative: a bare-string value is

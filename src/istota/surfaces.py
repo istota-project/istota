@@ -177,6 +177,9 @@ SURFACES: dict[str, SurfaceRoomFacts] = {
     "repl": SurfaceRoomFacts(
         room_role=None, room_view=None, user_turn_mirror=None,
     ),
+    "sms": SurfaceRoomFacts(
+        room_role=None, room_view=None, user_turn_mirror=None,
+    ),
 }
 
 _NO_FACTS = SurfaceRoomFacts(

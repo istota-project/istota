@@ -63,6 +63,7 @@ All variables with defaults are documented in `defaults/main.yml`. Key groups:
 | Feature | Variable | Default |
 |---|---|---|
 | Email integration | `istota_email_enabled` | `false` |
+| SMS integration | `istota_sms_enabled` | `false` |
 | Browser container | `istota_browser_enabled` | `false` |
 | Memory search | `istota_memory_search_enabled` | `true` |
 | Sleep cycle | `istota_sleep_cycle_enabled` | `false` |
@@ -112,7 +113,7 @@ The following external role dependencies have been inlined as direct tasks. You 
 - **Docker**: `apt-get install docker.io docker-compose-plugin` (when `istota_browser_enabled`)
 - **rclone**: `curl https://rclone.org/install.sh | bash` + config file (when `istota_configure_rclone`)
 - **rclone mount**: Systemd unit for FUSE mount (when `istota_use_nextcloud_mount`)
-- **nginx**: `apt-get install nginx` (when location or web enabled). Serves the web UI at `/istota/`, webhooks at `/webhooks/`, and a static root-owned web root at `/` (`istota_web_root_path`, default `/srv/www/html` — set `istota_web_root_enabled: false` to 404 instead). The web root is operator content: outside `istota_home`, unwritable by the istota user, bound into no sandbox. The placeholder `index.html` is written only when absent.
+- **nginx**: `apt-get install nginx` (when location, SMS callbacks, or web is enabled). Serves the web UI at `/istota/`, webhooks at `/webhooks/`, and a static root-owned web root at `/` (`istota_web_root_path`, default `/srv/www/html` — set `istota_web_root_enabled: false` to 404 instead). The web root is operator content: outside `istota_home`, unwritable by the istota user, bound into no sandbox. The placeholder `index.html` is written only when absent.
 - **Node.js**: NodeSource 20.x setup (when `istota_nodejs_enabled`)
 
 ## Update mode

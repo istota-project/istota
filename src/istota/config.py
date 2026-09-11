@@ -697,6 +697,7 @@ class UserConfig:
     """Per-user configuration."""
     display_name: str = ""  # friendly name for prompts
     email_addresses: list[str] = field(default_factory=list)  # for email-to-user mapping
+    sms_phone_number: str = ""  # operator-bound E.164 identity for the SMS surface
     timezone: str = "UTC"  # user's timezone for briefing scheduling
     briefings: list[BriefingConfig] = field(default_factory=list)
     resources: list[ResourceConfig] = field(default_factory=list)
@@ -1170,6 +1171,34 @@ class SiteConfig:
     tripping a gate. Serving static assets is now entirely outside istota.
     """
     hostname: str = ""        # e.g. "istota.example.com"
+
+
+@dataclass
+class TwilioSmsConfig:
+    account_sid: str = ""
+    auth_token: str = ""
+    api_key_sid: str = ""
+    api_key_secret: str = ""
+    messaging_service_sid: str = ""
+
+
+@dataclass
+class TelnyxSmsConfig:
+    api_key: str = ""
+    public_key: str = ""
+    messaging_profile_id: str = ""
+
+
+@dataclass
+class SmsConfig:
+    enabled: bool = False
+    provider: str = "twilio"
+    service_numbers: list[str] = field(default_factory=list)
+    default_sender_number: str = ""
+    max_segments: int = 6
+    request_timeout_seconds: int = 10
+    twilio: TwilioSmsConfig = field(default_factory=TwilioSmsConfig)
+    telnyx: TelnyxSmsConfig = field(default_factory=TelnyxSmsConfig)
 
 
 @dataclass
@@ -1785,6 +1814,7 @@ class Config:
     nextcloud: NextcloudConfig = field(default_factory=NextcloudConfig)
     talk: TalkConfig = field(default_factory=TalkConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
+    sms: SmsConfig = field(default_factory=SmsConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
@@ -1967,6 +1997,29 @@ class Config:
             if email_lower in [e.lower() for e in user_config.email_addresses]:
                 return user_id
         return None
+
+    def find_user_by_sms_number(self, phone_number: str) -> str | None:
+        """Return the user bound to an exact E.164 number, if any.
+
+        An empty or non-E.164 argument answers ``None`` rather than matching
+        the first user with no binding — `sms_phone_number` defaults to `''`,
+        so a bare equality test turns "no number" into "every unbound user",
+        and this answer decides which user an inbound message acts as.
+        """
+        from .user_profiles import is_e164
+        if not is_e164(phone_number):
+            return None
+        for user_id, user_config in self.users.items():
+            if user_config.sms_phone_number == phone_number:
+                return user_id
+        return None
+
+    def sms_phone_number_for(self, user_id: str) -> str | None:
+        """Return a user's current SMS binding, or ``None`` when unset."""
+        user = self.users.get(user_id)
+        if user is None or not user.sms_phone_number:
+            return None
+        return user.sms_phone_number
 
     def is_trusted_email_sender(
         self, user_id: str, sender_email: str, conn: "sqlite3.Connection | None" = None,
@@ -2507,9 +2560,20 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             _allow_obsolete=True,
         ))
 
+    # Validated here rather than taken raw: this number is the credential that
+    # decides which user an inbound SMS acts as, and the `[users.X]` block is
+    # the Docker entrypoint's path into `UserConfig`. It was the one writer of
+    # `sms_phone_number` that read nothing, so a number set this way was
+    # silently ignored and the binding simply did not exist.
+    from .user_profiles import normalize_sms_phone_number
+    sms_phone_number = normalize_sms_phone_number(
+        user_data.get("sms_phone_number", ""), allow_empty=True,
+    )
+
     return UserConfig(
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),
+        sms_phone_number=sms_phone_number,
         timezone=user_data.get("timezone", "UTC"),
         briefings=briefings,
         resources=resources,
@@ -3707,11 +3771,30 @@ def load_config(config_path: Path | None = None) -> Config:
         ("ISTOTA_GOOGLE_WORKSPACE_CLIENT_SECRET", "google_workspace", "client_secret"),
         ("ISTOTA_WEB_OAUTH2_CLIENT_SECRET", "web", "oauth2_client_secret"),
         ("ISTOTA_WEB_SESSION_SECRET_KEY", "web", "session_secret_key"),
+        ("ISTOTA_SMS_TWILIO_ACCOUNT_SID", "sms.twilio", "account_sid"),
+        ("ISTOTA_SMS_TWILIO_AUTH_TOKEN", "sms.twilio", "auth_token"),
+        ("ISTOTA_SMS_TWILIO_API_KEY_SID", "sms.twilio", "api_key_sid"),
+        ("ISTOTA_SMS_TWILIO_API_KEY_SECRET", "sms.twilio", "api_key_secret"),
+        (
+            "ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID",
+            "sms.twilio",
+            "messaging_service_sid",
+        ),
+        ("ISTOTA_SMS_TELNYX_API_KEY", "sms.telnyx", "api_key"),
+        ("ISTOTA_SMS_TELNYX_PUBLIC_KEY", "sms.telnyx", "public_key"),
+        (
+            "ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID",
+            "sms.telnyx",
+            "messaging_profile_id",
+        ),
     ]
-    for env_var, section, field_name in _env_secret_overrides:
+    for env_var, section_path, field_name in _env_secret_overrides:
         val = os.environ.get(env_var)
         if val:
-            setattr(getattr(config, section), field_name, val)
+            section = config
+            for part in section_path.split("."):
+                section = getattr(section, part)
+            setattr(section, field_name, val)
 
     # Docker-path override for the web token-storage mode (not a secret, but it
     # rides the same env channel as the other web knobs so the compose file can
@@ -3850,9 +3933,117 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_room_selectable(config)
     _validate_claude_code_brain(config)
     _validate_advisor_model(config)
+    _validate_sms(config)
     _validate_forge_clis(config)
 
     return config
+
+
+SMS_PROVIDER_NAMES = ("twilio", "telnyx")
+_SMS_PROVIDER_FIELDS = {
+    "twilio": (
+        "account_sid", "auth_token", "api_key_sid", "api_key_secret",
+        "messaging_service_sid",
+    ),
+    "telnyx": ("api_key", "public_key", "messaging_profile_id"),
+}
+
+
+def sms_provider_missing_fields(config: Config, provider: str) -> tuple[str, ...]:
+    """Names of blank fields in one provider block."""
+    fields = _SMS_PROVIDER_FIELDS.get(provider)
+    block = getattr(config.sms, provider, None)
+    if fields is None or block is None:
+        return ()
+    return tuple(name for name in fields if not getattr(block, name, ""))
+
+
+def sms_provider_has_values(config: Config, provider: str) -> bool:
+    """Whether any field in one provider block is populated."""
+    fields = _SMS_PROVIDER_FIELDS.get(provider)
+    block = getattr(config.sms, provider, None)
+    if fields is None or block is None:
+        return False
+    return any(bool(getattr(block, name, "")) for name in fields)
+
+
+def sms_webhooks_enabled(config: Config) -> bool:
+    """Whether active SMS or a complete callback-only adapter needs routes."""
+    if config.sms.enabled:
+        return True
+    return any(
+        sms_provider_has_values(config, provider)
+        and not sms_provider_missing_fields(config, provider)
+        for provider in SMS_PROVIDER_NAMES
+    )
+
+
+def _is_e164(value: object) -> bool:
+    """`user_profiles.is_e164`, imported lazily as this module's other
+    `user_profiles` reads are — one rule, not a second copy of the pattern."""
+    from .user_profiles import is_e164
+    return is_e164(value)
+
+
+def sms_config_errors(config: Config) -> list[str]:
+    """Return local SMS configuration errors without exposing field values."""
+    sms = config.sms
+    errors: list[str] = []
+
+    for provider in SMS_PROVIDER_NAMES:
+        missing = sms_provider_missing_fields(config, provider)
+        if sms_provider_has_values(config, provider) and missing:
+            role = "active" if sms.enabled and sms.provider == provider else "inactive"
+            errors.append(
+                f"{role} {provider} provider block is incomplete; missing "
+                + ", ".join(missing)
+            )
+
+    # Checked whether or not SMS is enabled. `make_provider_registry` raises on
+    # an unknown name, and the webhook receiver calls it unconditionally at
+    # `reload_config` — so a misspelled provider in a *disabled* block loaded
+    # cleanly here and then killed the receiver's lifespan with a ValueError
+    # naming something the operator was never warned about.
+    if sms.provider not in SMS_PROVIDER_NAMES:
+        errors.append(
+            "provider must be one of " + ", ".join(SMS_PROVIDER_NAMES)
+        )
+
+    if not sms.enabled:
+        return errors
+    if not sms.service_numbers:
+        errors.append("service_numbers must contain at least one E.164 number")
+    else:
+        invalid = [n for n in sms.service_numbers if not _is_e164(n)]
+        if invalid:
+            errors.append("every service_numbers entry must be an exact E.164 number")
+        if len(set(sms.service_numbers)) != len(sms.service_numbers):
+            errors.append("service_numbers must not contain duplicates")
+    if not _is_e164(sms.default_sender_number):
+        errors.append("default_sender_number must be an exact E.164 number")
+    elif sms.default_sender_number not in sms.service_numbers:
+        errors.append("default_sender_number must be present in service_numbers")
+    if not config.site.hostname.strip():
+        errors.append("site.hostname is required")
+    if not 1 <= sms.max_segments <= 10:
+        errors.append("max_segments must be between 1 and 10")
+    if not 1 <= sms.request_timeout_seconds <= 30:
+        errors.append("request_timeout_seconds must be between 1 and 30")
+
+    if sms.provider in SMS_PROVIDER_NAMES:
+        missing = sms_provider_missing_fields(config, sms.provider)
+        if missing and not sms_provider_has_values(config, sms.provider):
+            errors.append(
+                f"active {sms.provider} provider block is incomplete; missing "
+                + ", ".join(missing)
+            )
+    return errors
+
+
+def _validate_sms(config: Config) -> None:
+    errors = sms_config_errors(config)
+    if errors:
+        raise ValueError("Invalid SMS configuration: " + "; ".join(errors))
 
 
 CONFIG_LOAD_CHECKS = (

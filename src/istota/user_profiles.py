@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ class UserProfile:
     user_id: str
     display_name: str = ""
     email_addresses: list[str] = field(default_factory=list)
+    sms_phone_number: str = ""
     timezone: str = "UTC"
     log_channel: str = ""
     alerts_channel: str = ""
@@ -97,7 +99,7 @@ class UserProfile:
 
 
 _PROFILE_COLUMNS = (
-    "display_name", "email_addresses", "timezone",
+    "display_name", "email_addresses", "sms_phone_number", "timezone",
     "log_channel", "alerts_channel",
     "max_foreground_workers", "max_background_workers",
     "disabled_skills", "trusted_email_senders", "quiet_email_senders",
@@ -125,6 +127,45 @@ _BOOL_COLUMN_DEFAULTS = {
     "timezone_follow_location": False,
 }
 _BOOL_COLUMNS = frozenset(_BOOL_COLUMN_DEFAULTS)
+_E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
+
+
+def is_e164(value: object) -> bool:
+    """Whether ``value`` is an exact E.164 number.
+
+    The one spelling of this rule. It was written three times — here, in
+    ``config._validate_sms`` and in the SMS inbound path — which is three places
+    to keep in step for a predicate that decides which user an authenticated
+    message may act as.
+    """
+    return bool(_E164_PATTERN.fullmatch(str(value) if value is not None else ""))
+
+
+def normalize_sms_phone_number(value: object, *, allow_empty: bool = False) -> str:
+    """Validate an exact E.164 number without guessing or rewriting it."""
+    number = str(value) if value is not None else ""
+    if allow_empty and number == "":
+        return ""
+    if not is_e164(number):
+        raise ValueError(
+            "SMS phone number must be exact E.164: '+' followed by 8 to 15 "
+            "digits, with a non-zero country code"
+        )
+    return number
+
+
+def mask_sms_phone_number(number: str) -> str:
+    """Mask an E.164 number while retaining its country marker and suffix."""
+    if not number:
+        return ""
+    visible = number[-4:]
+    return "+" + "*" * max(0, len(number) - 5) + visible
+
+
+def _raise_phone_conflict(exc: sqlite3.IntegrityError) -> None:
+    if "sms_phone_number" in str(exc):
+        raise ValueError("SMS phone number is already assigned to another user") from None
+    raise exc
 
 
 def _coerce_bool(value: object, default: bool = True) -> bool:
@@ -150,6 +191,7 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         user_id=row["user_id"],
         display_name=row["display_name"] or "",
         email_addresses=_parse_json_list(row["email_addresses"]),
+        sms_phone_number=str(_row_get(row, "sms_phone_number") or ""),
         timezone=row["timezone"] or "UTC",
         log_channel=row["log_channel"] or "",
         alerts_channel=row["alerts_channel"] or "",
@@ -309,6 +351,7 @@ def ensure_profile(
         max_foreground_workers=int(_attr(seed_from, "max_foreground_workers") or 0),
         max_background_workers=int(_attr(seed_from, "max_background_workers") or 0),
         email_addresses=list(_attr(seed_from, "email_addresses") or []),
+        sms_phone_number=str(_attr(seed_from, "sms_phone_number") or ""),
         trusted_email_senders=list(_attr(seed_from, "trusted_email_senders") or []),
         quiet_email_senders=list(_attr(seed_from, "quiet_email_senders") or []),
         disabled_skills=list(_attr(seed_from, "disabled_skills") or []),
@@ -485,6 +528,8 @@ def update_profile(
     sets: list[str] = []
     params: list[object] = []
     for col, value in fields.items():
+        if col == "sms_phone_number":
+            value = normalize_sms_phone_number(value, allow_empty=True)
         if col in _LIST_COLUMNS:
             value = json.dumps(list(value or []))
         elif col in _DICT_COLUMNS:
@@ -507,13 +552,16 @@ def update_profile(
     sets.append("updated_at = datetime('now')")
     params.append(user_id)
 
-    with _connect(db_path) as conn:
-        cur = conn.execute(
-            f"UPDATE user_profiles SET {', '.join(sets)} WHERE user_id = ?",
-            params,
-        )
-        if cur.rowcount == 0:
-            raise ValueError(f"no user_profile row for {user_id!r}")
+    try:
+        with _connect(db_path) as conn:
+            cur = conn.execute(
+                f"UPDATE user_profiles SET {', '.join(sets)} WHERE user_id = ?",
+                params,
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"no user_profile row for {user_id!r}")
+    except sqlite3.IntegrityError as exc:
+        _raise_phone_conflict(exc)
 
     updated = get_profile(db_path, user_id)
     assert updated is not None  # row was just updated
@@ -547,12 +595,16 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
     ``created_at`` survives an upsert because we use ON CONFLICT instead of
     INSERT OR REPLACE. ``updated_at`` is always set to ``datetime('now')``.
     """
+    profile.sms_phone_number = normalize_sms_phone_number(
+        profile.sms_phone_number, allow_empty=True,
+    )
     insert_cols = ("user_id", *_PROFILE_COLUMNS)
     placeholders = ", ".join(["?"] * len(insert_cols))
     values = (
         profile.user_id,
         profile.display_name,
         json.dumps(list(profile.email_addresses)),
+        profile.sms_phone_number,
         profile.timezone,
         profile.log_channel,
         profile.alerts_channel,
@@ -587,12 +639,16 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         """
     else:
         sql = f"""
-            INSERT OR IGNORE INTO user_profiles ({cols_sql}, updated_at)
+            INSERT INTO user_profiles ({cols_sql}, updated_at)
             VALUES ({placeholders}, datetime('now'))
+            ON CONFLICT(user_id) DO NOTHING
         """
 
-    with _connect(db_path) as conn:
-        conn.execute(sql, values)
+    try:
+        with _connect(db_path) as conn:
+            conn.execute(sql, values)
+    except sqlite3.IntegrityError as exc:
+        _raise_phone_conflict(exc)
 
 
 # --- Migration: TOML → DB --------------------------------------------------
@@ -622,6 +678,7 @@ def import_from_user_configs(
             user_id=user_id,
             display_name=getattr(user_config, "display_name", "") or user_id,
             email_addresses=list(getattr(user_config, "email_addresses", []) or []),
+            sms_phone_number=str(getattr(user_config, "sms_phone_number", "") or ""),
             timezone=getattr(user_config, "timezone", "") or "UTC",
             log_channel=getattr(user_config, "log_channel", "") or "",
             alerts_channel=getattr(user_config, "alerts_channel", "") or "",
@@ -676,6 +733,7 @@ def merge_into_user_config(profile: UserProfile, user_config: "object") -> "obje
 
     setattr(user_config, "display_name", profile.display_name or getattr(user_config, "display_name", "") or profile.user_id)
     setattr(user_config, "timezone", profile.timezone or "UTC")
+    setattr(user_config, "sms_phone_number", profile.sms_phone_number or "")
     setattr(user_config, "default_destination", profile.default_destination or "talk")
     setattr(user_config, "email_reply_routing", profile.email_reply_routing or "origin+thread")
     setattr(user_config, "outbound_approval", profile.outbound_approval or "")

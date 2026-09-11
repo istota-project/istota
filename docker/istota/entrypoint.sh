@@ -656,14 +656,10 @@ fi
             echo " Feeds:    enabled — manage in web UI (Feeds → settings) or via 'istota-skill feeds'"
         fi
         if [ "${ISTOTA_LOCATION_ENABLED:-false}" = "true" ]; then
-            # Webhooks bind their port directly (not nginx-proxied), so the
-            # banner URL is {proto}://{host_without_port}:{WEBHOOKS_PORT}.
-            # Source order for the public host: ISTOTA_PUBLIC_HOST → DOMAIN
-            # → "localhost". Any trailing :port is stripped before reattaching
-            # the webhooks port.
-            _PUBLIC_HOST_RAW="${ISTOTA_PUBLIC_HOST:-${DOMAIN:-localhost}}"
-            _PUBLIC_HOST_BARE="${_PUBLIC_HOST_RAW%%:*}"
-            _BANNER_URL="${ISTOTA_PUBLIC_PROTO:-http}://${_PUBLIC_HOST_BARE}:${ISTOTA_WEBHOOKS_PORT:-8765}/webhooks/location"
+            # Nginx owns the public webhook address. Compose derives the site
+            # hostname from ISTOTA_PUBLIC_HOST, DOMAIN, and NC_PORT, including
+            # any port the public URL needs.
+            _BANNER_URL="${ISTOTA_PUBLIC_PROTO:-http}://${ISTOTA_WEB_SITE_HOSTNAME:-localhost:8080}/webhooks/location"
             echo " Location: enabled"
             echo "   Configure Overland (iOS):"
             echo "     URL:   ${_BANNER_URL}"

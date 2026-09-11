@@ -4,6 +4,7 @@ Run as: uvicorn istota.webhook_receiver:app --host 127.0.0.1 --port 8765
 
 Currently handles:
 - /webhooks/location — Overland GPS location data
+- /webhooks/sms/twilio and /webhooks/sms/telnyx — SMS callbacks
 """
 
 import logging
@@ -13,8 +14,8 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import APIRouter, FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, BackgroundTasks, FastAPI, Query, Request
+from fastapi.responses import JSONResponse, Response
 
 from . import location
 from .build_info import build_description
@@ -28,6 +29,7 @@ logger = logging.getLogger("istota.webhook_receiver")
 # atomically under ``_lock`` by ``reload_config`` so any reader holding
 # the lock sees a consistent snapshot.
 _config = None
+_sms_providers = None
 _token_map: dict[str, str] = {}                        # token -> user_id
 _user_contexts: dict[str, LocationContext] = {}        # user_id -> ctx
 _places_cache: dict[str, list] = {}                     # user_id -> places
@@ -166,8 +168,11 @@ def reload_config() -> None:
     from . import secrets_store  # noqa: PLC0415
     from .location import ingest_signal  # noqa: PLC0415
 
-    global _config, _token_map, _user_contexts, _places_cache, _sentinel_stamp
+    global _config, _sms_providers, _token_map, _user_contexts, _places_cache, _sentinel_stamp
     _config = load_config()
+    from .transport.sms.providers.registry import make_provider_registry  # noqa: PLC0415
+
+    _sms_providers = make_provider_registry(_config)
 
     # Read the sentinel *before* the secrets, not after: a token written
     # between the two would otherwise be marked as already-loaded and would
@@ -280,6 +285,110 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Istota Webhook Receiver", lifespan=lifespan)
 
 location_router = APIRouter(prefix="/webhooks/location")
+sms_router = APIRouter(prefix="/webhooks/sms")
+
+
+async def _bounded_body(request: Request, limit: int | None = None) -> bytes | None:
+    """Read the body, refusing anything over the adapters' own cap.
+
+    Streamed rather than `await request.body()` so an oversize payload is
+    refused as it arrives instead of after it is all in memory. The cap is the
+    providers' `MAX_WEBHOOK_BODY`, not a second number here: a reader that
+    accepted more than the adapter will parse is a difference with no purpose.
+    """
+    from .transport.sms.providers._types import MAX_WEBHOOK_BODY  # noqa: PLC0415
+
+    ceiling = MAX_WEBHOOK_BODY if limit is None else limit
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > ceiling:
+            return None
+    return bytes(body)
+
+
+async def _receive_sms(provider: str, request: Request, background: BackgroundTasks):
+    """Authenticate and persist one provider message or delivery callback.
+
+    One body for both providers. It was two, differing only in the provider
+    name in four places — and this is the authentication boundary, which is the
+    worst place to keep a copy that has to be edited twice. What actually
+    differs between Twilio and Telnyx lives behind `adapter.parse_webhook`,
+    which is the whole point of the adapter contract.
+    """
+    from . import db  # noqa: PLC0415
+    from .transport.sms.providers._types import (  # noqa: PLC0415
+        SmsWebhookError,
+        SmsWebhookRequest,
+    )
+    from .transport.sms.webhook import (  # noqa: PLC0415
+        deliver_event_response,
+        handle_provider_event,
+    )
+
+    config = _config
+    providers = _sms_providers
+    if config is None or providers is None:
+        return Response(status_code=404)
+    adapter = providers.get(provider)
+    if adapter is None:
+        return Response(status_code=404)
+    raw_body = await _bounded_body(request)
+    if raw_body is None:
+        return Response(status_code=413)
+    try:
+        parsed = adapter.parse_webhook(SmsWebhookRequest(
+            raw_body=raw_body,
+            headers=request.headers,
+            # From the configured hostname, never a forwarded header: Twilio
+            # signs the URL it called, so a caller-supplied host would let the
+            # signature be computed over a string the caller chose.
+            public_url=f"https://{config.site.hostname}/webhooks/sms/{provider}",
+        ))
+    except SmsWebhookError as exc:
+        logger.info("sms.inbound.rejected provider=%s reason=%s", provider, str(exc))
+        return Response(status_code=exc.status_code)
+
+    if parsed.event is None:
+        # Authenticated, understood, and modelling nothing the ledger holds.
+        # Acknowledged rather than refused, so the provider stops retrying.
+        return Response(
+            content=parsed.response_body,
+            status_code=parsed.response_status,
+            media_type=parsed.response_content_type,
+        )
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(
+                conn,
+                config,
+                parsed.event,
+                active_provider_ready=providers.active() is not None,
+            )
+    except sqlite3.Error:
+        logger.warning(
+            "sms.inbound.database_unavailable provider=%s", provider, exc_info=True,
+        )
+        return Response(status_code=503)
+    background.add_task(deliver_event_response, config, providers, result)
+    return Response(
+        content=parsed.response_body,
+        status_code=parsed.response_status,
+        media_type=parsed.response_content_type,
+    )
+
+
+@sms_router.post("/twilio")
+async def receive_twilio_sms(request: Request, background: BackgroundTasks):
+    """Twilio's form-encoded webhook. See :func:`_receive_sms`."""
+    return await _receive_sms("twilio", request, background)
+
+
+@sms_router.post("/telnyx")
+async def receive_telnyx_sms(request: Request, background: BackgroundTasks):
+    """Telnyx's JSON webhook. See :func:`_receive_sms`."""
+    return await _receive_sms("telnyx", request, background)
 
 
 @location_router.post("")
@@ -339,6 +448,7 @@ async def receive_location(
 
 
 app.include_router(location_router)
+app.include_router(sms_router)
 
 
 def _process_feature(

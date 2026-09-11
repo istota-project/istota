@@ -996,7 +996,10 @@ def cmd_user_list(args):
         return
     for user_id, user_config in config.users.items():
         emails = ", ".join(user_config.email_addresses) if user_config.email_addresses else "(none)"
-        print(f"{user_id:15} {user_config.display_name:20} {emails}")
+        sms_number = user_profiles.mask_sms_phone_number(
+            getattr(user_config, "sms_phone_number", "")
+        ) or "(none)"
+        print(f"{user_id:15} {user_config.display_name:20} {emails} {sms_number}")
 
 
 def cmd_user_lookup(args):
@@ -1112,6 +1115,18 @@ def cmd_user_ensure(args):
         updates["timezone"] = args.tz
     if args.email is not None:
         updates["email_addresses"] = list(args.email)
+    sms_number = getattr(args, "sms_number", None)
+    clear_sms_number = bool(getattr(args, "clear_sms_number", False))
+    if sms_number is not None:
+        try:
+            updates["sms_phone_number"] = user_profiles.normalize_sms_phone_number(
+                sms_number
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+    elif clear_sms_number:
+        updates["sms_phone_number"] = ""
     if args.trusted_sender is not None:
         updates["trusted_email_senders"] = list(args.trusted_sender)
     if args.quiet_sender is not None:
@@ -1263,13 +1278,24 @@ def cmd_user_ensure(args):
     if getattr(args, "timezone_follow_location", None) is not None:
         updates["timezone_follow_location"] = args.timezone_follow_location
 
-    profile, state = user_profiles.update_profile_with_status(db_path, user_id, **updates)
+    try:
+        profile, state = user_profiles.update_profile_with_status(
+            db_path, user_id, **updates
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"User {user_id!r} ensured.")
     print(f"  display_name: {profile.display_name}")
     print(f"  timezone:     {profile.timezone}")
     if profile.email_addresses:
         print(f"  emails:       {', '.join(profile.email_addresses)}")
+    if profile.sms_phone_number:
+        print(
+            "  sms_number:   "
+            + user_profiles.mask_sms_phone_number(profile.sms_phone_number)
+        )
     if profile.log_channel:
         print(f"  log_channel:  {profile.log_channel}")
     if profile.alerts_channel:
@@ -1320,6 +1346,7 @@ def cmd_user_show(args):
         "user_id": profile.user_id,
         "display_name": profile.display_name,
         "email_addresses": profile.email_addresses,
+        "sms_phone_number": profile.sms_phone_number,
         "timezone": profile.timezone,
         "log_channel": profile.log_channel,
         "alerts_channel": profile.alerts_channel,
@@ -2904,6 +2931,19 @@ def main():
     user_ensure_parser.add_argument("--tz", "--timezone", dest="tz", help="IANA timezone (e.g. America/Los_Angeles)")
     user_ensure_parser.add_argument(
         "--email", action="append", help="User email address (repeatable; replaces existing list when passed)"
+    )
+    sms_assignment = user_ensure_parser.add_mutually_exclusive_group()
+    sms_assignment.add_argument(
+        "--sms-number",
+        help=(
+            "Bind an exact E.164 phone number. The number gains full authority "
+            "to create tasks and answer pending confirmations as this user."
+        ),
+    )
+    sms_assignment.add_argument(
+        "--clear-sms-number",
+        action="store_true",
+        help="Remove the user's SMS identity binding.",
     )
     user_ensure_parser.add_argument(
         "--trusted-sender", action="append",

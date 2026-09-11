@@ -63,7 +63,7 @@ from tests.test_surface_facts import SHIPPED_SOURCE_TYPES
 # Every surface name a registry can produce. Held equal to `surfaces.SURFACES`
 # by `test_the_surface_enumeration_covers_the_table` below, so a surface added
 # without a row here fails rather than going unchecked.
-SURFACE_NAMES = ("email", "istota_file", "ntfy", "repl", "talk", "web")
+SURFACE_NAMES = ("email", "istota_file", "ntfy", "repl", "sms", "talk", "web")
 
 # Names in the *destination grammar* rather than surface names.
 # `parse_output_target` yields `Destination("room", <token>)` and

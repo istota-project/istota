@@ -393,6 +393,31 @@ def _send_web(
     return msg_id is not None
 
 
+def _send_sms(
+    config: "Config", user_id: str, message: str, reference_id: str | None,
+) -> bool:
+    """Send one notification over SMS. Returns True when a provider took it.
+
+    Through `SmsTransport`, the way `_send_web` goes through `WebTransport`,
+    rather than reaching past it to `deliver_sms`: the transport owns the
+    provider registry and caches it, so calling `make_provider_registry` here
+    would build a second one — a fresh HTTP client and connection pool — on
+    every notification.
+
+    `reference_id` is the caller's stable logical id and is what makes a repeat
+    raise cost nothing. Without one the send falls back to a random key, which
+    is honest but not free: see `SmsTransport.send_record`.
+    """
+    from .async_runtime import run_coro
+    from .transport.sms import SmsTransport
+    from .transport.sms._types import REACHED_PROVIDER
+
+    record = run_coro(SmsTransport(config).send_record(
+        "", message, user_id=user_id, reference_id=reference_id,
+    ))
+    return record is not None and record.status in REACHED_PROVIDER
+
+
 # How long the transcript mirror waits for the write lock before giving up. Well
 # under the 30s default, because a caller holding a transaction is a stall on
 # whatever thread it runs on rather than an error anyone sees. See the note in
@@ -588,7 +613,17 @@ def is_channel_configured(
         # alert that delivery would have provisioned a room for.
         return bool(config.db_path)
 
-    probes = {"talk": _talk_ok, "email": _email_ok, "ntfy": _ntfy_ok, "web": _web_ok}
+    def _sms_ok() -> bool:
+        from .transport.sms.outbound import is_sms_configured
+        return is_sms_configured(config, user_id)
+
+    probes = {
+        "talk": _talk_ok,
+        "email": _email_ok,
+        "ntfy": _ntfy_ok,
+        "web": _web_ok,
+        "sms": _sms_ok,
+    }
     dests = parse_output_target(surface)
     if not dests:
         return False
@@ -606,6 +641,7 @@ def _dispatch(
     title: str | None = None,
     priority: int | None = None,
     tags: str | None = None,
+    reference_id: str | None = None,
 ) -> tuple[bool, int | None]:
     """Deliver ``message`` to every resolved destination.
 
@@ -669,6 +705,9 @@ def _dispatch(
             # override only applies to bare `talk`, so pass the descriptor channel.
             if _send_web(config, user_id, body, dest.channel, title=title):
                 sent = True
+        elif dest.surface == "sms":
+            if _send_sms(config, user_id, message or title or "", reference_id):
+                sent = True
         else:
             logger.warning(
                 "Unsupported notification surface %r (user: %s)",
@@ -688,6 +727,7 @@ def send_notification(
     title: str | None = None,
     priority: int | None = None,
     tags: str | None = None,
+    reference_id: str | None = None,
 ) -> bool:
     """Send a notification via an explicit surface or the user's routing table.
 
@@ -717,7 +757,7 @@ def send_notification(
     sent, _talk_msg_id = _dispatch(
         config, user_id, message, dests,
         conversation_token=conversation_token,
-        title=title, priority=priority, tags=tags,
+        title=title, priority=priority, tags=tags, reference_id=reference_id,
     )
 
     if not sent:
