@@ -10,6 +10,7 @@ ntfy POST lives in ``transport.ntfy`` (the single ntfy delivery path); the
 
 import logging
 import threading
+import uuid
 from typing import TYPE_CHECKING
 
 # Re-exported so existing references (and the is_channel_configured probe) keep
@@ -588,7 +589,17 @@ def is_channel_configured(
         # alert that delivery would have provisioned a room for.
         return bool(config.db_path)
 
-    probes = {"talk": _talk_ok, "email": _email_ok, "ntfy": _ntfy_ok, "web": _web_ok}
+    def _sms_ok() -> bool:
+        from .transport.sms.outbound import is_sms_configured
+        return is_sms_configured(config, user_id)
+
+    probes = {
+        "talk": _talk_ok,
+        "email": _email_ok,
+        "ntfy": _ntfy_ok,
+        "web": _web_ok,
+        "sms": _sms_ok,
+    }
     dests = parse_output_target(surface)
     if not dests:
         return False
@@ -668,6 +679,16 @@ def _dispatch(
             # A bare `web` route carries no channel; the explicit conversation_token
             # override only applies to bare `talk`, so pass the descriptor channel.
             if _send_web(config, user_id, body, dest.channel, title=title):
+                sent = True
+        elif dest.surface == "sms":
+            from .transport.sms.outbound import deliver_sms
+            from .transport.sms.providers.registry import make_provider_registry
+            result = run_coro(deliver_sms(
+                config, make_provider_registry(config),
+                logical_key=f"notification:{uuid.uuid4()}",
+                user_id=user_id, text=body,
+            ))
+            if result.status in {"accepted", "queued", "sent", "delivered"}:
                 sent = True
         else:
             logger.warning(

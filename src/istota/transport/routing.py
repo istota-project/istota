@@ -46,7 +46,7 @@ _WARNED_NO_ROOM_TABLES = False
 # which is a different question that happens to have the same answer today.
 _STREAM_SURFACES = frozenset({"stream", "web"})
 # Source types that must never silently drop a reply (interactive surfaces).
-_INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "repl", "web"})
+_INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "repl", "web", "sms"})
 
 # Legacy compound aliases, normalized in exactly one place.
 _ALIASES: dict[str, list[str]] = {
@@ -281,6 +281,8 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
         # A non-synthetic, non-web/repl token on an email task is a real Talk
         # room set by our own inbound continuation routing.
         return f"talk:{tok}"
+    if surface == "sms":
+        return "sms"
     return None  # repl: no durable push target
 
 
@@ -351,6 +353,8 @@ def _infer_default_plan(task: "db.Task") -> list[Destination]:
         return [Destination("stream", "stream", "stream")]
     if st == "web":
         return [Destination("web", "stream", "stream")]
+    if st == "sms":
+        return [Destination("sms")]
     return []
 
 
@@ -856,6 +860,17 @@ def _resolve_one(
         # channel is advisory. Mirrors today's unconditional post_email.
         return Destination("email", dest.channel, "push")
 
+    if surface == "sms":
+        transport = registry.get("sms") if registry is not None else None
+        channel = transport.resolve_target(task) if transport is not None else None
+        if not channel:
+            logger.warning(
+                "Dropping SMS destination for task %s: no current user binding",
+                getattr(task, "id", "?"),
+            )
+            return None
+        return Destination("sms", channel, "push")
+
     if surface in ("ntfy", "istota_file"):
         # Resolved at delivery (Stage 1: inline; Stage 2: their transports).
         return Destination(surface, dest.channel, "push")
@@ -895,6 +910,14 @@ def _reply_origin_destination(
         return Destination("stream", "stream", "stream")
     if st == "web":
         return Destination("web", "stream", "stream")
+    if st == "sms":
+        try:
+            from .registry import make_registry
+            transport = make_registry(config).get("sms")
+        except Exception:
+            transport = None
+        channel = transport.resolve_target(task) if transport is not None else None
+        return Destination("sms", channel, "push") if channel else None
     channel = _resolve_talk_channel(config, task)
     if not channel:
         return None

@@ -38,11 +38,11 @@ from tests.support.drift import source_of
 # documents.
 SHIPPED_SOURCE_TYPES = (
     "briefing", "cli", "doctor", "email", "heartbeat", "istota_file",
-    "playbook", "repl", "scheduled", "subtask", "talk", "web",
+    "playbook", "repl", "scheduled", "sms", "subtask", "talk", "web",
 )
 
 # The five of those that name a surface a task can originate on.
-ORIGIN_SURFACE_SOURCE_TYPES = ("email", "istota_file", "repl", "talk", "web")
+ORIGIN_SURFACE_SOURCE_TYPES = ("email", "istota_file", "repl", "sms", "talk", "web")
 
 # Values a reader can be handed by a caller that read a column, parsed JSON, or
 # had nothing at all. None of them is a surface. The ids are spelled out rather
@@ -98,7 +98,7 @@ class TestTheTable:
         assert surfaces.is_room_member("email") is False
         assert surfaces.is_room_view("email") is False
 
-    @pytest.mark.parametrize("surface", ["ntfy", "istota_file", "repl"])
+    @pytest.mark.parametrize("surface", ["ntfy", "istota_file", "repl", "sms"])
     def test_the_non_room_surfaces_answer_nothing(self, surface):
         assert surfaces.room_role(surface) is None
         assert surfaces.room_view(surface) is None
@@ -259,11 +259,11 @@ class TestOriginSurfaceForSourceType:
 
 class TestTheTableCoversTheRegistry:
     def test_every_surface_make_registry_can_produce_has_a_record(self):
-        # Talk and email are the two config-gated transports, so enabling both
-        # is what makes the registry produce every surface there is.
+        # Enable each config-gated transport so the registry produces every surface.
         config = Config()
         config.talk.enabled = True
         config.email.enabled = True
+        config.sms.enabled = True
         registry = make_registry(config)
         assert set(registry.names()) == set(surfaces.SURFACES)
 

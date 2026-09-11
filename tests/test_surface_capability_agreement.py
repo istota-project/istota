@@ -27,16 +27,16 @@ from istota.transport._types import TransportCapabilities
 # `surfaces.SURFACES`, so dropping a row from the leaf shortens the enumeration
 # instead of failing it — the coverage test below is what holds this list and
 # the leaf equal, and it is the one that goes red when a surface is added.
-EVERY_SURFACE = ("email", "istota_file", "ntfy", "repl", "talk", "web")
+EVERY_SURFACE = ("email", "istota_file", "ntfy", "repl", "sms", "talk", "web")
 
 
 @pytest.fixture(scope="module")
 def transports():
-    """Every transport, instantiated. Talk and email are the two config-gated
-    ones, so enabling both is what makes the registry produce them all."""
+    """Every transport, instantiated with each config-gated surface enabled."""
     config = Config()
     config.talk.enabled = True
     config.email.enabled = True
+    config.sms.enabled = True
     registry = make_registry(config)
     return {name: registry.get(name) for name in registry.names()}
 
@@ -121,7 +121,7 @@ class TestTheDefaults:
         assert caps.inbound_room_role is None
         assert caps.user_turn_mirror is None
 
-    @pytest.mark.parametrize("name", ["ntfy", "istota_file", "repl"])
+    @pytest.mark.parametrize("name", ["ntfy", "istota_file", "repl", "sms"])
     def test_the_non_room_surfaces_declare_nothing(self, transports, name):
         caps = transports[name].capabilities
         assert (caps.room_view, caps.inbound_room_role, caps.user_turn_mirror) == (

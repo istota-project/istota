@@ -2871,6 +2871,7 @@ def process_one_task(
     _talk_is_mirror = bool(_talk_dest and getattr(_talk_dest, "mirror", False))
     plan_email = plan_has_surface(plan, "email")
     plan_ntfy = plan_has_surface(plan, "ntfy")
+    plan_sms = plan_has_surface(plan, "sms")
     plan_file = plan_has_surface(plan, "istota_file")
     plan_web = plan_has_surface(plan, "web")
     # A *push* web destination is a foreign task (e.g. an email reply) routing
@@ -2916,6 +2917,8 @@ def process_one_task(
     # The transport derives success from the task's terminal status at delivery.
     call_file_handler = False
     post_ntfy = False
+    post_sms_message: str | None = None
+    post_sms_reference_id: str | None = None
     post_web = False
 
     # Track what to post after DB transaction closes
@@ -2994,7 +2997,12 @@ def process_one_task(
     # replying). Computed once and reused by the status, event-emission, and
     # deferred-op-skip branches below.
     _own_origin_web = plan_web and task.source_type == "web"
-    _confirmable_surface = (plan_talk and talk_token and not plan_ntfy) or _own_origin_web
+    _own_origin_sms = plan_sms and task.source_type == "sms"
+    _confirmable_surface = (
+        (plan_talk and talk_token and not plan_ntfy)
+        or _own_origin_web
+        or _own_origin_sms
+    )
     # A no-final-answer result embeds mid-turn text the model wrote to itself,
     # not to the user, so its "should I proceed?" is not a question awaiting an
     # answer. Parking the task on it would hold it for the whole confirmation
@@ -3077,6 +3085,10 @@ def process_one_task(
                     ))
                 ):
                     post_talk_message = result
+                if _own_origin_sms:
+                    post_sms_message = (
+                        f"{result}\n\nTask #{task_id}. Reply YES or NO."
+                    )
 
                 # The durable record of the question, written on this connection
                 # inside the transaction that just parked the task — always,
@@ -3096,10 +3108,14 @@ def process_one_task(
                     body=confirmation_source.body_for(result),
                     room_token=transcript_token,
                 )
+                if _own_origin_sms and held_notification is not None:
+                    post_sms_reference_id = (
+                        f"confirmation:{held_notification.notification_id}"
+                    )
                 # Withheld here, and owed at the tail if that push fails —
                 # see the `talk_undelivered` arm at the end of this function
                 # (ISSUE-404). `held_notification` stays in scope for it.
-                if post_talk_message is None:
+                if post_talk_message is None and post_sms_message is None:
                     notification_results.append(held_notification)
                     held_notification = None
             else:
@@ -3273,6 +3289,8 @@ def process_one_task(
                         post_email = True
                     if plan_ntfy:
                         post_ntfy = True
+                    if plan_sms:
+                        post_sms_message = delivery_result
                     if web_foreign_dests:
                         post_web = True
                     if plan_file:
@@ -3898,6 +3916,16 @@ def process_one_task(
                     f"{email_transcript_body(email_result)}"
                 )
                 failure_alert_title = f"Could not send the email reply — task #{task.id}"
+    if post_sms_message:
+        sms_transport = registry.get("sms")
+        sms_dest = next((d for d in plan if d.surface == "sms"), None)
+        if sms_transport is not None and sms_dest is not None and sms_dest.channel:
+            run_coro(sms_transport.deliver(
+                sms_dest.channel, post_sms_message, task=task,
+                reference_id=(
+                    post_sms_reference_id or f"task-result:{task_id}"
+                ),
+            ))
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"

@@ -39,6 +39,7 @@ class SmsDeliveryEvent:
     status: SmsDeliveryStatus
     error_code: str | None
     reported_segments: int | None
+    opted_out: bool = False
 
 
 SmsProviderEvent: TypeAlias = InboundSmsEvent | SmsDeliveryEvent
