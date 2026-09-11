@@ -18,6 +18,8 @@ from istota.config import (
     TwilioSmsConfig,
     UserConfig,
     load_config,
+    sms_config_errors,
+    sms_structural_config_errors,
 )
 
 
@@ -116,7 +118,6 @@ class TestSmsConfig:
             ('max_segments = 6', 'max_segments = 11'),
             ('request_timeout_seconds = 10', 'request_timeout_seconds = 0'),
             ('hostname = "assistant.example.com"', 'hostname = ""'),
-            ('auth_token = "twilio-auth-secret"', 'auth_token = ""'),
         ],
     )
     def test_enabled_config_rejects_invalid_common_or_active_values(
@@ -126,13 +127,21 @@ class TestSmsConfig:
         with pytest.raises(ValueError, match="SMS"):
             load_config(_write_config(tmp_path, _valid_sms_config().replace(old, new)))
 
-    def test_partial_inactive_provider_is_rejected(self, tmp_path):
+    def test_partial_inactive_provider_is_reported_not_rejected(self, tmp_path):
+        """Half a credential block is still a mistake worth naming — but one
+        doctor reports, not one that fails the load. See
+        `sms_credential_errors` for why the load path cannot decide this."""
         body = _valid_sms_config().replace(
             'api_key = ""\npublic_key = ""\nmessaging_profile_id = ""',
             'api_key = "KEY-live-secret"\npublic_key = ""\nmessaging_profile_id = ""',
         )
-        with pytest.raises(ValueError, match="inactive.*telnyx|telnyx.*incomplete"):
-            load_config(_write_config(tmp_path, body))
+
+        cfg = load_config(_write_config(tmp_path, body))
+
+        assert any(
+            "inactive" in error and "telnyx" in error
+            for error in sms_config_errors(cfg)
+        )
 
     def test_disabled_empty_config_keeps_safe_defaults(self, tmp_path):
         cfg = load_config(_write_config(tmp_path, "[sms]\nenabled = false\n"))
@@ -558,3 +567,65 @@ def test_every_sms_provider_secret_is_redacted_and_no_number_is_rendered():
     ):
         assert secret not in rendered, f"{secret!r} reached the admin config view"
     assert "+15559998888" not in rendered, "a user's phone number was rendered"
+
+
+class TestCredentialPresenceDoesNotBlockConfigLoad:
+    """Credential *presence* is not a load-time error.
+
+    Under `istota_use_environment_file` the Ansible role deliberately renders
+    `[sms.telnyx]` empty and puts the credentials in `/etc/<ns>/secrets.env`,
+    which systemd hands to the units and which a plain `command:`/`script:`
+    task cannot read. Raising here meant the role's own deploy-time tasks —
+    the ISSUE-058 config validator among them, which touches no SMS — failed
+    on a config the daemon they were validating for would have loaded fine.
+    Every other credential in `_env_secret_overrides` already behaves this
+    way: absent at load, reported by doctor, fatal only at use.
+    """
+
+    def test_active_provider_with_no_credentials_anywhere_still_loads(self, tmp_path):
+        cfg = load_config(_write_config(tmp_path, _valid_sms_config("telnyx")))
+
+        assert cfg.sms.enabled is True
+        assert cfg.sms.provider == "telnyx"
+        assert cfg.sms.telnyx.api_key == ""
+
+    def test_partial_inactive_provider_still_loads(self, tmp_path):
+        body = _valid_sms_config().replace(
+            'api_key = ""\npublic_key = ""\nmessaging_profile_id = ""',
+            'api_key = "KEY-live-secret"\npublic_key = ""\nmessaging_profile_id = ""',
+        )
+
+        cfg = load_config(_write_config(tmp_path, body))
+
+        assert cfg.sms.telnyx.public_key == ""
+
+    def test_the_credential_gap_is_still_reported_rather_than_silently_dropped(self):
+        cfg = Config()
+        cfg.site.hostname = "assistant.example.com"
+        cfg.sms.enabled = True
+        cfg.sms.provider = "telnyx"
+        cfg.sms.service_numbers = ["+15551234567"]
+        cfg.sms.default_sender_number = "+15551234567"
+
+        errors = sms_config_errors(cfg)
+
+        assert any("incomplete" in error for error in errors)
+        assert sms_structural_config_errors(cfg) == []
+
+    @pytest.mark.parametrize(
+        "old, new",
+        [
+            ('provider = "twilio"', 'provider = "plivo"'),
+            ('service_numbers = ["+15551234567"]', 'service_numbers = ["555-123-4567"]'),
+            (
+                'default_sender_number = "+15551234567"',
+                'default_sender_number = "+15557654321"',
+            ),
+            ('max_segments = 6', 'max_segments = 11'),
+            ('request_timeout_seconds = 10', 'request_timeout_seconds = 0'),
+            ('hostname = "assistant.example.com"', 'hostname = ""'),
+        ],
+    )
+    def test_structural_errors_still_fail_the_load(self, tmp_path, old, new):
+        with pytest.raises(ValueError, match="SMS"):
+            load_config(_write_config(tmp_path, _valid_sms_config().replace(old, new)))

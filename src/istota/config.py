@@ -3985,11 +3985,25 @@ def _is_e164(value: object) -> bool:
     return is_e164(value)
 
 
-def sms_config_errors(config: Config) -> list[str]:
-    """Return local SMS configuration errors without exposing field values."""
+def sms_credential_errors(config: Config) -> list[str]:
+    """Return SMS provider blocks that hold some credentials but not all.
+
+    Split out of :func:`sms_config_errors` because credential *presence* is the
+    one class of SMS error that :func:`load_config` must not raise on. Under
+    ``istota_use_environment_file`` the Ansible role renders an empty
+    ``[sms.telnyx]`` on purpose and delivers the values through
+    ``/etc/<ns>/secrets.env``, which systemd hands to the units via
+    ``EnvironmentFile=`` and which a plain ``command:``/``script:`` task cannot
+    read — so the role's own deploy-time tasks saw a config the daemon they
+    were provisioning for would have loaded fine, and the ISSUE-058 validator,
+    which touches no SMS at all, failed the play. Every other credential in
+    ``_env_secret_overrides`` already behaves this way: absent at load,
+    reported by doctor, fatal only at use. `make_provider_registry` skips an
+    incomplete provider rather than raising, so the runtime consequence is a
+    send recorded ``unconfigured`` — a state the transport already models.
+    """
     sms = config.sms
     errors: list[str] = []
-
     for provider in SMS_PROVIDER_NAMES:
         missing = sms_provider_missing_fields(config, provider)
         if sms_provider_has_values(config, provider) and missing:
@@ -3998,6 +4012,28 @@ def sms_config_errors(config: Config) -> list[str]:
                 f"{role} {provider} provider block is incomplete; missing "
                 + ", ".join(missing)
             )
+        elif (
+            sms.enabled
+            and sms.provider == provider
+            and missing
+            and not sms_provider_has_values(config, provider)
+        ):
+            errors.append(
+                f"active {provider} provider block is incomplete; missing "
+                + ", ".join(missing)
+            )
+    return errors
+
+
+def sms_structural_config_errors(config: Config) -> list[str]:
+    """Return SMS errors that are facts about ``config.toml`` alone.
+
+    These are what :func:`load_config` raises on: every value here is visible
+    to any caller that can read the config file, so no deployment shape can
+    make one look absent when it is set.
+    """
+    sms = config.sms
+    errors: list[str] = []
 
     # Checked whether or not SMS is enabled. `make_provider_registry` raises on
     # an unknown name, and the webhook receiver calls it unconditionally at
@@ -4030,18 +4066,20 @@ def sms_config_errors(config: Config) -> list[str]:
     if not 1 <= sms.request_timeout_seconds <= 30:
         errors.append("request_timeout_seconds must be between 1 and 30")
 
-    if sms.provider in SMS_PROVIDER_NAMES:
-        missing = sms_provider_missing_fields(config, sms.provider)
-        if missing and not sms_provider_has_values(config, sms.provider):
-            errors.append(
-                f"active {sms.provider} provider block is incomplete; missing "
-                + ", ".join(missing)
-            )
     return errors
 
 
+def sms_config_errors(config: Config) -> list[str]:
+    """Return every local SMS configuration error, for reporting surfaces.
+
+    Doctor's `sms.` checks are the reader. `load_config` deliberately uses only
+    :func:`sms_structural_config_errors`; see :func:`sms_credential_errors`.
+    """
+    return sms_structural_config_errors(config) + sms_credential_errors(config)
+
+
 def _validate_sms(config: Config) -> None:
-    errors = sms_config_errors(config)
+    errors = sms_structural_config_errors(config)
     if errors:
         raise ValueError("Invalid SMS configuration: " + "; ".join(errors))
 
