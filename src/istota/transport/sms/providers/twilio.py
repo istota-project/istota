@@ -164,12 +164,11 @@ def _parse_webhook(
         raise TwilioWebhookError("unexpected account")
     if fields.get("MessagingServiceSid") != messaging_service_sid:
         raise TwilioWebhookError("unexpected messaging service")
-    if fields.get("To") not in service_numbers:
-        raise TwilioWebhookError("unexpected receiving number")
-
     message_sid = _required(fields, "MessageSid")
     callback_status = fields.get("MessageStatus")
     if callback_status:
+        if fields.get("From") not in service_numbers:
+            raise TwilioWebhookError("unexpected sending number")
         error_code = fields.get("ErrorCode") or None
         event = SmsDeliveryEvent(
             provider="twilio",
@@ -182,6 +181,8 @@ def _parse_webhook(
         )
         return SmsWebhookResult(event, 204, None, b"")
 
+    if fields.get("To") not in service_numbers:
+        raise TwilioWebhookError("unexpected receiving number")
     event = InboundSmsEvent(
         provider="twilio",
         provider_event_id=None,

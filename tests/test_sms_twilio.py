@@ -126,9 +126,12 @@ def test_twilio_rejects_signature_and_config_mismatches(tmp_path, change):
         name, value = change["field"]
         changed_params = dict(signed_params)
         changed_params[name] = value
+        headers = request.headers
+        if name != "Body":
+            headers = _signed_request(changed_params).headers
         request = SmsWebhookRequest(
             raw_body=urlencode(changed_params).encode(),
-            headers=request.headers,
+            headers=headers,
             public_url=PUBLIC_URL,
         )
 
@@ -182,6 +185,8 @@ def test_twilio_status_callback_maps_delivery_state(
     params = _inbound_params(
         MessageSid="SM-outbound",
         MessageStatus=provider_status,
+        From=SERVICE_NUMBER,
+        To=USER_NUMBER,
         ErrorCode="30007",
         NumSegments="3",
     )
