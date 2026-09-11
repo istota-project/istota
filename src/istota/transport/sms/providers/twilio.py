@@ -13,6 +13,7 @@ from twilio.rest import Client
 
 from ....config import Config
 from ._types import (
+    MAX_WEBHOOK_BODY,
     InboundSmsEvent,
     SmsDeliveryEvent,
     SmsDeliveryStatus,
@@ -24,9 +25,9 @@ from ._types import (
     SmsWebhookError,
     SmsWebhookRequest,
     SmsWebhookResult,
+    header_value,
 )
 
-_MAX_WEBHOOK_BODY = 64 * 1024
 _TWIML_RESPONSE = b'<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
 _STATUS_MAP: dict[str, SmsDeliveryStatus] = {
     "accepted": "accepted",
@@ -76,19 +77,11 @@ class _FormFields:
         return [value for key, value in self._pairs if key == name]
 
 
-def _header(headers, name: str) -> str:
-    wanted = name.casefold()
-    for key, value in headers.items():
-        if key.casefold() == wanted:
-            return value
-    return ""
-
-
 def _parse_fields(request: SmsWebhookRequest) -> _FormFields:
-    content_type = _header(request.headers, "content-type").partition(";")[0].strip()
+    content_type = header_value(request.headers, "content-type").partition(";")[0].strip()
     if content_type.casefold() != "application/x-www-form-urlencoded":
         raise TwilioWebhookError("unsupported content type", 415)
-    if len(request.raw_body) > _MAX_WEBHOOK_BODY:
+    if len(request.raw_body) > MAX_WEBHOOK_BODY:
         raise TwilioWebhookError("webhook body too large", 413)
     try:
         body = request.raw_body.decode("utf-8", errors="strict")
@@ -137,11 +130,16 @@ def _opt_out_action(fields: _FormFields) -> SmsOptOutAction | None:
     return None
 
 
-def _delivery_status(value: str) -> SmsDeliveryStatus:
-    status = _STATUS_MAP.get(value.strip().lower())
-    if status is None:
-        raise TwilioWebhookError("unsupported message status", 400)
-    return status
+def _delivery_status(value: str) -> SmsDeliveryStatus | None:
+    """Map a Twilio status, or ``None`` for one this adapter does not model.
+
+    ``None`` rather than a refusal. Twilio emits statuses this map does not
+    carry (`partially_delivered`, `receiving`), and a 400 makes Twilio retry
+    the same body to the same 400 for as long as it keeps trying. An unknown
+    status is acknowledged and dropped: it advances nothing, which is the
+    correct effect for a state the ledger has no column for.
+    """
+    return _STATUS_MAP.get(value.strip().lower())
 
 
 def _parse_webhook(
@@ -153,7 +151,7 @@ def _parse_webhook(
     service_numbers: frozenset[str],
 ) -> SmsWebhookResult:
     fields = _parse_fields(request)
-    signature = _header(request.headers, "x-twilio-signature")
+    signature = header_value(request.headers, "x-twilio-signature")
     if not signature or not validator.validate(request.public_url, fields, signature):
         raise TwilioWebhookError("invalid signature")
     if fields.get("AccountSid") != account_sid:
@@ -161,16 +159,30 @@ def _parse_webhook(
     if fields.get("MessagingServiceSid") != messaging_service_sid:
         raise TwilioWebhookError("unexpected messaging service")
     message_sid = _required(fields, "MessageSid")
-    callback_status = fields.get("MessageStatus")
+    # An inbound message is identified by `SmsStatus=received`, not by the
+    # *absence* of a status field. Twilio sends `SmsStatus` on the incoming
+    # webhook and has widened that parameter set before; discriminating on
+    # "MessageStatus is missing" meant that the day it starts arriving on an
+    # inbound webhook, `_delivery_status("received")` raises and every inbound
+    # message is refused with a 400 — the whole surface dead, and no fixture
+    # here able to see it, because the fixtures do not send the field either.
+    # Reading the positive marker first fails safe in that direction.
+    if fields.get("SmsStatus").strip().lower() == "received":
+        callback_status = ""
+    else:
+        callback_status = fields.get("MessageStatus")
     if callback_status:
         if fields.get("From") not in service_numbers:
             raise TwilioWebhookError("unexpected sending number")
+        status = _delivery_status(callback_status)
+        if status is None:
+            return SmsWebhookResult(None, 204, None, b"")
         error_code = fields.get("ErrorCode") or None
         event = SmsDeliveryEvent(
             provider="twilio",
             provider_event_id=None,
             provider_message_id=message_sid,
-            status=_delivery_status(callback_status),
+            status=status,
             error_code=error_code,
             reported_segments=_integer(fields, "NumSegments", default=None),
             opted_out=error_code == "21610",

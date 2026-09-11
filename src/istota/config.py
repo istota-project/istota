@@ -1999,7 +1999,16 @@ class Config:
         return None
 
     def find_user_by_sms_number(self, phone_number: str) -> str | None:
-        """Return the user bound to an exact E.164 number, if any."""
+        """Return the user bound to an exact E.164 number, if any.
+
+        An empty or non-E.164 argument answers ``None`` rather than matching
+        the first user with no binding — `sms_phone_number` defaults to `''`,
+        so a bare equality test turns "no number" into "every unbound user",
+        and this answer decides which user an inbound message acts as.
+        """
+        from .user_profiles import is_e164
+        if not is_e164(phone_number):
+            return None
         for user_id, user_config in self.users.items():
             if user_config.sms_phone_number == phone_number:
                 return user_id
@@ -2551,9 +2560,20 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             _allow_obsolete=True,
         ))
 
+    # Validated here rather than taken raw: this number is the credential that
+    # decides which user an inbound SMS acts as, and the `[users.X]` block is
+    # the Docker entrypoint's path into `UserConfig`. It was the one writer of
+    # `sms_phone_number` that read nothing, so a number set this way was
+    # silently ignored and the binding simply did not exist.
+    from .user_profiles import normalize_sms_phone_number
+    sms_phone_number = normalize_sms_phone_number(
+        user_data.get("sms_phone_number", ""), allow_empty=True,
+    )
+
     return UserConfig(
         display_name=user_data.get("display_name", user_id),
         email_addresses=user_data.get("email_addresses", []),
+        sms_phone_number=sms_phone_number,
         timezone=user_data.get("timezone", "UTC"),
         briefings=briefings,
         resources=resources,
@@ -3927,7 +3947,6 @@ _SMS_PROVIDER_FIELDS = {
     ),
     "telnyx": ("api_key", "public_key", "messaging_profile_id"),
 }
-_E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
 
 
 def sms_provider_missing_fields(config: Config, provider: str) -> tuple[str, ...]:
@@ -3959,6 +3978,13 @@ def sms_webhooks_enabled(config: Config) -> bool:
     )
 
 
+def _is_e164(value: object) -> bool:
+    """`user_profiles.is_e164`, imported lazily as this module's other
+    `user_profiles` reads are — one rule, not a second copy of the pattern."""
+    from .user_profiles import is_e164
+    return is_e164(value)
+
+
 def sms_config_errors(config: Config) -> list[str]:
     """Return local SMS configuration errors without exposing field values."""
     sms = config.sms
@@ -3973,22 +3999,27 @@ def sms_config_errors(config: Config) -> list[str]:
                 + ", ".join(missing)
             )
 
-    if not sms.enabled:
-        return errors
-
+    # Checked whether or not SMS is enabled. `make_provider_registry` raises on
+    # an unknown name, and the webhook receiver calls it unconditionally at
+    # `reload_config` — so a misspelled provider in a *disabled* block loaded
+    # cleanly here and then killed the receiver's lifespan with a ValueError
+    # naming something the operator was never warned about.
     if sms.provider not in SMS_PROVIDER_NAMES:
         errors.append(
             "provider must be one of " + ", ".join(SMS_PROVIDER_NAMES)
         )
+
+    if not sms.enabled:
+        return errors
     if not sms.service_numbers:
         errors.append("service_numbers must contain at least one E.164 number")
     else:
-        invalid = [number for number in sms.service_numbers if not _E164_PATTERN.fullmatch(number)]
+        invalid = [n for n in sms.service_numbers if not _is_e164(n)]
         if invalid:
             errors.append("every service_numbers entry must be an exact E.164 number")
         if len(set(sms.service_numbers)) != len(sms.service_numbers):
             errors.append("service_numbers must not contain duplicates")
-    if not _E164_PATTERN.fullmatch(sms.default_sender_number):
+    if not _is_e164(sms.default_sender_number):
         errors.append("default_sender_number must be an exact E.164 number")
     elif sms.default_sender_number not in sms.service_numbers:
         errors.append("default_sender_number must be present in service_numbers")

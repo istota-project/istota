@@ -147,7 +147,35 @@ async def deliver_sms(
     task_id: int | None = None,
     preferred_from_number: str | None = None,
 ) -> SmsDeliveryRecord:
-    """Claim and perform one logical send without retrying ambiguous outcomes."""
+    """Claim and perform one logical send, off whatever loop awaits it.
+
+    Every step below is synchronous SQLite plus one blocking provider call, and
+    two callers (`scheduler.process_one_task` and `notifications._dispatch`)
+    submit this to the process-global runtime loop through ``run_coro`` — the
+    same loop the Talk poller runs on. Opening a connection there would wait on
+    the WAL write lock from inside the loop thread, so the coroutine holding
+    that lock could never be resumed and the whole runtime would stall until
+    the 30s busy timeout expired. `WebTransport.deliver` hands its write to an
+    executor for this reason; this does the same for all of them at once.
+    """
+    return await asyncio.to_thread(
+        _deliver_sms_blocking, config, providers,
+        logical_key=logical_key, user_id=user_id, text=text, task_id=task_id,
+        preferred_from_number=preferred_from_number,
+    )
+
+
+def _deliver_sms_blocking(
+    config: Config,
+    providers: SmsProviderRegistry,
+    *,
+    logical_key: str,
+    user_id: str,
+    text: str,
+    task_id: int | None = None,
+    preferred_from_number: str | None = None,
+) -> SmsDeliveryRecord:
+    """The body of :func:`deliver_sms`, on a worker thread. Never on the loop."""
     previous = _existing(config, logical_key)
     if previous is not None and (
         previous["status"] != "pending"
@@ -206,7 +234,7 @@ async def deliver_sms(
             blocked_record = None
     if blocked_record is not None:
         _log_transition(config, blocked_record, task_id)
-        await _alert_failure(config, blocked_record, user_id, task_id)
+        _alert_failure(config, blocked_record, user_id, task_id)
         return blocked_record
 
     with db.get_db(config.db_path) as conn:
@@ -226,16 +254,16 @@ async def deliver_sms(
     adapter = providers.get(row["provider"])
     if adapter is None:
         record = _set_outcome(config, logical_key, "unknown")
-        await _alert_failure(config, record, user_id, task_id)
+        _alert_failure(config, record, user_id, task_id)
         return record
     number = config.sms_phone_number_for(user_id)
     if not number:
         record = _set_outcome(config, logical_key, "unconfigured")
-        await _alert_failure(config, record, user_id, task_id)
+        _alert_failure(config, record, user_id, task_id)
         return record
     if is_opted_out(config, number):
         record = _set_outcome(config, logical_key, "blocked_opt_out")
-        await _alert_failure(config, record, user_id, task_id)
+        _alert_failure(config, record, user_id, task_id)
         return record
     sender = (
         preferred_from_number
@@ -257,7 +285,7 @@ async def deliver_sms(
         status_callback_url=f"https://{config.site.hostname}/webhooks/sms/{adapter.name}",
     )
     try:
-        outcome = await asyncio.to_thread(adapter.send, request)
+        outcome = adapter.send(request)
     except Exception:
         outcome = SmsSendFailure(False, None, False, "delivery outcome unknown")
     if isinstance(outcome, SmsSendResult):
@@ -267,7 +295,7 @@ async def deliver_sms(
             reported_segments=outcome.reported_segments,
         )
         if record.status in {"failed", "unknown"}:
-            await _alert_failure(config, record, user_id, task_id)
+            _alert_failure(config, record, user_id, task_id)
         return record
     if outcome.opted_out and number:
         set_opt_out(config, number, True)
@@ -275,20 +303,19 @@ async def deliver_sms(
         config, logical_key, "failed" if outcome.definite else "unknown",
         error_code=outcome.error_code,
     )
-    await _alert_failure(config, record, user_id, task_id)
+    _alert_failure(config, record, user_id, task_id)
     return record
 
 
-async def _alert_failure(
+def _alert_failure(
     config: Config,
     record: SmsDeliveryRecord,
     user_id: str,
     task_id: int | None,
 ) -> None:
+    """Raise the failure alert. Sync: its only caller already runs off-loop."""
     try:
-        await asyncio.to_thread(
-            _raise_failure_alert, config, record, user_id, task_id,
-        )
+        _raise_failure_alert(config, record, user_id, task_id)
     except Exception:
         logger.warning(
             "sms.outbound.alert_failed logical_key_hash=%s task_id=%s",
@@ -464,7 +491,14 @@ def is_sms_configured(
     return bool(number and not is_opted_out(config, number))
 
 
-def apply_delivery_event(conn, event) -> tuple[str, SmsDeliveryRecord | None]:
+def apply_delivery_event(conn, event):
+    """``(disposition, record, pending_alert)`` for one provider callback.
+
+    The alert is *returned* rather than delivered: this runs inside the
+    caller's open write transaction, and a push from in here would open a
+    second connection against the lock this one holds. The caller sends it
+    after the commit.
+    """
     """Apply one canonical callback without regressing or reopening a row."""
     order = {"pending": 0, "accepted": 1, "queued": 2, "sent": 3, "delivered": 4}
     now = _now()
@@ -474,15 +508,18 @@ def apply_delivery_event(conn, event) -> tuple[str, SmsDeliveryRecord | None]:
         (event.provider, event.provider_message_id),
     ).fetchone()
     if row is None:
-        return "delivery_unknown", None
+        return "delivery_unknown", None, None
     current = row["status"]
     if current in _TERMINAL_STATUSES:
-        return "delivery_duplicate", _record(row)
+        return "delivery_duplicate", _record(row), None
     terminal_next = event.status in {"failed", "delivery_unconfirmed"}
     if not terminal_next and order.get(event.status, -1) <= order.get(current, -1):
-        return "delivery_stale", _record(row)
+        return "delivery_stale", _record(row), None
     conn.execute(
-        "UPDATE sent_sms SET status = ?, error_code = ?, "
+        # COALESCE like its neighbours: a `failed` row that later takes any
+        # other write would otherwise lose the public error code the task alert
+        # and the admin view read.
+        "UPDATE sent_sms SET status = ?, error_code = COALESCE(?, error_code), "
         "reported_segments = COALESCE(?, reported_segments), "
         "provider_event_id = COALESCE(?, provider_event_id), updated_at = ? "
         "WHERE id = ?",
@@ -507,6 +544,9 @@ def apply_delivery_event(conn, event) -> tuple[str, SmsDeliveryRecord | None]:
         event.provider, updated["task_id"], event.provider_message_id,
         event.provider_event_id, event.status, event.error_code,
     )
+    pending_alert = None
     if entered_failed:
-        _write_failure_alert(conn, record, updated["user_id"], updated["task_id"])
-    return "delivery_updated", record
+        pending_alert = _write_failure_alert(
+            conn, record, updated["user_id"], updated["task_id"],
+        )
+    return "delivery_updated", record, pending_alert

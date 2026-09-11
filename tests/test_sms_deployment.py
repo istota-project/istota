@@ -73,9 +73,12 @@ def test_compose_passes_sms_inputs_and_shares_one_webhook_service():
     assert set(webhook["profiles"]) == {"location", "sms"}
     assert "ports" not in webhook
     assert webhook["expose"] == ["${ISTOTA_WEBHOOKS_PORT:-8765}"]
-    assert services["istota"]["environment"]["ISTOTA_LOCATION_ENABLED"].endswith(
-        ":-false}"
-    )
+    # Deliberately no assertion on the location default. Flipping it to
+    # `false` disables a module for every Docker deployment that never set it,
+    # which is an unannounced behaviour change and no part of the SMS work —
+    # the two subsystems share this service through `profiles`, and nothing in
+    # SMS needs location off. Pinning the flip here would have made the
+    # out-of-scope change the tested behaviour.
     for name in SMS_VALUES:
         assert name in services["istota"]["environment"]
 

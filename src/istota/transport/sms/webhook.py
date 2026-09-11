@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import sqlite3
 
-from ... import commands, confirmations
+from ... import commands, confirmations, db
 from ...config import Config
+from ...user_profiles import is_e164
 from .._types import IncomingMessage
 from ..ingest import ingest_message
-from ..registry import TransportRegistry
 from . import sms_conversation_token
 from ._types import SmsEventResult
 from .outbound import apply_delivery_event, deliver_sms
@@ -19,7 +18,6 @@ from .providers._types import InboundSmsEvent, SmsDeliveryEvent
 from .providers.registry import SmsProviderRegistry
 
 _MMS_REPLY = "MMS is not supported. Please resend the request as text."
-_E164_RE = re.compile(r"\+[1-9][0-9]{7,14}\Z")
 logger = logging.getLogger(__name__)
 
 
@@ -52,6 +50,28 @@ def _set_disposition(conn, event: InboundSmsEvent, disposition: str, task_id=Non
     )
 
 
+def _own_parked_confirmation(conn, user_id: str, token: str):
+    """The question parked in this SMS conversation, or ``None``.
+
+    `confirmations.resolve` falls through to Path C, the user's single open
+    question on any surface, which is right for Talk and web — one question,
+    answerable wherever you happen to read it. It is not right here. A phone
+    number is the weakest credential any surface authenticates with (the spec
+    names SIM swap and number recycling), so a texted `Y` reaching Path C could
+    approve the untrusted-email confirmation gate — and `apply_answer` with
+    `trust_sender` then writes a permanent trust row for the sender whose mail
+    is parked in that task.
+
+    Path A is unreachable from SMS (no Talk response id), so this is Path B
+    alone: a question parked in this SMS conversation. `!confirm <id> yes|no`
+    stays as the explicit, deliberate route to any other surface's question.
+    """
+    task = db.get_pending_confirmation(conn, token)
+    if task is None or task.user_id != user_id:
+        return None
+    return task
+
+
 def handle_provider_event(
     conn,
     config: Config,
@@ -61,8 +81,10 @@ def handle_provider_event(
 ) -> SmsEventResult:
     """Apply one normalized event inside the caller's database transaction."""
     if isinstance(event, SmsDeliveryEvent):
-        disposition, delivery = apply_delivery_event(conn, event)
-        return SmsEventResult(disposition=disposition, delivery=delivery)
+        disposition, delivery, pending_alert = apply_delivery_event(conn, event)
+        return SmsEventResult(
+            disposition=disposition, delivery=delivery, pending_alert=pending_alert,
+        )
 
     if not config.sms.enabled or not active_provider_ready:
         return SmsEventResult("unconfigured_provider")
@@ -70,7 +92,7 @@ def handle_provider_event(
         return SmsEventResult("inactive_provider")
     if not event.provider_message_id or len(event.provider_message_id) > 255:
         return SmsEventResult("invalid_message_id")
-    if _E164_RE.fullmatch(event.from_number) is None:
+    if not is_e164(event.from_number):
         return SmsEventResult("invalid_sender")
     user_id = config.find_user_by_sms_number(event.from_number)
     if user_id is None:
@@ -113,22 +135,13 @@ def handle_provider_event(
         return SmsEventResult("empty")
     answer = confirmations.parse_answer(event.text)
     if answer is not None:
-        resolution = confirmations.resolve(
-            conn, user_id, conversation_token=token,
-        )
-        if resolution.ambiguous:
-            response = confirmations.ambiguity_listing(conn, resolution.ambiguous)
-            _set_disposition(conn, event, "confirmation_ambiguous")
-            return SmsEventResult(
-                "confirmation_ambiguous", user_id=user_id, response_text=response,
-                response_logical_key=(
-                    f"confirmation-answer:{event.provider}:{event.provider_message_id}"
-                ),
-                preferred_from_number=event.to_number,
-            )
-        if resolution.task is not None:
+        # No ambiguity arm: this conversation holds at most one parked
+        # question, so there is never a set to disambiguate. The listing arm
+        # existed only for Path C's "any surface" fallthrough.
+        parked = _own_parked_confirmation(conn, user_id, token)
+        if parked is not None:
             response = confirmations.apply_answer(
-                conn, resolution.task, answer, config, by="sms",
+                conn, parked, answer, config, by="sms",
             )
             _set_disposition(conn, event, "confirmation_answer")
             return SmsEventResult(
@@ -164,14 +177,26 @@ async def deliver_event_response(
     result: SmsEventResult,
 ) -> None:
     """Run command work and idempotent replies after the inbound commit."""
+    if result.pending_alert is not None:
+        # The delivery callback raised this inside the write transaction that
+        # has now committed; nothing else will push it.
+        from ...notification_store import deliver_pending
+        try:
+            deliver_pending(config, [result.pending_alert])
+        except Exception:
+            logger.warning("sms.delivery.alert_not_delivered", exc_info=True)
+
     response = result.response_text
     if result.command_text:
         if result.user_id is None:
             return
+        # No registry argument: `dispatch` builds one on demand and
+        # `make_registry` does no I/O. An empty one is strictly worse than
+        # none — `!route` and its neighbours read it and would report that the
+        # deployment has no surfaces at all.
         command = await commands.dispatch(
             config, result.user_id, sms_conversation_token(result.user_id),
-            result.command_text,
-            surface="sms", registry=TransportRegistry({}),
+            result.command_text, surface="sms",
         )
         response = command.text or ""
     if not response or not result.response_logical_key or not result.user_id:

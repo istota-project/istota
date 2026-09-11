@@ -10,7 +10,6 @@ ntfy POST lives in ``transport.ntfy`` (the single ntfy delivery path); the
 
 import logging
 import threading
-import uuid
 from typing import TYPE_CHECKING
 
 # Re-exported so existing references (and the is_channel_configured probe) keep
@@ -394,6 +393,31 @@ def _send_web(
     return msg_id is not None
 
 
+def _send_sms(
+    config: "Config", user_id: str, message: str, reference_id: str | None,
+) -> bool:
+    """Send one notification over SMS. Returns True when a provider took it.
+
+    Through `SmsTransport`, the way `_send_web` goes through `WebTransport`,
+    rather than reaching past it to `deliver_sms`: the transport owns the
+    provider registry and caches it, so calling `make_provider_registry` here
+    would build a second one — a fresh HTTP client and connection pool — on
+    every notification.
+
+    `reference_id` is the caller's stable logical id and is what makes a repeat
+    raise cost nothing. Without one the send falls back to a random key, which
+    is honest but not free: see `SmsTransport.send_record`.
+    """
+    from .async_runtime import run_coro
+    from .transport.sms import SmsTransport
+    from .transport.sms._types import REACHED_PROVIDER
+
+    record = run_coro(SmsTransport(config).send_record(
+        "", message, user_id=user_id, reference_id=reference_id,
+    ))
+    return record is not None and record.status in REACHED_PROVIDER
+
+
 # How long the transcript mirror waits for the write lock before giving up. Well
 # under the 30s default, because a caller holding a transaction is a stall on
 # whatever thread it runs on rather than an error anyone sees. See the note in
@@ -682,14 +706,7 @@ def _dispatch(
             if _send_web(config, user_id, body, dest.channel, title=title):
                 sent = True
         elif dest.surface == "sms":
-            from .transport.sms.outbound import deliver_sms
-            from .transport.sms.providers.registry import make_provider_registry
-            result = run_coro(deliver_sms(
-                config, make_provider_registry(config),
-                logical_key=reference_id or f"notification:{uuid.uuid4()}",
-                user_id=user_id, text=message or title or "",
-            ))
-            if result.status in {"accepted", "queued", "sent", "delivered"}:
+            if _send_sms(config, user_id, message or title or "", reference_id):
                 sent = True
         else:
             logger.warning(

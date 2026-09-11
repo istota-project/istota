@@ -3916,16 +3916,36 @@ def process_one_task(
                     f"{email_transcript_body(email_result)}"
                 )
                 failure_alert_title = f"Could not send the email reply — task #{task.id}"
+    sms_undelivered = False
     if post_sms_message:
+        # `send_record` rather than `deliver`, because `Transport.deliver`
+        # returns the surface's own message id — which SMS has none of — and so
+        # discarded the ledger record this arm has to read.
         sms_transport = registry.get("sms")
         sms_dest = next((d for d in plan if d.surface == "sms"), None)
-        if sms_transport is not None and sms_dest is not None and sms_dest.channel:
-            run_coro(sms_transport.deliver(
-                sms_dest.channel, post_sms_message, task=task,
-                reference_id=(
-                    post_sms_reference_id or f"task-result:{task_id}"
-                ),
-            ))
+        if sms_transport is None or sms_dest is None:
+            sms_undelivered = True
+        else:
+            # Outside the `try`, so an import failure is not swallowed and
+            # reported as a delivery failure.
+            from .transport.sms._types import REACHED_PROVIDER
+            try:
+                sms_record = run_coro(sms_transport.send_record(
+                    sms_dest.channel or "", post_sms_message, task=task,
+                    reference_id=(
+                        post_sms_reference_id or f"task-result:{task_id}"
+                    ),
+                ))
+                sms_undelivered = (
+                    sms_record is None
+                    or sms_record.status not in REACHED_PROVIDER
+                )
+            except Exception:
+                logger.warning(
+                    "Could not deliver the SMS leg for task %s", task_id,
+                    exc_info=True,
+                )
+                sms_undelivered = True
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"
@@ -3984,7 +4004,19 @@ def process_one_task(
     # that can reach the user, because the email leg must never carry the
     # question — so the carve-out below would leave exactly the shape the
     # confirmation gate's own comment records fixing.
-    if talk_undelivered and held_notification is not None:
+    # `sms_undelivered` is the SMS half of the same owed debt. An SMS-origin
+    # confirmation withholds the notification at the park (`post_sms_message`
+    # is set), so a send that did not reach the provider would otherwise leave
+    # the question pushed nowhere and the task parked until
+    # `expire_stale_confirmations` kills it two hours later — the `sms-failure`
+    # task alert `deliver_sms` raises says only that an SMS failed, and carries
+    # neither the question nor its `!confirm` verbs. One `deliver_pending` for
+    # both legs: a plan carrying Talk *and* SMS that fails on both owes the
+    # notification once, and `deliver_pending` pushes every time it is called.
+    # `held_notification` is deliberately left set — the arm further down reads
+    # `held_notification is None` to decide whether a Talk failure still needs
+    # its own alert, and clearing it here would fire that for a debt just paid.
+    if held_notification is not None and (talk_undelivered or sms_undelivered):
         deliver_pending(config, [held_notification])
 
     # A Talk leg that carried the message and posted nothing (ISSUE-404). Last,

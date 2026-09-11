@@ -861,14 +861,37 @@ def _resolve_one(
         return Destination("email", dest.channel, "push")
 
     if surface == "sms":
+        # The channel is advisory, as email's is: `deliver_sms` resolves the
+        # binding itself immediately before the send. A destination with no
+        # channel is kept rather than dropped, because dropping it empties the
+        # plan — and an empty plan discards a finished answer with nothing but
+        # a daemon WARNING, and makes an SMS-origin confirmation *complete*
+        # instead of parking. Kept, `deliver_sms` records `unconfigured` and
+        # raises the task alert the spec asks for.
         transport = registry.get("sms") if registry is not None else None
-        channel = transport.resolve_target(task) if transport is not None else None
-        if not channel:
+        if transport is None:
             logger.warning(
-                "Dropping SMS destination for task %s: no current user binding",
+                "Dropping SMS destination for task %s: transport not registered",
                 getattr(task, "id", "?"),
             )
             return None
+        channel = transport.resolve_target(task)
+        if dest.channel and dest.channel != channel:
+            # A descriptor carrying a number is never sent to. The binding
+            # wins, always — the route grammar must not become a way to send
+            # to an arbitrary number — but it is said out loud rather than
+            # rewritten in silence.
+            logger.warning(
+                "Ignoring the phone number in an sms: destination for task %s; "
+                "SMS always sends to the user's own binding",
+                getattr(task, "id", "?"),
+            )
+        if not channel:
+            logger.warning(
+                "SMS destination for task %s has no current user binding; "
+                "delivery will record `unconfigured`",
+                getattr(task, "id", "?"),
+            )
         return Destination("sms", channel, "push")
 
     if surface in ("ntfy", "istota_file"):
@@ -916,8 +939,10 @@ def _reply_origin_destination(
             transport = make_registry(config).get("sms")
         except Exception:
             transport = None
-        channel = transport.resolve_target(task) if transport is not None else None
-        return Destination("sms", channel, "push") if channel else None
+        if transport is None:
+            return None
+        # Channel-less is a live destination here too; see `_resolve_one`.
+        return Destination("sms", transport.resolve_target(task), "push")
     channel = _resolve_talk_channel(config, task)
     if not channel:
         return None

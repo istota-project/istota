@@ -349,3 +349,42 @@ def test_twilio_route_rejects_oversize_and_bad_signatures(tmp_path, monkeypatch)
     assert bad_signature.status_code == 403
     with db.get_db(config.db_path) as conn:
         assert conn.execute("SELECT count(*) FROM processed_sms").fetchone()[0] == 0
+
+
+class TestTheInboundCallbackDiscrimination:
+    """Which webhook is which, and what an unmodelled status does.
+
+    Both of these are about a provider widening its payload under us. The
+    fixtures in this file are written from the documented parameter set, so
+    neither case can be found by reading them — they exist because the failure
+    mode is "the whole inbound surface returns 400" and the suite stays green.
+    """
+
+    def test_smsstatus_received_is_inbound_even_when_messagestatus_is_present(
+        self, tmp_path
+    ):
+        from istota.transport.sms.providers.twilio import build_adapter
+
+        adapter = build_adapter(_config(tmp_path))
+        params = _inbound_params(SmsStatus="received", MessageStatus="received")
+        result = adapter.parse_webhook(_signed_request(params))
+
+        assert isinstance(result.event, InboundSmsEvent)
+        assert result.event.text == "check the backup"
+        assert result.response_status == 200
+
+    def test_an_unmodelled_delivery_status_is_acknowledged_not_refused(self, tmp_path):
+        from istota.transport.sms.providers.twilio import build_adapter
+
+        adapter = build_adapter(_config(tmp_path))
+        params = _inbound_params(
+            From=SERVICE_NUMBER, To=USER_NUMBER, MessageStatus="partially_delivered",
+        )
+        del params["Body"]
+        result = adapter.parse_webhook(_signed_request(params))
+
+        # Acknowledged so Twilio stops retrying, and carrying no event, so the
+        # ledger is not advanced into a state it has no column for. A 400 here
+        # would be retried to the same 400 for as long as Twilio keeps trying.
+        assert result.event is None
+        assert result.response_status == 204

@@ -6,7 +6,7 @@ An SMS exchange is separate from the room model. It does not create or join a Ta
 
 ## Identity and consent
 
-Assigning a phone number gives that number authority to act as the user. It can create tasks, run commands, and answer that user's pending SMS confirmation questions. Provider signatures prove which provider sent a webhook, but they do not prove that the same person still controls the SIM. Remove or change the assignment when a number is lost, transferred, or recycled.
+Assigning a phone number gives that number authority to act as the user. It can create tasks, run commands, and answer that user's pending SMS confirmation questions. A bare `yes` or `no` answers only a question parked by an SMS task — it will not resolve one waiting in Talk, web chat, or the inbound email gate, because the number is the weakest credential any surface authenticates with. Use `!confirm <id> yes|no` to answer another surface's question deliberately. Provider signatures prove which provider sent a webhook, but they do not prove that the same person still controls the SIM. Remove or change the assignment when a number is lost, transferred, or recycled.
 
 Phone numbers must use exact E.164 form and must be unique across users. Assign or clear one with the operator CLI:
 

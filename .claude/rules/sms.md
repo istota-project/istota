@@ -1,6 +1,6 @@
 # SMS
 
-SMS is one provider-neutral, user-routable push surface with Twilio and Telnyx adapters. It is never a room member or view, writes no `messages` row, and uses the stable `sms-<user hash>` conversation token plus task history for context. A bare `sms` destination resolves the user's current binding immediately before send; a descriptor containing a phone number is invalid.
+SMS is one provider-neutral, user-routable push surface with Twilio and Telnyx adapters. It is never a room member or view, writes no `messages` row, and uses the stable `sms-<user hash>` conversation token plus task history for context. A bare `sms` destination resolves the user's current binding immediately before send. A descriptor carrying a phone number is never sent to — the binding wins and the number is ignored with a warning — so the route grammar cannot become a way to send to an arbitrary number. A destination whose user has no binding is kept rather than dropped, and records `unconfigured` with a task alert: dropping it empties the plan, which discards the answer and makes an SMS-origin confirmation complete instead of parking.
 
 The phone binding is an identity credential. Exact E.164 lookup decides which user an authenticated inbound event may act as. It can create tasks, dispatch commands, and answer that user's pending SMS confirmations. Unknown senders create no task and are not retained. Changing or clearing the binding revokes delivery to the old number.
 

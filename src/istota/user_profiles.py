@@ -130,12 +130,23 @@ _BOOL_COLUMNS = frozenset(_BOOL_COLUMN_DEFAULTS)
 _E164_PATTERN = re.compile(r"^\+[1-9][0-9]{7,14}$")
 
 
+def is_e164(value: object) -> bool:
+    """Whether ``value`` is an exact E.164 number.
+
+    The one spelling of this rule. It was written three times — here, in
+    ``config._validate_sms`` and in the SMS inbound path — which is three places
+    to keep in step for a predicate that decides which user an authenticated
+    message may act as.
+    """
+    return bool(_E164_PATTERN.fullmatch(str(value) if value is not None else ""))
+
+
 def normalize_sms_phone_number(value: object, *, allow_empty: bool = False) -> str:
     """Validate an exact E.164 number without guessing or rewriting it."""
     number = str(value) if value is not None else ""
     if allow_empty and number == "":
         return ""
-    if not _E164_PATTERN.fullmatch(number):
+    if not is_e164(number):
         raise ValueError(
             "SMS phone number must be exact E.164: '+' followed by 8 to 15 "
             "digits, with a non-zero country code"

@@ -12,6 +12,7 @@ from telnyx.lib.webhooks_ed25519 import verify_ed25519
 
 from ....config import Config
 from ._types import (
+    MAX_WEBHOOK_BODY,
     InboundSmsEvent,
     SmsDeliveryEvent,
     SmsDeliveryStatus,
@@ -23,9 +24,9 @@ from ._types import (
     SmsWebhookError,
     SmsWebhookRequest,
     SmsWebhookResult,
+    header_value,
 )
 
-_MAX_WEBHOOK_BODY = 64 * 1024
 _STATUS_MAP: dict[str, SmsDeliveryStatus] = {
     "accepted": "accepted",
     "queued": "queued",
@@ -49,14 +50,6 @@ _PUBLIC_ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
 
 
 TelnyxWebhookError = SmsWebhookError
-
-
-def _header(headers: Mapping[str, str], name: str) -> str:
-    wanted = name.casefold()
-    for key, value in headers.items():
-        if key.casefold() == wanted:
-            return value
-    return ""
 
 
 def _mapping(value: object, name: str) -> Mapping[str, object]:
@@ -212,10 +205,10 @@ def _parse_webhook(
     messaging_profile_id: str,
     service_numbers: frozenset[str],
 ) -> SmsWebhookResult:
-    content_type = _header(request.headers, "content-type").partition(";")[0].strip()
+    content_type = header_value(request.headers, "content-type").partition(";")[0].strip()
     if content_type.casefold() != "application/json":
         raise TelnyxWebhookError("unsupported content type", 415)
-    if len(request.raw_body) > _MAX_WEBHOOK_BODY:
+    if len(request.raw_body) > MAX_WEBHOOK_BODY:
         raise TelnyxWebhookError("webhook body too large", 413)
     try:
         verify_ed25519(client, request.raw_body, request.headers)

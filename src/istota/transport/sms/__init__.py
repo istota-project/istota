@@ -8,11 +8,12 @@ from typing import TYPE_CHECKING
 
 from .._types import DeliveryOptions, IncomingMessage, TransportCapabilities
 from .outbound import deliver_sms
-from .providers.registry import SmsProviderRegistry, make_provider_registry
+from .providers.registry import SmsProviderRegistry
 
 if TYPE_CHECKING:
     from ... import db
     from ...config import Config
+    from ._types import SmsDeliveryRecord
 
 
 def sms_conversation_token(user_id: str) -> str:
@@ -42,8 +43,17 @@ class SmsTransport:
         self._providers = providers
 
     def _provider_registry(self) -> SmsProviderRegistry:
+        """Build the adapter registry once per transport, and cache it.
+
+        Resolved through the `providers.registry` module rather than a name
+        bound at import time, so there is exactly one place to patch and one
+        place the factory can be reached from. Binding it here as well gave the
+        suite two targets for one factory, and a test patching the other one
+        went inert without failing.
+        """
         if self._providers is None:
-            self._providers = make_provider_registry(self._config)
+            from .providers import registry as provider_registry
+            self._providers = provider_registry.make_provider_registry(self._config)
         return self._providers
 
     async def poll(self) -> list[IncomingMessage]:
@@ -54,11 +64,41 @@ class SmsTransport:
         reply_to: int | None = None, reference_id: str | None = None,
         threaded: bool = False, options: DeliveryOptions | None = None,
     ) -> int | None:
-        user_id = (
-            task.user_id
-            if task is not None
-            else self._config.find_user_by_sms_number(target)
+        await self.send_record(
+            target, text, task=task, reference_id=reference_id,
         )
+        return None
+
+    async def send_record(
+        self, target: str, text: str, *, task: "db.Task | None" = None,
+        user_id: str | None = None, reference_id: str | None = None,
+        preferred_from_number: str | None = None,
+    ) -> "SmsDeliveryRecord | None":
+        """`deliver`, returning the ledger record instead of a message id.
+
+        The `Transport.deliver` contract returns the surface's own message id,
+        and SMS has none — so the `SmsDeliveryRecord` had nowhere to go and was
+        dropped. The scheduler's owed-confirmation arm has to read it to know
+        whether the question reached anybody, so it calls this instead. `None`
+        means no user could be resolved, which is the one case that writes no
+        ledger row at all.
+
+        `reference_id` is the caller's stable logical id, and supplying one is
+        what makes a repeated send cost nothing. The random fallback is honest
+        — with no key there is nothing to deduplicate against — but it is not
+        free: every caller without one mints a fresh ledger row and a fresh
+        paid message.
+        """
+        # Explicit first, then the task, and only then the number. A caller
+        # that already knows the user must not be made to reverse-lookup one
+        # from a number it does not have — `find_user_by_sms_number("")` is a
+        # question with no good answer.
+        if not user_id:
+            user_id = (
+                task.user_id
+                if task is not None
+                else self._config.find_user_by_sms_number(target)
+            )
         if not user_id:
             return None
         logical_key = reference_id or (
@@ -66,12 +106,12 @@ class SmsTransport:
             if task is not None
             else f"notification:{uuid.uuid4()}"
         )
-        await deliver_sms(
+        return await deliver_sms(
             self._config, self._provider_registry(), logical_key=logical_key,
             user_id=user_id, text=text,
             task_id=task.id if task is not None else None,
+            preferred_from_number=preferred_from_number,
         )
-        return None
 
     async def edit(self, target: str, message_id: int, text: str) -> None:
         return None

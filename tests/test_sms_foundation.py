@@ -11,7 +11,14 @@ from types import SimpleNamespace
 import pytest
 
 from istota import admin_config_view, db, doctor, user_profiles
-from istota.config import Config, UserConfig, load_config
+from istota.config import (
+    Config,
+    SmsConfig,
+    TelnyxSmsConfig,
+    TwilioSmsConfig,
+    UserConfig,
+    load_config,
+)
 
 
 def _write_config(tmp_path: Path, body: str) -> Path:
@@ -462,3 +469,92 @@ class TestSmsDoctorReadiness:
         assert results["sms.common"].status == doctor.SKIP
         assert results["sms.telnyx"].status == doctor.OK
         assert "callback-only" in results["sms.telnyx"].detail
+
+
+def test_a_users_toml_block_binds_an_sms_number(tmp_path):
+    """`[users.X] sms_phone_number` is the Docker entrypoint's path in.
+
+    It was the one writer of this field that read nothing, so an operator on
+    the `[users.X]` shape set a number and got no binding — and the failure is
+    silent, because an unbound user simply never receives or sends SMS.
+    """
+    from istota.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[users.alice]\n'
+        'display_name = "Alice"\n'
+        'sms_phone_number = "+15551234567"\n'
+    )
+    config = load_config(path)
+
+    assert config.users["alice"].sms_phone_number == "+15551234567"
+    assert config.find_user_by_sms_number("+15551234567") == "alice"
+
+
+def test_a_users_toml_block_refuses_a_number_that_is_not_e164(tmp_path):
+    from istota.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text('[users.alice]\nsms_phone_number = "555-1234"\n')
+
+    with pytest.raises(ValueError, match="E.164"):
+        load_config(path)
+
+
+def test_an_empty_number_matches_no_user(tmp_path):
+    """`sms_phone_number` defaults to `''`, so a bare equality test on an empty
+    argument returns the first *unbound* user — and this answer decides which
+    user an inbound message acts as."""
+    from istota.config import Config, UserConfig
+
+    config = Config(users={
+        "alice": UserConfig(sms_phone_number=""),
+        "bob": UserConfig(sms_phone_number="+15551234567"),
+    })
+
+    assert config.find_user_by_sms_number("") is None
+    assert config.find_user_by_sms_number("not-a-number") is None
+    assert config.find_user_by_sms_number("+15551234567") == "bob"
+
+
+def test_every_sms_provider_secret_is_redacted_and_no_number_is_rendered():
+    """Named coverage for the SMS block, which the generic guards cover only
+    by name pattern — so a field whose name stopped matching would be caught
+    there, and a *phone number*, which matches no credential pattern at all,
+    would be caught by nothing.
+
+    Phone values are operational data and must not appear in operator output.
+    """
+    config = Config(
+        site=SimpleNamespace(hostname="assistant.example.test"),
+        sms=SmsConfig(
+            enabled=True,
+            provider="twilio",
+            service_numbers=["+15550001111"],
+            default_sender_number="+15550001111",
+            twilio=TwilioSmsConfig(
+                account_sid="AC-account",
+                auth_token="fabricated-auth-token",
+                api_key_sid="SK-key",
+                api_key_secret="fabricated-api-secret",
+                messaging_service_sid="MG-service",
+            ),
+            telnyx=TelnyxSmsConfig(
+                api_key="fabricated-telnyx-key",
+                public_key="fabricated-public-key",
+                messaging_profile_id="MP-profile",
+            ),
+        ),
+        users={"alice": UserConfig(sms_phone_number="+15559998888")},
+    )
+
+    rendered = repr(admin_config_view.build_config_view(config))
+
+    for secret in (
+        "fabricated-auth-token",
+        "fabricated-api-secret",
+        "fabricated-telnyx-key",
+    ):
+        assert secret not in rendered, f"{secret!r} reached the admin config view"
+    assert "+15559998888" not in rendered, "a user's phone number was rendered"

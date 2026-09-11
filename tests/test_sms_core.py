@@ -156,7 +156,7 @@ class TestSmsIdentityAndRouting:
         config = _config(tmp_path)
         adapter = _adapter(lambda _req: SmsSendResult("opaque-1", "accepted", 1))
         monkeypatch.setattr(
-            "istota.transport.sms.make_provider_registry", lambda _config: _providers(adapter)
+            "istota.transport.sms.providers.registry.make_provider_registry", lambda _config: _providers(adapter)
         )
 
         registry = make_registry(config)
@@ -548,25 +548,49 @@ class TestDeliveryEvents:
             assert row["reported_segments"] == 3
             assert row["provider_event_id"] == "event-delivered"
 
-    def test_failed_callback_enqueues_alert_without_network_delivery(
+    def test_failed_callback_enqueues_alert_in_transaction_and_pushes_after(
         self, tmp_path, monkeypatch
     ):
+        """The write is in the transaction; the push is after it, and happens.
+
+        Two halves, and the second is the one that was missing: the alert was
+        written and returned to nobody, so a `failed` callback left a row the
+        bell would show and pushed nothing — while the identical failure on the
+        *send* path did push. Asserting only "no delivery" passes equally
+        against that bug and against the fix, so each half is pinned
+        separately: `send_notification` is forbidden while the transaction is
+        open, and required once it has committed.
+        """
         config = _config(tmp_path)
         providers = _providers(_adapter(lambda _req: SmsSendResult("opaque-1", "sent", 1)))
         asyncio.run(deliver_sms(
             config, providers, logical_key="task-result:1", user_id="alice", text="done"
         ))
+        config.users["alice"].routing = {"alert": "ntfy"}
+        event = SmsDeliveryEvent("twilio", "event-failed", "opaque-1", "failed", "30007", None)
+
         monkeypatch.setattr(
             notifications, "send_notification",
-            lambda *_args, **_kwargs: pytest.fail("callback must not deliver notifications"),
+            lambda *_a, **_k: pytest.fail("no push while the transaction is open"),
         )
-
-        result = asyncio.run(_handle(
-            config, providers,
-            SmsDeliveryEvent("twilio", "event-failed", "opaque-1", "failed", "30007", None),
-        ))
-
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(
+                conn, config, event, active_provider_ready=True,
+            )
         assert result.disposition == "delivery_updated"
+        assert result.pending_alert is not None
+
+        pushed = []
+        monkeypatch.setattr(
+            notifications, "send_notification",
+            lambda *_a, **kw: pushed.append(kw.get("surface")) or True,
+        )
+        asyncio.run(deliver_event_response(config, providers, result))
+
+        assert pushed, "the committed alert was never pushed"
+        assert all("sms" not in (s or "") for s in pushed), (
+            "an SMS failure must not be reported over SMS"
+        )
         with db.get_db(config.db_path) as conn:
             assert conn.execute(
                 "SELECT count(*) FROM notifications WHERE source = 'task_alert'"
@@ -742,7 +766,7 @@ class TestSchedulerSmsDelivery:
         config = _config(tmp_path)
         providers = _providers(_adapter(send))
         monkeypatch.setattr(
-            "istota.transport.sms.make_provider_registry", lambda _config: providers
+            "istota.transport.sms.providers.registry.make_provider_registry", lambda _config: providers
         )
         monkeypatch.setattr(
             "istota.scheduler.execute_task", lambda *_args, **_kwargs: (
@@ -775,7 +799,7 @@ class TestSchedulerSmsDelivery:
         config = _config(tmp_path)
         providers = _providers(_adapter(send))
         monkeypatch.setattr(
-            "istota.transport.sms.make_provider_registry", lambda _config: providers
+            "istota.transport.sms.providers.registry.make_provider_registry", lambda _config: providers
         )
         monkeypatch.setattr(
             "istota.scheduler.execute_task", lambda *_args, **_kwargs: (
@@ -799,3 +823,217 @@ class TestSchedulerSmsDelivery:
             assert row["logical_key"] == f"confirmation:{notification_id}"
         assert len(calls) == 1
         assert f"Task #{task_id}. Reply YES or NO." in calls[0]
+
+
+class TestTheDeliveryPathStaysOffTheRuntimeLoop:
+    def test_deliver_sms_opens_no_database_connection_on_the_calling_loop(
+        self, tmp_path, monkeypatch
+    ):
+        """`deliver_sms` must not touch SQLite on the thread awaiting it.
+
+        Two callers submit this to the process-global runtime loop through
+        `run_coro` — the loop the Talk poller runs on. A synchronous
+        `db.get_db` there waits for the WAL write lock from inside the loop
+        thread, so a coroutine already holding that lock can never be resumed
+        and the whole runtime stalls until the 30s busy timeout. `.claude/
+        rules/transport.md` states the rule; `WebTransport.deliver` is the
+        existing implementation of it.
+
+        Asserting "it still returns a record" would pass either way, so this
+        records the *thread* of every connection open instead.
+        """
+        from istota import sqlite_util
+
+        config = _config(tmp_path)
+        providers = _providers(_adapter(lambda _req: SmsSendResult("opaque-1", "sent", 1)))
+        opens: list[int] = []
+        real_open = sqlite_util.open_db
+
+        def recording_open(*args, **kwargs):
+            opens.append(threading.get_ident())
+            return real_open(*args, **kwargs)
+
+        monkeypatch.setattr(sqlite_util, "open_db", recording_open)
+
+        async def drive():
+            loop_thread = threading.get_ident()
+            await deliver_sms(
+                config, providers, logical_key="task-result:9",
+                user_id="alice", text="done",
+            )
+            return loop_thread
+
+        loop_thread = asyncio.run(drive())
+
+        assert opens, "the probe recorded nothing; deliver_sms opened no database"
+        assert loop_thread not in opens, (
+            "deliver_sms opened a SQLite connection on the awaiting loop thread"
+        )
+
+
+class TestAnUnconfiguredSmsBindingIsRecordedNotDropped:
+    def _unbound(self, tmp_path):
+        config = _config(tmp_path)
+        config.users["alice"].sms_phone_number = ""
+        return config
+
+    def test_the_plan_keeps_the_sms_leg_so_the_failure_is_recorded(self, tmp_path):
+        """A dropped destination empties the plan, and an empty plan is silent.
+
+        The answer is discarded with nothing but a daemon WARNING: no ledger
+        row, no `unconfigured` status, and no task alert — while the spec asks
+        for the last two by name.
+        """
+        config = self._unbound(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="check", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"), output_target="sms",
+            )
+            task = db.get_task(conn, task_id)
+
+        plan = resolve_delivery_plan(config, task, make_registry(config))
+
+        assert [d.surface for d in plan] == ["sms"]
+        assert plan[0].channel in (None, "")
+
+    def test_an_unbound_user_parks_a_confirmation_instead_of_completing_it(
+        self, tmp_path, monkeypatch
+    ):
+        """The consequence that is worse than a lost answer.
+
+        With the leg dropped, `_own_origin_sms` is False, so the task is not a
+        confirmable surface and a "may I delete this?" completes — which
+        applies its deferred ops — instead of parking for an answer.
+        """
+        config = self._unbound(tmp_path)
+        providers = _providers(_adapter(lambda _req: SmsSendResult("x", "accepted", 1)))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task", lambda *_a, **_k: (
+                True, "I need your confirmation before deleting the file.", None, None,
+            ),
+        )
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="delete", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"), output_target="sms",
+            )
+
+        from istota.scheduler import process_one_task
+        assert process_one_task(config) == (task_id, True)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+            row = conn.execute("SELECT status FROM sent_sms").fetchone()
+        assert row is not None, "no ledger row: the SMS leg was dropped"
+        assert row["status"] == "unconfigured"
+
+
+class TestAWithheldConfirmationIsOwedBackWhenTheSmsFails:
+    def test_a_failed_confirmation_send_pushes_the_held_notification(
+        self, tmp_path, monkeypatch
+    ):
+        """The SMS half of ISSUE-404's owed-notification arm.
+
+        An SMS-origin confirmation withholds its notification at the park
+        because `post_sms_message` is set. If the send then reaches nobody, the
+        question is pushed nowhere and the task sits parked until
+        `expire_stale_confirmations` kills it two hours later. The separate
+        `sms-failure` alert says an SMS failed; it carries neither the question
+        nor its `!confirm` verbs, so it is not a substitute.
+        """
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda _req: SmsSendFailure(True, "30007", False, "provider rejected message")
+        ))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task", lambda *_a, **_k: (
+                True, "I need your confirmation before deleting the file.", None, None,
+            ),
+        )
+        pushed = []
+        monkeypatch.setattr(
+            "istota.scheduler.deliver_pending",
+            lambda _config, results: pushed.extend(r for r in results if r is not None),
+        )
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="delete", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"), output_target="sms",
+            )
+
+        from istota.scheduler import process_one_task
+        assert process_one_task(config) == (task_id, True)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+            sources = [
+                r[0] for r in conn.execute(
+                    "SELECT source FROM notifications"
+                ).fetchall()
+            ]
+        assert "confirmation" in sources
+        assert pushed, "the withheld confirmation was never owed back"
+
+
+class TestATextedAnswerResolvesOnlyItsOwnConversation:
+    """A phone number must not be able to answer another surface's question.
+
+    `confirmations.resolve` falls through to Path C — the user's single open
+    question on *any* surface — which is right for Talk and web and wrong here:
+    the number is the weakest credential any surface authenticates with, and a
+    texted `Y` reaching Path C approves the untrusted-email gate and can write
+    a permanent `trust_sender` row for the sender parked in it.
+    """
+
+    def _config_with_sms(self, tmp_path):
+        return _config(tmp_path)
+
+    def test_a_texted_yes_does_not_approve_an_email_origin_confirmation(
+        self, tmp_path
+    ):
+        config = self._config_with_sms(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            email_task = db.create_task(
+                conn, prompt="act on this mail", user_id="alice",
+                source_type="email", conversation_token="email-thread-1",
+            )
+            db.set_task_confirmation(conn, email_task, "May I trust this sender?")
+
+        result = asyncio.run(_handle(config, _providers(_adapter(
+            lambda _req: SmsSendResult("opaque-1", "accepted", 1)
+        )), _inbound(text="yes")))
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, email_task).status == "pending_confirmation", (
+                "a texted yes approved a confirmation parked by another surface"
+            )
+        # Not an answer to anything, so it is an ordinary turn: a new task.
+        assert result.disposition == "task"
+
+    def test_a_texted_yes_still_answers_its_own_parked_question(self, tmp_path):
+        """The control for the narrowing above: it must not refuse everything."""
+        config = self._config_with_sms(tmp_path)
+        token = sms_conversation_token("alice")
+        with db.get_db(config.db_path) as conn:
+            sms_task = db.create_task(
+                conn, prompt="delete it", user_id="alice", source_type="sms",
+                conversation_token=token, output_target="sms",
+            )
+            db.set_task_confirmation(conn, sms_task, "May I delete it?")
+
+        result = asyncio.run(_handle(config, _providers(_adapter(
+            lambda _req: SmsSendResult("opaque-2", "accepted", 1)
+        )), _inbound(text="yes")))
+
+        assert result.disposition == "confirmation_answer"
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, sms_task).status != "pending_confirmation"

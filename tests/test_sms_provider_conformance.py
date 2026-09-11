@@ -263,10 +263,19 @@ def test_callback_only_http_route_updates_delivery_but_rejects_inbound_work(
 
 
 def test_webhook_receiver_depends_only_on_common_provider_contract():
+    """The routes know provider *names*, never provider modules.
+
+    Both routes are wrappers over one `_receive_sms` now, so the body that has
+    to be checked is that one — reading only the wrappers would assert about
+    four lines that import nothing and pass whatever the shared body did.
+    The wrappers stay in the scan so a provider-specific branch added back into
+    one of them is still caught.
+    """
     from istota import webhook_receiver
 
     source = (
-        source_of(webhook_receiver.receive_twilio_sms)
+        source_of(webhook_receiver._receive_sms)
+        + source_of(webhook_receiver.receive_twilio_sms)
         + source_of(webhook_receiver.receive_telnyx_sms)
     )
 
