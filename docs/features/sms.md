@@ -42,7 +42,7 @@ Use a bare `sms` routing destination. `sms:+15551234567` is rejected because rou
 
 ## Twilio setup
 
-Create a Messaging Service, add every configured service number to its sender pool, and enable Advanced Opt-Out. Configure both incoming messages and status callbacks to:
+Create a Messaging Service, add every configured service number to its sender pool, and enable Advanced Opt-Out. Configure neutral provider-managed responses for START, STOP, and HELP because Istota deliberately sends no second compliance response. Configure both incoming messages and status callbacks to:
 
 ```text
 https://assistant.example.com/webhooks/sms/twilio

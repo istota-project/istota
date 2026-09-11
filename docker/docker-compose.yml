@@ -473,8 +473,8 @@ services:
       # ISTOTA_PUBLIC_PROTO=https when terminating TLS upstream. Override
       # ISTOTA_PUBLIC_HOST when the public hostname differs from DOMAIN
       # (e.g. behind a port-translating proxy).
-      # Also forwarded raw so the activation banner can build the Overland
-      # URL — the webhooks service binds its port directly, not via nginx.
+      # Also forwarded so the activation banner can build the public Overland
+      # URL through nginx.
       DOMAIN: ${DOMAIN:-}
       ISTOTA_PUBLIC_HOST: ${ISTOTA_PUBLIC_HOST:-}
       ISTOTA_PUBLIC_PROTO: ${ISTOTA_PUBLIC_PROTO:-http}

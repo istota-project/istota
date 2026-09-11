@@ -20,6 +20,7 @@ from tests.test_render_config import REQUIRED, render as render_docker_config
 REPO = Path(__file__).resolve().parent.parent
 COMPOSE = REPO / "docker" / "docker-compose.yml"
 DOCKER_NGINX = REPO / "docker" / "nginx" / "default.conf.template"
+DOCKER_ENTRYPOINT = REPO / "docker" / "istota" / "entrypoint.sh"
 ANSIBLE = REPO / "deploy" / "ansible"
 
 SMS_VALUES = {
@@ -85,6 +86,16 @@ def test_docker_nginx_keeps_webhooks_behind_the_shared_proxy():
     assert "set $upstream_webhooks" in nginx
     assert "location /webhooks/" in nginx
     assert "proxy_pass http://$upstream_webhooks" in nginx
+
+
+def test_location_banner_uses_the_public_nginx_address():
+    entrypoint = DOCKER_ENTRYPOINT.read_text()
+    banner = entrypoint.split("# --- Module activation summary", 1)[1].split(
+        "# --- Application secret key", 1,
+    )[0]
+
+    assert "ISTOTA_WEB_SITE_HOSTNAME" in banner
+    assert "ISTOTA_WEBHOOKS_PORT" not in banner
 
 
 def test_ansible_renders_sms_and_keeps_provider_secrets_out_of_config():

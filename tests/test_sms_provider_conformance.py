@@ -210,6 +210,58 @@ def test_sms_adapter_conformance_normalizes_delivery(provider, tmp_path):
     assert event.opted_out is False
 
 
+@pytest.mark.parametrize("provider", ["twilio", "telnyx"])
+def test_callback_only_http_route_updates_delivery_but_rejects_inbound_work(
+    provider, tmp_path, monkeypatch,
+):
+    from fastapi.testclient import TestClient
+
+    from istota import webhook_receiver as receiver
+    from istota.transport.sms.providers.registry import make_provider_registry
+
+    config = _config(tmp_path, provider)
+    message_id = TWILIO_MESSAGE_ID if provider == "twilio" else TELNYX_MESSAGE_ID
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "INSERT INTO sent_sms (logical_key, provider, provider_message_id, "
+            "user_id, to_number, from_number, status, estimated_segments, "
+            "body_chars, body_sha256, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'alice', ?, ?, 'sent', 1, 4, 'hash', "
+            "datetime('now'), datetime('now'))",
+            (f"callback-only:{provider}", provider, message_id, USER_NUMBER, SERVICE_NUMBER),
+        )
+    config.sms.enabled = False
+    monkeypatch.setattr(receiver, "_config", config)
+    monkeypatch.setattr(receiver, "_sms_providers", make_provider_registry(config))
+    monkeypatch.setattr(receiver, "reload_config", lambda: None)
+    monkeypatch.setattr(receiver.signal, "signal", lambda *_args: None)
+
+    delivery = _delivery_request(provider)
+    inbound = _inbound_request(provider)
+    with TestClient(receiver.app) as client:
+        delivery_response = client.post(
+            f"/webhooks/sms/{provider}",
+            content=delivery.raw_body,
+            headers=delivery.headers,
+        )
+        inbound_response = client.post(
+            f"/webhooks/sms/{provider}",
+            content=inbound.raw_body,
+            headers=inbound.headers,
+        )
+
+    assert delivery_response.status_code == 204
+    assert inbound_response.status_code == (200 if provider == "twilio" else 204)
+    with db.get_db(config.db_path) as conn:
+        row = conn.execute(
+            "SELECT status, reported_segments FROM sent_sms WHERE provider = ?",
+            (provider,),
+        ).fetchone()
+        task_count = conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
+    assert tuple(row) == ("delivered", 2)
+    assert task_count == 0
+
+
 def test_webhook_receiver_depends_only_on_common_provider_contract():
     from istota import webhook_receiver
 
