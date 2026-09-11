@@ -13,8 +13,8 @@ import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import APIRouter, FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, BackgroundTasks, FastAPI, Query, Request
+from fastapi.responses import JSONResponse, Response
 
 from . import location
 from .build_info import build_description
@@ -28,6 +28,7 @@ logger = logging.getLogger("istota.webhook_receiver")
 # atomically under ``_lock`` by ``reload_config`` so any reader holding
 # the lock sees a consistent snapshot.
 _config = None
+_sms_providers = None
 _token_map: dict[str, str] = {}                        # token -> user_id
 _user_contexts: dict[str, LocationContext] = {}        # user_id -> ctx
 _places_cache: dict[str, list] = {}                     # user_id -> places
@@ -166,8 +167,11 @@ def reload_config() -> None:
     from . import secrets_store  # noqa: PLC0415
     from .location import ingest_signal  # noqa: PLC0415
 
-    global _config, _token_map, _user_contexts, _places_cache, _sentinel_stamp
+    global _config, _sms_providers, _token_map, _user_contexts, _places_cache, _sentinel_stamp
     _config = load_config()
+    from .transport.sms.providers.registry import make_provider_registry  # noqa: PLC0415
+
+    _sms_providers = make_provider_registry(_config)
 
     # Read the sentinel *before* the secrets, not after: a token written
     # between the two would otherwise be marked as already-loaded and would
@@ -280,6 +284,67 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Istota Webhook Receiver", lifespan=lifespan)
 
 location_router = APIRouter(prefix="/webhooks/location")
+sms_router = APIRouter(prefix="/webhooks/sms")
+
+
+async def _bounded_body(request: Request, limit: int = 64 * 1024) -> bytes | None:
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            return None
+    return bytes(body)
+
+
+@sms_router.post("/twilio")
+async def receive_twilio_sms(request: Request, background: BackgroundTasks):
+    """Authenticate and persist one Twilio message or delivery callback."""
+    from . import db  # noqa: PLC0415
+    from .transport.sms.providers._types import SmsWebhookRequest  # noqa: PLC0415
+    from .transport.sms.providers.twilio import TwilioWebhookError  # noqa: PLC0415
+    from .transport.sms.webhook import (  # noqa: PLC0415
+        deliver_event_response,
+        handle_provider_event,
+    )
+
+    config = _config
+    providers = _sms_providers
+    if config is None or providers is None or not config.sms.enabled:
+        return Response(status_code=404)
+    adapter = providers.get("twilio")
+    if adapter is None:
+        return Response(status_code=404)
+    raw_body = await _bounded_body(request)
+    if raw_body is None:
+        return Response(status_code=413)
+    public_url = f"https://{config.site.hostname}/webhooks/sms/twilio"
+    try:
+        parsed = adapter.parse_webhook(SmsWebhookRequest(
+            raw_body=raw_body,
+            headers=request.headers,
+            public_url=public_url,
+        ))
+    except TwilioWebhookError as exc:
+        logger.info("sms.inbound.rejected provider=twilio reason=%s", str(exc))
+        return Response(status_code=exc.status_code)
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            result = handle_provider_event(
+                conn,
+                config,
+                parsed.event,
+                active_provider_ready=providers.active() is not None,
+            )
+    except sqlite3.Error:
+        logger.warning("sms.inbound.database_unavailable provider=twilio", exc_info=True)
+        return Response(status_code=503)
+    background.add_task(deliver_event_response, config, providers, result)
+    return Response(
+        content=parsed.response_body,
+        status_code=parsed.response_status,
+        media_type=parsed.response_content_type,
+    )
 
 
 @location_router.post("")
@@ -339,6 +404,7 @@ async def receive_location(
 
 
 app.include_router(location_router)
+app.include_router(sms_router)
 
 
 def _process_feature(

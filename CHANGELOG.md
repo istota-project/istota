@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Istota can now authenticate inbound Twilio SMS messages and delivery callbacks at its fixed webhook address, and send replies through a configured Twilio Messaging Service. Provider failures retain only a public error code and a safe delivery result; credentials, message bodies, and phone numbers are not copied from SDK exceptions.
+
 ## [0.41.1] - 2026-09-09
 
 You can now use the project page as a complete guide to Istota: what the personal system does, how its modules connect, where each deployment shape draws its security boundary, and how to install and develop it. The repository now uses the EUPL v1.2, with the package metadata and full license text in agreement.
