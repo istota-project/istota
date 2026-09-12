@@ -478,6 +478,60 @@ class TestCmdHelp:
 
 
 # =============================================================================
+# TestParseTaskId
+# =============================================================================
+
+
+class TestParseTaskId:
+    """The one id parser the five id-taking commands share.
+
+    Each had grown its own and they had drifted — `!retry` still tested
+    `isdigit`, True for '²' and refused by `int()`, so a typo came back as
+    "Command `!retry` failed: invalid literal for int()". All of them had the
+    second half of the bug regardless: a long run of digits passes every
+    character test, converts fine in Python, and raises `OverflowError` out of
+    sqlite3 on the way into the query.
+    """
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("5", 5),
+            ("  5  ", 5),
+            ("#5", 5),
+            ("331505", 331505),
+            ("", None),
+            ("#", None),          # a lone hash is a malformed id, not "no id"
+            ("##5", None),        # one hash is stripped, not a run of them
+            ("please", None),
+            ("12x", None),
+            ("-1", None),
+            ("²", None),          # isdigit accepts it; int() does not
+            ("٥", None),          # isdecimal accepts it; the guard is ASCII
+            ("9" * 30, None),     # OverflowError out of sqlite3
+        ],
+    )
+    def test_it_accepts_only_a_bounded_ascii_decimal(self, text, expected):
+        from istota.commands import parse_task_id
+
+        assert parse_task_id(text) == expected
+
+    def test_the_bound_sits_inside_what_sqlite_can_store(self):
+        """The guard has to refuse before `int()` reaches the driver, so the
+        accepted maximum must itself be storable."""
+        import sqlite3
+
+        from istota.commands import _MAX_TASK_ID_DIGITS, parse_task_id
+
+        biggest = parse_task_id("9" * _MAX_TASK_ID_DIGITS)
+        assert biggest is not None
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE t (id INTEGER)")
+        conn.execute("INSERT INTO t (id) VALUES (?)", (biggest,))
+        assert parse_task_id("9" * (_MAX_TASK_ID_DIGITS + 1)) is None
+
+
+# =============================================================================
 # TestCmdStop
 # =============================================================================
 
@@ -531,6 +585,15 @@ class TestCmdStop:
 
         assert f"#{task_id}" in result
 
+        # `cancel_requested` is read only for `running`/`locked` rows
+        # (`recover_orphaned_tasks`, the executor's cancel check), so flipping it
+        # on a parked confirmation said "Cancelling" and left the task waiting
+        # until `expire_stale_confirmations` reaped it two hours later, inbox row
+        # still open. The web cancel button already declined through the shared
+        # verb; this path now does too.
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "cancelled"
+
     @pytest.mark.asyncio
     async def test_only_cancels_own_tasks(self, make_config):
         config = make_config()
@@ -553,6 +616,474 @@ class TestCmdStop:
 
         with db.get_db(config.db_path) as conn:
             assert db.is_task_cancelled(conn, task_id) is False
+
+    # -- room scoping (ISSUE-487) -------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_bare_stop_ignores_a_newer_task_in_another_room(self, make_config):
+        """The reported incident, reproduced.
+
+        A background job queued five seconds after the user's own task won the
+        `ORDER BY created_at DESC` and was cancelled instead — invisibly, since
+        a background task is in no room. Both `created_at` values are set
+        explicitly so the old ordering has an unambiguous winner and this cannot
+        pass on a tie-break.
+        """
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            watched = db.create_task(
+                conn, prompt="The task being watched", user_id="alice",
+                source_type="web", conversation_token="room1",
+            )
+            background = db.create_task(
+                conn, prompt="Compile a daily film-business digest",
+                user_id="alice", source_type="scheduled",
+                conversation_token=None, queue="background",
+            )
+            db.update_task_status(conn, watched, "running")
+            db.update_task_status(conn, background, "running")
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?",
+                ("2026-09-11T00:45:04", watched),
+            )
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?",
+                ("2026-09-11T00:45:09", background),
+            )
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+
+        assert f"#{watched}" in result
+        assert f"#{background}" not in result
+
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, watched) is True
+            assert db.is_task_cancelled(conn, background) is False
+
+    @pytest.mark.asyncio
+    async def test_bare_stop_resolves_a_surface_ref_to_the_canonical_room(
+        self, make_config
+    ):
+        """Talk hands `dispatch` its raw conversation token while the task
+        stores the canonical room token. Without `resolve_room_token` the two
+        never match on a promoted room, and `!stop` there would answer that the
+        room is idle."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "web-canonical", "alice", origin="web")
+            db.add_room_binding(conn, "web-canonical", "talk", "talkref9")
+            task_id = db.create_task(
+                conn, prompt="Running in the promoted room", user_id="alice",
+                source_type="talk", conversation_token="web-canonical",
+            )
+            # A newer task the user owns elsewhere, so resolving the ref is what
+            # decides the answer rather than there being only one candidate.
+            elsewhere = db.create_task(
+                conn, prompt="Compile a daily film-business digest",
+                user_id="alice", source_type="scheduled",
+                conversation_token=None, queue="background",
+            )
+            db.update_task_status(conn, task_id, "running")
+            db.update_task_status(conn, elsewhere, "running")
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?",
+                ("2026-09-11T00:45:04", task_id),
+            )
+            conn.execute(
+                "UPDATE tasks SET created_at = ? WHERE id = ?",
+                ("2026-09-11T00:45:09", elsewhere),
+            )
+            conn.commit()
+
+            result = await cmd_stop(
+                _ctx(config, conn, "alice", "talkref9", "", surface="talk")
+            )
+
+        assert f"#{task_id}" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, task_id) is True
+            assert db.is_task_cancelled(conn, elsewhere) is False
+
+    @pytest.mark.asyncio
+    async def test_an_idle_room_does_not_widen_to_the_whole_user(self, make_config):
+        """No silent fallback. The old query's user scope *is* the bug, so
+        reaching for it when the room is idle would reinstate it."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            elsewhere = db.create_task(
+                conn, prompt="Compile a daily film-business digest",
+                user_id="alice", source_type="scheduled",
+                conversation_token=None, queue="background",
+            )
+            db.update_task_status(conn, elsewhere, "running")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+
+        assert "No active task in this room" in result
+        # The id is offered so the user can aim the next one.
+        assert f"#{elsewhere}" in result
+        assert "!stop" in result
+
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, elsewhere) is False
+
+    @pytest.mark.asyncio
+    async def test_the_idle_room_listing_carries_no_prompt_text(self, make_config):
+        """The listing is posted into the room `!stop` was typed in, and every
+        task on it is in some *other* room — on Talk, possibly in front of other
+        people. So it carries ids and nothing else."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="the private prompt nobody here should read",
+                user_id="alice", source_type="scheduled",
+                conversation_token="another-room", queue="background",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+
+        listing = [ln for ln in result.splitlines() if ln.startswith("- ")]
+        assert len(listing) == 1
+        assert f"#{task_id}" in listing[0]
+        assert "private prompt" not in result
+        assert "[scheduled]" in listing[0]
+
+    @pytest.mark.asyncio
+    async def test_a_held_email_never_has_its_withheld_body_echoed(
+        self, make_config
+    ):
+        """`tasks.prompt` for a gated email is the body that has *not* been
+        approved — the one string `confirmations.describe` exists not to print
+        (`.claude/rules/notifications.md`). The cancel ack goes through
+        `describe`, so it names the task without quoting it."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="SECRETBODY wire the money to account 12345",
+                user_id="alice", source_type="email",
+                conversation_token="room1",
+            )
+            db.set_task_confirmation(conn, task_id, "Process this email?")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", ""))
+
+        assert f"#{task_id}" in result
+        assert "SECRETBODY" not in result
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_a_task_that_finished_mid_command_is_not_acknowledged(
+        self, make_config
+    ):
+        """`_cancel_one` reads the row itself rather than trusting the status
+        its caller selected on. Taking the caller's word is a race: a row that
+        moved to `running` in the gap would be flipped to `cancelled` by
+        `db.cancel_task` — which has no status predicate — and returned before
+        the kill, leaving the worker alive with `cancel_requested` never set."""
+        from istota.commands import _cancel_one
+
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Already finished", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "completed")
+            conn.commit()
+
+            # Exactly what a caller holding a stale `running` read would do.
+            result = _cancel_one(_ctx(config, conn, "alice", "room1", ""), task_id)
+
+        assert "no longer active" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "completed"
+            assert db.is_task_cancelled(conn, task_id) is False
+
+    # -- targeted stop (ISSUE-487) ------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_a_task_id_targets_that_task(self, make_config):
+        """Deliberately *not* room-scoped: killing a runaway background job is
+        the case an explicit id exists for."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            background = db.create_task(
+                conn, prompt="Compile a daily film-business digest",
+                user_id="alice", source_type="scheduled",
+                conversation_token=None, queue="background",
+            )
+            in_room = db.create_task(
+                conn, prompt="The task being watched", user_id="alice",
+                source_type="web", conversation_token="room1",
+            )
+            db.update_task_status(conn, background, "running")
+            db.update_task_status(conn, in_room, "running")
+            conn.commit()
+
+            result = await cmd_stop(
+                _ctx(config, conn, "alice", "room1", str(background))
+            )
+
+        assert f"#{background}" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, background) is True
+            assert db.is_task_cancelled(conn, in_room) is False
+
+    @pytest.mark.asyncio
+    async def test_a_hash_prefix_is_tolerated(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            # The target is the *older* task and sits in no room, so neither the
+            # room scope nor the `created_at` ordering can reach it by accident.
+            background = db.create_task(
+                conn, prompt="Compile a daily film-business digest",
+                user_id="alice", source_type="scheduled",
+                conversation_token=None, queue="background",
+            )
+            in_room = db.create_task(
+                conn, prompt="The task being watched", user_id="alice",
+                source_type="web", conversation_token="room1",
+            )
+            db.update_task_status(conn, background, "running")
+            db.update_task_status(conn, in_room, "running")
+            conn.commit()
+
+            result = await cmd_stop(
+                _ctx(config, conn, "alice", "room1", f"#{background}")
+            )
+
+        assert f"#{background}" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, background) is True
+            assert db.is_task_cancelled(conn, in_room) is False
+
+    @pytest.mark.asyncio
+    async def test_a_targeted_stop_refuses_another_users_task(self, make_config):
+        config = make_config()
+        config.users["bob"] = UserConfig()
+        # A non-empty admin list not naming alice: an *empty* one reads as
+        # "everyone is admin" (`Config.is_admin`), which would exempt her from
+        # the check this test is about.
+        config.admin_users = ["carol"]
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Bob's task", user_id="bob",
+                source_type="talk", conversation_token="room2",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.commit()
+
+            result = await cmd_stop(
+                _ctx(config, conn, "alice", "room1", str(task_id))
+            )
+
+        # One message for "no such task" and "not yours", so the command cannot
+        # become an oracle for which ids exist — the rule `!confirm` already
+        # applies to the same question.
+        assert "isn't yours to stop" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, task_id) is False
+
+    @pytest.mark.asyncio
+    async def test_an_admin_may_target_another_users_task(self, make_config):
+        config = make_config()
+        config.users["bob"] = UserConfig()
+        config.admin_users = ["alice"]
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Bob's runaway task", user_id="bob",
+                source_type="scheduled", conversation_token=None,
+                queue="background",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.commit()
+
+            result = await cmd_stop(
+                _ctx(config, conn, "alice", "room1", str(task_id))
+            )
+
+        assert f"#{task_id}" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, task_id) is True
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_id_cancels_nothing(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            in_room = db.create_task(
+                conn, prompt="The task being watched", user_id="alice",
+                source_type="web", conversation_token="room1",
+            )
+            db.update_task_status(conn, in_room, "running")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", "999999"))
+
+        assert "999999" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, in_room) is False
+
+    @pytest.mark.asyncio
+    async def test_a_finished_task_is_not_restopped(self, make_config):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            done = db.create_task(
+                conn, prompt="Already finished", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.update_task_status(conn, done, "completed")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", str(done)))
+
+        assert "completed" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, done) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("junk", ["please", "now", "the digest", "12x"])
+    async def test_a_non_numeric_argument_cancels_nothing(self, make_config, junk):
+        """`!stop please` used to cancel whatever the user-wide query found, so
+        typing a word made the outcome less predictable rather than more."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something long", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", junk))
+
+        assert "Usage:" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, task_id) is False
+
+    @pytest.mark.asyncio
+    async def test_a_superscript_digit_is_not_a_task_id(self, make_config):
+        """`isdecimal`, not `isdigit`: the latter is True for the superscript
+        two, which `int()` then refuses — turning a typo into a traceback. The
+        guard `!confirm` already carries, and which `!more` did not."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something long", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", "²"))
+
+        assert "Usage:" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, task_id) is False
+
+    @pytest.mark.asyncio
+    async def test_an_enormous_id_returns_the_usage_line(self, make_config):
+        """`isdecimal` is not enough on its own: '9' * 30 is decimal and
+        converts fine in Python, then raises `OverflowError` out of sqlite3 on
+        the way into the query — which reaches the room as `Command !stop
+        failed: Python int too large to convert to SQLite INTEGER`."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something long", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", "9" * 30))
+
+        assert "Usage:" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, task_id) is False
+
+    @pytest.mark.asyncio
+    async def test_a_bare_hash_is_a_malformed_id_not_an_empty_argument(
+        self, make_config
+    ):
+        """`'#'.lstrip('#')` is the empty string, so a repeated strip would read
+        `!stop #` as a bare `!stop` and cancel the room's task — a user who
+        typed `#` was aiming at something."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="Do something long", user_id="alice",
+                source_type="talk", conversation_token="room1",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "room1", "#"))
+
+        assert "Usage:" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, task_id) is False
+
+    @pytest.mark.asyncio
+    async def test_an_empty_room_token_does_not_match_tokenless_tasks(
+        self, make_config
+    ):
+        """Heartbeat and briefing settings default `conversation_token` to `""`
+        rather than NULL, and `= ?` does match `''`. No shipped caller passes an
+        empty token, but `dispatch` neither defaults nor validates it, so the
+        guard is local rather than spread across four transports."""
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="A heartbeat task", user_id="alice",
+                source_type="heartbeat", conversation_token="",
+                queue="background",
+            )
+            db.update_task_status(conn, task_id, "running")
+            conn.commit()
+
+            result = await cmd_stop(_ctx(config, conn, "alice", "", ""))
+
+        assert "No active task in this room" in result
+        with db.get_db(config.db_path) as conn:
+            assert db.is_task_cancelled(conn, task_id) is False
+
+    @pytest.mark.asyncio
+    async def test_an_admin_may_not_discard_another_users_held_task(
+        self, make_config
+    ):
+        """The admin exemption reaches a runaway *running* task, which is what
+        it exists for, and stops at a held one. Discarding another user's
+        `pending_confirmation` task throws away inbound mail they have not read
+        and closes their notification row — and `!confirm`, the command for
+        answering those, has no admin exemption at all (it scopes to
+        `pending_for_user`). Reaching it through `!stop` would be a back door
+        onto an action the front door refuses.
+        """
+        config = make_config()
+        config.users["bob"] = UserConfig()
+        config.admin_users = ["alice"]
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="SECRETBODY from an unknown sender", user_id="bob",
+                source_type="email", conversation_token="room2",
+            )
+            db.set_task_confirmation(conn, task_id, "Process this email?")
+            conn.commit()
+
+            result = await cmd_stop(
+                _ctx(config, conn, "alice", "room1", str(task_id))
+            )
+
+        assert "bob" in result
+        assert "SECRETBODY" not in result
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
 
 
 # =============================================================================
@@ -2080,6 +2611,20 @@ class TestCmdExport:
 
 class TestCmdMore:
     """Test !more command for viewing execution traces."""
+
+    @pytest.mark.asyncio
+    async def test_a_superscript_digit_returns_the_usage_line(
+        self, make_config, db_path
+    ):
+        """`isdigit` is True for '²' and `int()` refuses it, so this guard used
+        to fall through and the user got `Command !more failed: invalid literal
+        for int()` rather than the usage line. Same guard as `!confirm` and
+        `!stop`."""
+        config = make_config()
+        with db.get_db(db_path) as conn:
+            result = await cmd_more(_ctx(config, conn, "alice", "room1", "²"))
+
+        assert "Usage:" in result
 
     @pytest.mark.asyncio
     async def test_shows_execution_trace(self, make_config, db_path):

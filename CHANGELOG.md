@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `!stop` now cancels the task running in the room you typed it in. It took your newest active task anywhere, so a scheduled job that queued in the seconds between your message and your `!stop` was cancelled instead — invisibly, since a background task is in no room — while the task you were watching kept going. When nothing is active in the room it lists your other active tasks with their ids rather than reaching for one, and `!stop <task-id>` cancels a named task wherever it runs, which is how to kill a runaway background job. A task id typed after `!stop` used to be parsed and discarded, so `!stop 331505` cancelled a different task and `!stop please` cancelled one too; a non-numeric argument now returns the usage line.
+
+- `!stop` on a task held for confirmation now discards it. It set a cancellation flag that only a `running` or `locked` task is ever checked against, so the reply said "Cancelling" and the task stayed parked with its notification open until it expired two hours later. The web cancel button already did this correctly.
+
+- A malformed task id now returns the command's usage line rather than an internal error. `!retry ²` came back as "invalid literal for int()", and a long run of digits came back as "Python int too large to convert to SQLite INTEGER" from `!stop`, `!confirm`, `!more`, `!retry` and `!drafts` alike. The five commands now share one parser.
+
 - Garmin-imported GPS points now carry altitude. Every run and hike recorded on the watch landed with no elevation at all, because the importer read altitude from the polyline, where Garmin leaves it empty, rather than from the per-point elevation series in the same response. Re-import a date range to fill in existing tracks — `import_garmin_tracks.py --user <name> --days-back 30`, or the web Import GPS tracks button — since a run replaces the points it previously imported for that window.
 
 - Moving or resizing a place from `istota-skill location update` left its GPS pings attached to the old footprint, where the web UI had always reassigned them. Pass `--backfill` to release the pings the place no longer contains and adopt the ones it now does; both surfaces run the same code for it.
