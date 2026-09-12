@@ -12,6 +12,7 @@ data, so this module imports nothing from the package and nothing from PyWa.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, TypeAlias
@@ -114,6 +115,42 @@ class WhatsAppParkedStatus:
 
 
 WhatsAppEvent: TypeAlias = InboundWhatsAppEvent | WhatsAppDeliveryEvent
+
+
+@dataclass(frozen=True)
+class WhatsAppWebhookRequest:
+    """One inbound HTTP callback, before any provider has looked at it.
+
+    `SmsWebhookRequest`'s counterpart, one field short: that record carries a
+    `public_url` because Twilio signs the URL the request arrived at, and no
+    WhatsApp provider does — Meta signs the body alone. A field no adapter
+    reads is a field the next one is tempted to fill in with a guess.
+
+    The headers are the request's as received, so a reader looks a name up
+    case-insensitively (`http_headers.header_value`) rather than indexing.
+    """
+    raw_body: bytes
+    headers: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class WhatsAppWebhookResult:
+    """What one authenticated callback yielded, and what to answer it with.
+
+    `events` is a tuple rather than the SMS seam's single ``event | None``,
+    and that is the one place the two surfaces genuinely differ rather than
+    merely being written twice: a Meta callback carries an entry/change/value
+    tree that can hold several messages and several statuses, and the whole
+    batch is normalized before the common code opens its transaction — so an
+    element it cannot read cannot leave earlier elements applied behind a 200
+    nobody will retry. An empty tuple is an authenticated callback holding
+    nothing this surface models, acknowledged so the provider stops retrying
+    and changing nothing.
+    """
+    events: tuple[WhatsAppEvent, ...]
+    response_status: int
+    response_content_type: str | None
+    response_body: bytes
 
 
 @dataclass(frozen=True)
