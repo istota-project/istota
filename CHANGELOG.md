@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Garmin-imported GPS points now carry altitude. Every run and hike recorded on the watch landed with no elevation at all, because the importer read altitude from the polyline, where Garmin leaves it empty, rather than from the per-point elevation series in the same response. Re-import a date range to fill in existing tracks — `import_garmin_tracks.py --user <name> --days-back 30`, or the web Import GPS tracks button — since a run replaces the points it previously imported for that window.
+
 - Moving or resizing a place from `istota-skill location update` left its GPS pings attached to the old footprint, where the web UI had always reassigned them. Pass `--backfill` to release the pings the place no longer contains and adopt the ones it now does; both surfaces run the same code for it.
 
 ## [0.41.1] - 2026-09-09
