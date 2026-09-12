@@ -42,6 +42,7 @@ from ._types import (
     LOCAL_TERMINAL_STATES,
     WhatsAppDeliveryEvent,
     WhatsAppDeliveryRecord,
+    WhatsAppParkedStatus,
     WhatsAppSendRequest,
     WhatsAppSendResult,
 )
@@ -73,6 +74,17 @@ SERVICE_WINDOW = timedelta(hours=23, minutes=55)
 
 TRUNCATION_SUFFIX = "\n\n[Reply shortened. Send a narrower follow-up.]"
 
+#: How long a status callback may sit in `whatsapp_parked_status` before it is
+#: pruned unread. The race it covers is the gap between the Cloud API reply and
+#: the `meta_message_id` write one statement later, so the real window is
+#: sub-second and this is three orders of magnitude of slack. What it is
+#: actually sized against is the *other* end: a send killed between its claim
+#: and its settle leaves an in-flight row nothing will ever clear, and while
+#: one of those exists every unmatched status parks. Fifteen minutes bounds
+#: what that can accumulate without ever being short enough to drop a status
+#: belonging to a send that is genuinely still in flight.
+PARKED_STATUS_WINDOW = timedelta(minutes=15)
+
 #: The row states no automatic path may leave. `LOCAL_TERMINAL_STATES` holds
 #: the six istota decided on its own; `failed` is Meta's, and the four that
 #: mean Meta took the message are here for the same reason — a row that reached
@@ -85,6 +97,13 @@ _NO_RESEND = frozenset(LOCAL_TERMINAL_STATES) | {
 #: each of them is a settled account of what happened, and a late callback
 #: about a message istota never sent (or sent and saw fail) is a duplicate.
 _TERMINAL_FOR_STATUS = frozenset(LOCAL_TERMINAL_STATES) | {"failed"}
+
+#: The same set as a stable sequence and its placeholder run, for the one place
+#: it has to reach SQL. A `frozenset` has no order, so binding it directly
+#: would produce a different parameter order per process and make the SQL
+#: unreadable in a log; sorted once here keeps the statement fixed.
+_TERMINAL_FOR_STATUS_ORDER = tuple(sorted(_TERMINAL_FOR_STATUS))
+_TERMINAL_PLACEHOLDERS = ", ".join("?" * len(_TERMINAL_FOR_STATUS_ORDER))
 
 #: Meta's four statuses as a total order. Out-of-order arrival is ordinary, and
 #: comparing rank is what makes a `delivered` landing after a `read` a no-op
@@ -573,16 +592,39 @@ def _settle(
     meta_message_id: str | None = None,
     error_code: str | None = None,
 ) -> WhatsAppDeliveryRecord:
+    """Write one row's outcome. One transaction, one row, nothing else.
+
+    **Refuses a row that is already terminal**, which is the one-send contract
+    stated where the write happens rather than only where the claim is. Every
+    ordinary settle lands on a `pending` row and never meets the guard; what it
+    covers is a second settle for one logical key, which `deliver_whatsapp`'s
+    escape wrapper can reach when a cancellation arrives after the first has
+    committed. Without it that wrapper overwrites a settled row with `unknown`
+    — the one state an operator can never resolve — and since ISSUE-490 the row
+    it would overwrite may be a `failed` Meta reported definitively, error code
+    and all.
+
+    Deliberately does **not** drain the statuses parked for this id: that is
+    `_settle_async`, in its own transaction afterwards. Draining in here was
+    written first and is wrong in a way worth recording, because the ordering
+    argument for it is sound and the failure mode is not. `db.get_db` commits
+    only on a clean exit, so any raise out of a replay — a notification write,
+    the admin file `_write_billing_alerts` reads, a missing parked table —
+    unwinds the `meta_message_id` write with it. That loses the id of a message
+    Meta accepted, no later status can ever match the row again, and the escape
+    wrapper then settles it `unknown`: strictly worse than the bug being fixed.
+    """
     now = db.sql_datetime_now()
     with db.get_db(config.db_path) as conn:
         try:
-            conn.execute(
+            changed = conn.execute(
                 "UPDATE sent_whatsapp SET status = ?, "
                 "meta_message_id = COALESCE(?, meta_message_id), "
                 "error_code = COALESCE(?, error_code), updated_at = ? "
-                "WHERE logical_key = ?",
-                (status, meta_message_id, error_code, now, logical_key),
-            )
+                f"WHERE logical_key = ? AND status NOT IN ({_TERMINAL_PLACEHOLDERS})",
+                (status, meta_message_id, error_code, now, logical_key,
+                 *_TERMINAL_FOR_STATUS_ORDER),
+            ).rowcount
         except sqlite3.IntegrityError:
             # `meta_message_id` is unique. Meta returning an id already on
             # another row is not something a resend could have caused — nothing
@@ -597,16 +639,32 @@ def _settle(
                 "whatsapp.outbound.unknown reason=duplicate_message_id message=%s",
                 message_fingerprint(meta_message_id),
             )
-            conn.execute(
+            # Its own rowcount, because the guarded UPDATE above raised rather
+            # than returning one. Reaching this branch already proves the row
+            # was not terminal — a WHERE that matches nothing writes nothing
+            # and so can violate no constraint — but the count is what the
+            # transition log reads and it has to come from the write that
+            # happened.
+            changed = conn.execute(
                 "UPDATE sent_whatsapp SET status = 'unknown', updated_at = ? "
                 "WHERE logical_key = ?",
                 (now, logical_key),
-            )
+            ).rowcount
         row = conn.execute(
             "SELECT * FROM sent_whatsapp WHERE logical_key = ?", (logical_key,),
         ).fetchone()
         record = _record(row)
-        _log_transition(conn, record, row["task_id"])
+        if changed:
+            _log_transition(conn, record, row["task_id"])
+        else:
+            # Not a transition, so not a transition log line: the row is what
+            # it already was, and saying otherwise would put a state it never
+            # entered into the task log.
+            logger.info(
+                "whatsapp.outbound.settle_refused status=%s current=%s message=%s",
+                status, record.status,
+                message_fingerprint(record.meta_message_id),
+            )
     return record
 
 
@@ -677,6 +735,80 @@ def _alert_failure(
         )
     except Exception:
         logger.warning("whatsapp.outbound.alert_failed", exc_info=True)
+
+
+def _push_drained_alerts(config: Config, alerts: tuple[object, ...]) -> None:
+    """Push the alerts a replayed status owed, once the settle has committed.
+
+    The webhook's own `deliver_pending_alerts` does exactly this for a status
+    that arrived in time; this is the same call for one that did not, and it
+    takes the same `whatsapp-alert` prefix so the two cannot be told apart by
+    the reference id — the alert is the same alert, and only the path it took
+    to get here differs. Off-surface for the reason every alert on this module
+    is: the notice is about WhatsApp failing, or about it costing money, and
+    both are addressed to somebody the surface has just shown it should not be
+    used to reach.
+
+    Sync and never raises, like `_alert_failure` beside it: the caller is on a
+    delivery path whose contract is that a failed alert is not a failed send.
+    `push_off_surface` documents itself as never raising, so the guard is for
+    what happens if that ever stops being true rather than for a path reachable
+    today — a raise from here lands in `deliver_whatsapp`'s escape wrapper,
+    which would settle an already-accepted row `unknown`. Per alert, so one
+    that cannot be pushed does not take the rest of the batch with it.
+    """
+    from .._alerts import push_off_surface
+
+    for alert in alerts:
+        try:
+            push_off_surface(
+                config, alert,
+                exclude_surface="whatsapp", reference_prefix="whatsapp-alert",
+            )
+        except Exception:
+            logger.warning("whatsapp.outbound.alert_failed", exc_info=True)
+
+
+async def _settle_async(
+    config: Config, logical_key: str, status: str, **fields,
+) -> WhatsAppDeliveryRecord:
+    """Settle one row, then replay whatever was waiting on the id it wrote.
+
+    Two transactions, in this order, and the order is the whole of it. The
+    settle commits on its own, so no failure in the replay can unwind the id
+    write; the replay then runs against a row that already holds the id, which
+    is what lets it go through `apply_delivery_event` unchanged.
+
+    **Nothing between the two can lose a status.** A status is parked only
+    under `handle_whatsapp_batch`'s `BEGIN IMMEDIATE`, which holds the write
+    lock across its own row lookup and the park, and the settle's UPDATE needs
+    that same lock — so a batch either commits its park before the settle
+    (this call drains it) or does its lookup after (it finds the row and
+    applies the status directly). There is no interleaving that parks a status
+    the drain has already run past.
+
+    Every settle goes through here rather than only the accepted one, because
+    `_drain_parked_statuses` keys on the id the *row* holds and the escape
+    wrapper in `deliver_whatsapp` can reach a row an earlier settle already
+    gave an id to. The replay is never allowed to raise: a billable status
+    tripping the circuit is a database write that has already committed, and
+    failing the send over the notice about it helps nobody.
+    """
+    record = await asyncio.to_thread(
+        _settle, config, logical_key, status, **fields,
+    )
+    if not record.meta_message_id:
+        return record
+    try:
+        drained, alerts = await asyncio.to_thread(
+            _drain_parked_statuses, config, record.meta_message_id,
+        )
+    except Exception:
+        logger.warning("whatsapp.outbound.drain_failed", exc_info=True)
+        return record
+    if alerts:
+        await asyncio.to_thread(_push_drained_alerts, config, alerts)
+    return drained if drained is not None else record
 
 
 # ---------------------------------------------------------------------------
@@ -759,9 +891,7 @@ async def deliver_whatsapp(
         # already be on the wire.
         logger.warning("whatsapp.outbound.unknown reason=deliver_escaped")
         try:
-            record = await asyncio.to_thread(
-                _settle, config, logical_key, "unknown",
-            )
+            record = await _settle_async(config, logical_key, "unknown")
             await asyncio.to_thread(
                 _alert_failure, config, record, user_id, task_id,
             )
@@ -800,9 +930,7 @@ async def _send_claimed(
         # old destination never receives the answer.
         destination = await asyncio.to_thread(current_destination, config, user_id)
         if not destination:
-            record = await asyncio.to_thread(
-                _settle, config, logical_key, "unconfigured",
-            )
+            record = await _settle_async(config, logical_key, "unconfigured")
             await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
             return record
         request = _request(config, destination, body, send_kind, buttons,
@@ -822,7 +950,7 @@ async def _send_claimed(
         logger.warning(
             "whatsapp.outbound.failed reason=presend_error", exc_info=True,
         )
-        record = await asyncio.to_thread(_settle, config, logical_key, "failed")
+        record = await _settle_async(config, logical_key, "failed")
         await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
         return record
 
@@ -839,14 +967,16 @@ async def _send_claimed(
             await client.aclose()
 
     if isinstance(result, WhatsAppSendResult):
-        return await asyncio.to_thread(
-            _settle, config, logical_key, "accepted",
-            meta_message_id=result.message_id,
+        # The only branch that can drain: it is the one that writes the id the
+        # parked statuses are waiting on. A status that beat the write may have
+        # taken the row straight to `failed`, so `record` is what the row says
+        # now rather than the `accepted` this branch asked for.
+        return await _settle_async(
+            config, logical_key, "accepted", meta_message_id=result.message_id,
         )
     definite = bool(getattr(result, "definite", False))
-    record = await asyncio.to_thread(
-        _settle, config, logical_key,
-        "failed" if definite else "unknown",
+    record = await _settle_async(
+        config, logical_key, "failed" if definite else "unknown",
         error_code=getattr(result, "error_code", None),
     )
     await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
@@ -904,7 +1034,8 @@ def current_destination(config: Config, user_id: str) -> str:
 
 
 def _observe_pricing(
-    conn, config: Config, row, event: WhatsAppDeliveryEvent,
+    conn, config: Config, row,
+    event: WhatsAppDeliveryEvent | WhatsAppParkedStatus,
 ) -> tuple[object, ...]:
     """Store what Meta said this message cost, and trip the circuit if it did.
 
@@ -1028,8 +1159,207 @@ def _write_billing_alerts(conn, user_id: str, task_id) -> tuple[object, ...]:
     return tuple(item for item in raised if item is not None)
 
 
-def apply_delivery_event(conn, config: Config, event: WhatsAppDeliveryEvent):
+def _send_in_flight(conn) -> bool:
+    """Whether some send of ours sits between its claim and its settle.
+
+    That interval is exactly what `status = 'pending'` with a claim stamped
+    and no id means: `_claim` commits the row `pending` with `claimed_at` set
+    *before* the Cloud API call, and `_settle` is what moves it off `pending`
+    and writes the id one statement later. An unclaimed `pending` row — the
+    hand-written repair `_claim`'s own docstring describes — is not in flight
+    and does not count.
+
+    This is the whole bound on parking. Meta cannot produce a status for a
+    message before we sent it, and the claim is committed before we send, so
+    any status belonging to one of our unsettled sends finds a row here; a
+    status that finds none cannot be ours and is discarded exactly as it was
+    before. Deployment-wide rather than per-user or per-key, because the
+    status carries an id that matches no row — there is nothing on it to scope
+    by, which is the situation being recovered from.
+    """
+    return conn.execute(
+        "SELECT 1 FROM sent_whatsapp WHERE status = 'pending' "
+        "AND claimed_at IS NOT NULL AND meta_message_id IS NULL LIMIT 1"
+    ).fetchone() is not None
+
+
+def _prune_parked_statuses(conn) -> int:
+    """Drop every parked status past the window, and say how many there were.
+
+    Called on **both** paths that touch the table — an attempted park and a
+    drain — and on the attempt before its gate rather than after, so a quiet
+    deployment still clears itself: a foreign status arriving with nothing in
+    flight prunes and then declines to park. Only a deployment receiving no
+    status callbacks at all and sending nothing keeps its rows, which is a
+    residue bounded by the last window's traffic rather than a leak.
+
+    A pruned row is a status istota held and could not place, so a non-zero
+    count is the signal that this number is carrying another application's
+    traffic — the thing the old unknown-id warning said, kept here because
+    the park path is where that warning stopped being reached.
+    """
+    dropped = conn.execute(
+        # SQLite's own clock, and the window as a bound modifier: `parked_at`
+        # is written in `datetime('now')` format and comparing it against a
+        # second Python rendering of the same format is one more place for the
+        # two to drift.
+        "DELETE FROM whatsapp_parked_status WHERE parked_at < datetime('now', ?)",
+        (f"-{int(PARKED_STATUS_WINDOW.total_seconds())} seconds",),
+    ).rowcount
+    if dropped > 0:
+        logger.warning(
+            "whatsapp.delivery.parked_expired count=%d: statuses for message "
+            "ids no send of ours ever claimed, which is what a number shared "
+            "with another application looks like",
+            dropped,
+        )
+    return dropped
+
+
+def _park_status(
+    conn, event: WhatsAppDeliveryEvent | WhatsAppParkedStatus,
+) -> bool:
+    """Hold one status whose message id has not been written yet.
+
+    Returns whether it was parked. `False` means no send was in flight, so the
+    id cannot become ours and the caller discards the status as before.
+
+    **Keyed on the fingerprint, never the id.** The row may be about a message
+    istota did not send — `_send_in_flight` is deployment-wide and cannot tell
+    one of ours from another application's on the same number — and a Meta
+    message id names a private conversation, which is why every log line in
+    this module fingerprints it. `_drain_parked_statuses` fingerprints the id
+    it already holds and looks up by that, so nothing is lost; a foreign
+    status's key stays an opaque digest that no send can ever match. Twelve
+    hex characters is `message_fingerprint`'s own length, kept so a parked row
+    and the log line about it read as the same message; over a table bounded
+    to one window's traffic a 48-bit collision is not a risk worth widening
+    the value for.
+    """
+    # Before the gate, not after it: behind the gate the only thing that clears
+    # the table is a *successful* park, so a deployment that went quiet — where
+    # a stranded row is most likely — would keep its rows for good.
+    _prune_parked_statuses(conn)
+    if not _send_in_flight(conn):
+        return False
+    conn.execute(
+        # The merge rule is `_observe_pricing`'s, restated because a parked
+        # status has not reached it yet: the latest non-NULL observation wins
+        # and a billable `true` is never taken back. First-write-wins was
+        # written first and inverts that rule for the length of the window —
+        # Meta redelivering a batch byte for byte is the common case and
+        # carries nothing new, but two genuine callbacks sharing a status
+        # (a `failed` seen first without its error code) are not that.
+        "INSERT INTO whatsapp_parked_status (message_fingerprint, status, "
+        "error_code, billable, pricing_model, pricing_category, pricing_type, "
+        "parked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(message_fingerprint, status) DO UPDATE SET "
+        "  error_code = COALESCE(excluded.error_code, error_code), "
+        "  billable = CASE WHEN billable = 1 OR excluded.billable = 1 THEN 1 "
+        "             ELSE COALESCE(excluded.billable, billable) END, "
+        "  pricing_model = COALESCE(excluded.pricing_model, pricing_model), "
+        "  pricing_category = COALESCE(excluded.pricing_category, pricing_category), "
+        "  pricing_type = COALESCE(excluded.pricing_type, pricing_type)",
+        (
+            message_fingerprint(event.message_id), event.status,
+            event.error_code,
+            None if event.billable is None else int(event.billable),
+            event.pricing_model, event.pricing_category, event.pricing_type,
+            db.sql_datetime_now(),
+        ),
+    )
+    logger.info(
+        "whatsapp.delivery.parked message=%s status=%s",
+        message_fingerprint(event.message_id), event.status,
+    )
+    return True
+
+
+def _parked_event(row, meta_message_id: str) -> WhatsAppParkedStatus:
+    """One parked row as the event it was, with its id put back.
+
+    The id comes from the caller rather than the row because the row never
+    held it — only its fingerprint — and the caller has the real one off the
+    `sent_whatsapp` row whose fingerprint selected this.
+    """
+    return WhatsAppParkedStatus(
+        message_id=meta_message_id,
+        status=row["status"],
+        error_code=row["error_code"],
+        billable=None if row["billable"] is None else bool(row["billable"]),
+        pricing_model=row["pricing_model"],
+        pricing_category=row["pricing_category"],
+        pricing_type=row["pricing_type"],
+    )
+
+
+def _drain_parked_statuses(
+    config: Config, meta_message_id: str,
+) -> tuple[WhatsAppDeliveryRecord | None, tuple[object, ...]]:
+    """Replay the statuses parked for an id that has just been written.
+
+    Returns the record the last replayed status left, or `None` when nothing
+    was parked, and the alerts they owe — buffered rather than pushed, because
+    this holds a write transaction and `.claude/rules/notifications.md` gives
+    the reason a push from inside one deadlocks on its own lock.
+
+    Its own transaction, opened here rather than shared with `_settle`. See
+    `_settle_async` for the ordering that makes that safe and `_settle` for
+    what sharing one cost.
+
+    **Replayed through `apply_delivery_event`, never written straight to the
+    row.** That is what keeps a parked status from resurrecting a settled one:
+    the ladder refuses a row already in `_TERMINAL_FOR_STATUS`, so a `failed`
+    drained ahead of a `delivered` parked after it closes the row and the
+    `delivered` is a duplicate. Writing the last status directly would invert
+    that, and the one-send contract rests on it.
+
+    `ORDER BY id` is arrival order, and the state the row ends in does not
+    depend on it: the ladder compares rank against the row and takes `failed`
+    from anywhere, so a monotonic replay lands on the same status whichever
+    order it runs in. What it buys is that the intermediate
+    transitions and the task-log lines they write read as the sequence Meta
+    actually sent, rather than as an order SQLite happened to return.
+    """
+    fingerprint = message_fingerprint(meta_message_id)
+    with db.get_db(config.db_path) as conn:
+        _prune_parked_statuses(conn)
+        rows = conn.execute(
+            "SELECT * FROM whatsapp_parked_status WHERE message_fingerprint = ? "
+            "ORDER BY id",
+            (fingerprint,),
+        ).fetchall()
+        if not rows:
+            return None, ()
+        conn.execute(
+            "DELETE FROM whatsapp_parked_status WHERE message_fingerprint = ?",
+            (fingerprint,),
+        )
+        record: WhatsAppDeliveryRecord | None = None
+        alerts: tuple[object, ...] = ()
+        for row in rows:
+            _disposition, applied, raised = apply_delivery_event(
+                conn, config, _parked_event(row, meta_message_id),
+            )
+            if applied is not None:
+                record = applied
+            alerts = (*alerts, *raised)
+        logger.info(
+            "whatsapp.delivery.drained message=%s statuses=%d",
+            fingerprint, len(rows),
+        )
+    return record, alerts
+
+
+def apply_delivery_event(
+    conn, config: Config, event: WhatsAppDeliveryEvent | WhatsAppParkedStatus,
+):
     """``(disposition, record, alerts)`` for one authenticated status.
+
+    Takes a parked status as well as a live one, which is what makes the
+    replay in `_drain_parked_statuses` the same code path rather than a second
+    account of the rules below. Only the seven fields both records share are
+    read here.
 
     Monotonic: a status whose rank is no higher than the row's current one is
     stale and changes nothing, which is what makes a `delivered` arriving after
@@ -1056,6 +1386,26 @@ def apply_delivery_event(conn, config: Config, event: WhatsAppDeliveryEvent):
         "SELECT * FROM sent_whatsapp WHERE meta_message_id = ?", (event.message_id,),
     ).fetchone()
     if row is None:
+        # Meta mints the message id in its reply to the send, so a status for
+        # one of our own messages can arrive before `_settle` has written it.
+        # Held rather than discarded while that is possible, because a `failed`
+        # dropped here leaves the row `accepted` for good and raises no alert
+        # (ISSUE-490); `_settle_async` replays it the moment the id lands.
+        #
+        # Guarded, and the guard is the point rather than caution: this branch
+        # used to be a log line and a return, so it could not fail, and it now
+        # runs three statements against a table `init_db` may not have created
+        # yet on a half-upgraded deployment. `handle_whatsapp_batch` lets any
+        # exception roll the whole batch back to a 503, which Meta retries into
+        # the same deterministic failure — so a park that cannot happen falls
+        # through to the discard that was the only behaviour before.
+        try:
+            parked = _park_status(conn, event)
+        except sqlite3.Error:
+            logger.warning("whatsapp.delivery.park_failed", exc_info=True)
+            parked = False
+        if parked:
+            return "delivery_parked", None, ()
         # Acknowledged and bounded. A message id istota did not send is
         # ordinary on a number that has ever been used by another application,
         # and the id is fingerprinted rather than logged: it names a private

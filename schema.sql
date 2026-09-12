@@ -856,7 +856,7 @@ CREATE TABLE IF NOT EXISTS sent_sms (
 CREATE INDEX IF NOT EXISTS idx_sent_sms_task_id ON sent_sms(task_id);
 CREATE INDEX IF NOT EXISTS idx_sent_sms_status ON sent_sms(status);
 
--- WhatsApp (Meta Cloud API). Four tables, all `CREATE TABLE IF NOT EXISTS`, so
+-- WhatsApp (Meta Cloud API). Five tables, all `CREATE TABLE IF NOT EXISTS`, so
 -- an existing deployment database gains them at the next `init_db` with no
 -- migration step of its own.
 --
@@ -946,6 +946,52 @@ CREATE INDEX IF NOT EXISTS idx_sent_whatsapp_status
 ON sent_whatsapp(status);
 CREATE INDEX IF NOT EXISTS idx_sent_whatsapp_quota
 ON sent_whatsapp(send_kind, quota_month, attempted_at);
+
+-- A status callback that arrived before the message id it names was written.
+-- Meta mints that id in its reply to the send, so between the Cloud API
+-- returning and `_settle` committing the id there is a window in which a
+-- status callback for one of our own messages matches no `sent_whatsapp` row.
+-- Discarding it is harmless for `sent`, `delivered` and `read`, which a later
+-- status supersedes, and silently wrong for `failed`: the row stays `accepted`
+-- for good and no failure alert is ever raised, so the surface reports a
+-- delivery that failed (ISSUE-490).
+--
+-- Only what `apply_delivery_event` reads is stored, and the message id is
+-- **fingerprinted rather than kept**. The row may well be about a message
+-- istota did not send: the in-flight test below is deployment-wide and cannot
+-- tell one of our ids from another application's on the same number, so a raw
+-- id here would persist an identifier naming somebody else's private
+-- conversation — the thing every log line in the transport fingerprints to
+-- avoid. The drain fingerprints the id it already holds and matches on that.
+-- The recipient id, the WABA id and the phone number id are absent for the
+-- plainer reason `sent_whatsapp` above gives: a recipient id is a destination.
+--
+-- Bounded twice, because either bound alone leaves a way to fill it. A status
+-- is parked only while one of our own sends sits between its claim and its
+-- settle, so a status for a message this deployment never sent is discarded
+-- exactly as before; and a row past the window is pruned whenever the table is
+-- touched at all — an attempted park, before its gate, and a drain — which is
+-- what keeps a send killed between those two points from parking every foreign
+-- status for ever. A deployment that stops both sending and receiving keeps
+-- whatever it had; that residue is one window's traffic, not a leak.
+--
+-- `UNIQUE` on the pair collapses Meta's redelivery of a whole batch after a
+-- non-2xx, and its upsert merges on `_observe_pricing`'s rule rather than
+-- keeping the first write — two genuine callbacks can share a status.
+CREATE TABLE IF NOT EXISTS whatsapp_parked_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_code TEXT,                  -- documented numeric code only, as in sent_whatsapp
+    billable INTEGER,
+    pricing_model TEXT,
+    pricing_category TEXT,
+    pricing_type TEXT,
+    parked_at TEXT NOT NULL,
+    UNIQUE(message_fingerprint, status)
+);
+CREATE INDEX IF NOT EXISTS idx_whatsapp_parked_at
+ON whatsapp_parked_status(parked_at);
 
 -- The billable circuit breaker, persistent so it survives a restart. Under
 -- `billing_policy = "free_guard"` the first authenticated status reporting

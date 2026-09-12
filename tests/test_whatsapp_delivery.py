@@ -43,6 +43,7 @@ from istota.transport.routing import (
 from istota.transport.whatsapp import (
     LOCAL_TERMINAL_STATES,
     WhatsAppTransport,
+    message_fingerprint,
     whatsapp_conversation_token,
 )
 from istota.transport.whatsapp._types import (
@@ -979,6 +980,380 @@ class TestDeliveryStates:
         assert row["pricing_model"] is None
         assert row["pricing_category"] is None
         assert row["pricing_type"] is None
+
+
+# ---------------------------------------------------------------------------
+# The status callback that overtakes our own id write (ISSUE-490)
+# ---------------------------------------------------------------------------
+
+
+def _parked(config):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute(
+            "SELECT message_fingerprint, status, error_code, billable, parked_at "
+            "FROM whatsapp_parked_status ORDER BY id"
+        ).fetchall()
+
+
+def _status_during_send(config, *events):
+    """A client that fires status callbacks before it answers the send.
+
+    This is the race the issue reports, made deterministic: at the moment
+    `client.send` is running, the ledger row is claimed `pending` and Meta's
+    id has not been written, because Meta mints it in the reply this call has
+    not yet returned. A status arriving here matches no row.
+    """
+    dispositions: list[str] = []
+
+    async def on_send(request):
+        with db.get_db(config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for event in events:
+                dispositions.append(apply_delivery_event(conn, config, event)[0])
+        return WhatsAppSendResult("wamid.race")
+
+    return _FakeClient(on_send=on_send), dispositions
+
+
+class TestAStatusThatOvertakesTheIdWrite:
+    async def test_a_failed_status_still_fails_the_row_and_alerts(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config)
+        client, dispositions = _status_during_send(
+            config,
+            _delivery(message_id="wamid.race", status="failed", error_code="131026"),
+        )
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=client,
+        )
+
+        assert dispositions == ["delivery_parked"]
+        row = _rows(config, "task-result:1")[0]
+        assert row["status"] == "failed"
+        assert row["error_code"] == "131026"
+        # The caller is told the send failed, not that Meta accepted it.
+        assert record.status == "failed"
+        assert [alert["source"] for alert in _alerts(config)] == ["task_alert"]
+        assert _parked(config) == []
+
+    async def test_parked_statuses_apply_in_arrival_order_and_stop_at_failed(
+        self, tmp_path,
+    ):
+        # Three statuses overtake the id write. They must be replayed in the
+        # order Meta sent them and through the same monotonic ladder a status
+        # arriving normally takes, which is what stops the trailing `delivered`
+        # reopening a row the `failed` closed.
+        config = _config(tmp_path)
+        _bind(config)
+        client, dispositions = _status_during_send(
+            config,
+            _delivery(message_id="wamid.race", status="sent"),
+            _delivery(message_id="wamid.race", status="failed", error_code="131026"),
+            _delivery(message_id="wamid.race", status="delivered"),
+        )
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=client,
+        )
+
+        assert dispositions == ["delivery_parked"] * 3
+        row = _rows(config, "task-result:1")[0]
+        assert row["status"] == "failed" and row["error_code"] == "131026"
+        assert len(_alerts(config)) == 1
+
+    async def test_a_billable_status_trips_the_circuit_through_the_park(
+        self, tmp_path,
+    ):
+        # Money: the circuit is what stops the *next* send being charged, so a
+        # billable status must not be lost to the race either.
+        config = _config(tmp_path)
+        _bind(config)
+        client, _dispositions = _status_during_send(
+            config,
+            _delivery(
+                message_id="wamid.race", status="sent", billable=True,
+                pricing_model="PMP", pricing_category="utility",
+            ),
+        )
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=client,
+        )
+
+        row = _rows(config, "task-result:1")[0]
+        assert row["status"] == "sent" and row["billable"] == 1
+        assert row["pricing_category"] == "utility"
+        with db.get_db(config.db_path) as conn:
+            assert db.whatsapp_billing_block(conn) is not None
+        assert [alert["dedup_key"] for alert in _alerts(config)] == [
+            "whatsapp:billing-blocked",
+        ]
+
+    async def test_a_status_with_no_send_in_flight_is_discarded_as_before(
+        self, tmp_path, caplog,
+    ):
+        # The bound. Parking every unmatched id would hand a number previously
+        # used by another application an unbounded write; a status can only
+        # belong to us while one of our own sends sits between its claim and
+        # its settle.
+        config = _config(tmp_path)
+        await _accepted_row(config)
+
+        with caplog.at_level("WARNING"), db.get_db(config.db_path) as conn:
+            disposition, record, alerts = apply_delivery_event(
+                conn, config, _delivery(message_id="wamid.nothing", status="failed"),
+            )
+
+        assert (disposition, record, alerts) == ("delivery_unknown", None, ())
+        assert _parked(config) == []
+        assert "wamid.nothing" not in caplog.text
+
+    async def test_a_parked_status_is_pruned_once_the_window_has_passed(
+        self, tmp_path,
+    ):
+        # A send killed between its claim and its settle leaves an in-flight
+        # row for ever, so the in-flight gate alone does not bound the table.
+        config = _config(tmp_path)
+        _bind(config)
+        stranded = message_fingerprint("wamid.stranded")
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO whatsapp_parked_status "
+                "(message_fingerprint, status, parked_at) VALUES (?, ?, ?)",
+                (stranded, "failed", _sql_now(-timedelta(days=1))),
+            )
+        assert [row["message_fingerprint"] for row in _parked(config)] == [stranded]
+        client, _dispositions = _status_during_send(
+            config, _delivery(message_id="wamid.race", status="sent"),
+        )
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=client,
+        )
+
+        # `wamid.race` left on the drain; `wamid.stranded` names no send this
+        # deployment ever made and only the window can clear it.
+        assert _parked(config) == []
+        assert _rows(config, "task-result:1")[0]["status"] == "sent"
+
+    async def test_a_redelivered_status_parks_once(self, tmp_path):
+        # Meta retries a whole batch on any non-2xx, so the same status can be
+        # parked twice. The ladder makes the replay harmless either way; the
+        # unique key is what keeps a retry storm from filling the table. The
+        # row count has to be read *inside* the send, because the drain empties
+        # the table before the caller gets a chance to look.
+        config = _config(tmp_path)
+        _bind(config)
+        event = _delivery(message_id="wamid.race", status="sent")
+        held: list[int] = []
+
+        async def on_send(request):
+            with db.get_db(config.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                apply_delivery_event(conn, config, event)
+                apply_delivery_event(conn, config, event)
+                held.append(
+                    conn.execute(
+                        "SELECT count(*) FROM whatsapp_parked_status"
+                    ).fetchone()[0]
+                )
+            return WhatsAppSendResult("wamid.race")
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=_FakeClient(on_send=on_send),
+        )
+
+        assert held == [1]
+        assert _rows(config, "task-result:1")[0]["status"] == "sent"
+
+    async def test_a_second_callback_for_one_status_merges_rather_than_drops(
+        self, tmp_path,
+    ):
+        # Not a redelivery: the same status seen twice with the error code only
+        # on the second. `_observe_pricing`'s rule is latest-non-NULL-wins, and
+        # the park must not invert it for the length of the window.
+        config = _config(tmp_path)
+        _bind(config)
+        client, _dispositions = _status_during_send(
+            config,
+            _delivery(message_id="wamid.race", status="failed"),
+            _delivery(message_id="wamid.race", status="failed",
+                      error_code="131026", billable=True),
+        )
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=client,
+        )
+
+        row = _rows(config, "task-result:1")[0]
+        assert row["status"] == "failed"
+        assert row["error_code"] == "131026"
+        assert row["billable"] == 1
+
+    async def test_no_raw_meta_message_id_is_written_to_the_parking_table(
+        self, tmp_path,
+    ):
+        # A parked status may well be about a message istota never sent — the
+        # in-flight gate is deployment-wide — so the key is the fingerprint
+        # every log line in the transport already uses.
+        config = _config(tmp_path)
+        _bind(config)
+        seen: list[str] = []
+
+        async def on_send(request):
+            with db.get_db(config.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                apply_delivery_event(
+                    conn, config,
+                    _delivery(message_id="wamid.foreign", status="failed"),
+                )
+                seen.extend(
+                    " ".join(str(value) for value in tuple(row))
+                    for row in conn.execute("SELECT * FROM whatsapp_parked_status")
+                )
+            return WhatsAppSendResult("wamid.race")
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=_FakeClient(on_send=on_send),
+        )
+
+        assert seen and all("wamid.foreign" not in row for row in seen)
+        assert any(message_fingerprint("wamid.foreign") in row for row in seen)
+
+    async def test_a_failing_replay_never_costs_the_accepted_id(
+        self, tmp_path, monkeypatch,
+    ):
+        # The replay runs in its own transaction, after the settle has
+        # committed. Sharing one transaction reads better and is wrong: a raise
+        # out of any replay — a notification write, the admin file the billing
+        # alert reads — would unwind the `meta_message_id` write with it, and a
+        # message Meta accepted whose id was never recorded can never be
+        # matched by a later status. That is worse than the bug being fixed.
+        from istota.transport.whatsapp import outbound as outbound_module
+
+        config = _config(tmp_path)
+        _bind(config)
+        client, _dispositions = _status_during_send(
+            config, _delivery(message_id="wamid.race", status="failed"),
+        )
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("replay exploded")
+
+        monkeypatch.setattr(outbound_module, "_drain_parked_statuses", boom)
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=client,
+        )
+
+        row = _rows(config, "task-result:1")[0]
+        assert row["status"] == "accepted"
+        assert row["meta_message_id"] == "wamid.race"
+        assert record.status == "accepted"
+
+    async def test_a_settled_row_is_never_reopened_by_a_second_settle(
+        self, tmp_path,
+    ):
+        # `deliver_whatsapp`'s escape wrapper settles `unknown` on any escape,
+        # and a cancellation can arrive after the first settle has already
+        # committed — now with a `failed` a replayed status put there. `unknown`
+        # is the one state an operator can never resolve, so the write refuses a
+        # row that is already terminal rather than trusting its callers.
+        from istota.transport.whatsapp.outbound import _settle
+
+        config = _config(tmp_path)
+        await _accepted_row(config)
+        with db.get_db(config.db_path) as conn:
+            apply_delivery_event(
+                conn, config, _delivery(status="failed", error_code="131026"),
+            )
+
+        record = await asyncio.to_thread(
+            _settle, config, "task-result:1", "unknown",
+        )
+
+        assert record.status == "failed" and record.error_code == "131026"
+        assert _rows(config, "task-result:1")[0]["status"] == "failed"
+
+    async def test_the_window_is_pruned_even_when_nothing_is_in_flight(
+        self, tmp_path,
+    ):
+        # The prune runs before the in-flight gate, not after it. Behind the
+        # gate, the only thing that clears the table is a *successful* park —
+        # so a deployment that went quiet, which is exactly where a stranded
+        # row is most likely, would keep its rows for good.
+        config = _config(tmp_path)
+        _bind(config)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO whatsapp_parked_status "
+                "(message_fingerprint, status, parked_at) VALUES (?, ?, ?)",
+                (message_fingerprint("wamid.stranded"), "failed",
+                 _sql_now(-timedelta(days=1))),
+            )
+
+        with db.get_db(config.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            disposition, _record, _alerts = apply_delivery_event(
+                conn, config, _delivery(message_id="wamid.nothing"),
+            )
+
+        assert disposition == "delivery_unknown"
+        assert _parked(config) == []
+
+    def test_a_status_racing_the_id_write_is_never_lost(self, tmp_path):
+        """Two real threads at the window, rather than an argument about locks.
+
+        The batch takes `BEGIN IMMEDIATE` before its row lookup and holds it
+        through the park; the settle's own write needs that same lock. So the
+        two orders are the only two there are — the batch commits its park
+        first and the settle drains it, or the batch looks up after the settle
+        committed and finds the row. Either way the `failed` lands.
+        """
+        from istota.transport.whatsapp.webhook import handle_whatsapp_batch
+
+        for attempt in range(12):
+            config = _config(tmp_path / f"race{attempt}")
+            _bind(config)
+            barrier = threading.Barrier(2)
+            event = _delivery(message_id="wamid.race", status="failed",
+                              error_code="131026")
+
+            async def on_send(request):
+                barrier.wait(5)
+                return WhatsAppSendResult("wamid.race")
+
+            def send():
+                return asyncio.run(deliver_whatsapp(
+                    config, logical_key="task-result:1", user_id="alice",
+                    text="done", client=_FakeClient(on_send=on_send),
+                ))
+
+            def callback():
+                barrier.wait(5)
+                with db.get_db(config.db_path) as conn:
+                    #  takes the immediate transaction
+                    # itself; that is the lock under test.
+                    return handle_whatsapp_batch(conn, config, [event])
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                sent = pool.submit(send)
+                delivered = pool.submit(callback)
+                sent.result(10)
+                delivered.result(10)
+
+            row = _rows(config, "task-result:1")[0]
+            assert row["status"] == "failed", f"attempt {attempt}"
+            assert row["error_code"] == "131026", f"attempt {attempt}"
+            assert _parked(config) == [], f"attempt {attempt}"
 
 
 # ---------------------------------------------------------------------------
@@ -2156,6 +2531,53 @@ class TestSchedulerDelivery:
         assert len(request.text) <= 1024
         assert [row["logical_key"] for row in _rows(config)] == [
             f"confirmation:{notification_id}"
+        ]
+
+    def test_a_prompt_never_claims_the_task_result_key_when_no_row_is_written(
+        self, tmp_path, monkeypatch,
+    ):
+        # A pin, not a regression test: this arm already had its fallback
+        # before ISSUE-489, so it passed unchanged against the pre-fix tree —
+        # the SMS sibling in `tests/test_sms_core.py` is the one that went red.
+        # It is here to hold the assignment now that it has been hoisted out of
+        # `if _own_origin_whatsapp:`; re-gating it turns this red and leaves
+        # every other WhatsApp test green.
+        from istota import confirmations
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        monkeypatch.setattr(
+            "istota.scheduler.confirmation_source.write",
+            lambda *_args, **_kwargs: None,
+        )
+        task_id = self._task(
+            config, monkeypatch, client,
+            "I need your confirmation before deleting the file.",
+        )
+
+        assert process_one_task(config) == (task_id, True)
+        assert [row["logical_key"] for row in _rows(config)] == [
+            f"confirmation-task:{task_id}"
+        ]
+
+        # The user taps Yes, and the answer has to arrive.
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *_args, **_kwargs: (True, "Deleted the file.", None, None),
+        )
+        with db.get_db(config.db_path) as conn:
+            confirmations.apply_answer(
+                conn, db.get_task(conn, task_id),
+                confirmations.Answer(approve=True, trust_sender=False),
+            )
+            conn.commit()
+        assert process_one_task(config) == (task_id, True)
+
+        assert client.requests[-1].text == "Deleted the file."
+        assert [row["logical_key"] for row in _rows(config)] == [
+            f"confirmation-task:{task_id}", f"task-result:{task_id}",
         ]
 
     def test_a_blocked_confirmation_still_reaches_the_user_off_whatsapp(
