@@ -94,6 +94,25 @@ class WhatsAppDeliveryEvent:
     pricing_type: str | None
 
 
+@dataclass(frozen=True)
+class WhatsAppParkedStatus:
+    """A status callback held because the id it names had not landed yet.
+
+    The seven fields `apply_delivery_event` reads, and no others. It is not a
+    `WhatsAppDeliveryEvent` with blanks in it: that record carries the
+    recipient id, the WABA id and the phone number id, none of which is stored
+    when a status is parked, and filling them with empty strings on the way
+    back out would put three values in a dataclass that never observed them.
+    """
+    message_id: str
+    status: WhatsAppDeliveryStatus
+    error_code: str | None
+    billable: bool | None
+    pricing_model: str | None
+    pricing_category: str | None
+    pricing_type: str | None
+
+
 WhatsAppEvent: TypeAlias = InboundWhatsAppEvent | WhatsAppDeliveryEvent
 
 
