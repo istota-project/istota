@@ -62,6 +62,14 @@ class TestParseTs:
         # 2021-11-14T22:13:20Z == 1_700_000_000_000 ms
         assert igt.epoch_ms_to_iso_z(1_700_000_000_000) == "2023-11-14T22:13:20Z"
 
+    def test_epoch_ms_to_iso_z_raises_value_error_on_every_bad_value(self):
+        """Its one caller catches ValueError alone, so an OverflowError or
+        OSError escaping here aborts a whole activity import."""
+        for bad in (float("inf"), float("-inf"), float("nan"), 1e20, -1e20,
+                    "x", None, True):
+            with pytest.raises(ValueError):
+                igt.epoch_ms_to_iso_z(bad)
+
     def test_epoch_ms_bad(self):
         with pytest.raises(ValueError):
             igt.epoch_ms_to_iso_z("nope")
@@ -104,6 +112,373 @@ class TestParsePolyline:
         ]}}
         pts = igt.parse_polyline(details, "running")
         assert len(pts) == 1
+
+    def test_a_non_finite_time_skips_the_point_rather_than_the_activity(self):
+        """``fromtimestamp`` answers inf with OverflowError or OSError, which
+        the caller's ``except ValueError`` does not catch — so one malformed
+        point aborted the whole activity import."""
+        details = {"geoPolylineDTO": {"polyline": [
+            {"lat": 34.0, "lon": -118.0, "time": float("inf")},
+            {"lat": 34.1, "lon": -118.1, "time": 1e20},    # finite, out of range
+            {"lat": 34.2, "lon": -118.2, "time": 1_700_000_000_000},
+        ]}}
+        pts = igt.parse_polyline(details, "running")
+        assert len(pts) == 1
+        assert pts[0].lat == 34.2
+
+    def test_a_non_finite_altitude_or_speed_is_dropped(self):
+        # json.loads accepts the bare Infinity literal, and SQLite stores inf
+        # in a REAL column — after which json.dumps emits invalid JSON.
+        details = {"geoPolylineDTO": {"polyline": [
+            {"lat": 34.0, "lon": -118.0, "altitude": float("inf"),
+             "speed": float("nan"), "time": 1_700_000_000_000},
+        ]}}
+        pt = igt.parse_polyline(details, "running")[0]
+        assert pt.altitude is None and pt.speed is None
+
+
+# ---------------------------------------------------------------------------
+# Elevation, which the polyline DTO does not carry (ISSUE-488)
+# ---------------------------------------------------------------------------
+
+
+def _metrics_details(polyline, *, rows, elevation_key="directElevation",
+                     unit="meter"):
+    """A get_activity_details payload shaped like the real one: a polyline
+    with null altitude, plus the chart half carrying per-point elevation.
+
+    ``rows`` is [(epoch_ms, elevation), ...]; the metric row layout puts
+    timestamp at index 0 and elevation at index 2, with an unrelated
+    column between them so an index mix-up cannot pass.
+    """
+    return {
+        "geoPolylineDTO": {"polyline": polyline},
+        "metricDescriptors": [
+            {"key": "directTimestamp", "metricsIndex": 0,
+             "unit": {"key": "gmt"}},
+            {"key": "directHeartRate", "metricsIndex": 1,
+             "unit": {"key": "bpm"}},
+            {"key": elevation_key, "metricsIndex": 2,
+             "unit": {"key": unit} if unit else None},
+        ],
+        "activityDetailMetrics": [
+            {"metrics": [ms, 140.0, elev]} for ms, elev in rows
+        ],
+    }
+
+
+class TestElevationFromMetrics:
+    """The polyline DTO carries lat/lon/time/speed and a null altitude; the
+    per-point elevation is in activityDetailMetrics. ISSUE-488."""
+
+    def test_null_polyline_altitude_is_filled_from_metrics(self):
+        base = 1_700_000_000_000
+        details = _metrics_details(
+            [
+                {"lat": 34.0, "lon": -118.0, "altitude": None, "speed": 2.5,
+                 "time": base},
+                {"lat": 34.1, "lon": -118.1, "altitude": None, "speed": 3.0,
+                 "time": base + 10_000},
+            ],
+            rows=[(base, 300.0), (base + 10_000, 310.0)],
+        )
+        pts = igt.parse_polyline(details, "hiking")
+        assert [p.altitude for p in pts] == [300.0, 310.0]
+
+    def test_polyline_altitude_wins_when_present(self):
+        base = 1_700_000_000_000
+        details = _metrics_details(
+            [{"lat": 34.0, "lon": -118.0, "altitude": 100.0, "speed": 2.5,
+              "time": base}],
+            rows=[(base, 300.0)],
+        )
+        assert igt.parse_polyline(details, "hiking")[0].altitude == 100.0
+
+    def test_nearest_sample_within_tolerance(self):
+        # The two arrays are sampled independently, so a polyline point
+        # rarely lands on a metric timestamp exactly.
+        base = 1_700_000_000_000
+        details = _metrics_details(
+            [{"lat": 34.0, "lon": -118.0, "altitude": None, "time": base + 4_000}],
+            rows=[(base, 300.0), (base + 5_000, 350.0)],
+        )
+        assert igt.parse_polyline(details, "hiking")[0].altitude == 350.0
+
+    def test_no_sample_within_tolerance_stays_null(self):
+        base = 1_700_000_000_000
+        details = _metrics_details(
+            [{"lat": 34.0, "lon": -118.0, "altitude": None, "time": base}],
+            rows=[(base + 600_000, 300.0)],
+        )
+        assert igt.parse_polyline(details, "hiking")[0].altitude is None
+
+    def test_gps_elevation_is_the_fallback_key(self):
+        base = 1_700_000_000_000
+        details = _metrics_details(
+            [{"lat": 34.0, "lon": -118.0, "altitude": None, "time": base}],
+            rows=[(base, 300.0)],
+            elevation_key="directGpsElevation",
+        )
+        assert igt.parse_polyline(details, "hiking")[0].altitude == 300.0
+
+    def test_missing_metrics_half_leaves_altitude_null(self):
+        base = 1_700_000_000_000
+        details = {"geoPolylineDTO": {"polyline": [
+            {"lat": 34.0, "lon": -118.0, "altitude": None, "time": base},
+        ]}}
+        assert igt.parse_polyline(details, "hiking")[0].altitude is None
+
+
+class TestParseElevationSeries:
+    """The shape of the metrics half is read permissively: anything not
+    recognised yields no series, and altitude stays NULL."""
+
+    BASE = 1_700_000_000_000
+
+    def _series(self, descriptors, rows):
+        return igt.parse_elevation_series({
+            "metricDescriptors": descriptors,
+            "activityDetailMetrics": rows,
+        })
+
+    def test_reads_index_from_the_descriptor_not_position(self):
+        # Elevation declared at index 2 while sitting third in the
+        # descriptor list, with the descriptors out of index order.
+        series = self._series(
+            [
+                {"key": "directElevation", "metricsIndex": 2},
+                {"key": "directTimestamp", "metricsIndex": 0},
+            ],
+            [{"metrics": [self.BASE, 99.0, 300.0]}],
+        )
+        assert series == [(self.BASE / 1000.0, 300.0)]
+
+    def test_direct_elevation_wins_over_gps_elevation(self):
+        series = self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directGpsElevation", "metricsIndex": 1},
+                {"key": "directElevation", "metricsIndex": 2},
+            ],
+            [{"metrics": [self.BASE, 111.0, 300.0]}],
+        )
+        assert series[0][1] == 300.0
+
+        # ...whichever order the descriptors arrive in.
+        series = self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 2},
+                {"key": "directGpsElevation", "metricsIndex": 1},
+            ],
+            [{"metrics": [self.BASE, 111.0, 300.0]}],
+        )
+        assert series[0][1] == 300.0
+
+    def test_feet_are_converted_to_metres(self):
+        series = self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1,
+                 "unit": {"key": "foot"}},
+            ],
+            [{"metrics": [self.BASE, 1000.0]}],
+        )
+        assert series[0][1] == pytest.approx(304.8)
+
+    @pytest.mark.parametrize("field", ["key", "unitKey", "displayUnit"])
+    def test_the_unit_is_read_under_any_known_spelling(self, field):
+        """Which field of the unit object names the unit is the unverified
+        half of ISSUE-488. Reading only ``key`` made the fail-closed claim
+        rest on the fixtures sharing the code's own guess, so a real payload
+        spelling it otherwise would have stored feet as metres."""
+        series = self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1,
+                 "unit": {field: "foot", "factor": 1.0}},
+            ],
+            [{"metrics": [self.BASE, 1000.0]}],
+        )
+        assert series[0][1] == pytest.approx(304.8)
+
+    def test_unrecognised_unit_drops_the_series(self):
+        # Storing a number in an unknown unit is worse than storing nothing:
+        # the column is metres everywhere else.
+        assert self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1,
+                 "unit": {"key": "furlong"}},
+            ],
+            [{"metrics": [self.BASE, 1000.0]}],
+        ) == []
+
+    def test_a_unit_object_naming_nothing_we_read_fails_closed(self):
+        """A present unit object is Garmin telling us something; failing to
+        read it is not the same as there being no unit at all, which is the
+        one case that may be assumed to be metres."""
+        assert self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1,
+                 "unit": {"id": 4, "factor": 1.0}},
+            ],
+            [{"metrics": [self.BASE, 1000.0]}],
+        ) == []
+
+    def test_a_declared_factor_other_than_one_drops_the_series(self):
+        # Whether it multiplies or divides is exactly what cannot be verified
+        # here, and a factor of 100 on a "meter" column is the same silent
+        # wrongness an unknown unit is refused for.
+        assert self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1,
+                 "unit": {"key": "meter", "factor": 100.0}},
+            ],
+            [{"metrics": [self.BASE, 300.0]}],
+        ) == []
+
+        # ...while the ordinary factor of 1.0 is no obstacle.
+        series = self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1,
+                 "unit": {"key": "meter", "factor": 1.0}},
+            ],
+            [{"metrics": [self.BASE, 300.0]}],
+        )
+        assert series[0][1] == 300.0
+
+    def test_a_bad_unit_falls_back_to_the_gps_column(self):
+        """The preferred column declaring an unusable unit drops that column,
+        not the whole series — which is what the warning now says."""
+        series = self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1,
+                 "unit": {"key": "furlong"}},
+                {"key": "directGpsElevation", "metricsIndex": 2,
+                 "unit": {"key": "meter"}},
+            ],
+            [{"metrics": [self.BASE, 1000.0, 305.0]}],
+        )
+        assert series == [(self.BASE / 1000.0, 305.0)]
+
+    def test_elevation_sharing_the_timestamp_index_is_refused(self):
+        # Reading the timestamp column as elevation yields ~1.7e12 m.
+        assert self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 0},
+            ],
+            [{"metrics": [self.BASE]}],
+        ) == []
+
+    def test_samples_off_the_planet_are_dropped_individually(self):
+        series = self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1},
+            ],
+            [
+                {"metrics": [self.BASE, 300.0]},
+                {"metrics": [self.BASE + 1_000, 1.7e12]},     # timestamp-ish
+                {"metrics": [self.BASE + 2_000, -20_000.0]},  # below the floor
+                {"metrics": [self.BASE + 3_000, 310.0]},
+            ],
+        )
+        assert [s[1] for s in series] == [300.0, 310.0]
+
+    def test_non_finite_values_are_not_samples(self):
+        """``json.loads`` accepts the bare Infinity and NaN literals, SQLite
+        stores inf in a REAL column, and a NaN timestamp would corrupt the
+        sort the bisect lookup depends on."""
+        assert self._series(
+            [
+                {"key": "directTimestamp", "metricsIndex": 0},
+                {"key": "directElevation", "metricsIndex": 1},
+            ],
+            [
+                {"metrics": [self.BASE, float("inf")]},
+                {"metrics": [float("nan"), 300.0]},
+                {"metrics": [self.BASE + 1_000, float("nan")]},
+            ],
+        ) == []
+
+    def test_malformed_descriptors_are_skipped(self):
+        series = self._series(
+            [
+                "not a descriptor",
+                {"key": "directTimestamp", "metricsIndex": 0},
+                # True is an int in Python, and index 1 is the elevation.
+                {"key": "directElevation", "metricsIndex": True},
+                {"key": "directElevation", "metricsIndex": -1},
+                {"key": "directElevation", "metricsIndex": 1.5},
+                {"key": "directGpsElevation", "metricsIndex": 1},
+            ],
+            [{"metrics": [self.BASE, 305.0]}],
+        )
+        assert series == [(self.BASE / 1000.0, 305.0)]
+
+    def test_no_timestamp_column_means_nothing_to_join_on(self):
+        assert self._series(
+            [{"key": "directElevation", "metricsIndex": 1}],
+            [{"metrics": [self.BASE, 300.0]}],
+        ) == []
+
+    def test_rows_are_sorted_and_unusable_ones_skipped(self):
+        descriptors = [
+            {"key": "directTimestamp", "metricsIndex": 0},
+            {"key": "directElevation", "metricsIndex": 1},
+        ]
+        series = self._series(descriptors, [
+            {"metrics": [self.BASE + 20_000, 320.0]},
+            {"metrics": [self.BASE, None]},            # gap in the series
+            {"metrics": [self.BASE + 10_000]},         # short row
+            {"metrics": [self.BASE + 5_000, 305.0]},
+            "not a row",
+        ])
+        assert series == [
+            ((self.BASE + 5_000) / 1000.0, 305.0),
+            ((self.BASE + 20_000) / 1000.0, 320.0),
+        ]
+
+    def test_missing_metrics_half_is_empty(self):
+        assert igt.parse_elevation_series({}) == []
+        assert igt.parse_elevation_series(None) == []
+        assert igt.parse_elevation_series(
+            {"metricDescriptors": "nope", "activityDetailMetrics": []}
+        ) == []
+
+
+class TestNearestElevation:
+    def test_picks_the_closer_of_two_neighbours(self):
+        series = [(100.0, 10.0), (110.0, 20.0)]
+        assert igt.nearest_elevation(series, 104.0) == 10.0
+        assert igt.nearest_elevation(series, 106.0) == 20.0
+
+    def test_tolerance_is_inclusive_and_bounded(self):
+        series = [(100.0, 10.0)]
+        assert igt.nearest_elevation(series, 115.0, tolerance=15.0) == 10.0
+        assert igt.nearest_elevation(series, 115.1, tolerance=15.0) is None
+
+    def test_before_and_after_the_series(self):
+        series = [(100.0, 10.0), (200.0, 20.0)]
+        assert igt.nearest_elevation(series, 95.0) == 10.0
+        assert igt.nearest_elevation(series, 205.0) == 20.0
+        assert igt.nearest_elevation(series, 150.0) is None   # in the gap
+
+    def test_an_exact_tie_goes_to_the_later_sample(self):
+        # Arbitrary but fixed, so a future <= edit is visible.
+        assert igt.nearest_elevation([(90.0, 1.0), (110.0, 2.0)], 100.0) == 2.0
+
+    def test_an_exact_match_is_taken(self):
+        assert igt.nearest_elevation([(100.0, 10.0), (110.0, 20.0)], 100.0) == 10.0
+
+    def test_empty_series(self):
+        assert igt.nearest_elevation([], 100.0) is None
 
 
 # ---------------------------------------------------------------------------
@@ -375,3 +750,130 @@ class TestDbGlue:
                 "SELECT COUNT(*) c FROM location_pings WHERE source='garmin'"
             ).fetchone()["c"]
         assert garmin_count == 0      # native now covers the route → all evicted
+
+
+class TestElevationReachesTheColumn:
+    """ISSUE-488 end to end. The reported symptom was rows in
+    ``location_pings`` with ``altitude IS NULL`` for every Garmin-imported
+    point, so the assertion is on the column rather than on the parser."""
+
+    def test_parsed_track_lands_with_altitude(self, loc_db):
+        base = 1_700_000_000_000
+        details = {
+            "geoPolylineDTO": {"polyline": [
+                # The watch signature: a 10s cadence and a null altitude.
+                {"lat": 34.05 + i * 1e-4, "lon": -118.30, "altitude": None,
+                 "speed": 2.5, "time": base + i * 10_000}
+                for i in range(6)
+            ]},
+            "metricDescriptors": [
+                {"key": "directTimestamp", "metricsIndex": 0,
+                 "unit": {"key": "gmt"}},
+                {"key": "directElevation", "metricsIndex": 1,
+                 "unit": {"key": "meter"}},
+            ],
+            # Sampled on its own grid, offset from the polyline's.
+            "activityDetailMetrics": [
+                {"metrics": [base + i * 7_000, 300.0 + i * 5.0]}
+                for i in range(9)
+            ],
+        }
+        pts = igt.downsample(igt.parse_polyline(details, "hiking"), 10.0)
+        assert pts
+        with location_db.connect(loc_db) as conn:
+            igt.insert_points(conn, pts)
+            conn.commit()
+            rows = conn.execute(
+                "SELECT altitude FROM location_pings WHERE source='garmin' "
+                "ORDER BY timestamp"
+            ).fetchall()
+        assert len(rows) == len(pts)
+        assert all(r["altitude"] is not None for r in rows)
+        assert rows[0]["altitude"] == 300.0
+
+
+class TestTheJoinIsObservable:
+    """Every way of getting the unverified metrics shape wrong fails closed,
+    which looks exactly like the bug. So a track that came back without
+    elevation has to say so above DEBUG and in the import report, or the
+    first real run cannot tell a working fix from a silent no-op."""
+
+    ACT = {
+        "activityId": 9001,
+        "hasPolyline": True,
+        "startTimeGMT": "2023-11-14 22:13:20",
+        "duration": 60.0,
+    }
+
+    class _Adapter:
+        def __init__(self, details):
+            self.details = details
+            self.seen = {}
+
+        def get_activity_details(self, activity_id, *, maxpoly, maxchart):
+            self.seen = {"id": activity_id, "maxpoly": maxpoly,
+                         "maxchart": maxchart}
+            return self.details
+
+    def _polyline(self, base, n=3):
+        return [
+            {"lat": 34.0 + i * 1e-4, "lon": -118.0, "altitude": None,
+             "time": base + i * 10_000}
+            for i in range(n)
+        ]
+
+    def test_a_track_with_no_elevation_warns(self, caplog):
+        base = 1_700_000_000_000
+        adapter = self._Adapter({
+            "geoPolylineDTO": {"polyline": self._polyline(base)},
+        })
+        with caplog.at_level("WARNING", logger="istota.location.garmin_import"):
+            pts, span = igt._fetch_points(adapter, self.ACT, igt.ImportOptions())
+        assert pts and span
+        assert all(p.altitude is None for p in pts)
+        assert "9001" in caplog.text
+        assert "no altitude" in caplog.text
+        assert "0 usable elevation samples" in caplog.text
+
+    def test_a_track_with_elevation_is_quiet(self, caplog):
+        base = 1_700_000_000_000
+        adapter = self._Adapter(_metrics_details(
+            self._polyline(base),
+            rows=[(base + i * 5_000, 300.0 + i) for i in range(13)],
+        ))
+        with caplog.at_level("WARNING", logger="istota.location.garmin_import"):
+            pts, _ = igt._fetch_points(adapter, self.ACT, igt.ImportOptions())
+        assert pts and all(p.altitude is not None for p in pts)
+        assert caplog.text == ""
+
+    def test_the_metrics_half_is_asked_for_at_the_polyline_cap(self):
+        base = 1_700_000_000_000
+        adapter = self._Adapter({
+            "geoPolylineDTO": {"polyline": self._polyline(base)},
+        })
+        igt._fetch_points(adapter, self.ACT, igt.ImportOptions(maxpoly=4000))
+        assert adapter.seen == {"id": "9001", "maxpoly": 4000, "maxchart": 4000}
+
+    def test_the_report_row_counts_points_without_altitude(self, loc_db):
+        base = 1_700_000_000_000
+        adapter = self._Adapter({
+            "geoPolylineDTO": {"polyline": self._polyline(base)},
+        })
+        with location_db.connect(loc_db) as conn:
+            row = igt._process_activity(
+                adapter, self.ACT, conn, igt.ImportOptions(), [], write=True,
+            )
+            conn.commit()
+        assert row["no_altitude"] == row["inserted"] > 0
+
+        adapter = self._Adapter(_metrics_details(
+            self._polyline(base),
+            rows=[(base + i * 5_000, 300.0 + i) for i in range(13)],
+        ))
+        with location_db.connect(loc_db) as conn:
+            row = igt._process_activity(
+                adapter, self.ACT, conn, igt.ImportOptions(), [], write=True,
+            )
+            conn.commit()
+        assert row["inserted"] > 0
+        assert row["no_altitude"] == 0

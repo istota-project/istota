@@ -455,16 +455,36 @@ class TestActivitySurface:
         seen = {}
 
         class _Client:
-            def get_activity_details(self, activity_id, maxpoly=None):
+            def get_activity_details(self, activity_id, maxpoly=None,
+                                     maxchart=None):
                 seen["id"] = activity_id
                 seen["maxpoly"] = maxpoly
+                seen["maxchart"] = maxchart
                 return {"geoPolylineDTO": {"polyline": []}}
 
         adapter = gm._RealGarminAdapter.__new__(gm._RealGarminAdapter)
         adapter._client = _Client()
         out = adapter.get_activity_details("42", maxpoly=4000)
-        assert seen == {"id": "42", "maxpoly": 4000}
+        assert seen == {"id": "42", "maxpoly": 4000, "maxchart": 2000}
         assert out == {"geoPolylineDTO": {"polyline": []}}
+
+    def test_get_activity_details_passes_maxchart(self):
+        """The elevation series the track importer joins on is capped by
+        maxChartSize, so the importer asks for it at the polyline's cap
+        (ISSUE-488)."""
+        seen = {}
+
+        class _Client:
+            def get_activity_details(self, activity_id, maxpoly=None,
+                                     maxchart=None):
+                seen["maxpoly"] = maxpoly
+                seen["maxchart"] = maxchart
+                return {}
+
+        adapter = gm._RealGarminAdapter.__new__(gm._RealGarminAdapter)
+        adapter._client = _Client()
+        adapter.get_activity_details("42", maxpoly=4000, maxchart=4000)
+        assert seen == {"maxpoly": 4000, "maxchart": 4000}
 
     def test_activity_rate_limit_raises(self):
         class _Client:

@@ -160,7 +160,7 @@ class GarminAdapter(Protocol):
     ) -> list[dict[str, Any]] | None: ...
 
     def get_activity_details(
-        self, activity_id: str, *, maxpoly: int = 4000,
+        self, activity_id: str, *, maxpoly: int = 4000, maxchart: int = 2000,
     ) -> dict[str, Any] | None: ...
 
 
@@ -366,10 +366,15 @@ class _RealGarminAdapter:
         )
 
     def get_activity_details(
-        self, activity_id: str, *, maxpoly: int = 4000,
+        self, activity_id: str, *, maxpoly: int = 4000, maxchart: int = 2000,
     ) -> dict[str, Any] | None:
+        # maxchart caps activityDetailMetrics (the per-point elevation series
+        # the track importer joins on) the way maxpoly caps the polyline. The
+        # SDK's own default is 2000; callers wanting the two arrays sampled
+        # alike pass both (ISSUE-488).
         return self._call_optional(
-            "get_activity_details", activity_id, maxpoly=maxpoly,
+            "get_activity_details", activity_id,
+            maxpoly=maxpoly, maxchart=maxchart,
         )
 
     def _call_optional(self, method: str, *args: Any, **kwargs: Any) -> Any:

@@ -12,15 +12,18 @@ It must run where ``location.db`` is writable (scheduler/web/cron), never
 inside a task sandbox (read-only DB). Dry-run is read-only.
 
 The pure logic (``parse_ts`` / ``filter_shadowed`` / ``downsample`` /
-``parse_polyline``) is unit-tested without Garmin or a DB.
+``parse_polyline`` / ``parse_elevation_series`` / ``nearest_elevation``) is
+unit-tested without Garmin or a DB.
 """
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import datetime as _dt
 import json
 import logging
+import math
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
@@ -127,11 +130,217 @@ def parse_ts(value: Any) -> float:
 
 def epoch_ms_to_iso_z(ms: Any) -> str:
     """Garmin polyline epoch-ms (GMT) → UTC ISO ``%Y-%m-%dT%H:%M:%SZ`` —
-    the format native pings use. Raises ValueError on a bad value."""
-    if not isinstance(ms, (int, float)):
+    the format native pings use. Raises ValueError on a bad value.
+
+    Every bad value, which is what the one ``except ValueError`` around the
+    call site assumes: ``fromtimestamp`` answers an out-of-range epoch with
+    OverflowError and an ``inf`` with OverflowError or OSError depending on
+    the platform, so without the re-raise one malformed point aborts the
+    whole activity rather than being skipped.
+    """
+    if not isinstance(ms, (int, float)) or isinstance(ms, bool):
         raise ValueError(f"bad epoch-ms: {ms!r}")
-    dt = _dt.datetime.fromtimestamp(ms / 1000.0, tz=_dt.timezone.utc)
+    if not math.isfinite(ms):
+        raise ValueError(f"non-finite epoch-ms: {ms!r}")
+    try:
+        dt = _dt.datetime.fromtimestamp(ms / 1000.0, tz=_dt.timezone.utc)
+    except (OverflowError, OSError) as exc:
+        raise ValueError(f"epoch-ms out of range: {ms!r}") from exc
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Elevation lives in the *other* half of a get_activity_details response.
+# ``geoPolylineDTO.polyline`` carries lat/lon/time/speed and an ``altitude``
+# Garmin leaves null on a watch-recorded activity, so every imported point
+# landed with altitude NULL (ISSUE-488). The per-point elevation is in
+# ``activityDetailMetrics``, rows of bare numbers whose columns are named by
+# ``metricDescriptors``.
+#
+# Descriptor keys in priority order: ``directElevation`` is the fused /
+# barometric series, ``directGpsElevation`` the GPS-derived one, noisier but
+# present when the first is not.
+_ELEVATION_METRIC_KEYS = ("directElevation", "directGpsElevation")
+_TIMESTAMP_METRIC_KEY = "directTimestamp"
+
+# Metres per unit, by the descriptor's declared unit. Anything not in here
+# drops the series rather than storing a number in unknown units: altitude
+# stays NULL, exactly as it is without this code at all, and the operator
+# gets a warning naming what arrived. The column is metres everywhere else —
+# native pings fill it in metres and `location-elevation.ts` plots it as
+# metres — so a unit we guessed wrong at is a silent 3.28x error in a number
+# that looks entirely plausible.
+_ELEVATION_UNIT_METRES = {
+    "meter": 1.0, "metre": 1.0, "meters": 1.0, "metres": 1.0, "m": 1.0,
+    "foot": 0.3048, "feet": 0.3048, "ft": 0.3048,
+}
+
+# Which field of the descriptor's ``unit`` object names the unit. The shape
+# is the unverified half of ISSUE-488, so more than one spelling is read —
+# each candidate still has to name a unit in the table above, so an extra
+# spelling cannot admit a wrong conversion, only a right one we would
+# otherwise have refused.
+_ELEVATION_UNIT_FIELDS = ("key", "unitKey", "displayUnit")
+
+# A declared conversion factor other than 1.0 drops the series too, and is
+# not applied. Whether it multiplies or divides is exactly what this module
+# cannot verify, and a factor of 100 on a "meter" column is the same silent
+# wrongness an unknown unit is refused for.
+_ELEVATION_FACTOR_TOLERANCE = 1e-6
+
+# Altitudes outside this range are not Earth. The guard is against a
+# descriptor whose ``metricsIndex`` does not mean what we think: reading the
+# timestamp column as elevation yields ~1.7e12, which this catches. It does
+# not catch a plausible-looking mix-up — a heart rate of 140 reads as 140 m —
+# which is what the per-activity join report exists for.
+ELEVATION_MIN_M = -500.0
+ELEVATION_MAX_M = 9000.0
+
+# How far a metric sample may sit from a polyline point and still be used.
+# The two arrays are sampled independently, so a point rarely lands on a
+# sample exactly. The importer now asks for both at the same cap (``maxpoly``
+# for ``maxPolylineSize`` and ``maxChartSize`` alike), so in the ordinary
+# case the grids are comparable; 15s also covers the case where the metrics
+# come back sparser than asked for — 2000 rows over a six-hour activity sit
+# ~11s apart, worst case ~5s from any given point — and elevation moves by a
+# few metres at most over 15s of running or hiking. Inferred from the SDK's
+# defaults rather than observed on a live response.
+ELEVATION_JOIN_TOLERANCE_SEC = 15.0
+
+
+def parse_elevation_series(details: dict | None) -> list[tuple[float, float]]:
+    """Sorted ``(epoch_seconds, metres)`` samples from the metrics half of a
+    ``get_activity_details`` response, for joining onto polyline points.
+
+    Returns ``[]`` for any payload this does not recognise — no metrics half,
+    no elevation column, no timestamp column, an elevation unit that is not a
+    known length, or an elevation column sharing the timestamp's own index.
+    The caller then leaves altitude unset, which is the behaviour without
+    this function at all. Samples outside :data:`ELEVATION_MIN_M` ..
+    :data:`ELEVATION_MAX_M` are dropped individually.
+    """
+    d = details or {}
+    descriptors = d.get("metricDescriptors")
+    rows = d.get("activityDetailMetrics")
+    if not isinstance(descriptors, list) or not isinstance(rows, list):
+        return []
+
+    ts_index: int | None = None
+    elev_index: int | None = None
+    elev_rank = len(_ELEVATION_METRIC_KEYS)
+    elev_factor = 1.0
+    for desc in descriptors:
+        if not isinstance(desc, dict):
+            continue
+        key = desc.get("key")
+        index = desc.get("metricsIndex")
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            continue
+        if key == _TIMESTAMP_METRIC_KEY:
+            ts_index = index
+            continue
+        if key not in _ELEVATION_METRIC_KEYS:
+            continue
+        rank = _ELEVATION_METRIC_KEYS.index(key)
+        if rank >= elev_rank:
+            continue
+        factor = _elevation_unit_factor(desc.get("unit"))
+        if factor is None:
+            # Not "leaving altitude unset": a lower-ranked column may still be
+            # usable, and saying otherwise sent an operator looking in the
+            # wrong place for the one shape this module cannot verify.
+            logger.warning(
+                "garmin elevation metric %s declares an unusable unit %r; "
+                "ignoring that column", key, desc.get("unit"),
+            )
+            continue
+        elev_index, elev_rank, elev_factor = index, rank, factor
+    if ts_index is None or elev_index is None:
+        return []
+    if elev_index == ts_index:
+        # Two columns cannot be one. Reading the timestamp as elevation is the
+        # failure this catches before the range guard has to.
+        logger.warning(
+            "garmin elevation and timestamp metrics share index %d; "
+            "ignoring the elevation series", ts_index,
+        )
+        return []
+
+    series: list[tuple[float, float]] = []
+    dropped = 0
+    for row in rows:
+        values = row.get("metrics") if isinstance(row, dict) else row
+        if not isinstance(values, list):
+            continue
+        if len(values) <= ts_index or len(values) <= elev_index:
+            continue
+        ms = _opt_float(values[ts_index])
+        elev = _opt_float(values[elev_index])
+        if ms is None or elev is None:
+            continue
+        metres = elev * elev_factor
+        if not ELEVATION_MIN_M <= metres <= ELEVATION_MAX_M:
+            dropped += 1
+            continue
+        series.append((ms / 1000.0, metres))
+    if dropped:
+        logger.warning(
+            "garmin elevation: dropped %d of %d samples outside %g..%g m",
+            dropped, len(rows), ELEVATION_MIN_M, ELEVATION_MAX_M,
+        )
+    series.sort(key=lambda sample: sample[0])
+    return series
+
+
+def _elevation_unit_factor(unit: Any) -> float | None:
+    """Metres per declared unit, or None when the unit is not a known length.
+
+    A wholly absent unit reads as metres, which is what the API documents for
+    this column. A unit object that is *present* but names nothing we
+    recognise does not: it is the case where Garmin told us something and we
+    could not read it, so it fails closed. Those two used to be one branch,
+    which made the fail-closed claim depend on the field being spelled
+    exactly ``key`` — the same guess the fixtures were written from.
+    """
+    if unit is None:
+        return 1.0
+    if not isinstance(unit, dict):
+        return None
+    factor = unit.get("factor")
+    if factor is not None:
+        f = _opt_float(factor)
+        if f is None or abs(f - 1.0) > _ELEVATION_FACTOR_TOLERANCE:
+            return None
+    for field in _ELEVATION_UNIT_FIELDS:
+        name = unit.get(field)
+        if isinstance(name, str):
+            metres = _ELEVATION_UNIT_METRES.get(name.strip().lower())
+            if metres is not None:
+                return metres
+    return None
+
+
+def nearest_elevation(
+    series: list[tuple[float, float]],
+    epoch: float,
+    tolerance: float = ELEVATION_JOIN_TOLERANCE_SEC,
+) -> float | None:
+    """Elevation of the sample closest to ``epoch``, or None when the
+    nearest one is further off than ``tolerance`` seconds. ``series`` must be
+    sorted, as :func:`parse_elevation_series` returns it. An exact tie goes
+    to the later sample, which is arbitrary but fixed — pinned by a test so a
+    future ``<=`` edit is visible rather than silent."""
+    if not series:
+        return None
+    i = bisect.bisect_left(series, (epoch,))
+    best: float | None = None
+    best_gap = tolerance
+    for j in (i - 1, i):
+        if 0 <= j < len(series):
+            gap = abs(series[j][0] - epoch)
+            if gap <= best_gap:
+                best_gap = gap
+                best = series[j][1]
+    return best
 
 
 def parse_polyline(details: dict, activity_type: str) -> list[TrackPoint]:
@@ -140,12 +349,17 @@ def parse_polyline(details: dict, activity_type: str) -> list[TrackPoint]:
     timestamp or missing lat/lon is skipped, not fatal.
 
     Per-point keys (confirmed against the live API): ``lat``, ``lon``,
-    ``altitude``, ``speed``, ``time`` (epoch ms, GMT).
+    ``altitude``, ``speed``, ``time`` (epoch ms, GMT). ``altitude`` is null
+    on a watch-recorded activity, so where it is missing the elevation is
+    joined on by timestamp from the response's metrics half — see
+    :func:`parse_elevation_series`.
     """
     parent = collapse_subtype(activity_type)
     dto = (details or {}).get("geoPolylineDTO") or {}
     raw = dto.get("polyline") or []
+    elevations = parse_elevation_series(details)
     out: list[TrackPoint] = []
+    joined = 0
     for pt in raw:
         if not isinstance(pt, dict):
             continue
@@ -158,24 +372,40 @@ def parse_polyline(details: dict, activity_type: str) -> list[TrackPoint]:
         except ValueError:
             logger.debug("skipping polyline point with bad time: %r", pt.get("time"))
             continue
+        altitude = _opt_float(pt.get("altitude"))
+        if altitude is None and elevations:
+            altitude = nearest_elevation(elevations, float(pt["time"]) / 1000.0)
+            if altitude is not None:
+                joined += 1
         out.append(TrackPoint(
             timestamp=ts,
             lat=float(lat),
             lon=float(lon),
-            altitude=_opt_float(pt.get("altitude")),
+            altitude=altitude,
             speed=_opt_float(pt.get("speed")),
             activity_type=parent,
         ))
+    if out:
+        logger.debug(
+            "polyline: %d points, %d elevations joined from %d metric samples",
+            len(out), joined, len(elevations),
+        )
     return out
 
 
 def _opt_float(v: Any) -> float | None:
+    """A usable float, or None. Non-finite is None rather than passed on:
+    ``json.loads`` accepts the bare ``Infinity`` / ``NaN`` literals, so a
+    provider can hand us one, and SQLite stores ``inf`` in a REAL column
+    happily — after which `json.dumps` emits a token no strict client
+    accepts. A NaN also breaks any sort it reaches."""
     if v is None:
         return None
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         return None
+    return f if math.isfinite(f) else None
 
 
 def downsample(points: list[TrackPoint], seconds: float) -> list[TrackPoint]:
@@ -499,15 +729,44 @@ def _fetch_points(adapter, act, options: ImportOptions):
     span = activity_span(act)
     if span is None:
         return None, None
+    # maxchart bounds activityDetailMetrics the way maxpoly bounds the
+    # polyline. They are asked for at the same cap so the elevation series is
+    # sampled no more coarsely than the track it has to join onto; left at the
+    # SDK's default 2000 it was half the polyline's resolution, and a long
+    # activity's points fell outside the join tolerance near the end.
     details = adapter.get_activity_details(
-        str(act.get("activityId")), maxpoly=options.maxpoly,
+        str(act.get("activityId")),
+        maxpoly=options.maxpoly,
+        maxchart=options.maxpoly,
     )
     if not details:
         return None, span
     pts = parse_polyline(details, activity_type_key(act))
     if not pts:
         return None, span  # hasPolyline true but empty → no-GPS
+    _report_elevation_join(act, details, pts)
     return downsample(pts, options.downsample_sec), span
+
+
+def _report_elevation_join(act, details, pts: list[TrackPoint]) -> None:
+    """Say, above DEBUG, when a track came back without elevation.
+
+    ISSUE-488's own caveat is that the metrics half of the response was never
+    captured from this deployment, and every way of getting its shape wrong
+    fails closed — which is indistinguishable from the bug it fixes. Without
+    this the first real run could not tell "Garmin has no elevation for this
+    activity" from "we are reading the wrong key", which is the whole
+    question. One line per activity, so it is bounded by the window.
+    """
+    missing = sum(1 for p in pts if p.altitude is None)
+    if not missing:
+        return
+    samples = len(parse_elevation_series(details))
+    logger.warning(
+        "garmin activity %s: %d of %d track points have no altitude "
+        "(%d usable elevation samples in the response)",
+        act.get("activityId"), missing, len(pts), samples,
+    )
 
 
 def _process_activity(adapter, act, conn, options, occupancy, *, write: bool):
@@ -533,6 +792,9 @@ def _process_activity(adapter, act, conn, options, occupancy, *, write: bool):
         "fetched": len(pts),
         "inserted": len(kept),
         "shadowed": len(pts) - len(kept),
+        # Surfaced rather than logged so the import endpoint and the cron
+        # script both answer "did elevation land" without debug logging.
+        "no_altitude": sum(1 for p in kept if p.altitude is None),
     }
 
 
