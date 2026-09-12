@@ -12,7 +12,12 @@ from .._types import IncomingMessage
 from ..ingest import ingest_message
 from . import sms_conversation_token
 from ._types import SmsEventResult
-from .outbound import apply_delivery_event, deliver_sms
+from .outbound import (
+    MAX_PROVIDER_MESSAGE_ID,
+    apply_delivery_event,
+    deliver_sms,
+    delivery_may_park,
+)
 from .providers._types import InboundSmsEvent, SmsDeliveryEvent
 from .providers.registry import SmsProviderRegistry
 
@@ -79,6 +84,22 @@ def handle_provider_event(
 ) -> SmsEventResult:
     """Apply one normalized event inside the caller's database transaction."""
     if isinstance(event, SmsDeliveryEvent):
+        # The delivery path used to run under no explicit transaction, which
+        # was harmless while it only read a row and updated it. It stopped
+        # being harmless when `apply_delivery_event` gained a park: a status
+        # whose id has not been written yet is parked on the strength of a
+        # lookup that found no row, and unless the write lock is held across
+        # both, the outcome write can commit the id in between — leaving a
+        # parked row nothing will ever drain and a `failed` lost exactly as
+        # before.
+        #
+        # Only that path needs the lock, and `delivery_may_park` is what keeps
+        # the other three from paying for it; see its docstring for why the
+        # unlocked pre-read is safe. The inbound branch below takes its own
+        # `BEGIN IMMEDIATE` for the analogous reason, and the two cannot
+        # collide because this branch returns.
+        if delivery_may_park(conn, event):
+            conn.execute("BEGIN IMMEDIATE")
         disposition, delivery, pending_alert = apply_delivery_event(conn, event)
         return SmsEventResult(
             disposition=disposition, delivery=delivery, pending_alert=pending_alert,
@@ -88,7 +109,10 @@ def handle_provider_event(
         return SmsEventResult("unconfigured_provider")
     if event.provider != config.sms.provider:
         return SmsEventResult("inactive_provider")
-    if not event.provider_message_id or len(event.provider_message_id) > 255:
+    if (
+        not event.provider_message_id
+        or len(event.provider_message_id) > MAX_PROVIDER_MESSAGE_ID
+    ):
         return SmsEventResult("invalid_message_id")
     if not is_e164(event.from_number):
         return SmsEventResult("invalid_sender")
@@ -178,9 +202,18 @@ async def deliver_event_response(
     if result.pending_alert is not None:
         # The delivery callback raised this inside the write transaction that
         # has now committed; nothing else will push it.
-        from ...notification_store import deliver_pending
+        #
+        # Off the SMS route. This alert says an SMS reached nobody, so sending
+        # it over SMS addresses it to exactly the person who has just been
+        # shown to be unreachable — the loop `transport/_alerts.py` exists to
+        # break, which `outbound._raise_failure_alert` already obeyed on the
+        # send path while this, the callback path, did not.
+        from .._alerts import push_off_surface
         try:
-            deliver_pending(config, [result.pending_alert])
+            push_off_surface(
+                config, result.pending_alert,
+                exclude_surface="sms", reference_prefix="sms-failure",
+            )
         except Exception:
             logger.warning("sms.delivery.alert_not_delivered", exc_info=True)
 
