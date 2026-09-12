@@ -1110,6 +1110,37 @@ def _whatsapp_binding_for_display(db_path, user_id):
         return None
 
 
+def _whatsapp_binding_state(binding) -> tuple | None:
+    """Everything on a binding but `updated_at`, for a before/after compare.
+
+    `user ensure` prints `STATE: created|updated|noop` and
+    `deploy/ansible/tasks/main.yml` keys `changed_when` off that one line, so
+    the verdict has to cover every table the command writes. The binding is
+    not on `user_profiles`, so `update_profile_with_status` cannot see it and
+    a WhatsApp-only enrollment reported `noop` — which suppresses the
+    scheduler and web restart handlers and leaves both processes on a config
+    snapshot taken before the user existed on the surface.
+
+    A compare rather than a return value from the three writers, because
+    `set_whatsapp_binding` rewrites the row unconditionally: it cannot tell
+    the operator asking for what is already there from a real change, and a
+    deploy that re-asserts inventory does the former on every run.
+    `updated_at` is excluded for the same reason — it moves on every write.
+    """
+    if binding is None:
+        return None
+    return (
+        binding.bootstrap_phone_number,
+        binding.bsuid,
+        binding.send_id,
+        binding.username,
+        binding.opted_out_at,
+        binding.last_user_message_at,
+        binding.enrolled_at,
+        binding.last_seen_at,
+    )
+
+
 def cmd_user_ensure(args):
     """Create or update a user_profiles row (idempotent).
 
@@ -1325,7 +1356,14 @@ def cmd_user_ensure(args):
     # The WhatsApp binding is its own table, written after the profile row so a
     # rejected identity leaves the profile update the operator also asked for
     # in place rather than half-applied in the other direction.
-    if whatsapp_number is not None or whatsapp_bsuid is not None or clear_whatsapp or reset_whatsapp:
+    whatsapp_requested = (
+        whatsapp_number is not None
+        or whatsapp_bsuid is not None
+        or clear_whatsapp
+        or reset_whatsapp
+    )
+    before = _whatsapp_binding_for_display(db_path, user_id) if whatsapp_requested else None
+    if whatsapp_requested:
         try:
             with db.get_db(db_path) as conn:
                 if clear_whatsapp:
@@ -1343,6 +1381,15 @@ def cmd_user_ensure(args):
             sys.exit(1)
 
     binding = _whatsapp_binding_for_display(db_path, user_id)
+    if (
+        whatsapp_requested
+        and state == "noop"
+        and _whatsapp_binding_state(before) != _whatsapp_binding_state(binding)
+    ):
+        # `created` and `updated` already say the row moved, so only `noop`
+        # is escalated — a first-time user whose enrollment arrives in the
+        # same call must still read as `created`.
+        state = "updated"
     if binding is not None:
         # Masked, always. `istota user show` is the private operator surface
         # that returns these in full.

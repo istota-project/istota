@@ -922,6 +922,51 @@ class TestWhatsAppOperatorCommands:
             assert db.get_whatsapp_binding(conn, "alice") is None
         capsys.readouterr()
 
+    def test_a_whatsapp_only_change_reports_a_state_the_role_acts_on(
+        self, tmp_path, capsys
+    ):
+        """`deploy/ansible/tasks/main.yml` keys `changed_when` off this line.
+
+        The binding lives in its own table, so `update_profile_with_status`
+        answers `noop` about a call that enrolled a number — and a `noop`
+        suppresses the scheduler and web restart handlers, leaving both
+        processes holding a config snapshot that predates the enrollment.
+        Adding `whatsapp_number:` to inventory is what makes this reachable.
+        """
+        from istota.cli import cmd_user_ensure
+
+        _, config_path = self._setup(tmp_path)
+        cmd_user_ensure(_ensure_args(config_path, display_name="Alice"))
+        capsys.readouterr()
+
+        cmd_user_ensure(_ensure_args(config_path, whatsapp_number="+15551234567"))
+        assert "STATE: updated" in capsys.readouterr().out
+
+        # A re-run of the same deploy asks for what is already there, and the
+        # role must see that as `noop` or every deploy restarts both units.
+        cmd_user_ensure(_ensure_args(config_path, whatsapp_number="+15551234567"))
+        assert "STATE: noop" in capsys.readouterr().out
+
+        cmd_user_ensure(_ensure_args(config_path, clear_whatsapp=True))
+        assert "STATE: updated" in capsys.readouterr().out
+
+        cmd_user_ensure(_ensure_args(config_path, clear_whatsapp=True))
+        assert "STATE: noop" in capsys.readouterr().out
+
+    def test_a_profile_change_still_outranks_the_binding_verdict(
+        self, tmp_path, capsys
+    ):
+        """`created` must not be overwritten by the binding's own `updated`."""
+        from istota.cli import cmd_user_ensure
+
+        _, config_path = self._setup(tmp_path)
+
+        cmd_user_ensure(_ensure_args(
+            config_path, display_name="Alice", whatsapp_number="+15551234567",
+        ))
+
+        assert "STATE: created" in capsys.readouterr().out
+
     def test_a_bad_number_exits_without_writing(self, tmp_path):
         from istota.cli import cmd_user_ensure
 
