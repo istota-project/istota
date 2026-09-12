@@ -4,8 +4,8 @@ CLI:
     python -m istota.skills.location current
     python -m istota.skills.location history [--limit N] [--date YYYY-MM-DD] [--tz TZ]
     python -m istota.skills.location places
-    python -m istota.skills.location learn NAME [--category CAT] [--radius N] [--notes TXT]
-    python -m istota.skills.location update (--name NAME | --id ID) [--rename NEW] [--category CAT] [--radius N] [--notes TXT] [--lat N] [--lon N]
+    python -m istota.skills.location learn NAME [--lat N --lon N] [--from-cluster] [--backfill] [--category CAT] [--radius N] [--notes TXT]
+    python -m istota.skills.location update (--name NAME | --id ID) [--rename NEW] [--category CAT] [--radius N] [--notes TXT] [--lat N] [--lon N] [--backfill]
     python -m istota.skills.location delete (--name NAME | --id ID)
     python -m istota.skills.location reverse-geocode --lat N --lon N
     python -m istota.skills.location day-summary --date YYYY-MM-DD [--tz TZ]
@@ -123,42 +123,142 @@ def cmd_places(args):
     print(json.dumps(location_places(_get_location_db_path())["places"]))
 
 
+class _LearnRefused(Exception):
+    """A `learn` argument error, raised so the caller can close its conn."""
+
+
+def _learn_coordinates(args, conn):
+    """Where a new place goes, and which of the three ways said so.
+
+    The workflow that produces a naming request is the reverse of the
+    one this command used to serve: a day summary or `discover` surfaces
+    a stop from hours ago, and by then the device is somewhere else. So
+    explicit coordinates win, a discovered cluster refines them, and the
+    newest ping is the fallback it always was.
+
+    Raises ``_LearnRefused`` rather than calling ``_fail`` directly, so
+    ``cmd_learn`` can close the connection it opened before exiting —
+    the code this replaced closed it on the one failure path it had.
+
+    Returns ``(lat, lon, source, cluster)``.
+    """
+    from istota.location import db as location_db
+    from istota.location_logic import CLUSTER_EXCLUSION_METERS, resolve_cluster_for_point
+
+    lat = getattr(args, "lat", None)
+    lon = getattr(args, "lon", None)
+    if (lat is None) != (lon is None):
+        raise _LearnRefused("--lat and --lon must be given together")
+    if lat is not None:
+        # The model picks these values and nothing downstream refuses a
+        # nonsense one: haversine does not raise, so an out-of-range
+        # centre would be compared against every ping at ingest forever.
+        if not -90.0 <= lat <= 90.0:
+            raise _LearnRefused(f"--lat must be between -90 and 90 (got {lat})")
+        if not -180.0 <= lon <= 180.0:
+            raise _LearnRefused(f"--lon must be between -180 and 180 (got {lon})")
+
+    if getattr(args, "from_cluster", False):
+        if lat is None:
+            raise _LearnRefused(
+                "--from-cluster needs --lat and --lon to resolve against"
+            )
+        # Reads through its own connection. Safe only because nothing has
+        # been written yet: a second connection cannot see this one's
+        # uncommitted rows, so resolving after the upsert would have
+        # `discover`'s own too-close-to-a-saved-place filter read stale
+        # state. Keep this call ahead of the write.
+        cluster = resolve_cluster_for_point(_get_location_db_path(), lat, lon)
+        if cluster is None:
+            raise _LearnRefused(
+                f"No discovered cluster near {lat:.5f}, {lon:.5f}. "
+                f"`discover` hides a cluster within {CLUSTER_EXCLUSION_METERS}m "
+                "of a place that is already saved, so this also fails when "
+                "re-siting an existing place or naming a stop next to one. "
+                "Drop --from-cluster to use the coordinates as given."
+            )
+        return cluster["lat"], cluster["lon"], "cluster", cluster
+
+    if lat is not None:
+        return lat, lon, "argument", None
+
+    ping = location_db.get_latest_ping(conn)
+    if not ping:
+        raise _LearnRefused("No location pings found")
+    return ping.lat, ping.lon, "latest_ping", None
+
+
 def cmd_learn(args):
     from istota.location import db as location_db
+    from istota.location_logic import assign_pings_to_place
 
     conn = _connect_location()
+    try:
+        name = args.name
+        category = args.category or "other"
+        notes = (getattr(args, "notes", None) or "").strip() or None
 
-    name = args.name
-    radius = args.radius or 100
-    category = args.category or "other"
-    notes = (getattr(args, "notes", None) or "").strip() or None
+        try:
+            lat, lon, source, cluster = _learn_coordinates(args, conn)
+        except _LearnRefused as exc:
+            _fail(str(exc))
+        # A cluster's radius is fitted to the spread of the pings it was
+        # derived from, which is a better answer than the flag's default.
+        asked_radius = getattr(args, "radius", None)
+        radius = cluster["radius_meters"] if cluster else (asked_radius or 100)
 
-    cursor = conn.execute(
-        "SELECT lat, lon, accuracy, timestamp FROM location_pings "
-        "ORDER BY timestamp DESC LIMIT 1"
-    )
-    row = cursor.fetchone()
-    if not row:
+        place_id = location_db.upsert_place(
+            conn, name, lat, lon,
+            radius_meters=radius, category=category, notes=notes,
+        )
+
+        # Opt-in: `place_id` is resolved at ingest, so adopting the pings
+        # already inside the new geofence is what makes the stop that
+        # prompted the naming read as this place in every later summary.
+        # It rewrites history, and a generous radius can absorb a
+        # neighbour's pings, so the caller asks for it.
+        #
+        # Both halves are reported, because `upsert_place` is
+        # ON CONFLICT DO UPDATE: `learn` on a name that already exists
+        # *moves* that place, and the release half then detaches the
+        # pings the old footprint held. Reporting the adopt count alone
+        # said "nothing happened to history" while rewriting rows.
+        counts = None
+        if getattr(args, "backfill", False):
+            counts = assign_pings_to_place(conn, place_id, lat, lon, radius)
+
+        conn.commit()
+    finally:
         conn.close()
-        _fail("No location pings found")
 
-    lat, lon = row["lat"], row["lon"]
-    location_db.upsert_place(
-        conn, name, lat, lon,
-        radius_meters=radius, category=category, notes=notes,
-    )
-    conn.commit()
-    conn.close()
-
-    print(json.dumps({
+    payload = {
         "status": "ok",
         "place": name,
         "lat": round(lat, 6),
         "lon": round(lon, 6),
         "radius_meters": radius,
         "notes": notes,
+        # Which of the three inputs sited the place. Without this a
+        # geofence saved at the device's current position is
+        # indistinguishable in the output from one saved where it was
+        # asked to go.
+        "source": source,
+        "backfilled_pings": counts["assigned"] if counts else None,
+        "released_pings": counts["released"] if counts else None,
         "message": f"Saved '{name}' at {lat:.4f}, {lon:.4f}.",
-    }))
+    }
+    if cluster:
+        payload["cluster"] = {
+            "total_pings": cluster["total_pings"],
+            "radius_meters": cluster["radius_meters"],
+            "first_seen": cluster["first_seen"],
+            "last_seen": cluster["last_seen"],
+        }
+        # `--radius` has no meaning here and saying so beats a number
+        # the caller asked for being silently replaced.
+        if asked_radius is not None:
+            payload["radius_overridden"] = asked_radius
+    print(json.dumps(payload))
 
 
 def _resolve_place(conn, name=None, place_id=None):
@@ -214,9 +314,23 @@ def cmd_update(args):
         location_db.update_place(conn, place.id, **updates)
     if clear_notes:
         conn.execute("UPDATE places SET notes = NULL WHERE id = ?", (place.id,))
-    conn.commit()
 
     updated = location_db.get_place_by_id(conn, place.id)
+
+    # Moving or resizing a place leaves its pings on the old footprint
+    # until they are reassigned — the web route has always done this and
+    # the CLI did not. Opt-in here for the reason the backfill is:
+    # it rewrites history.
+    geo_changed = any(k in updates for k in ("lat", "lon", "radius_meters"))
+    reassigned = None
+    if geo_changed and getattr(args, "backfill", False):
+        from istota.location_logic import assign_pings_to_place
+
+        reassigned = assign_pings_to_place(
+            conn, place.id, updated.lat, updated.lon, updated.radius_meters,
+        )
+
+    conn.commit()
     conn.close()
 
     print(json.dumps({
@@ -230,6 +344,7 @@ def cmd_update(args):
             "category": updated.category,
             "notes": updated.notes,
         },
+        "reassigned_pings": reassigned,
     }))
 
 
@@ -659,10 +774,25 @@ def build_parser():
 
     sub.add_parser("places", help="List known places")
 
-    learn = sub.add_parser("learn", help="Save current location as a named place")
+    learn = sub.add_parser("learn", help="Save a named place, here or at given coordinates")
     learn.add_argument("name", help="Place name")
+    learn.add_argument("--lat", type=float,
+                       help="Latitude to save (with --lon; default: newest ping)")
+    learn.add_argument("--lon", type=float,
+                       help="Longitude to save (with --lat; default: newest ping)")
+    learn.add_argument("--from-cluster", dest="from_cluster", action="store_true",
+                       help="Snap --lat/--lon to the nearest discovered cluster "
+                            "and adopt its fitted radius")
+    learn.add_argument("--backfill", action="store_true",
+                       help="Assign existing pings inside the new geofence to "
+                            "this place (rewrites history)")
     learn.add_argument("--category", default="other", help="Place category")
-    learn.add_argument("--radius", type=int, default=100, help="Geofence radius in meters")
+    # No argparse default: the code cannot otherwise tell "the caller asked
+    # for 100" from "the caller said nothing", which --from-cluster needs
+    # in order to report that it overrode an explicit radius.
+    learn.add_argument("--radius", type=int,
+                       help="Geofence radius in meters (default 100; ignored "
+                            "with --from-cluster, which fits its own)")
     learn.add_argument("--notes", help="Optional free-text notes")
 
     update = sub.add_parser("update", help="Update an existing place")
@@ -675,6 +805,9 @@ def build_parser():
     update.add_argument("--notes", help="New notes")
     update.add_argument("--lat", type=float, help="New latitude")
     update.add_argument("--lon", type=float, help="New longitude")
+    update.add_argument("--backfill", action="store_true",
+                        help="Reassign pings to match the new geofence when "
+                             "lat/lon/radius changed (rewrites history)")
 
     delete = sub.add_parser("delete", help="Delete a place")
     delete_target = delete.add_mutually_exclusive_group(required=True)

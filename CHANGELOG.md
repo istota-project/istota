@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Ansible role binds phone numbers: `sms_phone_number` under `istota_users` sets a user's SMS identity, and `""` revokes it. The deployment-level `[sms]` settings were already in the role, so a number had to be bound by hand over SSH and a rebuilt host came back with none.
 
+- You can name a place you have already left. `istota-skill location learn NAME --lat L --lon N` saves the coordinates you give it rather than wherever the phone is now, `--from-cluster` snaps them to the nearest discovered cluster and adopts its fitted centroid and radius, and `--backfill` assigns the pings already inside the new geofence so the stop that prompted the naming reads as that place in later day summaries and place stats. The response says which of the three sited the place, and how many pings it moved.
+
 ### Changed
 
 - **Upgrade note:** the Docker webhook receiver is now reached through nginx at `/webhooks/` instead of binding its own host port. An Overland client pointed at `http://<host>:8765/webhooks/location` needs repointing to `https://<your-domain>/webhooks/location`.
@@ -24,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Upgrade note:** a reverse proxy you maintain yourself needs two rules for `/webhooks/whatsapp`. Meta sends the verification token as a query value, so that path's access log has to be off or its format has to log the path without the query string. And its request-body limit has to sit above Istota's own 256 KiB so an oversized body is answered by Istota rather than by an HTML error page Meta will retry against; the shipped Docker and Ansible configurations use 512 KiB. Both are in place for a deployment that uses either of those.
 
 - The webhook receiver no longer writes an access log line per request. It logged the full request line including the query string, which for the WhatsApp verification handshake means the token — so silencing the proxy alone was not enough. Each webhook event is still recorded with its own log line, without the token. A receiver you start yourself needs `--no-access-log`.
+
+### Fixed
+
+- Moving or resizing a place from `istota-skill location update` left its GPS pings attached to the old footprint, where the web UI had always reassigned them. Pass `--backfill` to release the pings the place no longer contains and adopt the ones it now does; both surfaces run the same code for it.
 
 ## [0.41.1] - 2026-09-09
 
