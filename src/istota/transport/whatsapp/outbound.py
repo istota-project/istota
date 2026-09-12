@@ -18,11 +18,11 @@ order is not cosmetic: a user who opted out must be refused before a closed
 window is reported about them, because the second is an operator alert and the
 first is the user's own choice.
 
-Two things are deliberately absent and belong to stage 4: the monthly service
-attempt reservation (`quota_month` stays NULL here) and the pricing
-observation that trips the billable circuit. The circuit is *read* here, since
-"is this surface usable for this user" is a question this stage's notification
-probe has to answer; only the write is stage 4's.
+The cost controls sit in the same two places. **The monthly attempt cap is
+reserved by the claim**, inside the same immediate transaction, so two workers
+cannot both take the last free slot; and the **billable circuit** is tripped by
+a status callback, which is evidence after the fact rather than authorization
+before it — the message that revealed the charge has already been sent.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 
 from ... import db
-from ...config import Config
+from ...config import WHATSAPP_FREE_GUARD_MAX_ATTEMPTS, Config
 from . import message_fingerprint
 from ._types import (
     LOCAL_TERMINAL_STATES,
@@ -306,6 +306,94 @@ def _destination(binding) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The WABA month and the local attempt cap
+# ---------------------------------------------------------------------------
+
+
+def quota_month(config: Config, *, now: datetime | None = None) -> str:
+    """The WABA calendar month a claim counts against, as ``YYYY-MM``.
+
+    Meta's announced allowance is per business phone number and per calendar
+    month **on the business account**, which is why the zone is configured
+    rather than assumed. A WABA at UTC+14 turns over fourteen hours before the
+    daemon's own clock does, so counting in UTC would hand back a fresh
+    allowance early there and keep spending an exhausted one at UTC-11.
+
+    Never raises. `load_config` refuses an unresolvable zone, so the only way
+    to reach the fallback is a daemon whose tzdata differs from the one that
+    validated the file — and this is called from inside the claim transaction,
+    where an exception would abort a send rather than bound it. UTC is the
+    fallback because it is the zone the stored timestamps are already in.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: PLC0415
+
+    moment = now or datetime.now(timezone.utc)
+    try:
+        zone = ZoneInfo(config.whatsapp.business_timezone or "UTC")
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        logger.warning(
+            "whatsapp.quota.timezone_unresolved: counting the month in UTC",
+        )
+        zone = timezone.utc
+    return moment.astimezone(zone).strftime("%Y-%m")
+
+
+def _attempt_limit(config: Config) -> int:
+    """The service-attempt ceiling for this month, or ``0`` for unlimited.
+
+    ``0`` means opposite things under the two policies, and picking the wrong
+    one costs money in exactly the mode that exists to avoid it. Under
+    ``allow_paid`` it is the operator saying "no local bound"; under
+    ``free_guard`` it must never be read that way, so the value is clamped
+    into the range `load_config` already enforces. The clamp is defence in
+    depth against a `WhatsAppConfig` built in code rather than parsed.
+    """
+    limit = config.whatsapp.monthly_service_attempt_limit
+    if config.whatsapp.billing_policy == "allow_paid":
+        return max(0, limit)
+    return min(max(limit, 1), WHATSAPP_FREE_GUARD_MAX_ATTEMPTS)
+
+
+def _service_attempts_used(conn, month: str) -> int:
+    """Claimed service rows in ``month``. The count the cap is applied to.
+
+    **Claims, not deliveries.** An attempt that failed may still have been
+    counted by Meta and an ambiguous one may have arrived, so handing either
+    slot back would make the bound overshoot by exactly the population a
+    deployment in trouble has most of. A row blocked locally never reached
+    Meta and has no `claimed_at`, so it is not counted and consumes nothing.
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM sent_whatsapp WHERE send_kind = 'service' "
+        "AND quota_month = ? AND claimed_at IS NOT NULL",
+        (month,),
+    ).fetchone()[0]
+
+
+def _service_budget_exhausted(conn, config: Config, month: str) -> bool:
+    limit = _attempt_limit(config)
+    return bool(limit) and _service_attempts_used(conn, month) >= limit
+
+
+def template_available(config: Config) -> bool:
+    """Whether a closed window has a paid template to fall through to.
+
+    The policy is re-checked here and not merely at config load. `load_config`
+    refuses ``proactive_template.enabled`` under ``free_guard``, but one
+    validator standing between a free-biased deployment and a paid message is
+    one place for the rule to be edited out of — and the whole point of
+    ``free_guard`` is that no code path can spend money.
+    """
+    template = config.whatsapp.proactive_template
+    return bool(
+        config.whatsapp.billing_policy == "allow_paid"
+        and template.enabled
+        and template.name.strip()
+        and template.language.strip()
+    )
+
+
+# ---------------------------------------------------------------------------
 # The ledger
 # ---------------------------------------------------------------------------
 
@@ -321,37 +409,55 @@ def _record(row) -> WhatsAppDeliveryRecord:
     )
 
 
-def _gate(conn, config: Config, user_id: str, *, ignore_opt_out: bool) -> str:
-    """The local terminal state that blocks this send, or ``"pending"``.
+def _gate(
+    conn, config: Config, user_id: str, *, ignore_opt_out: bool, month: str,
+) -> tuple[str, str]:
+    """``(status, send_kind)``: the state that blocks this send, or ``pending``.
 
     Ordered by whose decision it is. A disabled or invalid transport is the
     deployment's; a missing binding is the operator's; an opt-out is the
     *user's* and outranks everything below it, because reporting a closed
     window about somebody who asked not to be messaged is an operator alert
-    nobody should be woken by. The billing circuit is next, and the window last
-    — it is the only one of the five that a later message from the user
-    reopens on its own.
+    nobody should be woken by. The billing circuit is next, then the window —
+    which is the one of these a later message from the user reopens on its own
+    — and the monthly cap last, because it is the only one that depends on
+    which kind of message the window just chose.
+
+    The kind is decided here rather than by the caller, and it has to be: the
+    window read and the budget count both belong inside the claim's own
+    transaction, and the kind is what says which of the two rendered bodies
+    goes on the row.
     """
     from ...config import whatsapp_config_errors
 
     if not config.whatsapp.enabled or whatsapp_config_errors(config):
-        return "unconfigured"
+        return "unconfigured", "service"
     binding = db.get_whatsapp_binding(conn, user_id)
     if binding is None or not _destination(binding):
-        return "unconfigured"
+        return "unconfigured", "service"
     if binding.opted_out_at is not None and not ignore_opt_out:
-        return "opted_out"
+        return "opted_out", "service"
     if (
         config.whatsapp.billing_policy == "free_guard"
         and db.whatsapp_billing_block(conn) is not None
     ):
-        return "billing_blocked"
+        return "billing_blocked", "service"
+    send_kind = "service"
     if not service_window_open(binding):
         # A template is the only way past a closed window, and `free_guard`
-        # forbids one outright — even inside the window — so there is nothing
-        # to fall through to here until stage 4 wires the paid path.
-        return "window_closed"
-    return "pending"
+        # forbids one outright — even inside the window — so a free-biased
+        # deployment has nothing to fall through to.
+        if not template_available(config):
+            return "window_closed", "service"
+        send_kind = "template"
+    if send_kind == "service" and _service_budget_exhausted(conn, config, month):
+        # Named for service attempts and counting only those. A template is
+        # reachable only under `allow_paid`, which is the operator's explicit
+        # acceptance of billing, so this number does not bound it. Pinned by
+        # `test_a_template_attempt_does_not_consume_the_service_cap`, and the
+        # setup guide has to say so where an operator sets the number.
+        return "budget_exhausted", "service"
+    return "pending", send_kind
 
 
 def _claim(
@@ -360,7 +466,7 @@ def _claim(
     logical_key: str,
     user_id: str,
     task_id: int | None,
-    body: str,
+    bodies: dict[str, str],
     ignore_opt_out: bool,
 ) -> tuple[str, WhatsAppDeliveryRecord]:
     """Insert-or-reuse one ledger row and take it, in one transaction.
@@ -374,9 +480,17 @@ def _claim(
     concurrent case safe: without it two workers both read "no row" and the
     second's INSERT raises on the unique index, which is recoverable, but two
     workers both reading an unclaimed `pending` and both updating it is not.
+    **The monthly reservation rides on that same lock**, which is the whole of
+    why the cap is concurrency-safe: the count and the row that increments it
+    are one write transaction, so the final slot cannot be read as free twice.
+
+    `bodies` carries both renderings because the gate is what picks between
+    them. `quota_month` is stamped on every row, blocked ones included — it
+    records which month the decision was made in — and only a *claimed* row
+    counts against the allowance.
     """
     now = db.sql_datetime_now()
-    digest = hashlib.sha256(body.encode()).hexdigest()
+    month = quota_month(config)
     with db.get_db(config.db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -386,24 +500,33 @@ def _claim(
             row["status"] in _NO_RESEND or row["claimed_at"] is not None
         ):
             return "settled", _record(row)
-        status = _gate(conn, config, user_id, ignore_opt_out=ignore_opt_out)
+        status, send_kind = _gate(
+            conn, config, user_id, ignore_opt_out=ignore_opt_out, month=month,
+        )
+        body = bodies[send_kind]
+        digest = hashlib.sha256(body.encode()).hexdigest()
         claimed_at = now if status == "pending" else None
         if row is None:
             conn.execute(
                 "INSERT INTO sent_whatsapp (logical_key, user_id, task_id, "
-                "send_kind, status, body_chars, body_sha256, claimed_at, "
-                "created_at, updated_at) VALUES (?, ?, ?, 'service', ?, ?, ?, ?, ?, ?)",
+                "send_kind, status, body_chars, body_sha256, quota_month, "
+                "claimed_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    logical_key, user_id, task_id, status, len(body), digest,
-                    claimed_at, now, now,
+                    logical_key, user_id, task_id, send_kind, status, len(body),
+                    digest, month, claimed_at, now, now,
                 ),
             )
         else:
             conn.execute(
-                "UPDATE sent_whatsapp SET status = ?, body_chars = ?, "
-                "body_sha256 = ?, task_id = COALESCE(?, task_id), "
-                "claimed_at = ?, updated_at = ? WHERE logical_key = ?",
-                (status, len(body), digest, task_id, claimed_at, now, logical_key),
+                "UPDATE sent_whatsapp SET send_kind = ?, status = ?, "
+                "body_chars = ?, body_sha256 = ?, task_id = COALESCE(?, task_id), "
+                "quota_month = ?, claimed_at = ?, updated_at = ? "
+                "WHERE logical_key = ?",
+                (
+                    send_kind, status, len(body), digest, task_id, month,
+                    claimed_at, now, logical_key,
+                ),
             )
         fresh = conn.execute(
             "SELECT * FROM sent_whatsapp WHERE logical_key = ?", (logical_key,),
@@ -581,18 +704,25 @@ async def deliver_whatsapp(
     timeout does: past `_stamp_attempt` the request may have gone out, and
     from out here there is no way to tell which side of it the failure fell.
     """
-    body = render_whatsapp(
-        text,
-        # A message carrying buttons is an interactive object with a quarter of
-        # the plain-text body limit. Rendering it at 4096 means Meta refuses
-        # every confirmation question longer than 1024 and the row reads
-        # `failed`, so the question is asked nowhere.
-        limit=WHATSAPP_INTERACTIVE_BODY_LIMIT if buttons else WHATSAPP_TEXT_LIMIT,
-    )
+    # Both renderings, because only the claim's own transaction can read the
+    # service window and therefore decide which one this send is. Both are
+    # pure functions of `text`, so computing the unused one costs two regex
+    # passes and buys the kind decision staying where the lock is.
+    bodies = {
+        "service": render_whatsapp(
+            text,
+            # A message carrying buttons is an interactive object with a
+            # quarter of the plain-text body limit. Rendering it at 4096 means
+            # Meta refuses every confirmation question longer than 1024 and the
+            # row reads `failed`, so the question is asked nowhere.
+            limit=WHATSAPP_INTERACTIVE_BODY_LIMIT if buttons else WHATSAPP_TEXT_LIMIT,
+        ),
+        "template": render_template_parameter(text),
+    }
     outcome, record = await asyncio.to_thread(
         _claim, config,
         logical_key=logical_key, user_id=user_id, task_id=task_id,
-        body=body, ignore_opt_out=ignore_opt_out,
+        bodies=bodies, ignore_opt_out=ignore_opt_out,
     )
     if outcome == "settled":
         return record
@@ -602,7 +732,8 @@ async def deliver_whatsapp(
 
     try:
         return await _send_claimed(
-            config, logical_key=logical_key, user_id=user_id, body=body,
+            config, logical_key=logical_key, user_id=user_id,
+            body=bodies[record.send_kind], send_kind=record.send_kind,
             task_id=task_id, buttons=buttons,
             reply_to_message_id=reply_to_message_id, client=client,
         )
@@ -633,6 +764,7 @@ async def _send_claimed(
     logical_key: str,
     user_id: str,
     body: str,
+    send_kind: str,
     task_id: int | None,
     buttons: tuple[tuple[str, str], ...],
     reply_to_message_id: str | None,
@@ -659,10 +791,8 @@ async def _send_claimed(
             )
             await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
             return record
-        request = WhatsAppSendRequest(
-            to=destination, text=body, kind="service",
-            reply_to_message_id=reply_to_message_id, buttons=tuple(buttons),
-        )
+        request = _request(config, destination, body, send_kind, buttons,
+                           reply_to_message_id)
         await asyncio.to_thread(_stamp_attempt, config, logical_key)
         if client is None:
             from .client import make_client  # noqa: PLC0415
@@ -709,6 +839,38 @@ async def _send_claimed(
     return record
 
 
+def _request(
+    config: Config,
+    destination: str,
+    body: str,
+    send_kind: str,
+    buttons: tuple[tuple[str, str], ...],
+    reply_to_message_id: str | None,
+) -> WhatsAppSendRequest:
+    """One Cloud API call described, for whichever kind the gate chose.
+
+    A template carries **neither the buttons nor the reply id**, and both
+    omissions are decisions. An approved template's buttons are Meta account
+    state istota neither creates nor can map onto a confirmation id, so a
+    question sent this way is answered by a typed `YES` or by `!confirm <id>`
+    — which is why the scheduler keeps that sentence inside the smaller of the
+    two budgets. And the message a reply id would point at is by definition
+    more than twenty-four hours old, since a template is only reachable once
+    the window has shut.
+    """
+    if send_kind == "template":
+        template = config.whatsapp.proactive_template
+        return WhatsAppSendRequest(
+            to=destination, text=body, kind="template",
+            template_name=template.name.strip(),
+            template_language=template.language.strip(),
+        )
+    return WhatsAppSendRequest(
+        to=destination, text=body, kind="service",
+        reply_to_message_id=reply_to_message_id, buttons=tuple(buttons),
+    )
+
+
 def current_destination(config: Config, user_id: str) -> str:
     """The user's WhatsApp destination right now, or ``""``.
 
@@ -727,8 +889,100 @@ def current_destination(config: Config, user_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def apply_delivery_event(conn, event: WhatsAppDeliveryEvent):
-    """``(disposition, record, pending_alert)`` for one authenticated status.
+def _observe_pricing(conn, config: Config, row, event: WhatsAppDeliveryEvent):
+    """Store what Meta said this message cost, and trip the circuit if it did.
+
+    Returns the buffered billing alert, or `None`.
+
+    **Read, never derived.** The normalizer takes `pricing.billable` off the
+    payload and refuses to infer it from anything else (PyWa's own
+    `Pricing.from_dict` guesses it from `type == "regular"`), so `None` here
+    means Meta said nothing — which is neither free nor paid, and is stored as
+    NULL rather than resolved to either.
+
+    **A `true` is never downgraded.** Two statuses about one message can
+    disagree, and a row reading `free` beside a circuit the first of them
+    opened would contradict the evidence an operator is being asked to take to
+    Meta billing. Every other field takes the latest non-NULL observation.
+
+    The circuit itself is `free_guard`'s alone: under `allow_paid` the operator
+    has accepted billing and the pricing is recorded as an observation and
+    nothing more.
+    """
+    updates: dict[str, object] = {}
+    if event.billable is not None:
+        updates["billable"] = 1 if (event.billable or row["billable"] == 1) else 0
+    for column, value in (
+        ("pricing_model", event.pricing_model),
+        ("pricing_category", event.pricing_category),
+        ("pricing_type", event.pricing_type),
+    ):
+        if value is not None:
+            updates[column] = value
+    if updates:
+        # The column names are this function's own literals — the keys are set
+        # four lines above from a fixed tuple — so the interpolation carries no
+        # caller value; every observed value is a bound parameter.
+        assignments = ", ".join(f"{column} = ?" for column in updates)
+        conn.execute(
+            f"UPDATE sent_whatsapp SET {assignments}, updated_at = ? WHERE id = ?",
+            (*updates.values(), db.sql_datetime_now(), row["id"]),
+        )
+        logger.info(
+            "whatsapp.delivery.priced message=%s billable=%s category=%s",
+            message_fingerprint(event.message_id), event.billable,
+            event.pricing_category,
+        )
+
+    if not event.billable or config.whatsapp.billing_policy != "free_guard":
+        return None
+    if not db.block_whatsapp_billing(conn, event.message_id):
+        # The circuit was already open. One alert per outage, not one per
+        # status: every later billable message is the same operator decision.
+        return None
+    logger.warning(
+        "whatsapp.billing.blocked message=%s category=%s: every later WhatsApp "
+        "send is refused until `istota whatsapp billing-unblock`",
+        message_fingerprint(event.message_id), event.pricing_category,
+    )
+    return _write_billing_alert(conn, row["user_id"], row["task_id"])
+
+
+def _write_billing_alert(conn, user_id: str, task_id):
+    """The durable row behind an open billable circuit.
+
+    Not `write_delivery_failure`: that one is about a message that reached
+    nobody, and this is the opposite — a message that arrived and was charged
+    for. The alert has to say so, because the charge is already made and no
+    action an operator takes will unmake it; what the circuit buys is that the
+    *next* one is not.
+
+    A fixed dedup key, since the circuit is a singleton and only an operator
+    reopens it. The Meta message id is not in the row at any length: a
+    notification body renders on the web panel and through every alert route,
+    and the id names a private conversation. `istota whatsapp billing-unblock`
+    prints it in full, which is the private operator surface for it.
+    """
+    from ...notification_resolvers import task_alert  # noqa: PLC0415
+
+    return task_alert.write(
+        conn, user_id,
+        dedup_key="whatsapp:billing-blocked",
+        title="WhatsApp billing blocked — Meta reported a billable message",
+        body=(
+            "Meta's delivery callback reported that a WhatsApp message istota "
+            "sent was billable, so every later WhatsApp send is refused. That "
+            "message may already have been charged — the circuit stops the "
+            "next one, not this one. Check the Meta billing page, then run "
+            "`istota whatsapp billing-unblock` or switch "
+            '`[whatsapp] billing_policy` to "allow_paid".'
+        ),
+        params={"task_id": task_id, "status": "billing_blocked"},
+    )
+
+
+def apply_delivery_event(conn, config: Config, event: WhatsAppDeliveryEvent):
+    """``(disposition, record, alerts)`` for one authenticated status.
 
     Monotonic: a status whose rank is no higher than the row's current one is
     stale and changes nothing, which is what makes a `delivered` arriving after
@@ -736,14 +990,20 @@ def apply_delivery_event(conn, event: WhatsAppDeliveryEvent):
     terminal from any non-terminal state, because Meta reporting a failure
     after a `sent` is new information rather than a late duplicate.
 
-    The alert is *returned* rather than pushed: this runs inside the webhook's
+    **Pricing is observed before that ladder and independently of it**, which
+    is the one ordering here that is not obvious. Meta may put the pricing on a
+    `delivered` that arrives after a `read`, or on a status about a row already
+    `failed`; both are correctly refused as state transitions, and reading the
+    pricing only on an applied one would throw the evidence away in exactly the
+    out-of-order case the ladder exists for. A billable `failed` row is the
+    loudest evidence there is — money spent on a message nobody received.
+
+    Alerts are *returned* rather than pushed: this runs inside the webhook's
     open write transaction, and a push from in here would open a second
     connection against the lock this one holds, wait out the full busy timeout
-    and raise into a never-raises contract.
-
-    Pricing is deliberately not read. Stage 4 owns the observation and the
-    circuit it opens, and a half-implementation that stored `billable` without
-    acting on it would look like a working guard.
+    and raise into a never-raises contract. A tuple because one status can owe
+    two — a failure notice and a circuit notice are different things with
+    different dedup keys, and a status can carry both.
     """
     row = conn.execute(
         "SELECT * FROM sent_whatsapp WHERE meta_message_id = ?", (event.message_id,),
@@ -757,15 +1017,18 @@ def apply_delivery_event(conn, event: WhatsAppDeliveryEvent):
             "whatsapp.delivery.unknown_message message=%s status=%s",
             message_fingerprint(event.message_id), event.status,
         )
-        return "delivery_unknown", None, None
+        return "delivery_unknown", None, ()
+
+    billing_alert = _observe_pricing(conn, config, row, event)
+    alerts = () if billing_alert is None else (billing_alert,)
 
     current = row["status"]
     if current in _TERMINAL_FOR_STATUS:
-        return "delivery_duplicate", _record(row), None
+        return "delivery_duplicate", _record(row), alerts
     if event.status != "failed" and (
         _STATUS_RANK.get(event.status, -1) <= _STATUS_RANK.get(current, -1)
     ):
-        return "delivery_stale", _record(row), None
+        return "delivery_stale", _record(row), alerts
 
     now = db.sql_datetime_now()
     conn.execute(
@@ -785,12 +1048,13 @@ def apply_delivery_event(conn, event: WhatsAppDeliveryEvent):
         updated["task_id"], message_fingerprint(event.message_id),
         event.status, event.error_code,
     )
-    pending_alert = None
     if event.status == "failed":
-        pending_alert = _write_failure_alert(
+        failure_alert = _write_failure_alert(
             conn, record, updated["user_id"], updated["task_id"],
         )
-    return "delivery_updated", record, pending_alert
+        if failure_alert is not None:
+            alerts = (*alerts, failure_alert)
+    return "delivery_updated", record, alerts
 
 
 # ---------------------------------------------------------------------------
@@ -806,8 +1070,12 @@ def is_whatsapp_configured(config: Config, user_id: str) -> bool:
     it is shut would make `heartbeat.check_heartbeats` skip the alert outright
     rather than record `window_closed` and say so off-surface. The gates here
     are the ones that will still be true in an hour — the transport, the
-    binding, the opt-out, and the billing circuit, which only an operator
-    clears.
+    binding, the opt-out, the billing circuit, which only an operator clears,
+    and the monthly cap, which only the calendar clears.
+
+    The cap is read *against the template*, which is the one subtlety: on a
+    paid deployment with an approved template a closed window still has a
+    route, so an exhausted service allowance is not the end of the surface.
     """
     from ...config import whatsapp_config_errors
 
@@ -825,6 +1093,10 @@ def is_whatsapp_configured(config: Config, user_id: str) -> bool:
                 and db.whatsapp_billing_block(conn) is not None
             ):
                 return False
+            if not template_available(config) and _service_budget_exhausted(
+                conn, config, quota_month(config)
+            ):
+                return False
     except sqlite3.Error:
         logger.warning("whatsapp.configured.unavailable", exc_info=True)
         return False
@@ -835,12 +1107,15 @@ __all__ = [
     "SERVICE_WINDOW",
     "TEMPLATE_PARAMETER_LIMIT",
     "TRUNCATION_SUFFIX",
+    "WHATSAPP_INTERACTIVE_BODY_LIMIT",
     "WHATSAPP_TEXT_LIMIT",
     "apply_delivery_event",
     "current_destination",
     "deliver_whatsapp",
     "is_whatsapp_configured",
+    "quota_month",
     "render_template_parameter",
     "render_whatsapp",
     "service_window_open",
+    "template_available",
 ]

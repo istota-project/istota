@@ -21,13 +21,19 @@ import asyncio
 import sqlite3
 import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from istota import db, notifications, surfaces
-from istota.config import Config, UserConfig, WhatsAppConfig
+from istota.config import (
+    Config,
+    UserConfig,
+    WhatsAppConfig,
+    WhatsAppTemplateConfig,
+)
 from istota.transport import Destination, make_registry
 from istota.transport.routing import (
     origin_descriptor,
@@ -47,14 +53,18 @@ from istota.transport.whatsapp._types import (
 )
 from istota.transport.whatsapp.outbound import (
     SERVICE_WINDOW,
+    _attempt_limit,
     TEMPLATE_PARAMETER_LIMIT,
+    WHATSAPP_INTERACTIVE_BODY_LIMIT,
     WHATSAPP_TEXT_LIMIT,
     apply_delivery_event,
     deliver_whatsapp,
     is_whatsapp_configured,
+    quota_month,
     render_template_parameter,
     render_whatsapp,
     service_window_open,
+    template_available,
 )
 
 WABA_ID = "123456789012345"
@@ -70,6 +80,7 @@ TRUNCATION_SUFFIX = "\n\n[Reply shortened. Send a narrower follow-up.]"
 
 
 def _config(tmp_path, **overrides) -> Config:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "istota.db"
     db.init_db(path)
     fields = dict(
@@ -124,14 +135,22 @@ class _FakeClient:
     def __init__(self, outcome=None, *, on_send=None):
         self.requests: list[WhatsAppSendRequest] = []
         self.closed = 0
-        self._outcome = outcome or WhatsAppSendResult("wamid.sent.1")
+        self._outcome = outcome
         self._on_send = on_send
 
     async def send(self, request: WhatsAppSendRequest):
         self.requests.append(request)
         if self._on_send is not None:
-            return await self._on_send(request) or self._outcome
-        return self._outcome
+            return await self._on_send(request) or self._default()
+        return self._outcome if self._outcome is not None else self._default()
+
+    def _default(self):
+        # A fresh id per call, because `sent_whatsapp.meta_message_id` is
+        # unique: a fake handing back one id for several sends settles every
+        # send after the first as `unknown`, which reads as a product defect
+        # in any case that sends more than once. The first call still returns
+        # `wamid.sent.1`, which is what the single-send cases expect.
+        return WhatsAppSendResult(f"wamid.sent.{len(self.requests)}")
 
     async def aclose(self) -> None:
         self.closed += 1
@@ -698,27 +717,32 @@ class TestTheSend:
         assert titles == ["WhatsApp delivery blocked by a closed service window "
                           "— a notification"]
 
-    async def test_a_configured_template_does_not_reopen_the_window_yet(
+    async def test_a_half_configured_template_never_becomes_a_free_form_send(
         self, tmp_path,
     ):
-        # The paid template path is stage four's. Until it lands, a closed
-        # window blocks in `allow_paid` too — visibly, as `window_closed`, and
-        # never by falling through to a free-form send Meta would either refuse
-        # or price as a template. `free_guard` cannot reach this case at all:
-        # a template under that policy fails the config load, which
-        # `tests/test_whatsapp_core.py` holds.
+        """An unusable template is refused, never quietly downgraded.
+
+        A closed window has exactly two answers: the configured template, or a
+        recorded refusal. What it must never do is fall through to a free-form
+        service message, which Meta would either reject or price as a template
+        on a deployment that asked for neither. Here the template is enabled
+        with no language, so it is refused at the config rung as
+        `unconfigured` — a state an operator can act on, and no send.
+        """
         config = _config(tmp_path, billing_policy="allow_paid")
         config.whatsapp.proactive_template.enabled = True
         config.whatsapp.proactive_template.name = "istota_result"
+        config.whatsapp.proactive_template.language = ""
         _bind(config, window=timedelta(hours=30))
         client = _FakeClient()
 
+        assert template_available(config) is False
         record = await deliver_whatsapp(
             config, logical_key="task-result:12", user_id="alice",
             text="done", client=client,
         )
 
-        assert record.status == "window_closed"
+        assert record.status == "unconfigured"
         assert client.requests == []
 
     async def test_an_open_billing_circuit_blocks_every_send(self, tmp_path):
@@ -850,8 +874,8 @@ class TestDeliveryStates:
         seen = []
         with db.get_db(config.db_path) as conn:
             for status in ("sent", "delivered", "read", "delivered", "sent"):
-                disposition, record, _alert = apply_delivery_event(
-                    conn, _delivery(status=status),
+                disposition, record, _raised = apply_delivery_event(
+                    conn, config, _delivery(status=status),
                 )
                 seen.append((disposition, record.status))
 
@@ -868,9 +892,9 @@ class TestDeliveryStates:
         await _accepted_row(config)
 
         with db.get_db(config.db_path) as conn:
-            apply_delivery_event(conn, _delivery(status="read"))
-            disposition, record, _alert = apply_delivery_event(
-                conn, _delivery(status="delivered"),
+            apply_delivery_event(conn, config, _delivery(status="read"))
+            disposition, record, _raised = apply_delivery_event(
+                conn, config, _delivery(status="delivered"),
             )
 
         assert disposition == "delivery_stale"
@@ -881,30 +905,30 @@ class TestDeliveryStates:
         await _accepted_row(config)
 
         with db.get_db(config.db_path) as conn:
-            apply_delivery_event(conn, _delivery(status="sent"))
-            failed, record, alert = apply_delivery_event(
-                conn, _delivery(status="failed", error_code="131026"),
+            apply_delivery_event(conn, config, _delivery(status="sent"))
+            failed, record, alerts = apply_delivery_event(
+                conn, config, _delivery(status="failed", error_code="131026"),
             )
-            after, later, second_alert = apply_delivery_event(
-                conn, _delivery(status="delivered"),
+            after, later, second_alerts = apply_delivery_event(
+                conn, config, _delivery(status="delivered"),
             )
 
         assert failed == "delivery_updated"
         assert record.status == "failed" and record.error_code == "131026"
-        assert alert is not None
+        assert len(alerts) == 1
         assert after == "delivery_duplicate" and later.status == "failed"
-        assert second_alert is None
+        assert second_alerts == ()
 
     async def test_an_unknown_message_id_is_acknowledged(self, tmp_path, caplog):
         config = _config(tmp_path)
         _bind(config)
 
         with caplog.at_level("WARNING"), db.get_db(config.db_path) as conn:
-            disposition, record, alert = apply_delivery_event(
-                conn, _delivery(message_id="wamid.nothing"),
+            disposition, record, alerts = apply_delivery_event(
+                conn, config, _delivery(message_id="wamid.nothing"),
             )
 
-        assert (disposition, record, alert) == ("delivery_unknown", None, None)
+        assert (disposition, record, alerts) == ("delivery_unknown", None, ())
         assert "wamid.nothing" not in caplog.text
 
     async def test_a_status_never_reaches_a_local_terminal_row(self, tmp_path):
@@ -919,8 +943,8 @@ class TestDeliveryStates:
                 "UPDATE sent_whatsapp SET meta_message_id = 'wamid.abc' "
                 "WHERE logical_key = 'task-result:1'"
             )
-            disposition, record, _alert = apply_delivery_event(
-                conn, _delivery(status="delivered"),
+            disposition, record, _raised = apply_delivery_event(
+                conn, config, _delivery(status="delivered"),
             )
 
         assert disposition == "delivery_duplicate"
@@ -938,21 +962,671 @@ class TestDeliveryStates:
         assert [r.disposition for r in results] == ["delivery_updated"]
         assert _rows(config, "task-result:1")[0]["status"] == "sent"
 
-    async def test_stage_three_observes_no_pricing(self, tmp_path):
-        # Pricing observation and the billable circuit are stage four's. This
-        # states what stage three leaves untouched so the later change is a
-        # visible diff rather than an accident.
+    async def test_a_status_carrying_no_pricing_leaves_the_columns_null(
+        self, tmp_path,
+    ):
+        # "Pricing data is absent: retain NULL; do not infer free or paid."
+        # Meta puts pricing on some statuses and not others, and a default of
+        # either value would be istota inventing an observation.
         config = _config(tmp_path)
         await _accepted_row(config)
 
         with db.get_db(config.db_path) as conn:
-            apply_delivery_event(
-                conn, _delivery(status="sent", billable=True, pricing_category="utility"),
-            )
+            apply_delivery_event(conn, config, _delivery(status="sent"))
 
         row = _rows(config, "task-result:1")[0]
         assert row["billable"] is None
+        assert row["pricing_model"] is None
         assert row["pricing_category"] is None
+        assert row["pricing_type"] is None
+
+
+# ---------------------------------------------------------------------------
+# The monthly service-attempt reservation
+# ---------------------------------------------------------------------------
+
+
+def _claimed_rows(config, month, kind="service"):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM sent_whatsapp WHERE send_kind = ? "
+            "AND quota_month = ? AND claimed_at IS NOT NULL",
+            (kind, month),
+        ).fetchone()[0]
+
+
+class TestTheQuotaMonth:
+    def test_the_month_is_computed_in_the_waba_timezone(self, tmp_path):
+        """The whole reason the timezone is configured rather than assumed.
+
+        Meta's allowance is a calendar month on the business account, and a
+        deployment whose WABA sits at UTC+14 rolls over fourteen hours before
+        UTC does. Counting in the daemon's own zone would hand back a fresh
+        allowance early — or, at UTC-11, keep spending last month's.
+        """
+        instant = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+
+        assert quota_month(_config(tmp_path), now=instant) == "2026-09"
+        ahead = _config(tmp_path / "a", business_timezone="Pacific/Kiritimati")
+        assert quota_month(ahead, now=instant) == "2026-10"
+
+    def test_a_zone_behind_utc_keeps_the_earlier_month(self, tmp_path):
+        instant = datetime(2026, 10, 1, 4, 0, tzinfo=timezone.utc)
+        behind = _config(tmp_path, business_timezone="Pacific/Midway")
+
+        assert quota_month(behind, now=instant) == "2026-09"
+        assert quota_month(_config(tmp_path / "b"), now=instant) == "2026-10"
+
+    def test_an_unresolvable_zone_falls_back_to_utc_without_raising(self, tmp_path):
+        # `load_config` refuses an invalid zone, so this is the shape where the
+        # tzdata a running daemon can reach differs from the one that validated
+        # the file. Raising here would escape the claim transaction.
+        config = _config(tmp_path)
+        config.whatsapp.business_timezone = "Nowhere/Atlantis"
+        instant = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+
+        assert quota_month(config, now=instant) == "2026-09"
+
+    async def test_a_claim_stamps_the_month_on_the_row(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config)
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=_FakeClient(),
+        )
+
+        assert _rows(config, "task-result:1")[0]["quota_month"] == quota_month(config)
+
+
+class TestTheMonthlyAttemptCap:
+    async def test_the_cap_blocks_the_next_claim_with_no_api_call(self, tmp_path):
+        config = _config(tmp_path, monthly_service_attempt_limit=2)
+        _bind(config)
+        client = _FakeClient()
+
+        for index in range(2):
+            await deliver_whatsapp(
+                config, logical_key=f"task-result:{index}", user_id="alice",
+                text="done", client=client,
+            )
+        blocked = await deliver_whatsapp(
+            config, logical_key="task-result:2", user_id="alice", text="done",
+            client=client,
+        )
+
+        assert blocked.status == "budget_exhausted"
+        assert len(client.requests) == 2
+        row = _rows(config, "task-result:2")[0]
+        # Blocked, so never claimed — and therefore never counted against the
+        # month it was refused in.
+        assert row["claimed_at"] is None
+        assert _claimed_rows(config, quota_month(config)) == 2
+
+    async def test_a_blocked_claim_alerts_off_whatsapp(self, tmp_path):
+        config = _config(tmp_path, monthly_service_attempt_limit=1)
+        _bind(config)
+        client = _FakeClient()
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="a",
+            client=client,
+        )
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:2", user_id="alice", text="b",
+            client=client,
+        )
+
+        titles = [row["title"] for row in _alerts(config)]
+        assert any("monthly attempt cap" in title for title in titles)
+
+    @pytest.mark.parametrize(
+        "outcome, expected",
+        [
+            (WhatsAppSendFailure(True, "131047", "refused"), "failed"),
+            (WhatsAppSendFailure(False, None, "unknown"), "unknown"),
+        ],
+        ids=["failed", "unknown"],
+    )
+    async def test_a_failed_or_unknown_attempt_still_consumes_the_cap(
+        self, tmp_path, outcome, expected,
+    ):
+        """The bound is on *attempts*, and reclaiming one would weaken it.
+
+        A failed send may still have been counted by Meta, and an ambiguous one
+        may have been delivered — that is what `unknown` means. Handing either
+        slot back turns a conservative cap into a cap that overshoots by the
+        number of things that went wrong, which is exactly the population a
+        deployment in trouble has most of.
+        """
+        config = _config(tmp_path, monthly_service_attempt_limit=1)
+        _bind(config)
+
+        first = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="a",
+            client=_FakeClient(outcome),
+        )
+        second = await deliver_whatsapp(
+            config, logical_key="task-result:2", user_id="alice", text="b",
+            client=_FakeClient(),
+        )
+
+        assert first.status == expected
+        assert second.status == "budget_exhausted"
+
+    async def test_a_locally_blocked_row_consumes_nothing(self, tmp_path):
+        # A closed window, an opt-out or an open circuit never reached Meta and
+        # never could have been billed, so they must not spend the allowance.
+        config = _config(tmp_path, monthly_service_attempt_limit=1)
+        _bind(config, window=timedelta(hours=30))
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="a",
+            client=_FakeClient(),
+        )
+        _bind(config, window=timedelta())
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:2", user_id="alice", text="b",
+            client=_FakeClient(),
+        )
+
+        assert record.status == "accepted"
+
+    async def test_last_months_attempts_do_not_consume_this_month(self, tmp_path):
+        config = _config(tmp_path, monthly_service_attempt_limit=1)
+        _bind(config)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO sent_whatsapp (logical_key, user_id, send_kind, "
+                "status, body_chars, body_sha256, quota_month, claimed_at, "
+                "attempted_at, created_at, updated_at) VALUES "
+                "('task-result:old', 'alice', 'service', 'delivered', 1, 'x', "
+                "'1999-01', datetime('now'), datetime('now'), datetime('now'), "
+                "datetime('now'))"
+            )
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="a",
+            client=_FakeClient(),
+        )
+
+        assert record.status == "accepted"
+
+    def test_the_final_slot_goes_to_exactly_one_of_two_concurrent_claims(
+        self, tmp_path,
+    ):
+        """The reservation is the claim, taken under one immediate transaction.
+
+        Two workers reading the count and then writing their own row would both
+        see the last free slot. `BEGIN IMMEDIATE` around the count and the
+        insert together is what makes that impossible, and this drives two real
+        threads at it rather than asserting the SQL looks right.
+        """
+        config = _config(tmp_path, monthly_service_attempt_limit=1)
+        _bind(config)
+        barrier = threading.Barrier(2)
+        clients = [_FakeClient(), _FakeClient()]
+
+        def attempt(index):
+            barrier.wait(5)
+            return asyncio.run(deliver_whatsapp(
+                config, logical_key=f"task-result:{index}", user_id="alice",
+                text="done", client=clients[index],
+            ))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            records = list(pool.map(attempt, range(2)))
+
+        assert sorted(r.status for r in records) == ["accepted", "budget_exhausted"]
+        assert sum(len(c.requests) for c in clients) == 1
+        assert _claimed_rows(config, quota_month(config)) == 1
+
+    async def test_paid_mode_with_a_zero_limit_is_unlimited(self, tmp_path):
+        config = _config(
+            tmp_path, billing_policy="allow_paid", monthly_service_attempt_limit=0,
+        )
+        _bind(config)
+        client = _FakeClient()
+
+        records = [
+            await deliver_whatsapp(
+                config, logical_key=f"task-result:{index}", user_id="alice",
+                text="done", client=client,
+            )
+            for index in range(4)
+        ]
+
+        assert {r.status for r in records} == {"accepted"}
+        assert len(client.requests) == 4
+
+    async def test_paid_mode_with_a_positive_budget_still_caps(self, tmp_path):
+        config = _config(
+            tmp_path, billing_policy="allow_paid", monthly_service_attempt_limit=1,
+        )
+        _bind(config)
+        client = _FakeClient()
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="a",
+            client=client,
+        )
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:2", user_id="alice", text="b",
+            client=client,
+        )
+
+        assert record.status == "budget_exhausted"
+
+    async def test_a_zero_limit_under_free_guard_is_never_read_as_unlimited(
+        self, tmp_path,
+    ):
+        """`0` means opposite things under the two policies.
+
+        Driven at `_attempt_limit` rather than end to end, because the whole
+        send is refused a rung earlier: a non-positive limit under
+        `free_guard` is a config error, so `_gate` answers `unconfigured` and
+        nothing is sent at all. That is the safe direction and is asserted
+        here too — but it also means the clamp below is only ever reached by a
+        caller that skipped the config check, which is exactly the kind of
+        change this states the rule against.
+        """
+        config = _config(tmp_path, monthly_service_attempt_limit=0)
+        _bind(config)
+        client = _FakeClient()
+
+        assert _attempt_limit(config) == 1  # the clamped floor, not unlimited
+        paid = _config(
+            tmp_path / "p", billing_policy="allow_paid",
+            monthly_service_attempt_limit=0,
+        )
+        assert _attempt_limit(paid) == 0  # unlimited, and only here
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="done",
+            client=client,
+        )
+        assert record.status == "unconfigured"
+        assert client.requests == []
+
+
+# ---------------------------------------------------------------------------
+# Pricing observation and the billable circuit
+# ---------------------------------------------------------------------------
+
+
+def _billable(config, message_id="wamid.abc", status="sent", **overrides):
+    with db.get_db(config.db_path) as conn:
+        return apply_delivery_event(
+            conn, config,
+            _delivery(message_id=message_id, status=status, billable=True, **overrides),
+        )
+
+
+class TestPricingObservation:
+    async def test_every_pricing_field_is_stored_as_observed(self, tmp_path):
+        config = _config(tmp_path, billing_policy="allow_paid")
+        await _accepted_row(config)
+
+        with db.get_db(config.db_path) as conn:
+            apply_delivery_event(conn, config, _delivery(
+                status="sent", billable=True, pricing_model="PMP",
+                pricing_category="service", pricing_type="regular",
+            ))
+
+        row = _rows(config, "task-result:1")[0]
+        assert row["billable"] == 1
+        assert row["pricing_model"] == "PMP"
+        assert row["pricing_category"] == "service"
+        assert row["pricing_type"] == "regular"
+
+    async def test_a_later_status_without_pricing_does_not_erase_it(self, tmp_path):
+        config = _config(tmp_path, billing_policy="allow_paid")
+        await _accepted_row(config)
+
+        with db.get_db(config.db_path) as conn:
+            apply_delivery_event(conn, config, _delivery(
+                status="sent", billable=False, pricing_category="service",
+            ))
+            apply_delivery_event(conn, config, _delivery(status="delivered"))
+
+        row = _rows(config, "task-result:1")[0]
+        assert row["billable"] == 0
+        assert row["pricing_category"] == "service"
+
+    async def test_a_billable_observation_is_never_downgraded(self, tmp_path):
+        # Two statuses disagreeing must not leave the row reading `free` while
+        # the circuit the first one opened is still shut.
+        config = _config(tmp_path)
+        await _accepted_row(config)
+
+        with db.get_db(config.db_path) as conn:
+            apply_delivery_event(conn, config, _delivery(status="sent", billable=True))
+            apply_delivery_event(
+                conn, config, _delivery(status="delivered", billable=False),
+            )
+
+        assert _rows(config, "task-result:1")[0]["billable"] == 1
+
+
+class TestTheBillableCircuit:
+    async def test_the_first_billable_status_opens_the_circuit_and_alerts(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+        await _accepted_row(config)
+
+        disposition, _record, alerts = _billable(config)
+
+        assert disposition == "delivery_updated"
+        assert len(alerts) == 1
+        with db.get_db(config.db_path) as conn:
+            block = db.whatsapp_billing_block(conn)
+        assert block is not None and block.billing_message_id == "wamid.abc"
+        titles = [row["title"] for row in _alerts(config)]
+        assert any("billable" in title.lower() for title in titles)
+
+    async def test_the_alert_names_no_meta_message_id_in_full(self, tmp_path):
+        config = _config(tmp_path)
+        await _accepted_row(config)
+
+        _billable(config)
+
+        with db.get_db(config.db_path) as conn:
+            rows = conn.execute(
+                "SELECT title, body, dedup_key FROM notifications"
+            ).fetchall()
+        written = " ".join(str(value) for row in rows for value in tuple(row))
+        assert "wamid.abc" not in written
+
+    async def test_a_later_send_is_billing_blocked_and_calls_nobody(self, tmp_path):
+        config = _config(tmp_path)
+        await _accepted_row(config)
+        _billable(config)
+        client = _FakeClient()
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:2", user_id="alice", text="next",
+            client=client,
+        )
+
+        assert record.status == "billing_blocked"
+        assert client.requests == []
+
+    async def test_the_circuit_alerts_once(self, tmp_path):
+        config = _config(tmp_path)
+        await _accepted_row(config)
+
+        first = _billable(config)
+        second = _billable(config, status="delivered")
+
+        assert len(first[2]) == 1
+        assert second[2] == ()
+
+    async def test_a_stale_status_still_carries_its_pricing_and_trips(
+        self, tmp_path,
+    ):
+        """The observation is independent of the state machine, deliberately.
+
+        Meta may put the pricing on a `delivered` that arrives after a `read`,
+        which the ladder correctly refuses to apply. Reading the pricing only
+        on an applied transition would throw away the evidence the circuit
+        exists to act on, in exactly the out-of-order case the ladder is there
+        for.
+        """
+        config = _config(tmp_path)
+        await _accepted_row(config)
+        with db.get_db(config.db_path) as conn:
+            apply_delivery_event(conn, config, _delivery(status="read"))
+
+        disposition, _record, alerts = _billable(config, status="delivered")
+
+        assert disposition == "delivery_stale"
+        assert len(alerts) == 1
+        assert _rows(config, "task-result:1")[0]["billable"] == 1
+
+    async def test_a_terminal_row_still_reports_a_billable_status(self, tmp_path):
+        # A `failed` row Meta nonetheless priced is the loudest evidence there
+        # is: money spent on a message nobody received.
+        config = _config(tmp_path)
+        await _accepted_row(config)
+        with db.get_db(config.db_path) as conn:
+            apply_delivery_event(conn, config, _delivery(status="failed"))
+
+        disposition, _record, alerts = _billable(config, status="delivered")
+
+        assert disposition == "delivery_duplicate"
+        assert len(alerts) == 1
+        with db.get_db(config.db_path) as conn:
+            assert db.whatsapp_billing_block(conn) is not None
+
+    async def test_billable_false_trips_nothing(self, tmp_path):
+        config = _config(tmp_path)
+        await _accepted_row(config)
+
+        with db.get_db(config.db_path) as conn:
+            _disposition, _record, alerts = apply_delivery_event(
+                conn, config, _delivery(status="sent", billable=False),
+            )
+            assert db.whatsapp_billing_block(conn) is None
+        assert alerts == ()
+
+    async def test_paid_mode_records_the_pricing_and_opens_no_circuit(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path, billing_policy="allow_paid")
+        await _accepted_row(config)
+
+        _disposition, _record, alerts = _billable(config)
+
+        assert alerts == ()
+        with db.get_db(config.db_path) as conn:
+            assert db.whatsapp_billing_block(conn) is None
+        assert _rows(config, "task-result:1")[0]["billable"] == 1
+
+    async def test_clearing_the_circuit_lets_a_send_through_again(self, tmp_path):
+        config = _config(tmp_path)
+        await _accepted_row(config)
+        _billable(config)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.clear_whatsapp_billing_block(conn) is True
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:2", user_id="alice", text="next",
+            client=_FakeClient(),
+        )
+
+        assert record.status == "accepted"
+
+    async def test_the_webhook_batch_pushes_the_billing_alert_off_whatsapp(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota.transport.whatsapp import webhook
+
+        config = _config(tmp_path)
+        config.users["alice"].routing = {"alert": "whatsapp,ntfy"}
+        await _accepted_row(config)
+        sent: list[tuple] = []
+        monkeypatch.setattr(
+            notifications, "send_notification",
+            lambda cfg, uid, text, **kw: sent.append((uid, kw.get("surface"))) or True,
+        )
+
+        with db.get_db(config.db_path) as conn:
+            results = webhook.handle_whatsapp_batch(
+                conn, config,
+                [_delivery(status="sent", billable=True)],
+            )
+        webhook.deliver_pending_alerts(config, results)
+
+        assert sent and all("whatsapp" not in surface for _uid, surface in sent)
+
+
+# ---------------------------------------------------------------------------
+# The approved utility template
+# ---------------------------------------------------------------------------
+
+
+def _paid_template(tmp_path, **overrides):
+    fields = dict(
+        billing_policy="allow_paid",
+        proactive_template=WhatsAppTemplateConfig(
+            enabled=True, name="istota_result", language="en_US",
+        ),
+    )
+    fields.update(overrides)
+    return _config(tmp_path, **fields)
+
+
+class TestTheTemplatePath:
+    async def test_free_guard_never_sends_a_template(self, tmp_path):
+        """The templates-disabled failure, held in two independent places.
+
+        `load_config` refuses `proactive_template.enabled` under `free_guard`,
+        so a file cannot express this — and a single validator standing
+        between a free-biased deployment and a paid message is one place for
+        the rule to be edited out of. `template_available` re-asserts the
+        policy at the gate, and the whole config reads as invalid besides, so
+        the send is refused twice over and reaches nobody either way.
+        """
+        config = _config(
+            tmp_path,
+            proactive_template=WhatsAppTemplateConfig(
+                enabled=True, name="istota_result", language="en_US",
+            ),
+        )
+        _bind(config, window=timedelta(hours=30))
+        client = _FakeClient()
+
+        assert template_available(config) is False
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="late",
+            client=client,
+        )
+
+        # `unconfigured` rather than `window_closed`: the invalid combination
+        # is caught by the gate's first rung, one above the window.
+        assert record.status == "unconfigured"
+        assert client.requests == []
+
+    async def test_paid_mode_without_a_template_still_records_window_closed(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path, billing_policy="allow_paid")
+        _bind(config, window=timedelta(hours=30))
+        client = _FakeClient()
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="late",
+            client=client,
+        )
+
+        assert record.status == "window_closed"
+        assert client.requests == []
+
+    async def test_a_closed_window_with_a_paid_template_sends_one(self, tmp_path):
+        config = _paid_template(tmp_path)
+        _bind(config, window=timedelta(hours=30))
+        client = _FakeClient()
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice",
+            text="the late answer", client=client,
+        )
+
+        assert record.status == "accepted"
+        assert record.send_kind == "template"
+        assert len(client.requests) == 1
+        request = client.requests[0]
+        assert request.kind == "template"
+        assert request.template_name == "istota_result"
+        assert request.template_language == "en_US"
+        assert request.text == "the late answer"
+        assert _rows(config, "task-result:1")[0]["send_kind"] == "template"
+
+    async def test_the_template_parameter_is_flattened_and_capped(self, tmp_path):
+        config = _paid_template(tmp_path)
+        _bind(config, window=timedelta(hours=30))
+        client = _FakeClient()
+
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice",
+            text="line one\n\nline two " + "x" * 2000, client=client,
+        )
+
+        body = client.requests[0].text
+        assert "\n" not in body and "\t" not in body
+        assert len(body) <= TEMPLATE_PARAMETER_LIMIT
+        assert _rows(config, "task-result:1")[0]["body_chars"] == len(body)
+
+    async def test_a_template_carries_no_quick_reply_buttons(self, tmp_path):
+        # An approved template's buttons are Meta account state istota neither
+        # creates nor can map to a confirmation id, so the question travels as
+        # text and is answered by a typed YES or by `!confirm <id>`.
+        config = _paid_template(tmp_path)
+        _bind(config, window=timedelta(hours=30))
+        client = _FakeClient()
+
+        await deliver_whatsapp(
+            config, logical_key="confirmation:1", user_id="alice",
+            text="Proceed? Task #1. Reply YES or NO.", client=client,
+            buttons=(("confirm:1:yes", "Yes"), ("confirm:1:no", "No")),
+        )
+
+        assert client.requests[0].buttons == ()
+
+    async def test_an_open_window_still_sends_a_service_message_in_paid_mode(
+        self, tmp_path,
+    ):
+        config = _paid_template(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="hi",
+            client=client,
+        )
+
+        assert record.send_kind == "service"
+        assert client.requests[0].kind == "service"
+
+    async def test_a_template_attempt_does_not_consume_the_service_cap(
+        self, tmp_path,
+    ):
+        """The cap is named for service attempts and counts only those.
+
+        Stated as a test rather than left implicit, because it is the one place
+        a reader might expect the number to bound *every* paid message. It does
+        not: `allow_paid` is the operator's explicit acceptance of billing, and
+        a template is only reachable there.
+        """
+        config = _paid_template(tmp_path, monthly_service_attempt_limit=1)
+        _bind(config, window=timedelta(hours=30))
+        client = _FakeClient()
+
+        for index in range(3):
+            record = await deliver_whatsapp(
+                config, logical_key=f"task-result:{index}", user_id="alice",
+                text="late", client=client,
+            )
+            assert record.status == "accepted"
+
+        assert _claimed_rows(config, quota_month(config), kind="template") == 3
+        assert _claimed_rows(config, quota_month(config)) == 0
+
+    async def test_an_opt_out_outranks_the_template(self, tmp_path):
+        config = _paid_template(tmp_path)
+        _bind(config, window=timedelta(hours=30))
+        with db.get_db(config.db_path) as conn:
+            db.set_whatsapp_opt_out(conn, "alice", True)
+        client = _FakeClient()
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="late",
+            client=client,
+        )
+
+        assert record.status == "opted_out"
+        assert client.requests == []
 
 
 # ---------------------------------------------------------------------------
@@ -1079,6 +1753,31 @@ class TestConfiguredProbe:
         # `heartbeat` skip the alert entirely.
         config = _config(tmp_path)
         _bind(config, window=timedelta(hours=30))
+
+        assert is_whatsapp_configured(config, "alice") is True
+
+    async def test_an_exhausted_cap_makes_the_user_unconfigured(self, tmp_path):
+        # Unlike the window, the cap does not reopen on its own — the month has
+        # to turn — so a route that would only ever record `budget_exhausted`
+        # is not a route.
+        config = _config(tmp_path, monthly_service_attempt_limit=1)
+        _bind(config)
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="a",
+            client=_FakeClient(),
+        )
+
+        assert is_whatsapp_configured(config, "alice") is False
+
+    async def test_an_exhausted_cap_with_a_paid_template_is_still_configured(
+        self, tmp_path,
+    ):
+        config = _paid_template(tmp_path, monthly_service_attempt_limit=1)
+        _bind(config)
+        await deliver_whatsapp(
+            config, logical_key="task-result:1", user_id="alice", text="a",
+            client=_FakeClient(),
+        )
 
         assert is_whatsapp_configured(config, "alice") is True
 
@@ -1272,6 +1971,35 @@ class TestSchedulerDelivery:
     returns a message id WhatsApp has none of and would discard the record the
     owed-confirmation arm reads.
     """
+
+    def test_a_confirmation_is_sized_for_whichever_send_may_carry_it(
+        self, tmp_path,
+    ):
+        """The question is sized before anybody knows which object carries it.
+
+        A confirmation prompt is trimmed in the scheduler so the trailing
+        `Task #N. Reply YES or NO.` survives — that sentence is the address
+        `!confirm <id>` and a typed YES are answered at. With a paid template
+        configured the same body may go out as a 900-character template
+        parameter instead of a 1,024-character interactive body, and the
+        window is not known here, so the smaller budget is the only one that
+        cannot lose the sentence.
+        """
+        from istota.scheduler import _whatsapp_confirmation_body
+
+        long_answer = "w " * 1200
+        plain = _whatsapp_confirmation_body(_config(tmp_path), long_answer, 7)
+        templated = _whatsapp_confirmation_body(
+            _paid_template(tmp_path / "t"), long_answer, 7,
+        )
+
+        assert plain.endswith("Task #7. Reply YES or NO.")
+        assert templated.endswith("Task #7. Reply YES or NO.")
+        assert len(plain) <= WHATSAPP_INTERACTIVE_BODY_LIMIT
+        assert len(templated) <= TEMPLATE_PARAMETER_LIMIT
+        assert render_template_parameter(templated).endswith(
+            "Task #7. Reply YES or NO."
+        )
 
     @staticmethod
     def _task(config, monkeypatch, client, answer):

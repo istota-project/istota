@@ -152,11 +152,18 @@ class _FakePyWa:
 
     def __init__(self, result=None, raises=None):
         self.calls: list[dict] = []
+        self.template_calls: list[dict] = []
         self._result = result
         self._raises = raises
 
     async def send_message(self, **kwargs):
         self.calls.append(kwargs)
+        if self._raises is not None:
+            raise self._raises
+        return self._result
+
+    async def send_template(self, **kwargs):
+        self.template_calls.append(kwargs)
         if self._raises is not None:
             raise self._raises
         return self._result
@@ -351,13 +358,58 @@ class TestTheSendClassification:
 
         assert outcome.definite is False
 
-    async def test_a_template_request_is_refused_definitely_and_never_sent(
+    async def test_a_template_send_names_the_configured_template(
         self, monkeypatch, adapters,
     ):
-        # The paid template path is stage four's. `definite` because nothing
-        # opened a socket: `unknown` means "may have reached Meta", and spending
-        # it on a code path that never called would make the one state an
-        # operator cannot resolve mean two different things.
+        from pywa.types.templates import TemplateLanguage
+
+        from istota.transport.whatsapp._types import (
+            WhatsAppSendRequest, WhatsAppSendResult,
+        )
+
+        fake = _FakePyWa(result=_Sent("wamid.tmpl"))
+        adapter = _adapter(monkeypatch, fake, adapters)
+
+        outcome = await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="the late answer", kind="template",
+            template_name="istota_result", template_language="en_US",
+        ))
+
+        assert outcome == WhatsAppSendResult("wamid.tmpl")
+        assert fake.calls == []
+        call = fake.template_calls[0]
+        assert call["to"] == "US.1"
+        assert call["name"] == "istota_result"
+        assert call["language"] is TemplateLanguage.ENGLISH_US
+        assert call["sender"] == "223456789012345"
+        assert [param.to_dict() for param in call["params"]] == [
+            {
+                "type": "BODY",
+                "parameters": [{"type": "text", "text": "the late answer"}],
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        "name, language",
+        [
+            ("", "en_US"),
+            ("istota_result", ""),
+            ("istota_result", "zz_ZZ"),
+        ],
+        ids=["no-name", "no-language", "unknown-language"],
+    )
+    async def test_an_unusable_template_is_definite_and_never_calls(
+        self, monkeypatch, adapters, name, language,
+    ):
+        """`definite`, because nothing opened a socket.
+
+        The unknown-language case is the one worth having: PyWa's
+        `TemplateLanguage` has no `UNKNOWN` member, so its `_missing_` hook
+        raises `TypeError` rather than returning one — which the generic
+        handler would classify as *ambiguous*, i.e. "may have reached Meta".
+        Resolving the code before the call is what keeps a local
+        misconfiguration out of the one state an operator cannot resolve.
+        """
         from istota.transport.whatsapp._types import WhatsAppSendRequest
 
         fake = _FakePyWa(result=_Sent("wamid.never"))
@@ -365,11 +417,12 @@ class TestTheSendClassification:
 
         outcome = await adapter.send(WhatsAppSendRequest(
             to="US.1", text="hi", kind="template",
-            template_name="istota_result", template_language="en_US",
+            template_name=name, template_language=language,
         ))
 
         assert outcome.definite is True
-        assert fake.calls == []
+        assert fake.calls == [] and fake.template_calls == []
+        assert "zz_ZZ" not in outcome.safe_reason
 
     @pytest.mark.parametrize("status", [400, 500, None])
     async def test_no_failure_reason_carries_provider_text(self, monkeypatch, adapters, status):

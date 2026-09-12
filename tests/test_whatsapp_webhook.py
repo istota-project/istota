@@ -1059,7 +1059,7 @@ class TestIdentityAndEnrollment:
             messages=[_text_message(message_id="wamid.again", sender=OTHER_BSUID)],
         )))
 
-        assert first[0].pending_alert is not None
+        assert len(first[0].pending_alerts) == 1
         with db.get_db(config.db_path) as conn:
             rows = conn.execute(
                 "SELECT source, dedup_key, title, body FROM notifications"
@@ -1194,7 +1194,7 @@ class TestIdentityAndEnrollment:
         first = _handle(config, _text_payload(message_id="wamid.one"))
         _handle(config, _text_payload(message_id="wamid.two"))
 
-        assert first[0].pending_alert is not None
+        assert len(first[0].pending_alerts) == 1
         with db.get_db(config.db_path) as conn:
             rows = conn.execute(
                 "SELECT dedup_key, title, body FROM notifications"

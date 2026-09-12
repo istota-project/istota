@@ -129,7 +129,10 @@ class WhatsAppEventResult:
     response_text: str | None = None
     response_logical_key: str | None = None
     command_text: str | None = None
-    pending_alert: object | None = None
+    # A tuple rather than one slot: a single status callback can owe both an
+    # undelivered-message notice and a billing-circuit notice, which are
+    # different things under different dedup keys.
+    pending_alerts: tuple[object, ...] = ()
     # The STOP acknowledgement and nothing else. The spec makes it one
     # best-effort message *after* the opt-out is stored, so the send has to
     # pass a gate the opt-out has just closed. A flag on the result rather than
@@ -519,6 +522,18 @@ def _e164_from_wa_id(wa_id: str | None) -> str:
     return candidate if is_e164(candidate) else ""
 
 
+def _alerts(*raised: object) -> tuple[object, ...]:
+    """The buffered alerts a result carries, with the nothings dropped.
+
+    Every producer here returns `None` when it wrote no row — a bump rather
+    than an insert, or a caller with no user to address — and `push_off_surface`
+    treats `None` as one of the three harmless nothings. Filtering at the
+    boundary keeps a `pending_alerts` tuple meaning "rows to push" rather than
+    "slots somebody may have filled".
+    """
+    return tuple(item for item in raised if item is not None)
+
+
 @dataclass(frozen=True)
 class _Resolution:
     user_id: str | None
@@ -705,7 +720,7 @@ def _handle_inbound(
         )
         return WhatsAppEventResult(
             resolution.disposition or "unknown_sender",
-            pending_alert=resolution.pending_alert,
+            pending_alerts=_alerts(resolution.pending_alert),
         )
 
     user_id = resolution.user_id
@@ -738,8 +753,8 @@ def _handle_inbound(
         # collided. Buffered like every other alert raised in here.
         result = replace(
             result,
-            pending_alert=result.pending_alert
-            or _write_send_id_alert(conn, user_id, event.from_user.bsuid),
+            pending_alerts=result.pending_alerts
+            or _alerts(_write_send_id_alert(conn, user_id, event.from_user.bsuid)),
         )
     _set_disposition(conn, event, result.disposition, result.task_id)
     logger.info(
@@ -878,22 +893,20 @@ def _handle_delivery(
 ) -> WhatsAppEventResult:
     """Apply one status callback to the ledger, inside the batch transaction.
 
-    The monotonic transition itself is `outbound.apply_delivery_event`, which
-    is where the ledger's own rules live. What belongs here is only that the
-    alert it may raise is *buffered* rather than pushed: this runs under the
-    batch's `BEGIN IMMEDIATE`, and a push from in here would open a second
-    connection against the lock this one holds.
-
-    Pricing observation and the billable circuit are stage 4's and are read by
-    nothing yet — the seam is this call, not a second one.
+    The monotonic transition, the pricing observation and the billable circuit
+    are all `outbound.apply_delivery_event`, which is where the ledger's own
+    rules live. What belongs here is only that the alerts it may raise are
+    *buffered* rather than pushed: this runs under the batch's
+    `BEGIN IMMEDIATE`, and a push from in here would open a second connection
+    against the lock this one holds.
     """
     from .outbound import apply_delivery_event
 
-    disposition, _record, pending_alert = apply_delivery_event(conn, event)
+    disposition, _record, pending_alerts = apply_delivery_event(conn, config, event)
     return WhatsAppEventResult(
         disposition,
         user_id=None,
-        pending_alert=pending_alert,
+        pending_alerts=pending_alerts,
     )
 
 
@@ -972,10 +985,11 @@ def deliver_pending_alerts(config: Config, results: Sequence[WhatsAppEventResult
     from .._alerts import push_off_surface
 
     for result in results:
-        push_off_surface(
-            config, result.pending_alert,
-            exclude_surface="whatsapp", reference_prefix="whatsapp-alert",
-        )
+        for alert in result.pending_alerts:
+            push_off_surface(
+                config, alert,
+                exclude_surface="whatsapp", reference_prefix="whatsapp-alert",
+            )
 
 
 async def deliver_event_responses(

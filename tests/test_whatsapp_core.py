@@ -1235,3 +1235,61 @@ class TestWhatsAppDoctorReadiness:
 
         assert "istota_result" in detail
         assert "approved" not in detail
+
+    def test_the_billing_check_reports_a_closed_circuit_and_the_months_spend(
+        self, tmp_path,
+    ):
+        cfg = _ready_config()
+        cfg.db_path = tmp_path / "istota.db"
+        db.init_db(cfg.db_path)
+
+        result = self._results(cfg)["whatsapp.billing"]
+
+        assert result.status == doctor.OK
+        assert "circuit closed" in result.detail
+        assert "0 service attempts" in result.detail
+
+    def test_an_open_circuit_warns_and_fingerprints_its_evidence(self, tmp_path):
+        """An open circuit refuses every send on a perfectly-configured
+        deployment, so `whatsapp.common` reading `ready` says nothing about it.
+
+        `WARN` rather than `FAIL`: the circuit is the guard doing its job, and
+        exiting 1 over a deliberate protective trip trains an operator to stop
+        reading the exit status. The evidence is fingerprinted because a
+        `CheckResult` reaches the boot log and the admin Health pane.
+        """
+        cfg = _ready_config()
+        cfg.db_path = tmp_path / "istota.db"
+        db.init_db(cfg.db_path)
+        with db.get_db(cfg.db_path) as conn:
+            db.block_whatsapp_billing(conn, "wamid.billable.1")
+
+        result = self._results(cfg)["whatsapp.billing"]
+
+        assert result.status == doctor.WARN
+        assert "wamid.billable.1" not in result.detail
+        assert "billing-unblock" in result.remedy
+
+    def test_a_missing_database_is_skipped_rather_than_created(self, tmp_path):
+        # A diagnostic that opens a database into existence leaves the
+        # zero-byte file `check_framework_db` later reports as corruption.
+        cfg = _ready_config()
+        cfg.db_path = tmp_path / "absent" / "istota.db"
+
+        result = self._results(cfg)["whatsapp.billing"]
+
+        assert result.status == doctor.SKIP
+        assert not cfg.db_path.exists()
+
+    def test_an_unreadable_ledger_is_unanswered_rather_than_clear(self, tmp_path):
+        # A reader must not call a boundary closed on a question it could not
+        # settle: a database with no `sent_whatsapp` table is a migration gap,
+        # not evidence that the circuit is shut.
+        cfg = _ready_config()
+        cfg.db_path = tmp_path / "istota.db"
+        cfg.db_path.write_bytes(b"")
+
+        result = self._results(cfg)["whatsapp.billing"]
+
+        assert result.status == doctor.WARN
+        assert "could not be read" in result.detail

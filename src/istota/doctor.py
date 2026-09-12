@@ -7023,6 +7023,93 @@ def check_whatsapp_common(config: "Config", probe: bool) -> CheckResult:
     return CheckResult("whatsapp.common", OK, detail)
 
 
+def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
+    """Whether the billable circuit is open, and what this month has spent.
+
+    Two facts that live in the database rather than the config file, and that
+    a `whatsapp.common` reading `ready` says nothing about — an open circuit
+    refuses every send on a deployment whose configuration is perfect. The
+    surface is silent in that state by design, so something has to say so out
+    loud; the notification the circuit raises is one push at the moment it
+    trips, and this is what still answers a week later.
+
+    `WARN`, not `FAIL`: the circuit is the guard working, not a broken
+    install, and `istota doctor` exiting 1 over a deliberate protective trip
+    would train an operator to ignore the exit status.
+
+    Reads the database and spawns nothing, so it is safe under `probe=False`.
+    It reads through `sqlite_util.connect_read_only` and refuses a database
+    that is not there rather than opening one: a diagnostic that creates a
+    zero-byte file leaves behind exactly the state `check_framework_db` later
+    reports as corruption. Never raises — a ledger it cannot read is reported
+    as unanswered rather than as a closed circuit, since a reader must not
+    call a boundary open on a question it could not settle.
+    """
+    name = "whatsapp.billing"
+    if not config.whatsapp.enabled:
+        return CheckResult(name, SKIP, "[whatsapp] enabled = false")
+
+    import sqlite3
+
+    from . import db as _db
+    from .transport.whatsapp.outbound import (
+        _attempt_limit,
+        _service_attempts_used,
+        quota_month,
+    )
+
+    month = quota_month(config)
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        # `check_framework_db` already reports the absence and owns its remedy.
+        return CheckResult(name, SKIP, f"{db_path} does not exist")
+    conn = None
+    try:
+        conn = sqlite_util.connect_read_only(db_path)
+        # `connect_read_only` takes no `row_factory` argument and leaves the
+        # default tuple rows, while `whatsapp_billing_block` reads its row by
+        # column name — the two other readers here happen not to, which is why
+        # the omission passes as far as the first non-empty runtime row.
+        conn.row_factory = sqlite3.Row
+        block = _db.whatsapp_billing_block(conn)
+        used = _service_attempts_used(conn, month)
+    except Exception:
+        return CheckResult(
+            name, WARN,
+            "the WhatsApp ledger could not be read, so neither the billable "
+            "circuit nor this month's attempts were established",
+            remedy=(
+                "Check that the framework database is readable and migrated "
+                "(`istota init`)."
+            ),
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    limit = _attempt_limit(config)
+    spend = f"{used} service attempts in {month}"
+    spend += f" of at most {limit}" if limit else " with no local cap"
+    if block is not None:
+        # The message id is fingerprinted, not printed: a `CheckResult` reaches
+        # the boot log and the admin Health pane, and the id names a private
+        # conversation. `istota whatsapp billing-unblock` prints it in full.
+        from .transport.whatsapp import message_fingerprint
+
+        return CheckResult(
+            name, WARN,
+            f"the billable circuit opened at {block.billing_blocked_at} "
+            f"(message {message_fingerprint(block.billing_message_id)}); every "
+            f"WhatsApp send is refused. {spend}",
+            remedy=(
+                "Check the Meta billing page, then run `istota whatsapp "
+                'billing-unblock`, or set [whatsapp] billing_policy = '
+                '"allow_paid" to accept charges.'
+            ),
+        )
+    return CheckResult(name, OK, f"circuit closed; {spend}")
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -7063,6 +7150,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("sms.twilio", check_sms_twilio),
     ("sms.telnyx", check_sms_telnyx),
     ("whatsapp.common", check_whatsapp_common),
+    ("whatsapp.billing", check_whatsapp_billing),
     ("web.static", check_web_static),
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
@@ -7166,6 +7254,7 @@ CHECK_SCOPES: dict[str, str] = {
     "sms.twilio": DEPLOYMENT,
     "sms.telnyx": DEPLOYMENT,
     "whatsapp.common": DEPLOYMENT,
+    "whatsapp.billing": DEPLOYMENT,
     "web.static": IMAGE,
     # Deployment, not image: it compares the bundle against the checkout it
     # was built from, and a bare `docker run` has no checkout.

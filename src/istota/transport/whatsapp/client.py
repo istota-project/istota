@@ -47,7 +47,8 @@ logger = logging.getLogger(__name__)
 _AMBIGUOUS_REASON = "delivery outcome unknown"
 _REJECTED_REASON = "meta refused the message"
 _UNREADABLE_REASON = "meta returned an unreadable response"
-_TEMPLATE_UNSUPPORTED_REASON = "template sends are not available"
+_TEMPLATE_UNCONFIGURED_REASON = "no approved template name and language configured"
+_TEMPLATE_LANGUAGE_REASON = "the configured template language is not a Meta code"
 
 SIGNATURE_HEADER = pywa_utils.HUB_SIG
 """``X-Hub-Signature-256``, read from PyWa rather than spelled again here."""
@@ -178,16 +179,22 @@ class WhatsAppClient:
         """One Cloud API call. Never raises, and never leaks provider text."""
         from pywa import errors as pywa_errors  # noqa: PLC0415
 
+        template_language = None
         if request.kind == "template":
-            # Stage 4 owns the approved-utility-template path. A **definite**
-            # refusal rather than the ambiguous default, because nothing was
-            # sent and the row must say so: `unknown` means "may have reached
-            # Meta", and spending that state on a code path that never opened a
-            # socket would make the one state an operator cannot resolve mean
-            # two different things.
-            return WhatsAppSendFailure(True, None, _TEMPLATE_UNSUPPORTED_REASON)
+            if not request.template_name or not request.template_language:
+                return WhatsAppSendFailure(True, None, _TEMPLATE_UNCONFIGURED_REASON)
+            template_language = _template_language(request.template_language)
+            if template_language is None:
+                # **Definite**, and this is the case that makes resolving the
+                # code up here worth a branch. PyWa's `TemplateLanguage` has no
+                # `UNKNOWN` member, so an unrecognised value raises out of its
+                # own `_missing_` hook — which the generic handler below would
+                # read as *ambiguous*, i.e. "may have reached Meta". Nothing
+                # opened a socket, and `unknown` is the one state an operator
+                # can never resolve.
+                return WhatsAppSendFailure(True, None, _TEMPLATE_LANGUAGE_REASON)
         try:
-            sent = await self._call(request)
+            sent = await self._call(request, template_language)
         except pywa_errors.WhatsAppError as exc:
             failure = _classify(exc)
             logger.info(
@@ -211,7 +218,23 @@ class WhatsAppClient:
             return WhatsAppSendFailure(False, None, _UNREADABLE_REASON)
         return WhatsAppSendResult(message_id)
 
-    async def _call(self, request: WhatsAppSendRequest):
+    async def _call(self, request: WhatsAppSendRequest, template_language=None):
+        if request.kind == "template":
+            from pywa.types.templates import BodyText  # noqa: PLC0415
+
+            # Exactly one positional body parameter, which is the shape the
+            # spec requires of the operator's approved template: fixed wording
+            # around one `{{1}}`. A template whose body takes none, or takes
+            # more, is refused by Meta with a 4xx — definite, and correctly so:
+            # it is a mismatch between the deployment's config and the account
+            # state Meta owns, and only the operator can settle it.
+            return await self._client.send_template(
+                to=request.to,
+                name=request.template_name,
+                language=template_language,
+                params=[BodyText.params(request.text)],
+                sender=self._phone_number_id,
+            )
         return await self._client.send_message(
             to=request.to,
             text=request.text,
@@ -226,6 +249,36 @@ class WhatsAppClient:
                 await self._session.aclose()
             except Exception:  # pragma: no cover - closing must not raise
                 logger.debug("whatsapp.client.close_failed", exc_info=True)
+
+
+def _template_language(code: str):
+    """The configured language code as PyWa's enum member, or ``None``.
+
+    `load_config` bounds the *shape* of the code and cannot bound the *set*:
+    the set is whatever the installed PyWa release knows, and it moves with
+    the dependency. So the lookup happens before the call and its failure is
+    reported as a local misconfiguration rather than as a send that may have
+    happened.
+
+    Every exception is caught, and broadly on purpose: an unknown member here
+    raises `TypeError` out of PyWa's `_missing_` hook (there is no `UNKNOWN`
+    member for it to fall back to) rather than the `ValueError` an enum lookup
+    normally raises, and the hook emits a `PywaUnknownEnumMemberWarning` on the
+    way past that a strict session can promote to an error of a third kind.
+    Suppressing that warning is deliberately *not* done: `warnings.catch_warnings`
+    mutates process-global state and is documented as unsafe from a thread,
+    this runs on the event loop beside every other send, and the outcome is the
+    same either way — the lookup fails and the caller refuses the send.
+    """
+    from pywa.types.templates import TemplateLanguage  # noqa: PLC0415
+
+    try:
+        return TemplateLanguage(code)
+    except Exception:
+        # No `exc_info` and no code in the message: the value is operator
+        # config, and the caller's `safe_reason` names the field instead.
+        logger.warning("whatsapp.outbound.failed reason=template_language")
+        return None
 
 
 def _buttons(pairs: tuple[tuple[str, str], ...]):

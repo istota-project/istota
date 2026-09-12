@@ -2444,7 +2444,7 @@ def run_task_inline(
     return success, result
 
 
-def _whatsapp_confirmation_body(result: str, task_id: int) -> str:
+def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> str:
     """A confirmation question plus the sentence that says how to answer it.
 
     Sized to the **interactive** body limit rather than the plain-text one,
@@ -2455,19 +2455,30 @@ def _whatsapp_confirmation_body(result: str, task_id: int) -> str:
     typed `YES` are answered at, and the only route left on a client that
     renders no buttons.
 
+    With a paid proactive template configured the same body may instead go out
+    as a **template parameter**, whose cap is smaller again — and which of the
+    two carries it is decided by the service window, inside the ledger claim,
+    long after this. So the smaller budget is taken whenever the template
+    exists: it is the only one that cannot lose the sentence, and 124
+    characters of question is a cheap price for a question that stays
+    answerable. Nothing changes for a deployment with no template.
+
     The renderer is asked for the budget rather than the arithmetic being
     repeated here: `render_whatsapp` is what knows the truncation suffix and
     how not to cut a combining sequence in half.
     """
     from .transport.whatsapp.outbound import (
+        TEMPLATE_PARAMETER_LIMIT,
         WHATSAPP_INTERACTIVE_BODY_LIMIT,
         render_whatsapp,
+        template_available,
     )
 
+    budget = WHATSAPP_INTERACTIVE_BODY_LIMIT
+    if template_available(config):
+        budget = min(budget, TEMPLATE_PARAMETER_LIMIT)
     tail = f"\n\nTask #{task_id}. Reply YES or NO."
-    question = render_whatsapp(
-        result, limit=max(1, WHATSAPP_INTERACTIVE_BODY_LIMIT - len(tail)),
-    )
+    question = render_whatsapp(result, limit=max(1, budget - len(tail)))
     return f"{question}{tail}"
 
 
@@ -3142,7 +3153,7 @@ def process_one_task(
                         (f"confirm:{task_id}:no", "No"),
                     )
                     post_whatsapp_message = _whatsapp_confirmation_body(
-                        result, task_id,
+                        config, result, task_id,
                     )
                     # Set before the notification row exists, so it can never
                     # fall through to the `task-result:` key below: that key
