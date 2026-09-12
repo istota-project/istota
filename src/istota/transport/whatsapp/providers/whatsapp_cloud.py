@@ -76,19 +76,22 @@ adapter, exactly as the hard-coded version did.
 _CLIENT_UNAVAILABLE_REASON = "the whatsapp cloud client could not be built"
 
 
-def build_adapter(config: "Config", *, client=None) -> WhatsAppProviderAdapter:
+def build_adapter(config: "Config") -> WhatsAppProviderAdapter:
     """The Cloud adapter. No I/O, no PyWa import, no session.
 
     `make_registry` may not do I/O on construction and this registry follows
     the same rule, so nothing here builds a client: `send` constructs one per
     call and closes it, which is the lifetime `client.py` already argues for —
     the surface is capped at a few hundred messages a month and an
-    `httpx.AsyncClient` is bound to the loop it was made on.
+    `httpx.AsyncClient` is bound to the loop it was made on. That rule is what
+    lets `outbound.active_adapter` build a registry per send without the
+    caching the SMS side needs, and it is pinned rather than stated.
 
-    `client` is the test seam `deliver_whatsapp` already had, moved to the one
-    place that owns a client's lifetime. An injected client is **used and not
-    closed**, matching what `_send_claimed`'s `owned` flag did: the caller made
-    it and the caller ends it.
+    **No client-injection parameter**, deliberately. One existed and was
+    removed: `deliver_whatsapp` injects by replacing the resolved adapter's
+    `send`, so a second seam here would be a second mechanism for one job,
+    exercised only by tests and diverging from the path production takes. A
+    test that wants a double replaces `send` the way production does.
     """
     def parse(request: WhatsAppWebhookRequest) -> WhatsAppWebhookResult:
         from ..webhook import parse_webhook  # noqa: PLC0415
@@ -118,7 +121,7 @@ def build_adapter(config: "Config", *, client=None) -> WhatsAppProviderAdapter:
         )
 
     async def send(request: WhatsAppSendRequest) -> WhatsAppSendOutcome:
-        return await _send(config, request, client)
+        return await _send(config, request)
 
     return WhatsAppProviderAdapter(
         name="whatsapp_cloud",
@@ -129,7 +132,7 @@ def build_adapter(config: "Config", *, client=None) -> WhatsAppProviderAdapter:
     )
 
 
-async def _send(config: "Config", request: WhatsAppSendRequest, injected):
+async def _send(config: "Config", request: WhatsAppSendRequest):
     """One Cloud API call, with the client's whole lifetime inside it.
 
     The construction is guarded separately from the call, and the split is the
@@ -138,13 +141,21 @@ async def _send(config: "Config", request: WhatsAppSendRequest, injected):
     imports PyWa before it makes a session, so a missing or renamed dependency
     raises here — which used to reach `_send_claimed`'s pre-send arm and settle
     `failed`. Returning a *definite* failure keeps that ledger outcome exactly.
-    """
-    if injected is not None:
-        # Not closed, deliberately. See `build_adapter`.
-        return await injected.send(request)
-    from ..client import make_client  # noqa: PLC0415
 
+    Nothing between the construction and the first byte can have sent
+    anything, which is what makes `definite` honest rather than optimistic:
+    `client.py` records that `WhatsApp(**kwargs)` issues no request, and the
+    `httpx.AsyncClient` it wraps opens no socket until one is made.
+    """
     try:
+        # Inside the guard, not above it. `client.py` is the module that
+        # imports PyWa, so a missing or renamed dependency raises at *this*
+        # line as readily as inside `make_client` — and an import left outside
+        # would escape to `_send_claimed`'s backstop and settle `unknown`,
+        # which is precisely the outcome this function exists to keep as
+        # `failed`.
+        from ..client import make_client  # noqa: PLC0415
+
         client = make_client(config)
     except Exception:
         # `exc_info` kept: the cause is a dependency or configuration fault an

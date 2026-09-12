@@ -854,6 +854,14 @@ async def _settle_async(
 # ---------------------------------------------------------------------------
 
 
+#: Provider faults already reported at WARNING, as ``<provider>:<ExcType>``.
+#: Process-lifetime and deliberately unbounded in the only axis that matters:
+#: both keys come from code — the provider name is refused at config load
+#: unless it is one of two, and the type is whatever the import raised — so
+#: there is no caller-chosen value here to grow it.
+_REPORTED_PROVIDER_FAULTS: set[str] = set()
+
+
 def active_adapter(config: Config) -> "WhatsAppProviderAdapter | None":
     """The adapter this deployment sends through, or ``None``.
 
@@ -870,18 +878,40 @@ def active_adapter(config: Config) -> "WhatsAppProviderAdapter | None":
 
     No database and no client, which is what makes it safe to call on the
     event loop as both callers do: the registry's builders construct closures,
-    and the Cloud adapter's session is made and closed inside one `send`. The
-    one blocking step is `importlib` reading the provider module, once per
-    process and cached after — `make_registry`'s no-I/O-on-construction rule
-    read strictly, and the same first-call cost every deferred import in this
-    package pays.
+    and the Cloud adapter's session is made and closed inside one `send`. A
+    *successful* import is cached in `sys.modules`; a failing one is not, so on
+    a deployment naming a provider whose module is absent every call repeats
+    the finder walk and raises. That is the shape the report below is bounded
+    for, and it is reachable today: `WHATSAPP_PROVIDER_NAMES` carries `baileys`
+    and the config load accepts it, while `providers/baileys.py` does not exist
+    yet.
+
+    **The failure is reported once per process and per reason.** Both callers
+    are hot — `is_whatsapp_configured` runs on the notification routing path
+    and in `doctor` — so an unbounded `exc_info` here writes a traceback per
+    notification for the life of the daemon, into the rotating log the admin
+    Logs pane reads back line by line. The first one carries the traceback
+    because an operator has to see the cause; the rest are debug. Keyed on the
+    provider and the exception type rather than counted, so a *different*
+    failure on the same provider is still reported.
     """
     try:
         from .providers.registry import make_provider_registry  # noqa: PLC0415
 
         return make_provider_registry(config).active()
-    except Exception:
-        logger.warning("whatsapp.outbound.provider_unavailable", exc_info=True)
+    except Exception as exc:
+        reason = f"{config.whatsapp.provider}:{type(exc).__name__}"
+        if reason in _REPORTED_PROVIDER_FAULTS:
+            logger.debug(
+                "whatsapp.outbound.provider_unavailable reason=%s", reason,
+            )
+        else:
+            _REPORTED_PROVIDER_FAULTS.add(reason)
+            logger.warning(
+                "whatsapp.outbound.provider_unavailable reason=%s: every "
+                "WhatsApp send is recorded `unconfigured` until this resolves",
+                reason, exc_info=True,
+            )
         return None
 
 

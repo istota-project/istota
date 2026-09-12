@@ -43,6 +43,14 @@ class WhatsAppProviderCaps:
     `delivery_receipts` is the one that is easy to guess wrong in the
     optimistic direction — it says the provider reports a *handset* state
     back, not that a send was accepted. Every provider reports the latter.
+
+    **`delivery_receipts` is declared ahead of its reader and nothing reads it
+    yet.** `outbound._gate` reads the other three; the parked-status table, the
+    monotonic status ladder and the failure alert are unconditional, so
+    declaring this `False` disables none of them today. It is here rather than
+    added later because a capability record answered by two adapters and then
+    widened is a record whose existing answers were never considered — but an
+    adapter author must not read the field's presence as a switch.
     """
     metered: bool
     has_service_window: bool
@@ -62,6 +70,34 @@ class WhatsAppProviderAdapter:
     signature scheme would be a thing to refuse loudly rather than to express.
 
     `send` is not optional. A provider that cannot send is not a provider.
+
+    **`send` carries two obligations the ledger's correctness now rests on,
+    and neither is expressible in the type.** They used to be structural:
+    `outbound._send_claimed` built the Cloud client itself, inside the arm that
+    settles `failed`. With construction behind this field, an adapter owns the
+    line.
+
+    1. **It never raises.** `_send_claimed`'s `except Exception` is a backstop
+       for a double that does not, and it settles `unknown` — which
+       `.claude/rules/whatsapp.md` calls the one state an operator can never
+       resolve. An adapter that raises for a message that never left has
+       spent it for nothing.
+    2. **A provably-unsent failure is `definite=True`.** That single bit is the
+       whole ledger decision: `definite` settles `failed`, anything else
+       settles `unknown`. Erring towards ambiguous is safe and erring towards
+       definite is not, so an adapter reports `definite` only where it knows
+       nothing was queued — the provider refused under a documented rule, or
+       no request was ever built.
+
+    `parse_webhook` keeps a **different** error convention, and it is a
+    convention rather than a type: `WhatsAppWebhookResult` carries a
+    `response_status` for the answer, and a *rejection* is raised as the
+    provider's own error carrying its status (`WhatsAppWebhookError` for
+    Cloud) rather than returned. That is what keeps authenticate-then-read one
+    call — a result object for a 403 is a value a caller can forget to check,
+    where a raise is not. A second adapter with a webhook either follows it or
+    the two are unified onto `response_status` before it lands; today Cloud is
+    the only one and the route already catches that error.
 
     **`send` is awaitable and the other two are not**, which is where this
     seam departs from the SMS one it copies. There both halves are synchronous

@@ -4320,6 +4320,15 @@ def whatsapp_webhooks_enabled(config: Config) -> bool:
     Named rather than inlined because four places have to agree on it: this
     process gate, ``serve._maybe_mount_webhooks``, the Ansible role's
     ``Resolve webhook receiver need``, and the ``whatsapp`` compose profile.
+    **Two of the four cannot express the provider half yet**, and that is an
+    outstanding gap rather than a subtlety: the role gates on
+    ``istota_whatsapp_enabled`` alone and the compose profile is a static
+    name, while neither ``templates/config.toml.j2`` nor ``render-config.sh``
+    renders ``provider`` at all. So on both shipped shapes the key takes its
+    default and all four agree by unreachability. They stop agreeing the day
+    ``provider`` becomes settable, and the failure is benign but silly — a
+    provisioned receiver whose two handlers 404 everything — so the render
+    passthrough and these two predicates land together.
     """
     return bool(
         config.whatsapp.enabled

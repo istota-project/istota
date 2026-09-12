@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import logging
 from collections.abc import Callable, Mapping
 
 from ....config import (
@@ -12,6 +14,8 @@ from ....config import (
     whatsapp_provider_missing_fields,
 )
 from ._types import WhatsAppProviderAdapter, WhatsAppProviderName
+
+logger = logging.getLogger(__name__)
 
 AdapterBuilder = Callable[[Config], WhatsAppProviderAdapter]
 
@@ -45,16 +49,54 @@ class WhatsAppProviderRegistry:
         """Adapters built for something other than sending.
 
         **Never a mount decision.** `config.whatsapp_webhooks_enabled` is the
-        only gate on serving `/webhooks/whatsapp`, and it is `enabled` alone —
-        turning the block off is turning the account off, where SMS instead
-        keeps a switched-away provider's routes alive. This list follows the
-        SMS registry's shape and does name every built adapter on a disabled
-        deployment, because what it answers is which credentials the
-        deployment still holds, not which routes it should serve.
+        only gate on serving `/webhooks/whatsapp`, and it reads `enabled` and
+        the *active* provider — turning the block off is turning the account
+        off, where SMS instead keeps a switched-away provider's routes alive.
+        This list follows the SMS registry's shape and does name every built
+        adapter on a disabled deployment, because what it answers is which
+        credentials the deployment still holds, not which routes it should
+        serve. Reading it as the mount would restore exactly the SMS rule this
+        surface does not follow: Meta's route alive on a deployment that
+        switched away from Cloud.
         """
         if not self._active_enabled:
             return tuple(self._adapters)
         return tuple(name for name in self._adapters if name != self._active_name)
+
+
+def _contract_fault(name: str, adapter: WhatsAppProviderAdapter) -> str | None:
+    """What this adapter gets wrong about the record it fills in, or ``None``.
+
+    Three checks a provider module cannot fail in production without somebody
+    having edited it, which is why they are worth making at build rather than
+    at use: each one's symptom at use is silent, and two of them are silent in
+    the direction the ledger cannot recover from.
+
+    The awaitability check is the one that earns its place. `send` is declared
+    `Awaitable` and `_send_claimed` awaits it, so a synchronous `send` raises
+    `TypeError` *inside the claim-to-settle region* — where the backstop
+    catches it and settles the row `unknown`, the one state an operator can
+    never resolve, for a message that was never sent. A row spent that way is
+    unrecoverable; a refusal here is a failed import in a test run.
+    """
+    if adapter.name != name:
+        return (
+            f"WhatsApp adapter registered as {adapter.name!r}, expected {name!r}"
+        )
+    if (adapter.parse_webhook is None) != (adapter.verify_signature is None):
+        # `_types` calls an adapter with a webhook and no signature scheme "a
+        # thing to refuse loudly rather than to express"; this is where it is
+        # refused.
+        return (
+            f"WhatsApp adapter {name!r} must declare parse_webhook and "
+            "verify_signature together, or neither"
+        )
+    if not asyncio.iscoroutinefunction(adapter.send):
+        return (
+            f"WhatsApp adapter {name!r} must declare an awaitable send; a "
+            "synchronous one settles the ledger row `unknown`"
+        )
+    return None
 
 
 def _load_builder(provider: WhatsAppProviderName) -> AdapterBuilder:
@@ -101,22 +143,20 @@ def make_provider_registry(
             continue
         builder = builders[name] if builders is not None else _load_builder(name)
         adapter = builder(config)
-        if adapter.name != name:
-            raise ValueError(
-                f"WhatsApp adapter registered as {adapter.name!r}, expected {name!r}"
-            )
-        if (adapter.parse_webhook is None) != (adapter.verify_signature is None):
-            # The `_types` docstring says an adapter with a webhook and no
-            # signature scheme is "a thing to refuse loudly rather than to
-            # express"; this is where it is refused. Loudly rather than by
-            # dropping the adapter, because the half-declared shape is a
-            # programming error in a provider module and not a deployment
-            # state — and the direction that matters is the one where a route
-            # gets mounted for an adapter with nothing to authenticate with.
-            raise ValueError(
-                f"WhatsApp adapter {name!r} must declare parse_webhook and "
-                "verify_signature together, or neither"
-            )
+        fault = _contract_fault(name, adapter)
+        if fault is not None:
+            if name != active_name:
+                # Dropped rather than raised, and the asymmetry is the point.
+                # Every fault here is a programming error in a provider module,
+                # but the only caller in `src/` is `outbound.active_adapter`,
+                # which catches everything and returns `None` — so a raise for
+                # a *callback-only* adapter would take the active one down with
+                # it and stop every send on the surface with `unconfigured`. A
+                # broken provider nobody selected costs its own adapter and
+                # nothing else.
+                logger.error("whatsapp.provider.contract_violation %s", fault)
+                continue
+            raise ValueError(fault)
         adapters[name] = adapter
 
     return WhatsAppProviderRegistry(

@@ -328,6 +328,15 @@ class TestServeWebhookMount:
         ``callback_only_names`` and would keep Meta's route alive on a
         deployment that switched away from Cloud; that is the SMS rule, and
         this surface's is that turning the block off turns the account off.
+
+        **A forward pin rather than live coverage.** The config it builds is
+        one ``load_config`` currently refuses — the Cloud-only structural arms
+        (``waba_id`` and its neighbours) still run unconditionally under
+        ``enabled``, so an enabled ``baileys`` block fails the load, and the
+        per-provider split is Stage 3's. Constructing ``WhatsAppConfig``
+        directly is what reaches the state at all. So this gate is inert in
+        production until that lands, and the test exists to keep it correct
+        when it stops being.
         """
         from fastapi import FastAPI
 

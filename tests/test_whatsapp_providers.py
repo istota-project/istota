@@ -12,6 +12,7 @@ import asyncio
 import dataclasses
 import hashlib
 import hmac
+import importlib
 import itertools
 import json
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ from istota import db
 from istota.config import (
     Config,
     WHATSAPP_PROVIDER_NAMES,
+    WHATSAPP_WEBHOOK_PROVIDERS,
     UserConfig,
     WhatsAppConfig,
     WhatsAppTemplateConfig,
@@ -74,12 +76,24 @@ BAILEYS_CAPS = WhatsAppProviderCaps(
 )
 
 
+async def _stub_send(request):
+    """An adapter's `send` is awaitable, and a stub that is not costs a row.
+
+    `_send_claimed` awaits it, so a synchronous stub raises `TypeError` inside
+    the claim-to-settle region and the backstop settles `unknown` — the one
+    state an operator can never resolve, spent on a message nobody sent. The
+    registry refuses one at build for that reason; these stubs have to be the
+    shape it accepts or the refusal would fire on the test's own fixture.
+    """
+    return WhatsAppSendResult(message_id="wamid.1")
+
+
 def _adapter(name, caps, *, webhook=True) -> WhatsAppProviderAdapter:
     return WhatsAppProviderAdapter(
         name=name,
         caps=caps,
         parse_webhook=(lambda request: request) if webhook else None,
-        send=lambda request: WhatsAppSendResult(message_id="wamid.1"),
+        send=_stub_send,
         verify_signature=(lambda request: True) if webhook else None,
     )
 
@@ -573,6 +587,14 @@ class TestTheCloudAdapter:
             delivery_receipts=True,
         )
 
+    def test_it_satisfies_its_own_registry_contract(self):
+        """The checks `_contract_fault` makes, driven against the real adapter
+        rather than against a stub built to pass them."""
+        adapter = whatsapp_cloud.build_adapter(_cloud_config())
+
+        assert asyncio.iscoroutinefunction(adapter.send)
+        assert (adapter.parse_webhook is None) == (adapter.verify_signature is None)
+
     def test_building_one_makes_no_client(self, monkeypatch):
         """`make_registry`'s no-I/O-on-construction rule, one surface down.
 
@@ -652,21 +674,6 @@ class TestTheCloudAdapter:
             ),
         ) is False
 
-    def test_an_injected_client_is_used_and_is_not_closed(self):
-        """The lifetime `_send_claimed`'s `owned` flag carried: the caller made
-        it, the caller ends it."""
-        client = _FakeClient()
-        adapter = whatsapp_cloud.build_adapter(_cloud_config(), client=client)
-
-        outcome = asyncio.run(adapter.send(
-            WhatsAppSendRequest(to="US.1", text="hi", kind="service"),
-        ))
-
-        assert isinstance(outcome, WhatsAppSendResult)
-        assert outcome.message_id.startswith("wamid.sent.")
-        assert len(client.requests) == 1
-        assert client.closed == 0
-
     def test_a_client_it_builds_itself_is_closed(self, monkeypatch):
         client = _FakeClient()
         monkeypatch.setattr(
@@ -707,6 +714,38 @@ class TestTheCloudAdapter:
         assert "pywa" not in outcome.safe_reason
 
 
+class TestTheMountNameSetTracksTheAdapters:
+    """`WHATSAPP_WEBHOOK_PROVIDERS` is a second spelling of
+    `adapter.parse_webhook is not None`, and drift is silent both ways.
+
+    A name missing from the set never gets a route; a name in it whose adapter
+    declares no webhook mounts `webhook.py` — Meta's handler — for a non-Meta
+    provider, because `webhook_receiver` calls that module directly and never
+    the adapter. The set exists because the three readers outside this process
+    cannot ask an adapter, not because the two answers may differ.
+    """
+
+    def test_every_importable_provider_agrees_with_the_name_set(self):
+        checked = []
+        for name in WHATSAPP_PROVIDER_NAMES:
+            try:
+                module = importlib.import_module(
+                    f"istota.transport.whatsapp.providers.{name}",
+                )
+            except ModuleNotFoundError:
+                # Not yet implemented. The guard covers what exists rather
+                # than asserting a count, so the next adapter is covered by
+                # arriving rather than by anybody remembering this file.
+                continue
+            adapter = module.build_adapter(_cloud_config(provider=name))
+            checked.append(name)
+            assert (name in WHATSAPP_WEBHOOK_PROVIDERS) == (
+                adapter.parse_webhook is not None
+            ), f"{name} disagrees with WHATSAPP_WEBHOOK_PROVIDERS"
+
+        assert checked, "no provider module imported, so nothing was checked"
+
+
 class TestTheWebhookFieldsAreDeclaredTogether:
     """`_types` calls a webhook with no signature scheme "a thing to refuse
     loudly rather than to express"; this is where it is refused."""
@@ -720,12 +759,52 @@ class TestTheWebhookFieldsAreDeclaredTogether:
         half = WhatsAppProviderAdapter(
             name="whatsapp_cloud", caps=CLOUD_CAPS,
             parse_webhook=parse,
-            send=lambda request: WhatsAppSendResult("wamid.1"),
+            send=_stub_send,
             verify_signature=verify,
         )
 
         with pytest.raises(ValueError, match="parse_webhook and verify_signature"):
             make_provider_registry(cfg, builders={"whatsapp_cloud": lambda c: half})
+
+    def test_a_synchronous_send_is_refused_before_it_can_cost_a_row(self):
+        """The check that earns its place: `_send_claimed` awaits `send`, so a
+        synchronous one raises inside the claim-to-settle region and the
+        backstop settles `unknown` for a message nobody sent."""
+        cfg = _cloud_config()
+        sync = WhatsAppProviderAdapter(
+            name="whatsapp_cloud", caps=CLOUD_CAPS,
+            parse_webhook=lambda request: None,
+            send=lambda request: WhatsAppSendResult("wamid.1"),
+            verify_signature=lambda request: True,
+        )
+
+        with pytest.raises(ValueError, match="awaitable send"):
+            make_provider_registry(cfg, builders={"whatsapp_cloud": lambda c: sync})
+
+    def test_a_broken_callback_only_adapter_does_not_take_the_surface_down(self):
+        """Dropped and logged rather than raised.
+
+        The only caller in `src/` catches everything and returns `None`, so a
+        raise for an adapter nobody selected would record every send on the
+        active provider `unconfigured` — a whole-surface outage caused by a
+        provider the deployment does not use.
+        """
+        cfg = _cloud_config(provider="baileys")
+        broken = WhatsAppProviderAdapter(
+            name="whatsapp_cloud", caps=CLOUD_CAPS,
+            parse_webhook=lambda request: None,
+            send=_stub_send,
+            verify_signature=None,
+        )
+        active = _adapter("baileys", BAILEYS_CAPS, webhook=False)
+
+        registry = make_provider_registry(cfg, builders={
+            "whatsapp_cloud": lambda c: broken,
+            "baileys": lambda c: active,
+        })
+
+        assert registry.active() is active
+        assert registry.get("whatsapp_cloud") is None
 
     def test_declaring_neither_is_the_shape_a_socket_provider_takes(self):
         cfg = _cloud_config(provider="baileys")
@@ -749,11 +828,15 @@ class TestCapsDriveTheGates:
     """
 
     def _send(self, monkeypatch, cfg, caps, *, key):
+        # The double goes in by replacing `send` on a real Cloud adapter,
+        # which is exactly how `deliver_whatsapp` injects one — rather than
+        # through a second seam on `build_adapter`, which would exercise a
+        # path production never takes.
         client = _FakeClient()
         monkeypatch.setattr(
             outbound, "active_adapter",
             lambda _config: dataclasses.replace(
-                whatsapp_cloud.build_adapter(cfg, client=client), caps=caps,
+                whatsapp_cloud.build_adapter(cfg), caps=caps, send=client.send,
             ),
         )
         record = asyncio.run(outbound.deliver_whatsapp(
@@ -851,6 +934,45 @@ class TestCapsDriveTheGates:
         ))
 
         assert record.status == "unconfigured"
+
+    def test_a_client_that_cannot_be_built_settles_the_row_failed(
+        self, tmp_path, monkeypatch,
+    ):
+        """The claim the port rests on, driven to the row rather than read.
+
+        `_send_claimed` used to construct the client inside its pre-send arm,
+        so a construction failure settled `failed`. That moved behind
+        `adapter.send`, and the equivalence instrument structurally could not
+        have caught a change: every existing test injects a client, so none
+        reaches the construction branch at all — the pre-change behaviour was
+        just as untested. Asserted on the ledger row and the alert, not on the
+        adapter's return value.
+        """
+        def _explode(_config):
+            raise ImportError("no module named pywa_async")
+
+        cfg = _deployment(tmp_path)
+        _bind(cfg)
+        monkeypatch.setattr(
+            "istota.transport.whatsapp.client.make_client", _explode,
+        )
+
+        record = asyncio.run(outbound.deliver_whatsapp(
+            cfg, logical_key="k", user_id="alice", text="the answer",
+        ))
+
+        assert record.status == "failed"
+        with db.get_db(cfg.db_path) as conn:
+            row = conn.execute(
+                "SELECT status, meta_message_id FROM sent_whatsapp "
+                "WHERE logical_key = 'k'",
+            ).fetchone()
+            alerts = conn.execute(
+                "SELECT COUNT(*) FROM notifications WHERE user_id = 'alice'",
+            ).fetchone()[0]
+        assert row["status"] == "failed"
+        assert row["meta_message_id"] is None
+        assert alerts == 1
 
     def test_a_provider_that_cannot_be_resolved_is_never_raised(self, tmp_path):
         """`active_adapter` sits outside the claim-to-settle region precisely

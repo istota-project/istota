@@ -78,11 +78,19 @@
              and (istota_sms_telnyx_public_key | length > 0)
              and (istota_sms_telnyx_messaging_profile_id | length > 0))
          or (istota_whatsapp_enabled | bool) }}
-  # WhatsApp is the plain arm and stays that way. The two SMS provider arms
-  # exist because a complete-but-inactive block keeps its delivery callbacks
-  # authenticating across a provider switch; WhatsApp has one account, and
-  # both its handlers refuse every request while `enabled` is false — the same
-  # rule `config.whatsapp_webhooks_enabled` states for the combined process.
+  # WhatsApp is the plain arm. The two SMS provider arms exist because a
+  # complete-but-inactive block keeps its delivery callbacks authenticating
+  # across a provider switch; WhatsApp has one account, and both its handlers
+  # refuse every request while `enabled` is false.
+  #
+  # `config.whatsapp_webhooks_enabled` is no longer this expression, and the
+  # difference is outstanding rather than settled: it also requires the active
+  # `provider` to be one with an HTTP callback. This role renders no
+  # `provider` key, so the config always takes its `whatsapp_cloud` default
+  # and the two agree today. Add the provider condition here in the same
+  # change that renders `istota_whatsapp_provider` — otherwise a deployment
+  # selecting a socket-based adapter provisions a receiver whose two handlers
+  # 404 everything.
 
 # ============================================================
 # FULL INSTALL TASKS (skipped when istota_update_only=true)
