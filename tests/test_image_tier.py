@@ -28,8 +28,17 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.nested_pytest import run_nested_pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TESTS = REPO_ROOT / "tests" / "image"
+
+#: What the nested collects below walk. The guards here assert about the image
+#: tier's own items, so collecting the whole tree to reach them cost 26631 items
+#: and 12s warm against 107 items and 0.35s (ISSUE-492). Unlike the smoke tier
+#: this needs no second path: `tests/image` under `-m image` still selects, and
+#: under the default run it exits 5, which is what the assertions already allow.
+IMAGE_SCOPE = ["tests/image"]
 
 # Every module in the image tier, enumerated at import so the checks below
 # cover files added after they were written. Guarded by
@@ -85,7 +94,7 @@ class TestTheGuardDoesNotFireOnTheDefaultRun:
     """
 
     def test_an_ordinary_collection_over_the_image_dir_succeeds(self):
-        result = _collect(["tests/image"])
+        result = _collect()
 
         assert result.returncode in (0, 5), (
             "the default run tripped the image tier's xdist guard\n"
@@ -127,25 +136,10 @@ class TestTheGuardDoesNotFireOnTheDefaultRun:
         fixture setup, before `require_docker()` and before any build — which
         also means this test needs no Docker daemon.
         """
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-p",
-                "no:cacheprovider",
-                "-q",
-                "--no-header",
-                "-m",
-                "image",
-                "-n",
-                "2",
-                "tests/image/test_istota_image.py::TestGroupBTheRuntime",
-            ],
+        result = run_nested_pytest(
+            scope=["tests/image/test_istota_image.py::TestGroupBTheRuntime"],
+            args=["-q", "--no-header", "-m", "image", "-n", "2"],
             cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=300,
             env={**os.environ, "ISTOTA_IMAGE_TAG": "guard-test-should-never-be-pulled"},
         )
         output = result.stdout + result.stderr
@@ -155,34 +149,18 @@ class TestTheGuardDoesNotFireOnTheDefaultRun:
         assert "xdist worker" in output, output
 
 
-def _collect(args: list[str]) -> subprocess.CompletedProcess:
-    """A nested `--collect-only` pytest, from the repo root.
+def _collect(args: list[str] | None = None) -> subprocess.CompletedProcess:
+    """A nested `--collect-only` pytest over the image tier, from the repo root.
 
     A subprocess rather than `pytester`: the thing under test is this repo's own
     `addopts` and conftest, and `pytester` gives a synthetic project with
-    neither.
+    neither. Scoped to `IMAGE_SCOPE` rather than the whole tree, and bounded by
+    `run_nested_pytest`, for ISSUE-492's reasons.
     """
-    return subprocess.run(
-        # `-p no:cacheprovider`: the cacheprovider writes .pytest_cache/v/cache/
-        # nodeids during collection, and three of these run concurrently with an
-        # outer `-n auto` session writing the same file. Benign today (a
-        # clobbered `--lf` set, not a failure), but shared mutable state across
-        # processes is exactly what the order-independence rule in AGENTS.md
-        # rules out.
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-p",
-            "no:cacheprovider",
-            "--collect-only",
-            "-q",
-            *args,
-        ],
+    return run_nested_pytest(
+        scope=IMAGE_SCOPE,
+        args=["--collect-only", "-q", *(args or [])],
         cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=300,
     )
 
 

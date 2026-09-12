@@ -14,14 +14,13 @@ be off by default and start building Docker images on a developer's laptop.
 from __future__ import annotations
 
 import re
-import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from .conftest import DISCRETIONARY_MARKERS
+from .support.nested_pytest import run_nested_pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -66,10 +65,11 @@ class TestTheEnvVarActuallyDeselects:
         env.pop("ISTOTA_DESELECT_TIERS", None)
         if env_value is not None:
             env["ISTOTA_DESELECT_TIERS"] = env_value
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", "--collect-only", "-q",
-             "-o", "addopts=", "-p", "no:randomly", "tests/image/"],
-            cwd=REPO_ROOT, capture_output=True, text=True, env=env,
+        result = run_nested_pytest(
+            scope=["tests/image/"],
+            args=["--collect-only", "-q", "-o", "addopts=", "-p", "no:randomly"],
+            cwd=REPO_ROOT,
+            env=env,
         )
         return result.stdout + result.stderr
 

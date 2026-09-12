@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -40,6 +39,7 @@ from .support.env_isolation import (
     manifest_env_names,
     scrubbed_env_names,
 )
+from .support.nested_pytest import run_nested_pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -440,18 +440,16 @@ class TestTheScrubHoldsUnderARealRun:
             env.pop(name, None)
         env.update(env_extra)
         env["PY_COLORS"] = "0"
-        return subprocess.run(
-            [
-                sys.executable, "-m", "pytest",
-                *self.SELECTION,
-                "-q", "-n0", "-p", "no:cacheprovider",
-                "--no-header", "-p", "no:randomly", "-rf",
-            ],
+        # The selection is the scope, so this one was never at risk of
+        # collecting the whole tree — but it *runs* nine tests twice rather than
+        # collecting, which makes it the call most exposed to the other half of
+        # ISSUE-492: a breached bound came back as a `TimeoutExpired` traceback
+        # through `subprocess` rather than as a failure about the scrub.
+        return run_nested_pytest(
+            scope=list(self.SELECTION),
+            args=["-q", "-n0", "--no-header", "-p", "no:randomly", "-rf"],
             cwd=REPO_ROOT,
             env=env,
-            capture_output=True,
-            text=True,
-            timeout=300,
         )
 
     def test_the_reported_tests_pass_under_a_polluted_shell(self):
