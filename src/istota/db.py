@@ -10467,8 +10467,12 @@ def touch_whatsapp_binding(
     username: str | None = None,
     last_seen_at: str,
     last_user_message_at: str | None = None,
-) -> None:
+) -> bool:
     """Record what an authenticated inbound event taught us about a binding.
+
+    Returns whether the `send_id` ended up as the caller asked. Read it: a
+    `False` means another user's row already holds that destination, which is
+    an operator's problem rather than this message's.
 
     Not `set_whatsapp_binding`: that one treats any change to the number or the
     BSUID as an identity change and discards the window, the opt-out and the
@@ -10476,25 +10480,51 @@ def touch_whatsapp_binding(
     ordinary message. This writes only the non-authoritative columns, and
     touches neither of the two the identity is made of.
 
+    **`send_id` carries a partial unique index, so this write cannot be
+    unconditional.** It is set on every authenticated message, and the ordinary
+    inbound path's only answer to an exception is the route's retryable 503 —
+    so a plain `COALESCE(?, send_id)` colliding with another user's stale
+    destination would raise, 503, and be redelivered by Meta against the same
+    deterministic failure for ever, with no disposition row, no alert and
+    nothing in the inbox. `latch_whatsapp_bsuid`'s caller catches that
+    `IntegrityError` and fails the event closed; this path must not fail the
+    event at all, because the sender is a legitimate authenticated user whose
+    messages would otherwise stop working over a row that is not theirs. So the
+    conflict is resolved in the SQL — the column keeps its old value, the rest
+    of the touch lands, and the caller alerts. The outbound side then falls
+    back to the bootstrap number, which is what that column is for.
+
+    The check is a correlated `EXISTS` rather than a `SELECT` above the
+    `UPDATE` so it holds for a caller outside a transaction too. The webhook
+    holds `BEGIN IMMEDIATE` and would be safe either way; a later caller that
+    does not would reintroduce exactly the raise this exists to prevent.
+
     `last_user_message_at` is advanced by a **SQL** comparison rather than a
     read-modify-write, because it is the sole input to the 24-hour service
     window and the value the caller holds may be stale by the time it writes.
     `MAX` over the stored value is what makes a replayed or delayed event
     unable to move the window backwards; the caller has already clamped the
-    other direction.
+    other direction. It is the scalar `MAX`, not the aggregate: two arguments.
     """
     conn.execute(
         """
         UPDATE whatsapp_user_bindings
-           SET send_id = COALESCE(?, send_id),
-               username = COALESCE(?, username),
-               last_seen_at = ?,
-               last_user_message_at = CASE
-                   WHEN ? IS NULL THEN last_user_message_at
-                   ELSE MAX(COALESCE(last_user_message_at, ''), ?)
+           SET send_id = CASE
+                   WHEN ?1 IS NULL OR ?1 = '' THEN send_id
+                   WHEN EXISTS (
+                       SELECT 1 FROM whatsapp_user_bindings other
+                        WHERE other.send_id = ?1 AND other.user_id <> ?7
+                   ) THEN send_id
+                   ELSE ?1
                END,
-               updated_at = ?
-         WHERE user_id = ?
+               username = COALESCE(?2, username),
+               last_seen_at = ?3,
+               last_user_message_at = CASE
+                   WHEN ?4 IS NULL THEN last_user_message_at
+                   ELSE MAX(COALESCE(last_user_message_at, ''), ?4)
+               END,
+               updated_at = ?6
+         WHERE user_id = ?7
         """,
         (
             send_id, username, last_seen_at,
@@ -10502,6 +10532,12 @@ def touch_whatsapp_binding(
             sql_datetime_now(), user_id,
         ),
     )
+    if send_id is None or send_id == "":
+        return True
+    row = conn.execute(
+        "SELECT send_id FROM whatsapp_user_bindings WHERE user_id = ?", (user_id,),
+    ).fetchone()
+    return row is not None and row["send_id"] == send_id
 
 
 def set_whatsapp_opt_out(

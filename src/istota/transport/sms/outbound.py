@@ -425,30 +425,21 @@ def _raise_failure_alert(
     user_id: str,
     task_id: int | None,
 ) -> None:
-    """Write one durable alert and push it only through non-SMS destinations."""
-    from ... import notifications
-    from ...notification_store import mark_delivered
+    """Write one durable alert and push it only through non-SMS destinations.
+
+    The push itself is `transport._alerts.push_off_surface`, shared with the
+    WhatsApp surface: the descriptor construction is the comma-list grammar
+    `send_notification` parses, and two surfaces spelling it differently would
+    route to the wrong place rather than fail. Only the row is written here,
+    because only this module knows what an SMS failure means.
+    """
+    from .._alerts import push_off_surface
 
     with db.get_db(config.db_path) as conn:
         raised = _write_failure_alert(conn, record, user_id, task_id)
-    if raised is None or not raised.deliver:
-        return
-    dests = [
-        dest for dest in notifications.resolve_destinations(config, user_id, "alert")
-        if dest.surface != "sms"
-    ]
-    descriptor = ",".join(
-        dest.surface if dest.channel is None else f"{dest.surface}:{dest.channel}"
-        for dest in dests
+    push_off_surface(
+        config, raised, exclude_surface="sms", reference_prefix="sms-failure",
     )
-    if not descriptor:
-        return
-    if notifications.send_notification(
-        config, user_id, raised.text, surface=descriptor, title=raised.title,
-        reference_id=f"sms-failure:{raised.notification_id}",
-    ):
-        with db.get_db(config.db_path) as conn:
-            mark_delivered(conn, [raised.notification_id])
 
 
 def _write_failure_alert(conn, record, user_id: str, task_id: int | None):

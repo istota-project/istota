@@ -6,6 +6,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
+from ....http_headers import header_value  # noqa: F401  (re-exported; see below)
+
 SmsProviderName = Literal["twilio", "telnyx"]
 SmsEncoding = Literal["gsm7", "ucs2"]
 SmsDeliveryStatus = Literal[
@@ -104,18 +106,10 @@ class SmsWebhookError(ValueError):
 MAX_WEBHOOK_BODY = 64 * 1024
 
 
-def header_value(headers: "Mapping[str, str]", name: str) -> str:
-    """One case-insensitive header lookup for both adapters.
-
-    HTTP header names are case-insensitive and neither provider promises a
-    casing, so each adapter grew its own copy of this — and both are reading
-    the header that carries the signature.
-    """
-    wanted = name.casefold()
-    for key, value in headers.items():
-        if key.casefold() == wanted:
-            return value
-    return ""
+# Re-exported, not defined: the WhatsApp webhook needs the same lookup and
+# importing it from an SMS provider package would be the wrong direction, so
+# the implementation moved to the stdlib-only `istota.http_headers` leaf. Both
+# adapters' callers keep the name they already import from here.
 
 
 @dataclass(frozen=True)

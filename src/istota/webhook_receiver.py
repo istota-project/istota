@@ -453,7 +453,22 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
     try:
         with db.get_db(config.db_path) as conn:
             results = handle_whatsapp_batch(conn, config, events)
-    except sqlite3.Error:
+    except Exception:
+        # Every exception, not just `sqlite3.Error`. The transaction rolls back
+        # either way — `get_db` closes the connection, which discards an
+        # uncommitted `BEGIN IMMEDIATE` — so the data outcome is already right
+        # and what a narrower clause changes is only the answer and the log: a
+        # `ValueError` out of `create_task`'s user-id guard would leave a 500
+        # and a traceback where this route's own contract promises a 503, and
+        # a traceback here prints the frames that hold the payload.
+        #
+        # The residual is stated rather than hidden: a *deterministic* failure
+        # answers 503 and Meta redelivers the same batch into the same failure
+        # until it gives up. That is what the spec asks for ("Any database
+        # failure rolls the transaction back and returns 503 so Meta can
+        # retry") and the alternative — claiming the message and reporting the
+        # failure per event — is a change to the transaction contract rather
+        # than a fix, so it belongs in the spec before it belongs here.
         logger.warning("whatsapp.inbound.database_unavailable", exc_info=True)
         return Response(status_code=503)
     background.add_task(deliver_pending_alerts, config, results)

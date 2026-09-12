@@ -30,7 +30,7 @@ SIGNATURE_HEADER = pywa_utils.HUB_SIG
 def verify_signature(app_secret: str, raw_body: bytes, signature: str) -> bool:
     """Whether ``signature`` is Meta's HMAC over exactly these bytes.
 
-    Two guards in front of PyWa's validator, and the first is the one that
+    Three guards in front of PyWa's validator, and the first is the one that
     matters. ``webhook_updates_validator`` takes the secret as a plain string
     and computes an HMAC under whatever it is given — including ``b""``. So a
     deployment with no ``app_secret`` configured would not fail to validate;

@@ -38,11 +38,12 @@ import json
 import logging
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from ... import commands, confirmations, db
 from ...config import Config
+from ...http_headers import header_value
 from ...user_profiles import is_e164, short_fingerprint
 from .._types import IncomingMessage
 from ..ingest import ingest_message
@@ -147,10 +148,24 @@ def verify_subscription(config: Config, params: Mapping[str, str]) -> str:
     if params.get("hub.mode") != "subscribe":
         raise WhatsAppWebhookError("unsupported hub mode", 400)
     presented = params.get("hub.verify_token") or ""
-    if not hmac.compare_digest(presented, whatsapp.verify_token):
+    # Bytes, not str. `hmac.compare_digest` raises TypeError on a non-ASCII
+    # `str`, and this is a query value a caller chose — so the str form turns
+    # one unauthenticated GET carrying `?hub.verify_token=tokën` into a 500 and
+    # a traceback, where a 403 belongs. `client.verify_signature` documents
+    # exactly this hazard for the signature header; it is the same mistake on
+    # the other secret comparison. Encoding is constant time and leaks only the
+    # length, which a wrong-length token has already decided.
+    if not hmac.compare_digest(presented.encode(), whatsapp.verify_token.encode()):
         raise WhatsAppWebhookError("verify token mismatch", 403)
     challenge = params.get("hub.challenge") or ""
-    if not challenge.isdecimal() or len(challenge) > MAX_CHALLENGE_CHARS:
+    # `isascii()` as well as `isdecimal()`: the latter is True for Arabic-Indic,
+    # Devanagari and a dozen other digit sets, and this value is echoed back
+    # verbatim from a route that answers before anything authenticates it.
+    if (
+        not challenge.isascii()
+        or not challenge.isdecimal()
+        or len(challenge) > MAX_CHALLENGE_CHARS
+    ):
         raise WhatsAppWebhookError("invalid hub challenge", 400)
     return challenge
 
@@ -158,14 +173,6 @@ def verify_subscription(config: Config, params: Mapping[str, str]) -> str:
 # ---------------------------------------------------------------------------
 # POST: bounds, signature, normalization
 # ---------------------------------------------------------------------------
-
-
-def _header(headers: Mapping[str, str], name: str) -> str:
-    wanted = name.casefold()
-    for key, value in headers.items():
-        if key.casefold() == wanted:
-            return value
-    return ""
 
 
 def parse_webhook(
@@ -179,7 +186,7 @@ def parse_webhook(
     """
     if len(raw_body) > MAX_WEBHOOK_BODY:
         raise WhatsAppWebhookError("webhook body too large", 413)
-    content_type = _header(headers, "content-type").partition(";")[0].strip()
+    content_type = header_value(headers, "content-type").partition(";")[0].strip()
     if content_type.casefold() != "application/json":
         raise WhatsAppWebhookError("unsupported content type", 415)
     if not config.whatsapp.app_secret:
@@ -187,12 +194,18 @@ def parse_webhook(
         # validator would verify an HMAC under an empty key. See `client.py`.
         raise WhatsAppWebhookError("whatsapp app secret not configured", 503)
     if not verify_signature(
-        config.whatsapp.app_secret, raw_body, _header(headers, SIGNATURE_HEADER),
+        config.whatsapp.app_secret, raw_body, header_value(headers, SIGNATURE_HEADER),
     ):
         raise WhatsAppWebhookError("invalid signature")
     try:
         payload = json.loads(raw_body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (ValueError, RecursionError):
+        # `ValueError` covers `UnicodeDecodeError` and `JSONDecodeError` both.
+        # `RecursionError` is the one that is neither, and it is not
+        # hypothetical: a deeply nested body — `b"[" * 60000` — blows the
+        # interpreter stack inside the decoder, and an authenticated sender
+        # chooses the body. A 500 with a traceback is the wrong answer to
+        # something this module's own contract calls malformed.
         raise WhatsAppWebhookError("invalid json body", 400) from None
     return normalize_payload(config, payload)
 
@@ -261,7 +274,16 @@ def _identity_for(
     case left is a message with no `from` at all beside exactly one contact,
     which is unambiguous.
     """
-    sender = _optional_text(message.get("from"))
+    raw_sender = message.get("from")
+    if raw_sender is not None and not isinstance(raw_sender, str):
+        # Present but not a string. Telling this from absent matters:
+        # `_optional_text` answers None for both, and the absent branch below
+        # falls back to positional attribution — so an `int` or a `list` in
+        # `from` would take that fallback and be attributed to `contacts[0]`,
+        # which is the takeover this function exists to prevent, arriving by
+        # the one door it was not watching.
+        return _NO_IDENTITY
+    sender = _optional_text(raw_sender)
     if sender is None:
         return _identity(contacts[0]) if len(contacts) == 1 else _NO_IDENTITY
     for contact in contacts:
@@ -313,10 +335,12 @@ def _inbound_event(
     message_type, text, callback_data = _message_shape(message)
     context = message.get("context")
     context = context if isinstance(context, Mapping) else {}
-    # A group id on the message is what makes it a group chat, and it is read
-    # here rather than in the resolver so the caller can refuse it before any
-    # identity lookup happens. It rides on the type, because the record models
-    # a direct conversation and a group is not one.
+    # A `group_id` on the *message* object is what makes it a group chat —
+    # `pywa.types.chat.Chat.from_message` (4.4) reads exactly that key and
+    # nothing else, which is the nearest thing to a citation available without
+    # a live capture. It is read here rather than in the resolver so the caller
+    # can refuse before any identity lookup happens, and it rides on the type
+    # because the record models a direct conversation and a group is not one.
     if "group_id" in message:
         message_type = "group"
         text = None
@@ -395,9 +419,18 @@ def normalize_payload(config: Config, payload: object) -> list[WhatsAppEvent]:
         for change in _sequence(entry.get("changes"), "change list"):
             field = _optional_text(change.get("field"))
             if field != "messages":
-                # Acknowledged and logged by name only. The value carries
-                # message bodies and identifiers whatever the field is.
-                logger.info("whatsapp.inbound.ignored_field field=%s", field or "")
+                # Acknowledged, and logged by name only — the value carries
+                # message bodies and identifiers whatever the field is. The
+                # name is bounded and slugged first: it is an arbitrary string
+                # up to the body cap, newlines included, and the admin Logs
+                # pane reads that file back line by line, so an unbounded value
+                # forges log records and a large one writes kilobytes per
+                # change element. Same rule, same reason, as
+                # `notification_resolvers`' `_slug` on a model-supplied
+                # `alert_type`.
+                logger.info(
+                    "whatsapp.inbound.ignored_field field=%s", _slug(field or ""),
+                )
                 continue
             value = _mapping(change.get("value"), "change value")
             if value.get("messaging_product") != "whatsapp":
@@ -424,6 +457,22 @@ def normalize_payload(config: Config, payload: object) -> list[WhatsAppEvent]:
 # ---------------------------------------------------------------------------
 # The inbound transaction
 # ---------------------------------------------------------------------------
+
+
+#: Everything a log line may keep of a sender-supplied name.
+_SLUG_KEEP = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+def _slug(value: str, *, limit: int = 48) -> str:
+    """Bound and flatten a sender-supplied string before it reaches a log line.
+
+    Newlines are why this is not a plain slice: the rotating app log is read
+    back line by line by the admin Logs pane, so a value carrying one forges a
+    record. Anything outside the keep set becomes `-`, lossily and on purpose —
+    this is for recognising a field name, not reproducing it.
+    """
+    lowered = value.strip().lower()[:limit]
+    return "".join(c if c in _SLUG_KEEP else "-" for c in lowered)
 
 
 def _bsuid_fingerprint(value: str) -> str:
@@ -497,6 +546,31 @@ def _write_identity_alert(conn, user_id: str, bsuid: str) -> object | None:
             "Either the number was reassigned or the identity changed. Check "
             "with the user, then run `istota user ensure <user> "
             "--reset-whatsapp-identity` or set the new BSUID explicitly."
+        ),
+        params={"identity_fingerprint": fingerprint},
+    )
+
+
+def _write_send_id_alert(conn, user_id: str, bsuid: str) -> object | None:
+    """One deduplicated operator alert about two rows claiming one destination.
+
+    Distinct from the identity-mismatch alert above, and worth being: that one
+    says a message was refused, this one says a message was accepted and its
+    reply will take the fallback route. Deduplicated on the destination, so a
+    user who keeps writing bumps one row rather than firing a push per message.
+    """
+    from ...notification_resolvers import task_alert
+
+    fingerprint = _bsuid_fingerprint(bsuid)
+    return task_alert.write(
+        conn, user_id,
+        dedup_key=f"whatsapp-send-id:{fingerprint}",
+        title="WhatsApp send id already assigned",
+        body=(
+            "This user's WhatsApp destination is recorded against another "
+            "user's binding, so it was left alone and replies will fall back "
+            "to the bootstrap number. Clear the stale binding with `istota "
+            "user ensure <user> --reset-whatsapp-identity`."
         ),
         params={"identity_fingerprint": fingerprint},
     )
@@ -634,10 +708,17 @@ def _handle_inbound(
 
     user_id = resolution.user_id
     if not _claim(conn, event, user_id, event.message_type):
+        # A named event rather than silence: `whatsapp.inbound.duplicate` is in
+        # the spec's stable list, and a wholly redelivered batch otherwise
+        # leaves nothing in the log to say the 200 was a no-op rather than work.
+        logger.info(
+            "whatsapp.inbound.duplicate message=%s",
+            _message_fingerprint(event.message_id),
+        )
         return WhatsAppEventResult("duplicate", user_id=user_id)
 
     binding = db.get_whatsapp_binding(conn, user_id)
-    db.touch_whatsapp_binding(
+    send_id_applied = db.touch_whatsapp_binding(
         conn, user_id,
         send_id=event.from_user.bsuid or None,
         username=event.from_user.username,
@@ -646,6 +727,18 @@ def _handle_inbound(
     )
 
     result = _dispatch_inbound(conn, config, event, user_id, binding)
+    if not send_id_applied:
+        # Another user's row already holds this destination. The message still
+        # goes through — the sender is authenticated and legitimate, and
+        # refusing everything they send over a row that is not theirs would be
+        # a denial of service — but stage 3's send will fall back to the
+        # bootstrap number, so an operator has to be told which two rows
+        # collided. Buffered like every other alert raised in here.
+        result = replace(
+            result,
+            pending_alert=result.pending_alert
+            or _write_send_id_alert(conn, user_id, event.from_user.bsuid),
+        )
     _set_disposition(conn, event, result.disposition, result.task_id)
     logger.info(
         "whatsapp.inbound.accepted disposition=%s message=%s task_id=%s",
@@ -715,14 +808,18 @@ def _dispatch_inbound(
                 response_logical_key=f"confirmation-answer:{event.message_id}",
             )
 
+    if not text:
+        # Above the opt-out gate, because the spec's step 4 sits above its step
+        # 5 and `## Behaviour > Edge cases` names `empty` unconditionally. It
+        # also reads better in the dedup row: nothing was withheld from this
+        # message, there was nothing in it.
+        return WhatsAppEventResult("empty", user_id=user_id)
+
     if opted_out:
         # Recorded but not acted on. STOP means no outbound WhatsApp, and a
         # task whose only reply route is blocked is an answer nobody reads —
         # as is a command whose whole value is its response.
         return WhatsAppEventResult("opted_out", user_id=user_id)
-
-    if not text:
-        return WhatsAppEventResult("empty", user_id=user_id)
 
     if text.startswith("!"):
         return WhatsAppEventResult(
@@ -855,43 +952,21 @@ def deliver_pending_alerts(config: Config, results: Sequence[WhatsAppEventResult
     waits out the full busy timeout and then raises into a never-raises
     contract. The WhatsApp leg is stripped because every alert raised here is
     about WhatsApp being unable to identify or reach somebody — reporting it
-    over the failing surface is the loop this rule exists to break.
+    over the failing surface is the loop that rule exists to break.
+
+    The push itself is `transport._alerts.push_off_surface`, shared with the
+    SMS surface: the destination filter and the comma-list descriptor are the
+    same two lines on both, and a surface spelling that join differently would
+    route somewhere wrong rather than fail. Never raises — it runs after the
+    response has already gone.
     """
-    from ... import notifications
-    from ...notification_store import mark_delivered
+    from .._alerts import push_off_surface
 
     for result in results:
-        raised = result.pending_alert
-        if raised is None or not raised.deliver:
-            continue
-        # The row's own user, never the event's: an identity mismatch resolves
-        # to no principal at all, and the person who has to act on it is the
-        # one the bootstrap number is bound to.
-        user_id = raised.user_id
-        if not user_id:
-            continue
-        dests = [
-            dest for dest in notifications.resolve_destinations(config, user_id, "alert")
-            if dest.surface != "whatsapp"
-        ]
-        descriptor = ",".join(
-            dest.surface if dest.channel is None else f"{dest.surface}:{dest.channel}"
-            for dest in dests
+        push_off_surface(
+            config, result.pending_alert,
+            exclude_surface="whatsapp", reference_prefix="whatsapp-alert",
         )
-        if not descriptor:
-            continue
-        try:
-            delivered = notifications.send_notification(
-                config, user_id, raised.text, surface=descriptor,
-                title=raised.title,
-                reference_id=f"whatsapp-alert:{raised.notification_id}",
-            )
-        except Exception:
-            logger.warning("whatsapp.alert.not_delivered", exc_info=True)
-            continue
-        if delivered:
-            with db.get_db(config.db_path) as conn:
-                mark_delivered(conn, [raised.notification_id])
 
 
 __all__ = [

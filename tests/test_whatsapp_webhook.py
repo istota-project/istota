@@ -271,6 +271,43 @@ class TestTheVerificationHandshake:
             })
         assert excinfo.value.status_code == 403
 
+    @pytest.mark.parametrize("token", ["tokën", "\u0442\u043e\u043a\u0435\u043d", "é" * 40])
+    def test_a_non_ascii_token_is_refused_rather_than_raising(
+        self, tmp_path, monkeypatch, token,
+    ):
+        """`hmac.compare_digest` raises TypeError on a non-ASCII `str`.
+
+        One unauthenticated GET, and the route caught only
+        `WhatsAppWebhookError`, so it escaped as a 500 with a traceback in the
+        app log. `client.verify_signature` documents this exact hazard for the
+        signature header and guards it; the handshake repeated the mistake on
+        the other secret comparison.
+        """
+        client = _receiver(_config(tmp_path), monkeypatch)
+
+        response = client.get("/webhooks/whatsapp", params={
+            "hub.mode": "subscribe", "hub.verify_token": token,
+            "hub.challenge": "1234",
+        })
+
+        assert response.status_code == 403
+
+    def test_a_non_ascii_decimal_challenge_is_not_reflected(self, tmp_path):
+        """`isdecimal()` is True for Arabic-Indic and a dozen other digit sets.
+
+        The comment above `MAX_CHALLENGE_CHARS` says the shape is bounded
+        rather than reflected as given; without an `isascii()` beside it, it
+        was not.
+        """
+        config = _config(tmp_path)
+
+        with pytest.raises(WhatsAppWebhookError) as excinfo:
+            verify_subscription(config, {
+                "hub.mode": "subscribe", "hub.verify_token": VERIFY_TOKEN,
+                "hub.challenge": "١٢٣",
+            })
+        assert excinfo.value.status_code == 400
+
     def test_a_disabled_transport_has_no_endpoint(self, tmp_path, monkeypatch):
         client = _receiver(_config(tmp_path, enabled=False), monkeypatch)
 
@@ -421,6 +458,20 @@ class TestTheSignedPostRoute:
             parse_webhook(config, raw, _post_headers(raw))
         assert excinfo.value.status_code == 400
 
+    def test_a_deeply_nested_body_is_400_rather_than_a_stack_overflow(self, tmp_path):
+        """`RecursionError` is not a `ValueError` and was caught by nothing.
+
+        The sender is authenticated, so this is Meta or a secret holder rather
+        than a public denial of service — but a 500 and a traceback is still
+        the wrong answer to something this module's contract calls malformed.
+        """
+        config = _config(tmp_path)
+        raw = b"[" * 60000 + b"]" * 60000
+
+        with pytest.raises(WhatsAppWebhookError) as excinfo:
+            parse_webhook(config, raw, _post_headers(raw))
+        assert excinfo.value.status_code == 400
+
     def test_an_oversize_body_is_refused_before_the_signature(
         self, tmp_path, monkeypatch,
     ):
@@ -516,9 +567,14 @@ class TestTheSignedPostRoute:
 
         client.post("/webhooks/whatsapp", content=raw, headers=_post_headers(raw))
 
+        ours = _istota_log(caplog)
+        # The watermark. Without it this is a pure negative that stays green if
+        # the accepted-path logging is deleted outright, which would be a
+        # regression rather than a pass.
+        assert "whatsapp.inbound.accepted" in ours
         for secret in ("my bank code is 4242", USER_NUMBER, USER_WA_ID,
                        USER_BSUID, APP_SECRET, "wa-access-token"):
-            assert secret not in caplog.text
+            assert secret not in ours
 
 
 def _body_two_messages():
@@ -704,6 +760,63 @@ class TestPayloadNormalization:
 
         assert events[0].from_user.bsuid == ""
         assert events[1].from_user.bsuid == USER_BSUID
+
+    @pytest.mark.parametrize("sender", [15551234567, ["US.9876543210"], {"a": 1}, True])
+    def test_a_non_string_sender_yields_no_identity_rather_than_the_lone_contact(
+        self, tmp_path, sender,
+    ):
+        """Present-but-malformed is not absent.
+
+        `_optional_text` answers None for both, and the absent branch falls
+        back to the single contact — so an int or a list in `from` was
+        attributed to `contacts[0]`, which is the positional attribution the
+        pairing rule exists to refuse, reached by the one door it was not
+        watching.
+        """
+        config = _config(tmp_path)
+        message = dict(_text_message())
+        message["from"] = sender
+
+        events = normalize_payload(config, _payload(_value(
+            contacts=[_contact()], messages=[message],
+        )))
+
+        assert events[0].from_user.bsuid == ""
+
+    def test_an_absent_sender_beside_one_contact_is_still_paired(self, tmp_path):
+        """The control for the case above: absent really does fall back."""
+        config = _config(tmp_path)
+        message = dict(_text_message())
+        del message["from"]
+
+        events = normalize_payload(config, _payload(_value(
+            contacts=[_contact()], messages=[message],
+        )))
+
+        assert events[0].from_user.bsuid == USER_BSUID
+
+    def test_an_ignored_field_name_is_bounded_and_flattened_in_the_log(
+        self, tmp_path, caplog,
+    ):
+        """The field name is a sender-chosen string up to the body cap.
+
+        The admin Logs pane reads the rotating file back line by line, so a
+        newline in it forges a record, and an unbounded one writes kilobytes
+        per change element.
+        """
+        caplog.set_level("INFO")
+        config = _config(tmp_path)
+
+        normalize_payload(config, _payload(
+            _value(contacts=[_contact()], messages=[_text_message()]),
+            field="a\nINFO forged log line\n" + "z" * 5000,
+        ))
+
+        ours = _istota_log(caplog)
+        assert "whatsapp.inbound.ignored_field" in ours
+        assert "\n" not in ours.split("field=", 1)[1]
+        assert "forged log line" not in ours
+        assert len(ours.split("field=", 1)[1]) <= 64
 
     def test_a_username_only_contact_carries_no_wa_id(self, tmp_path):
         config = _config(tmp_path)
@@ -1037,6 +1150,60 @@ class TestIdentityAndEnrollment:
             ) is False
             assert db.get_whatsapp_binding(conn, "alice").bsuid == USER_BSUID
 
+    def test_a_send_id_another_user_holds_does_not_break_this_users_messages(
+        self, tmp_path,
+    ):
+        """The 503 loop. `send_id` carries a partial unique index.
+
+        Alice is bound to a BSUID that also sits, stale, in bob's `send_id`.
+        Every authenticated message from alice rewrote her `send_id` to that
+        BSUID, hit the index, raised `IntegrityError` out of the batch, and the
+        route answered 503 — which Meta redelivers against the same
+        deterministic failure for ever, with no disposition row, no task and no
+        alert. Her messages must keep working; the collision is an operator's
+        problem, and the outbound side falls back to the bootstrap number.
+        """
+        config = _config(tmp_path)
+        config.users["bob"] = UserConfig()
+        _bind(config, "alice", bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        _bind(config, "bob", bootstrap_phone_number="+15557654321",
+              bsuid=OTHER_BSUID, send_id=USER_BSUID)
+
+        results = _handle(config, _text_payload())
+
+        assert _dispositions(results) == ["task"]
+        assert results[0].task_id is not None
+        with db.get_db(config.db_path) as conn:
+            alice = db.get_whatsapp_binding(conn, "alice")
+            # Left alone rather than stolen from bob, and the rest of the touch
+            # still landed — the service window above all, since losing that
+            # would silently close her window on a message she just sent.
+            assert alice.send_id == ""
+            assert alice.last_user_message_at
+            assert db.get_whatsapp_binding(conn, "bob").send_id == USER_BSUID
+
+    def test_the_send_id_collision_raises_one_deduplicated_operator_alert(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+        config.users["bob"] = UserConfig()
+        _bind(config, "alice", bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        _bind(config, "bob", bootstrap_phone_number="+15557654321",
+              bsuid=OTHER_BSUID, send_id=USER_BSUID)
+
+        first = _handle(config, _text_payload(message_id="wamid.one"))
+        _handle(config, _text_payload(message_id="wamid.two"))
+
+        assert first[0].pending_alert is not None
+        with db.get_db(config.db_path) as conn:
+            rows = conn.execute(
+                "SELECT dedup_key, title, body FROM notifications"
+            ).fetchall()
+        assert len(rows) == 1, "a user who keeps writing must bump, not duplicate"
+        for field in ("dedup_key", "title", "body"):
+            assert USER_BSUID not in rows[0][field]
+            assert USER_NUMBER not in rows[0][field]
+
     def test_the_send_id_and_username_follow_an_authenticated_message(self, tmp_path):
         config = _config(tmp_path)
         _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
@@ -1079,6 +1246,30 @@ class TestTheServiceWindowClock:
             stored = db.get_whatsapp_binding(conn, "alice").last_user_message_at
         assert stored == sent.strftime("%Y-%m-%d %H:%M:%S")
 
+    def test_a_later_message_advances_the_window(self, tmp_path):
+        """The `MAX` that authorises every free-form send, driven forwards.
+
+        Without this the three cases below all run against a binding whose
+        `last_user_message_at` is NULL, and a write-once `COALESCE` — a window
+        that closes 24 hours after a user's *first* message and never reopens —
+        keeps the whole file green. Measured: it did.
+        """
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        first = datetime.now(timezone.utc) - timedelta(hours=3)
+        second = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+        _handle(config, _text_payload(message_id="wamid.first", timestamp=first))
+        with db.get_db(config.db_path) as conn:
+            after_first = db.get_whatsapp_binding(conn, "alice").last_user_message_at
+        _handle(config, _text_payload(message_id="wamid.second", timestamp=second))
+        with db.get_db(config.db_path) as conn:
+            after_second = db.get_whatsapp_binding(conn, "alice").last_user_message_at
+
+        assert after_first == first.strftime("%Y-%m-%d %H:%M:%S")
+        assert after_second == second.strftime("%Y-%m-%d %H:%M:%S")
+        assert after_second > after_first
+
     def test_a_replayed_older_event_never_moves_the_window_backwards(self, tmp_path):
         config = _config(tmp_path)
         _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
@@ -1103,13 +1294,20 @@ class TestTheServiceWindowClock:
         _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
         future = datetime.now(timezone.utc) + timedelta(hours=9)
 
+        before = datetime.now(timezone.utc) - timedelta(seconds=60)
         _handle(config, _text_payload(timestamp=future))
 
         with db.get_db(config.db_path) as conn:
             stored = db.get_whatsapp_binding(conn, "alice").last_user_message_at
-        assert stored < (
+        # Two-sided. A one-sided upper bound is equally satisfied by a clamp
+        # that writes 1970 — which would *close* the window on a legitimate
+        # message rather than merely refuse to extend it, the worse of the two
+        # failures. Measured: the one-sided form stayed green under exactly
+        # that mutation.
+        upper = (
             datetime.now(timezone.utc) + timedelta(minutes=6)
         ).strftime("%Y-%m-%d %H:%M:%S")
+        assert before.strftime("%Y-%m-%d %H:%M:%S") <= stored <= upper
 
     def test_a_slightly_future_timestamp_inside_the_margin_is_taken_as_given(
         self, tmp_path,
@@ -1304,6 +1502,20 @@ class TestInboundDispositions:
 
         assert _dispositions(results) == ["opted_out"]
         assert results[0].command_text is None
+
+    def test_an_empty_body_records_empty_even_for_an_opted_out_binding(
+        self, tmp_path,
+    ):
+        """The spec's step 4 sits above its step 5, and `empty` is named
+        unconditionally in the edge-case list. Nothing was withheld from this
+        message; there was nothing in it."""
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        _handle(config, _text_payload(message_id="wamid.stop", text="STOP"))
+
+        results = _handle(config, _text_payload(message_id="wamid.blank", text="  "))
+
+        assert _dispositions(results) == ["empty"]
 
     def test_the_keywords_are_exact_and_a_sentence_is_an_ordinary_request(
         self, tmp_path,
@@ -1587,9 +1799,14 @@ class TestTheSurfaceStaysOutsideTheRoomModel:
         from istota.transport.whatsapp import webhook as webhook_module
 
         source = source_of(webhook_module)
+        # `add_message` rather than `store_message`, which is not a function
+        # in this tree and therefore guarded nothing. The list is the backstop;
+        # the real control is the positive test below, because omitting the
+        # kwarg entirely reintroduces the mirror (`record_inbound` defaults it
+        # to True) while passing every name check here.
         for forbidden in (
             "register_room", "add_room_binding", "add_room_member",
-            "store_message", "mirror_to_room=True",
+            "add_message", "rename_room", "mirror_to_room=True",
         ):
             assert forbidden not in source
 
