@@ -13,7 +13,7 @@ GPS-based location tracking via the Overland iOS app. Tracks location pings, res
 
 Places (named geofences) are stored in the database. Full CRUD via CLI:
 - **`places`** — list all saved places (includes `id` for each)
-- **`learn`** — save current GPS position as a named place
+- **`learn`** — save a named place, at given coordinates or (with none) at the current GPS position
 - **`update`** — modify an existing place (category, name, radius, coordinates, notes)
 - **`delete`** — remove a place (also clears place assignment from historical pings)
 - **`place-stats`** — visit count, first/last/longest visit, total time spent (derived from pings)
@@ -48,11 +48,38 @@ istota-skill location history --date 2026-02-15 --tz America/New_York
 # List known places (each entry includes id, name, lat, lon, radius_meters, category, notes)
 istota-skill location places
 
-# Save current location as a named place (inserts into DB)
+# Save a named place (inserts into DB)
 # Takes effect immediately on the next incoming ping
 istota-skill location learn "coffee shop"
 istota-skill location learn "gym" --category gym --radius 75
 istota-skill location learn "office" --notes "side entrance, 4th floor"
+
+# Name a stop you have already left — the usual case, since a day summary or
+# `discover` surfaces the stop hours later. Without --lat/--lon the place is
+# saved at the device's CURRENT position, which by then is somewhere else.
+istota-skill location learn "hardware store" --lat 40.75012 --lon -73.98771 --radius 50
+
+# Better: snap to the discovered cluster nearest that point and adopt its
+# fitted centroid and radius. Coordinates read off a summary are one ping's
+# position; a cluster's centre is weighted by every ping in it. --radius is
+# ignored here; the cluster's own fitted radius wins.
+#
+# `discover` hides any cluster within 200m of a place that is already saved,
+# and --from-cluster resolves through that same filter — so this refuses when
+# re-siting an existing place, or naming a stop next to one. Drop the flag and
+# pass the coordinates directly in that case.
+istota-skill location learn "hardware store" --lat 40.75012 --lon -73.98771 --from-cluster
+
+# --backfill assigns the pings already inside the new geofence to this place.
+# Without it the visit that prompted the naming keeps reading as an unnamed
+# coordinate in every later day-summary and place-stats. It rewrites history
+# and a generous radius can absorb a neighbour's pings, so it is opt-in; the
+# response reports how many rows moved.
+#
+# It rewrites pings only. `day-summary` and `place-stats` are derived from
+# pings and so pick the naming up; the `visits` table is re-derived on a
+# rolling recent window, so a backfill of older pings does not reach it.
+istota-skill location learn "hardware store" --lat 40.75012 --lon -73.98771 --backfill
 
 # Update an existing place — identify by --name or --id
 # Only specified fields are changed; others are left as-is
@@ -61,6 +88,11 @@ istota-skill location update --name "old name" --rename "new name"
 istota-skill location update --id 42 --radius 200 --notes "back entrance"
 istota-skill location update --id 42 --notes ""  # clear notes
 istota-skill location update --name "office" --lat 40.71 --lon -74.01
+
+# Moving or resizing a place leaves its pings on the old footprint. --backfill
+# reassigns them: pings now outside the geofence are released, unassigned ones
+# now inside are adopted. Reported as `reassigned_pings`.
+istota-skill location update --id 42 --radius 200 --backfill
 
 # Delete a place — identify by --name or --id
 # Also removes the place assignment from historical pings
@@ -172,9 +204,27 @@ for "this was a climb" and never as an altimeter reading.
   "lat": 40.75,
   "lon": -73.99,
   "radius_meters": 100,
+  "source": "argument",
+  "backfilled_pings": 4,
+  "released_pings": 0,
   "message": "Saved 'coffee shop' at 40.7500, -73.9900"
 }
 ```
+
+`source` says which input sited the place: `argument` for `--lat`/`--lon`,
+`cluster` for `--from-cluster`, `latest_ping` when neither was given. Check it
+— a place saved at the device's current position looks identical otherwise.
+
+`learn` on a name that already exists **moves** that place rather than failing.
+With `--backfill` that means pings can be detached as well as adopted, so both
+counts are reported: `backfilled_pings` took the new geofence,
+`released_pings` fell outside it and went back to unassigned. Both are `null`
+without `--backfill`.
+
+A `--from-cluster` response also carries a `cluster` object with the ping
+count, the fitted radius and the first and last times the cluster was seen,
+plus `radius_overridden` when a `--radius` was passed and ignored in favour of
+the fitted one.
 
 ### update
 
@@ -189,9 +239,14 @@ for "this was a climb" and never as an altimeter reading.
     "radius_meters": 100,
     "category": "food",
     "notes": null
-  }
+  },
+  "reassigned_pings": {"assigned": 0, "released": 1}
 }
 ```
+
+`reassigned_pings` is `null` without `--backfill` and on an edit that did not
+change `lat`, `lon` or `radius` — there is nothing to reassign. Otherwise
+`released` left the geofence and `assigned` entered it.
 
 ### delete
 
