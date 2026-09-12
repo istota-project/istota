@@ -26,7 +26,6 @@ from istota.config import (
     WHATSAPP_PROVIDER_NAMES,
     WHATSAPP_WEBHOOK_PROVIDERS,
     UserConfig,
-    WhatsAppConfig,
     WhatsAppTemplateConfig,
     load_config,
     whatsapp_missing_credentials,
@@ -35,6 +34,8 @@ from istota.config import (
     whatsapp_structural_config_errors,
     whatsapp_webhooks_enabled,
 )
+from .support.whatsapp_config import build_whatsapp_config
+
 from istota.transport.whatsapp import outbound
 from istota.transport.whatsapp._types import (
     WhatsAppSendFailure,
@@ -102,9 +103,9 @@ def _cloud_config(*, enabled: bool = True, provider: str = "whatsapp_cloud") -> 
     cfg = Config()
     cfg.whatsapp.enabled = enabled
     cfg.whatsapp.provider = provider
-    cfg.whatsapp.access_token = "wa-access-token"
-    cfg.whatsapp.app_secret = "wa-app-secret"
-    cfg.whatsapp.verify_token = "wa-verify-token"
+    cfg.whatsapp.cloud.access_token = "wa-access-token"
+    cfg.whatsapp.cloud.app_secret = "wa-app-secret"
+    cfg.whatsapp.cloud.verify_token = "wa-verify-token"
     return cfg
 
 
@@ -147,16 +148,24 @@ class TestTheAdapterRecord:
 
 
 class TestNothingSelectsAProviderYet:
-    """The property this stage rests on, which is that it moves nothing.
+    """What a config that names no provider gets, and it is now two answers.
 
-    Both assertions are also what Stage 3 has to keep green when it flips the
-    default to `baileys` and nests the Cloud fields: a flat `[whatsapp]` block
-    written before any of this existed must go on loading as Cloud rather than
-    quietly becoming a broken Baileys install.
+    The class was written when the two were one — every deployment ran Cloud,
+    so the dataclass default and the legacy file resolved alike. Flipping the
+    default to `baileys` split them, and the split is the whole compatibility
+    claim: a config written *today* with no provider key gets the new adapter,
+    while one carrying the pre-adapter flat block goes on running the adapter
+    it has always run.
     """
 
-    def test_the_default_is_the_adapter_every_deployment_already_runs(self):
-        assert Config().whatsapp.provider == "whatsapp_cloud"
+    def test_the_default_is_the_adapter_a_fresh_install_should_get(self):
+        """Deliberately the opposite of what this asserted at Stage 1.
+
+        A fresh install writes no Meta account object and cannot be given one
+        by a default, so the only value that can work unattended is the one
+        whose credential is a QR scan.
+        """
+        assert Config().whatsapp.provider == "baileys"
 
     def test_a_config_naming_no_provider_loads_as_cloud(self, tmp_path):
         path = tmp_path / "config.toml"
@@ -184,7 +193,7 @@ class TestNothingSelectsAProviderYet:
 class TestTheProviderFieldValidators:
     def test_the_cloud_block_reports_its_own_blanks(self):
         cfg = Config()
-        cfg.whatsapp.access_token = "wa-access-token"
+        cfg.whatsapp.cloud.access_token = "wa-access-token"
 
         assert whatsapp_provider_missing_fields(cfg, "whatsapp_cloud") == (
             "app_secret", "verify_token",
@@ -193,7 +202,7 @@ class TestTheProviderFieldValidators:
 
     def test_whitespace_is_blank(self):
         cfg = _cloud_config()
-        cfg.whatsapp.app_secret = "   "
+        cfg.whatsapp.cloud.app_secret = "   "
 
         assert whatsapp_provider_missing_fields(cfg, "whatsapp_cloud") == ("app_secret",)
 
@@ -201,7 +210,7 @@ class TestTheProviderFieldValidators:
         """Delegated rather than restated, so the registry's gate and doctor's
         report cannot drift on what counts as blank."""
         cfg = Config()
-        cfg.whatsapp.app_secret = " "
+        cfg.whatsapp.cloud.app_secret = " "
 
         assert whatsapp_missing_credentials(cfg) == whatsapp_provider_missing_fields(
             cfg, "whatsapp_cloud"
@@ -250,6 +259,38 @@ class TestTheProviderFieldValidators:
             "access_token", "app_secret", "verify_token",
         )
         assert whatsapp_provider_has_values(cfg, "whatsapp_cloud") is False
+
+    def test_every_named_provider_names_its_own_block(self):
+        """The block map is the other half of the fields map, and a name
+        missing from it makes every field read resolve to `None` — which
+        `whatsapp_provider_missing_fields` fails closed on and
+        `whatsapp_provider_has_values` reads as unconfigured, so the provider
+        would be reported as holding nothing whatever the operator wrote."""
+        from istota.config import _WHATSAPP_PROVIDER_BLOCKS
+
+        assert set(_WHATSAPP_PROVIDER_BLOCKS) == set(WHATSAPP_PROVIDER_NAMES)
+        for provider, attribute in _WHATSAPP_PROVIDER_BLOCKS.items():
+            block = getattr(Config().whatsapp, attribute)
+            assert dataclasses.is_dataclass(block), provider
+
+    def test_every_named_provider_has_a_structural_validator(self):
+        """Otherwise the whole of that provider's config goes unvalidated: the
+        dispatch answers with a single error naming the gap rather than
+        returning `[]`, which would read as a config with nothing wrong."""
+        from istota.config import _WHATSAPP_PROVIDER_VALIDATORS
+
+        assert set(_WHATSAPP_PROVIDER_VALIDATORS) == set(WHATSAPP_PROVIDER_NAMES)
+
+    def test_a_provider_with_no_validator_reports_rather_than_passing(self, monkeypatch):
+        from istota import config as config_module
+
+        monkeypatch.delitem(config_module._WHATSAPP_PROVIDER_VALIDATORS, "baileys")
+        cfg = Config()
+        cfg.whatsapp.provider = "baileys"
+
+        assert whatsapp_structural_config_errors(cfg) == [
+            "provider 'baileys' has no structural validation"
+        ]
 
     def test_every_named_provider_declares_its_fields(self):
         """A name in the tuple with no entry in the map is indistinguishable
@@ -329,7 +370,7 @@ class TestTheRegistry:
         """The ISSUE-058 shape: a missing secret is refused at use and recorded
         `unconfigured`, never raised at load."""
         cfg = _cloud_config()
-        cfg.whatsapp.app_secret = ""
+        cfg.whatsapp.cloud.app_secret = ""
         built = _adapter("whatsapp_cloud", CLOUD_CAPS)
 
         registry = make_provider_registry(
@@ -486,7 +527,7 @@ def _deployment(tmp_path, **overrides) -> Config:
     cfg = Config(
         db_path=path,
         temp_dir=tmp_path / "tmp",
-        whatsapp=WhatsAppConfig(**fields),
+        whatsapp=build_whatsapp_config(**fields),
         users={"alice": UserConfig()},
     )
     cfg.site.hostname = "assistant.example.com"
@@ -629,8 +670,8 @@ class TestTheCloudAdapter:
         """The declared webhook contract, driven end to end rather than
         asserted as a non-None field."""
         cfg = _cloud_config()
-        cfg.whatsapp.waba_id = WABA_ID
-        cfg.whatsapp.phone_number_id = PHONE_NUMBER_ID
+        cfg.whatsapp.cloud.waba_id = WABA_ID
+        cfg.whatsapp.cloud.phone_number_id = PHONE_NUMBER_ID
         adapter = whatsapp_cloud.build_adapter(cfg)
         body = _meta_payload()
 
@@ -649,8 +690,8 @@ class TestTheCloudAdapter:
         """The chain is one call rather than a signature check the caller has
         to remember: a forged body is refused with nothing parsed."""
         cfg = _cloud_config()
-        cfg.whatsapp.waba_id = WABA_ID
-        cfg.whatsapp.phone_number_id = PHONE_NUMBER_ID
+        cfg.whatsapp.cloud.waba_id = WABA_ID
+        cfg.whatsapp.cloud.phone_number_id = PHONE_NUMBER_ID
         adapter = whatsapp_cloud.build_adapter(cfg)
         body = _meta_payload()
 
@@ -808,9 +849,9 @@ class TestTheWebhookFieldsAreDeclaredTogether:
 
     def test_declaring_neither_is_the_shape_a_socket_provider_takes(self):
         cfg = _cloud_config(provider="baileys")
-        cfg.whatsapp.access_token = ""
-        cfg.whatsapp.app_secret = ""
-        cfg.whatsapp.verify_token = ""
+        cfg.whatsapp.cloud.access_token = ""
+        cfg.whatsapp.cloud.app_secret = ""
+        cfg.whatsapp.cloud.verify_token = ""
         built = _adapter("baileys", BAILEYS_CAPS, webhook=False)
 
         registry = make_provider_registry(cfg, builders={"baileys": lambda c: built})

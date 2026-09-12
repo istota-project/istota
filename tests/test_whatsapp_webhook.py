@@ -30,7 +30,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from istota import db
-from istota.config import Config, UserConfig, WhatsAppConfig
+from istota.config import Config, UserConfig
+
+from .support.whatsapp_config import build_whatsapp_config
 from istota.transport.whatsapp import whatsapp_conversation_token
 from istota.transport.whatsapp.webhook import (
     MAX_WEBHOOK_BODY,
@@ -73,7 +75,7 @@ def _config(tmp_path, *, enabled: bool = True, **overrides) -> Config:
     config = Config(
         db_path=path,
         temp_dir=tmp_path / "tmp",
-        whatsapp=WhatsAppConfig(**fields),
+        whatsapp=build_whatsapp_config(**fields),
         users={"alice": UserConfig()},
     )
     config.site.hostname = "assistant.example.com"

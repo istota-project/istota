@@ -6,7 +6,7 @@ import os
 import re
 from dataclasses import dataclass, field, replace as _dc_replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import tomli
 
@@ -1216,27 +1216,28 @@ class WhatsAppTemplateConfig:
 
 
 @dataclass
-class WhatsAppConfig:
-    """One WhatsApp business number, reached through one provider.
+class WhatsAppCloudConfig:
+    """``[whatsapp.cloud]`` — everything Meta's hosted Cloud API needs.
 
-    ``provider`` names the adapter that sends and receives; see
-    ``WHATSAPP_PROVIDER_NAMES``. Every other field here is Meta's hosted Cloud
-    API, which is the only adapter that exists so far and therefore the
-    default.
+    Every field here was flat on ``[whatsapp]`` before the surface gained
+    adapters, and a config still writing them there is read as this block; see
+    :func:`_migrate_whatsapp_flat`.
 
     ``graph_api_version = ""`` means the version pinned by the installed PyWa
     release. An explicit value exists for a controlled migration, not for
     permanently avoiding an API upgrade.
 
-    ``billing_policy`` is the only field here that decides whether a send can
-    ever cost money, which is why an unrecognised value fails the config load
-    in both directions rather than resolving to a default.
+    ``billing_policy`` is the only field in the tree that decides whether a
+    send can ever cost money, which is why an unrecognised value fails the
+    config load in both directions rather than resolving to a default.
+
+    ``business_timezone`` and ``request_timeout_seconds`` are here rather than
+    on the parent for the reason the ids are: the first is the calendar the
+    *metered* monthly quota's month is computed in, and the second is the Graph
+    API HTTP timeout. Neither means anything to an adapter that is not Meta's.
     """
-    enabled: bool = False
-    provider: str = "whatsapp_cloud"
     waba_id: str = ""
     phone_number_id: str = ""
-    business_phone_number: str = ""
     access_token: str = ""
     app_secret: str = ""
     verify_token: str = ""
@@ -1248,6 +1249,43 @@ class WhatsAppConfig:
     proactive_template: WhatsAppTemplateConfig = field(
         default_factory=WhatsAppTemplateConfig,
     )
+
+
+@dataclass
+class WhatsAppBaileysConfig:
+    """``[whatsapp.baileys]`` — the little a paired WhatsApp Web session needs.
+
+    Both fields default to empty and are resolved at use rather than here:
+    ``session_dir`` to ``{db_path.parent}/whatsapp-baileys-session`` and
+    ``library_version`` to whatever the shipped sidecar pins. **Neither is a
+    credential and neither belongs in** ``_WHATSAPP_PROVIDER_FIELDS`` — the
+    credential is the paired session on disk, so a defaulted field here would
+    make the provider look configured on every deployment and be kept as a
+    callback-only adapter on a Cloud one.
+    """
+    session_dir: str = ""
+    library_version: str = ""
+
+
+@dataclass
+class WhatsAppConfig:
+    """One WhatsApp business number, reached through one provider.
+
+    ``provider`` names the adapter that sends and receives; see
+    ``WHATSAPP_PROVIDER_NAMES``. Each adapter's own settings are its nested
+    block, the arrangement ``[sms]`` already has with ``twilio`` and ``telnyx``.
+
+    Three fields stay at this level because they are facts about the surface
+    rather than about an adapter: whether it runs at all, which adapter runs
+    it, and the number itself — the dedicated line is the same line whichever
+    adapter is holding it, which is what lets a deployment switch adapters
+    without the conversation token, the bindings or the ledger moving.
+    """
+    enabled: bool = False
+    provider: str = "baileys"
+    business_phone_number: str = ""
+    cloud: WhatsAppCloudConfig = field(default_factory=WhatsAppCloudConfig)
+    baileys: WhatsAppBaileysConfig = field(default_factory=WhatsAppBaileysConfig)
 
 
 @dataclass
@@ -3287,6 +3325,153 @@ def _migrate_workspace_fields(data: dict, config: "Config") -> None:
     )
 
 
+_LEGACY_FLAT_WHATSAPP_KEYS = (
+    "waba_id",
+    "phone_number_id",
+    "access_token",
+    "app_secret",
+    "verify_token",
+    "graph_api_version",
+    "business_timezone",
+    "request_timeout_seconds",
+    "billing_policy",
+    "monthly_service_attempt_limit",
+    "proactive_template",
+)
+"""Every key that used to sit flat on ``[whatsapp]`` and now lives in
+``[whatsapp.cloud]``.
+
+``proactive_template`` is in the list and is a *sub-table* rather than a scalar,
+which is the entry easiest to leave out: both shipped generators render
+``[whatsapp.proactive_template]`` explicitly, so forgetting it would put that
+block in the unknown-key report of every deployment there is.
+
+``enabled``, ``provider`` and ``business_phone_number`` are deliberately absent
+— they did not move.
+"""
+
+_LEGACY_WHATSAPP_CLOUD_SIGNALS = (
+    "waba_id",
+    "phone_number_id",
+    "access_token",
+    "app_secret",
+    "verify_token",
+)
+"""The flat keys whose *value* says a config was written for Meta's Cloud API.
+
+**Non-empty values, never key presence, and the difference decides whether the
+default flip breaks every existing deployment.** ``config.toml.j2`` and
+``render-config.sh`` both render the whole flat block unconditionally — a
+deployment that has never heard of WhatsApp still gets ``waba_id = ""`` — so a
+presence test reads every shipped render as a Cloud deployment, for ever,
+including the Baileys ones this spec is for.
+
+The five are the Meta account's own identifiers and secrets: nothing else can
+mean a Cloud deployment, and nothing that is not one can carry them.
+``billing_policy``, ``business_timezone``, ``request_timeout_seconds`` and the
+template block are excluded for the mirror-image reason — the generators render
+all four at their defaults on every deployment, so they carry no information.
+
+The three credentials are in the set as well as the two ids, which the Ansible
+shape makes look redundant and does not: under ``istota_use_environment_file``
+the role omits the three credential lines entirely and delivers them through
+``secrets.env``, so *there* the ids are the whole signal — while a hand-written
+or Docker config that set a token and no id is still a Cloud config, and the day
+it gets an id it must not change meaning.
+"""
+
+
+def _is_legacy_whatsapp_cloud_signal(raw: object) -> bool:
+    """Whether one flat value is evidence of a Cloud deployment.
+
+    Deliberately the same blank-versus-whitespace rule
+    :func:`whatsapp_provider_missing_fields` applies, and deliberately tolerant
+    of an unquoted number the way ``coerce_str`` is — a hand-written
+    ``waba_id = 1234`` is a Cloud config with a missing pair of quotes, and
+    reading it as "no signal" would take the deployment's webhook away over a
+    TOML nicety. A table or a list is not a signal: it cannot be an id.
+    """
+    if isinstance(raw, bool) or isinstance(raw, (dict, list, tuple)):
+        return False
+    if isinstance(raw, (int, float)):
+        return True
+    return bool(str(raw or "").strip())
+
+
+def _migrate_whatsapp_flat(data: dict) -> None:
+    """Read a pre-adapter ``[whatsapp]`` block as ``[whatsapp.cloud]``.
+
+    Two separate decisions, and keeping them separate is what makes this safe.
+
+    **Where the fields live** is mechanical and unconditional: a flat key that
+    moved is rewritten into the nested table whatever ``provider`` says, since a
+    value in the wrong place is a value nobody can act on. An explicit
+    ``[whatsapp.cloud]`` entry wins over the flat spelling of the same key, and
+    the flat key is dropped either way — left in the table it would land in the
+    unknown-key report, which is the same noise this exists to prevent.
+
+    **Which provider is selected** is the judgement, and it is only ever made
+    for a config that names none: a flat block carrying any
+    :data:`_LEGACY_WHATSAPP_CLOUD_SIGNALS` value is a deployment that predates
+    the seam, so it keeps the adapter it has always run rather than silently
+    becoming a Baileys install with no session. That is not only a send-path
+    concern since Stage 2 — ``whatsapp_webhooks_enabled`` reads ``provider``, so
+    without this an existing Cloud deployment stops serving Meta's callback and
+    inbound dies with nothing in the log.
+
+    Runs **before** the dataclass walk, on the parsed document, because that is
+    what leaves the walk with an ordinary nested section to map: every coercion,
+    every hook and the unknown-key report keep working, and no reader of the
+    loaded ``Config`` learns that the flat shape ever existed. Nothing else
+    reads ``data["whatsapp"]``.
+
+    There is deliberately **no deprecation warning yet**. ``load_config`` runs in
+    every host-side skill CLI the proxy spawns per call, so a per-process line is
+    a per-call line there; and until the two generators emit the nested shape the
+    warning would be about istota's own output, with nothing an operator could
+    do. ``config/config.example.toml`` carries the deprecation instead.
+    """
+    block = data.get("whatsapp")
+    if not isinstance(block, dict):
+        return
+
+    nested = block.get("cloud")
+    if not isinstance(nested, dict):
+        nested = {}
+
+    legacy_signal = False
+    for name in _LEGACY_FLAT_WHATSAPP_KEYS:
+        if name not in block:
+            continue
+        raw = block.pop(name)
+        if name in _LEGACY_WHATSAPP_CLOUD_SIGNALS and _is_legacy_whatsapp_cloud_signal(raw):
+            legacy_signal = True
+        nested.setdefault(name, raw)
+
+    if nested:
+        block["cloud"] = nested
+    if legacy_signal and "provider" not in block:
+        block["provider"] = "whatsapp_cloud"
+
+
+def normalize_legacy_document(data: dict) -> None:
+    """Every rewrite :func:`load_config` applies before the dataclass walk.
+
+    One named step rather than a call buried in the loader, because two kinds
+    of caller have to agree on it. The loader is the first. The second is the
+    drift guards over the two deployment generators
+    (``tests/test_render_config.py``, ``tests/test_ansible_config_template.py``),
+    which answer "does the loader read every key this file renders" by driving
+    ``apply_section`` themselves — so a rewrite the loader does and they do not
+    reads to them as a rendered key nothing consumes, which is the opposite of
+    what it is.
+
+    Mutates ``data`` in place, like the walk it feeds. A caller that needs the
+    document afterwards copies it first.
+    """
+    _migrate_whatsapp_flat(data)
+
+
 _LEGACY_BRAIN_DEFAULT_TARGETS = ("claude_code", "tmux")
 """The blocks the retired top-level ``model`` / ``effort`` migrate onto.
 
@@ -3613,6 +3798,11 @@ def load_config(config_path: Path | None = None) -> Config:
     #
     # Sections carrying real judgement are named in `_HANDWRITTEN` and parsed by
     # hand below; the walk neither maps nor reports those.
+    # Before the walk, not after: this rewrites a pre-adapter `[whatsapp]` into
+    # the nested shape the dataclasses now declare, so what the walk sees is an
+    # ordinary section and the unknown-key report stays honest about it.
+    normalize_legacy_document(data)
+
     unknown: list[str] = []
     apply_section(
         config, data, hooks=_CONFIG_HOOKS, unknown=unknown,
@@ -3846,9 +4036,14 @@ def load_config(config_path: Path | None = None) -> Config:
             "sms.telnyx",
             "messaging_profile_id",
         ),
-        ("ISTOTA_WHATSAPP_ACCESS_TOKEN", "whatsapp", "access_token"),
-        ("ISTOTA_WHATSAPP_APP_SECRET", "whatsapp", "app_secret"),
-        ("ISTOTA_WHATSAPP_VERIFY_TOKEN", "whatsapp", "verify_token"),
+        # The section moved under `cloud` and the variable names deliberately
+        # did not: these three are what an existing `secrets.env` carries, on a
+        # deployment whose config the role rewrites but whose environment file
+        # it does not. A rename here would take every Cloud deployment's
+        # credentials away at the upgrade that nested the block.
+        ("ISTOTA_WHATSAPP_ACCESS_TOKEN", "whatsapp.cloud", "access_token"),
+        ("ISTOTA_WHATSAPP_APP_SECRET", "whatsapp.cloud", "app_secret"),
+        ("ISTOTA_WHATSAPP_VERIFY_TOKEN", "whatsapp.cloud", "verify_token"),
     ]
     for env_var, section_path, field_name in _env_secret_overrides:
         val = os.environ.get(env_var)
@@ -4195,22 +4390,38 @@ _WHATSAPP_PROVIDER_FIELDS: dict[str, tuple[str, ...]] = {
     "baileys": (),
 }
 
+_WHATSAPP_PROVIDER_BLOCKS: dict[str, str] = {
+    "whatsapp_cloud": "cloud",
+    "baileys": "baileys",
+}
+"""Which field of ``WhatsAppConfig`` holds each adapter's own settings.
+
+A table rather than a rule, because the two names differ by an accident of what
+each adapter is called: the surface is `whatsapp`, so the Meta adapter had to be
+`whatsapp_cloud` to leave the plain name alone, while the block under it has no
+such neighbour to avoid and stays `cloud`. Deriving one from the other by
+stripping a prefix would read as a convention and hold only until the third
+adapter. `tests/test_whatsapp_providers.py` requires an entry per provider name.
+"""
+
 
 def _whatsapp_provider_block(config: Config, provider: str) -> object | None:
     """Where one provider's own fields live, or ``None`` if there is no block.
 
-    Every WhatsApp field is flat on ``[whatsapp]`` today, so both providers
-    answer to the same block and only ``whatsapp_cloud`` declares anything in
-    it — the ``provider`` argument is what the nested ``cloud:`` / ``baileys:``
-    blocks will branch on, and this is the one place that has to move then.
+    One nested block per adapter since the config nesting landed, which is what
+    this function was written to absorb — its callers ask about fields by name
+    and never learn which table they came out of.
 
     An absent block is a different answer from an unknown provider, which is
     why this does not also fold in the name check: a caller asked about a
     provider that should have a block and has none reports every field it
     declares missing, rather than reporting nothing missing.
     """
-    del provider  # until the nested blocks land, there is one block to return
-    return getattr(config, "whatsapp", None)
+    whatsapp = getattr(config, "whatsapp", None)
+    attribute = _WHATSAPP_PROVIDER_BLOCKS.get(provider)
+    if whatsapp is None or attribute is None:
+        return None
+    return getattr(whatsapp, attribute, None)
 
 
 def whatsapp_provider_missing_fields(config: Config, provider: str) -> tuple[str, ...]:
@@ -4349,7 +4560,7 @@ def whatsapp_missing_credentials(config: Config) -> tuple[str, ...]:
 
 
 def whatsapp_credential_errors(config: Config) -> list[str]:
-    """Report the three Meta secrets an enabled transport needs but has not got.
+    """Report the credentials the *active* adapter needs and has not got.
 
     Presence is deliberately not a load-time error, for exactly the reason
     :func:`sms_credential_errors` gives: under ``istota_use_environment_file``
@@ -4359,53 +4570,53 @@ def whatsapp_credential_errors(config: Config) -> list[str]:
     play on a config the daemon it is provisioning for would load fine. Doctor
     is the reporting surface, and the transport refuses to start without the
     app secret at use time.
+
+    **Per provider, not per surface, and that is a correctness rule rather than
+    a tidiness one.** ``outbound._gate`` records ``unconfigured`` whenever this
+    returns anything, so while it named Meta's three secrets unconditionally a
+    Baileys deployment — which declares no credential in the file at all, its
+    own being the paired session on disk — would have had every send refused
+    for want of a token belonging to an adapter it does not run.
     """
     if not config.whatsapp.enabled:
         return []
-    missing = whatsapp_missing_credentials(config)
+    missing = whatsapp_provider_missing_fields(config, config.whatsapp.provider)
     if not missing:
         return []
     return ["missing credentials: " + ", ".join(missing)]
 
 
-def whatsapp_structural_config_errors(config: Config) -> list[str]:
-    """Return the WhatsApp errors that are facts about ``config.toml`` alone.
+def _whatsapp_cloud_structural_errors(config: Config) -> list[str]:
+    """The Cloud adapter's own structural errors.
 
-    These are what :func:`load_config` raises on: every value here is visible
-    to any caller that can read the config file, so no deployment shape can
-    make one look absent when it is set.
+    Reached only where ``provider = "whatsapp_cloud"``, which is what lets a
+    Baileys deployment leave every Meta field blank — the whole point of the
+    per-provider split. Inside that branch the enabled/disabled line is drawn
+    exactly where it was before the split, so a Cloud deployment's load is
+    unchanged in both directions.
     """
-    whatsapp = config.whatsapp
+    cloud = config.whatsapp.cloud
     errors: list[str] = []
-
-    # Checked whether or not the transport is enabled, exactly as `sms.provider`
-    # is and for the same reason: `make_provider_registry` raises on an unknown
-    # name, and a process that builds one at startup would die naming something
-    # the operator was never warned about.
-    if whatsapp.provider not in WHATSAPP_PROVIDER_NAMES:
-        errors.append(
-            "provider must be one of " + ", ".join(WHATSAPP_PROVIDER_NAMES)
-        )
 
     # Checked whether or not the transport is enabled, on the `sms.provider`
     # precedent: a misspelling in a disabled block otherwise loads cleanly and
     # then decides, at the first send on the day someone enables it, whether
     # money may be spent.
-    if whatsapp.billing_policy not in WHATSAPP_BILLING_POLICIES:
+    if cloud.billing_policy not in WHATSAPP_BILLING_POLICIES:
         errors.append(
             "billing_policy must be one of " + ", ".join(WHATSAPP_BILLING_POLICIES)
         )
-    if whatsapp.graph_api_version and not _WHATSAPP_GRAPH_VERSION_RE.fullmatch(
-        whatsapp.graph_api_version
+    if cloud.graph_api_version and not _WHATSAPP_GRAPH_VERSION_RE.fullmatch(
+        cloud.graph_api_version
     ):
         errors.append(
             "graph_api_version must be empty (the installed PyWa release's "
             "pin) or a v-prefixed Graph API version such as v23.0"
         )
 
-    template = whatsapp.proactive_template
+    template = cloud.proactive_template
     if template.enabled:
-        if whatsapp.billing_policy != "allow_paid":
+        if cloud.billing_policy != "allow_paid":
             errors.append(
                 'proactive_template.enabled requires billing_policy = "allow_paid"'
             )
@@ -4420,25 +4631,25 @@ def whatsapp_structural_config_errors(config: Config) -> list[str]:
                 "code such as en_US"
             )
 
-    if not whatsapp.enabled:
+    if not config.whatsapp.enabled:
         return errors
 
-    if not _WHATSAPP_META_ID_RE.fullmatch(whatsapp.waba_id):
+    if not _WHATSAPP_META_ID_RE.fullmatch(cloud.waba_id):
         errors.append("waba_id must be the decimal WABA id from the Meta app")
-    if not _WHATSAPP_META_ID_RE.fullmatch(whatsapp.phone_number_id):
+    if not _WHATSAPP_META_ID_RE.fullmatch(cloud.phone_number_id):
         errors.append(
             "phone_number_id must be the decimal business phone number id "
             "from the Meta app, not the phone number itself"
         )
-    if not _is_e164(whatsapp.business_phone_number):
+    if not _is_e164(config.whatsapp.business_phone_number):
         errors.append("business_phone_number must be an exact E.164 number")
-    if not _is_valid_timezone(whatsapp.business_timezone):
+    if not _is_valid_timezone(cloud.business_timezone):
         errors.append("business_timezone must be a valid IANA timezone name")
-    if not 1 <= whatsapp.request_timeout_seconds <= 30:
+    if not 1 <= cloud.request_timeout_seconds <= 30:
         errors.append("request_timeout_seconds must be between 1 and 30")
 
-    limit = whatsapp.monthly_service_attempt_limit
-    if whatsapp.billing_policy == "free_guard":
+    limit = cloud.monthly_service_attempt_limit
+    if cloud.billing_policy == "free_guard":
         if not 1 <= limit <= WHATSAPP_FREE_GUARD_MAX_ATTEMPTS:
             errors.append(
                 "monthly_service_attempt_limit must be between 1 and "
@@ -4450,6 +4661,62 @@ def whatsapp_structural_config_errors(config: Config) -> list[str]:
         )
 
     return errors
+
+
+def _whatsapp_baileys_structural_errors(config: Config) -> list[str]:
+    """The Baileys adapter's own structural errors — nearly none, by design.
+
+    A paired WhatsApp Web session carries its own number, its own credential
+    and no account object, so there is nothing in ``config.toml`` a deployment
+    is *required* to write. ``business_phone_number`` is therefore checked for
+    shape when it is set and not demanded when it is not — the reverse of the
+    Cloud arm, where the whole account is configured by hand and an absent
+    number is a deployment that cannot work.
+    """
+    number = config.whatsapp.business_phone_number
+    if number and not _is_e164(number):
+        return ["business_phone_number must be an exact E.164 number"]
+    return []
+
+
+_WHATSAPP_PROVIDER_VALIDATORS: dict[str, Callable[[Config], list[str]]] = {
+    "whatsapp_cloud": _whatsapp_cloud_structural_errors,
+    "baileys": _whatsapp_baileys_structural_errors,
+}
+
+
+def whatsapp_structural_config_errors(config: Config) -> list[str]:
+    """Return the WhatsApp errors that are facts about ``config.toml`` alone.
+
+    These are what :func:`load_config` raises on: every value here is visible
+    to any caller that can read the config file, so no deployment shape can
+    make one look absent when it is set.
+
+    **Only the selected adapter's arm runs**, which is the half of the split
+    worth stating: every Meta rule used to run on every deployment, so
+    ``provider = "baileys"`` with the block enabled failed the load naming
+    ``waba_id`` — an error about an account the deployment deliberately has
+    not got. The cost is that a Cloud rule now goes unchecked until a
+    deployment selects Cloud; that is loud rather than quiet, since the switch
+    is the moment the same file stops loading, and it is the only reading
+    under which the two adapters can share one block.
+    """
+    whatsapp = config.whatsapp
+
+    # Checked whether or not the transport is enabled, exactly as `sms.provider`
+    # is and for the same reason: `make_provider_registry` raises on an unknown
+    # name, and a process that builds one at startup would die naming something
+    # the operator was never warned about.
+    if whatsapp.provider not in WHATSAPP_PROVIDER_NAMES:
+        return ["provider must be one of " + ", ".join(WHATSAPP_PROVIDER_NAMES)]
+
+    validator = _WHATSAPP_PROVIDER_VALIDATORS.get(whatsapp.provider)
+    if validator is None:
+        # A name in the tuple with no validator behind it. Unreachable while a
+        # test holds the two in step, and reported rather than passed silently:
+        # the alternative is a provider whose whole config goes unchecked.
+        return [f"provider {whatsapp.provider!r} has no structural validation"]
+    return validator(config)
 
 
 def whatsapp_config_errors(config: Config) -> list[str]:

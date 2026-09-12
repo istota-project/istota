@@ -784,10 +784,26 @@ messaging_profile_id = ""
 # set `v23.0`-style only for a controlled migration.
 [whatsapp]
 enabled = false
-provider = "whatsapp_cloud"
+# Which adapter sends and receives. "baileys" is the default and needs no Meta
+# account: it pairs with a phone by QR scan, sends are free and unmetered, and
+# there is no 24-hour window and no template. "whatsapp_cloud" is Meta's hosted
+# Cloud API — sanctioned, metered, and configured in [whatsapp.cloud] below.
+provider = "baileys"
+business_phone_number = ""      # exact E.164, e.g. "+15551234567"
+
+# The Meta Cloud API adapter. Read only under provider = "whatsapp_cloud", and
+# every value here is refused at load only under that provider — a Baileys
+# deployment need not carry a WABA id.
+#
+# DEPRECATED: these keys used to sit flat on [whatsapp] itself. A config still
+# writing them there keeps working — they are read as this block, and a flat
+# block carrying a waba_id, a phone_number_id or one of the three credentials
+# also selects provider = "whatsapp_cloud" when no provider key is present, so
+# an existing Cloud deployment is unchanged by the default above. Move them
+# under [whatsapp.cloud]; the flat spelling will be removed.
+[whatsapp.cloud]
 waba_id = ""                    # decimal WhatsApp Business Account id
 phone_number_id = ""            # decimal business phone number id, not the number
-business_phone_number = ""      # exact E.164, e.g. "+15551234567"
 access_token = ""
 app_secret = ""
 verify_token = ""
@@ -801,10 +817,18 @@ monthly_service_attempt_limit = 900
 # customer service window has closed. Paid, reviewed and language-specific:
 # valid only with billing_policy = "allow_paid", and istota never creates,
 # submits or substitutes one.
-[whatsapp.proactive_template]
+[whatsapp.cloud.proactive_template]
 enabled = false
 name = ""
 language = "en_US"
+
+# The Baileys adapter's own settings, both of which resolve themselves when
+# left empty: the session directory to {db_path parent}/whatsapp-baileys-session
+# and the library version to whatever the shipped sidecar pins. The paired
+# session on disk is this adapter's credential; there is none in this file.
+[whatsapp.baileys]
+session_dir = ""
+library_version = ""
 
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)

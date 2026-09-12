@@ -280,7 +280,21 @@ def _unknown_keys(section: dict, target, prefix: str) -> list[str]:
     Descends only where the dataclass field is itself a dataclass. A dict-valued
     field like `users` is user data, not config schema — its keys are user ids
     and cannot be checked against a field list.
+
+    At the top level the document is first put through the loader's own pre-walk
+    rewrite, so a key the loader *moves* is not reported as one it drops: this
+    template still renders the pre-adapter flat `[whatsapp]` block, which
+    `load_config` reads as `[whatsapp.cloud]`. The copy is because the caller's
+    `parsed` is a module-scoped fixture.
     """
+    if prefix == "":
+        from copy import deepcopy
+
+        from istota.config import normalize_legacy_document
+
+        section = deepcopy(section)
+        normalize_legacy_document(section)
+
     if not is_dataclass(target):
         return []
 

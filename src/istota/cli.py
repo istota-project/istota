@@ -1555,13 +1555,13 @@ def cmd_whatsapp_billing_status(args):
         print("WhatsApp billing is not blocked.")
         return
     print(f"WhatsApp billing is blocked{_whatsapp_block_detail(blocked)}.")
-    if config.whatsapp.billing_policy != "free_guard":
+    if config.whatsapp.cloud.billing_policy != "free_guard":
         # The row outlives the policy that reads it: switching to `allow_paid`
         # is one of the two documented ways to clear the circuit, and after it
         # nothing consults the row at all.
         print(
             f"It is not enforced under billing_policy = "
-            f'"{config.whatsapp.billing_policy}".'
+            f'"{config.whatsapp.cloud.billing_policy}".'
         )
 
 

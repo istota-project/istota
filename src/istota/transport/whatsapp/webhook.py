@@ -155,8 +155,8 @@ def verify_subscription(config: Config, params: Mapping[str, str]) -> str:
     comparison is, and an empty configured token refuses outright rather than
     matching an empty presented one.
     """
-    whatsapp = config.whatsapp
-    if not whatsapp.verify_token:
+    cloud = config.whatsapp.cloud
+    if not cloud.verify_token:
         raise WhatsAppWebhookError("whatsapp verify token not configured", 503)
     if params.get("hub.mode") != "subscribe":
         raise WhatsAppWebhookError("unsupported hub mode", 400)
@@ -168,7 +168,7 @@ def verify_subscription(config: Config, params: Mapping[str, str]) -> str:
     # exactly this hazard for the signature header; it is the same mistake on
     # the other secret comparison. Encoding is constant time and leaks only the
     # length, which a wrong-length token has already decided.
-    if not hmac.compare_digest(presented.encode(), whatsapp.verify_token.encode()):
+    if not hmac.compare_digest(presented.encode(), cloud.verify_token.encode()):
         raise WhatsAppWebhookError("verify token mismatch", 403)
     challenge = params.get("hub.challenge") or ""
     # `isascii()` as well as `isdecimal()`: the latter is True for Arabic-Indic,
@@ -202,12 +202,13 @@ def parse_webhook(
     content_type = header_value(headers, "content-type").partition(";")[0].strip()
     if content_type.casefold() != "application/json":
         raise WhatsAppWebhookError("unsupported content type", 415)
-    if not config.whatsapp.app_secret:
+    if not config.whatsapp.cloud.app_secret:
         # Refusing to serve, not refusing this request: with no secret the
         # validator would verify an HMAC under an empty key. See `client.py`.
         raise WhatsAppWebhookError("whatsapp app secret not configured", 503)
     if not verify_signature(
-        config.whatsapp.app_secret, raw_body, header_value(headers, SIGNATURE_HEADER),
+        config.whatsapp.cloud.app_secret, raw_body,
+        header_value(headers, SIGNATURE_HEADER),
     ):
         raise WhatsAppWebhookError("invalid signature")
     try:
@@ -430,7 +431,7 @@ def normalize_payload(config: Config, payload: object) -> list[WhatsAppEvent]:
     and yields nothing; a structurally broken one is a 400 and also yields
     nothing, so a partial batch can never be acknowledged.
     """
-    whatsapp = config.whatsapp
+    cloud = config.whatsapp.cloud
     body = _mapping(payload, "webhook body")
     if body.get("object") != "whatsapp_business_account":
         raise WhatsAppWebhookError("unexpected webhook object")
@@ -440,7 +441,7 @@ def normalize_payload(config: Config, payload: object) -> list[WhatsAppEvent]:
         raise WhatsAppWebhookError("invalid entry list", 400)
     for entry in _sequence(entries, "entry list"):
         waba_id = _required_text(entry, "id", "waba id")
-        if waba_id != whatsapp.waba_id:
+        if waba_id != cloud.waba_id:
             raise WhatsAppWebhookError("unexpected whatsapp business account")
         for change in _sequence(entry.get("changes"), "change list"):
             field = _optional_text(change.get("field"))
@@ -462,18 +463,18 @@ def normalize_payload(config: Config, payload: object) -> list[WhatsAppEvent]:
             if value.get("messaging_product") != "whatsapp":
                 raise WhatsAppWebhookError("unexpected messaging product")
             metadata = _mapping(value.get("metadata"), "metadata")
-            if metadata.get("phone_number_id") != whatsapp.phone_number_id:
+            if metadata.get("phone_number_id") != cloud.phone_number_id:
                 raise WhatsAppWebhookError("unexpected business phone number")
             contacts = _sequence(value.get("contacts", []), "contact list")
             for message in _sequence(value.get("messages", []), "message list"):
                 events.append(_inbound_event(
                     message, contacts,
-                    waba_id=waba_id, phone_number_id=whatsapp.phone_number_id,
+                    waba_id=waba_id, phone_number_id=cloud.phone_number_id,
                 ))
             for status in _sequence(value.get("statuses", []), "status list"):
                 delivery = _delivery_event(
                     status,
-                    waba_id=waba_id, phone_number_id=whatsapp.phone_number_id,
+                    waba_id=waba_id, phone_number_id=cloud.phone_number_id,
                 )
                 if delivery is not None:
                     events.append(delivery)

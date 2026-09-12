@@ -7000,17 +7000,17 @@ def check_whatsapp_common(config: "Config", probe: bool) -> CheckResult:
             remedy=credential_remedy,
         )
 
-    whatsapp = config.whatsapp
+    cloud = config.whatsapp.cloud
     detail = (
-        f"local configuration is ready under {whatsapp.billing_policy}; "
-        f"quota month in {whatsapp.business_timezone}"
+        f"local configuration is ready under {cloud.billing_policy}; "
+        f"quota month in {cloud.business_timezone}"
     )
-    if whatsapp.billing_policy == "free_guard":
+    if cloud.billing_policy == "free_guard":
         detail += (
-            f", at most {whatsapp.monthly_service_attempt_limit} service "
+            f", at most {cloud.monthly_service_attempt_limit} service "
             "attempts a month and no templates"
         )
-    template = whatsapp.proactive_template
+    template = cloud.proactive_template
     if template.enabled:
         # Configured state only. Meta owns approval, pause and category, so a
         # word like "approved" here would be a claim this check cannot make.
@@ -7138,7 +7138,7 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
                 f"the monthly attempt cap is spent; {spend}",
                 remedy=(
                     "WhatsApp sends resume when the WABA month turns over in "
-                    f"{config.whatsapp.business_timezone}. Raise [whatsapp] "
+                    f"{config.whatsapp.cloud.business_timezone}. Raise [whatsapp.cloud] "
                     "monthly_service_attempt_limit only after checking what "
                     "Meta's own allowance has left."
                 ),
@@ -7154,7 +7154,7 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
         f"the billable circuit opened at {block.billing_blocked_at} "
         f"(message {message_fingerprint(block.billing_message_id)})"
     )
-    if config.whatsapp.billing_policy != "free_guard":
+    if config.whatsapp.cloud.billing_policy != "free_guard":
         # Switching to `allow_paid` is one of the two documented ways to clear
         # the circuit, so tripped-then-switched is a reachable state — and in
         # it nothing reads the row: both `outbound._gate` and
@@ -7163,7 +7163,7 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
         # and would prescribe the remedy already applied.
         return CheckResult(
             name, OK,
-            f"{opened}, and is not enforced under {config.whatsapp.billing_policy}; "
+            f"{opened}, and is not enforced under {config.whatsapp.cloud.billing_policy}; "
             f"{spend}",
         )
     return CheckResult(
@@ -7172,7 +7172,7 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
         remedy=(
             "Read `istota whatsapp billing-status` for the Meta message id, "
             "check the Meta billing page, then run `istota whatsapp "
-            'billing-unblock`, or set [whatsapp] billing_policy = '
+            'billing-unblock`, or set [whatsapp.cloud] billing_policy = '
             '"allow_paid" to accept charges.'
         ),
     )

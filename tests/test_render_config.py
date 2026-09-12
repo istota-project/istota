@@ -395,11 +395,19 @@ def _config_declares(section: str) -> bool:
     `_NOT_CONFIGURATION` is consulted for the same reason: `apply_section`
     reports those *because* they are real fields, so field-existence alone is
     the wrong question.
+
+    A section the loader *rewrites* before the walk is declared even though the
+    tree no longer names it: `[whatsapp.proactive_template]`, which this script
+    still renders, is read as `[whatsapp.cloud.proactive_template]`. Asking the
+    dataclass tree alone would report a key the daemon consumes as one it
+    discards — the opposite of this scan's question.
     """
-    from istota.config import _NOT_CONFIGURATION
+    from istota.config import _LEGACY_FLAT_WHATSAPP_KEYS, _NOT_CONFIGURATION
 
     if section in _NOT_CONFIGURATION:
         return False
+    if section in {f"whatsapp.{key}" for key in _LEGACY_FLAT_WHATSAPP_KEYS}:
+        return True
     cls = Config
     for part in section.split("."):
         if not dataclasses.is_dataclass(cls):
@@ -420,13 +428,25 @@ def _unrecognised_keys(config_path: Path) -> list[str]:
     The loader's own call rather than a reimplementation of it, so a key this
     reports is exactly a key the daemon discards. `report_unknown` turns the
     same list into one WARNING line and moves on; here it is the assertion.
+
+    `normalize_legacy_document` is the loader's own pre-walk step and has to run
+    here for the same reason: a key it rewrites is read rather than discarded,
+    and skipping it would report the whole flat `[whatsapp]` block — which both
+    generators still render — as keys nothing consumes.
     """
-    from istota.config import _CONFIG_HOOKS, _HANDWRITTEN, _NOT_CONFIGURATION
+    from istota.config import (
+        _CONFIG_HOOKS,
+        _HANDWRITTEN,
+        _NOT_CONFIGURATION,
+        normalize_legacy_document,
+    )
     from istota.config_mapper import apply_section
 
+    data = tomllib.loads(config_path.read_text())
+    normalize_legacy_document(data)
     unknown: list[str] = []
     apply_section(
-        Config(), tomllib.loads(config_path.read_text()),
+        Config(), data,
         hooks=_CONFIG_HOOKS, unknown=unknown,
         skip=_HANDWRITTEN, reject=_NOT_CONFIGURATION,
     )

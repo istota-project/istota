@@ -131,7 +131,7 @@ class TestTheDockerRender:
         config = load_config(path)
 
         assert config.whatsapp.enabled is True
-        assert config.whatsapp.proactive_template.name == "istota_result"
+        assert config.whatsapp.cloud.proactive_template.name == "istota_result"
 
 
 class TestTheComposeStack:
@@ -300,11 +300,11 @@ class TestTheAnsibleRole:
             config = load_config(path)
 
             assert config.whatsapp.enabled is True
-            assert config.whatsapp.business_timezone == "Europe/Warsaw"
-            assert config.whatsapp.request_timeout_seconds == 8
-            assert config.whatsapp.monthly_service_attempt_limit == 400
-            assert config.whatsapp.billing_policy == "free_guard"
-            assert bool(config.whatsapp.app_secret) is not env_file
+            assert config.whatsapp.cloud.business_timezone == "Europe/Warsaw"
+            assert config.whatsapp.cloud.request_timeout_seconds == 8
+            assert config.whatsapp.cloud.monthly_service_attempt_limit == 400
+            assert config.whatsapp.cloud.billing_policy == "free_guard"
+            assert bool(config.whatsapp.cloud.app_secret) is not env_file
 
     def test_a_paid_render_with_a_template_loads(self, tmp_path):
         """`proactive_template.enabled` is refused outside `allow_paid`, and
@@ -326,10 +326,10 @@ class TestTheAnsibleRole:
 
         config = load_config(path)
 
-        assert config.whatsapp.billing_policy == "allow_paid"
-        assert config.whatsapp.proactive_template.enabled is True
-        assert config.whatsapp.proactive_template.name == "istota_result"
-        assert config.whatsapp.proactive_template.language == "en_GB"
+        assert config.whatsapp.cloud.billing_policy == "allow_paid"
+        assert config.whatsapp.cloud.proactive_template.enabled is True
+        assert config.whatsapp.cloud.proactive_template.name == "istota_result"
+        assert config.whatsapp.cloud.proactive_template.language == "en_GB"
 
     def test_the_config_template_inlines_the_secrets_without_the_env_file(self):
         overrides = {
@@ -496,6 +496,117 @@ class TestTheAnsibleRole:
         assert "whatsapp_number" in command
         assert "--whatsapp-number" in command
         assert "--clear-whatsapp" in command
+
+
+class TestTheMountGateOnALoadedConfig:
+    """What the shipped generators produce, loaded, decides the webhook mount.
+
+    This is the hazard the provider default carries and the one place it can be
+    settled honestly. `whatsapp_webhooks_enabled` reads `provider`, both
+    generators still render the pre-adapter flat block, and the default is now
+    `baileys` — so if the flat block did not resolve back to `whatsapp_cloud`,
+    every existing Cloud deployment would stop serving Meta's callback at the
+    upgrade, with nothing in any log saying so.
+
+    Hand-written TOML cannot answer it: the question is about what these two
+    files emit, including the shape where the role deliberately omits the three
+    credentials. Neither generator renders `provider` at all yet — that is
+    Stage 7 — so what these assert is precisely the compatibility path.
+    """
+
+    def _ansible(self, tmp_path, name: str, **overrides):
+        from istota.config import load_config
+
+        path = tmp_path / name
+        path.write_text(render_ansible_config(**overrides))
+        return load_config(path)
+
+    def test_an_ansible_cloud_render_still_serves_metas_callback(self, tmp_path):
+        from istota.config import whatsapp_webhooks_enabled
+
+        config = self._ansible(
+            tmp_path, "cloud.toml",
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_waba_id="100000000000001",
+            istota_whatsapp_phone_number_id="100000000000002",
+            istota_whatsapp_business_phone_number="+15551230000",
+        )
+
+        assert config.whatsapp.provider == "whatsapp_cloud"
+        assert whatsapp_webhooks_enabled(config) is True
+
+    def test_the_env_file_shape_resolves_on_the_ids_alone(self, tmp_path):
+        """Under `istota_use_environment_file` the role renders no
+        `access_token`, `app_secret` or `verify_token` line at all, so a
+        migration keyed on the credentials would read the deployment this rule
+        most has to protect as a non-Cloud one."""
+        from istota.config import whatsapp_webhooks_enabled
+
+        config = self._ansible(
+            tmp_path, "envfile.toml",
+            istota_use_environment_file=True,
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_waba_id="100000000000001",
+            istota_whatsapp_phone_number_id="100000000000002",
+            istota_whatsapp_business_phone_number="+15551230000",
+        )
+
+        assert config.whatsapp.cloud.access_token == ""
+        assert config.whatsapp.provider == "whatsapp_cloud"
+        assert whatsapp_webhooks_enabled(config) is True
+
+    def test_the_default_ansible_render_is_a_baileys_deployment(self, tmp_path):
+        """The role renders the whole flat block whether or not WhatsApp is
+        configured, so this is the render on every istota host there is. It
+        must not read as a Cloud deployment."""
+        from istota.config import whatsapp_webhooks_enabled
+
+        config = self._ansible(tmp_path, "default.toml")
+
+        assert config.whatsapp.enabled is False
+        assert config.whatsapp.provider == "baileys"
+        assert whatsapp_webhooks_enabled(config) is False
+
+    def test_a_docker_cloud_render_still_serves_metas_callback(self, tmp_path):
+        from istota.config import load_config, whatsapp_webhooks_enabled
+
+        path = render_docker_config(tmp_path, **REQUIRED, **WHATSAPP_VALUES)
+        config = load_config(path)
+
+        assert config.whatsapp.provider == "whatsapp_cloud"
+        assert config.whatsapp.cloud.waba_id == "100000000000001"
+        assert whatsapp_webhooks_enabled(config) is True
+
+    def test_the_default_docker_render_is_a_baileys_deployment(self, tmp_path):
+        from istota.config import load_config, whatsapp_webhooks_enabled
+
+        path = render_docker_config(tmp_path, **REQUIRED)
+        config = load_config(path)
+
+        assert config.whatsapp.enabled is False
+        assert config.whatsapp.provider == "baileys"
+        assert whatsapp_webhooks_enabled(config) is False
+
+    def test_neither_generator_renders_a_provider_key_yet(self, tmp_path):
+        """States what these tests rest on, so the day Stage 7 renders the key
+        this file says which assertions stopped being about the migration."""
+        ansible = render_ansible_config()
+        docker = render_docker_config(tmp_path, **REQUIRED).read_text()
+
+        assert "provider" not in _whatsapp_section(ansible)
+        assert "provider" not in _whatsapp_section(docker)
+
+
+def _whatsapp_section(rendered: str) -> str:
+    """The `[whatsapp]` block's own lines, excluding its sub-tables."""
+    lines = rendered.splitlines()
+    start = lines.index("[whatsapp]")
+    body: list[str] = []
+    for line in lines[start + 1:]:
+        if line.startswith("["):
+            break
+        body.append(line)
+    return "\n".join(body)
 
 
 def _ansible_ish_environment() -> Environment:

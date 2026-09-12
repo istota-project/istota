@@ -115,7 +115,7 @@ def build_adapter(config: "Config") -> WhatsAppProviderAdapter:
         from ..client import SIGNATURE_HEADER, verify_signature  # noqa: PLC0415
 
         return verify_signature(
-            config.whatsapp.app_secret,
+            config.whatsapp.cloud.app_secret,
             request.raw_body,
             header_value(request.headers, SIGNATURE_HEADER),
         )

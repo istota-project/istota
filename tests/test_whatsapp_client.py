@@ -19,6 +19,8 @@ import pytest
 
 from istota.transport.whatsapp import client
 
+from .support.whatsapp_config import build_whatsapp_config
+
 APP_SECRET = "wa-app-secret"
 BODY = b'{"object":"whatsapp_business_account","entry":[]}'
 
@@ -190,9 +192,9 @@ async def adapters():
 
 
 def _adapter(monkeypatch, fake, adapters) -> "client.WhatsAppClient":
-    from istota.config import Config, WhatsAppConfig
+    from istota.config import Config
 
-    config = Config(whatsapp=WhatsAppConfig(
+    config = Config(whatsapp=build_whatsapp_config(
         enabled=True, waba_id="123456789012345",
         phone_number_id="223456789012345",
         business_phone_number="+15551230000",
@@ -445,9 +447,9 @@ class TestTheSendClassification:
         assert "wa-access-token" not in outcome.safe_reason
 
     async def test_the_configured_timeout_bounds_the_session(self, monkeypatch):
-        from istota.config import Config, WhatsAppConfig
+        from istota.config import Config
 
-        config = Config(whatsapp=WhatsAppConfig(
+        config = Config(whatsapp=build_whatsapp_config(
             enabled=True, waba_id="1", phone_number_id="2",
             access_token="t", app_secret="s", verify_token="v",
             request_timeout_seconds=7,
@@ -463,10 +465,10 @@ class TestTheSendClassification:
     ):
         import httpx
 
-        from istota.config import Config, WhatsAppConfig
+        from istota.config import Config
 
         session = httpx.AsyncClient()
-        config = Config(whatsapp=WhatsAppConfig(
+        config = Config(whatsapp=build_whatsapp_config(
             enabled=True, waba_id="1", phone_number_id="2",
             access_token="t", app_secret="s", verify_token="v",
         ))

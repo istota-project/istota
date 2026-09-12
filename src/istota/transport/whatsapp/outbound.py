@@ -359,7 +359,7 @@ def quota_month(config: Config, *, now: datetime | None = None) -> str:
 
     moment = now or datetime.now(timezone.utc)
     try:
-        zone = ZoneInfo(config.whatsapp.business_timezone or "UTC")
+        zone = ZoneInfo(config.whatsapp.cloud.business_timezone or "UTC")
     except (ZoneInfoNotFoundError, ValueError, OSError):
         logger.warning(
             "whatsapp.quota.timezone_unresolved: counting the month in UTC",
@@ -384,8 +384,8 @@ def attempt_limit(config: Config) -> int:
     *unbounded* reading in the paid mode, which is the one direction this
     function's whole argument says not to guess.
     """
-    limit = config.whatsapp.monthly_service_attempt_limit
-    if config.whatsapp.billing_policy == "allow_paid":
+    limit = config.whatsapp.cloud.monthly_service_attempt_limit
+    if config.whatsapp.cloud.billing_policy == "allow_paid":
         return max(0, limit) if limit >= 0 else 1
     return min(max(limit, 1), WHATSAPP_FREE_GUARD_MAX_ATTEMPTS)
 
@@ -420,9 +420,9 @@ def template_available(config: Config) -> bool:
     one place for the rule to be edited out of — and the whole point of
     ``free_guard`` is that no code path can spend money.
     """
-    template = config.whatsapp.proactive_template
+    template = config.whatsapp.cloud.proactive_template
     return bool(
-        config.whatsapp.billing_policy == "allow_paid"
+        config.whatsapp.cloud.billing_policy == "allow_paid"
         and template.enabled
         and template.name.strip()
         and template.language.strip()
@@ -493,7 +493,7 @@ def _gate(
         return "opted_out", "service"
     if (
         caps.metered
-        and config.whatsapp.billing_policy == "free_guard"
+        and config.whatsapp.cloud.billing_policy == "free_guard"
         and db.whatsapp_billing_block(conn) is not None
     ):
         return "billing_blocked", "service"
@@ -1111,7 +1111,7 @@ def _request(
     the window has shut.
     """
     if send_kind == "template":
-        template = config.whatsapp.proactive_template
+        template = config.whatsapp.cloud.proactive_template
         return WhatsAppSendRequest(
             to=destination, text=body, kind="template",
             template_name=template.name.strip(),
@@ -1190,7 +1190,7 @@ def _observe_pricing(
             event.pricing_category,
         )
 
-    if not event.billable or config.whatsapp.billing_policy != "free_guard":
+    if not event.billable or config.whatsapp.cloud.billing_policy != "free_guard":
         return ()
     if not db.block_whatsapp_billing(conn, event.message_id):
         # The circuit was already open. One alert per outage, not one per
@@ -1211,7 +1211,7 @@ _BILLING_ALERT_BODY = (
     "already have been charged — the circuit stops the next one, not this "
     "one. Read `istota whatsapp billing-status` for the Meta message id, "
     "check the Meta billing page, then run `istota whatsapp billing-unblock` "
-    'or switch `[whatsapp] billing_policy` to "allow_paid".'
+    'or switch `[whatsapp.cloud] billing_policy` to "allow_paid".'
 )
 
 
@@ -1603,7 +1603,7 @@ def is_whatsapp_configured(config: Config, user_id: str) -> bool:
                 return False
             if (
                 caps.metered
-                and config.whatsapp.billing_policy == "free_guard"
+                and config.whatsapp.cloud.billing_policy == "free_guard"
                 and db.whatsapp_billing_block(conn) is not None
             ):
                 return False

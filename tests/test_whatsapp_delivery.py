@@ -31,9 +31,10 @@ from istota import db, notifications, surfaces
 from istota.config import (
     Config,
     UserConfig,
-    WhatsAppConfig,
     WhatsAppTemplateConfig,
 )
+
+from .support.whatsapp_config import build_whatsapp_config
 from istota.transport import Destination, make_registry
 from istota.transport.routing import (
     origin_descriptor,
@@ -98,7 +99,7 @@ def _config(tmp_path, **overrides) -> Config:
     config = Config(
         db_path=path,
         temp_dir=tmp_path / "tmp",
-        whatsapp=WhatsAppConfig(**fields),
+        whatsapp=build_whatsapp_config(**fields),
         users={"alice": UserConfig()},
     )
     config.site.hostname = "assistant.example.com"
@@ -731,9 +732,9 @@ class TestTheSend:
         `unconfigured` — a state an operator can act on, and no send.
         """
         config = _config(tmp_path, billing_policy="allow_paid")
-        config.whatsapp.proactive_template.enabled = True
-        config.whatsapp.proactive_template.name = "istota_result"
-        config.whatsapp.proactive_template.language = ""
+        config.whatsapp.cloud.proactive_template.enabled = True
+        config.whatsapp.cloud.proactive_template.name = "istota_result"
+        config.whatsapp.cloud.proactive_template.language = ""
         _bind(config, window=timedelta(hours=30))
         client = _FakeClient()
 
@@ -1397,7 +1398,7 @@ class TestTheQuotaMonth:
         # tzdata a running daemon can reach differs from the one that validated
         # the file. Raising here would escape the claim transaction.
         config = _config(tmp_path)
-        config.whatsapp.business_timezone = "Nowhere/Atlantis"
+        config.whatsapp.cloud.business_timezone = "Nowhere/Atlantis"
         instant = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
 
         assert quota_month(config, now=instant) == "2026-09"
