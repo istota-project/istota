@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 
 from istota import db, notifications, surfaces
+from istota.notification_resolvers import confirmation as confirmation_source
 from istota.config import Config, SmsConfig, UserConfig
 from istota.transport import make_registry
 from istota.transport.routing import (
@@ -823,6 +824,149 @@ class TestSchedulerSmsDelivery:
             assert row["logical_key"] == f"confirmation:{notification_id}"
         assert len(calls) == 1
         assert f"Task #{task_id}. Reply YES or NO." in calls[0]
+
+    def test_a_prompt_never_claims_the_task_result_key_when_no_row_is_written(
+        self, tmp_path, monkeypatch
+    ):
+        # `write_notification` never raises — it returns None — so the
+        # confirmation row is not guaranteed to exist. With the prompt's key
+        # derived only from that row, it fell through to `task-result:`, which
+        # belongs to the task's own final answer. `sent_sms.logical_key` is
+        # UNIQUE and the ledger is one-send, so the answer the user had just
+        # approved was refused against the settled prompt row and never sent,
+        # permanently and with no retry (ISSUE-489).
+        from istota import confirmations
+        from istota.scheduler import process_one_task
+
+        calls = []
+
+        def send(req):
+            calls.append(req.text)
+            return SmsSendResult(f"opaque-{len(calls)}", "accepted", 1)
+
+        config = _config(tmp_path)
+        providers = _providers(_adapter(send))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.confirmation_source.write",
+            lambda *_args, **_kwargs: None,
+        )
+        answers = iter([
+            (True, "I need your confirmation before deleting the file.", None, None),
+            (True, "Deleted the file.", None, None),
+        ])
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task", lambda *_args, **_kwargs: next(answers),
+        )
+        with db.get_db(config.db_path) as conn:
+            task_id = db.create_task(
+                conn, prompt="delete", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"),
+                output_target="sms",
+            )
+
+        assert process_one_task(config) == (task_id, True)
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+            assert conn.execute(
+                "SELECT logical_key FROM sent_sms"
+            ).fetchone()["logical_key"] == f"confirmation-task:{task_id}"
+
+        # The user says yes, and the answer has to arrive.
+        with db.get_db(config.db_path) as conn:
+            confirmations.apply_answer(
+                conn, db.get_task(conn, task_id),
+                confirmations.Answer(approve=True, trust_sender=False),
+            )
+            conn.commit()
+        assert process_one_task(config) == (task_id, True)
+
+        assert calls[-1] == "Deleted the file."
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "completed"
+            keys = [
+                row["logical_key"] for row in conn.execute(
+                    "SELECT logical_key FROM sent_sms ORDER BY id"
+                )
+            ]
+        assert keys == [f"confirmation-task:{task_id}", f"task-result:{task_id}"]
+
+    def test_a_fallback_key_cannot_swallow_another_tasks_prompt(
+        self, tmp_path, monkeypatch
+    ):
+        # `logical_key` is UNIQUE across the whole table and nothing deletes
+        # from it, so a claim is permanent. A task id and a notification id are
+        # independent small integers, so sharing one `confirmation:` prefix let
+        # task 1's row-less fallback claim the very key task 2's notification
+        # row would derive — and the second prompt came back `accepted` off the
+        # settled row, so nothing reported it undelivered and the task waited on
+        # a question nobody had seen (ISSUE-489 review).
+        from istota.scheduler import process_one_task
+
+        calls = []
+
+        def send(req):
+            calls.append(req.text)
+            return SmsSendResult(f"opaque-{len(calls)}", "accepted", 1)
+
+        config = _config(tmp_path)
+        config.users["bob"] = UserConfig(sms_phone_number="+15551239999")
+        providers = _providers(_adapter(send))
+        monkeypatch.setattr(
+            "istota.transport.sms.providers.registry.make_provider_registry",
+            lambda _config: providers,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task", lambda *_args, **_kwargs: (
+                True, "I need your confirmation before deleting the file.",
+                None, None,
+            ),
+        )
+        with db.get_db(config.db_path) as conn:
+            first = db.create_task(
+                conn, prompt="delete", user_id="alice", source_type="sms",
+                conversation_token=sms_conversation_token("alice"),
+                output_target="sms",
+            )
+
+        # Task 1 parks with no notification row, so it takes the fallback.
+        write = confirmation_source.write
+        monkeypatch.setattr(
+            "istota.scheduler.confirmation_source.write",
+            lambda *_args, **_kwargs: None,
+        )
+        assert process_one_task(config) == (first, True)
+        monkeypatch.setattr("istota.scheduler.confirmation_source.write", write)
+
+        # Task 2 parks normally. Its notification row is the first ever written,
+        # so `notifications.id` is 1 — the same integer as task 1's id.
+        with db.get_db(config.db_path) as conn:
+            second = db.create_task(
+                conn, prompt="delete", user_id="bob", source_type="sms",
+                conversation_token=sms_conversation_token("bob"),
+                output_target="sms",
+            )
+        assert process_one_task(config) == (second, True)
+
+        with db.get_db(config.db_path) as conn:
+            notification_id = conn.execute(
+                "SELECT id FROM notifications WHERE source = 'confirmation'"
+            ).fetchone()[0]
+            keys = [
+                row["logical_key"] for row in conn.execute(
+                    "SELECT logical_key FROM sent_sms ORDER BY id"
+                )
+            ]
+        # The collision this guards is only meaningful while the two integers
+        # are equal, so assert that rather than assuming it.
+        assert notification_id == first
+        assert keys == [
+            f"confirmation-task:{first}", f"confirmation:{notification_id}",
+        ]
+        assert len(calls) == 2
 
 
 class TestTheDeliveryPathStaysOffTheRuntimeLoop:
