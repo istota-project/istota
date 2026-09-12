@@ -1379,6 +1379,23 @@ def cmd_user_ensure(args):
         except ValueError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
+        except sqlite3.OperationalError as exc:
+            # The read above tolerates a missing table and this refuses one,
+            # and the difference is who asked. `user ensure` reads the binding
+            # on every invocation, so a deploy landing the code before the
+            # migration must not crash a call nobody pointed at WhatsApp; a
+            # call carrying `--whatsapp-number` did ask, and a missing table
+            # is a real error. What it must not be is a traceback out of a
+            # command that has already committed the profile row.
+            if "no such table" not in str(exc):
+                raise
+            print(
+                "Error: the WhatsApp tables are missing from this database. "
+                "Run `istota init` to migrate it, then re-run this command. "
+                "The profile row was written.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     binding = _whatsapp_binding_for_display(db_path, user_id)
     if (

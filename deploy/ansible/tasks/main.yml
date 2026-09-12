@@ -44,6 +44,26 @@
       without the skill, set istota_google_workspace_enabled=false.
   when: istota_google_workspace_enabled | bool
 
+# Deliberately ungated on istota_whatsapp_enabled. An unknown billing_policy
+# fails `load_config` on a *disabled* block too, and both values here are
+# rejected at load rather than reported by doctor — so without this the play
+# writes a config.toml no istota process can read and then fails at the first
+# task that runs the CLI against it (`Ensure user_profiles rows`), having
+# already replaced the running deployment's config.
+- name: Assert WhatsApp settings the config loader accepts
+  assert:
+    that:
+      - istota_whatsapp_billing_policy in ["free_guard", "allow_paid"]
+      - not (istota_whatsapp_template_enabled | bool) or
+        istota_whatsapp_billing_policy == "allow_paid"
+    fail_msg: |
+      The [whatsapp] settings would produce a config.toml the daemon refuses
+      to load. istota_whatsapp_billing_policy must be "free_guard" or
+      "allow_paid" (it is checked even when WhatsApp is disabled), and
+      istota_whatsapp_template_enabled=true needs
+      istota_whatsapp_billing_policy="allow_paid" — a proactive template is a
+      paid message, so free_guard cannot reach one.
+
 - name: Resolve webhook receiver need
   set_fact:
     istota_webhooks_enabled: >-

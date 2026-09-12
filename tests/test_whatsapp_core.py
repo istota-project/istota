@@ -953,6 +953,36 @@ class TestWhatsAppOperatorCommands:
         cmd_user_ensure(_ensure_args(config_path, clear_whatsapp=True))
         assert "STATE: noop" in capsys.readouterr().out
 
+    def test_the_state_compare_covers_every_column_but_updated_at(self):
+        """A column added later must not be invisible to the STATE verdict.
+
+        `_whatsapp_binding_state` names its fields, and a name list only ever
+        covers the ones its author thought of. The failure is silent and it is
+        the one the function exists to prevent: a write that moved the row
+        reports `noop`, the role's `changed_when` reads no change, and the
+        restart handlers are suppressed. `user_id` is excluded because it is
+        the key rather than a value, `updated_at` because it moves on every
+        write including one that changed nothing.
+        """
+        from dataclasses import fields
+
+        from istota.cli import _whatsapp_binding_state
+
+        binding = db.WhatsAppBinding(
+            user_id="alice",
+            bootstrap_phone_number="+15551234567",
+            bsuid="US.1234567890",
+            send_id="send-1",
+            username="alice-wa",
+            opted_out_at=None,
+            last_user_message_at=None,
+            enrolled_at=None,
+            last_seen_at=None,
+            updated_at="2026-01-01T00:00:00",
+        )
+
+        assert len(_whatsapp_binding_state(binding)) == len(fields(binding)) - 2
+
     def test_a_profile_change_still_outranks_the_binding_verdict(
         self, tmp_path, capsys
     ):
@@ -995,6 +1025,31 @@ class TestWhatsAppOperatorCommands:
 
         cmd_user_ensure(_ensure_args(config_path, display_name="Alice"))
         cmd_user_show(SimpleNamespace(config=str(config_path), name="alice"))
+
+    def test_an_unmigrated_database_refuses_a_binding_write_by_message(
+        self, tmp_path, capsys
+    ):
+        """The read tolerates a missing table; the write must not, and the
+        difference is who asked.
+
+        `user ensure` reads the binding on every invocation, so a deploy that
+        lands the code before the migration must not crash a command nobody
+        pointed at WhatsApp — that is the case above. A command carrying
+        `--whatsapp-number` did ask, so a missing table is a real error the
+        operator has to see. What it must not be is a traceback out of a
+        command that has already committed the profile row: the role runs this
+        per user and would report a stack trace on a half-applied task.
+        """
+        from istota.cli import cmd_user_ensure
+
+        path, config_path = self._setup(tmp_path)
+        with db.get_db(path) as conn:
+            conn.execute("DROP TABLE whatsapp_user_bindings")
+
+        with pytest.raises(SystemExit):
+            cmd_user_ensure(_ensure_args(config_path, whatsapp_number="+15551234567"))
+
+        assert "istota init" in capsys.readouterr().err
 
     def test_user_show_returns_the_complete_binding_for_operator_automation(
         self, tmp_path, capsys

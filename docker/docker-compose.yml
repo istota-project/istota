@@ -871,7 +871,14 @@ services:
         fi
         mkdir -p /app/config
         ln -sf /data/config/config.toml /app/config/config.toml
-        exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}"
+        # --no-access-log, because one route's query string is a credential.
+        # Meta sends the WhatsApp verify token as `?hub.verify_token=` on the
+        # GET subscription handshake, and uvicorn's default access formatter
+        # renders the path *with* the query string — so the container log
+        # would hold the token however nginx is configured. nginx is told not
+        # to log that path too; this is the half nginx cannot reach. The
+        # receiver logs each event itself under a stable name, without it.
+        exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
     command: []
     restart: unless-stopped
 

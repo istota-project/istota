@@ -87,7 +87,8 @@ server {
         proxy_set_header Connection $connection_upgrade;
     }
 
-    # Meta's Cloud API webhook, ahead of /webhooks/ on longest-prefix match.
+    # Meta's Cloud API webhook, an exact-match location, so nginx picks it
+    # before the /webhooks/ prefix block below.
     # It differs from its neighbours in two ways that nginx has to hold,
     # because the application cannot.
     #
@@ -100,6 +101,15 @@ server {
     # this file is one server block inside a generated conf.d — so the access
     # log for this path goes. The application logs the handshake itself with
     # a stable event name and no token.
+    #
+    # `off` takes the signed POST's line with it, and only the GET carries a
+    # secret — the POST's is in the X-Hub-Signature-256 header, which
+    # `combined` never logs. Accepted rather than overlooked: the receiver
+    # records every refusal and every database failure under its own stable
+    # event names, so what is lost is the request *rate* on this path. A
+    # `map $request_method` at http level plus `access_log ... if=$var` would
+    # keep the POST half; it is not here because nothing in this tree can run
+    # `nginx -t` against it.
     #
     # The body limit sits above istota's own 256 KiB cap and far below the
     # 10m below, so an oversized POST is answered by the application (413,

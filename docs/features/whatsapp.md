@@ -182,6 +182,8 @@ Two things the application cannot enforce for itself, so both belong in front of
 
 The verify token arrives as a **query value** on the GET handshake, and nginx's default log format writes the whole request line. Turn the access log off for `/webhooks/whatsapp`, or use a format that logs `$uri` rather than `$request`. Istota logs the handshake itself under a stable event name and without the token.
 
+That is only half of it, and the other half is not in the proxy. Uvicorn's own access log renders the path with its query string, so the receiver would write the token to the container log or the journal whatever the front end does. Both shipped shapes run the receiver with `--no-access-log`, and the combined `istota serve` process has always disabled it. A receiver you start yourself needs the same flag.
+
 The POST body limit has to sit above Istota's own 256 KiB cap so the application answers an oversized body with its own 413 rather than nginx answering with an HTML page Meta will retry against. The shipped configurations use `client_max_body_size 512k` on that one path. The raw body must reach the application unmodified: `X-Hub-Signature-256` is computed over the exact bytes, so anything that rewrites, re-encodes or buffers-and-reserializes the body breaks every request.
 
 ## Switching away

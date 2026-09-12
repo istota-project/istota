@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Upgrade note:** a reverse proxy you maintain yourself needs two rules for `/webhooks/whatsapp`. Meta sends the verification token as a query value, so that path's access log has to be off or its format has to log the path without the query string. And its request-body limit has to sit above Istota's own 256 KiB so an oversized body is answered by Istota rather than by an HTML error page Meta will retry against; the shipped Docker and Ansible configurations use 512 KiB. Both are in place for a deployment that uses either of those.
 
+- The webhook receiver no longer writes an access log line per request. It logged the full request line including the query string, which for the WhatsApp verification handshake means the token — so silencing the proxy alone was not enough. Each webhook event is still recorded with its own log line, without the token. A receiver you start yourself needs `--no-access-log`.
+
 ## [0.41.1] - 2026-09-09
 
 You can now use the project page as a complete guide to Istota: what the personal system does, how its modules connect, where each deployment shape draws its security boundary, and how to install and develop it. The repository now uses the EUPL v1.2, with the package metadata and full license text in agreement.

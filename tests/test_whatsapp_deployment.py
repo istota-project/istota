@@ -14,6 +14,7 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
 import yaml
 from jinja2 import Environment
 
@@ -90,6 +91,32 @@ class TestTheDockerRender:
         assert whatsapp["billing_policy"] == "free_guard"
         assert whatsapp["monthly_service_attempt_limit"] == 900
         assert whatsapp["proactive_template"]["enabled"] is False
+
+    def test_a_capitalised_boolean_renders_invalid_toml(self, tmp_path):
+        """Recorded rather than fixed, so the next reader knows it was decided.
+
+        The four numeric and boolean fields are interpolated bare, so
+        `ISTOTA_WHATSAPP_ENABLED=True` writes `enabled = True`, which is not a
+        TOML boolean and fails the load of the *whole* config rather than the
+        WhatsApp block. The Ansible template normalizes the same field with
+        `| lower` and the shell has no equivalent.
+
+        Not fixed here, and the reason is that it is the file's own pattern:
+        roughly fifty booleans and integers are interpolated this way, so a
+        `toml_bool` helper on these four alone makes one file hold two
+        conventions while leaving the class open everywhere else. Normalizing
+        all of them is its own change with its own blast radius.
+        `docker/.env.example` shows every one of these as lowercase, which is
+        the documentation. No injection either way: the heredoc expands and
+        does not re-evaluate.
+        """
+        path = render_docker_config(
+            tmp_path, **REQUIRED, ISTOTA_WHATSAPP_ENABLED="True",
+        )
+
+        assert "enabled = True" in path.read_text()
+        with pytest.raises(tomllib.TOMLDecodeError):
+            tomllib.loads(path.read_text())
 
     def test_the_rendered_config_loads(self, tmp_path):
         """The render is only correct if `load_config` accepts what it wrote.
@@ -173,6 +200,49 @@ class TestTheDockerNginx:
         assert "location /webhooks/ {" in nginx
 
 
+class TestTheReceiverLogsNoVerifyToken:
+    """nginx is only half of it, and the half that was missing is louder.
+
+    Meta sends the verify token as a query value on the GET handshake. Turning
+    the nginx access log off for that path stops the front end writing it, and
+    then uvicorn writes it anyway: its default access formatter renders
+    `get_path_with_query_string(scope)`, so the line reaching the container log
+    and the systemd journal is
+    `GET /webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=<secret>...`.
+    Measured against a live uvicorn, not read off the source.
+
+    `serve.build_uvicorn_server` already passes `access_log=False`, so the
+    combined process was the only shape holding the property the docs claim.
+    These two bring the standalone shapes into line with it.
+    """
+
+    def test_the_compose_receiver_disables_the_uvicorn_access_log(self):
+        compose = COMPOSE.read_text()
+        command = compose.split("  webhooks:", 1)[1]
+        line = next(
+            ln for ln in command.splitlines()
+            if "uvicorn istota.webhook_receiver:app" in ln
+        )
+
+        assert "--no-access-log" in line
+
+    def test_the_systemd_receiver_disables_the_uvicorn_access_log(self):
+        unit = (ANSIBLE / "templates" / "istota-webhooks.service.j2").read_text()
+        line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+
+        assert "--no-access-log" in line
+
+    def test_the_combined_process_already_disabled_it(self):
+        """The control for the two above: if `serve` ever turns it back on,
+        every shape leaks and these assertions would be the only ones left
+        describing a property nothing holds."""
+        from istota import serve
+
+        source = (Path(serve.__file__)).read_text()
+
+        assert "access_log=False" in source
+
+
 class TestTheAnsibleRole:
     def test_the_config_template_renders_whatsapp_without_the_secrets(self):
         overrides = {
@@ -195,6 +265,71 @@ class TestTheAnsibleRole:
         assert "access_token" not in parsed
         assert "app_secret" not in parsed
         assert "verify_token" not in parsed
+
+    def test_the_rendered_config_loads_in_both_credential_shapes(self, tmp_path):
+        """The Docker case next door states the rule; bare metal needs it more.
+
+        `tests/test_ansible_config_template.py` runs `load_config` over the
+        *default* render, which is `enabled = false` with every value empty —
+        so none of `billing_policy`, `business_timezone`,
+        `request_timeout_seconds` or `monthly_service_attempt_limit` has been
+        through the validator on the shape AGENTS.md calls the only canonical
+        deployment. Both credential shapes, because the env-file one renders
+        no secrets at all and that has to load too (ISSUE-058).
+        """
+        from istota.config import load_config
+
+        base = {
+            "istota_whatsapp_enabled": True,
+            "istota_whatsapp_waba_id": "100000000000001",
+            "istota_whatsapp_phone_number_id": "100000000000002",
+            "istota_whatsapp_business_phone_number": "+15551230000",
+            "istota_whatsapp_business_timezone": "Europe/Warsaw",
+            "istota_whatsapp_request_timeout_seconds": 8,
+            "istota_whatsapp_monthly_service_attempt_limit": 400,
+            "istota_whatsapp_access_token": "token-placeholder",
+            "istota_whatsapp_app_secret": "app-secret-placeholder",
+            "istota_whatsapp_verify_token": "verify-placeholder",
+        }
+        for index, env_file in enumerate((True, False)):
+            path = tmp_path / f"config-{index}.toml"
+            path.write_text(
+                render_ansible_config(**base, istota_use_environment_file=env_file)
+            )
+
+            config = load_config(path)
+
+            assert config.whatsapp.enabled is True
+            assert config.whatsapp.business_timezone == "Europe/Warsaw"
+            assert config.whatsapp.request_timeout_seconds == 8
+            assert config.whatsapp.monthly_service_attempt_limit == 400
+            assert config.whatsapp.billing_policy == "free_guard"
+            assert bool(config.whatsapp.app_secret) is not env_file
+
+    def test_a_paid_render_with_a_template_loads(self, tmp_path):
+        """`proactive_template.enabled` is refused outside `allow_paid`, and
+        the role can express both halves independently — so the combination is
+        a config the loader raises on that only a render exercises."""
+        from istota.config import load_config
+
+        path = tmp_path / "config.toml"
+        path.write_text(render_ansible_config(
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_waba_id="100000000000001",
+            istota_whatsapp_phone_number_id="100000000000002",
+            istota_whatsapp_business_phone_number="+15551230000",
+            istota_whatsapp_billing_policy="allow_paid",
+            istota_whatsapp_template_enabled=True,
+            istota_whatsapp_template_name="istota_result",
+            istota_whatsapp_template_language="en_GB",
+        ))
+
+        config = load_config(path)
+
+        assert config.whatsapp.billing_policy == "allow_paid"
+        assert config.whatsapp.proactive_template.enabled is True
+        assert config.whatsapp.proactive_template.name == "istota_result"
+        assert config.whatsapp.proactive_template.language == "en_GB"
 
     def test_the_config_template_inlines_the_secrets_without_the_env_file(self):
         overrides = {
@@ -251,6 +386,72 @@ class TestTheAnsibleRole:
         assert template.render(
             {**base, "istota_whatsapp_enabled": False},
         ).strip() == "False"
+
+    def test_the_role_refuses_the_two_configs_the_loader_raises_on(self):
+        """A pre-flight assert, because the alternative fails half-way through.
+
+        `Deploy istota configuration` writes the file and a later task runs
+        the CLI against it, so an inventory value `load_config` rejects makes
+        the play fail at `Ensure user_profiles rows` having already replaced
+        the running deployment's config. Two WhatsApp values are reachable
+        that way — an unknown `billing_policy` (which raises even while the
+        block is disabled) and a template enabled under `free_guard`. The role
+        already guards this class for the developer and google_workspace
+        toggles, and its comment there asks for the same treatment.
+        """
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        asserts = [
+            task for task in tasks
+            if "assert" in task and "whatsapp" in str(task.get("name", "")).lower()
+        ]
+        assert asserts, "the role has no WhatsApp pre-flight assert"
+
+        conditions = " ".join(
+            str(clause)
+            for task in asserts
+            for clause in task["assert"]["that"]
+        )
+        assert "istota_whatsapp_billing_policy" in conditions
+        assert "istota_whatsapp_template_enabled" in conditions
+
+        # The assert has to run whatever `enabled` says, because an unknown
+        # billing policy fails the load on a disabled block too.
+        for task in asserts:
+            assert "istota_whatsapp_enabled" not in str(task.get("when", ""))
+
+    def test_the_whatsapp_asserts_pass_on_the_defaults(self):
+        """Otherwise every deploy that never touched WhatsApp fails."""
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        env = _ansible_ish_environment()
+
+        for task in tasks:
+            if "assert" not in task or "whatsapp" not in str(task.get("name", "")).lower():
+                continue
+            for clause in task["assert"]["that"]:
+                rendered = env.from_string("{{ " + clause + " }}").render(defaults)
+                assert rendered.strip() == "True", f"{clause!r} -> {rendered!r}"
+
+    def test_the_whatsapp_asserts_catch_both_bad_shapes(self):
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        env = _ansible_ish_environment()
+        clauses = [
+            clause
+            for task in tasks
+            if "assert" in task and "whatsapp" in str(task.get("name", "")).lower()
+            for clause in task["assert"]["that"]
+        ]
+
+        for label, bad in (
+            ("typo in the policy", {"istota_whatsapp_billing_policy": "free-guard"}),
+            ("template under free_guard", {"istota_whatsapp_template_enabled": True}),
+        ):
+            verdicts = [
+                env.from_string("{{ " + clause + " }}").render({**defaults, **bad}).strip()
+                for clause in clauses
+            ]
+            assert "False" in verdicts, f"nothing refuses {label}"
 
     def test_the_nginx_template_bounds_and_unlogs_the_whatsapp_route(self):
         defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
