@@ -10901,7 +10901,7 @@ def _location_query_places(db_path: str) -> dict:
 
 def _location_create_place(db_path: str, data: dict) -> dict:
     from .location import db as location_db
-    from .geo import haversine
+    from .location_logic import assign_pings_to_place
 
     with location_db.connect(db_path) as conn:
         notes = (data.get("notes") or "").strip() or None
@@ -10914,38 +10914,27 @@ def _location_create_place(db_path: str, data: dict) -> dict:
             category=data.get("category"),
             notes=notes,
         )
-        # Backfill: assign this place to existing pings within radius
+        # `place_id` is resolved at ingest, so a place saved after the fact
+        # leaves the pings it contains at NULL. Only the adopt half of the
+        # helper can do anything here, and that is a property of *this*
+        # route rather than of the helper: `add_place` always inserts, so
+        # nothing is attached to the id yet. The skill's `learn` upserts,
+        # where the release half does fire and is reported.
         radius_m = data.get("radius_meters", 100)
         lat, lon = data["lat"], data["lon"]
-        # Rough lat/lon bounding box (1 degree lat ~ 111km)
-        dlat = radius_m / 111_000
-        dlon = radius_m / (111_000 * max(0.01, abs(__import__("math").cos(__import__("math").radians(lat)))))
-        candidates = conn.execute(
-            """
-            SELECT id, lat, lon FROM location_pings
-            WHERE place_id IS NULL
-              AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
-            """,
-            (lat - dlat, lat + dlat, lon - dlon, lon + dlon),
-        ).fetchall()
-        backfilled = 0
-        for row in candidates:
-            if haversine(lat, lon, row["lat"], row["lon"]) <= radius_m:
-                conn.execute("UPDATE location_pings SET place_id = ? WHERE id = ?", (place_id, row["id"]))
-                backfilled += 1
+        counts = assign_pings_to_place(conn, place_id, lat, lon, radius_m)
         conn.commit()
         return {
             "id": place_id, "name": data["name"], "lat": lat, "lon": lon,
             "radius_meters": radius_m, "category": data.get("category"),
             "notes": notes,
-            "backfilled_pings": backfilled,
+            "backfilled_pings": counts["assigned"],
         }
 
 
 def _location_update_place(db_path: str, place_id: int, data: dict) -> dict | None:
     from .location import db as location_db
-    from .geo import haversine
-    import math
+    from .location_logic import assign_pings_to_place
 
     with location_db.connect(db_path) as conn:
         place = location_db.get_place_by_id(conn, place_id)
@@ -10970,34 +10959,13 @@ def _location_update_place(db_path: str, place_id: int, data: dict) -> dict | No
         if not updated:
             return None
 
-        # Reassign pings when location or radius changed
+        # Reassign pings when location or radius changed: one released,
+        # the other adopted. See `assign_pings_to_place`.
         if geo_changed:
-            lat, lon = updated.lat, updated.lon
-            radius_m = updated.radius_meters
-
-            # Unassign pings that no longer fall within the new geofence
-            assigned = conn.execute(
-                "SELECT id, lat, lon FROM location_pings WHERE place_id = ?",
-                (place_id,),
-            ).fetchall()
-            for row in assigned:
-                if haversine(lat, lon, row["lat"], row["lon"]) > radius_m:
-                    conn.execute("UPDATE location_pings SET place_id = NULL WHERE id = ?", (row["id"],))
-
-            # Assign unassigned pings that now fall within the geofence
-            dlat = radius_m / 111_000
-            dlon = radius_m / (111_000 * max(0.01, abs(math.cos(math.radians(lat)))))
-            candidates = conn.execute(
-                """
-                SELECT id, lat, lon FROM location_pings
-                WHERE place_id IS NULL
-                  AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
-                """,
-                (lat - dlat, lat + dlat, lon - dlon, lon + dlon),
-            ).fetchall()
-            for row in candidates:
-                if haversine(lat, lon, row["lat"], row["lon"]) <= radius_m:
-                    conn.execute("UPDATE location_pings SET place_id = ? WHERE id = ?", (place_id, row["id"]))
+            assign_pings_to_place(
+                conn, place_id, updated.lat, updated.lon,
+                updated.radius_meters,
+            )
 
         conn.commit()
         return {

@@ -522,15 +522,17 @@ class TestNeitherSurfaceQueriesPingsItself:
         "INTO location_pings",
     )
 
-    # What each surface still legitimately does with the table. None of it is
-    # the query pipeline: the first two are the place-editing routes
-    # reassigning `place_id`, the third is `cmd_learn` reading the newest ping
-    # to site a new saved place, the fourth is the admin dashboard's
-    # freshness probe.
+    # What each surface still legitimately does with the table: one thing,
+    # the admin dashboard's freshness probe.
+    #
+    # The other three entries are gone with ISSUE-491. The place-editing
+    # routes' `place_id` reassignment is now `location_logic.
+    # assign_pings_to_place`, shared with the skill's `learn --backfill`
+    # and `update --backfill`, and `cmd_learn`'s newest-ping read is
+    # `location_db.get_latest_ping`. Both were allow-listed because they
+    # were the only copy; neither is a copy any more, so the allow-list
+    # shrank rather than growing to cover what replaced them.
     ALLOWED_SUBSTRINGS = (
-        "UPDATE location_pings SET place_id",
-        "SELECT id, lat, lon FROM location_pings",
-        "SELECT lat, lon, accuracy, timestamp FROM location_pings ",
         "SELECT MAX(timestamp) AS ts FROM location_pings",
     )
 

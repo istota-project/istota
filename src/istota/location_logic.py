@@ -10,6 +10,7 @@ Per-user split: every helper takes a path to the per-user
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -156,6 +157,13 @@ def _location_restore_dismissed(db_path: str | Path, cluster_id: int) -> bool:
         return deleted
 
 
+# How close a discovered cluster may sit to a place that is already saved
+# before `discover` stops surfacing it. Named because `learn
+# --from-cluster` resolves through the same filter and has to explain
+# the refusal it produces when re-siting an existing place.
+CLUSTER_EXCLUSION_METERS = 200
+
+
 def _location_discover_places(
     db_path: str | Path, min_pings: int = 10,
 ) -> dict:
@@ -239,7 +247,7 @@ def _location_discover_places(
             too_close = False
             for ep in existing:
                 dist = haversine(c["lat"], c["lon"], ep["lat"], ep["lon"])
-                if dist <= max(ep["radius_meters"], 200):
+                if dist <= max(ep["radius_meters"], CLUSTER_EXCLUSION_METERS):
                     too_close = True
                     break
             if too_close:
@@ -252,6 +260,124 @@ def _location_discover_places(
                 filtered.append(c)
 
         return {"clusters": filtered}
+
+
+def resolve_cluster_for_point(
+    db_path: str | Path,
+    lat: float,
+    lon: float,
+    *,
+    min_pings: int = 5,
+    max_distance_m: float = 250.0,
+) -> dict | None:
+    """The discovered cluster nearest ``(lat, lon)``, or ``None``.
+
+    A coordinate read off a day summary is one ping's position, which is
+    a worse input than the cluster it belongs to: ``discover`` weights
+    the centroid by ping count and fits the radius to the observed
+    spread. Clusters carry no id — they are recomputed per run — so the
+    coordinate stays the addressing mechanism and this resolves it.
+
+    ``min_pings`` is lower than ``discover``'s own default because the
+    caller has already named the stop: it is a point somebody is looking
+    at, not a candidate competing for attention in a list.
+    """
+    clusters = _location_discover_places(db_path, min_pings=min_pings)["clusters"]
+    scored = [
+        (haversine(lat, lon, c["lat"], c["lon"]), c) for c in clusters
+    ]
+    scored = [(d, c) for d, c in scored if d <= max_distance_m]
+    if not scored:
+        return None
+    return min(scored, key=lambda pair: pair[0])[1]
+
+
+def assign_pings_to_place(
+    conn,
+    place_id: int,
+    lat: float,
+    lon: float,
+    radius_meters: float,
+) -> dict:
+    """Bring ``location_pings.place_id`` into line with a place's geofence.
+
+    ``place_id`` is resolved at ingest (``webhook_receiver.resolve_place``),
+    so a place saved after the fact leaves every historical ping inside it
+    at NULL and ``location_day_summary`` — which names a stop by joining
+    ``location_pings.place_id`` to ``places.name`` — goes on reporting it
+    as an unnamed coordinate. Moving or resizing a place has the mirror
+    problem: its pings stay attached to a footprint that no longer
+    contains them.
+
+    Two halves, and both surfaces need both. A ping still attached to the
+    place but now outside the circle is released; an *unattached* ping
+    inside it is adopted. A place that has just been created only ever
+    takes the second half, nothing being attached to it yet, which is why
+    one helper serves create and update alike.
+
+    Only unattached pings are adopted: the bounding box is centred on this
+    place, so a neighbour's pings fall inside it wherever the two circles
+    overlap, and reassigning those would silently move history from one
+    place to another.
+
+    What it deliberately does not touch is ``location_pings.visit_id``,
+    nor the ``visits`` table behind it. A released ping keeps a
+    ``visit_id`` naming a visit to the place it just left, and an
+    adopted one may carry a visit belonging to somewhere else.
+    ``location_db.update_ping_place`` is the writer that keeps the pair
+    in step, and only the ingest path uses it; nothing outside
+    ``webhook_receiver`` reads the column today, so this is latent
+    rather than observable. ``reconcile_visits`` is what re-derives
+    ``visits`` from ping ``place_id``, and it runs on a rolling window
+    that a backfill of older pings falls outside — so the ping-derived
+    surfaces (``location_day_summary``, ``_location_place_stats``) see
+    a backfill and the ``visits`` table does not. Lifted verbatim from
+    the web route, which has always behaved this way.
+
+    Takes an open connection rather than a path — the caller writes the
+    place and this in one transaction, and commits.
+    """
+    released = 0
+    for row in conn.execute(
+        "SELECT id, lat, lon FROM location_pings WHERE place_id = ?",
+        (place_id,),
+    ).fetchall():
+        if haversine(lat, lon, row["lat"], row["lon"]) > radius_meters:
+            conn.execute(
+                "UPDATE location_pings SET place_id = NULL WHERE id = ?",
+                (row["id"],),
+            )
+            released += 1
+
+    # Rough bounding box to keep the haversine pass off the whole table
+    # (1 degree of latitude is ~111 km). Two known limits, neither worth
+    # carrying machinery for at the scale of one person's GPS history:
+    # the box does not wrap the antimeridian, so a ping just across
+    # +/-180 from the centre is missed; and the cosine floor caps dlon,
+    # which *under*-covers above about 89 degrees of latitude rather
+    # than merely avoiding a division by zero. The release half scans
+    # the place's own rows and has neither problem.
+    dlat = radius_meters / 111_000
+    dlon = radius_meters / (
+        111_000 * max(0.01, abs(math.cos(math.radians(lat))))
+    )
+    assigned = 0
+    for row in conn.execute(
+        """
+        SELECT id, lat, lon FROM location_pings
+        WHERE place_id IS NULL
+          AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
+        """,
+        (lat - dlat, lat + dlat, lon - dlon, lon + dlon),
+    ).fetchall():
+        if haversine(lat, lon, row["lat"], row["lon"]) <= radius_meters:
+            conn.execute(
+                "UPDATE location_pings SET place_id = ? WHERE id = ?",
+                (place_id, row["id"]),
+            )
+            assigned += 1
+
+    return {"assigned": assigned, "released": released}
 
 
 # ===========================================================================
