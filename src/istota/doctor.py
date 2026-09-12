@@ -6938,6 +6938,62 @@ def check_sms_twilio(config: "Config", probe: bool) -> CheckResult:
 def check_sms_telnyx(config: "Config", probe: bool) -> CheckResult:
     return _check_sms_provider(config, "telnyx")
 
+
+def check_whatsapp_common(config: "Config", probe: bool) -> CheckResult:
+    """Local WhatsApp readiness, with no claim about Meta's account state.
+
+    Everything this can answer is in the config file. Whether the token is
+    still valid, whether the WABA is subscribed to `messages`, whether the
+    number's quality is restricted and whether the template is approved,
+    paused or reclassified are all Meta account state, and only the opt-in
+    live check may ask about them. Saying "ready" here means the deployment is
+    correctly configured, not that a message will send.
+
+    Nothing here renders a value: the three secrets are named when missing and
+    never shown, and the business phone number is not printed at all — a
+    `CheckResult` reaches the boot log and the admin Health pane.
+    """
+    if not config.whatsapp.enabled:
+        return CheckResult("whatsapp.common", SKIP, "[whatsapp] enabled = false")
+
+    from .config import whatsapp_config_errors
+
+    errors = whatsapp_config_errors(config)
+    if errors:
+        return CheckResult(
+            "whatsapp.common",
+            FAIL,
+            "; ".join(errors),
+            remedy=(
+                "Correct the local [whatsapp] values (credentials travel "
+                "through ISTOTA_WHATSAPP_ACCESS_TOKEN, _APP_SECRET and "
+                "_VERIFY_TOKEN) and reload the configuration."
+            ),
+        )
+
+    whatsapp = config.whatsapp
+    detail = (
+        f"local configuration is ready under {whatsapp.billing_policy}; "
+        f"quota month in {whatsapp.business_timezone}"
+    )
+    if whatsapp.billing_policy == "free_guard":
+        detail += (
+            f", at most {whatsapp.monthly_service_attempt_limit} service "
+            "attempts a month and no templates"
+        )
+    template = whatsapp.proactive_template
+    if template.enabled:
+        # Configured state only. Meta owns approval, pause and category, so a
+        # word like "approved" here would be a claim this check cannot make.
+        detail += (
+            f"; proactive template {template.name} ({template.language}) is "
+            "configured — its Meta status was not read"
+        )
+    else:
+        detail += "; no proactive template configured"
+    return CheckResult("whatsapp.common", OK, detail)
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -6977,6 +7033,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("sms.common", check_sms_common),
     ("sms.twilio", check_sms_twilio),
     ("sms.telnyx", check_sms_telnyx),
+    ("whatsapp.common", check_whatsapp_common),
     ("web.static", check_web_static),
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
@@ -7079,6 +7136,7 @@ CHECK_SCOPES: dict[str, str] = {
     "sms.common": DEPLOYMENT,
     "sms.twilio": DEPLOYMENT,
     "sms.telnyx": DEPLOYMENT,
+    "whatsapp.common": DEPLOYMENT,
     "web.static": IMAGE,
     # Deployment, not image: it compares the bundle against the checkout it
     # was built from, and a bare `docker run` has no checkout.

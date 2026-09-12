@@ -144,6 +144,7 @@ all = [
     "istota[garmin]",
     "istota[signaling]",
     "istota[sms]",
+    "istota[whatsapp]",
 ]
 # What the test suite needs: `all` minus the two heavy ML extras. Not a
 # deployment shape — nobody should install `istota[test]` to run the bot; it
@@ -173,10 +174,23 @@ test = [
     "istota[garmin]",
     "istota[signaling]",
     "istota[sms]",
+    "istota[whatsapp]",
 ]
 sms = [
     "telnyx[webhooks]>=4.178.0",
     "twilio>=9.11.1",
+]
+
+# Meta WhatsApp Cloud API client. `pywa`, not `pywa[server]`: istota already
+# owns FastAPI and Uvicorn, and the fixed `/webhooks/whatsapp` endpoint needs
+# project-specific body bounds, logging and 503-on-rollback behaviour that
+# PyWa's own handler loop cannot express — it catches a callback exception and
+# acknowledges the webhook anyway, which is the opposite of what a transaction
+# that did not commit must tell Meta. The base package is httpx and nothing
+# else. Pinned below 5 because major PyWa releases have changed both the
+# identity model (BSUIDs in 4.x) and the webhook interfaces.
+whatsapp = [
+    "pywa>=4.4,<5",
 ]
 
 [project.scripts]

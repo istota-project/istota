@@ -1127,6 +1127,10 @@ def cmd_user_ensure(args):
             sys.exit(1)
     elif clear_sms_number:
         updates["sms_phone_number"] = ""
+    whatsapp_number = getattr(args, "whatsapp_number", None)
+    whatsapp_bsuid = getattr(args, "whatsapp_bsuid", None)
+    clear_whatsapp = bool(getattr(args, "clear_whatsapp", False))
+    reset_whatsapp = bool(getattr(args, "reset_whatsapp_identity", False))
     if args.trusted_sender is not None:
         updates["trusted_email_senders"] = list(args.trusted_sender)
     if args.quiet_sender is not None:
@@ -1178,8 +1182,9 @@ def cmd_user_ensure(args):
         # it would be inert at both ends and silent at both ends. An operator
         # provisioning a room adds the member first, then pins it.
         if room:
-            from . import db
-
+            # `db` is the module-level import; a local `from . import db` here
+            # would make the name local to the whole function and unbind every
+            # earlier use of it.
             with db.get_db(db_path) as conn:
                 if db.get_room(conn, room) is None:
                     print(
@@ -1296,6 +1301,44 @@ def cmd_user_ensure(args):
             "  sms_number:   "
             + user_profiles.mask_sms_phone_number(profile.sms_phone_number)
         )
+
+    # The WhatsApp binding is its own table, written after the profile row so a
+    # rejected identity leaves the profile update the operator also asked for
+    # in place rather than half-applied in the other direction.
+    if whatsapp_number is not None or whatsapp_bsuid is not None or clear_whatsapp or reset_whatsapp:
+        try:
+            with db.get_db(db_path) as conn:
+                if clear_whatsapp:
+                    db.clear_whatsapp_binding(conn, user_id)
+                elif reset_whatsapp:
+                    db.reset_whatsapp_identity(conn, user_id)
+                else:
+                    db.set_whatsapp_binding(
+                        conn, user_id,
+                        bootstrap_phone_number=whatsapp_number,
+                        bsuid=whatsapp_bsuid,
+                    )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    with db.get_db(db_path) as conn:
+        binding = db.get_whatsapp_binding(conn, user_id)
+    if binding is not None:
+        # Masked, always. `istota user show` is the private operator surface
+        # that returns these in full.
+        if binding.bootstrap_phone_number:
+            print(
+                "  whatsapp_number: "
+                + user_profiles.mask_phone_number(binding.bootstrap_phone_number)
+            )
+        if binding.bsuid:
+            print(
+                "  whatsapp_bsuid: "
+                + user_profiles.mask_whatsapp_identifier(binding.bsuid)
+            )
+        if binding.opted_out_at:
+            print("  whatsapp: opted out")
     if profile.log_channel:
         print(f"  log_channel:  {profile.log_channel}")
     if profile.alerts_channel:
@@ -1342,11 +1385,27 @@ def cmd_user_show(args):
         print(f"No DB profile row for {args.name!r}")
         return
 
+    with db.get_db(db_path) as conn:
+        binding = db.get_whatsapp_binding(conn, args.name)
+
     print(json.dumps({
         "user_id": profile.user_id,
         "display_name": profile.display_name,
         "email_addresses": profile.email_addresses,
         "sms_phone_number": profile.sms_phone_number,
+        # Complete, not masked: this command already returns the full
+        # `sms_phone_number` and exists for private operator automation. Every
+        # general surface masks these instead.
+        "whatsapp": None if binding is None else {
+            "bootstrap_phone_number": binding.bootstrap_phone_number,
+            "bsuid": binding.bsuid,
+            "send_id": binding.send_id,
+            "username": binding.username,
+            "opted_out_at": binding.opted_out_at,
+            "last_user_message_at": binding.last_user_message_at,
+            "enrolled_at": binding.enrolled_at,
+            "last_seen_at": binding.last_seen_at,
+        },
         "timezone": profile.timezone,
         "log_channel": profile.log_channel,
         "alerts_channel": profile.alerts_channel,
@@ -1378,6 +1437,35 @@ def cmd_user_remove(args):
         print(f"Removed profile row for {args.name!r}.")
     else:
         print(f"No profile row for {args.name!r} (nothing to remove).")
+
+
+def cmd_whatsapp_billing_unblock(args):
+    """Close the WhatsApp billable circuit after checking Meta billing.
+
+    Deliberately an operator action rather than anything automatic: the
+    circuit is open because Meta reported that a message istota sent was
+    billable, and only a person who has looked at the Meta billing page knows
+    whether that was expected.
+    """
+    from . import user_profiles
+
+    config = load_config(Path(args.config) if args.config else None)
+    with db.get_db(config.db_path) as conn:
+        blocked = db.whatsapp_billing_block(conn)
+        cleared = db.clear_whatsapp_billing_block(conn)
+
+    if not cleared:
+        print("WhatsApp billing is not blocked; nothing to do.")
+        return
+    evidence = user_profiles.mask_whatsapp_identifier(
+        blocked.billing_message_id or "" if blocked else ""
+    )
+    detail = f" (opened {blocked.billing_blocked_at}" if blocked else ""
+    if detail and evidence:
+        detail += f" by message {evidence}"
+    if detail:
+        detail += ")"
+    print(f"WhatsApp billing block cleared{detail}.")
 
 
 def cmd_calendar_discover(args):
@@ -2945,6 +3033,40 @@ def main():
         action="store_true",
         help="Remove the user's SMS identity binding.",
     )
+    # Not one mutually exclusive group: `--whatsapp-number` and
+    # `--whatsapp-bsuid` are the documented explicit-enrollment pair (a
+    # username-only user cannot bootstrap by phone), while each of the two
+    # destructive flags conflicts with everything else.
+    whatsapp_removal = user_ensure_parser.add_mutually_exclusive_group()
+    whatsapp_removal.add_argument(
+        "--whatsapp-number",
+        help=(
+            "Bind an exact E.164 WhatsApp number. Used for the first binding "
+            "and as an outbound fallback; changing it clears the learned "
+            "BSUID unless --whatsapp-bsuid is given in the same command."
+        ),
+    )
+    whatsapp_removal.add_argument(
+        "--clear-whatsapp",
+        action="store_true",
+        help="Remove the user's whole WhatsApp binding.",
+    )
+    whatsapp_removal.add_argument(
+        "--reset-whatsapp-identity",
+        action="store_true",
+        help=(
+            "Clear only the learned WhatsApp identity (BSUID, send id, "
+            "username, service window), keeping the bootstrap number."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--whatsapp-bsuid",
+        help=(
+            "Bind a Business-Scoped User ID explicitly. The durable WhatsApp "
+            "identity; required for a user who has no phone number on "
+            "WhatsApp."
+        ),
+    )
     user_ensure_parser.add_argument(
         "--trusted-sender", action="append",
         help="Trusted email sender pattern (repeatable; fnmatch syntax)",
@@ -3297,12 +3419,38 @@ def main():
     bot_icon_subparsers.add_parser("clear", help="Remove the bot icon")
     bot_icon_subparsers.add_parser("show", help="Show what is stored, never the bytes")
 
+    # whatsapp
+    whatsapp_parser = subparsers.add_parser(
+        "whatsapp", help="WhatsApp Cloud API operations",
+    )
+    whatsapp_subparsers = whatsapp_parser.add_subparsers(
+        dest="whatsapp_action", required=True,
+    )
+    whatsapp_subparsers.add_parser(
+        "billing-unblock",
+        help=(
+            "Clear the billable circuit breaker after checking Meta billing"
+        ),
+    )
+
     # experimental
     exp_parser = subparsers.add_parser("experimental", help="Experimental feature flags")
     exp_subparsers = exp_parser.add_subparsers(dest="experimental_action", required=True)
     exp_subparsers.add_parser("list", help="List known feature flags with on/off status")
 
     args = parser.parse_args()
+
+    # argparse cannot express this one: `--whatsapp-number` and
+    # `--whatsapp-bsuid` are the documented explicit-enrollment pair, so the
+    # BSUID flag cannot join the mutually exclusive group that holds the two
+    # destructive flags. `parser.error` keeps the exit status and the shape of
+    # every other conflicting-flag refusal.
+    if getattr(args, "command", None) == "user" and getattr(args, "user_action", None) == "ensure":
+        if args.whatsapp_bsuid and (args.clear_whatsapp or args.reset_whatsapp_identity):
+            parser.error(
+                "--whatsapp-bsuid cannot be combined with --clear-whatsapp or "
+                "--reset-whatsapp-identity"
+            )
 
     # Load config and setup logging (except for init/setup which don't need — or
     # may pre-date — a config file).
@@ -3395,6 +3543,11 @@ def main():
             "show": cmd_bot_icon_show,
         }
         bot_icon_commands[args.bot_icon_action](args)
+    elif args.command == "whatsapp":
+        whatsapp_commands = {
+            "billing-unblock": cmd_whatsapp_billing_unblock,
+        }
+        whatsapp_commands[args.whatsapp_action](args)
     elif args.command == "experimental":
         experimental_commands = {
             "list": cmd_experimental_list,

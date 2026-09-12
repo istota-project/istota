@@ -87,6 +87,30 @@ _EXCLUDED_TOP_LEVEL = {
 _COUNT_FIELDS = {"users", "default_briefings", "briefing_shared_blocks"}
 
 
+def _mask_phone_number(number: Any) -> str:
+    """`user_profiles.mask_phone_number`, imported lazily.
+
+    This module is imported by the web app on a request path and holds no
+    package imports at module scope; `user_profiles` opens databases.
+    """
+    from .user_profiles import mask_phone_number
+
+    return mask_phone_number(str(number or ""))
+
+
+# Fields rendered through a masking function rather than in full. Not
+# credentials — a redacted value would tell an operator nothing, and these are
+# settings they have to be able to check against a provider portal — but
+# private operational data that identifies a person and does not belong on a
+# page an admin may screen-share or paste into a report.
+#
+# Keyed on the full dotted path for the reason `NON_SECRET_KEYS` is: a bare
+# name would mask a same-named field in another section, or fail to.
+MASKED_KEYS = {
+    "whatsapp.business_phone_number": _mask_phone_number,
+}
+
+
 def is_secret_name(name: str) -> bool:
     """Whether a field or header name looks like a credential.
 
@@ -157,6 +181,16 @@ def _field_entry(prefix: str, name: str, value: Any) -> dict:
             "value": None,
             "type": "secret",
             "secret": True,
+            "set": _is_set(value),
+        }
+    masker = MASKED_KEYS.get(key)
+    if masker is not None:
+        return {
+            "key": key,
+            "name": name,
+            "value": masker(value),
+            "type": "str",
+            "secret": False,
             "set": _is_set(value),
         }
     if name in _COUNT_FIELDS:

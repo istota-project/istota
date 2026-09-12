@@ -20,6 +20,7 @@ The DB row, when present, wins.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -154,12 +155,55 @@ def normalize_sms_phone_number(value: object, *, allow_empty: bool = False) -> s
     return number
 
 
-def mask_sms_phone_number(number: str) -> str:
+def normalize_whatsapp_phone_number(value: object, *, allow_empty: bool = False) -> str:
+    """The same rule for a WhatsApp bootstrap number, said in its own words.
+
+    One predicate (:func:`is_e164`), two messages: an operator told "SMS phone
+    number must be exact E.164" after typing `--whatsapp-number` has to work
+    out which of the two bindings the command refused.
+
+    Meta's `wa_id` arrives without the leading `+`, so the inbound path
+    prepends one before asking — it does not clean punctuation or guess a
+    country code, and neither does this.
+    """
+    number = str(value) if value is not None else ""
+    if allow_empty and number == "":
+        return ""
+    if not is_e164(number):
+        raise ValueError(
+            "WhatsApp phone number must be exact E.164: '+' followed by 8 to "
+            "15 digits, with a non-zero country code"
+        )
+    return number
+
+
+def mask_phone_number(number: str) -> str:
     """Mask an E.164 number while retaining its country marker and suffix."""
     if not number:
         return ""
     visible = number[-4:]
     return "+" + "*" * max(0, len(number) - 5) + visible
+
+
+def mask_sms_phone_number(number: str) -> str:
+    """:func:`mask_phone_number` under the name its callers already use."""
+    return mask_phone_number(number)
+
+
+def mask_whatsapp_identifier(value: str) -> str:
+    """A short one-way fingerprint of a BSUID, send id or Meta message id.
+
+    These are not credentials, but they are private operational data that
+    identifies a person to Meta, and every general surface — an operator's
+    terminal, a log line, an alert — shows this instead of the value. It is
+    stable, so two lines about the same identity can be matched up, and it is
+    truncated, so it is short enough to read and no use as an identifier
+    anywhere but here.
+    """
+    if not value:
+        return ""
+    digest = hashlib.sha256(f"istota-whatsapp-id-v1\0{value}".encode())
+    return digest.hexdigest()[:12]
 
 
 def _raise_phone_conflict(exc: sqlite3.IntegrityError) -> None:
@@ -583,6 +627,17 @@ def delete_profile(db_path: Path, user_id: str) -> bool:
     """
     with _connect(db_path) as conn:
         avatars.delete_all_user_avatars(conn, user_id)
+        # The WhatsApp binding goes with the profile, on this function's own
+        # connection for the reason the avatars do. It is a separate table
+        # rather than a column only because BSUID and window state are
+        # transport runtime data — leaving it behind would keep a deleted
+        # user's phone number and BSUID reserved, and would leave a live
+        # principal an authenticated inbound event could still resolve to.
+        # `sms_phone_number` needs no line here because it is a column on the
+        # row this deletes.
+        conn.execute(
+            "DELETE FROM whatsapp_user_bindings WHERE user_id = ?", (user_id,),
+        )
         cur = conn.execute(
             "DELETE FROM user_profiles WHERE user_id = ?", (user_id,),
         )
