@@ -7,7 +7,7 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | Command | Description |
 |---|---|
 | `!help` | List all available commands |
-| `!stop` | Cancel the active task (sets `cancel_requested` flag + SIGTERM to worker) |
+| `!stop [#ID]` | Cancel the task running in this room, or the one named by id (sets `cancel_requested` flag + SIGTERM to worker; a held task is declined instead) |
 | `!steer TEXT` | Send a note to the running task without restarting it (alias: `!inject`) |
 | `!retry [#ID]` | Re-run a failed or cancelled task from scratch |
 | `!resume [#ID]` | Re-run a failed or cancelled task, continuing from its captured progress |
@@ -44,6 +44,14 @@ A task held for your approval — inbound mail from an unknown sender, or a ques
 A bare `!confirm` acts only when **exactly one** question is open. With several it lists them and does nothing — the held task is untrusted inbound mail, and approving the wrong one is the misfire the gate exists to prevent. A contradiction is refused rather than resolved: `!no 41 trust` says two different things and gets an explanation, not an approval.
 
 The same items appear behind the [notification bell](../features/notifications.md) in the web UI, and answering in one place closes them everywhere.
+
+## Cancelling a task
+
+A bare `!stop` is **room-scoped**: it cancels your most recent active task in the room you typed it in, the same rule `!steer` follows. It used to take your newest active task anywhere, which on a deployment running scheduled jobs is a race you cannot see — a background task queued between your message and your `!stop` wins, and cancelling it is invisible because it is in no room.
+
+When nothing is active in the room, `!stop` lists your other active tasks with their ids rather than reaching for one. `!stop <task-id>` (a `#` prefix is fine) cancels that task wherever it is running, which is how you kill a runaway background job; it is your own tasks only, unless you are an admin. A non-numeric argument gets the usage line — `!stop please` cancels nothing.
+
+A task held for confirmation is **discarded** rather than flagged, since a parked task has no worker to receive a cancellation.
 
 ## Steering a running task
 

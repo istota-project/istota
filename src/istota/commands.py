@@ -485,35 +485,151 @@ async def cmd_help(ctx: CommandContext):
     return "\n".join(lines)
 
 
-@command("stop", "Cancel your currently running task")
-async def cmd_stop(ctx: CommandContext):
-    conn, user_id = ctx.conn, ctx.user_id
-    cursor = conn.execute(
-        """
-        SELECT id, prompt FROM tasks
-        WHERE user_id = ? AND status IN ('running', 'locked', 'pending_confirmation')
-        ORDER BY created_at DESC LIMIT 1
-        """,
-        (user_id,),
+# The source types `!status` files under "Your tasks" rather than "Background",
+# shared with the `!stop` listing so one task cannot be labelled two ways.
+# Deliberately *not* "every surface a person types at": `web` is absent, which
+# predates this and is `!status`'s own question to answer, not this command's.
+_INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "cli"})
+
+# SQLite stores an INTEGER in eight bytes and raises `OverflowError` out of the
+# driver above that, so the length bound is what keeps a long run of digits from
+# reaching the database at all. 18 digits is comfortably inside the limit and far
+# past any real task id.
+_MAX_TASK_ID_DIGITS = 18
+
+
+def parse_task_id(text: str) -> int | None:
+    """A task id typed by a user, or None if the text is not one.
+
+    One parser for the five commands that take an id (`!stop`, `!confirm`,
+    `!more`, `!retry`, `!drafts`), each of which grew its own and drifted:
+    `!retry` still tested `isdigit`, which is True for '²' and which `int()`
+    then refuses, so a typo came back as "Command `!retry` failed: invalid
+    literal for int()" instead of the usage line. `isdecimal` is the guard that
+    fixes it, and all five had the *second* half of the same bug regardless —
+    `'9' * 30` is decimal, converts fine in Python, and raises `OverflowError`
+    from sqlite3 on the way into the query, which reaches the room as the same
+    kind of internal error string.
+
+    Strips a single leading `#`, so `!stop #` is a malformed id rather than the
+    empty string a repeated `lstrip("#")` would collapse it to — which the
+    caller would then read as "no argument given" and act on the whole room.
+    """
+    text = text.strip()
+    if text.startswith("#"):
+        text = text[1:]
+    # `isdecimal` admits non-ASCII digits ('٥' is 5), which is harmless — it
+    # resolves to a real id and every caller still checks ownership — but the
+    # ASCII test is the one a reader expects here.
+    if not text.isascii() or not text.isdecimal():
+        return None
+    if len(text) > _MAX_TASK_ID_DIGITS:
+        return None
+    return int(text)
+
+
+# What `!stop` can act on. `pending` is deliberately absent: an unclaimed task
+# owns no worker to signal, and cancelling one is `!status`'s business rather
+# than the "stop what is happening now" this command means.
+_STOPPABLE_STATUSES = ("running", "locked", "pending_confirmation")
+
+
+def _stop_usage() -> str:
+    return (
+        "Usage: `!stop` cancels the task running in this room, or "
+        "`!stop <task-id>` a specific one. `!status` lists the ids."
     )
-    row = cursor.fetchone()
-    if not row:
-        return "No active task to cancel."
 
-    task_id, prompt = row["id"], row["prompt"]
 
-    # Set cancellation flag
+def _stop_listing(rows) -> str:
+    """One addressable line per active task: the id, and what kind of task it is.
+
+    **No prompt text, deliberately.** This listing answers a bare `!stop` typed
+    in a room where nothing is running, so every task on it is by definition in
+    some *other* room — and the reply is posted into the room the command was
+    typed in, which on Talk can have other people in it. Rendering previews here
+    would read one room's prompts out in another. Two of them would be worse
+    still: a task parked in `pending_confirmation` holds the *withheld* body of
+    an unapproved inbound email in `tasks.prompt`, which is the one string
+    `confirmations.describe` exists not to print.
+
+    The id is all the listing has to carry, because the id is what `!stop <id>`
+    takes; `!status` is the surface that says what each task is, and it answers
+    in the asker's own room.
+    """
+    lines = []
+    for row in rows:
+        tag = (
+            "" if row["source_type"] in _INTERACTIVE_SOURCE_TYPES
+            else f" [{row['source_type']}]"
+        )
+        lines.append(f"- `#{row['id']}`{tag}")
+    return "\n".join(lines)
+
+
+def _cancel_one(ctx: CommandContext, task_id: int) -> str:
+    """Cancel one task and return the acknowledgement line.
+
+    **Reads the row itself and branches on what it read.** Taking the caller's
+    status as an argument looks like a saved query and is a race: both callers
+    select first, so a row that moves in the gap is handled by the wrong arm.
+    The costly direction is `pending_confirmation` -> `running`, where
+    `db.cancel_task` has no status predicate — it would flip a *running* task to
+    `cancelled` and return before the kill, leaving the worker alive with
+    `cancel_requested` never set, so nothing downstream would stop it either.
+    One read, one dispatch.
+
+    A `pending_confirmation` task is **declined**, not flagged. `cancel_requested`
+    is only ever read for `running`/`locked` rows — `recover_orphaned_tasks`
+    filters on exactly those, and the executor's cancel check runs inside a live
+    attempt — so flipping it on a parked task told the user "Cancelling" and then
+    did nothing at all: the task sat in `pending_confirmation` with its inbox row
+    open until `expire_stale_confirmations` reaped it two hours later. The web
+    cancel button has always gone through `confirmations.decline` for this
+    (`web_app._chat_cancel_task`); this path was the copy that did not.
+    """
+    from . import confirmations
+
+    conn = ctx.conn
+    task = db.get_task(conn, task_id)
+    if task is None or task.status not in _STOPPABLE_STATUSES:
+        # Reachable as a race — the row finished or was reaped between the
+        # caller's select and this read. Say so rather than acknowledging a
+        # cancellation that did not happen, the rule `cmd_confirm` states for
+        # its own acks: key the reply on what happened, not on what was asked.
+        return f"Task #{task_id} is no longer active."
+
+    if task.status == "pending_confirmation":
+        # `describe`, never the prompt: for a gated email `tasks.prompt` is the
+        # withheld body, and this is the label rule `.claude/rules/notifications.md`
+        # already settled for the same object.
+        label = confirmations.describe(conn, task)
+        confirmations.decline(conn, task, by=ctx.surface)
+        conn.commit()
+        return f"Discarded task #{task_id}: {label}"
+
+    label = confirmations.describe_prompt(task.prompt)
+
+    # Read the pid before the flip, and gate the kill on a status that can still
+    # own a subprocess — `worker_pid` is cleared on every transition out of
+    # `running`, so a cancel racing a task that has just finished would signal a
+    # pid the OS may since have reused, and a *group* kill makes that mistake
+    # cost a whole group rather than one process. Same reasoning, and the same
+    # shape, as `web_app._chat_cancel_task`.
+    pid_row = conn.execute(
+        "SELECT worker_pid, status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+
     conn.execute(
         "UPDATE tasks SET cancel_requested = 1 WHERE id = ?",
         (task_id,),
     )
     conn.commit()
 
-    # Also try to kill subprocess if PID is stored
-    pid_row = conn.execute(
-        "SELECT worker_pid FROM tasks WHERE id = ?", (task_id,)
-    ).fetchone()
-    if pid_row and pid_row["worker_pid"]:
+    if (
+        pid_row and pid_row["worker_pid"]
+        and pid_row["status"] in ("running", "locked")
+    ):
         # The whole group, not the pid alone: the CLI's children are where the
         # work is, and a bare kill leaves them running after the user has
         # visibly stopped the task (ISSUE-257). kill_process_group falls back
@@ -523,8 +639,111 @@ async def cmd_stop(ctx: CommandContext):
         # a tmux `!stop` now takes the pane's whole command tree.
         kill_process_group(pid_row["worker_pid"], signal.SIGTERM)
 
-    preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
-    return f"Cancelling task #{task_id}: {preview}"
+    return f"Cancelling task #{task_id}: {label}"
+
+
+@command(
+    "stop",
+    "Cancel the task running in this room: `!stop`, or `!stop <task-id>` for a "
+    "specific one",
+)
+async def cmd_stop(ctx: CommandContext):
+    """Cancel a task — the one in this room, or one named by id.
+
+    **Bare `!stop` is room-scoped** (ISSUE-487). It used to take the user's
+    newest active task *anywhere*, which on a deployment running background jobs
+    is a race the user cannot see: a scheduled task queued between their message
+    and their `!stop` wins the `ORDER BY created_at DESC` and is cancelled
+    instead, invisibly, because a background task is in no room. Five seconds
+    was the whole margin in the reported incident. `!steer` — advertised
+    alongside this command as the other way to interrupt a run — has always
+    resolved the room and filtered on it, and the two disagreeing about what
+    "your running task" means is the defect.
+
+    **An idle room does not widen to the user.** That fallback is the old
+    behaviour wearing a safer name, so the reply lists the ids instead and lets
+    the user aim, the way `!confirm` answers an ambiguous bare invocation.
+
+    **`!stop <task-id>` is deliberately not room-scoped**: killing a runaway
+    background job is the case an explicit id exists for. It was parsed and
+    thrown away before — `parse_command` split it out and this handler never
+    read `ctx.args` — so typing a target made the outcome less predictable
+    rather than more, and so did any trailing word (`!stop please` cancelled).
+    """
+    config, conn, user_id = ctx.config, ctx.conn, ctx.user_id
+
+    raw = ctx.args.strip()
+    if raw:
+        target_id = parse_task_id(raw)
+        if target_id is None:
+            return _stop_usage()
+
+        task = db.get_task(conn, target_id)
+        # One message for "no such task" and "not yours", so the command cannot
+        # be used to probe which task ids exist — `!confirm` draws the same line
+        # over the same question. "Already finished" is told apart, because it
+        # is about a task the user demonstrably knows of and the remedy differs.
+        if task is None or (
+            task.user_id != user_id and not config.is_admin(user_id)
+        ):
+            return f"Task #{target_id} isn't yours to stop."
+        if task.status not in _STOPPABLE_STATUSES:
+            return f"Task #{target_id} is already {task.status}."
+        # The admin exemption covers cancelling somebody's *running* task —
+        # a runaway background job is what an operator needs to reach. It stops
+        # at a held one: discarding another user's `pending_confirmation` task
+        # throws away an inbound email they have not read yet and closes their
+        # notification row, and `!confirm` — the command that exists to answer
+        # those — has no admin exemption at all, scoping to
+        # `pending_for_user(conn, user_id)`. Reaching it through `!stop` would
+        # be a back door onto an action the front door refuses.
+        if task.user_id != user_id and task.status == "pending_confirmation":
+            return (
+                f"Task #{target_id} is waiting on {task.user_id} to answer it. "
+                "Only they can discard it."
+            )
+        return _cancel_one(ctx, task.id)
+
+    # Room-scoped, resolving a per-surface ref onto the canonical token the task
+    # stored — Talk hands `dispatch` its own conversation token, web hands the
+    # canonical one already. Exactly what `cmd_steer` does, for the same reason.
+    room_token = _room_token(ctx)
+
+    # No shipped caller passes an empty token, but `dispatch` neither defaults
+    # nor validates it, so the invariant lives in four transports. An empty
+    # value here would match the `conversation_token = ''` rows that heartbeat
+    # and briefing settings produce, and cancel a background task — the exact
+    # bug this command is being fixed for. One line, locally.
+    row = None
+    if room_token:
+        row = conn.execute(
+            f"""
+            SELECT id FROM tasks
+            WHERE user_id = ? AND conversation_token = ?
+              AND status IN ({", ".join("?" * len(_STOPPABLE_STATUSES))})
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (user_id, room_token, *_STOPPABLE_STATUSES),
+        ).fetchone()
+    if row:
+        return _cancel_one(ctx, row["id"])
+
+    others = conn.execute(
+        f"""
+        SELECT id, source_type FROM tasks
+        WHERE user_id = ?
+          AND status IN ({", ".join("?" * len(_STOPPABLE_STATUSES))})
+        ORDER BY created_at ASC
+        """,
+        (user_id, *_STOPPABLE_STATUSES),
+    ).fetchall()
+    if not others:
+        return "No active task to cancel."
+    return (
+        f"No active task in this room. You have {len(others)} running "
+        f"elsewhere:\n{_stop_listing(others)}\n\n"
+        "Cancel one with `!stop <task-id>`, or `!status` to see what they are."
+    )
 
 
 # `!confirm` verbs, keyed by the alias the user typed. A bare `!confirm` is an
@@ -563,10 +782,13 @@ async def cmd_confirm(ctx: CommandContext):
     words = ctx.args.split()
 
     target_id: int | None = None
-    # `isdecimal`, not `isdigit`: the latter is True for '²', which `int()` then
-    # refuses, turning a typo into a traceback instead of the usage message.
-    if words and words[0].lstrip("#").isdecimal():
-        target_id = int(words.pop(0).lstrip("#"))
+    if words:
+        # A leading word that parses as an id is the target; anything else is a
+        # verb and falls through to `_VERB_WORDS` below.
+        parsed = parse_task_id(words[0])
+        if parsed is not None:
+            target_id = parsed
+            words.pop(0)
 
     # Contradictions are refused, not resolved. `verb = mapped` last-word-wins
     # made `!no 41 trust` approve *and* trust — resolving an ambiguous input
@@ -1285,9 +1507,12 @@ async def cmd_status(ctx: CommandContext):
         (user_id,),
     ).fetchall()
 
-    _interactive_types = {"talk", "email", "cli"}
-    interactive = [r for r in rows if r["source_type"] in _interactive_types]
-    background = [r for r in rows if r["source_type"] not in _interactive_types]
+    interactive = [
+        r for r in rows if r["source_type"] in _INTERACTIVE_SOURCE_TYPES
+    ]
+    background = [
+        r for r in rows if r["source_type"] not in _INTERACTIVE_SOURCE_TYPES
+    ]
 
     status_emoji = {
         "pending": "...",
@@ -2356,12 +2581,10 @@ async def cmd_export(ctx: CommandContext):
 @command("more", "Show execution trace for a task: `!more #31875` or `!more 31875`")
 async def cmd_more(ctx: CommandContext):
     config, conn, user_id, args = ctx.config, ctx.conn, ctx.user_id, ctx.args
-    # Parse task ID from args (strip # prefix if present)
-    task_id_str = args.strip().lstrip("#")
-    if not task_id_str.isdigit():
+    task_id = parse_task_id(args)
+    if task_id is None:
         return "Usage: `!more #<task_id>` — show the execution trace for a completed task."
 
-    task_id = int(task_id_str)
     task = db.get_task(conn, task_id)
     if not task:
         return f"Task #{task_id} not found."
@@ -2433,16 +2656,17 @@ async def _resolve_retry_target(ctx: CommandContext) -> "tuple[db.Task | None, s
     room_token = db.resolve_room_token(conn, ctx.surface, ctx.conversation_token) \
         or ctx.conversation_token
 
-    id_str = args.strip().lstrip("#")
+    id_str = args.strip()
     if id_str:
-        if not id_str.isdigit():
+        target_id = parse_task_id(id_str)
+        if target_id is None:
             return None, (
                 "Usage: `!retry [#<task_id>]` — re-run a failed or cancelled "
                 "task (defaults to the last one in this room)."
             )
-        task = db.get_task(conn, int(id_str))
+        task = db.get_task(conn, target_id)
         if task is None:
-            return None, f"Task #{id_str} not found."
+            return None, f"Task #{target_id} not found."
         if task.user_id != user_id and not config.is_admin(user_id):
             return None, f"Task #{task.id} belongs to another user."
         if task.source_type not in _RETRYABLE_SOURCE_TYPES:
@@ -3230,12 +3454,10 @@ async def cmd_drafts(ctx: CommandContext):
 
     target_id: int | None = None
     if words:
-        token = words.pop(0).lstrip("#")
-        # `isdecimal`, not `isdigit`: the latter is True for '²', which `int()`
-        # then refuses, turning a typo into a traceback.
-        if not token.isdecimal():
+        token = words.pop(0)
+        target_id = parse_task_id(token)
+        if target_id is None:
             return f"`{token}` is not a draft id. Try `!drafts` to see the open ones."
-        target_id = int(token)
     if words:
         return (
             f"Too many arguments. Try `!drafts {verb or 'send'} <id>`."
