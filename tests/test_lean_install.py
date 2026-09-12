@@ -152,6 +152,10 @@ IMPORT_TO_DISTRIBUTION = {
     "dotenv": "python-dotenv",
     "testmon": "pytest-testmon",
     "xdist": "pytest-xdist",
+    # One distribution, two top-level packages: `pywa` ships the synchronous
+    # client and `pywa_async` the asyncio one, and istota imports both — the
+    # signature validator from the first, the send methods from the second.
+    "pywa_async": "pywa",
 }
 
 # The roots that hold this project's own importable code. `docker` is in the

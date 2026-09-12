@@ -5,6 +5,7 @@ Run as: uvicorn istota.webhook_receiver:app --host 127.0.0.1 --port 8765
 Currently handles:
 - /webhooks/location — Overland GPS location data
 - /webhooks/sms/twilio and /webhooks/sms/telnyx — SMS callbacks
+- /webhooks/whatsapp — Meta Cloud API verification and signed events
 """
 
 import logging
@@ -286,6 +287,7 @@ app = FastAPI(title="Istota Webhook Receiver", lifespan=lifespan)
 
 location_router = APIRouter(prefix="/webhooks/location")
 sms_router = APIRouter(prefix="/webhooks/sms")
+whatsapp_router = APIRouter(prefix="/webhooks/whatsapp")
 
 
 async def _bounded_body(request: Request, limit: int | None = None) -> bytes | None:
@@ -391,6 +393,73 @@ async def receive_telnyx_sms(request: Request, background: BackgroundTasks):
     return await _receive_sms("telnyx", request, background)
 
 
+@whatsapp_router.get("")
+async def verify_whatsapp_subscription(request: Request):
+    """Meta's one-time subscription handshake.
+
+    `hub.verify_token` is a shared secret arriving as a *query value*, which is
+    why the deployment's nginx must not log the query string for this path and
+    why nothing here logs the parameters either — not the presented token and
+    not the configured one, on any branch.
+    """
+    from .transport.whatsapp.webhook import (  # noqa: PLC0415
+        WhatsAppWebhookError,
+        verify_subscription,
+    )
+
+    config = _config
+    if config is None or not config.whatsapp.enabled:
+        return Response(status_code=404)
+    try:
+        challenge = verify_subscription(config, dict(request.query_params))
+    except WhatsAppWebhookError as exc:
+        logger.info("whatsapp.verify.rejected reason=%s", str(exc))
+        return Response(status_code=exc.status_code)
+    return Response(content=challenge, media_type="text/plain")
+
+
+@whatsapp_router.post("")
+async def receive_whatsapp(request: Request, background: BackgroundTasks):
+    """One signed Meta batch: authenticate, normalize, commit, acknowledge.
+
+    The three answers are the contract. A refused request is the adapter's own
+    status and writes nothing. A database failure is 503, so Meta retries a
+    batch that did not commit — and because normalization runs to completion
+    before the transaction opens, a retry never re-applies a half-processed
+    batch. Everything else is an empty 200, duplicates included, because a
+    duplicate that answered anything else would be redelivered for ever.
+    """
+    from . import db  # noqa: PLC0415
+    from .transport.whatsapp.webhook import (  # noqa: PLC0415
+        MAX_WEBHOOK_BODY,
+        WhatsAppWebhookError,
+        deliver_pending_alerts,
+        handle_whatsapp_batch,
+        parse_webhook,
+    )
+
+    config = _config
+    if config is None or not config.whatsapp.enabled:
+        return Response(status_code=404)
+    raw_body = await _bounded_body(request, MAX_WEBHOOK_BODY)
+    if raw_body is None:
+        return Response(status_code=413)
+    try:
+        events = parse_webhook(config, raw_body, request.headers)
+    except WhatsAppWebhookError as exc:
+        logger.info("whatsapp.inbound.rejected reason=%s", str(exc))
+        return Response(status_code=exc.status_code)
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            results = handle_whatsapp_batch(conn, config, events)
+    except sqlite3.Error:
+        logger.warning("whatsapp.inbound.database_unavailable", exc_info=True)
+        return Response(status_code=503)
+    background.add_task(deliver_pending_alerts, config, results)
+    return Response(status_code=200)
+
+
 @location_router.post("")
 async def receive_location(
     request: Request,
@@ -449,6 +518,7 @@ async def receive_location(
 
 app.include_router(location_router)
 app.include_router(sms_router)
+app.include_router(whatsapp_router)
 
 
 def _process_feature(

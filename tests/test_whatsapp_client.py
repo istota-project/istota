@@ -1,0 +1,157 @@
+"""The PyWa boundary: signature validation and the dependency contract.
+
+Two different kinds of test live here and the difference matters. The signature
+cases exercise istota's own wrapper against a fixed HMAC vector — they would
+pass against any correct implementation. The dependency contract pins the
+*shape* of what PyWa exposes, so a future 4.x release that renames the
+validator, changes its argument order, or changes the header constant fails
+here rather than by quietly refusing (or, far worse, quietly accepting) every
+webhook on a deployment.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import inspect
+
+import pytest
+
+from istota.transport.whatsapp import client
+
+APP_SECRET = "wa-app-secret"
+BODY = b'{"object":"whatsapp_business_account","entry":[]}'
+
+
+def _signature(secret: str, body: bytes) -> str:
+    return "sha256=" + hmac.new(
+        secret.encode(), body, hashlib.sha256,
+    ).hexdigest()
+
+
+class TestSignatureValidation:
+    def test_a_correct_signature_over_the_exact_bytes_is_accepted(self):
+        assert client.verify_signature(APP_SECRET, BODY, _signature(APP_SECRET, BODY))
+
+    def test_the_vector_is_fixed_rather_than_recomputed_by_the_helper(self):
+        # A test that signs with the same call the product verifies with proves
+        # only that one function is its own inverse. This vector was computed
+        # once, by hand, from the documented rule: hex HMAC-SHA256 of the raw
+        # body under the app secret, prefixed `sha256=`.
+        assert client.verify_signature(
+            "abc123",
+            b"hello",
+            "sha256=33963716627d0d59617a4bed91c7f13b"
+            "cf3b312e79b946a73937000fa910e3f5",
+        )
+
+    @pytest.mark.parametrize(
+        "secret, body, signature",
+        [
+            (APP_SECRET, b'{"object":"x"}', _signature(APP_SECRET, BODY)),
+            (APP_SECRET, BODY, _signature("another-app-secret", BODY)),
+            (APP_SECRET, BODY, ""),
+            (APP_SECRET, BODY, _signature(APP_SECRET, BODY).removeprefix("sha256=")),
+            (APP_SECRET, BODY, "sha1=" + _signature(APP_SECRET, BODY)[7:]),
+            (APP_SECRET, BODY, "sha256=" + _signature(APP_SECRET, BODY)[7:].upper()),
+            (APP_SECRET, BODY, "sha256=zz"),
+            (APP_SECRET, BODY, "sha256=é" * 8),
+        ],
+    )
+    def test_every_wrong_signature_shape_is_refused(self, secret, body, signature):
+        assert client.verify_signature(secret, body, signature) is False
+
+    def test_an_absent_app_secret_refuses_rather_than_signing_with_an_empty_key(self):
+        """The case PyWa's own helper gets wrong for our purposes.
+
+        `webhook_updates_validator` takes the secret as a plain string and
+        happily computes an HMAC under `b""`, so with no app secret configured
+        it *validates* — against a key every reader of this repository knows.
+        A caller could then sign their own payload and be believed. The wrapper
+        refuses before reaching it, and the transport refuses to start without
+        the secret besides.
+        """
+        assert client.verify_signature("", BODY, _signature("", BODY)) is False
+        assert client.verify_signature("", BODY, "sha256=anything") is False
+
+
+class TestThePyWaDependencyContract:
+    """What a future PyWa minor release must not change under us.
+
+    Every assertion here names something istota calls or will call. The point
+    is not that PyWa is fragile; it is that this dependency sits on an
+    authentication boundary, and the failure mode of a renamed validator is a
+    deployment that stops verifying signatures with nothing in the suite going
+    red.
+    """
+
+    def test_the_validator_is_the_public_name_with_the_argument_order_we_pass(self):
+        from pywa import utils as pywa_utils
+
+        signature = inspect.signature(pywa_utils.webhook_updates_validator)
+        assert list(signature.parameters) == [
+            "app_secret", "request_body", "x_hub_signature",
+        ]
+        assert signature.return_annotation in (bool, "bool")
+
+    def test_the_signature_header_constant_is_the_meta_header(self):
+        from pywa import utils as pywa_utils
+
+        assert pywa_utils.HUB_SIG == "X-Hub-Signature-256"
+        assert client.SIGNATURE_HEADER == pywa_utils.HUB_SIG
+
+    def test_the_wrapper_calls_pywa_rather_than_reimplementing_hmac(self, monkeypatch):
+        """A control against the wrapper drifting into a local copy.
+
+        Reimplementing thirty characters of `hmac` here would pass every case
+        above and would be a second implementation of the boundary — the thing
+        `client.py` exists to prevent.
+        """
+        from pywa import utils as pywa_utils
+
+        seen: list[tuple] = []
+
+        def spy(app_secret, request_body, x_hub_signature):
+            seen.append((app_secret, request_body, x_hub_signature))
+            return False
+
+        monkeypatch.setattr(pywa_utils, "webhook_updates_validator", spy)
+        assert client.verify_signature(APP_SECRET, BODY, "sha256=00") is False
+        assert seen == [(APP_SECRET, BODY, "sha256=00")]
+
+    def test_the_async_send_methods_keep_the_parameters_stage_three_passes(self):
+        from pywa_async import WhatsApp
+
+        send_message = inspect.signature(WhatsApp.send_message).parameters
+        assert {"to", "text", "reply_to_message_id", "sender"} <= set(send_message)
+
+        send_template = inspect.signature(WhatsApp.send_template).parameters
+        assert {"to", "name", "language", "params", "sender"} <= set(send_template)
+
+    def test_the_client_constructor_keeps_the_fields_the_adapter_configures(self):
+        from pywa_async import WhatsApp
+
+        params = inspect.signature(WhatsApp.__init__).parameters
+        assert {
+            "phone_id", "token", "waba_id", "app_secret", "api_version", "session",
+        } <= set(params)
+        # No `server`/`webhook_endpoint` is ever passed: istota owns FastAPI and
+        # the endpoint, so PyWa must never be handed either. That they exist is
+        # PyWa's business; that istota's adapter names neither is ours, and the
+        # module-text guard below is what holds it.
+        assert {"server", "webhook_endpoint", "callback_url"} <= set(params)
+
+
+class TestTheAdapterStaysNarrow:
+    def test_the_client_module_registers_no_callback_url_and_no_pywa_server(self):
+        from tests.support.drift import source_of
+
+        source = source_of(client)
+        for forbidden in (
+            "callback_url=", "webhook_endpoint=", "server=", "handlers_modules=",
+            "set_callback_url(", "on_message", ".run(", "flask", "Flask",
+        ):
+            assert forbidden not in source, (
+                f"client.py names {forbidden!r}: istota owns the webhook endpoint "
+                "and must never let PyWa register or serve one"
+            )
