@@ -25,7 +25,6 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -35,10 +34,39 @@ from testbed import profiles
 from testbed import stack as compose_support
 from testbed.probe import WATERMARK_TABLES, Probe
 from testbed.services import gitlab
+from tests.support.nested_pytest import run_nested_pytest
 
 REPO = Path(__file__).resolve().parents[1]
 PREBUILT_OVERLAY = REPO / "docker" / "docker-compose.test.prebuilt.yml"
 COMPOSE_FILE = REPO / "docker" / "docker-compose.test.yml"
+
+#: What the nested collects below walk. A tier guard asserts about the items of
+#: one tier, so it need not pay for the whole tree — 26631 items against 278
+#: here, and 12s warm against 0.4s (ISSUE-492).
+#:
+#: The two spellings are not interchangeable, and `tests/smoke/` alone is the
+#: trap. With the smoke marker deselected, everything in that directory
+#: deselects, pytest exits 5 for an empty collection, and a `returncode == 0`
+#: assertion then fails for a reason unrelated to the guard. The wider scope
+#: keeps the selected set non-empty while still leaving the marked items
+#: collected-then-deselected, which is the state the guard is about.
+SMOKE_DIR_ONLY = ["tests/smoke/"]
+
+#: And the wider one covers **every** serial tier, not just this file's own.
+#: `SERIAL_TIER_MARKERS` is `("smoke", "full", "testbed", "deploy")`, and the
+#: hook under test raises if *any* selected item carries one of them — so the
+#: whole-tree collect this replaced was, incidentally, the only end-to-end
+#: witness that `testbed` and `deploy` are deselected by `addopts` too. Scoping
+#: to `tests/smoke/` alone silently dropped 104 of the 150 deselected items and
+#: left those two markers guarded by nothing. Found in review; the four
+#: directories cost the same 0.4s as the one did.
+SERIAL_TIER_SCOPE = [
+    "tests/smoke/",
+    "tests/full/",
+    "tests/testbed/",
+    "tests/deploy/",
+    "tests/test_smoke_tier.py",
+]
 
 # Deliberately not `os.environ`: these checks are about what rides in the
 # argument list, and an inherited environment would satisfy them either way.
@@ -71,22 +99,7 @@ class TestTheMarkerIsWired:
         )
 
     def test_the_default_run_collects_nothing_from_the_smoke_directory(self):
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-p",
-                "no:cacheprovider",
-                "--collect-only",
-                "-q",
-                "tests/smoke/",
-            ],
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        result = _collect(SMOKE_DIR_ONLY)
 
         assert result.returncode == 5, f"{result.stdout}\n{result.stderr}"
         assert "deselected" in result.stdout, result.stdout
@@ -124,7 +137,7 @@ class TestTheXdistGuard:
     """
 
     def test_the_collection_hook_rejects_the_collect_only_spelling(self):
-        result = _collect(["-m", "smoke", "-n", "2"])
+        result = _collect(SMOKE_DIR_ONLY, ["-m", "smoke", "-n", "2"])
 
         assert result.returncode == 4, (
             f"expected a usage error, got {result.returncode}\n"
@@ -134,11 +147,34 @@ class TestTheXdistGuard:
 
     def test_the_guard_does_not_fire_on_the_default_run(self):
         # The direction that would break every ordinary `uv run pytest`: the
-        # hook is `trylast` so `-m` deselection has already emptied the smoke
-        # items by the time it runs.
-        result = _collect([])
+        # hook is `trylast` so `-m` deselection has already emptied the serial
+        # items by the time it runs. That precondition is about deselection, not
+        # about the size of the tree, so the scoped collect witnesses it exactly
+        # — across all four serial markers, since the hook reads them all.
+        result = _collect(SERIAL_TIER_SCOPE)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "deselected" in result.stdout, (
+            "nothing was deselected, so this passed without exercising the "
+            f"precondition it is about\n{result.stdout}"
+        )
+
+    def test_the_scope_reaches_every_serial_marker(self):
+        """The guard above is only as good as what it walks.
+
+        Its verdict is "the hook did not fire", which a scope holding no items
+        of a given marker returns just as happily. So this pins that each of
+        `SERIAL_TIER_MARKERS` has a directory in the scope — the property that
+        made the whole-tree collect worth replacing rather than merely shrinking.
+        """
+        from tests.conftest import SERIAL_TIER_MARKERS
+
+        for marker in SERIAL_TIER_MARKERS:
+            assert f"tests/{marker}/" in SERIAL_TIER_SCOPE, (
+                f"the {marker} tier is in SERIAL_TIER_MARKERS but no directory "
+                "in SERIAL_TIER_SCOPE collects it, so the default-run guard "
+                "cannot see whether addopts still deselects it"
+            )
 
     def test_a_real_xdist_run_is_refused_before_anything_is_built(self):
         """The scenario the collection hook structurally cannot see.
@@ -150,16 +186,10 @@ class TestTheXdistGuard:
         fixture setup, before `require_docker()` and before any build, so this
         test needs no Docker daemon and costs a fraction of a second.
         """
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
-                "-q", "--no-header", "-m", "smoke", "-n", "2",
-                "tests/smoke/test_lean_stack.py::TestTheStackAnswersATask",
-            ],
+        result = run_nested_pytest(
+            scope=["tests/smoke/test_lean_stack.py::TestTheStackAnswersATask"],
+            args=["-q", "--no-header", "-m", "smoke", "-n", "2"],
             cwd=REPO,
-            capture_output=True,
-            text=True,
-            timeout=300,
         )
         output = result.stdout + result.stderr
 
@@ -168,22 +198,17 @@ class TestTheXdistGuard:
         assert "xdist worker" in output, output
 
 
-def _collect(args: list[str]) -> subprocess.CompletedProcess:
-    """A nested `--collect-only` pytest, from the repo root.
+def _collect(scope: list[str], args: list[str] | None = None):
+    """A nested `--collect-only` pytest over `scope`, from the repo root.
 
-    `-p no:cacheprovider` because the cacheprovider writes nodeids during
-    collection, and these run concurrently with an outer `-n auto` session
-    writing the same file.
+    The scope is what keeps this off the whole tree; `run_nested_pytest` carries
+    the rest, including turning a breached bound into a failure that names the
+    tier rather than a `TimeoutExpired` traceback (ISSUE-492).
     """
-    return subprocess.run(
-        [
-            sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
-            "--collect-only", "-q", *args,
-        ],
+    return run_nested_pytest(
+        scope=scope,
+        args=["--collect-only", "-q", *(args or [])],
         cwd=REPO,
-        capture_output=True,
-        text=True,
-        timeout=300,
     )
 
 

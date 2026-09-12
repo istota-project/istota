@@ -24,12 +24,12 @@ from __future__ import annotations
 import ast
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
 from tests.support import drift
+from tests.support.nested_pytest import run_nested_pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -97,11 +97,21 @@ def _run(project: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     env.pop("ISTOTA_DESELECT_TIERS", None)
     env.pop("TESTMON_DATAFILE", None)
     env["PYTEST_ADDOPTS"] = ""
-    return subprocess.run(
-        # `no:cacheprovider` is not an option here: testmon reads the `lf`
-        # option off the config and aborts the session without it.
-        [sys.executable, "-m", "pytest", "--testmon", "-v", "-p", "no:randomly", *extra],
-        cwd=project, capture_output=True, text=True, env=env,
+    return run_nested_pytest(
+        # `cacheprovider=True`: testmon reads the `lf` option off the config and
+        # aborts the session without it, so this is the one caller that keeps it.
+        #
+        # `["."]` is the scope because the child's rootdir is the throwaway
+        # project rather than this repo, so "everything" is four tests and is
+        # the right answer. The helper asks a caller to *state* its scope, not
+        # to make it small, and this had no bound at all before — the worst
+        # instance of ISSUE-492's second half, since a hang here ran until the
+        # outer session was killed.
+        scope=list(extra) or ["."],
+        args=["--testmon", "-v", "-p", "no:randomly"],
+        cwd=project,
+        env=env,
+        cacheprovider=True,
     )
 
 

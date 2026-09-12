@@ -22,7 +22,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from urllib.error import URLError
 
@@ -32,8 +31,15 @@ from testbed import profiles
 from testbed import stack as compose_support
 from testbed.services import nextcloud as nextcloud_service
 from tests.support.monotonic_spy import monotonic_spy
+from tests.support.nested_pytest import run_nested_pytest
 
 REPO = Path(__file__).resolve().parents[1]
+
+#: What the nested collect below walks. The guard asserts that selecting the
+#: full tier under xdist is refused, which the tier's own directory witnesses —
+#: the whole tree cost 26631 items and 12s warm to reach the same verdict
+#: (ISSUE-492).
+FULL_SCOPE = ["tests/full"]
 FULL_COMPOSE = REPO / "docker" / "docker-compose.yml"
 RENDER_CONFIG = REPO / "docker" / "istota" / "render-config.sh"
 TESTBED_OVERLAY = REPO / "testbed" / "compose" / "testbed.yml"
@@ -1044,15 +1050,10 @@ class TestTheMarker:
     def test_the_xdist_guard_covers_it(self):
         """Session-scoped fixtures are per-worker, so N workers would each bring
         up their own six-container stack under one project prefix."""
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "pytest", "-m", "full", "-n", "2",
-                "--collect-only", "-q", "-p", "no:cacheprovider",
-            ],
-            capture_output=True,
-            text=True,
+        result = run_nested_pytest(
+            scope=FULL_SCOPE,
+            args=["-m", "full", "-n", "2", "--collect-only", "-q"],
             cwd=REPO,
-            timeout=300,
         )
 
         assert result.returncode == 4, result.stdout + result.stderr
@@ -1066,17 +1067,11 @@ class TestTheProvisioningSuiteRefusesAKeptVolumeSet:
         first install happened in a previous session — where the
         `post-installation` hook that runs `provision-nc.sh` will not run
         again."""
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "pytest",
-                "tests/full/test_provisioning.py", "-m", "full",
-                "--collect-only", "-q", "-p", "no:cacheprovider", "-n0",
-            ],
-            capture_output=True,
-            text=True,
+        result = run_nested_pytest(
+            scope=["tests/full/test_provisioning.py"],
+            args=["-m", "full", "--collect-only", "-q", "-n0"],
             cwd=REPO,
             env={**os.environ, "ISTOTA_TESTBED_KEEP": "1"},
-            timeout=300,
         )
 
         # Collection succeeds; the skip is at session-fixture setup. What this
