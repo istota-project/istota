@@ -7023,6 +7023,21 @@ def check_whatsapp_common(config: "Config", probe: bool) -> CheckResult:
     return CheckResult("whatsapp.common", OK, detail)
 
 
+def _whatsapp_template_attempts(conn, month: str) -> int:
+    """Claimed template rows in ``month``, for reporting and nothing else.
+
+    Not in `outbound` beside its service sibling, because nothing there reads
+    it: the cap bounds service attempts alone, so this number gates no send and
+    exists only so an operator can see the volume of the one path that no local
+    ceiling bounds.
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM sent_whatsapp WHERE send_kind = 'template' "
+        "AND quota_month = ? AND claimed_at IS NOT NULL",
+        (month,),
+    ).fetchone()[0]
+
+
 def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
     """Whether the billable circuit is open, and what this month has spent.
 
@@ -7053,8 +7068,8 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
 
     from . import db as _db
     from .transport.whatsapp.outbound import (
-        _attempt_limit,
-        _service_attempts_used,
+        attempt_limit,
+        service_attempts_used,
         quota_month,
     )
 
@@ -7063,6 +7078,15 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
     if not db_path.exists():
         # `check_framework_db` already reports the absence and owns its remedy.
         return CheckResult(name, SKIP, f"{db_path} does not exist")
+    unreadable = CheckResult(
+        name, WARN,
+        "the WhatsApp ledger could not be read, so the billable circuit was "
+        "not established",
+        remedy=(
+            "Check that the framework database is readable and migrated "
+            "(`istota init`)."
+        ),
+    )
     conn = None
     try:
         conn = sqlite_util.connect_read_only(db_path)
@@ -7071,43 +7095,87 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
         # column name — the two other readers here happen not to, which is why
         # the omission passes as far as the first non-empty runtime row.
         conn.row_factory = sqlite3.Row
-        block = _db.whatsapp_billing_block(conn)
-        used = _service_attempts_used(conn, month)
     except Exception:
-        return CheckResult(
-            name, WARN,
-            "the WhatsApp ledger could not be read, so neither the billable "
-            "circuit nor this month's attempts were established",
-            remedy=(
-                "Check that the framework database is readable and migrated "
-                "(`istota init`)."
-            ),
-        )
+        return unreadable
+    # Two reads, two `try` blocks, because they fail for different reasons and
+    # only one of them may ever be lost: a missing `sent_whatsapp` column must
+    # not be reported as "the circuit is unknown", which is the alarming half,
+    # when the circuit was read and is shut.
+    try:
+        block = _db.whatsapp_billing_block(conn)
+    except Exception:
+        conn.close()
+        return unreadable
+    try:
+        used = service_attempts_used(conn, month)
+        templates = _whatsapp_template_attempts(conn, month)
+    except Exception:
+        used = templates = None
     finally:
-        if conn is not None:
-            conn.close()
+        conn.close()
 
-    limit = _attempt_limit(config)
-    spend = f"{used} service attempts in {month}"
-    spend += f" of at most {limit}" if limit else " with no local cap"
-    if block is not None:
-        # The message id is fingerprinted, not printed: a `CheckResult` reaches
-        # the boot log and the admin Health pane, and the id names a private
-        # conversation. `istota whatsapp billing-unblock` prints it in full.
-        from .transport.whatsapp import message_fingerprint
+    limit = attempt_limit(config)
+    if used is None:
+        spend = f"this month's attempts in {month} could not be counted"
+    else:
+        spend = f"{used} service attempts in {month}"
+        spend += f" of at most {limit}" if limit else " with no local cap"
+        if templates:
+            # Reported because it is the one unbounded money path here: the cap
+            # is named for service attempts and counts only those, so a paid
+            # deployment's template volume is visible nowhere else.
+            spend += f", plus {templates} template attempts, which the cap does not bound"
+    if block is None:
+        if used is not None and limit and used >= limit:
+            # The terminal state of the cap, and it is silent everywhere else:
+            # `is_whatsapp_configured` answers False from here, so the
+            # heartbeat skips the surface without writing an alert, and only a
+            # *task*-driven send still reaches `_claim` to record
+            # `budget_exhausted`. Reporting `OK` at 900 of 900 would leave a
+            # dead surface, an empty inbox and a green check.
+            return CheckResult(
+                name, WARN,
+                f"the monthly attempt cap is spent; {spend}",
+                remedy=(
+                    "WhatsApp sends resume when the WABA month turns over in "
+                    f"{config.whatsapp.business_timezone}. Raise [whatsapp] "
+                    "monthly_service_attempt_limit only after checking what "
+                    "Meta's own allowance has left."
+                ),
+            )
+        return CheckResult(name, OK, f"circuit closed; {spend}")
 
+    # The message id is fingerprinted, not printed: a `CheckResult` reaches the
+    # boot log and the admin Health pane, and the id names a private
+    # conversation. `istota whatsapp billing-status` prints it in full.
+    from .transport.whatsapp import message_fingerprint
+
+    opened = (
+        f"the billable circuit opened at {block.billing_blocked_at} "
+        f"(message {message_fingerprint(block.billing_message_id)})"
+    )
+    if config.whatsapp.billing_policy != "free_guard":
+        # Switching to `allow_paid` is one of the two documented ways to clear
+        # the circuit, so tripped-then-switched is a reachable state — and in
+        # it nothing reads the row: both `outbound._gate` and
+        # `is_whatsapp_configured` guard the block read on `free_guard`. A WARN
+        # here would be permanent, would assert a refusal that does not happen,
+        # and would prescribe the remedy already applied.
         return CheckResult(
-            name, WARN,
-            f"the billable circuit opened at {block.billing_blocked_at} "
-            f"(message {message_fingerprint(block.billing_message_id)}); every "
-            f"WhatsApp send is refused. {spend}",
-            remedy=(
-                "Check the Meta billing page, then run `istota whatsapp "
-                'billing-unblock`, or set [whatsapp] billing_policy = '
-                '"allow_paid" to accept charges.'
-            ),
+            name, OK,
+            f"{opened}, and is not enforced under {config.whatsapp.billing_policy}; "
+            f"{spend}",
         )
-    return CheckResult(name, OK, f"circuit closed; {spend}")
+    return CheckResult(
+        name, WARN,
+        f"{opened}; every WhatsApp send is refused. {spend}",
+        remedy=(
+            "Read `istota whatsapp billing-status` for the Meta message id, "
+            "check the Meta billing page, then run `istota whatsapp "
+            'billing-unblock`, or set [whatsapp] billing_policy = '
+            '"allow_paid" to accept charges.'
+        ),
+    )
 
 
 # The name is part of the registry rather than only of the result, so `only=`

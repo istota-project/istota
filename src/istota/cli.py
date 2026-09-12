@@ -1457,13 +1457,58 @@ def cmd_user_remove(args):
         print(f"No profile row for {args.name!r} (nothing to remove).")
 
 
+def _whatsapp_block_detail(blocked) -> str:
+    """The open circuit's evidence, in full rather than fingerprinted.
+
+    The private operator surface the masking rule exempts, the same exemption
+    `user show` takes. The Meta message id is what an operator matches against
+    the Meta billing page, and every other surface — the alert body, the
+    notification panel, `doctor` — shows a fingerprint because each of them
+    renders somewhere the id must not.
+    """
+    if not blocked:
+        return ""
+    detail = f" (opened {blocked.billing_blocked_at}"
+    if blocked.billing_message_id:
+        detail += f" by message {blocked.billing_message_id}"
+    return detail + ")"
+
+
+def cmd_whatsapp_billing_status(args):
+    """Report the WhatsApp billable circuit without changing it.
+
+    The read-only half, and it exists because the remedy is *check Meta
+    billing, then unblock* and the id needed for the first step used to be
+    obtainable only by doing the second: `clear_whatsapp_billing_block` takes
+    the evidence with the block, so the one command that printed the id in
+    full destroyed it in the same call.
+    """
+    config = load_config(Path(args.config) if args.config else None)
+    with db.get_db(config.db_path) as conn:
+        blocked = db.whatsapp_billing_block(conn)
+
+    if not blocked:
+        print("WhatsApp billing is not blocked.")
+        return
+    print(f"WhatsApp billing is blocked{_whatsapp_block_detail(blocked)}.")
+    if config.whatsapp.billing_policy != "free_guard":
+        # The row outlives the policy that reads it: switching to `allow_paid`
+        # is one of the two documented ways to clear the circuit, and after it
+        # nothing consults the row at all.
+        print(
+            f"It is not enforced under billing_policy = "
+            f'"{config.whatsapp.billing_policy}".'
+        )
+
+
 def cmd_whatsapp_billing_unblock(args):
     """Close the WhatsApp billable circuit after checking Meta billing.
 
     Deliberately an operator action rather than anything automatic: the
     circuit is open because Meta reported that a message istota sent was
     billable, and only a person who has looked at the Meta billing page knows
-    whether that was expected.
+    whether that was expected. `billing-status` is the read-only half, for
+    reading the evidence *before* taking it away.
     """
     config = load_config(Path(args.config) if args.config else None)
     with db.get_db(config.db_path) as conn:
@@ -1473,18 +1518,7 @@ def cmd_whatsapp_billing_unblock(args):
     if not cleared:
         print("WhatsApp billing is not blocked; nothing to do.")
         return
-    # The Meta message id in full, not a fingerprint. This is the private
-    # operator command the masking rule exempts — the same exemption
-    # `user show` takes — and it is the only place the id is readable: the
-    # row it lives on is cleared by this very call, and it is what the
-    # operator matches against the Meta billing page.
-    detail = ""
-    if blocked:
-        detail = f" (opened {blocked.billing_blocked_at}"
-        if blocked.billing_message_id:
-            detail += f" by message {blocked.billing_message_id}"
-        detail += ")"
-    print(f"WhatsApp billing block cleared{detail}.")
+    print(f"WhatsApp billing block cleared{_whatsapp_block_detail(blocked)}.")
 
 
 def cmd_calendar_discover(args):
@@ -3446,6 +3480,10 @@ def main():
         dest="whatsapp_action", required=True,
     )
     whatsapp_subparsers.add_parser(
+        "billing-status",
+        help="Report the billable circuit breaker without changing it",
+    )
+    whatsapp_subparsers.add_parser(
         "billing-unblock",
         help=(
             "Clear the billable circuit breaker after checking Meta billing"
@@ -3564,6 +3602,7 @@ def main():
         bot_icon_commands[args.bot_icon_action](args)
     elif args.command == "whatsapp":
         whatsapp_commands = {
+            "billing-status": cmd_whatsapp_billing_status,
             "billing-unblock": cmd_whatsapp_billing_unblock,
         }
         whatsapp_commands[args.whatsapp_action](args)

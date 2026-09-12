@@ -895,6 +895,32 @@ class TestPayloadNormalization:
             (None, None, None),
         ]
 
+    def test_a_billable_of_the_wrong_type_is_refused_loudly(self, tmp_path, caplog):
+        """Present-and-unreadable is not the same as absent, and only one of
+        the two is safe to treat as silence.
+
+        `billable` is the single input to the free-guard circuit. A Graph
+        version that started sending `"true"` for `true` would leave the guard
+        reading "Meta said nothing" for ever — no send blocked, and nothing in
+        any log to say the guard had stopped working. The value is still
+        refused, since deriving one is what the spec forbids, but the refusal
+        is observable.
+        """
+        config = _config(tmp_path)
+        with caplog.at_level("WARNING"):
+            events = normalize_payload(config, _payload(_value(statuses=[
+                _status(message_id="wamid.stringy", status="sent", pricing={
+                    "billable": "true", "category": "service",
+                }),
+                _status(message_id="wamid.absent", status="sent", pricing={
+                    "category": "service",
+                }),
+            ])))
+
+        assert [e.billable for e in events] == [None, None]
+        assert caplog.text.count("whatsapp.delivery.pricing_unreadable") == 1
+        assert "str" in caplog.text
+
     def test_a_status_error_keeps_only_the_numeric_code(self, tmp_path):
         config = _config(tmp_path)
         events = normalize_payload(config, _payload(_value(statuses=[

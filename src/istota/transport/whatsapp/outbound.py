@@ -338,7 +338,7 @@ def quota_month(config: Config, *, now: datetime | None = None) -> str:
     return moment.astimezone(zone).strftime("%Y-%m")
 
 
-def _attempt_limit(config: Config) -> int:
+def attempt_limit(config: Config) -> int:
     """The service-attempt ceiling for this month, or ``0`` for unlimited.
 
     ``0`` means opposite things under the two policies, and picking the wrong
@@ -347,14 +347,20 @@ def _attempt_limit(config: Config) -> int:
     ``free_guard`` it must never be read that way, so the value is clamped
     into the range `load_config` already enforces. The clamp is defence in
     depth against a `WhatsAppConfig` built in code rather than parsed.
+
+    **A negative is clamped rather than read as unlimited, under both
+    policies.** `load_config` refuses one either way, so this is the same
+    defence in depth — but `max(0, limit)` would have resolved it to the
+    *unbounded* reading in the paid mode, which is the one direction this
+    function's whole argument says not to guess.
     """
     limit = config.whatsapp.monthly_service_attempt_limit
     if config.whatsapp.billing_policy == "allow_paid":
-        return max(0, limit)
+        return max(0, limit) if limit >= 0 else 1
     return min(max(limit, 1), WHATSAPP_FREE_GUARD_MAX_ATTEMPTS)
 
 
-def _service_attempts_used(conn, month: str) -> int:
+def service_attempts_used(conn, month: str) -> int:
     """Claimed service rows in ``month``. The count the cap is applied to.
 
     **Claims, not deliveries.** An attempt that failed may still have been
@@ -371,8 +377,8 @@ def _service_attempts_used(conn, month: str) -> int:
 
 
 def _service_budget_exhausted(conn, config: Config, month: str) -> bool:
-    limit = _attempt_limit(config)
-    return bool(limit) and _service_attempts_used(conn, month) >= limit
+    limit = attempt_limit(config)
+    return bool(limit) and service_attempts_used(conn, month) >= limit
 
 
 def template_available(config: Config) -> bool:
@@ -483,6 +489,14 @@ def _claim(
     **The monthly reservation rides on that same lock**, which is the whole of
     why the cap is concurrency-safe: the count and the row that increments it
     are one write transaction, so the final slot cannot be read as free twice.
+
+    The UPDATE branch is reachable only for a row this function did not write.
+    Every row it writes is either `pending` with a claim stamped or a blocked
+    status, and both are caught by the early return above — so what reaches the
+    UPDATE is an unclaimed `pending` row from somewhere else: a future producer,
+    a hand-written repair, a restored snapshot. It is exercised by
+    `test_an_unclaimed_pending_row_is_claimable`, and the reason to keep it is
+    that the alternative is an INSERT raising on `logical_key`'s unique index.
 
     `bodies` carries both renderings because the gate is what picks between
     them. `quota_month` is stamped on every row, blocked ones included — it
@@ -889,10 +903,13 @@ def current_destination(config: Config, user_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _observe_pricing(conn, config: Config, row, event: WhatsAppDeliveryEvent):
+def _observe_pricing(
+    conn, config: Config, row, event: WhatsAppDeliveryEvent,
+) -> tuple[object, ...]:
     """Store what Meta said this message cost, and trip the circuit if it did.
 
-    Returns the buffered billing alert, or `None`.
+    Returns the buffered billing alerts, empty when the circuit did not
+    open on this status.
 
     **Read, never derived.** The normalizer takes `pricing.billable` off the
     payload and refuses to infer it from anything else (PyWa's own
@@ -935,21 +952,32 @@ def _observe_pricing(conn, config: Config, row, event: WhatsAppDeliveryEvent):
         )
 
     if not event.billable or config.whatsapp.billing_policy != "free_guard":
-        return None
+        return ()
     if not db.block_whatsapp_billing(conn, event.message_id):
         # The circuit was already open. One alert per outage, not one per
         # status: every later billable message is the same operator decision.
-        return None
+        return ()
     logger.warning(
         "whatsapp.billing.blocked message=%s category=%s: every later WhatsApp "
         "send is refused until `istota whatsapp billing-unblock`",
         message_fingerprint(event.message_id), event.pricing_category,
     )
-    return _write_billing_alert(conn, row["user_id"], row["task_id"])
+    return _write_billing_alerts(conn, row["user_id"], row["task_id"])
 
 
-def _write_billing_alert(conn, user_id: str, task_id):
-    """The durable row behind an open billable circuit.
+_BILLING_ALERT_TITLE = "WhatsApp billing blocked — Meta reported a billable message"
+_BILLING_ALERT_BODY = (
+    "Meta's delivery callback reported that a WhatsApp message istota sent "
+    "was billable, so every later WhatsApp send is refused. That message may "
+    "already have been charged — the circuit stops the next one, not this "
+    "one. Read `istota whatsapp billing-status` for the Meta message id, "
+    "check the Meta billing page, then run `istota whatsapp billing-unblock` "
+    'or switch `[whatsapp] billing_policy` to "allow_paid".'
+)
+
+
+def _write_billing_alerts(conn, user_id: str, task_id) -> tuple[object, ...]:
+    """The durable rows behind an open billable circuit, one per reader.
 
     Not `write_delivery_failure`: that one is about a message that reached
     nobody, and this is the opposite — a message that arrived and was charged
@@ -957,28 +985,47 @@ def _write_billing_alert(conn, user_id: str, task_id):
     action an operator takes will unmake it; what the circuit buys is that the
     *next* one is not.
 
-    A fixed dedup key, since the circuit is a singleton and only an operator
-    reopens it. The Meta message id is not in the row at any length: a
+    **Addressed to an admin as well as to the recipient, and that is the half
+    that is easy to miss.** The circuit is deployment-wide and the body asks
+    for an operator action — read the billing page, run a CLI verb, edit a
+    config key — but `sent_whatsapp.user_id` is whoever happened to receive the
+    charged message. On a multi-user deployment that is one non-admin's inbox,
+    and since the circuit trips exactly once nobody ever gets a second copy;
+    with `push_off_surface` stripping the failing surface, a user with no other
+    route means the notice reaches nobody at all.
+
+    An empty admin file means "everyone is admin" to `Config.is_admin`, and
+    writing a row per user there would be a fan-out rather than an escalation
+    — on that shape the recipient's own row is the notice, which on the
+    single-user install it describes is the operator's inbox anyway.
+
+    A fixed dedup key per reader, since the circuit is a singleton and only an
+    operator reopens it. The Meta message id is in no row at any length: a
     notification body renders on the web panel and through every alert route,
-    and the id names a private conversation. `istota whatsapp billing-unblock`
+    and the id names a private conversation. `istota whatsapp billing-status`
     prints it in full, which is the private operator surface for it.
     """
+    from ...config import load_admin_users  # noqa: PLC0415
     from ...notification_resolvers import task_alert  # noqa: PLC0415
 
-    return task_alert.write(
-        conn, user_id,
-        dedup_key="whatsapp:billing-blocked",
-        title="WhatsApp billing blocked — Meta reported a billable message",
-        body=(
-            "Meta's delivery callback reported that a WhatsApp message istota "
-            "sent was billable, so every later WhatsApp send is refused. That "
-            "message may already have been charged — the circuit stops the "
-            "next one, not this one. Check the Meta billing page, then run "
-            "`istota whatsapp billing-unblock` or switch "
-            '`[whatsapp] billing_policy` to "allow_paid".'
-        ),
-        params={"task_id": task_id, "status": "billing_blocked"},
-    )
+    readers = [user_id]
+    try:
+        readers += sorted(load_admin_users() - {user_id})
+    except Exception:
+        # An unreadable admins file must not cost the recipient their alert.
+        logger.warning("whatsapp.billing.admins_unreadable", exc_info=True)
+    raised = [
+        task_alert.write(
+            conn, reader,
+            dedup_key="whatsapp:billing-blocked",
+            title=_BILLING_ALERT_TITLE,
+            body=_BILLING_ALERT_BODY,
+            params={"task_id": task_id if reader == user_id else None,
+                    "status": "billing_blocked"},
+        )
+        for reader in readers
+    ]
+    return tuple(item for item in raised if item is not None)
 
 
 def apply_delivery_event(conn, config: Config, event: WhatsAppDeliveryEvent):
@@ -1019,8 +1066,7 @@ def apply_delivery_event(conn, config: Config, event: WhatsAppDeliveryEvent):
         )
         return "delivery_unknown", None, ()
 
-    billing_alert = _observe_pricing(conn, config, row, event)
-    alerts = () if billing_alert is None else (billing_alert,)
+    alerts = _observe_pricing(conn, config, row, event)
 
     current = row["status"]
     if current in _TERMINAL_FOR_STATUS:
@@ -1110,10 +1156,16 @@ __all__ = [
     "WHATSAPP_INTERACTIVE_BODY_LIMIT",
     "WHATSAPP_TEXT_LIMIT",
     "apply_delivery_event",
+    # Public because `doctor.whatsapp.billing` reads them, and on the precedent
+    # `.claude/rules/doctor.md` records for `executor.mask_shadowed_by`: a
+    # check asks the owning module's own predicate rather than reaching through
+    # an underscore or keeping a copy, so a rename here breaks visibly.
+    "attempt_limit",
     "current_destination",
     "deliver_whatsapp",
     "is_whatsapp_configured",
     "quota_month",
+    "service_attempts_used",
     "render_template_parameter",
     "render_whatsapp",
     "service_window_open",

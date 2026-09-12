@@ -53,7 +53,7 @@ from istota.transport.whatsapp._types import (
 )
 from istota.transport.whatsapp.outbound import (
     SERVICE_WINDOW,
-    _attempt_limit,
+    attempt_limit,
     TEMPLATE_PARAMETER_LIMIT,
     WHATSAPP_INTERACTIVE_BODY_LIMIT,
     WHATSAPP_TEXT_LIMIT,
@@ -1222,7 +1222,7 @@ class TestTheMonthlyAttemptCap:
     ):
         """`0` means opposite things under the two policies.
 
-        Driven at `_attempt_limit` rather than end to end, because the whole
+        Driven at `attempt_limit` rather than end to end, because the whole
         send is refused a rung earlier: a non-positive limit under
         `free_guard` is a config error, so `_gate` answers `unconfigured` and
         nothing is sent at all. That is the safe direction and is asserted
@@ -1234,12 +1234,12 @@ class TestTheMonthlyAttemptCap:
         _bind(config)
         client = _FakeClient()
 
-        assert _attempt_limit(config) == 1  # the clamped floor, not unlimited
+        assert attempt_limit(config) == 1  # the clamped floor, not unlimited
         paid = _config(
             tmp_path / "p", billing_policy="allow_paid",
             monthly_service_attempt_limit=0,
         )
-        assert _attempt_limit(paid) == 0  # unlimited, and only here
+        assert attempt_limit(paid) == 0  # unlimited, and only here
 
         record = await deliver_whatsapp(
             config, logical_key="task-result:1", user_id="alice", text="done",
@@ -1436,6 +1436,64 @@ class TestTheBillableCircuit:
         )
 
         assert record.status == "accepted"
+
+    async def test_the_alert_reaches_an_admin_and_not_only_the_recipient(
+        self, tmp_path, monkeypatch,
+    ):
+        """The circuit is deployment-wide; the charged message is one user's.
+
+        `sent_whatsapp.user_id` is whoever happened to receive the billable
+        message, and on a multi-user deployment that is one non-admin's inbox
+        — while the alert body asks for an operator action. The circuit trips
+        exactly once, so nobody ever gets a second copy.
+        """
+        config = _config(tmp_path)
+        config.users["carol"] = UserConfig()
+        monkeypatch.setattr(
+            "istota.config.load_admin_users", lambda *a, **k: {"carol"},
+        )
+        await _accepted_row(config)
+
+        _disposition, _record, alerts = _billable(config)
+
+        assert len(alerts) == 2
+        with db.get_db(config.db_path) as conn:
+            addressed = [
+                row["user_id"] for row in conn.execute(
+                    "SELECT user_id FROM notifications ORDER BY user_id"
+                )
+            ]
+        assert addressed == ["alice", "carol"]
+
+    async def test_an_unreadable_admin_list_still_alerts_the_recipient(
+        self, tmp_path, monkeypatch,
+    ):
+        config = _config(tmp_path)
+        monkeypatch.setattr(
+            "istota.config.load_admin_users",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("no admins file")),
+        )
+        await _accepted_row(config)
+
+        _disposition, _record, alerts = _billable(config)
+
+        assert len(alerts) == 1
+        with db.get_db(config.db_path) as conn:
+            assert db.whatsapp_billing_block(conn) is not None
+
+    async def test_an_empty_admin_list_does_not_fan_out(self, tmp_path, monkeypatch):
+        # An empty admins file reads as "everyone is admin" to `Config.is_admin`,
+        # and a row per user there would be a fan-out rather than an escalation.
+        config = _config(tmp_path)
+        config.users["carol"] = UserConfig()
+        monkeypatch.setattr(
+            "istota.config.load_admin_users", lambda *a, **k: set(),
+        )
+        await _accepted_row(config)
+
+        _disposition, _record, alerts = _billable(config)
+
+        assert len(alerts) == 1
 
     async def test_the_webhook_batch_pushes_the_billing_alert_off_whatsapp(
         self, tmp_path, monkeypatch,

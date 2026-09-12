@@ -1058,6 +1058,49 @@ class TestWhatsAppBillingCircuit:
         with db.get_db(path) as conn:
             assert db.whatsapp_billing_block(conn) is None
 
+    def test_the_status_verb_reads_the_evidence_without_clearing_it(
+        self, tmp_path, capsys,
+    ):
+        """The read-only half, and the reason it exists.
+
+        The remedy is *check Meta billing, then unblock* — and the id needed
+        for the first step used to be obtainable only by doing the second,
+        since `clear_whatsapp_billing_block` takes the evidence with the
+        block. The alert body and doctor's remedy both point here.
+        """
+        from istota.cli import cmd_whatsapp_billing_status
+
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        config_path = _write_config(tmp_path, f'db_path = "{path}"\n')
+        with db.get_db(path) as conn:
+            db.block_whatsapp_billing(conn, "wamid.evidence")
+
+        cmd_whatsapp_billing_status(SimpleNamespace(config=str(config_path)))
+        output = capsys.readouterr().out
+
+        assert "wamid.evidence" in output
+        with db.get_db(path) as conn:
+            assert db.whatsapp_billing_block(conn) is not None
+
+    def test_the_status_verb_says_when_the_row_gates_nothing(self, tmp_path, capsys):
+        # The row outlives the policy that reads it: switching to `allow_paid`
+        # is one of the two documented ways to clear the circuit.
+        from istota.cli import cmd_whatsapp_billing_status
+
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        config_path = _write_config(
+            tmp_path,
+            f'db_path = "{path}"\n\n[whatsapp]\nbilling_policy = "allow_paid"\n',
+        )
+        with db.get_db(path) as conn:
+            db.block_whatsapp_billing(conn, "wamid.evidence")
+
+        cmd_whatsapp_billing_status(SimpleNamespace(config=str(config_path)))
+
+        assert "not enforced" in capsys.readouterr().out
+
     def test_unblocking_an_open_circuit_says_so_without_inventing_evidence(
         self, tmp_path, capsys
     ):
@@ -1146,6 +1189,22 @@ class TestWhatsAppSecretRedaction:
 # ---------------------------------------------------------------------------
 # Doctor
 # ---------------------------------------------------------------------------
+
+
+def _seed_whatsapp_attempts(cfg, send_kind: str, count: int) -> None:
+    """`count` claimed rows of `send_kind` in the config's current WABA month."""
+    from istota.transport.whatsapp.outbound import quota_month
+
+    month = quota_month(cfg)
+    with db.get_db(cfg.db_path) as conn:
+        for index in range(count):
+            conn.execute(
+                "INSERT INTO sent_whatsapp (logical_key, user_id, send_kind, "
+                "status, body_chars, body_sha256, quota_month, claimed_at, "
+                "created_at, updated_at) VALUES (?, 'alice', ?, 'accepted', 1, "
+                "'x', ?, datetime('now'), datetime('now'), datetime('now'))",
+                (f"task-result:{send_kind}:{index}", send_kind, month),
+            )
 
 
 class TestWhatsAppDoctorReadiness:
@@ -1269,6 +1328,60 @@ class TestWhatsAppDoctorReadiness:
         assert result.status == doctor.WARN
         assert "wamid.billable.1" not in result.detail
         assert "billing-unblock" in result.remedy
+
+    def test_an_exhausted_cap_warns_rather_than_reporting_a_closed_circuit(
+        self, tmp_path,
+    ):
+        """The terminal state of the cap, which is silent everywhere else.
+
+        `is_whatsapp_configured` answers False once the cap is spent, so the
+        heartbeat skips the surface without writing an alert and only a
+        task-driven send still reaches `_claim` to record `budget_exhausted`.
+        Reporting `OK` at the cap would leave a dead surface, an empty inbox
+        and a green check.
+        """
+        cfg = _ready_config()
+        cfg.whatsapp.monthly_service_attempt_limit = 2
+        cfg.db_path = tmp_path / "istota.db"
+        db.init_db(cfg.db_path)
+        _seed_whatsapp_attempts(cfg, "service", 2)
+
+        result = self._results(cfg)["whatsapp.billing"]
+
+        assert result.status == doctor.WARN
+        assert "cap is spent" in result.detail
+        assert cfg.whatsapp.business_timezone in result.remedy
+
+    def test_a_stale_circuit_is_not_a_warning_under_paid_billing(self, tmp_path):
+        # Switching to `allow_paid` is one of the two documented ways to clear
+        # the circuit, and after it nothing reads the row: warning permanently
+        # about a refusal that does not happen, with a remedy already applied,
+        # is worse than saying nothing.
+        cfg = _ready_config()
+        cfg.whatsapp.billing_policy = "allow_paid"
+        cfg.db_path = tmp_path / "istota.db"
+        db.init_db(cfg.db_path)
+        with db.get_db(cfg.db_path) as conn:
+            db.block_whatsapp_billing(conn, "wamid.billable.1")
+
+        result = self._results(cfg)["whatsapp.billing"]
+
+        assert result.status == doctor.OK
+        assert "not enforced" in result.detail
+
+    def test_template_attempts_are_reported_as_the_unbounded_path(self, tmp_path):
+        # The cap is named for service attempts and counts only those, so a
+        # paid deployment's template volume is visible nowhere else.
+        cfg = _ready_config()
+        cfg.whatsapp.billing_policy = "allow_paid"
+        cfg.db_path = tmp_path / "istota.db"
+        db.init_db(cfg.db_path)
+        _seed_whatsapp_attempts(cfg, "template", 3)
+
+        detail = self._results(cfg)["whatsapp.billing"].detail
+
+        assert "3 template attempts" in detail
+        assert "does not bound" in detail
 
     def test_a_missing_database_is_skipped_rather_than_created(self, tmp_path):
         # A diagnostic that opens a database into existence leaves the

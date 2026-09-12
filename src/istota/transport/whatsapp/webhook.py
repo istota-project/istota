@@ -382,6 +382,19 @@ def _delivery_event(
     pricing = status.get("pricing")
     pricing = pricing if isinstance(pricing, Mapping) else {}
     billable = pricing.get("billable")
+    if billable is not None and not isinstance(billable, bool):
+        # Present and the wrong type is **not** the same as absent, and only
+        # one of the two is safe to treat as silence. `billable` is the single
+        # input to the free-guard circuit, so a Graph version that started
+        # sending `"true"` instead of `true` would leave the guard reading
+        # "Meta said nothing" for ever, with no send blocked and nothing in any
+        # log to say the guard had stopped working. The value is still refused
+        # — deriving one is what the spec forbids — but the refusal is loud.
+        logger.warning(
+            "whatsapp.delivery.pricing_unreadable type=%s: `billable` is not a "
+            "boolean, so the free-guard circuit cannot read it",
+            type(billable).__name__,
+        )
     errors = status.get("errors")
     error_code = None
     if isinstance(errors, list):
