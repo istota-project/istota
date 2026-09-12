@@ -4171,6 +4171,25 @@ def _is_valid_timezone(name: object) -> bool:
     return True
 
 
+def whatsapp_webhooks_enabled(config: Config) -> bool:
+    """Whether a process has to serve ``/webhooks/whatsapp``.
+
+    The sibling of :func:`sms_webhooks_enabled`, and deliberately the simpler
+    of the two. SMS keeps its routes mounted while *disabled* whenever a
+    complete inactive provider block remains, so a delivery callback for a
+    message sent before a provider switch still authenticates. WhatsApp has
+    one account rather than two adapters, and both handlers refuse every
+    request while ``enabled`` is false — so mounting them on a disabled
+    deployment would answer 403 where the absence answers 404, and would keep
+    no late callback alive. Turning the block off is turning the account off.
+
+    Named rather than inlined because four places have to agree on it: this
+    process gate, ``serve._maybe_mount_webhooks``, the Ansible role's
+    ``Resolve webhook receiver need``, and the ``whatsapp`` compose profile.
+    """
+    return bool(config.whatsapp.enabled)
+
+
 def whatsapp_missing_credentials(config: Config) -> tuple[str, ...]:
     """Names of the blank Meta secrets. The value is never read, only its
     emptiness — a caller rendering this into a log or a check result must be

@@ -83,6 +83,61 @@ class TestAnsibleUserEnsureOmitsTimezone:
         assert "--display-name" in rendered
 
 
+class TestTheWhatsAppEnrollmentArms:
+    """Four shapes an inventory can express, and the CLI refuses two pairs.
+
+    `--whatsapp-number`, `--clear-whatsapp` and `--reset-whatsapp-identity`
+    are one mutually exclusive group, and the CLI additionally refuses
+    `--whatsapp-bsuid` beside either destructive flag. Inventory holding a
+    stale `whatsapp_bsuid` under a cleared `whatsapp_number` is the shape that
+    would fail the play, so the template has to withhold the id rather than
+    render both.
+    """
+
+    def _render(self, value: dict) -> str:
+        return _render(_ensure_profiles_command(), {"display_name": "Alice", **value})
+
+    def test_an_omitted_key_leaves_a_cli_set_binding_alone(self):
+        # `whatsapp` and not `--whatsapp-`, so `--clear-whatsapp` is caught too.
+        assert "whatsapp" not in self._render({})
+
+    def test_a_null_key_leaves_it_alone_too(self):
+        """`sms_phone_number` draws the same line, and a YAML key written with
+        no value is `None` rather than the empty string."""
+        assert "whatsapp" not in self._render({"whatsapp_number": None})
+
+    def test_a_number_enrolls(self):
+        rendered = self._render({"whatsapp_number": "+15551234567"})
+
+        assert '--whatsapp-number "+15551234567"' in rendered
+        assert "--clear-whatsapp" not in rendered
+
+    def test_a_number_and_a_bsuid_enroll_explicitly(self):
+        rendered = self._render({
+            "whatsapp_number": "+15551234567",
+            "whatsapp_bsuid": "US.1234567890",
+        })
+
+        assert '--whatsapp-number "+15551234567"' in rendered
+        assert '--whatsapp-bsuid "US.1234567890"' in rendered
+
+    def test_a_bsuid_alone_enrolls_the_username_only_user(self):
+        rendered = self._render({"whatsapp_bsuid": "US.1234567890"})
+
+        assert '--whatsapp-bsuid "US.1234567890"' in rendered
+        assert "--whatsapp-number" not in rendered
+
+    def test_an_empty_number_clears_and_withholds_a_stale_bsuid(self):
+        rendered = self._render({
+            "whatsapp_number": "",
+            "whatsapp_bsuid": "US.1234567890",
+        })
+
+        assert "--clear-whatsapp" in rendered
+        assert "--whatsapp-bsuid" not in rendered
+        assert "--whatsapp-number" not in rendered
+
+
 class TestTimezoneSurvivesRedeploy:
     """End-to-end: web edit then redeploy preserves the user's timezone.
 

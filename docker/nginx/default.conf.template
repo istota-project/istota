@@ -87,6 +87,35 @@ server {
         proxy_set_header Connection $connection_upgrade;
     }
 
+    # Meta's Cloud API webhook, ahead of /webhooks/ on longest-prefix match.
+    # It differs from its neighbours in two ways that nginx has to hold,
+    # because the application cannot.
+    #
+    # The verify token is a shared secret and Meta sends it as a *query
+    # value* on the GET subscription handshake, so the default `combined`
+    # format's $request would write it into access.log verbatim. By the time
+    # the route runs nginx has already decided what to log, so there is
+    # nothing the handler can do about it. A log_format naming $uri instead
+    # would keep the line, but log_format is only valid at http level and
+    # this file is one server block inside a generated conf.d — so the access
+    # log for this path goes. The application logs the handshake itself with
+    # a stable event name and no token.
+    #
+    # The body limit sits above istota's own 256 KiB cap and far below the
+    # 10m below, so an oversized POST is answered by the application (413,
+    # through the same bounded-body reader the SMS routes use) rather than by
+    # nginx with an HTML page Meta would retry against.
+    location = /webhooks/whatsapp {
+        access_log off;
+        proxy_pass http://$upstream_webhooks;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 512k;
+    }
+
     # Provider callbacks and location pings share one receiver. The variable
     # upstream lets nginx start when neither optional webhook profile is on.
     location /webhooks/ {
