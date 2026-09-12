@@ -42,6 +42,16 @@ class WhatsAppProviderRegistry:
         return tuple(self._adapters)
 
     def callback_only_names(self) -> tuple[WhatsAppProviderName, ...]:
+        """Adapters built for something other than sending.
+
+        **Never a mount decision.** `config.whatsapp_webhooks_enabled` is the
+        only gate on serving `/webhooks/whatsapp`, and it is `enabled` alone —
+        turning the block off is turning the account off, where SMS instead
+        keeps a switched-away provider's routes alive. This list follows the
+        SMS registry's shape and does name every built adapter on a disabled
+        deployment, because what it answers is which credentials the
+        deployment still holds, not which routes it should serve.
+        """
         if not self._active_enabled:
             return tuple(self._adapters)
         return tuple(name for name in self._adapters if name != self._active_name)

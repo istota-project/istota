@@ -4197,16 +4197,20 @@ _WHATSAPP_PROVIDER_FIELDS: dict[str, tuple[str, ...]] = {
 
 
 def _whatsapp_provider_block(config: Config, provider: str) -> object | None:
-    """Where one provider's own fields live.
+    """Where one provider's own fields live, or ``None`` if there is no block.
 
     Every WhatsApp field is flat on ``[whatsapp]`` today, so both providers
     answer to the same block and only ``whatsapp_cloud`` declares anything in
-    it. Named rather than inlined because the nested ``cloud:`` / ``baileys:``
-    blocks land later, and this is the one place that has to move then.
+    it — the ``provider`` argument is what the nested ``cloud:`` / ``baileys:``
+    blocks will branch on, and this is the one place that has to move then.
+
+    An absent block is a different answer from an unknown provider, which is
+    why this does not also fold in the name check: a caller asked about a
+    provider that should have a block and has none reports every field it
+    declares missing, rather than reporting nothing missing.
     """
-    if provider not in _WHATSAPP_PROVIDER_FIELDS:
-        return None
-    return config.whatsapp
+    del provider  # until the nested blocks land, there is one block to return
+    return getattr(config, "whatsapp", None)
 
 
 def whatsapp_provider_missing_fields(config: Config, provider: str) -> tuple[str, ...]:
@@ -4217,9 +4221,17 @@ def whatsapp_provider_missing_fields(config: Config, provider: str) -> tuple[str
     credential.
     """
     fields = _WHATSAPP_PROVIDER_FIELDS.get(provider)
-    block = _whatsapp_provider_block(config, provider)
-    if fields is None or block is None:
+    if fields is None:
         return ()
+    block = _whatsapp_provider_block(config, provider)
+    if block is None:
+        # Fail closed. The comprehension this replaced read `getattr(None, …)`
+        # as three blanks and named all three, and a credential report that
+        # answers "nothing is missing" about a block that does not exist reads
+        # as fully configured. Unreachable while both callers dereference
+        # `config.whatsapp.enabled` first, and the wrong direction to be
+        # careless in regardless.
+        return fields
     return tuple(
         name for name in fields
         if not str(getattr(block, name, "") or "").strip()
@@ -4235,7 +4247,7 @@ def whatsapp_provider_has_values(config: Config, provider: str) -> bool:
     """
     fields = _WHATSAPP_PROVIDER_FIELDS.get(provider)
     block = _whatsapp_provider_block(config, provider)
-    if fields is None or block is None:
+    if not fields or block is None:
         return False
     return any(
         str(getattr(block, name, "") or "").strip() for name in fields
@@ -4266,11 +4278,19 @@ def whatsapp_webhooks_enabled(config: Config) -> bool:
     The sibling of :func:`sms_webhooks_enabled`, and deliberately the simpler
     of the two. SMS keeps its routes mounted while *disabled* whenever a
     complete inactive provider block remains, so a delivery callback for a
-    message sent before a provider switch still authenticates. WhatsApp has
-    one account rather than two adapters, and both handlers refuse every
-    request while ``enabled`` is false — so mounting them on a disabled
-    deployment would answer 403 where the absence answers 404, and would keep
-    no late callback alive. Turning the block off is turning the account off.
+    message sent before a provider switch still authenticates. Both WhatsApp
+    handlers refuse every request while ``enabled`` is false — so mounting
+    them on a disabled deployment would answer 403 where the absence answers
+    404, and would keep no late callback alive. Turning the block off is
+    turning the account off.
+
+    That rule survived this surface gaining adapters, and the reasoning had to
+    be restated because the version it replaces rested on there being only
+    one. ``WhatsAppProviderRegistry.callback_only_names`` is the SMS registry's
+    shape and does list every built adapter on a disabled deployment; it is an
+    answer about credentials a switched-away deployment still holds, and is
+    not a mount decision. This function stays the only mount gate, and the
+    four places that must agree on it are unchanged.
 
     Named rather than inlined because four places have to agree on it: this
     process gate, ``serve._maybe_mount_webhooks``, the Ansible role's

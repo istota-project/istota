@@ -769,7 +769,9 @@ messaging_profile_id = ""
 # ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN.
 #
 # `provider` names the adapter that sends and receives. `whatsapp_cloud` is the
-# Meta Cloud API described here and every field below belongs to it.
+# Meta Cloud API described here and every field below belongs to it. The name
+# `baileys` is reserved for a second adapter and is not implemented yet — it
+# loads, and it does nothing.
 #
 # `billing_policy` decides whether a send can ever cost money.
 #   free_guard — no templates at all, and at most

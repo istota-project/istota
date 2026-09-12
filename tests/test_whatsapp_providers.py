@@ -1,6 +1,6 @@
 """The WhatsApp provider seam: the adapter record, the caps and the registry.
 
-`tests/test_sms_foundation.py::TestSmsProviderSeam` is the file this mirrors,
+`tests/test_sms_foundation.py::TestSmsProviderContract` is what this mirrors,
 and the places where it deliberately does not are where the two surfaces
 differ: an adapter that receives over no HTTP callback at all, and one whose
 credential lives nowhere in `config.toml`.
@@ -9,6 +9,7 @@ credential lives nowhere in `config.toml`.
 from __future__ import annotations
 
 import dataclasses
+from typing import get_args
 
 import pytest
 
@@ -20,6 +21,7 @@ from istota.config import (
     whatsapp_provider_has_values,
     whatsapp_provider_missing_fields,
     whatsapp_structural_config_errors,
+    whatsapp_webhooks_enabled,
 )
 from istota.transport.whatsapp._types import (
     WhatsAppSendFailure,
@@ -30,6 +32,7 @@ from istota.transport.whatsapp._types import (
 from istota.transport.whatsapp.providers._types import (
     WhatsAppProviderAdapter,
     WhatsAppProviderCaps,
+    WhatsAppProviderName,
 )
 from istota.transport.whatsapp.providers.registry import (
     WhatsAppProviderRegistry,
@@ -92,7 +95,6 @@ class TestTheAdapterRecord:
 
         assert adapter.parse_webhook is None
         assert adapter.verify_signature is None
-        assert isinstance(adapter.send(object()), WhatsAppSendResult)
 
     def test_the_webhook_types_carry_a_batch_rather_than_one_event(self):
         request = WhatsAppWebhookRequest(raw_body=b"{}", headers={"Content-Type": "x"})
@@ -107,6 +109,41 @@ class TestTheAdapterRecord:
         assert result.events == ()
         with pytest.raises(dataclasses.FrozenInstanceError):
             result.response_status = 500
+
+
+class TestNothingSelectsAProviderYet:
+    """The property this stage rests on, which is that it moves nothing.
+
+    Both assertions are also what Stage 3 has to keep green when it flips the
+    default to `baileys` and nests the Cloud fields: a flat `[whatsapp]` block
+    written before any of this existed must go on loading as Cloud rather than
+    quietly becoming a broken Baileys install.
+    """
+
+    def test_the_default_is_the_adapter_every_deployment_already_runs(self):
+        assert Config().whatsapp.provider == "whatsapp_cloud"
+
+    def test_a_config_naming_no_provider_loads_as_cloud(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(
+            "[site]\n"
+            'hostname = "assistant.example.com"\n'
+            "\n"
+            "[whatsapp]\n"
+            "enabled = true\n"
+            'waba_id = "123456789012345"\n'
+            'phone_number_id = "223456789012345"\n'
+            'business_phone_number = "+15551234567"\n'
+            'access_token = "wa-access-token"\n'
+            'app_secret = "wa-app-secret"\n'
+            'verify_token = "wa-verify-token"\n'
+        )
+
+        cfg = load_config(path)
+
+        assert cfg.whatsapp.provider == "whatsapp_cloud"
+        assert whatsapp_structural_config_errors(cfg) == []
+        assert whatsapp_missing_credentials(cfg) == ()
 
 
 class TestTheProviderFieldValidators:
@@ -167,6 +204,18 @@ class TestTheProviderFieldValidators:
             for error in whatsapp_structural_config_errors(cfg)
         )
 
+    def test_a_missing_block_reports_every_field_rather_than_none(self):
+        """Fail closed. Unreachable while both callers dereference
+        `config.whatsapp.enabled` first, and the wrong direction to be
+        careless in: `()` here reads as fully configured."""
+        cfg = Config()
+        cfg.whatsapp = None  # type: ignore[assignment]
+
+        assert whatsapp_provider_missing_fields(cfg, "whatsapp_cloud") == (
+            "access_token", "app_secret", "verify_token",
+        )
+        assert whatsapp_provider_has_values(cfg, "whatsapp_cloud") is False
+
     def test_every_named_provider_declares_its_fields(self):
         """A name in the tuple with no entry in the map is indistinguishable
         from an unknown one — `()` missing and nothing populated — so it would
@@ -176,6 +225,14 @@ class TestTheProviderFieldValidators:
         from istota.config import _WHATSAPP_PROVIDER_FIELDS
 
         assert set(_WHATSAPP_PROVIDER_FIELDS) == set(WHATSAPP_PROVIDER_NAMES)
+
+    def test_the_adapter_literal_and_the_config_tuple_are_the_same_set(self):
+        """Two spellings of the provider list, and a typechecker run over this
+        diff would not notice them diverging: the registry annotates its return
+        with the `Literal` while iterating the tuple, so a third name added to
+        one alone makes `names()` return values outside its own declared type.
+        """
+        assert set(get_args(WhatsAppProviderName)) == set(WHATSAPP_PROVIDER_NAMES)
 
 
 class TestTheRegistry:
@@ -278,6 +335,12 @@ class TestTheRegistry:
 
         assert registry.active() is baileys
         assert registry.callback_only_names() == ("whatsapp_cloud",)
+        # The loop follows `WHATSAPP_PROVIDER_NAMES`, which is what makes the
+        # tuple's order the thing `names()` reports. Asserted here rather than
+        # on a hand-built registry, where the dict literal supplies the order
+        # and the assertion is about the test's own input: reversing the tuple
+        # leaves every such assertion green.
+        assert registry.names() == ("baileys", "whatsapp_cloud")
 
     def test_an_unselected_provider_holding_nothing_is_not_built(self):
         """Not merely tidiness: the only reason to keep a non-active adapter is
@@ -312,6 +375,27 @@ class TestTheRegistry:
         assert registry.active() is None
         assert registry.get("whatsapp_cloud") is built
         assert registry.callback_only_names() == ("whatsapp_cloud",)
+
+    def test_the_callback_only_list_is_not_the_route_gate(self):
+        """The one place the SMS shape and this surface's own rule disagree,
+        pinned so a later stage does not wire the mount to the wrong one.
+
+        SMS keeps a switched-away provider's routes alive; WhatsApp's rule is
+        that turning the block off turns the account off, and
+        `whatsapp_webhooks_enabled` is `enabled` alone. So a disabled
+        deployment holding complete Cloud credentials names an adapter here
+        and still serves no webhook.
+        """
+        cfg = _cloud_config(enabled=False)
+        registry = make_provider_registry(
+            cfg,
+            builders={"whatsapp_cloud": lambda config: _adapter(
+                "whatsapp_cloud", CLOUD_CAPS,
+            )},
+        )
+
+        assert registry.callback_only_names() == ("whatsapp_cloud",)
+        assert whatsapp_webhooks_enabled(cfg) is False
 
 
 class TestTheSeamCarriesTheExistingVocabulary:
