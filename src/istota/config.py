@@ -1217,7 +1217,12 @@ class WhatsAppTemplateConfig:
 
 @dataclass
 class WhatsAppConfig:
-    """One Meta-hosted WhatsApp Cloud API business number.
+    """One WhatsApp business number, reached through one provider.
+
+    ``provider`` names the adapter that sends and receives; see
+    ``WHATSAPP_PROVIDER_NAMES``. Every other field here is Meta's hosted Cloud
+    API, which is the only adapter that exists so far and therefore the
+    default.
 
     ``graph_api_version = ""`` means the version pinned by the installed PyWa
     release. An explicit value exists for a controlled migration, not for
@@ -1228,6 +1233,7 @@ class WhatsAppConfig:
     in both directions rather than resolving to a default.
     """
     enabled: bool = False
+    provider: str = "whatsapp_cloud"
     waba_id: str = ""
     phone_number_id: str = ""
     business_phone_number: str = ""
@@ -4161,6 +4167,80 @@ _WHATSAPP_TEMPLATE_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}([_-][A-Za-z0-9]{2,8})?
 
 WHATSAPP_CREDENTIAL_FIELDS = ("access_token", "app_secret", "verify_token")
 
+WHATSAPP_PROVIDER_NAMES = ("baileys", "whatsapp_cloud")
+"""The adapters `transport/whatsapp/providers/` can build.
+
+Ordered as the SMS tuple is — the order decides nothing, since
+`make_provider_registry` reads `whatsapp.provider` for the active one and
+treats the rest alike, but a stable order keeps a registry's `names()` worth
+asserting on.
+
+`whatsapp_cloud` rather than `whatsapp`, so the surface keeps the plain name
+and no adapter claims it — the arrangement `sms` already has with `twilio` and
+`telnyx`.
+"""
+
+_WHATSAPP_PROVIDER_FIELDS: dict[str, tuple[str, ...]] = {
+    # Not `waba_id` / `phone_number_id`, which are structural: this map answers
+    # "what would this adapter have to hold to authenticate", and those two are
+    # already refused at load when the transport is enabled.
+    "whatsapp_cloud": WHATSAPP_CREDENTIAL_FIELDS,
+    # Deliberately empty, and deliberately not a defaulted field standing in
+    # for one. A Baileys deployment's credential is a paired session on disk,
+    # so there is nothing in `config.toml` whose presence or absence answers
+    # anything about it. An entry added here that is *always* populated — a
+    # defaulted session directory, say — would make the provider look
+    # configured on every deployment and so be kept as a callback-only adapter
+    # on a Cloud one, which is a build for a callback it can never receive.
+    "baileys": (),
+}
+
+
+def _whatsapp_provider_block(config: Config, provider: str) -> object | None:
+    """Where one provider's own fields live.
+
+    Every WhatsApp field is flat on ``[whatsapp]`` today, so both providers
+    answer to the same block and only ``whatsapp_cloud`` declares anything in
+    it. Named rather than inlined because the nested ``cloud:`` / ``baileys:``
+    blocks land later, and this is the one place that has to move then.
+    """
+    if provider not in _WHATSAPP_PROVIDER_FIELDS:
+        return None
+    return config.whatsapp
+
+
+def whatsapp_provider_missing_fields(config: Config, provider: str) -> tuple[str, ...]:
+    """Names of the blank fields in one provider block.
+
+    The value is never read, only its emptiness — a caller rendering this into
+    a log or a check result must be able to name the gap without holding the
+    credential.
+    """
+    fields = _WHATSAPP_PROVIDER_FIELDS.get(provider)
+    block = _whatsapp_provider_block(config, provider)
+    if fields is None or block is None:
+        return ()
+    return tuple(
+        name for name in fields
+        if not str(getattr(block, name, "") or "").strip()
+    )
+
+
+def whatsapp_provider_has_values(config: Config, provider: str) -> bool:
+    """Whether any field in one provider block is populated.
+
+    False for a provider that declares no fields, which is the honest answer
+    and not the one that makes `make_provider_registry`'s loop convenient —
+    see the split gate there.
+    """
+    fields = _WHATSAPP_PROVIDER_FIELDS.get(provider)
+    block = _whatsapp_provider_block(config, provider)
+    if fields is None or block is None:
+        return False
+    return any(
+        str(getattr(block, name, "") or "").strip() for name in fields
+    )
+
 
 def _is_valid_timezone(name: object) -> bool:
     """Whether `name` resolves to a zone, without raising for any input.
@@ -4200,13 +4280,15 @@ def whatsapp_webhooks_enabled(config: Config) -> bool:
 
 
 def whatsapp_missing_credentials(config: Config) -> tuple[str, ...]:
-    """Names of the blank Meta secrets. The value is never read, only its
-    emptiness — a caller rendering this into a log or a check result must be
-    able to name the gap without holding the credential."""
-    return tuple(
-        name for name in WHATSAPP_CREDENTIAL_FIELDS
-        if not str(getattr(config.whatsapp, name, "") or "").strip()
-    )
+    """Names of the blank Meta secrets.
+
+    The Cloud adapter's arm of :func:`whatsapp_provider_missing_fields`, under
+    the name its callers already use. Delegated rather than restated: the two
+    would be the same three fields read the same way, and a second copy is
+    where the blank-versus-whitespace rule starts to differ between the
+    registry's gate and doctor's report.
+    """
+    return whatsapp_provider_missing_fields(config, "whatsapp_cloud")
 
 
 def whatsapp_credential_errors(config: Config) -> list[str]:
@@ -4238,6 +4320,15 @@ def whatsapp_structural_config_errors(config: Config) -> list[str]:
     """
     whatsapp = config.whatsapp
     errors: list[str] = []
+
+    # Checked whether or not the transport is enabled, exactly as `sms.provider`
+    # is and for the same reason: `make_provider_registry` raises on an unknown
+    # name, and a process that builds one at startup would die naming something
+    # the operator was never warned about.
+    if whatsapp.provider not in WHATSAPP_PROVIDER_NAMES:
+        errors.append(
+            "provider must be one of " + ", ".join(WHATSAPP_PROVIDER_NAMES)
+        )
 
     # Checked whether or not the transport is enabled, on the `sms.provider`
     # precedent: a misspelling in a disabled block otherwise loads cleanly and

@@ -768,6 +768,9 @@ messaging_profile_id = ""
 # are credentials: leave them empty here and deliver them through
 # ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN.
 #
+# `provider` names the adapter that sends and receives. `whatsapp_cloud` is the
+# Meta Cloud API described here and every field below belongs to it.
+#
 # `billing_policy` decides whether a send can ever cost money.
 #   free_guard — no templates at all, and at most
 #     `monthly_service_attempt_limit` service-message attempts per business
@@ -779,6 +782,7 @@ messaging_profile_id = ""
 # set `v23.0`-style only for a controlled migration.
 [whatsapp]
 enabled = false
+provider = "whatsapp_cloud"
 waba_id = ""                    # decimal WhatsApp Business Account id
 phone_number_id = ""            # decimal business phone number id, not the number
 business_phone_number = ""      # exact E.164, e.g. "+15551234567"
