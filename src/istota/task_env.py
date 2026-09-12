@@ -252,7 +252,7 @@ def build_task_runtime(
         env, derive_proxy_only_set(skill_index),
     )
     if config.security.skill_proxy_enabled:
-        from .skill_proxy import SkillProxy
+        from .skill_proxy import SkillProxy, effective_client_wait
         # Phase 3: credential set is derived from the loaded skill
         # index; no hand-maintained constant. Same for the per-skill
         # credential map and the lookup-endpoint allowlist.
@@ -275,6 +275,18 @@ def build_task_runtime(
         # its own DB.
         _proxy_sock = Path(tempfile.gettempdir()) / f"istota-proxy-{os.getpid()}-{task.id}.sock"
         env["ISTOTA_SKILL_PROXY_SOCK"] = str(_proxy_sock)
+        # Informational: the client arms its socket at this before it sends,
+        # and cannot read a config from inside the sandbox. The proxy's own
+        # ceiling comes from the config field below, never from this export —
+        # a model that rewrites its copy shortens or lengthens only its own
+        # patience (ISSUE-450). Exported through the proxy's own coercion so
+        # both ends derive the same wait from one rule: a raw `str()` of a
+        # value the loader never coerced (a float set programmatically) is
+        # junk to the client's strict parse, which would leave the proxy
+        # honouring a longer wait than the client arms.
+        env["ISTOTA_SKILL_CLIENT_WAIT"] = str(
+            effective_client_wait(config.security.skill_client_wait_seconds)
+        )
         allowed_creds = derive_lookup_allowlist(
             authorized_skills, skill_index,
         )
@@ -363,6 +375,7 @@ def build_task_runtime(
             _proxy_sock, credential_env, proxy_base_env,
             timeout=config.security.skill_proxy_timeout,
             skill_timeouts=config.security.skill_proxy_timeouts,
+            client_wait_seconds=config.security.skill_client_wait_seconds,
             allowed_credentials=allowed_creds,
             skill_credential_map=skill_cred_map,
             allowed_skills=cli_skills,

@@ -323,6 +323,8 @@ enabled: bool = True         allow_pypi: bool = True      extra_hosts: list[str]
 ```
 sandbox_enabled: bool = True         skill_proxy_enabled: bool = True
 skill_proxy_timeout: int = 300
+skill_proxy_timeouts: dict[str, int] = {}  # per-skill overrides of the global; ships empty, the code_review ceiling lives in skill_proxy.DEFAULT_SKILL_TIMEOUTS (ISSUE-448)
+skill_client_wait_seconds: int = 600 # what the sandboxed istota-skill client waits; every skill budget is capped at this minus 30s (ISSUE-450)
 passthrough_env_vars: list[str] = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 sandbox_ro_paths: list[str] = []     # extra RO binds; keep narrow
 sandbox_cache_dir: str = ""          # FALLBACK cache root; unread while developer.repos_dir is set

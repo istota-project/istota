@@ -37,13 +37,63 @@ CONNECTION_SLACK_SECONDS = 10
 CLIENT_WAIT_MARGIN_SECONDS = 30
 
 # The ceiling on any single skill's timeout, the global and a per-skill entry
-# alike. Derived from what `skill_client` waits rather than chosen: the client
-# arms its socket before it sends and cannot read a config, so a server budget
-# past that wait means the client gives up first and the model reads a completed
-# call as no answer at all.
+# alike, at the *default* client wait. Derived from what `skill_client` waits
+# rather than chosen: the client arms its socket before it sends, so a server
+# budget past that wait means the client gives up first and the model reads a
+# completed call as no answer at all. A deployment that raises
+# `security.skill_client_wait_seconds` raises the ceiling with it — the config
+# field is what the resolver takes, never `ISTOTA_SKILL_CLIENT_WAIT`, which
+# lives in the model's own environment where a task can rewrite it
+# (ISSUE-450).
 MAX_SKILL_TIMEOUT_SECONDS = (
     skill_client.SKILL_CLIENT_WAIT_SECONDS - CLIENT_WAIT_MARGIN_SECONDS
 )
+
+
+def _usable_seconds(raw) -> int | None:
+    """A usable positive whole number of seconds, or None.
+
+    `bool` is excluded before `int()` because `int(True)` is 1 and `= true` is
+    a plausible typo that would otherwise resolve to a one-second value rather
+    than falling through.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        candidate = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return candidate if candidate > 0 else None
+
+
+def effective_client_wait(client_wait) -> int:
+    """The wait to derive the ceiling from: a usable configured value, or the
+    client's shipped default. Same robustness rule as the per-skill entries —
+    the value comes off a loaded config nothing validates, and this runs on
+    the path of every skill call.
+
+    Clamped to `skill_client.MAX_CLIENT_WAIT_SECONDS`, matching the client's
+    own clamp, so an absurd configured value neither overflows
+    `conn.settimeout` nor leaves the two ends deriving different waits.
+    Public because `task_env` builds the client's export from this same
+    function — one parse feeding both ends is what keeps a value the loader
+    did not coerce (a float set programmatically, say) from giving the proxy
+    a longer wait than the client arms."""
+    usable = _usable_seconds(client_wait)
+    if usable is None:
+        return skill_client.SKILL_CLIENT_WAIT_SECONDS
+    return min(usable, skill_client.MAX_CLIENT_WAIT_SECONDS)
+
+
+def _ceiling_seconds(client_wait) -> int:
+    """The largest budget any skill may be given under this client wait.
+
+    Floored at one second: a wait at or under the margin is a
+    misconfiguration, and a non-positive number here would reach
+    `subprocess.run(timeout=...)` and `conn.settimeout(...)`, turning it into
+    a raise on every call rather than a call that fails fast and is reported
+    by `describe_skill_timeouts`."""
+    return max(1, effective_client_wait(client_wait) - CLIENT_WAIT_MARGIN_SECONDS)
 
 # The shipped per-skill policy, in code rather than in the config default, and
 # that placement is the point (ISSUE-448). `config_mapper` maps a `dict` field
@@ -65,7 +115,7 @@ DEFAULT_SKILL_TIMEOUTS: dict[str, int] = {
 }
 
 
-def resolve_skill_timeout(default: int, overrides, skill: str) -> int:
+def resolve_skill_timeout(default: int, overrides, skill: str, client_wait=None) -> int:
     """Seconds this skill's subprocess gets: operator entry, shipped policy, global.
 
     `security.skill_proxy_timeout` is one number applied to every proxied call,
@@ -86,6 +136,13 @@ def resolve_skill_timeout(default: int, overrides, skill: str) -> int:
     not log, because per-connection is the wrong cadence for a fact about the
     configuration: `describe_skill_timeouts` reports the same judgements once,
     at proxy construction, by asking this function rather than restating it.
+
+    `client_wait` is `security.skill_client_wait_seconds` — the operator's
+    statement of what the sandboxed client arms — and moves the ceiling with
+    it (ISSUE-450). It must come from the loaded config, never from
+    `ISTOTA_SKILL_CLIENT_WAIT`: the variable lives in the model's environment,
+    and deriving the server-side cap from it would let a task widen a bound
+    the operator set. `None` (or anything unusable) is the shipped 600.
     """
     resolved = default
     entry = _entry_seconds(overrides, skill)
@@ -93,30 +150,19 @@ def resolve_skill_timeout(default: int, overrides, skill: str) -> int:
         entry = _entry_seconds(DEFAULT_SKILL_TIMEOUTS, skill)
     if entry is not None:
         resolved = entry
-    return min(resolved, MAX_SKILL_TIMEOUT_SECONDS)
+    return min(resolved, _ceiling_seconds(client_wait))
 
 
 def _entry_seconds(overrides, skill) -> int | None:
-    """One usable positive entry from a mapping, or None for absent or unusable.
-
-    `bool` is excluded before `int()` because `int(True)` is 1 and
-    `code_review = true` is a plausible typo that would otherwise resolve to a
-    one-second budget rather than falling through.
-    """
+    """One usable positive entry from a mapping, or None for absent or unusable."""
     try:
         raw = overrides.get(skill) if overrides is not None else None
     except AttributeError:
         return None
-    if raw is None or isinstance(raw, bool):
-        return None
-    try:
-        candidate = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return candidate if candidate > 0 else None
+    return _usable_seconds(raw)
 
 
-def describe_skill_timeouts(default: int, overrides) -> list[str]:
+def describe_skill_timeouts(default: int, overrides, client_wait=None) -> list[str]:
     """Every configured timeout whose resolved value is not what was written.
 
     Reported once, at proxy construction, rather than from the resolver — that
@@ -127,17 +173,36 @@ def describe_skill_timeouts(default: int, overrides) -> list[str]:
     not make.
 
     Covers the unusable entry (a string, a bool, a zero) that silently falls
-    through, and any value clamped by `MAX_SKILL_TIMEOUT_SECONDS` — the global
+    through, any value clamped by the client-wait ceiling — the global
     included, which is the one an operator who never wrote a per-skill table can
-    still trip.
+    still trip — and a `skill_client_wait_seconds` that is not a positive
+    number of seconds, which silently falls back to the client's shipped
+    default.
     """
     notes: list[str] = []
-    if default > MAX_SKILL_TIMEOUT_SECONDS:
+    effective_wait = effective_client_wait(client_wait)
+    ceiling = _ceiling_seconds(client_wait)
+    if client_wait is not None and _usable_seconds(client_wait) is None:
+        notes.append(
+            f"skill_client_wait_seconds is {client_wait!r}, which is not a "
+            f"positive number of seconds, so the client wait is the default "
+            f"{skill_client.SKILL_CLIENT_WAIT_SECONDS}s"
+        )
+    elif (
+        client_wait is not None
+        and _usable_seconds(client_wait) > skill_client.MAX_CLIENT_WAIT_SECONDS
+    ):
+        notes.append(
+            f"skill_client_wait_seconds of {client_wait!r} is past the "
+            f"{skill_client.MAX_CLIENT_WAIT_SECONDS}s either end will arm, so "
+            f"the client wait is {effective_wait}s"
+        )
+    if default > ceiling:
         notes.append(
             f"skill_proxy_timeout of {default}s is past the "
-            f"{skill_client.SKILL_CLIENT_WAIT_SECONDS}s the sandboxed client "
+            f"{effective_wait}s the sandboxed client "
             f"waits, so every skill is being given "
-            f"{MAX_SKILL_TIMEOUT_SECONDS}s instead"
+            f"{ceiling}s instead"
         )
     try:
         written = dict(overrides) if overrides is not None else {}
@@ -148,7 +213,7 @@ def describe_skill_timeouts(default: int, overrides) -> list[str]:
         )
         return notes
     for skill in sorted(written, key=str):
-        resolved = resolve_skill_timeout(default, written, skill)
+        resolved = resolve_skill_timeout(default, written, skill, client_wait)
         if _entry_seconds(written, skill) is None:
             notes.append(
                 f"skill_proxy_timeouts[{skill!r}] is {written[skill]!r}, which "
@@ -158,7 +223,7 @@ def describe_skill_timeouts(default: int, overrides) -> list[str]:
         elif resolved != written[skill]:
             notes.append(
                 f"skill_proxy_timeouts[{skill!r}] of {written[skill]!r} is past "
-                f"the {skill_client.SKILL_CLIENT_WAIT_SECONDS}s the sandboxed "
+                f"the {effective_wait}s the sandboxed "
                 f"client waits, so {skill!r} is being given {resolved}s"
             )
     return notes
@@ -184,6 +249,7 @@ class SkillProxy:
         base_env: dict[str, str],
         timeout: int = 300,
         skill_timeouts: dict | None = None,
+        client_wait_seconds: int | None = None,
         allowed_credentials: set[str] | None = None,
         skill_credential_map: dict[str, set[str]] | None = None,
         allowed_skills: frozenset[str] | None = None,
@@ -198,7 +264,15 @@ class SkillProxy:
         # so `code_review`'s minutes and `email`'s seconds have to come apart
         # inside the handler.
         self.skill_timeouts = skill_timeouts
-        for note in describe_skill_timeouts(timeout, skill_timeouts):
+        # `security.skill_client_wait_seconds`, from the loaded config and
+        # nowhere else. Never read back from ISTOTA_SKILL_CLIENT_WAIT: that
+        # export is in the model's environment, and deriving the server-side
+        # ceiling from it would let a task widen a bound the operator set
+        # (ISSUE-450).
+        self.client_wait_seconds = client_wait_seconds
+        for note in describe_skill_timeouts(
+            timeout, skill_timeouts, client_wait_seconds,
+        ):
             logger.warning("skill proxy: %s", note)
         self.allowed_credentials = allowed_credentials
         self.skill_credential_map = skill_credential_map
@@ -333,7 +407,8 @@ class SkillProxy:
             # return before this deliberately — each answers from memory, so the
             # global is already more than any of them can need.
             skill_timeout = resolve_skill_timeout(
-                self.timeout, self.skill_timeouts, skill
+                self.timeout, self.skill_timeouts, skill,
+                self.client_wait_seconds,
             )
             if skill_timeout != self.timeout:
                 conn.settimeout(skill_timeout + CONNECTION_SLACK_SECONDS)

@@ -454,9 +454,17 @@ features = []
 #                                  # are masked out of the sandbox, so a skill CLI that can't reach
 #                                  # the proxy has nothing to read and refuses rather than guessing.
 # skill_proxy_timeout = 300        # timeout for proxied skill commands (seconds).
-#                                  # Capped at 570 by what the sandboxed client waits;
+#                                  # Capped at skill_client_wait_seconds minus 30;
 #                                  # see [security.skill_proxy_timeouts] below to give
 #                                  # one skill a different budget.
+# skill_client_wait_seconds = 600  # how long the sandboxed istota-skill client waits
+#                                  # on the proxy socket. The bound every skill budget
+#                                  # sits under: the global above and every per-skill
+#                                  # entry are capped at this minus a 30s margin, so a
+#                                  # skill wanting more than 570s needs this raised
+#                                  # too. Exported to the client as
+#                                  # ISTOTA_SKILL_CLIENT_WAIT; the proxy reads this
+#                                  # field, never the export.
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 # sandbox_ro_paths = []            # extra RO bind-mounts in sandbox, for co-located services the
 #                                  # agent needs to read. Keep entries narrow — a broad path sweeps
@@ -494,9 +502,9 @@ features = []
 
 # Per-skill overrides of skill_proxy_timeout, applied instead of the global for
 # the skills named. An entry narrows as readily as it widens. Everything here is
-# bounded at 570s by the fixed wait the sandboxed client arms before it sends,
-# which is not configurable — and that bound applies to skill_proxy_timeout
-# above as well.
+# bounded by the wait the sandboxed client arms before it sends —
+# skill_client_wait_seconds above, minus a 30s margin, so 570s at the default —
+# and that bound applies to skill_proxy_timeout above as well.
 #
 # code_review already has a 540s ceiling of its own without an entry here: it is
 # the only skill that drives model calls, and raising the global to suit it

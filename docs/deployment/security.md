@@ -211,6 +211,11 @@ skill_proxy_enabled = true   # needed wherever sandbox_enabled is true; turning 
                              # model can read it, and leaves skill commands with
                              # nothing to read
 skill_proxy_timeout = 300
+skill_client_wait_seconds = 600  # what the sandboxed istota-skill client waits on the
+                             # proxy socket; every skill budget is capped at this
+                             # minus a 30s margin. The proxy derives its ceiling from
+                             # this field, never from the exported copy the model
+                             # could rewrite
 passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 sandbox_ro_paths = []        # extra RO binds for co-located services; keep narrow
 

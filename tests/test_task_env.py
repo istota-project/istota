@@ -825,3 +825,49 @@ class TestTheCacheRedirect:
 
         assert "UV_CACHE_DIR" not in runtime.env
         assert "npm_config_cache" not in runtime.env
+
+
+class TestTheClientWaitExport:
+    """ISSUE-450: `security.skill_client_wait_seconds` reaches both ends of the
+    socket from the one config field. The proxy takes it as a constructor
+    argument — never from the environment variable, which lives where the model
+    can rewrite it — and the sandboxed client reads the export."""
+
+    def test_the_wait_reaches_both_sides_of_the_socket(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path, skill_client_wait_seconds=900)
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert runtime.env["ISTOTA_SKILL_CLIENT_WAIT"] == "900"
+        assert runtime.proxy_ctx.client_wait_seconds == 900
+
+    def test_the_export_goes_through_the_proxy_own_coercion(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        """One parse feeds both ends. A raw `str()` of a value the loader
+        never coerced — a float set programmatically — exports "1200.9",
+        which the client's strict `int()` rejects back to 600 while the proxy
+        truncates to 1200: the proxy then honours a longer wait than the
+        client arms, the exact inversion the margin exists to prevent."""
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path)
+        config.security.skill_client_wait_seconds = 1200.9
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert runtime.env["ISTOTA_SKILL_CLIENT_WAIT"] == "1200"
+
+    def test_no_export_without_the_proxy(
+        self, tmp_path, runtime_inputs, monkeypatch,
+    ):
+        """With the proxy off there is no socket and no client wait to arm; an
+        export would name a bound nothing enforces."""
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path, skill_proxy_enabled=False)
+
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+
+        assert "ISTOTA_SKILL_CLIENT_WAIT" not in runtime.env

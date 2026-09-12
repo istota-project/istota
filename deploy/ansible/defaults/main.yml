@@ -1379,9 +1379,14 @@ istota_security_sandbox_enabled: true             # bwrap filesystem isolation p
 # the sandbox, so a skill CLI that can't reach the proxy has nothing to read.
 istota_security_skill_proxy_enabled: true         # proxy skill CLI calls via Unix socket (credential isolation)
 istota_security_skill_proxy_timeout: 300          # timeout for proxied skill commands (seconds)
+# How long the sandboxed istota-skill client waits on the proxy socket. The
+# bound every skill budget sits under: the global above and every per-skill
+# entry below are capped at this minus a 30s margin (570s at the default), so
+# a skill wanting more than that needs this raised too (ISSUE-450).
+istota_security_skill_client_wait_seconds: 600
 # Per-skill overrides of the timeout above, applied instead of it for the skills
-# named. Bounded at 570s by what the sandboxed client waits, which is not
-# configurable — that bound applies to the global above as well.
+# named. Bounded by istota_security_skill_client_wait_seconds minus 30s — that
+# bound applies to the global above as well.
 #
 # Empty on purpose. code_review already has a 540s ceiling of its own from the
 # code, because it is the only skill that drives model calls and raising the

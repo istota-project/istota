@@ -19,17 +19,52 @@ import socket
 import subprocess
 import sys
 
-#: How long this client waits on the proxy socket before giving up.
+#: How long this client waits on the proxy socket before giving up, when the
+#: deployment says nothing else.
 #:
-#: A constant rather than a setting, because this process runs *inside* the
-#: sandbox, where there is no config file to read — so it is the one bound in
-#: the whole arrangement that nothing can raise per deployment. Every
-#: server-side timeout has to fit under it with room for the proxy's own
-#: bookkeeping, or the client gives up first and the model is told the proxy
-#: answered nothing: a worse failure than the short budget, and one that looks
-#: like a wedged proxy rather than a timeout. `skill_proxy.MAX_SKILL_TIMEOUT_SECONDS`
-#: is derived from this and is what enforces the fit (ISSUE-448).
+#: This process runs *inside* the sandbox, where there is no config file to
+#: read, so the operator's value arrives as ``ISTOTA_SKILL_CLIENT_WAIT`` —
+#: exported by ``task_env`` from ``security.skill_client_wait_seconds`` — and
+#: this constant is the fallback when the export is absent or unusable
+#: (ISSUE-450). Every server-side timeout has to fit under the wait with room
+#: for the proxy's own bookkeeping, or the client gives up first and the model
+#: is told the proxy answered nothing: a worse failure than the short budget,
+#: and one that looks like a wedged proxy rather than a timeout. The proxy
+#: enforces that fit from the *config field*, never from the environment
+#: variable — the variable lives in the model's own environment, so a task
+#: that rewrites its copy changes only its own patience, not the bound the
+#: operator set.
 SKILL_CLIENT_WAIT_SECONDS = 600
+
+#: The largest wait either end will honour: one day. Not a policy choice so
+#: much as a robustness one — `socket.settimeout` raises `OverflowError` on a
+#: large enough value (measured at 10**10 on CPython), which would replace the
+#: call with a traceback, and the value is model-writable here. The proxy
+#: clamps its configured wait to the same number so the two ends stay in
+#: agreement.
+MAX_CLIENT_WAIT_SECONDS = 86400
+
+
+def client_wait_seconds(env=None) -> int:
+    """The wait to arm on the proxy socket: the export, or the default.
+
+    Never raises — this runs in front of every proxied skill call, and a
+    malformed value must cost the override, not the call. Whole positive
+    integer seconds only, clamped to `MAX_CLIENT_WAIT_SECONDS`; anything else
+    falls back.
+    """
+    if env is None:
+        env = os.environ
+    raw = env.get("ISTOTA_SKILL_CLIENT_WAIT")
+    if raw is None:
+        return SKILL_CLIENT_WAIT_SECONDS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return SKILL_CLIENT_WAIT_SECONDS
+    if value <= 0:
+        return SKILL_CLIENT_WAIT_SECONDS
+    return min(value, MAX_CLIENT_WAIT_SECONDS)
 
 
 def main() -> None:
@@ -54,7 +89,7 @@ def _run_via_proxy(sock_path: str, skill: str, args: list[str]) -> None:
 
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(SKILL_CLIENT_WAIT_SECONDS)
+        sock.settimeout(client_wait_seconds())
         sock.connect(sock_path)
         sock.sendall(request.encode("utf-8"))
 

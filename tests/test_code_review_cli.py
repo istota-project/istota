@@ -1063,6 +1063,19 @@ class TestTimeoutBudget:
         assert any("skill_proxy_timeout" in r.message for r in caplog.records)
         assert stub_brain.timeouts == [300 - code_review.RESERVED_SECONDS]
 
+    def test_a_raised_client_wait_raises_the_review_ceiling_too(
+        self, capsys, worktree, review_env, developer_config, stub_brain
+    ):
+        """ISSUE-450: the review's ceiling and the proxy's have to be the same
+        answer, so the clamp here reads the same `skill_client_wait_seconds`
+        the proxy derives its cap from. A per-skill entry past the old fixed
+        570 must reach the agents once the deployment raised the wait."""
+        cfg = developer_config(timeout_seconds=900)
+        cfg.security.skill_client_wait_seconds = 1200
+        cfg.security.skill_proxy_timeouts = {"code_review": 840}
+        drive(capsys, "run", "--worktree", str(worktree), "--base", "main")
+        assert stub_brain.timeouts == [840 - code_review.RESERVED_SECONDS]
+
     def test_the_ceiling_warning_fires_even_when_the_run_is_capped(
         self, capsys, caplog, worktree, review_env, developer_config,
         stub_brain, review_db,

@@ -292,6 +292,7 @@ bypass_accept_marker = "{{ istota_brain_tmux_bypass_accept_marker | istota_toml_
 sandbox_enabled = {{ istota_security_sandbox_enabled | lower }}
 skill_proxy_enabled = {{ istota_security_skill_proxy_enabled | lower }}
 skill_proxy_timeout = {{ istota_security_skill_proxy_timeout }}
+skill_client_wait_seconds = {{ istota_security_skill_client_wait_seconds }}
 {% if istota_security_sandbox_ro_paths %}
 sandbox_ro_paths = {{ istota_security_sandbox_ro_paths | to_json }}
 {% endif %}

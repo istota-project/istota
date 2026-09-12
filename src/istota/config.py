@@ -1286,6 +1286,15 @@ class SecurityConfig:
     # back to the global and reintroducing the bug the map exists to fix.
     # Naming `code_review` here still overrides the shipped value.
     skill_proxy_timeouts: dict[str, int] = field(default_factory=dict)
+    # How long the sandboxed `istota-skill` client waits on the proxy socket
+    # before giving up. The one bound the two timeouts above sit under: every
+    # skill's budget — the global and a per-skill entry alike — is capped at
+    # this minus a 30s margin, so a skill wanting more than that needs this
+    # raised too (ISSUE-450). The client cannot read a config from inside the
+    # sandbox, so the value is exported as ISTOTA_SKILL_CLIENT_WAIT; the proxy
+    # derives its ceiling from this field directly, never from that export,
+    # which the model can rewrite.
+    skill_client_wait_seconds: int = 600
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])
