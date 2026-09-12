@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The webhook receiver no longer writes an access log line per request. It logged the full request line including the query string, which for the WhatsApp verification handshake means the token — so silencing the proxy alone was not enough. Each webhook event is still recorded with its own log line, without the token. A receiver you start yourself needs `--no-access-log`.
 
+### Fixed
+
+- Garmin-imported GPS points now carry altitude. Every run and hike recorded on the watch landed with no elevation at all, because the importer read altitude from the polyline, where Garmin leaves it empty, rather than from the per-point elevation series in the same response. Re-import a date range to fill in existing tracks — `import_garmin_tracks.py --user <name> --days-back 30`, or the web Import GPS tracks button — since a run replaces the points it previously imported for that window.
+
 ## [0.41.1] - 2026-09-09
 
 You can now use the project page as a complete guide to Istota: what the personal system does, how its modules connect, where each deployment shape draws its security boundary, and how to install and develop it. The repository now uses the EUPL v1.2, with the package metadata and full license text in agreement.
