@@ -796,11 +796,14 @@ business_phone_number = ""      # exact E.164, e.g. "+15551234567"
 # deployment need not carry a WABA id.
 #
 # DEPRECATED: these keys used to sit flat on [whatsapp] itself. A config still
-# writing them there keeps working — they are read as this block, and a flat
-# block carrying a waba_id, a phone_number_id or one of the three credentials
-# also selects provider = "whatsapp_cloud" when no provider key is present, so
-# an existing Cloud deployment is unchanged by the default above. Move them
-# under [whatsapp.cloud]; the flat spelling will be removed.
+# writing them there keeps working — they are read as this block, and a block
+# carrying a waba_id, a phone_number_id or one of the three credentials also
+# selects provider = "whatsapp_cloud" when no provider key is present, so an
+# existing Cloud deployment is unchanged by the default above. That holds
+# whichever spelling the values are in, so moving them under [whatsapp.cloud]
+# is safe on its own — writing provider = "whatsapp_cloud" as well is clearer
+# and is what a config written today should say. The flat spelling will be
+# removed.
 [whatsapp.cloud]
 waba_id = ""                    # decimal WhatsApp Business Account id
 phone_number_id = ""            # decimal business phone number id, not the number

@@ -3350,21 +3350,33 @@ block in the unknown-key report of every deployment there is.
 — they did not move.
 """
 
-_LEGACY_WHATSAPP_CLOUD_SIGNALS = (
+_WHATSAPP_CLOUD_SIGNAL_KEYS = (
     "waba_id",
     "phone_number_id",
     "access_token",
     "app_secret",
     "verify_token",
 )
-"""The flat keys whose *value* says a config was written for Meta's Cloud API.
+"""The keys whose *value* says a config was written for Meta's Cloud API.
+
+Read against the **resolved** ``[whatsapp.cloud]`` table, so a value counts
+whether the file wrote it flat or nested. Flat-only was the first version and
+it turned the deprecation note into a trap: ``config.example.toml`` tells an
+operator to move these keys under ``[whatsapp.cloud]``, and doing so removed
+the last flat key, dropped the signal, and silently converted a working Cloud
+deployment into a Baileys one — webhook unmounted, every send `unconfigured`,
+and doctor reporting OK about it. Where the value sits is a spelling; that it
+is a Meta identifier is the fact.
 
 **Non-empty values, never key presence, and the difference decides whether the
 default flip breaks every existing deployment.** ``config.toml.j2`` and
 ``render-config.sh`` both render the whole flat block unconditionally — a
 deployment that has never heard of WhatsApp still gets ``waba_id = ""`` — so a
 presence test reads every shipped render as a Cloud deployment, for ever,
-including the Baileys ones this spec is for.
+including the Baileys ones this spec is for. That is also why the nested read
+above cannot misfire: an operator who wants Baileys while keeping a populated
+Cloud block through a switch writes ``provider`` explicitly, and an explicit
+value is never overridden.
 
 The five are the Meta account's own identifiers and secrets: nothing else can
 mean a Cloud deployment, and nothing that is not one can carry them.
@@ -3381,20 +3393,22 @@ it gets an id it must not change meaning.
 """
 
 
-def _is_legacy_whatsapp_cloud_signal(raw: object) -> bool:
-    """Whether one flat value is evidence of a Cloud deployment.
+def _is_whatsapp_cloud_signal(raw: object) -> bool:
+    """Whether one value is evidence of a Cloud deployment.
 
     Deliberately the same blank-versus-whitespace rule
     :func:`whatsapp_provider_missing_fields` applies, and deliberately tolerant
     of an unquoted number the way ``coerce_str`` is — a hand-written
     ``waba_id = 1234`` is a Cloud config with a missing pair of quotes, and
     reading it as "no signal" would take the deployment's webhook away over a
-    TOML nicety. A table or a list is not a signal: it cannot be an id.
+    TOML nicety. A numeric **zero** is not a signal, since the rule is
+    non-empty values and `0` is the numeric spelling of an unset id. A table or
+    a list is not one either: neither can be an id.
     """
     if isinstance(raw, bool) or isinstance(raw, (dict, list, tuple)):
         return False
     if isinstance(raw, (int, float)):
-        return True
+        return raw != 0
     return bool(str(raw or "").strip())
 
 
@@ -3411,13 +3425,19 @@ def _migrate_whatsapp_flat(data: dict) -> None:
     unknown-key report, which is the same noise this exists to prevent.
 
     **Which provider is selected** is the judgement, and it is only ever made
-    for a config that names none: a flat block carrying any
-    :data:`_LEGACY_WHATSAPP_CLOUD_SIGNALS` value is a deployment that predates
-    the seam, so it keeps the adapter it has always run rather than silently
+    for a config that names none: a resolved ``cloud`` block carrying any
+    :data:`_WHATSAPP_CLOUD_SIGNAL_KEYS` value is a deployment configured for
+    Meta, so it keeps the adapter it has always run rather than silently
     becoming a Baileys install with no session. That is not only a send-path
     concern since Stage 2 — ``whatsapp_webhooks_enabled`` reads ``provider``, so
     without this an existing Cloud deployment stops serving Meta's callback and
     inbound dies with nothing in the log.
+
+    The signal is read **after** the merge and against the nested table, so it
+    does not matter which spelling the file used. Reading only the flat keys
+    was the first version, and it made the deprecation note a trap: an operator
+    who followed it and moved the keys under ``[whatsapp.cloud]`` removed the
+    last flat key and converted their own deployment to Baileys, silently.
 
     Runs **before** the dataclass walk, on the parsed document, because that is
     what leaves the walk with an ordinary nested section to map: every coercion,
@@ -3436,21 +3456,26 @@ def _migrate_whatsapp_flat(data: dict) -> None:
         return
 
     nested = block.get("cloud")
-    if not isinstance(nested, dict):
+    if nested is None:
         nested = {}
+    elif not isinstance(nested, dict):
+        # A `cloud` that is not a table is an operator mistake, and the walk
+        # already has the right words for it ("[whatsapp.cloud] must be a
+        # table"). Overwriting it here would take the value away and report
+        # nothing, so nothing is migrated on top of it and the flat keys are
+        # left to the unknown-key report beside that warning.
+        return
 
-    legacy_signal = False
     for name in _LEGACY_FLAT_WHATSAPP_KEYS:
-        if name not in block:
-            continue
-        raw = block.pop(name)
-        if name in _LEGACY_WHATSAPP_CLOUD_SIGNALS and _is_legacy_whatsapp_cloud_signal(raw):
-            legacy_signal = True
-        nested.setdefault(name, raw)
+        if name in block:
+            nested.setdefault(name, block.pop(name))
 
     if nested:
         block["cloud"] = nested
-    if legacy_signal and "provider" not in block:
+    if "provider" not in block and any(
+        _is_whatsapp_cloud_signal(nested.get(name))
+        for name in _WHATSAPP_CLOUD_SIGNAL_KEYS
+    ):
         block["provider"] = "whatsapp_cloud"
 
 
@@ -4598,10 +4623,13 @@ def _whatsapp_cloud_structural_errors(config: Config) -> list[str]:
     cloud = config.whatsapp.cloud
     errors: list[str] = []
 
-    # Checked whether or not the transport is enabled, on the `sms.provider`
-    # precedent: a misspelling in a disabled block otherwise loads cleanly and
-    # then decides, at the first send on the day someone enables it, whether
-    # money may be spent.
+    # Checked whether or not the transport is enabled — but only once this
+    # provider is the selected one, which is the narrowing the split brought
+    # and is not what this comment used to say. Within Cloud the reason is the
+    # `sms.provider` precedent: a misspelling in a disabled block otherwise
+    # loads cleanly and then decides, at the first send on the day someone
+    # enables it, whether money may be spent. Under Baileys nothing reads it,
+    # and the switch back to Cloud is where the same file stops loading.
     if cloud.billing_policy not in WHATSAPP_BILLING_POLICIES:
         errors.append(
             "billing_policy must be one of " + ", ".join(WHATSAPP_BILLING_POLICIES)
@@ -4672,7 +4700,19 @@ def _whatsapp_baileys_structural_errors(config: Config) -> list[str]:
     shape when it is set and not demanded when it is not — the reverse of the
     Cloud arm, where the whole account is configured by hand and an absent
     number is a deployment that cannot work.
+
+    **Gated on ``enabled``, like the number check it mirrors.** Without that
+    gate this arm tightened the load for a config nobody had changed: a
+    *disabled* block with a placeholder number is an ordinary hand-written
+    shape, it resolves to this provider by default, and it used to load
+    because the Cloud arm returns before its own ``_is_e164`` call when the
+    transport is off. A stage whose claim is that the old shape keeps working
+    must not fail a load that used to succeed — and this raises in the daemon,
+    the web app, the webhook receiver, every CLI invocation and every
+    host-side skill CLI spawn alike.
     """
+    if not config.whatsapp.enabled:
+        return []
     number = config.whatsapp.business_phone_number
     if number and not _is_e164(number):
         return ["business_phone_number must be an exact E.164 number"]

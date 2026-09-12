@@ -28,12 +28,23 @@ _BAILEYS_FIELDS = frozenset(f.name for f in dataclasses.fields(WhatsAppBaileysCo
 
 
 def build_whatsapp_config(**fields) -> WhatsAppConfig:
-    """A `WhatsAppConfig` from flat keywords, each routed to its own block."""
+    """A `WhatsAppConfig` from flat keywords, each routed to its own block.
+
+    Raises on a keyword that is also given as a whole block, rather than
+    letting one win: `build_whatsapp_config(access_token="x", cloud=...)` has
+    two answers for one field and neither is obviously the caller's.
+    """
     fields.setdefault("provider", "whatsapp_cloud")
     cloud = {k: fields.pop(k) for k in list(fields) if k in _CLOUD_FIELDS}
     baileys = {k: fields.pop(k) for k in list(fields) if k in _BAILEYS_FIELDS}
-    if cloud:
-        fields.setdefault("cloud", WhatsAppCloudConfig(**cloud))
-    if baileys:
-        fields.setdefault("baileys", WhatsAppBaileysConfig(**baileys))
+    for name, collected in (("cloud", cloud), ("baileys", baileys)):
+        if not collected:
+            continue
+        if name in fields:
+            raise TypeError(
+                f"build_whatsapp_config got both {name}= and the flat field(s) "
+                f"{sorted(collected)}; pass one or the other"
+            )
+        block = WhatsAppCloudConfig if name == "cloud" else WhatsAppBaileysConfig
+        fields[name] = block(**collected)
     return WhatsAppConfig(**fields)

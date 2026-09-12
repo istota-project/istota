@@ -6952,25 +6952,37 @@ def check_whatsapp_common(config: "Config", probe: bool) -> CheckResult:
     Nothing here renders a value: the three secrets are named when missing and
     never shown, and the business phone number is not printed at all — a
     `CheckResult` reaches the boot log and the admin Health pane.
+
+    **The credential arms are the active adapter's, not Meta's.** Reading the
+    Cloud three unconditionally was a defect the `baileys` default made
+    reachable rather than a deferral: with none of them set the check WARNed
+    for ever about credentials that adapter does not use, and with *one or two*
+    set — a deployment migrating off Cloud, or a stale `secrets.env` entry
+    still arriving through the `ISTOTA_WHATSAPP_*` overrides — the partial-set
+    arm below returned FAIL, so `istota doctor` exited 1 and the hourly sweep
+    alerted every admin about an adapter nothing was running. An adapter that
+    declares no credential fields reports neither.
     """
     if not config.whatsapp.enabled:
         return CheckResult("whatsapp.common", SKIP, "[whatsapp] enabled = false")
 
     from .config import (
-        WHATSAPP_CREDENTIAL_FIELDS,
-        whatsapp_missing_credentials,
+        whatsapp_provider_missing_fields,
         whatsapp_structural_config_errors,
     )
+    from .config import _WHATSAPP_PROVIDER_FIELDS
 
+    provider = config.whatsapp.provider
+    declared = _WHATSAPP_PROVIDER_FIELDS.get(provider, ())
     structural = whatsapp_structural_config_errors(config)
-    missing = whatsapp_missing_credentials(config)
+    missing = whatsapp_provider_missing_fields(config, provider)
     credential_remedy = (
         "The three credentials travel through ISTOTA_WHATSAPP_ACCESS_TOKEN, "
         "ISTOTA_WHATSAPP_APP_SECRET and ISTOTA_WHATSAPP_VERIFY_TOKEN; a shell "
         "that has not sourced the deployment's environment file sees none of "
         "them."
     )
-    if structural or (missing and len(missing) < len(WHATSAPP_CREDENTIAL_FIELDS)):
+    if structural or (missing and len(missing) < len(declared)):
         errors = list(structural)
         if missing:
             errors.append("missing credentials: " + ", ".join(missing))
@@ -6998,6 +7010,17 @@ def check_whatsapp_common(config: "Config", probe: bool) -> CheckResult:
             "no WhatsApp credentials are visible to this process; the "
             "deployment may still hold them",
             remedy=credential_remedy,
+        )
+
+    if provider != "whatsapp_cloud":
+        # Every sentence below is a Meta fact — the billing policy, the quota
+        # month's calendar, the monthly cap and the template — and none of them
+        # governs a send this deployment will make. Rendering them under another
+        # adapter states four things that are not true about it.
+        return CheckResult(
+            "whatsapp.common",
+            OK,
+            f"local configuration is ready for the {provider} adapter",
         )
 
     cloud = config.whatsapp.cloud

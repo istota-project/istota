@@ -480,6 +480,24 @@ class TestValidationIsPerProvider:
         with pytest.raises(ValueError, match="waba_id"):
             load_config(_write_config(tmp_path, body))
 
+    def test_a_disabled_block_with_a_bad_number_still_loads(self, tmp_path):
+        """A config that loaded before this stage has to load after it.
+
+        The Cloud arm reaches `_is_e164` only once the transport is enabled, so
+        a disabled block with a placeholder number has always loaded. The
+        Baileys arm is what a config that names no provider now takes, so an
+        ungated check there fails a load nobody changed — in the daemon, the
+        web app, the webhook receiver and every skill CLI spawn alike.
+        """
+        body = self._baileys('business_phone_number = "555 1234"\n').replace(
+            "enabled = true", "enabled = false",
+        )
+
+        cfg = load_config(_write_config(tmp_path, body))
+
+        assert cfg.whatsapp.enabled is False
+        assert whatsapp_structural_config_errors(cfg) == []
+
     def test_the_baileys_block_loads_its_own_two_fields(self, tmp_path):
         body = self._baileys(
             "\n[whatsapp.baileys]\n"
@@ -659,6 +677,78 @@ class TestTheLegacyFlatBlock:
 
         assert cfg.whatsapp.provider == "whatsapp_cloud"
         assert cfg.whatsapp.cloud.waba_id == "123456789012345"
+
+    def test_the_documented_migration_does_not_change_the_adapter(self, tmp_path):
+        """The trap the first version of this shipped with.
+
+        `config.example.toml` tells an operator to move the Cloud keys under
+        `[whatsapp.cloud]`. With the signal read off the *flat* keys only,
+        doing exactly that removed the last one, dropped the signal, and
+        converted a working Cloud deployment into a Baileys install — webhook
+        unmounted, every send `unconfigured`, and doctor reporting OK about it.
+        Where a Meta id is written is a spelling; that it is a Meta id is not.
+        """
+        from istota.config import whatsapp_webhooks_enabled
+
+        body = (
+            "[site]\n"
+            'hostname = "assistant.example.com"\n'
+            "\n"
+            "[whatsapp]\n"
+            "enabled = true\n"
+            'business_phone_number = "+15551234567"\n'
+            "\n"
+            "[whatsapp.cloud]\n"
+            'waba_id = "123456789012345"\n'
+            'phone_number_id = "223456789012345"\n'
+            'access_token = "wa-access-token"\n'
+            'app_secret = "wa-app-secret"\n'
+            'verify_token = "wa-verify-token"\n'
+        )
+
+        cfg = load_config(_write_config(tmp_path, body))
+
+        assert cfg.whatsapp.provider == "whatsapp_cloud"
+        assert whatsapp_webhooks_enabled(cfg) is True
+
+    def test_a_nested_block_at_its_defaults_is_not_a_signal(self, tmp_path):
+        """The control on the line above: reading the nested table must not
+        make every config that merely *has* the section a Cloud one."""
+        body = (
+            "[whatsapp]\n"
+            "enabled = false\n"
+            "\n"
+            "[whatsapp.cloud]\n"
+            'waba_id = ""\n'
+            'billing_policy = "free_guard"\n'
+            "request_timeout_seconds = 10\n"
+        )
+
+        cfg = load_config(_write_config(tmp_path, body))
+
+        assert cfg.whatsapp.provider == "baileys"
+
+    def test_a_numeric_zero_is_not_a_signal(self, tmp_path):
+        """`0` is the numeric spelling of an unset id, and the rule this is
+        built on is non-empty values."""
+        body = "[whatsapp]\nenabled = false\nwaba_id = 0\n"
+
+        cfg = load_config(_write_config(tmp_path, body))
+
+        assert cfg.whatsapp.provider == "baileys"
+
+    def test_a_cloud_key_that_is_not_a_table_is_left_for_the_walk_to_report(
+        self, tmp_path, caplog,
+    ):
+        """Overwriting it would take the operator's value away and report
+        nothing; `apply_section` already has the right words for it."""
+        body = '[whatsapp]\nenabled = false\ncloud = "not-a-table"\nwaba_id = "1"\n'
+
+        with caplog.at_level("WARNING"):
+            cfg = load_config(_write_config(tmp_path, body))
+
+        assert cfg.whatsapp.cloud.waba_id == ""
+        assert any("must be a table" in r.getMessage() for r in caplog.records)
 
     def test_a_config_with_no_whatsapp_block_at_all_takes_the_new_default(
         self, tmp_path,
@@ -1677,6 +1767,56 @@ class TestWhatsAppDoctorReadiness:
         detail = results["whatsapp.common"].detail.lower()
         assert "free_guard" in detail
         assert "deliver" not in detail
+
+    def _baileys_config(self) -> Config:
+        cfg = Config()
+        cfg.site.hostname = "assistant.example.com"
+        cfg.whatsapp = WhatsAppConfig(enabled=True, provider="baileys")
+        return cfg
+
+    def test_a_baileys_deployment_is_not_told_it_lacks_metas_credentials(self):
+        """It declares none, so there is nothing to be missing."""
+        result = self._results(self._baileys_config())["whatsapp.common"]
+
+        assert result.status == doctor.OK
+        assert "credential" not in result.detail.lower()
+
+    def test_a_leftover_cloud_credential_does_not_fail_a_baileys_deployment(self):
+        """The arm that made this worth fixing here rather than deferring.
+
+        One or two of the three set is the shape of a deployment migrating off
+        Cloud, and of a stale `secrets.env` entry still arriving through the
+        `ISTOTA_WHATSAPP_*` overrides — which land whatever the provider is. The
+        partial-credential arm reads that as a real mistake and returns FAIL, so
+        `istota doctor` exited 1 and the hourly sweep alerted every admin about
+        an adapter the deployment does not run.
+        """
+        cfg = self._baileys_config()
+        cfg.whatsapp.cloud.app_secret = "left-over-from-the-cloud-era"
+
+        result = self._results(cfg)["whatsapp.common"]
+
+        assert result.status == doctor.OK
+
+    def test_a_partial_cloud_credential_set_still_fails_under_cloud(self):
+        """The control: the same shape, the other provider, the verdict the
+        partial-set rule exists for."""
+        cfg = _ready_config()
+        cfg.whatsapp.cloud.app_secret = ""
+
+        result = self._results(cfg)["whatsapp.common"]
+
+        assert result.status == doctor.FAIL
+        assert "app_secret" in result.detail
+
+    def test_the_ready_line_claims_no_meta_facts_under_another_adapter(self):
+        """Billing policy, quota month, cap and template are all Cloud facts
+        and none governs a Baileys send."""
+        detail = self._results(self._baileys_config())["whatsapp.common"].detail
+
+        assert "baileys" in detail
+        for meta_fact in ("free_guard", "quota month", "template"):
+            assert meta_fact not in detail
 
     def test_missing_fields_are_named_without_their_values(self):
         cfg = _ready_config()

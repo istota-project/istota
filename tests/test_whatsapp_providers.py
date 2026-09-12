@@ -26,6 +26,9 @@ from istota.config import (
     WHATSAPP_PROVIDER_NAMES,
     WHATSAPP_WEBHOOK_PROVIDERS,
     UserConfig,
+    WhatsAppBaileysConfig,
+    WhatsAppCloudConfig,
+    WhatsAppConfig,
     WhatsAppTemplateConfig,
     load_config,
     whatsapp_missing_credentials,
@@ -272,6 +275,38 @@ class TestTheProviderFieldValidators:
         for provider, attribute in _WHATSAPP_PROVIDER_BLOCKS.items():
             block = getattr(Config().whatsapp, attribute)
             assert dataclasses.is_dataclass(block), provider
+
+    def test_no_field_name_appears_at_two_levels_of_the_block_tree(self):
+        """What `tests/support/whatsapp_config.py` rests on, pinned here.
+
+        That helper routes a flat keyword to a block by looking the name up in
+        the nested dataclasses first, so a name appearing at two levels would
+        be silently claimed by the wrong one. `enabled` is the live hazard: add
+        it to `WhatsAppCloudConfig` and `build_whatsapp_config(enabled=True)`
+        starts building a *disabled* transport with an enabled Cloud block, and
+        four converted suites go on passing while asserting about a surface
+        that is switched off.
+        """
+        from istota.config import _WHATSAPP_PROVIDER_BLOCKS
+
+        levels = {
+            "whatsapp": {f.name for f in dataclasses.fields(WhatsAppConfig)},
+            "cloud": {f.name for f in dataclasses.fields(WhatsAppCloudConfig)},
+            "baileys": {f.name for f in dataclasses.fields(WhatsAppBaileysConfig)},
+        }
+        # The block fields themselves are the names of the nested blocks, and
+        # those are how a caller addresses a whole block rather than a field.
+        levels["whatsapp"] -= set(_WHATSAPP_PROVIDER_BLOCKS.values())
+
+        for left, right in itertools.combinations(sorted(levels), 2):
+            assert not levels[left] & levels[right], (left, right)
+
+    def test_the_helper_refuses_a_field_and_its_whole_block_at_once(self):
+        with pytest.raises(TypeError, match="pass one or the other"):
+            build_whatsapp_config(
+                access_token="wa-access-token",
+                cloud=WhatsAppCloudConfig(access_token="other"),
+            )
 
     def test_every_named_provider_has_a_structural_validator(self):
         """Otherwise the whole of that provider's config goes unvalidated: the

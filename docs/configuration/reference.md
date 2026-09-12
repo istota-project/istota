@@ -117,14 +117,26 @@ When SMS is enabled, the common block and active provider block must be complete
 
 ## `[whatsapp]`
 
-One WhatsApp business phone number through Meta's hosted Cloud API, used directly rather than through a Business Solution Provider. Text only, and outside the room model: a WhatsApp exchange never creates, joins or mirrors into a Talk or web room. See the [WhatsApp setup guide](../features/whatsapp.md) for the Meta portal steps, the three operating modes, enrollment, and what the billing controls can and cannot see.
+One WhatsApp business phone number, reached through one adapter. Text only, and outside the room model: a WhatsApp exchange never creates, joins or mirrors into a Talk or web room. See the [WhatsApp setup guide](../features/whatsapp.md) for the Meta portal steps, the three operating modes, enrollment, and what the billing controls can and cannot see.
+
+Three settings are at this level; each adapter's own are its nested block.
 
 | Setting | Default | Description |
 |---|---|---|
-| `enabled` | `false` | Accept inbound WhatsApp work and send through the Cloud API |
+| `enabled` | `false` | Accept inbound WhatsApp work and send |
+| `provider` | `"baileys"` | Which adapter sends and receives: `baileys` (a paired WhatsApp Web session, free and unmetered, no Meta account) or `whatsapp_cloud` (Meta's hosted Cloud API) |
+| `business_phone_number` | `""` | Exact E.164 number this deployment sends from, whichever adapter holds it |
+
+A configuration written before the adapters existed put every `[whatsapp.cloud]` setting below directly under `[whatsapp]`. It still loads: those keys are read as the nested block, and one carrying a `waba_id`, a `phone_number_id` or one of the three credentials selects `whatsapp_cloud` when no `provider` is set, so an existing Cloud deployment keeps its adapter and its webhook. The flat spelling is deprecated and will be removed.
+
+### `[whatsapp.cloud]`
+
+Meta's Cloud API, used directly rather than through a Business Solution Provider. Read only under `provider = "whatsapp_cloud"`, and refused at load only under it — a Baileys deployment need not carry a WABA id.
+
+| Setting | Default | Description |
+|---|---|---|
 | `waba_id` | `""` | Decimal WhatsApp Business Account id; an event from another WABA is rejected |
 | `phone_number_id` | `""` | Decimal business phone number id from the Meta app, not the phone number |
-| `business_phone_number` | `""` | Exact E.164 number the WABA sends from |
 | `access_token` | `""` | System-user token with `whatsapp_business_messaging`. Deliver it through `ISTOTA_WHATSAPP_ACCESS_TOKEN` |
 | `app_secret` | `""` | Meta app secret; validates `X-Hub-Signature-256` over the raw webhook body. `ISTOTA_WHATSAPP_APP_SECRET` |
 | `verify_token` | `""` | Shared secret Meta echoes on the `GET` verification handshake. `ISTOTA_WHATSAPP_VERIFY_TOKEN` |
@@ -134,7 +146,14 @@ One WhatsApp business phone number through Meta's hosted Cloud API, used directl
 | `billing_policy` | `"free_guard"` | `free_guard` (no templates, local attempt cap, circuit breaker on the first billable status) or `allow_paid` |
 | `monthly_service_attempt_limit` | `900` | Service-message attempts per business number and calendar month. 1 to 1000 under `free_guard`; under `allow_paid`, 0 means no local cap |
 
-### `[whatsapp.proactive_template]`
+### `[whatsapp.baileys]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `session_dir` | `""` | Where the paired session is stored. Empty derives it beside the database. The session is a full-account credential |
+| `library_version` | `""` | Pin the sidecar's Baileys version. Empty follows what the shipped sidecar pins |
+
+### `[whatsapp.cloud.proactive_template]`
 
 | Setting | Default | Description |
 |---|---|---|
