@@ -301,6 +301,11 @@ GUIDELINES = {
     "email": "EMAIL GUIDELINES for {user_id}.",
     "web": "WEB GUIDELINES for {user_id}.",
     "briefing": "BRIEFING GUIDELINES for {user_id}.",
+    # `sms` is deliberately absent and its golden therefore carries no
+    # `## Response format` block: the shipped `config/guidelines/sms.md` exists,
+    # but nothing here asked for a synthetic one. Left as it is rather than
+    # rewritten in a change about another surface.
+    "whatsapp": "WHATSAPP GUIDELINES for {user_id}.",
 }
 
 
@@ -376,6 +381,11 @@ CASES: tuple[Case, ...] = (
     Case("source_talk", source_type="talk", conversation_token="room-token"),
     Case("source_email", source_type="email"),
     Case("source_sms", source_type="sms"),
+    # The channel guideline is standing instruction, so it must land in the
+    # system half — the half a compaction summary does not replace. Asserted
+    # below as well as snapshotted, because a golden records where the line is
+    # and not which half it is in.
+    Case("source_whatsapp", source_type="whatsapp"),
     # Memory is seeded here on purpose and must NOT appear: the eager `digest`
     # skill carries `exclude_memory`, which is the other half of the pair the
     # briefing case exists to witness. Without the seed, its absence would
@@ -699,6 +709,26 @@ def test_every_case_renders_two_labelled_halves(case, tmp_path, monkeypatch):
     assert user.startswith("## ")
     assert "## User's request" in user
     assert "## Important rules" not in user
+
+
+def test_the_whatsapp_guideline_is_standing_instruction(tmp_path, monkeypatch):
+    """The channel guideline lands in the system half, not the user half.
+
+    A golden records where a line sits in the rendered pair and says nothing
+    about which half it is in — the labels are text in the snapshot. This is
+    the half question, and for WhatsApp it is load-bearing: the guideline is
+    what tells the model that its final answer is the only text the recipient
+    sees and that a long one will be shortened, and a compaction that replaced
+    it would leave the model writing markdown tables into a message nobody can
+    read, on a metered surface where each attempt is a separate charge.
+    """
+    system, user = split_halves(
+        assemble(CASES_BY_NAME["source_whatsapp"], tmp_path, monkeypatch)
+    )
+
+    assert "## Response format (whatsapp)" in system
+    assert "WHATSAPP GUIDELINES" in system
+    assert "WHATSAPP GUIDELINES" not in user
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)

@@ -6950,6 +6950,8 @@ def execute_task(
             effective_output_target = "email"
         elif task.source_type == "sms":
             effective_output_target = "sms"
+        elif task.source_type == "whatsapp":
+            effective_output_target = "whatsapp"
         elif task.source_type == "istota_file":
             effective_output_target = "istota_file"
 
