@@ -1131,9 +1131,9 @@ name = "garminconnect"
 version = "0.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "curl-cffi" },
-    { name = "requests" },
-    { name = "ua-generator" },
+    { name = "curl-cffi", marker = "python_full_version >= '3.12'" },
+    { name = "requests", marker = "python_full_version >= '3.12'" },
+    { name = "ua-generator", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/dd/d9/7ad240d86453de083f0c460ee328e8209232d9d0ee099dcf49439d90be7a/garminconnect-0.3.3.tar.gz", hash = "sha256:f608193d7a90079fa1fd1d86e8d10e88b871b6ab2500372a9dc48358f8c2d386", size = 52234, upload-time = "2026-04-22T12:57:24.79Z" }
 wheels = [
@@ -1382,6 +1382,7 @@ all = [
     { name = "psutil" },
     { name = "pytesseract" },
     { name = "python-multipart" },
+    { name = "pywa" },
     { name = "sentence-transformers" },
     { name = "sqlite-vec" },
     { name = "starlette" },
@@ -1482,6 +1483,7 @@ test = [
     { name = "itsdangerous" },
     { name = "pytesseract" },
     { name = "python-multipart" },
+    { name = "pywa" },
     { name = "starlette" },
     { name = "telnyx", extra = ["webhooks"] },
     { name = "timezonefinder" },
@@ -1502,6 +1504,9 @@ web = [
     { name = "python-multipart" },
     { name = "starlette" },
     { name = "uvicorn" },
+]
+whatsapp = [
+    { name = "pywa" },
 ]
 whisper = [
     { name = "faster-whisper" },
@@ -1570,6 +1575,8 @@ requires-dist = [
     { name = "istota", extras = ["web"], marker = "extra == 'all'" },
     { name = "istota", extras = ["web"], marker = "extra == 'local'" },
     { name = "istota", extras = ["web"], marker = "extra == 'test'" },
+    { name = "istota", extras = ["whatsapp"], marker = "extra == 'all'" },
+    { name = "istota", extras = ["whatsapp"], marker = "extra == 'test'" },
     { name = "istota", extras = ["whisper"], marker = "extra == 'all'" },
     { name = "itsdangerous", marker = "extra == 'web'", specifier = ">=2.1.0" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.6.0" },
@@ -1581,6 +1588,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.9" },
+    { name = "pywa", marker = "extra == 'whatsapp'", specifier = ">=4.4,<5" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "sentence-transformers", marker = "extra == 'memory-search'", specifier = ">=3.0.0" },
     { name = "sqlite-vec", marker = "extra == 'memory-search'", specifier = ">=0.1.6" },
@@ -1598,7 +1606,7 @@ requires-dist = [
     { name = "yfinance", marker = "extra == 'markets'", specifier = ">=0.2.0" },
     { name = "yfinance", marker = "extra == 'money'", specifier = ">=0.2.0" },
 ]
-provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "signaling", "location", "web", "money", "feeds", "garmin", "docs", "local", "all", "test", "sms"]
+provides-extras = ["dev", "calendar", "email", "markets", "transcribe", "memory-search", "whisper", "signaling", "location", "web", "money", "feeds", "garmin", "docs", "local", "all", "test", "sms", "whatsapp"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2969,6 +2977,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pywa"
+version = "4.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c2/51/8ba2430a88525cbfe616df508cda41fea433a97bb768c8109a6e96495c82/pywa-4.4.0.tar.gz", hash = "sha256:17a3b86efb560a1d920b43c7dc1a311cd30d1e136e0ec93899036447daae7227", size = 350393, upload-time = "2026-08-11T12:00:32.932Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/73/ae/b6ed4958928c59ac20b31ce96d7d8d2d205e287b0106e3993dfe37b084be/pywa-4.4.0-py3-none-any.whl", hash = "sha256:c8283b38e237f6fe0cdb8d1c9cc0f8f2291d260d2cac5f3ef2485634dce5a51a", size = 378429, upload-time = "2026-08-11T12:00:31.356Z" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -3706,13 +3726,13 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform == 'darwin'",
 ]
 dependencies = [
-    { name = "filelock" },
-    { name = "fsspec" },
-    { name = "jinja2" },
-    { name = "networkx" },
-    { name = "setuptools", marker = "python_full_version >= '3.12'" },
-    { name = "sympy" },
-    { name = "typing-extensions" },
+    { name = "filelock", marker = "sys_platform == 'darwin'" },
+    { name = "fsspec", marker = "sys_platform == 'darwin'" },
+    { name = "jinja2", marker = "sys_platform == 'darwin'" },
+    { name = "networkx", marker = "sys_platform == 'darwin'" },
+    { name = "setuptools", marker = "python_full_version >= '3.12' and sys_platform == 'darwin'" },
+    { name = "sympy", marker = "sys_platform == 'darwin'" },
+    { name = "typing-extensions", marker = "sys_platform == 'darwin'" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.10.0-1-cp311-none-macosx_11_0_arm64.whl", hash = "sha256:0826ac8e409551e12b2360ac18b4161a838cbd111933e694752f351191331d09", upload-time = "2026-02-06T16:27:14Z" },
@@ -3748,13 +3768,13 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'darwin' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "filelock" },
-    { name = "fsspec" },
-    { name = "jinja2" },
-    { name = "networkx" },
-    { name = "setuptools", marker = "python_full_version >= '3.12'" },
-    { name = "sympy" },
-    { name = "typing-extensions" },
+    { name = "filelock", marker = "sys_platform != 'darwin'" },
+    { name = "fsspec", marker = "sys_platform != 'darwin'" },
+    { name = "jinja2", marker = "sys_platform != 'darwin'" },
+    { name = "networkx", marker = "sys_platform != 'darwin'" },
+    { name = "setuptools", marker = "python_full_version >= '3.12' and sys_platform != 'darwin'" },
+    { name = "sympy", marker = "sys_platform != 'darwin'" },
+    { name = "typing-extensions", marker = "sys_platform != 'darwin'" },
 ]
 wheels = [
     { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.10.0%2Bcpu-cp311-cp311-linux_aarch64.whl", hash = "sha256:ce5c113d1f55f8c1f5af05047a24e50d11d293e0cbbb5bf7a75c6c761edd6eaa", upload-time = "2026-01-23T15:10:11Z" },

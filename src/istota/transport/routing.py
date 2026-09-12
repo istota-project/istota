@@ -46,7 +46,9 @@ _WARNED_NO_ROOM_TABLES = False
 # which is a different question that happens to have the same answer today.
 _STREAM_SURFACES = frozenset({"stream", "web"})
 # Source types that must never silently drop a reply (interactive surfaces).
-_INTERACTIVE_SOURCE_TYPES = frozenset({"talk", "email", "repl", "web", "sms"})
+_INTERACTIVE_SOURCE_TYPES = frozenset(
+    {"talk", "email", "repl", "web", "sms", "whatsapp"}
+)
 
 # Legacy compound aliases, normalized in exactly one place.
 _ALIASES: dict[str, list[str]] = {
@@ -283,6 +285,12 @@ def origin_descriptor(task: "db.Task", conn=None) -> str | None:
         return f"talk:{tok}"
     if surface == "sms":
         return "sms"
+    if surface == "whatsapp":
+        # Bare, always. A descriptor is stored and read back later, and the
+        # only destination a WhatsApp route may name is the user's own current
+        # binding — a channel here would be a Meta identifier written into a
+        # durable row and re-sent to hours later.
+        return "whatsapp"
     return None  # repl: no durable push target
 
 
@@ -355,6 +363,8 @@ def _infer_default_plan(task: "db.Task") -> list[Destination]:
         return [Destination("web", "stream", "stream")]
     if st == "sms":
         return [Destination("sms")]
+    if st == "whatsapp":
+        return [Destination("whatsapp")]
     return []
 
 
@@ -894,6 +904,39 @@ def _resolve_one(
             )
         return Destination("sms", channel, "push")
 
+    if surface == "whatsapp":
+        # The same shape as SMS's branch above and for the same two reasons.
+        # The channel is advisory — `deliver_whatsapp` resolves the binding
+        # itself immediately before the call — and a destination with no
+        # channel is kept rather than dropped, because dropping it empties the
+        # plan, which discards a finished answer with nothing but a WARNING and
+        # makes a WhatsApp-origin confirmation *complete* instead of parking.
+        transport = registry.get("whatsapp") if registry is not None else None
+        if transport is None:
+            logger.warning(
+                "Dropping WhatsApp destination for task %s: transport not registered",
+                getattr(task, "id", "?"),
+            )
+            return None
+        channel = transport.resolve_target(task)
+        if dest.channel and dest.channel != channel:
+            # `whatsapp:<phone-or-id>` is refused rather than obeyed. The route
+            # grammar must not become a way to send to an arbitrary contact, so
+            # the binding wins always — said out loud rather than rewritten in
+            # silence, and without echoing the identifier the caller supplied.
+            logger.warning(
+                "Ignoring the explicit destination in a whatsapp: target for "
+                "task %s; WhatsApp always sends to the user's own binding",
+                getattr(task, "id", "?"),
+            )
+        if not channel:
+            logger.warning(
+                "WhatsApp destination for task %s has no current user binding; "
+                "delivery will record `unconfigured`",
+                getattr(task, "id", "?"),
+            )
+        return Destination("whatsapp", channel, "push")
+
     if surface in ("ntfy", "istota_file"):
         # Resolved at delivery (Stage 1: inline; Stage 2: their transports).
         return Destination(surface, dest.channel, "push")
@@ -943,6 +986,16 @@ def _reply_origin_destination(
             return None
         # Channel-less is a live destination here too; see `_resolve_one`.
         return Destination("sms", transport.resolve_target(task), "push")
+    if st == "whatsapp":
+        try:
+            from .registry import make_registry
+            transport = make_registry(config).get("whatsapp")
+        except Exception:
+            transport = None
+        if transport is None:
+            return None
+        # Channel-less is a live destination here too; see `_resolve_one`.
+        return Destination("whatsapp", transport.resolve_target(task), "push")
     channel = _resolve_talk_channel(config, task)
     if not channel:
         return None

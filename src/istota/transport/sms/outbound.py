@@ -425,50 +425,52 @@ def _raise_failure_alert(
     user_id: str,
     task_id: int | None,
 ) -> None:
-    """Write one durable alert and push it only through non-SMS destinations."""
-    from ... import notifications
-    from ...notification_store import mark_delivered
+    """Write one durable alert and push it only through non-SMS destinations.
+
+    The push itself is `transport._alerts.push_off_surface`, shared with the
+    WhatsApp surface: the descriptor construction is the comma-list grammar
+    `send_notification` parses, and two surfaces spelling it differently would
+    route to the wrong place rather than fail. Only the row is written here,
+    because only this module knows what an SMS failure means.
+    """
+    from .._alerts import push_off_surface
 
     with db.get_db(config.db_path) as conn:
         raised = _write_failure_alert(conn, record, user_id, task_id)
-    if raised is None or not raised.deliver:
-        return
-    dests = [
-        dest for dest in notifications.resolve_destinations(config, user_id, "alert")
-        if dest.surface != "sms"
-    ]
-    descriptor = ",".join(
-        dest.surface if dest.channel is None else f"{dest.surface}:{dest.channel}"
-        for dest in dests
+    push_off_surface(
+        config, raised, exclude_surface="sms", reference_prefix="sms-failure",
     )
-    if not descriptor:
-        return
-    if notifications.send_notification(
-        config, user_id, raised.text, surface=descriptor, title=raised.title,
-        reference_id=f"sms-failure:{raised.notification_id}",
-    ):
-        with db.get_db(config.db_path) as conn:
-            mark_delivered(conn, [raised.notification_id])
+
+
+_ALERT_LABELS = {
+    "blocked_opt_out": "blocked by opt-out",
+    "unconfigured": "unconfigured",
+    "unknown": "delivery unknown",
+    "failed": "failed",
+}
 
 
 def _write_failure_alert(conn, record, user_id: str, task_id: int | None):
-    from ...notification_resolvers import task_alert
+    """One durable alert row about an SMS that reached nobody.
 
-    label = {
-        "blocked_opt_out": "blocked by opt-out",
-        "unconfigured": "unconfigured",
-        "unknown": "delivery unknown",
-        "failed": "failed",
-    }.get(record.status)
-    if label is None:
-        return None
-    task_label = f"task #{task_id}" if task_id is not None else "a notification"
-    title = f"SMS delivery {label} — {task_label}"
-    body = f"The SMS for {task_label} was not delivered. Its state is {label}."
-    dedup_key = f"sms:{hashlib.sha256(record.logical_key.encode()).hexdigest()[:24]}"
-    return task_alert.write(
-        conn, user_id, dedup_key=dedup_key, title=title, body=body,
-        params={"task_id": task_id, "status": record.status},
+    The row is `transport._alerts.write_delivery_failure`, shared with the
+    WhatsApp surface the way `push_off_surface` already is: the two were the
+    same sentence, the same `task #N` fallback and the same hashed dedup key,
+    and only the label table genuinely differs. The body gains one word
+    ("The SMS message for…" rather than "The SMS for…") so that one sentence
+    reads on both surfaces; nothing asserts on it.
+    """
+    from .._alerts import write_delivery_failure
+
+    return write_delivery_failure(
+        conn,
+        surface_label="SMS",
+        dedup_prefix="sms",
+        user_id=user_id,
+        task_id=task_id,
+        logical_key=record.logical_key,
+        status=record.status,
+        labels=_ALERT_LABELS,
     )
 
 

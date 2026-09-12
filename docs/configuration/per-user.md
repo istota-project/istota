@@ -78,6 +78,8 @@ log = "web:<room-token>"       # verbose execution log streamed to a web chat ro
 
 The SMS number is an identity binding, not a delivery address alone. A message from it can create tasks and answer pending SMS confirmations as this user. Set or clear it with `istota user ensure --name alice --sms-number +15551234567` or `--clear-sms-number`; assignments must be exact E.164 numbers and unique across users. See [SMS](../features/sms.md).
 
+The WhatsApp binding is the same kind of credential and lives in its own table rather than on the profile row, because the durable identity is the sender's business-scoped user id (BSUID) rather than a phone number. `istota user ensure --name alice --whatsapp-number +15551234567` sets a bootstrap number, which is used for the first binding and as an outbound fallback; the BSUID is latched from the user's first authenticated message. `--whatsapp-bsuid` enrolls one explicitly, which is the only route for a user with a WhatsApp username and no reachable number. `--reset-whatsapp-identity` clears what was learned and keeps the number, `--clear-whatsapp` removes the binding. See [WhatsApp](../features/whatsapp.md).
+
 ### Resources (folder mounts)
 
 After the Resources sunset, the only declarable resource type is `folder` —

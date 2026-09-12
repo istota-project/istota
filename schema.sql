@@ -856,6 +856,110 @@ CREATE TABLE IF NOT EXISTS sent_sms (
 CREATE INDEX IF NOT EXISTS idx_sent_sms_task_id ON sent_sms(task_id);
 CREATE INDEX IF NOT EXISTS idx_sent_sms_status ON sent_sms(status);
 
+-- WhatsApp (Meta Cloud API). Four tables, all `CREATE TABLE IF NOT EXISTS`, so
+-- an existing deployment database gains them at the next `init_db` with no
+-- migration step of its own.
+--
+-- The binding is its own table rather than columns on `user_profiles` because
+-- BSUID, send id, service-window time and opt-out state are transport runtime
+-- data rather than profile text. User deletion follows the project's existing
+-- profile cleanup rule.
+--
+-- Three partial unique indexes, not three UNIQUE columns: '' is the unbound
+-- value on all three, and a plain UNIQUE would let the second user with no
+-- WhatsApp identity fail to insert. Each of the three decides which Istota
+-- user an authenticated inbound event may act as, so a second user holding the
+-- same value is a principal takeover rather than a duplicate row.
+CREATE TABLE IF NOT EXISTS whatsapp_user_bindings (
+    user_id TEXT PRIMARY KEY,
+    bootstrap_phone_number TEXT NOT NULL DEFAULT '',  -- E.164; first binding and fallback only
+    bsuid TEXT NOT NULL DEFAULT '',                   -- durable Business-Scoped User ID
+    send_id TEXT NOT NULL DEFAULT '',                 -- current opaque destination
+    username TEXT NOT NULL DEFAULT '',                -- display only, never an auth fallback
+    opted_out_at TEXT,
+    last_user_message_at TEXT,                        -- opens the 24-hour service window
+    enrolled_at TEXT,
+    last_seen_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_binding_phone
+ON whatsapp_user_bindings(bootstrap_phone_number)
+WHERE bootstrap_phone_number <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_binding_bsuid
+ON whatsapp_user_bindings(bsuid)
+WHERE bsuid <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_binding_send_id
+ON whatsapp_user_bindings(send_id)
+WHERE send_id <> '';
+
+-- Durable inbound deduplication. Only authenticated messages from a known
+-- binding are stored, and none of the body, raw webhook, BSUID, phone number,
+-- username or callback data is: the ordinary task prompt is the durable text
+-- for a message that becomes a task.
+CREATE TABLE IF NOT EXISTS processed_whatsapp (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    task_id INTEGER,
+    disposition TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(id)
+);
+CREATE INDEX IF NOT EXISTS idx_processed_whatsapp_task
+ON processed_whatsapp(task_id);
+CREATE INDEX IF NOT EXISTS idx_processed_whatsapp_received
+ON processed_whatsapp(received_at);
+
+-- One row per logical outbound response, inserted `pending` and committed
+-- before any Cloud API call, so a timeout leaves a visible `unknown` rather
+-- than an automatic resend. Neither the rendered body nor the destination is
+-- stored: the task, notification source or command record already owns the
+-- content, and the binding is resolved immediately before the send.
+-- `body_sha256` supports diagnostics without a second copy of private text.
+CREATE TABLE IF NOT EXISTS sent_whatsapp (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    logical_key TEXT NOT NULL UNIQUE,
+    meta_message_id TEXT,
+    user_id TEXT NOT NULL,
+    task_id INTEGER,
+    send_kind TEXT NOT NULL,          -- service | template
+    status TEXT NOT NULL,
+    error_code TEXT,                  -- documented numeric code only, never Meta's prose
+    body_chars INTEGER NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    quota_month TEXT,                 -- WABA-timezone month, stamped before the claim
+    billable INTEGER,                 -- observed on a status webhook; NULL means unknown
+    pricing_model TEXT,
+    pricing_category TEXT,
+    pricing_type TEXT,
+    claimed_at TEXT,
+    attempted_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(task_id) REFERENCES tasks(id),
+    UNIQUE(meta_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sent_whatsapp_task
+ON sent_whatsapp(task_id);
+CREATE INDEX IF NOT EXISTS idx_sent_whatsapp_status
+ON sent_whatsapp(status);
+CREATE INDEX IF NOT EXISTS idx_sent_whatsapp_quota
+ON sent_whatsapp(send_kind, quota_month, attempted_at);
+
+-- The billable circuit breaker, persistent so it survives a restart. Under
+-- `billing_policy = "free_guard"` the first authenticated status reporting
+-- `billable = true` sets `billing_blocked_at` and blocks every later attempt;
+-- `istota whatsapp billing-unblock` is the only way back short of switching to
+-- `allow_paid`. The message id is operational evidence and is masked outside
+-- private operator commands.
+CREATE TABLE IF NOT EXISTS whatsapp_runtime (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    billing_blocked_at TEXT,
+    billing_message_id TEXT,
+    updated_at TEXT NOT NULL
+);
+
 -- Web chat rooms (in-app chat surface). Each room owns a per-user channel
 -- token used as the task's conversation_token, so every room gets its own
 -- CHANNEL.md memory and sleep-cycle treatment with no special-casing.

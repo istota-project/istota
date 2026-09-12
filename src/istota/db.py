@@ -9532,6 +9532,17 @@ def iso_utc_days_ago(days: int) -> str:
     return then.strftime("%Y-%m-%dT%H:%M:%S.") + f"{then.microsecond // 1000:03d}Z"
 
 
+def sql_datetime_now() -> str:
+    """The `datetime('now')` format, for a timestamp built in Python.
+
+    Its sibling below explains why the two formats are named functions rather
+    than one reused bound. This one exists for a write whose value is decided
+    in Python — a column set to a timestamp on one branch and to NULL on
+    another cannot be `datetime('now')` in the SQL and stay readable.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def sql_datetime_days_ago(days: int) -> str:
     """The `datetime('now')` format `tasks.created_at` stores.
 
@@ -10110,3 +10121,500 @@ def prune_old_usage(conn: sqlite3.Connection, retention_days: int) -> int:
         """
     )
     return cursor.rowcount
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp bindings and the billing circuit
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WhatsAppBinding:
+    """One Istota user's WhatsApp identity.
+
+    `bsuid` is the durable one — PyWa 4.x documents that `wa_id` may be absent
+    for a user with a username, and a recycled phone number must never take
+    over an existing principal. `bootstrap_phone_number` is the operator's way
+    in and an outbound fallback, never the authentication field once a BSUID is
+    latched.
+    """
+    user_id: str
+    bootstrap_phone_number: str = ""
+    bsuid: str = ""
+    send_id: str = ""
+    username: str = ""
+    opted_out_at: str | None = None
+    last_user_message_at: str | None = None
+    enrolled_at: str | None = None
+    last_seen_at: str | None = None
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
+class WhatsAppBillingBlock:
+    """The open billable circuit, or nothing when it has never tripped."""
+    billing_blocked_at: str
+    billing_message_id: str | None
+    updated_at: str
+
+
+# The three columns whose partial unique index decides which Istota user an
+# authenticated inbound event may act as. The message names the column in
+# operator words, because a raw "UNIQUE constraint failed" tells the operator
+# nothing about which of the three collided.
+_WHATSAPP_IDENTITY_CONFLICTS = (
+    ("bootstrap_phone_number", "WhatsApp phone number is already assigned to another user"),
+    ("bsuid", "WhatsApp BSUID is already assigned to another user"),
+    ("send_id", "WhatsApp send id is already assigned to another user"),
+)
+
+
+def _raise_whatsapp_conflict(exc: sqlite3.IntegrityError) -> None:
+    text = str(exc)
+    for column, message in _WHATSAPP_IDENTITY_CONFLICTS:
+        if column in text:
+            raise ValueError(message) from None
+    raise exc
+
+
+def _whatsapp_binding_from_row(row: Any) -> WhatsAppBinding:
+    return WhatsAppBinding(
+        user_id=row["user_id"],
+        bootstrap_phone_number=row["bootstrap_phone_number"] or "",
+        bsuid=row["bsuid"] or "",
+        send_id=row["send_id"] or "",
+        username=row["username"] or "",
+        opted_out_at=row["opted_out_at"],
+        last_user_message_at=row["last_user_message_at"],
+        enrolled_at=row["enrolled_at"],
+        last_seen_at=row["last_seen_at"],
+        updated_at=row["updated_at"] or "",
+    )
+
+
+def get_whatsapp_binding(
+    conn: sqlite3.Connection, user_id: str
+) -> WhatsAppBinding | None:
+    row = conn.execute(
+        "SELECT * FROM whatsapp_user_bindings WHERE user_id = ?", (user_id,),
+    ).fetchone()
+    return None if row is None else _whatsapp_binding_from_row(row)
+
+
+def list_whatsapp_bindings(conn: sqlite3.Connection) -> list[WhatsAppBinding]:
+    return [
+        _whatsapp_binding_from_row(row)
+        for row in conn.execute(
+            "SELECT * FROM whatsapp_user_bindings ORDER BY user_id"
+        )
+    ]
+
+
+def set_whatsapp_binding(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    bootstrap_phone_number: str | None = None,
+    bsuid: str | None = None,
+    send_id: str | None = None,
+    username: str | None = None,
+) -> WhatsAppBinding:
+    """Create or update one user's binding, writing only what was supplied.
+
+    **Any change to the identity discards everything learned about the
+    previous holder.** The identity is the bootstrap number and the BSUID
+    together; a change to either means the operator has pointed this Istota
+    user at a different person or a recycled line, and every other column on
+    the row is a fact about whoever held it before — the send id (one of the
+    three that decides which user an authenticated event may act as), the
+    username, `last_seen_at`, the opt-out, and above all
+    `last_user_message_at`, which is the sole input to the 24-hour service
+    window and therefore the thing that authorises a free-form send. Carrying
+    any of them across is the takeover this table exists to prevent, and
+    carrying the window across would let istota message a stranger who never
+    wrote in. `reset_whatsapp_identity` clears exactly the same set.
+
+    Changing the number therefore also clears the BSUID unless the same call
+    supplies one — that is the operator saying which identity the new number
+    belongs to — and clearing the opt-out is deliberate rather than an
+    oversight: it belonged to the previous holder, nothing can be sent to the
+    new one until they open a window of their own, and leaving it would strand
+    them opted out with no verb to undo it.
+
+    A field the caller supplies explicitly always wins over the discard, so
+    the inbound path can latch a fresh BSUID, send id and username in one
+    call.
+    """
+    from .user_profiles import normalize_whatsapp_phone_number
+
+    existing = get_whatsapp_binding(conn, user_id)
+    old_number = existing.bootstrap_phone_number if existing else ""
+    old_bsuid = existing.bsuid if existing else ""
+
+    number = old_number
+    if bootstrap_phone_number is not None:
+        number = normalize_whatsapp_phone_number(
+            bootstrap_phone_number, allow_empty=True,
+        )
+
+    new_bsuid = old_bsuid
+    if bsuid is not None:
+        new_bsuid = str(bsuid or "").strip()
+    if bootstrap_phone_number is not None and number != old_number and bsuid is None:
+        new_bsuid = ""
+
+    if bootstrap_phone_number is not None and not number and not new_bsuid:
+        # The end state would be a row naming a user and no way to reach or
+        # recognise them, which is `clear_whatsapp_binding` said less clearly
+        # — and `reset_whatsapp_identity` already refuses to produce it.
+        raise ValueError(
+            "unsetting the WhatsApp bootstrap number leaves no identity; "
+            "use --clear-whatsapp to remove the binding instead"
+        )
+
+    new_send_id = existing.send_id if existing else ""
+    if send_id is not None:
+        new_send_id = str(send_id or "").strip()
+    new_username = existing.username if existing else ""
+    if username is not None:
+        new_username = str(username or "").strip()
+
+    identity_changed = existing is not None and (
+        number != old_number or new_bsuid != old_bsuid
+    )
+    if identity_changed:
+        if send_id is None:
+            new_send_id = ""
+        if username is None:
+            new_username = ""
+
+    # `enrolled_at` is stamped whenever the BSUID becomes a *different*
+    # non-empty value, so a re-enrollment reads as the new enrollment it is
+    # rather than as the original. Only clearing the BSUID clears it.
+    enrolled_at = existing.enrolled_at if existing else None
+    if not new_bsuid:
+        enrolled_at = None
+    elif new_bsuid != old_bsuid or not enrolled_at:
+        enrolled_at = sql_datetime_now()
+
+    keep_state = existing is not None and not identity_changed
+    last_user_message_at = existing.last_user_message_at if keep_state else None
+    last_seen_at = existing.last_seen_at if keep_state else None
+    opted_out_at = existing.opted_out_at if keep_state else None
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO whatsapp_user_bindings (
+                user_id, bootstrap_phone_number, bsuid, send_id, username,
+                opted_out_at, last_user_message_at, enrolled_at, last_seen_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                bootstrap_phone_number = excluded.bootstrap_phone_number,
+                bsuid = excluded.bsuid,
+                send_id = excluded.send_id,
+                username = excluded.username,
+                opted_out_at = excluded.opted_out_at,
+                last_user_message_at = excluded.last_user_message_at,
+                enrolled_at = excluded.enrolled_at,
+                last_seen_at = excluded.last_seen_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id, number, new_bsuid, new_send_id, new_username,
+                opted_out_at, last_user_message_at, enrolled_at, last_seen_at,
+                sql_datetime_now(),
+            ),
+        )
+    except sqlite3.IntegrityError as exc:
+        _raise_whatsapp_conflict(exc)
+
+    binding = get_whatsapp_binding(conn, user_id)
+    assert binding is not None  # the row was just written
+    return binding
+
+
+def reset_whatsapp_identity(
+    conn: sqlite3.Connection, user_id: str
+) -> WhatsAppBinding:
+    """Clear the learned identity, keeping the operator's bootstrap number.
+
+    Refuses a binding with no bootstrap number left, because the result would
+    be a row naming a user and no way to reach or recognise them — which is
+    `clear_whatsapp_binding`, said less clearly.
+    """
+    existing = get_whatsapp_binding(conn, user_id)
+    if existing is None:
+        raise ValueError(f"no WhatsApp binding for {user_id!r}")
+    if not existing.bootstrap_phone_number:
+        raise ValueError(
+            "a WhatsApp identity reset needs a bootstrap phone number to keep; "
+            "use --clear-whatsapp to remove the binding instead"
+        )
+    # The same set `set_whatsapp_binding` discards on an identity change, and
+    # for the same reason. `last_user_message_at` in particular: it is the only
+    # input to the 24-hour service window, so leaving it would let the next
+    # holder of this binding be messaged without having written in.
+    conn.execute(
+        """
+        UPDATE whatsapp_user_bindings
+           SET bsuid = '', send_id = '', username = '',
+               enrolled_at = NULL, last_user_message_at = NULL,
+               last_seen_at = NULL, opted_out_at = NULL,
+               updated_at = ?
+         WHERE user_id = ?
+        """,
+        (sql_datetime_now(), user_id),
+    )
+    binding = get_whatsapp_binding(conn, user_id)
+    assert binding is not None
+    return binding
+
+
+def clear_whatsapp_binding(conn: sqlite3.Connection, user_id: str) -> bool:
+    """Remove the whole binding. True when a row went."""
+    cur = conn.execute(
+        "DELETE FROM whatsapp_user_bindings WHERE user_id = ?", (user_id,),
+    )
+    return cur.rowcount > 0
+
+
+def get_whatsapp_binding_by_bsuid(
+    conn: sqlite3.Connection, bsuid: str
+) -> WhatsAppBinding | None:
+    """The binding this durable identity belongs to.
+
+    The only lookup an authenticated inbound event may resolve a principal
+    with. `''` matches nothing rather than matching every unbound row — the
+    partial index leaves the column empty for each user with no WhatsApp
+    identity yet, so a truthiness slip here would resolve an unknown sender to
+    whichever of them sorted first.
+    """
+    if not bsuid:
+        return None
+    row = conn.execute(
+        "SELECT * FROM whatsapp_user_bindings WHERE bsuid = ?", (bsuid,),
+    ).fetchone()
+    return None if row is None else _whatsapp_binding_from_row(row)
+
+
+def get_whatsapp_binding_by_phone(
+    conn: sqlite3.Connection, phone_number: str
+) -> WhatsAppBinding | None:
+    """The binding an operator assigned this bootstrap number to.
+
+    Enrollment only. A number is never sufficient identity on its own — see
+    `latch_whatsapp_bsuid` and the caller's recycled-number branch — and `''`
+    matches nothing, for the reason above.
+    """
+    if not phone_number:
+        return None
+    row = conn.execute(
+        "SELECT * FROM whatsapp_user_bindings WHERE bootstrap_phone_number = ?",
+        (phone_number,),
+    ).fetchone()
+    return None if row is None else _whatsapp_binding_from_row(row)
+
+
+def latch_whatsapp_bsuid(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    bsuid: str,
+    send_id: str,
+    username: str = "",
+) -> bool:
+    """Bind a durable identity to a row that has none yet. True when this did.
+
+    Deliberately **not** `set_whatsapp_binding(bsuid=...)`, on two counts.
+    The write is conditional on `bsuid = ''` in the SQL rather than on a value
+    read a moment earlier, so two workers latching the same row concurrently
+    produce one winner and one `False` — the loser fails closed rather than
+    overwriting an identity that was latched between its read and its write.
+    And a `False` is the *only* safe answer for a row that already carries a
+    BSUID: reaching that state means the number was recycled or the identity
+    changed under us, which is a decision for the caller and an operator, never
+    a rebind.
+
+    A `sqlite3.IntegrityError` still escapes, and must: it means another user
+    already holds this BSUID or send id, and the partial unique indexes are
+    what the whole enrollment story rests on.
+    """
+    if not bsuid:
+        return False
+    cur = conn.execute(
+        """
+        UPDATE whatsapp_user_bindings
+           SET bsuid = ?, send_id = ?, username = ?,
+               enrolled_at = ?, last_seen_at = ?, updated_at = ?
+         WHERE user_id = ? AND bsuid = ''
+        """,
+        (
+            bsuid, send_id, username,
+            sql_datetime_now(), sql_datetime_now(), sql_datetime_now(),
+            user_id,
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def touch_whatsapp_binding(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    send_id: str | None = None,
+    username: str | None = None,
+    last_seen_at: str,
+    last_user_message_at: str | None = None,
+) -> bool:
+    """Record what an authenticated inbound event taught us about a binding.
+
+    Returns whether the `send_id` ended up as the caller asked. Read it: a
+    `False` means another user's row already holds that destination, which is
+    an operator's problem rather than this message's.
+
+    Not `set_whatsapp_binding`: that one treats any change to the number or the
+    BSUID as an identity change and discards the window, the opt-out and the
+    send id, which is right for an operator command and wrong for every
+    ordinary message. This writes only the non-authoritative columns, and
+    touches neither of the two the identity is made of.
+
+    **`send_id` carries a partial unique index, so this write cannot be
+    unconditional.** It is set on every authenticated message, and the ordinary
+    inbound path's only answer to an exception is the route's retryable 503 —
+    so a plain `COALESCE(?, send_id)` colliding with another user's stale
+    destination would raise, 503, and be redelivered by Meta against the same
+    deterministic failure for ever, with no disposition row, no alert and
+    nothing in the inbox. `latch_whatsapp_bsuid`'s caller catches that
+    `IntegrityError` and fails the event closed; this path must not fail the
+    event at all, because the sender is a legitimate authenticated user whose
+    messages would otherwise stop working over a row that is not theirs. So the
+    conflict is resolved in the SQL — the column keeps its old value, the rest
+    of the touch lands, and the caller alerts. The outbound side then falls
+    back to the bootstrap number, which is what that column is for.
+
+    The check is a correlated `EXISTS` rather than a `SELECT` above the
+    `UPDATE` so it holds for a caller outside a transaction too. The webhook
+    holds `BEGIN IMMEDIATE` and would be safe either way; a later caller that
+    does not would reintroduce exactly the raise this exists to prevent.
+
+    `last_user_message_at` is advanced by a **SQL** comparison rather than a
+    read-modify-write, because it is the sole input to the 24-hour service
+    window and the value the caller holds may be stale by the time it writes.
+    `MAX` over the stored value is what makes a replayed or delayed event
+    unable to move the window backwards; the caller has already clamped the
+    other direction. It is the scalar `MAX`, not the aggregate: two arguments.
+    """
+    conn.execute(
+        """
+        UPDATE whatsapp_user_bindings
+           SET send_id = CASE
+                   WHEN ?1 IS NULL OR ?1 = '' THEN send_id
+                   WHEN EXISTS (
+                       SELECT 1 FROM whatsapp_user_bindings other
+                        WHERE other.send_id = ?1 AND other.user_id <> ?7
+                   ) THEN send_id
+                   ELSE ?1
+               END,
+               username = COALESCE(?2, username),
+               last_seen_at = ?3,
+               last_user_message_at = CASE
+                   WHEN ?4 IS NULL THEN last_user_message_at
+                   ELSE MAX(COALESCE(last_user_message_at, ''), ?4)
+               END,
+               updated_at = ?6
+         WHERE user_id = ?7
+        """,
+        (
+            send_id, username, last_seen_at,
+            last_user_message_at, last_user_message_at,
+            sql_datetime_now(), user_id,
+        ),
+    )
+    if send_id is None or send_id == "":
+        return True
+    row = conn.execute(
+        "SELECT send_id FROM whatsapp_user_bindings WHERE user_id = ?", (user_id,),
+    ).fetchone()
+    return row is not None and row["send_id"] == send_id
+
+
+def set_whatsapp_opt_out(
+    conn: sqlite3.Connection, user_id: str, opted_out: bool
+) -> None:
+    """STOP and START, stored on the binding rather than by phone number.
+
+    SMS keys its opt-out table on the number, because a number is all a carrier
+    gives it. Here the durable identity is the BSUID and the number is a
+    bootstrap hint that may be absent altogether, so the state belongs on the
+    row it applies to — and `set_whatsapp_binding` already clears it on an
+    identity change, so a recycled line does not inherit the previous holder's
+    opt-out.
+    """
+    conn.execute(
+        "UPDATE whatsapp_user_bindings SET opted_out_at = ?, updated_at = ? "
+        "WHERE user_id = ?",
+        (sql_datetime_now() if opted_out else None, sql_datetime_now(), user_id),
+    )
+
+
+def whatsapp_billing_block(
+    conn: sqlite3.Connection,
+) -> WhatsAppBillingBlock | None:
+    """The open billable circuit, or `None` while it has never tripped."""
+    row = conn.execute(
+        "SELECT billing_blocked_at, billing_message_id, updated_at "
+        "FROM whatsapp_runtime WHERE singleton = 1"
+    ).fetchone()
+    if row is None or not row["billing_blocked_at"]:
+        return None
+    return WhatsAppBillingBlock(
+        billing_blocked_at=row["billing_blocked_at"],
+        billing_message_id=row["billing_message_id"],
+        updated_at=row["updated_at"] or "",
+    )
+
+
+def block_whatsapp_billing(
+    conn: sqlite3.Connection, message_id: str | None
+) -> bool:
+    """Trip the circuit on the first billable status. True when this call did.
+
+    The first message id is kept, not the latest: it is the evidence an
+    operator takes to Meta billing, and a later status overwriting it would
+    replace the observation that opened the circuit with one made after every
+    send was already blocked.
+    """
+    now = sql_datetime_now()
+    cur = conn.execute(
+        """
+        INSERT INTO whatsapp_runtime (
+            singleton, billing_blocked_at, billing_message_id, updated_at
+        ) VALUES (1, ?, ?, ?)
+        ON CONFLICT(singleton) DO UPDATE SET
+            billing_blocked_at = COALESCE(whatsapp_runtime.billing_blocked_at, excluded.billing_blocked_at),
+            billing_message_id = COALESCE(whatsapp_runtime.billing_message_id, excluded.billing_message_id),
+            updated_at = excluded.updated_at
+         WHERE whatsapp_runtime.billing_blocked_at IS NULL
+        """,
+        (now, message_id, now),
+    )
+    return cur.rowcount > 0
+
+
+def clear_whatsapp_billing_block(conn: sqlite3.Connection) -> bool:
+    """Close the circuit after the operator has checked Meta billing.
+
+    True when a block was open. The evidence goes with it: keeping a stale
+    message id beside a closed circuit reads as a block that is still in force.
+    """
+    cur = conn.execute(
+        """
+        UPDATE whatsapp_runtime
+           SET billing_blocked_at = NULL, billing_message_id = NULL, updated_at = ?
+         WHERE singleton = 1 AND billing_blocked_at IS NOT NULL
+        """,
+        (sql_datetime_now(),),
+    )
+    return cur.rowcount > 0

@@ -433,6 +433,26 @@ services:
       ISTOTA_SMS_TELNYX_API_KEY: ${ISTOTA_SMS_TELNYX_API_KEY:-}
       ISTOTA_SMS_TELNYX_PUBLIC_KEY: ${ISTOTA_SMS_TELNYX_PUBLIC_KEY:-}
       ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID: ${ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID:-}
+      # WhatsApp through Meta's hosted Cloud API (optional). One business
+      # phone number, direct rather than through a Business Solution
+      # Provider. The three credentials are the access token, the app secret
+      # that signs every webhook body, and the verify token Meta echoes on
+      # the subscription handshake.
+      ISTOTA_WHATSAPP_ENABLED: ${ISTOTA_WHATSAPP_ENABLED:-false}
+      ISTOTA_WHATSAPP_WABA_ID: ${ISTOTA_WHATSAPP_WABA_ID:-}
+      ISTOTA_WHATSAPP_PHONE_NUMBER_ID: ${ISTOTA_WHATSAPP_PHONE_NUMBER_ID:-}
+      ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER: ${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER:-}
+      ISTOTA_WHATSAPP_ACCESS_TOKEN: ${ISTOTA_WHATSAPP_ACCESS_TOKEN:-}
+      ISTOTA_WHATSAPP_APP_SECRET: ${ISTOTA_WHATSAPP_APP_SECRET:-}
+      ISTOTA_WHATSAPP_VERIFY_TOKEN: ${ISTOTA_WHATSAPP_VERIFY_TOKEN:-}
+      ISTOTA_WHATSAPP_GRAPH_API_VERSION: ${ISTOTA_WHATSAPP_GRAPH_API_VERSION:-}
+      ISTOTA_WHATSAPP_BUSINESS_TIMEZONE: ${ISTOTA_WHATSAPP_BUSINESS_TIMEZONE:-UTC}
+      ISTOTA_WHATSAPP_REQUEST_TIMEOUT_SECONDS: ${ISTOTA_WHATSAPP_REQUEST_TIMEOUT_SECONDS:-10}
+      ISTOTA_WHATSAPP_BILLING_POLICY: ${ISTOTA_WHATSAPP_BILLING_POLICY:-free_guard}
+      ISTOTA_WHATSAPP_MONTHLY_SERVICE_ATTEMPT_LIMIT: ${ISTOTA_WHATSAPP_MONTHLY_SERVICE_ATTEMPT_LIMIT:-900}
+      ISTOTA_WHATSAPP_TEMPLATE_ENABLED: ${ISTOTA_WHATSAPP_TEMPLATE_ENABLED:-false}
+      ISTOTA_WHATSAPP_TEMPLATE_NAME: ${ISTOTA_WHATSAPP_TEMPLATE_NAME:-}
+      ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE: ${ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE:-en_US}
       # Feeds (RSS / Atom / Tumblr / Are.na — native, in-process)
       ISTOTA_FEEDS_ENABLED: ${ISTOTA_FEEDS_ENABLED:-true}
       # Money / accounting (beancount). Monarch creds optional; only
@@ -813,6 +833,7 @@ services:
     profiles:
       - location
       - sms
+      - whatsapp
     depends_on:
       nextcloud:
         condition: service_healthy
@@ -850,7 +871,14 @@ services:
         fi
         mkdir -p /app/config
         ln -sf /data/config/config.toml /app/config/config.toml
-        exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}"
+        # --no-access-log, because one route's query string is a credential.
+        # Meta sends the WhatsApp verify token as `?hub.verify_token=` on the
+        # GET subscription handshake, and uvicorn's default access formatter
+        # renders the path *with* the query string — so the container log
+        # would hold the token however nginx is configured. nginx is told not
+        # to log that path too; this is the half nginx cannot reach. The
+        # receiver logs each event itself under a stable name, without it.
+        exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
     command: []
     restart: unless-stopped
 

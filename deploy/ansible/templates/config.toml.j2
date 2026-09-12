@@ -406,6 +406,34 @@ public_key = "{{ istota_sms_telnyx_public_key | istota_toml_escape }}"
 messaging_profile_id = "{{ istota_sms_telnyx_messaging_profile_id | istota_toml_escape }}"
 {% endif %}
 
+{# WhatsApp through Meta's Cloud API. The three credentials go through
+   secrets.env under istota_use_environment_file, like every other secret
+   here: config.toml is world-readable to the daemon user and reaches a
+   task's config path, while the env file is root-owned and handed to the
+   units by systemd. Missing credentials are reported by doctor rather than
+   raised at load, so a role task running before secrets.env is readable does
+   not fail the play (ISSUE-058). #}
+[whatsapp]
+enabled = {{ istota_whatsapp_enabled | lower }}
+waba_id = "{{ istota_whatsapp_waba_id | istota_toml_escape }}"
+phone_number_id = "{{ istota_whatsapp_phone_number_id | istota_toml_escape }}"
+business_phone_number = "{{ istota_whatsapp_business_phone_number | istota_toml_escape }}"
+graph_api_version = "{{ istota_whatsapp_graph_api_version | istota_toml_escape }}"
+business_timezone = "{{ istota_whatsapp_business_timezone | istota_toml_escape }}"
+request_timeout_seconds = {{ istota_whatsapp_request_timeout_seconds }}
+billing_policy = "{{ istota_whatsapp_billing_policy | istota_toml_escape }}"
+monthly_service_attempt_limit = {{ istota_whatsapp_monthly_service_attempt_limit }}
+{% if not istota_use_environment_file %}
+access_token = "{{ istota_whatsapp_access_token | istota_toml_escape }}"
+app_secret = "{{ istota_whatsapp_app_secret | istota_toml_escape }}"
+verify_token = "{{ istota_whatsapp_verify_token | istota_toml_escape }}"
+{% endif %}
+
+[whatsapp.proactive_template]
+enabled = {{ istota_whatsapp_template_enabled | lower }}
+name = "{{ istota_whatsapp_template_name | istota_toml_escape }}"
+language = "{{ istota_whatsapp_template_language | istota_toml_escape }}"
+
 {# Model alias registry ([models.aliases]) — tiers (fast/general/smart) and
    shortcuts (opus/sonnet/haiku), overlaying the code-shipped defaults, resolved
    per active brain. istota_models_aliases is authoritative: a bare-string value is

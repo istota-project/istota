@@ -615,6 +615,24 @@ istota_experimental_features: []
 #     # or recycled number is taken out of service from a deploy. One number per
 #     # user — two users sharing one fails the deploy on a unique index.
 #     sms_phone_number: "+15551234567"
+#     # The bootstrap WhatsApp number for this user, and a CREDENTIAL for the
+#     # same reason sms_phone_number is: an authenticated message from the
+#     # person behind it creates tasks and answers confirmations as this user.
+#     # It is used only for the *first* binding and as an outbound fallback —
+#     # the durable identity is the BSUID Meta sends, which istota latches on
+#     # that first message. Omit the key to leave a CLI-set binding alone;
+#     # `""` clears the whole binding, which is how a lost or recycled number
+#     # is taken out of service from a deploy. One number per user.
+#     #
+#     # Changing this number discards everything learned about the previous
+#     # holder, the 24-hour service window included, so istota cannot message
+#     # a stranger who never wrote in.
+#     whatsapp_number: "+15551234567"
+#     # Optional, for a user with a WhatsApp username and no reachable phone
+#     # number: their BSUID, which the operator reads off an inbound event.
+#     # Supplied alongside whatsapp_number it is explicit enrollment, and the
+#     # pair skips the first-message latch entirely.
+#     whatsapp_bsuid: "US.1234567890"
 #     trusted_email_senders:        # skips the inbound gate and the outbound
 #       - "*@example.com"           # approval hold. Domain wildcard or exact
 #       - "bob@example.net"         # match.
@@ -967,6 +985,36 @@ istota_sms_twilio_messaging_service_sid: ""
 istota_sms_telnyx_api_key: ""
 istota_sms_telnyx_public_key: ""
 istota_sms_telnyx_messaging_profile_id: ""
+
+# WhatsApp through Meta's hosted Cloud API, direct rather than through a
+# Business Solution Provider. One business phone number, text only, and
+# outside the room model. Setup is docs/features/whatsapp.md; the callback
+# URL to register with Meta is https://{{ istota_hostname }}/webhooks/whatsapp.
+#
+# Unlike SMS there is no complete-but-inactive shape: the routes are mounted
+# and the account is live only while istota_whatsapp_enabled is true.
+istota_whatsapp_enabled: false
+istota_whatsapp_waba_id: ""                  # decimal WABA id, not a number
+istota_whatsapp_phone_number_id: ""          # decimal phone number id
+istota_whatsapp_business_phone_number: ""    # exact E.164
+istota_whatsapp_graph_api_version: ""        # empty follows the pinned PyWa version
+istota_whatsapp_business_timezone: "UTC"     # IANA zone the quota month uses
+istota_whatsapp_request_timeout_seconds: 10
+# free_guard sends no templates, caps its own service-message attempts, and
+# blocks every later send the first time Meta reports one as billable.
+# allow_paid is the explicit opt-in to spending; 0 is no local cap there.
+istota_whatsapp_billing_policy: "free_guard"
+istota_whatsapp_monthly_service_attempt_limit: 900
+# One approved Meta utility template for delivering a result after the
+# 24-hour service window closes. Paid, so allow_paid only.
+istota_whatsapp_template_enabled: false
+istota_whatsapp_template_name: ""
+istota_whatsapp_template_language: "en_US"
+# Vault these three. They reach the units through secrets.env, never
+# config.toml, while istota_use_environment_file is on.
+istota_whatsapp_access_token: ""
+istota_whatsapp_app_secret: ""
+istota_whatsapp_verify_token: ""
 
 # Authenticated web interface (Nextcloud built-in OAuth2). Set up the client in
 # NC Settings → Security → OAuth 2.0 clients, then put the client_id/secret below

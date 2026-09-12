@@ -11,11 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - You can now text Istota. SMS is a task and notification surface through either Twilio or Telnyx: a phone number is bound to one user, replies stay outside Talk and web rooms, and each result is capped to one provider message within a segment budget you set. Opt-out state is keyed by number, so it survives a provider change.
 - Signed provider callbacks are served through the shared webhook receiver on Docker, the combined local server, and the Ansible deployment. `docs/features/sms.md` covers both providers and how to switch between them.
+- You can now message Istota on WhatsApp. It talks to Meta's Cloud API directly rather than through a reseller: one business phone number, private text messages, and confirmation questions with Yes and No buttons. A WhatsApp exchange stays outside Talk and web rooms, and a reply is one message rather than several. Enrollment is an operator action — `istota user ensure --name alice --whatsapp-number +15551234567` — and the durable identity is the business-scoped id Meta sends on the first message, so a recycled phone number cannot take over an account.
+
+- WhatsApp defaults to a free-biased setup rather than being described as free. It sends no templates, caps its own service messages at 900 attempts per calendar month, and blocks every later send the first time Meta reports one as billable. That cap is conservative only when the business number is dedicated to Istota; a coexistence client or another application spends Meta's allowance without passing through it. `billing_policy = "allow_paid"` is the explicit opt-in to spending, and it is what unlocks the one approved utility template that can carry a result after the 24-hour service window closes. `docs/features/whatsapp.md` covers the Meta setup for the test number and for both production modes.
+
 - The Ansible role binds phone numbers: `sms_phone_number` under `istota_users` sets a user's SMS identity, and `""` revokes it. The deployment-level `[sms]` settings were already in the role, so a number had to be bound by hand over SSH and a rebuilt host came back with none.
 
 ### Changed
 
 - **Upgrade note:** the Docker webhook receiver is now reached through nginx at `/webhooks/` instead of binding its own host port. An Overland client pointed at `http://<host>:8765/webhooks/location` needs repointing to `https://<your-domain>/webhooks/location`.
+
+- **Upgrade note:** a reverse proxy you maintain yourself needs two rules for `/webhooks/whatsapp`. Meta sends the verification token as a query value, so that path's access log has to be off or its format has to log the path without the query string. And its request-body limit has to sit above Istota's own 256 KiB so an oversized body is answered by Istota rather than by an HTML error page Meta will retry against; the shipped Docker and Ansible configurations use 512 KiB. Both are in place for a deployment that uses either of those.
+
+- The webhook receiver no longer writes an access log line per request. It logged the full request line including the query string, which for the WhatsApp verification handshake means the token — so silencing the proxy alone was not enough. Each webhook event is still recorded with its own log line, without the token. A receiver you start yourself needs `--no-access-log`.
 
 ## [0.41.1] - 2026-09-09
 

@@ -1202,6 +1202,49 @@ class SmsConfig:
 
 
 @dataclass
+class WhatsAppTemplateConfig:
+    """The one approved utility template a paid deployment may send.
+
+    Off by default and valid only under ``billing_policy = "allow_paid"``: a
+    template is a billed, reviewed, language-specific Meta account object that
+    Meta may pause or reclassify, so istota neither creates one nor guesses at
+    its category, language or wording.
+    """
+    enabled: bool = False
+    name: str = ""
+    language: str = "en_US"
+
+
+@dataclass
+class WhatsAppConfig:
+    """One Meta-hosted WhatsApp Cloud API business number.
+
+    ``graph_api_version = ""`` means the version pinned by the installed PyWa
+    release. An explicit value exists for a controlled migration, not for
+    permanently avoiding an API upgrade.
+
+    ``billing_policy`` is the only field here that decides whether a send can
+    ever cost money, which is why an unrecognised value fails the config load
+    in both directions rather than resolving to a default.
+    """
+    enabled: bool = False
+    waba_id: str = ""
+    phone_number_id: str = ""
+    business_phone_number: str = ""
+    access_token: str = ""
+    app_secret: str = ""
+    verify_token: str = ""
+    graph_api_version: str = ""
+    business_timezone: str = "UTC"
+    request_timeout_seconds: int = 10
+    billing_policy: str = "free_guard"
+    monthly_service_attempt_limit: int = 900
+    proactive_template: WhatsAppTemplateConfig = field(
+        default_factory=WhatsAppTemplateConfig,
+    )
+
+
+@dataclass
 class CaldavConfig:
     """Explicit CalDAV override (``[caldav]``).
 
@@ -1815,6 +1858,7 @@ class Config:
     talk: TalkConfig = field(default_factory=TalkConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
     sms: SmsConfig = field(default_factory=SmsConfig)
+    whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
@@ -3787,6 +3831,9 @@ def load_config(config_path: Path | None = None) -> Config:
             "sms.telnyx",
             "messaging_profile_id",
         ),
+        ("ISTOTA_WHATSAPP_ACCESS_TOKEN", "whatsapp", "access_token"),
+        ("ISTOTA_WHATSAPP_APP_SECRET", "whatsapp", "app_secret"),
+        ("ISTOTA_WHATSAPP_VERIFY_TOKEN", "whatsapp", "verify_token"),
     ]
     for env_var, section_path, field_name in _env_secret_overrides:
         val = os.environ.get(env_var)
@@ -3934,6 +3981,7 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_claude_code_brain(config)
     _validate_advisor_model(config)
     _validate_sms(config)
+    _validate_whatsapp(config)
     _validate_forge_clis(config)
 
     return config
@@ -4082,6 +4130,185 @@ def _validate_sms(config: Config) -> None:
     errors = sms_structural_config_errors(config)
     if errors:
         raise ValueError("Invalid SMS configuration: " + "; ".join(errors))
+
+
+WHATSAPP_BILLING_POLICIES = ("free_guard", "allow_paid")
+WHATSAPP_FREE_GUARD_MAX_ATTEMPTS = 1000
+"""Headroom below Meta's announced 1,000 free service messages per business
+phone number per month. The cap bounds istota's own *attempts*; it cannot see a
+send made from a coexistence client or another application, so it is
+conservative rather than a reproduction of Meta's invoice."""
+
+_WHATSAPP_META_ID_RE = re.compile(r"^[0-9]{1,32}$")
+# `v25` and `v25.0` both. The Graph API's own versions carry a minor component
+# (PyWa 4.4 pins `25.0`), so requiring a bare integer would refuse every real
+# version string; the `v` prefix is what the spec asks for and is kept.
+_WHATSAPP_GRAPH_VERSION_RE = re.compile(r"^v[0-9]+(\.[0-9]+)?$")
+# Meta template names are lowercase letters, digits and underscores.
+_WHATSAPP_TEMPLATE_NAME_RE = re.compile(r"^[a-z0-9_]{1,512}$")
+# `en`, `en_US`, `zh_HK`, `fil`. Deliberately loose: Meta adds locales, and a
+# refusal here would block an approved template for a spelling we had not seen.
+_WHATSAPP_TEMPLATE_LANGUAGE_RE = re.compile(r"^[a-z]{2,3}([_-][A-Za-z0-9]{2,8})?$")
+
+WHATSAPP_CREDENTIAL_FIELDS = ("access_token", "app_secret", "verify_token")
+
+
+def _is_valid_timezone(name: object) -> bool:
+    """Whether `name` resolves to a zone, without raising for any input.
+
+    `OSError` is in the tuple because `ZoneInfo` resolves the name as a *path*
+    under the tzdata directories, so a 300-character value raises
+    `ENAMETOOLONG` rather than `ZoneInfoNotFoundError` — and this runs inside
+    `load_config`, where that escaped as a traceback carrying the venv path.
+    `ZoneInfoNotFoundError` subclasses `KeyError` and is named for the reader.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(str(name))
+    except (ZoneInfoNotFoundError, ValueError, KeyError, OSError):
+        return False
+    return True
+
+
+def whatsapp_webhooks_enabled(config: Config) -> bool:
+    """Whether a process has to serve ``/webhooks/whatsapp``.
+
+    The sibling of :func:`sms_webhooks_enabled`, and deliberately the simpler
+    of the two. SMS keeps its routes mounted while *disabled* whenever a
+    complete inactive provider block remains, so a delivery callback for a
+    message sent before a provider switch still authenticates. WhatsApp has
+    one account rather than two adapters, and both handlers refuse every
+    request while ``enabled`` is false — so mounting them on a disabled
+    deployment would answer 403 where the absence answers 404, and would keep
+    no late callback alive. Turning the block off is turning the account off.
+
+    Named rather than inlined because four places have to agree on it: this
+    process gate, ``serve._maybe_mount_webhooks``, the Ansible role's
+    ``Resolve webhook receiver need``, and the ``whatsapp`` compose profile.
+    """
+    return bool(config.whatsapp.enabled)
+
+
+def whatsapp_missing_credentials(config: Config) -> tuple[str, ...]:
+    """Names of the blank Meta secrets. The value is never read, only its
+    emptiness — a caller rendering this into a log or a check result must be
+    able to name the gap without holding the credential."""
+    return tuple(
+        name for name in WHATSAPP_CREDENTIAL_FIELDS
+        if not str(getattr(config.whatsapp, name, "") or "").strip()
+    )
+
+
+def whatsapp_credential_errors(config: Config) -> list[str]:
+    """Report the three Meta secrets an enabled transport needs but has not got.
+
+    Presence is deliberately not a load-time error, for exactly the reason
+    :func:`sms_credential_errors` gives: under ``istota_use_environment_file``
+    the Ansible role renders these empty on purpose and delivers them through
+    ``/etc/<ns>/secrets.env``, which systemd hands to the units and which a
+    plain ``command:``/``script:`` task cannot read — so raising here fails the
+    play on a config the daemon it is provisioning for would load fine. Doctor
+    is the reporting surface, and the transport refuses to start without the
+    app secret at use time.
+    """
+    if not config.whatsapp.enabled:
+        return []
+    missing = whatsapp_missing_credentials(config)
+    if not missing:
+        return []
+    return ["missing credentials: " + ", ".join(missing)]
+
+
+def whatsapp_structural_config_errors(config: Config) -> list[str]:
+    """Return the WhatsApp errors that are facts about ``config.toml`` alone.
+
+    These are what :func:`load_config` raises on: every value here is visible
+    to any caller that can read the config file, so no deployment shape can
+    make one look absent when it is set.
+    """
+    whatsapp = config.whatsapp
+    errors: list[str] = []
+
+    # Checked whether or not the transport is enabled, on the `sms.provider`
+    # precedent: a misspelling in a disabled block otherwise loads cleanly and
+    # then decides, at the first send on the day someone enables it, whether
+    # money may be spent.
+    if whatsapp.billing_policy not in WHATSAPP_BILLING_POLICIES:
+        errors.append(
+            "billing_policy must be one of " + ", ".join(WHATSAPP_BILLING_POLICIES)
+        )
+    if whatsapp.graph_api_version and not _WHATSAPP_GRAPH_VERSION_RE.fullmatch(
+        whatsapp.graph_api_version
+    ):
+        errors.append(
+            "graph_api_version must be empty (the installed PyWa release's "
+            "pin) or a v-prefixed Graph API version such as v23.0"
+        )
+
+    template = whatsapp.proactive_template
+    if template.enabled:
+        if whatsapp.billing_policy != "allow_paid":
+            errors.append(
+                'proactive_template.enabled requires billing_policy = "allow_paid"'
+            )
+        if not _WHATSAPP_TEMPLATE_NAME_RE.fullmatch(template.name):
+            errors.append(
+                "proactive_template.name must be a Meta template name "
+                "(lowercase letters, digits and underscores)"
+            )
+        if not _WHATSAPP_TEMPLATE_LANGUAGE_RE.fullmatch(template.language):
+            errors.append(
+                "proactive_template.language must be an exact Meta language "
+                "code such as en_US"
+            )
+
+    if not whatsapp.enabled:
+        return errors
+
+    if not _WHATSAPP_META_ID_RE.fullmatch(whatsapp.waba_id):
+        errors.append("waba_id must be the decimal WABA id from the Meta app")
+    if not _WHATSAPP_META_ID_RE.fullmatch(whatsapp.phone_number_id):
+        errors.append(
+            "phone_number_id must be the decimal business phone number id "
+            "from the Meta app, not the phone number itself"
+        )
+    if not _is_e164(whatsapp.business_phone_number):
+        errors.append("business_phone_number must be an exact E.164 number")
+    if not _is_valid_timezone(whatsapp.business_timezone):
+        errors.append("business_timezone must be a valid IANA timezone name")
+    if not 1 <= whatsapp.request_timeout_seconds <= 30:
+        errors.append("request_timeout_seconds must be between 1 and 30")
+
+    limit = whatsapp.monthly_service_attempt_limit
+    if whatsapp.billing_policy == "free_guard":
+        if not 1 <= limit <= WHATSAPP_FREE_GUARD_MAX_ATTEMPTS:
+            errors.append(
+                "monthly_service_attempt_limit must be between 1 and "
+                f"{WHATSAPP_FREE_GUARD_MAX_ATTEMPTS} under free_guard"
+            )
+    elif limit < 0:
+        errors.append(
+            "monthly_service_attempt_limit must be 0 (unlimited) or positive"
+        )
+
+    return errors
+
+
+def whatsapp_config_errors(config: Config) -> list[str]:
+    """Every local WhatsApp configuration error, for reporting surfaces.
+
+    Doctor's ``whatsapp.`` check is the reader. ``load_config`` deliberately
+    uses only :func:`whatsapp_structural_config_errors`; see
+    :func:`whatsapp_credential_errors`.
+    """
+    return whatsapp_structural_config_errors(config) + whatsapp_credential_errors(config)
+
+
+def _validate_whatsapp(config: Config) -> None:
+    errors = whatsapp_structural_config_errors(config)
+    if errors:
+        raise ValueError("Invalid WhatsApp configuration: " + "; ".join(errors))
 
 
 CONFIG_LOAD_CHECKS = (

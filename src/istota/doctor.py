@@ -6938,6 +6938,246 @@ def check_sms_twilio(config: "Config", probe: bool) -> CheckResult:
 def check_sms_telnyx(config: "Config", probe: bool) -> CheckResult:
     return _check_sms_provider(config, "telnyx")
 
+
+def check_whatsapp_common(config: "Config", probe: bool) -> CheckResult:
+    """Local WhatsApp readiness, with no claim about Meta's account state.
+
+    Everything this can answer is in the config file. Whether the token is
+    still valid, whether the WABA is subscribed to `messages`, whether the
+    number's quality is restricted and whether the template is approved,
+    paused or reclassified are all Meta account state, and only the opt-in
+    live check may ask about them. Saying "ready" here means the deployment is
+    correctly configured, not that a message will send.
+
+    Nothing here renders a value: the three secrets are named when missing and
+    never shown, and the business phone number is not printed at all — a
+    `CheckResult` reaches the boot log and the admin Health pane.
+    """
+    if not config.whatsapp.enabled:
+        return CheckResult("whatsapp.common", SKIP, "[whatsapp] enabled = false")
+
+    from .config import (
+        WHATSAPP_CREDENTIAL_FIELDS,
+        whatsapp_missing_credentials,
+        whatsapp_structural_config_errors,
+    )
+
+    structural = whatsapp_structural_config_errors(config)
+    missing = whatsapp_missing_credentials(config)
+    credential_remedy = (
+        "The three credentials travel through ISTOTA_WHATSAPP_ACCESS_TOKEN, "
+        "ISTOTA_WHATSAPP_APP_SECRET and ISTOTA_WHATSAPP_VERIFY_TOKEN; a shell "
+        "that has not sourced the deployment's environment file sees none of "
+        "them."
+    )
+    if structural or (missing and len(missing) < len(WHATSAPP_CREDENTIAL_FIELDS)):
+        errors = list(structural)
+        if missing:
+            errors.append("missing credentials: " + ", ".join(missing))
+        return CheckResult(
+            "whatsapp.common",
+            FAIL,
+            "; ".join(errors),
+            remedy=(
+                "Correct the local [whatsapp] values and reload the "
+                "configuration. " + credential_remedy
+            ),
+        )
+    if missing:
+        # All three absent is the shape the Ansible role renders on purpose:
+        # `config.toml` carries no secret and `secrets.env` delivers them to
+        # the units through `EnvironmentFile=`. An operator running `istota
+        # doctor` from their own shell is therefore reading an environment
+        # the daemon has and they do not, so a FAIL here would report a
+        # working deployment as broken — the shape `.claude/rules/doctor.md`
+        # records correcting twice. A partially-filled set above is a real
+        # mistake and still fails: no delivery mechanism supplies one of three.
+        return CheckResult(
+            "whatsapp.common",
+            WARN,
+            "no WhatsApp credentials are visible to this process; the "
+            "deployment may still hold them",
+            remedy=credential_remedy,
+        )
+
+    whatsapp = config.whatsapp
+    detail = (
+        f"local configuration is ready under {whatsapp.billing_policy}; "
+        f"quota month in {whatsapp.business_timezone}"
+    )
+    if whatsapp.billing_policy == "free_guard":
+        detail += (
+            f", at most {whatsapp.monthly_service_attempt_limit} service "
+            "attempts a month and no templates"
+        )
+    template = whatsapp.proactive_template
+    if template.enabled:
+        # Configured state only. Meta owns approval, pause and category, so a
+        # word like "approved" here would be a claim this check cannot make.
+        detail += (
+            f"; proactive template {template.name} ({template.language}) is "
+            "configured — its Meta status was not read"
+        )
+    else:
+        detail += "; no proactive template configured"
+    return CheckResult("whatsapp.common", OK, detail)
+
+
+def _whatsapp_template_attempts(conn, month: str) -> int:
+    """Claimed template rows in ``month``, for reporting and nothing else.
+
+    Not in `outbound` beside its service sibling, because nothing there reads
+    it: the cap bounds service attempts alone, so this number gates no send and
+    exists only so an operator can see the volume of the one path that no local
+    ceiling bounds.
+    """
+    return conn.execute(
+        "SELECT COUNT(*) FROM sent_whatsapp WHERE send_kind = 'template' "
+        "AND quota_month = ? AND claimed_at IS NOT NULL",
+        (month,),
+    ).fetchone()[0]
+
+
+def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
+    """Whether the billable circuit is open, and what this month has spent.
+
+    Two facts that live in the database rather than the config file, and that
+    a `whatsapp.common` reading `ready` says nothing about — an open circuit
+    refuses every send on a deployment whose configuration is perfect. The
+    surface is silent in that state by design, so something has to say so out
+    loud; the notification the circuit raises is one push at the moment it
+    trips, and this is what still answers a week later.
+
+    `WARN`, not `FAIL`: the circuit is the guard working, not a broken
+    install, and `istota doctor` exiting 1 over a deliberate protective trip
+    would train an operator to ignore the exit status.
+
+    Reads the database and spawns nothing, so it is safe under `probe=False`.
+    It reads through `sqlite_util.connect_read_only` and refuses a database
+    that is not there rather than opening one: a diagnostic that creates a
+    zero-byte file leaves behind exactly the state `check_framework_db` later
+    reports as corruption. Never raises — a ledger it cannot read is reported
+    as unanswered rather than as a closed circuit, since a reader must not
+    call a boundary open on a question it could not settle.
+    """
+    name = "whatsapp.billing"
+    if not config.whatsapp.enabled:
+        return CheckResult(name, SKIP, "[whatsapp] enabled = false")
+
+    import sqlite3
+
+    from . import db as _db
+    from .transport.whatsapp.outbound import (
+        attempt_limit,
+        service_attempts_used,
+        quota_month,
+    )
+
+    month = quota_month(config)
+    db_path = Path(config.db_path)
+    if not db_path.exists():
+        # `check_framework_db` already reports the absence and owns its remedy.
+        return CheckResult(name, SKIP, f"{db_path} does not exist")
+    unreadable = CheckResult(
+        name, WARN,
+        "the WhatsApp ledger could not be read, so the billable circuit was "
+        "not established",
+        remedy=(
+            "Check that the framework database is readable and migrated "
+            "(`istota init`)."
+        ),
+    )
+    conn = None
+    try:
+        conn = sqlite_util.connect_read_only(db_path)
+        # `connect_read_only` takes no `row_factory` argument and leaves the
+        # default tuple rows, while `whatsapp_billing_block` reads its row by
+        # column name — the two other readers here happen not to, which is why
+        # the omission passes as far as the first non-empty runtime row.
+        conn.row_factory = sqlite3.Row
+    except Exception:
+        return unreadable
+    # Two reads, two `try` blocks, because they fail for different reasons and
+    # only one of them may ever be lost: a missing `sent_whatsapp` column must
+    # not be reported as "the circuit is unknown", which is the alarming half,
+    # when the circuit was read and is shut.
+    try:
+        block = _db.whatsapp_billing_block(conn)
+    except Exception:
+        conn.close()
+        return unreadable
+    try:
+        used = service_attempts_used(conn, month)
+        templates = _whatsapp_template_attempts(conn, month)
+    except Exception:
+        used = templates = None
+    finally:
+        conn.close()
+
+    limit = attempt_limit(config)
+    if used is None:
+        spend = f"this month's attempts in {month} could not be counted"
+    else:
+        spend = f"{used} service attempts in {month}"
+        spend += f" of at most {limit}" if limit else " with no local cap"
+        if templates:
+            # Reported because it is the one unbounded money path here: the cap
+            # is named for service attempts and counts only those, so a paid
+            # deployment's template volume is visible nowhere else.
+            spend += f", plus {templates} template attempts, which the cap does not bound"
+    if block is None:
+        if used is not None and limit and used >= limit:
+            # The terminal state of the cap, and it is silent everywhere else:
+            # `is_whatsapp_configured` answers False from here, so the
+            # heartbeat skips the surface without writing an alert, and only a
+            # *task*-driven send still reaches `_claim` to record
+            # `budget_exhausted`. Reporting `OK` at 900 of 900 would leave a
+            # dead surface, an empty inbox and a green check.
+            return CheckResult(
+                name, WARN,
+                f"the monthly attempt cap is spent; {spend}",
+                remedy=(
+                    "WhatsApp sends resume when the WABA month turns over in "
+                    f"{config.whatsapp.business_timezone}. Raise [whatsapp] "
+                    "monthly_service_attempt_limit only after checking what "
+                    "Meta's own allowance has left."
+                ),
+            )
+        return CheckResult(name, OK, f"circuit closed; {spend}")
+
+    # The message id is fingerprinted, not printed: a `CheckResult` reaches the
+    # boot log and the admin Health pane, and the id names a private
+    # conversation. `istota whatsapp billing-status` prints it in full.
+    from .transport.whatsapp import message_fingerprint
+
+    opened = (
+        f"the billable circuit opened at {block.billing_blocked_at} "
+        f"(message {message_fingerprint(block.billing_message_id)})"
+    )
+    if config.whatsapp.billing_policy != "free_guard":
+        # Switching to `allow_paid` is one of the two documented ways to clear
+        # the circuit, so tripped-then-switched is a reachable state — and in
+        # it nothing reads the row: both `outbound._gate` and
+        # `is_whatsapp_configured` guard the block read on `free_guard`. A WARN
+        # here would be permanent, would assert a refusal that does not happen,
+        # and would prescribe the remedy already applied.
+        return CheckResult(
+            name, OK,
+            f"{opened}, and is not enforced under {config.whatsapp.billing_policy}; "
+            f"{spend}",
+        )
+    return CheckResult(
+        name, WARN,
+        f"{opened}; every WhatsApp send is refused. {spend}",
+        remedy=(
+            "Read `istota whatsapp billing-status` for the Meta message id, "
+            "check the Meta billing page, then run `istota whatsapp "
+            'billing-unblock`, or set [whatsapp] billing_policy = '
+            '"allow_paid" to accept charges.'
+        ),
+    )
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -6977,6 +7217,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("sms.common", check_sms_common),
     ("sms.twilio", check_sms_twilio),
     ("sms.telnyx", check_sms_telnyx),
+    ("whatsapp.common", check_whatsapp_common),
+    ("whatsapp.billing", check_whatsapp_billing),
     ("web.static", check_web_static),
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
@@ -7079,6 +7321,8 @@ CHECK_SCOPES: dict[str, str] = {
     "sms.common": DEPLOYMENT,
     "sms.twilio": DEPLOYMENT,
     "sms.telnyx": DEPLOYMENT,
+    "whatsapp.common": DEPLOYMENT,
+    "whatsapp.billing": DEPLOYMENT,
     "web.static": IMAGE,
     # Deployment, not image: it compares the bundle against the checkout it
     # was built from, and a bare `docker run` has no checkout.

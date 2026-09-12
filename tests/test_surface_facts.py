@@ -29,7 +29,7 @@ from tests.support.drift import source_of
 # enumeration is to state what they are and check each one; a list generated
 # from the same place the code reads would assert nothing.
 #
-# Eleven of these are values `tasks.source_type` actually holds. `playbook` is
+# Thirteen of these are values `tasks.source_type` actually holds. `playbook` is
 # not — every `playbook` literal in `src/` is a `memory_chunks.source_type`
 # (`executor._recall_playbooks`, `memory/sleep_cycle.py`) and no `create_task`
 # call passes it. It is kept because an extra unrecognised value costs one
@@ -39,10 +39,13 @@ from tests.support.drift import source_of
 SHIPPED_SOURCE_TYPES = (
     "briefing", "cli", "doctor", "email", "heartbeat", "istota_file",
     "playbook", "repl", "scheduled", "sms", "subtask", "talk", "web",
+    "whatsapp",
 )
 
-# The five of those that name a surface a task can originate on.
-ORIGIN_SURFACE_SOURCE_TYPES = ("email", "istota_file", "repl", "sms", "talk", "web")
+# The seven of those that name a surface a task can originate on.
+ORIGIN_SURFACE_SOURCE_TYPES = (
+    "email", "istota_file", "repl", "sms", "talk", "web", "whatsapp",
+)
 
 # Values a reader can be handed by a caller that read a column, parsed JSON, or
 # had nothing at all. None of them is a surface. The ids are spelled out rather
@@ -98,7 +101,9 @@ class TestTheTable:
         assert surfaces.is_room_member("email") is False
         assert surfaces.is_room_view("email") is False
 
-    @pytest.mark.parametrize("surface", ["ntfy", "istota_file", "repl", "sms"])
+    @pytest.mark.parametrize(
+        "surface", ["ntfy", "istota_file", "repl", "sms", "whatsapp"],
+    )
     def test_the_non_room_surfaces_answer_nothing(self, surface):
         assert surfaces.room_role(surface) is None
         assert surfaces.room_view(surface) is None
@@ -229,7 +234,7 @@ class TestOriginSurfaceForSourceType:
         # The defect this function exists to avoid, asserted rather than
         # described: `_surface_for_source_type` maps every non-surface source
         # type to "talk", so asking it the origin question flips eight of the
-        # twelve values enumerated above from "no surface" to "a room surface"
+        # fourteen values enumerated above from "no surface" to "a room surface"
         # — seven of them real task source types. At the confirmation gate
         # the predicate is negated, which is what suppressed the prompt on the
         # mirror leg for cron, briefing and heartbeat tasks. (The spec says six;
@@ -264,6 +269,7 @@ class TestTheTableCoversTheRegistry:
         config.talk.enabled = True
         config.email.enabled = True
         config.sms.enabled = True
+        config.whatsapp.enabled = True
         registry = make_registry(config)
         assert set(registry.names()) == set(surfaces.SURFACES)
 

@@ -754,6 +754,44 @@ api_key = ""
 public_key = ""
 messaging_profile_id = ""
 
+# WhatsApp through Meta's hosted Cloud API, used directly rather than through a
+# Business Solution Provider. One business phone number, text only, and never
+# part of a Talk or web room. `access_token`, `app_secret` and `verify_token`
+# are credentials: leave them empty here and deliver them through
+# ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN.
+#
+# `billing_policy` decides whether a send can ever cost money.
+#   free_guard — no templates at all, and at most
+#     `monthly_service_attempt_limit` service-message attempts per business
+#     phone number and calendar month (1..1000). This is conservative, not a
+#     guarantee: istota cannot see a message sent from a coexistence client or
+#     another application against the same Meta allowance.
+#   allow_paid — an explicit operator choice. 0 means no local cap.
+# `graph_api_version = ""` follows the version the installed PyWa release pins;
+# set `v23.0`-style only for a controlled migration.
+[whatsapp]
+enabled = false
+waba_id = ""                    # decimal WhatsApp Business Account id
+phone_number_id = ""            # decimal business phone number id, not the number
+business_phone_number = ""      # exact E.164, e.g. "+15551234567"
+access_token = ""
+app_secret = ""
+verify_token = ""
+graph_api_version = ""
+business_timezone = "UTC"       # IANA zone the monthly quota month is computed in
+request_timeout_seconds = 10
+billing_policy = "free_guard"   # free_guard | allow_paid
+monthly_service_attempt_limit = 900
+
+# One approved Meta utility template, for delivering a result after the 24-hour
+# customer service window has closed. Paid, reviewed and language-specific:
+# valid only with billing_policy = "allow_paid", and istota never creates,
+# submits or substitutes one.
+[whatsapp.proactive_template]
+enabled = false
+name = ""
+language = "en_US"
+
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)
 enabled = true

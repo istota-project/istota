@@ -110,7 +110,7 @@ def _has_hot_journal(path: Path | str) -> bool:
 def connect_read_only(path: Path | str) -> sqlite3.Connection:
     """Open ``path`` for reading without writing to it. Caller closes it.
 
-    ``doctor`` is the only caller, five times, and what it needs is a connection
+    ``doctor`` is the only caller, and what it needs is a connection
     that does not change what it is inspecting and strands nothing beside it.
 
     **The mode is chosen per database, and neither mode is right for both

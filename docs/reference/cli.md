@@ -50,12 +50,14 @@ istota user init USER                        # Initialize user workspace
 istota user status USER                      # User status and resources
 istota user show --name USER_ID              # Dump the stored profile row as JSON
 istota user remove --name USER_ID            # Delete a user_profiles row (no other tables touched)
-istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--sms-number E164 | --clear-sms-number] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--quiet-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread] [--outbound-approval off|untrusted|all|""] [--external-turn-display full|collapsed|hidden] [--default-briefings | --no-default-briefings] [--briefing-email-html | --no-briefing-email-html] [--timezone-follow-location | --no-timezone-follow-location]
+istota user ensure --name USER_ID [--display-name NAME] [--tz TZ] [--email ADDR ...] [--sms-number E164 | --clear-sms-number] [--whatsapp-number E164 | --clear-whatsapp | --reset-whatsapp-identity] [--whatsapp-bsuid BSUID] [--max-foreground-workers N] [--max-background-workers N] [--log-channel TOKEN] [--alerts-channel TOKEN] [--default-destination DESCRIPTOR] [--route PURPOSE=DESCRIPTOR ...] [--disabled-skill NAME ...] [--disabled-module NAME ...] [--trusted-sender PATTERN ...] [--quiet-sender PATTERN ...] [--email-reply-routing origin+thread|origin|thread] [--outbound-approval off|untrusted|all|""] [--external-turn-display full|collapsed|hidden] [--default-briefings | --no-default-briefings] [--briefing-email-html | --no-briefing-email-html] [--timezone-follow-location | --no-timezone-follow-location]
 ```
 
 `istota user ensure` has no `-u`/`--user` flag — the user id comes from `--name` (required). `--tz` and `--timezone` are aliases. `--email` takes a bare address and is repeatable (each pass replaces the stored list). Worker caps are `--max-foreground-workers` / `--max-background-workers`.
 
 `--sms-number` binds one exact E.164 number to the user; `--clear-sms-number` removes it. The number gains authority to create tasks and answer the user's pending SMS confirmations, so assignment and number recycling are operator-controlled. See [SMS](../features/sms.md).
+
+`--whatsapp-number` binds a bootstrap E.164 number for the WhatsApp surface, used for the first binding and as an outbound fallback; `--whatsapp-bsuid` enrolls the business-scoped user id explicitly, which is the only route for a WhatsApp user with a username and no reachable number. The two may be given together. `--reset-whatsapp-identity` clears the learned identity and keeps the number, `--clear-whatsapp` removes the binding. Changing the number discards the 24-hour service window along with everything else learned about the previous holder. See [WhatsApp](../features/whatsapp.md).
 
 `--default-briefings` / `--no-default-briefings` controls whether the shared `[[default_briefings]]` set is seeded into this user (on by default). Seeding is one-time per briefing name, so a later opt-in never clobbers briefings the user has edited.
 
@@ -144,6 +146,8 @@ All four `* ensure` subcommands (`user`, `resource`, `briefing`, `secret`) share
 
 Subsystem helpers that own the contract: `db.upsert_user_resource`, `secrets_store.upsert_secret`, `user_profiles.update_profile_with_status`, and `db.upsert_briefing_config` (via the existing briefing helper). Each returns `(thing, state)` (or just the state string) so the CLI is a thin printer.
 
+`user ensure` writes one table those helpers do not cover: the WhatsApp binding is its own row, so the command compares it before and after and escalates a `noop` to `updated` when it moved. A WhatsApp-only change has to report `updated`, or the role's `changed_when` suppresses the restarts and both processes carry on with a user set snapshotted before the enrollment.
+
 ### Email
 
 ```bash
@@ -151,6 +155,15 @@ istota email list                            # List recent emails
 istota email poll                            # Poll for new emails
 istota email test                            # Test email configuration
 ```
+
+### WhatsApp
+
+```bash
+istota whatsapp billing-status               # Read the billable circuit breaker
+istota whatsapp billing-unblock              # Clear it, after checking Meta billing
+```
+
+`billing-status` reads and prints; `billing-unblock` destroys the evidence row along with the block, which is why the two are separate. Both print the Meta message id in full — this is the private operator surface. See [WhatsApp](../features/whatsapp.md).
 
 ### Calendar
 

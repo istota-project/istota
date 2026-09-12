@@ -243,11 +243,12 @@ def install_force_quit(server) -> None:
 def _maybe_mount_webhooks(web_app) -> None:
     """Serve configured webhook routes from the combined web process.
 
-    Off by default in the lean footprint. Location or a complete SMS provider
-    configuration enables it.
+    Off by default in the lean footprint. Location, a complete SMS provider
+    configuration, or an enabled WhatsApp block enables it.
     Running it on the same uvicorn server is what keeps the local install a
     single port. SMS also needs these routes while disabled when a complete
-    provider block remains configured for late delivery callbacks.
+    provider block remains configured for late delivery callbacks; WhatsApp
+    does not, and :func:`config.whatsapp_webhooks_enabled` says why.
 
     The receiver's **router** is included rather than its FastAPI app being
     mounted, because mounting got both halves wrong. The router already
@@ -268,13 +269,14 @@ def _maybe_mount_webhooks(web_app) -> None:
 
     if not web_config:
         return
-    from .config import sms_webhooks_enabled
+    from .config import sms_webhooks_enabled, whatsapp_webhooks_enabled
 
     location_enabled = bool(
         getattr(web_config, "location", None) and web_config.location.enabled
     )
     sms_enabled = sms_webhooks_enabled(web_config)
-    if not location_enabled and not sms_enabled:
+    whatsapp_enabled = whatsapp_webhooks_enabled(web_config)
+    if not location_enabled and not sms_enabled and not whatsapp_enabled:
         return
     try:
         from . import webhook_receiver
@@ -288,6 +290,12 @@ def _maybe_mount_webhooks(web_app) -> None:
         if sms_enabled and not any(path.startswith("/webhooks/sms/") for path in paths):
             web_app.include_router(webhook_receiver.sms_router)
             logger.info("Serving SMS webhook receivers at /webhooks/sms")
+            attached = True
+        # One path, two methods: the GET subscription handshake and the signed
+        # POST. `paths` is a set, so the membership test covers both at once.
+        if whatsapp_enabled and "/webhooks/whatsapp" not in paths:
+            web_app.include_router(webhook_receiver.whatsapp_router)
+            logger.info("Serving WhatsApp webhook receiver at /webhooks/whatsapp")
             attached = True
         if attached:
             web_app.add_event_handler("startup", webhook_receiver.reload_config)

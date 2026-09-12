@@ -27,7 +27,9 @@ from istota.transport._types import TransportCapabilities
 # `surfaces.SURFACES`, so dropping a row from the leaf shortens the enumeration
 # instead of failing it — the coverage test below is what holds this list and
 # the leaf equal, and it is the one that goes red when a surface is added.
-EVERY_SURFACE = ("email", "istota_file", "ntfy", "repl", "sms", "talk", "web")
+EVERY_SURFACE = (
+    "email", "istota_file", "ntfy", "repl", "sms", "talk", "web", "whatsapp",
+)
 
 
 @pytest.fixture(scope="module")
@@ -37,6 +39,7 @@ def transports():
     config.talk.enabled = True
     config.email.enabled = True
     config.sms.enabled = True
+    config.whatsapp.enabled = True
     registry = make_registry(config)
     return {name: registry.get(name) for name in registry.names()}
 

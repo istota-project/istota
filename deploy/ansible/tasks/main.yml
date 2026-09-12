@@ -44,6 +44,26 @@
       without the skill, set istota_google_workspace_enabled=false.
   when: istota_google_workspace_enabled | bool
 
+# Deliberately ungated on istota_whatsapp_enabled. An unknown billing_policy
+# fails `load_config` on a *disabled* block too, and both values here are
+# rejected at load rather than reported by doctor — so without this the play
+# writes a config.toml no istota process can read and then fails at the first
+# task that runs the CLI against it (`Ensure user_profiles rows`), having
+# already replaced the running deployment's config.
+- name: Assert WhatsApp settings the config loader accepts
+  assert:
+    that:
+      - istota_whatsapp_billing_policy in ["free_guard", "allow_paid"]
+      - not (istota_whatsapp_template_enabled | bool) or
+        istota_whatsapp_billing_policy == "allow_paid"
+    fail_msg: |
+      The [whatsapp] settings would produce a config.toml the daemon refuses
+      to load. istota_whatsapp_billing_policy must be "free_guard" or
+      "allow_paid" (it is checked even when WhatsApp is disabled), and
+      istota_whatsapp_template_enabled=true needs
+      istota_whatsapp_billing_policy="allow_paid" — a proactive template is a
+      paid message, so free_guard cannot reach one.
+
 - name: Resolve webhook receiver need
   set_fact:
     istota_webhooks_enabled: >-
@@ -56,7 +76,13 @@
              and (istota_sms_twilio_messaging_service_sid | length > 0))
          or ((istota_sms_telnyx_api_key | length > 0)
              and (istota_sms_telnyx_public_key | length > 0)
-             and (istota_sms_telnyx_messaging_profile_id | length > 0)) }}
+             and (istota_sms_telnyx_messaging_profile_id | length > 0))
+         or (istota_whatsapp_enabled | bool) }}
+  # WhatsApp is the plain arm and stays that way. The two SMS provider arms
+  # exist because a complete-but-inactive block keeps its delivery callbacks
+  # authenticating across a provider switch; WhatsApp has one account, and
+  # both its handlers refuse every request while `enabled` is false — the same
+  # rule `config.whatsapp_webhooks_enabled` states for the combined process.
 
 # ============================================================
 # FULL INSTALL TASKS (skipped when istota_update_only=true)
@@ -1986,6 +2012,14 @@
     {% if (user_item.value.display_name | default('')) %}--display-name "{{ user_item.value.display_name }}"{% endif %}
     {% for email in user_item.value.email_addresses | default([]) %}--email "{{ email }}" {% endfor %}
     {% if user_item.value.sms_phone_number is defined and user_item.value.sms_phone_number is not none %}{{ '--sms-number "%s"' % user_item.value.sms_phone_number if user_item.value.sms_phone_number else '--clear-sms-number' }}{% endif %}
+    {# `""` clears the binding, an omitted or null key leaves a CLI-set one
+       alone, matching sms_phone_number above. A BSUID is withheld from a
+       clearing call because the CLI refuses that pair outright, so inventory
+       carrying both a `whatsapp_number: ""` and a stale `whatsapp_bsuid:`
+       would fail the play rather than clear the binding. #}
+    {% set whatsapp_cleared = user_item.value.whatsapp_number is defined and user_item.value.whatsapp_number is not none and not user_item.value.whatsapp_number %}
+    {% if user_item.value.whatsapp_number is defined and user_item.value.whatsapp_number is not none %}{{ '--clear-whatsapp' if whatsapp_cleared else '--whatsapp-number "%s"' % user_item.value.whatsapp_number }}{% endif %}
+    {% if (user_item.value.whatsapp_bsuid | default('')) and not whatsapp_cleared %}--whatsapp-bsuid "{{ user_item.value.whatsapp_bsuid }}"{% endif %}
     {% for sender in user_item.value.trusted_email_senders | default([]) %}--trusted-sender "{{ sender }}" {% endfor %}
     {% for sender in user_item.value.quiet_email_senders | default([]) %}--quiet-sender "{{ sender }}" {% endfor %}
     {% if (user_item.value.log_channel | default('')) %}--log-channel "{{ user_item.value.log_channel }}"{% endif %}

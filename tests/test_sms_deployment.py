@@ -70,7 +70,10 @@ def test_compose_passes_sms_inputs_and_shares_one_webhook_service():
     services = compose["services"]
     webhook = services["webhooks"]
 
-    assert set(webhook["profiles"]) == {"location", "sms"}
+    # An equality, not a superset: the claim is that every optional webhook
+    # surface shares this one service rather than growing its own. WhatsApp
+    # joined it in the spec after this one.
+    assert set(webhook["profiles"]) == {"location", "sms", "whatsapp"}
     assert "ports" not in webhook
     assert webhook["expose"] == ["${ISTOTA_WEBHOOKS_PORT:-8765}"]
     # Deliberately no assertion on the location default. Flipping it to

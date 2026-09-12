@@ -14,7 +14,14 @@ Type=simple
 User={{ istota_user }}
 Group={{ istota_group }}
 WorkingDirectory={{ istota_repo_dir }}
-ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.webhook_receiver:app --host 127.0.0.1 --port {{ istota_webhooks_port }}
+# --no-access-log, because one route's query string is a credential. Meta
+# sends the WhatsApp verify token as `?hub.verify_token=` on the GET
+# subscription handshake, and uvicorn's default access formatter renders the
+# path *with* the query string — so the journal would hold the token however
+# the front end is configured. nginx is told not to log that path too; this is
+# the half nginx cannot reach. The receiver logs each event itself under a
+# stable name and without the token.
+ExecStart={{ istota_home }}/.venv/bin/uvicorn {{ istota_package }}.webhook_receiver:app --host 127.0.0.1 --port {{ istota_webhooks_port }} --no-access-log
 Restart=always
 RestartSec=5
 

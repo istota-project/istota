@@ -168,6 +168,17 @@ ISTOTA_SMS_TELNYX_PUBLIC_KEY="$(toml_escape "${ISTOTA_SMS_TELNYX_PUBLIC_KEY:-}")
 ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID="$(toml_escape "${ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID:-}")"
 ISTOTA_SMS_PROVIDER="$(toml_escape "${ISTOTA_SMS_PROVIDER:-twilio}")"
 ISTOTA_SMS_DEFAULT_SENDER_NUMBER="$(toml_escape "${ISTOTA_SMS_DEFAULT_SENDER_NUMBER:-}")"
+ISTOTA_WHATSAPP_WABA_ID="$(toml_escape "${ISTOTA_WHATSAPP_WABA_ID:-}")"
+ISTOTA_WHATSAPP_PHONE_NUMBER_ID="$(toml_escape "${ISTOTA_WHATSAPP_PHONE_NUMBER_ID:-}")"
+ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER="$(toml_escape "${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER:-}")"
+ISTOTA_WHATSAPP_ACCESS_TOKEN="$(toml_escape "${ISTOTA_WHATSAPP_ACCESS_TOKEN:-}")"
+ISTOTA_WHATSAPP_APP_SECRET="$(toml_escape "${ISTOTA_WHATSAPP_APP_SECRET:-}")"
+ISTOTA_WHATSAPP_VERIFY_TOKEN="$(toml_escape "${ISTOTA_WHATSAPP_VERIFY_TOKEN:-}")"
+ISTOTA_WHATSAPP_GRAPH_API_VERSION="$(toml_escape "${ISTOTA_WHATSAPP_GRAPH_API_VERSION:-}")"
+ISTOTA_WHATSAPP_BUSINESS_TIMEZONE="$(toml_escape "${ISTOTA_WHATSAPP_BUSINESS_TIMEZONE:-UTC}")"
+ISTOTA_WHATSAPP_BILLING_POLICY="$(toml_escape "${ISTOTA_WHATSAPP_BILLING_POLICY:-free_guard}")"
+ISTOTA_WHATSAPP_TEMPLATE_NAME="$(toml_escape "${ISTOTA_WHATSAPP_TEMPLATE_NAME:-}")"
+ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE="$(toml_escape "${ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE:-en_US}")"
 
 render_config() {
     echo "[istota] Generating config.toml..."
@@ -446,6 +457,32 @@ messaging_service_sid = "${ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID}"
 api_key = "${ISTOTA_SMS_TELNYX_API_KEY}"
 public_key = "${ISTOTA_SMS_TELNYX_PUBLIC_KEY}"
 messaging_profile_id = "${ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID}"
+TOML
+
+    # The defaults here are the free-biased shape, and that is deliberate
+    # rather than a copy of the dataclass: a render defaulting to
+    # billing_policy = "allow_paid" would let every Docker deployment send a
+    # paid template the moment somebody named one.
+    cat >> "$CONFIG_FILE" <<TOML
+
+[whatsapp]
+enabled = ${ISTOTA_WHATSAPP_ENABLED:-false}
+waba_id = "${ISTOTA_WHATSAPP_WABA_ID}"
+phone_number_id = "${ISTOTA_WHATSAPP_PHONE_NUMBER_ID}"
+business_phone_number = "${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER}"
+access_token = "${ISTOTA_WHATSAPP_ACCESS_TOKEN}"
+app_secret = "${ISTOTA_WHATSAPP_APP_SECRET}"
+verify_token = "${ISTOTA_WHATSAPP_VERIFY_TOKEN}"
+graph_api_version = "${ISTOTA_WHATSAPP_GRAPH_API_VERSION}"
+business_timezone = "${ISTOTA_WHATSAPP_BUSINESS_TIMEZONE}"
+request_timeout_seconds = ${ISTOTA_WHATSAPP_REQUEST_TIMEOUT_SECONDS:-10}
+billing_policy = "${ISTOTA_WHATSAPP_BILLING_POLICY}"
+monthly_service_attempt_limit = ${ISTOTA_WHATSAPP_MONTHLY_SERVICE_ATTEMPT_LIMIT:-900}
+
+[whatsapp.proactive_template]
+enabled = ${ISTOTA_WHATSAPP_TEMPLATE_ENABLED:-false}
+name = "${ISTOTA_WHATSAPP_TEMPLATE_NAME}"
+language = "${ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE}"
 TOML
 
     cat >> "$CONFIG_FILE" <<TOML

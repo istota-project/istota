@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import sqlite3
 
 from ... import commands, confirmations, db
 from ...config import Config
-from ...user_profiles import is_e164
+from ...user_profiles import is_e164, short_fingerprint
 from .._types import IncomingMessage
 from ..ingest import ingest_message
 from . import sms_conversation_token
@@ -22,8 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _number_fingerprint(number: str) -> str:
-    value = f"istota-sms-number-v1\0{number}".encode()
-    return hashlib.sha256(value).hexdigest()[:16]
+    return short_fingerprint("istota-sms-number-v1", number)
 
 
 def _claim_inbound(conn, event: InboundSmsEvent, user_id: str) -> bool:

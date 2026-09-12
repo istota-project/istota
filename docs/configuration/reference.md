@@ -115,6 +115,35 @@ One provider-neutral SMS surface backed by Twilio or Telnyx. See the [SMS setup 
 
 When SMS is enabled, the common block and active provider block must be complete. A provider block with any value must also be complete when inactive. This lets its adapter authenticate late delivery callbacks after a switch without accepting new inbound tasks.
 
+## `[whatsapp]`
+
+One WhatsApp business phone number through Meta's hosted Cloud API, used directly rather than through a Business Solution Provider. Text only, and outside the room model: a WhatsApp exchange never creates, joins or mirrors into a Talk or web room. See the [WhatsApp setup guide](../features/whatsapp.md) for the Meta portal steps, the three operating modes, enrollment, and what the billing controls can and cannot see.
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Accept inbound WhatsApp work and send through the Cloud API |
+| `waba_id` | `""` | Decimal WhatsApp Business Account id; an event from another WABA is rejected |
+| `phone_number_id` | `""` | Decimal business phone number id from the Meta app, not the phone number |
+| `business_phone_number` | `""` | Exact E.164 number the WABA sends from |
+| `access_token` | `""` | System-user token with `whatsapp_business_messaging`. Deliver it through `ISTOTA_WHATSAPP_ACCESS_TOKEN` |
+| `app_secret` | `""` | Meta app secret; validates `X-Hub-Signature-256` over the raw webhook body. `ISTOTA_WHATSAPP_APP_SECRET` |
+| `verify_token` | `""` | Shared secret Meta echoes on the `GET` verification handshake. `ISTOTA_WHATSAPP_VERIFY_TOKEN` |
+| `graph_api_version` | `""` | Empty follows the version the installed PyWa release pins. An explicit `v23.0`-style value is for a controlled migration |
+| `business_timezone` | `"UTC"` | IANA zone the monthly quota month is computed in |
+| `request_timeout_seconds` | `10` | Cloud API timeout, from 1 through 30 seconds |
+| `billing_policy` | `"free_guard"` | `free_guard` (no templates, local attempt cap, circuit breaker on the first billable status) or `allow_paid` |
+| `monthly_service_attempt_limit` | `900` | Service-message attempts per business number and calendar month. 1 to 1000 under `free_guard`; under `allow_paid`, 0 means no local cap |
+
+### `[whatsapp.proactive_template]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Send one approved utility template when the 24-hour service window has closed. Valid only with `billing_policy = "allow_paid"` |
+| `name` | `""` | The approved Meta template name (lowercase letters, digits, underscores) |
+| `language` | `"en_US"` | The exact approved language code. Istota never substitutes another |
+
+The three credentials never enter task environments, prompts, logs or the admin configuration page, and the business phone number is masked there. The attempt cap bounds Istota's own attempts only: a message sent from a coexistence client or another application consumes Meta's allowance without passing through the ledger, so `free_guard` is conservative rather than a guaranteed zero invoice.
+
 ## `[conversation]`
 
 | Setting | Default | Description |
