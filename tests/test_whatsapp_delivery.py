@@ -2158,6 +2158,53 @@ class TestSchedulerDelivery:
             f"confirmation:{notification_id}"
         ]
 
+    def test_a_prompt_never_claims_the_task_result_key_when_no_row_is_written(
+        self, tmp_path, monkeypatch,
+    ):
+        # A pin, not a regression test: this arm already had its fallback
+        # before ISSUE-489, so it passed unchanged against the pre-fix tree —
+        # the SMS sibling in `tests/test_sms_core.py` is the one that went red.
+        # It is here to hold the assignment now that it has been hoisted out of
+        # `if _own_origin_whatsapp:`; re-gating it turns this red and leaves
+        # every other WhatsApp test green.
+        from istota import confirmations
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        monkeypatch.setattr(
+            "istota.scheduler.confirmation_source.write",
+            lambda *_args, **_kwargs: None,
+        )
+        task_id = self._task(
+            config, monkeypatch, client,
+            "I need your confirmation before deleting the file.",
+        )
+
+        assert process_one_task(config) == (task_id, True)
+        assert [row["logical_key"] for row in _rows(config)] == [
+            f"confirmation-task:{task_id}"
+        ]
+
+        # The user taps Yes, and the answer has to arrive.
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *_args, **_kwargs: (True, "Deleted the file.", None, None),
+        )
+        with db.get_db(config.db_path) as conn:
+            confirmations.apply_answer(
+                conn, db.get_task(conn, task_id),
+                confirmations.Answer(approve=True, trust_sender=False),
+            )
+            conn.commit()
+        assert process_one_task(config) == (task_id, True)
+
+        assert client.requests[-1].text == "Deleted the file."
+        assert [row["logical_key"] for row in _rows(config)] == [
+            f"confirmation-task:{task_id}", f"task-result:{task_id}",
+        ]
+
     def test_a_blocked_confirmation_still_reaches_the_user_off_whatsapp(
         self, tmp_path, monkeypatch,
     ):

@@ -3133,6 +3133,18 @@ def process_one_task(
                     ))
                 ):
                     post_talk_message = result
+
+                # Both metered surfaces claim their prompt's ledger key here,
+                # so neither can reach the `task-result:` default at its send
+                # site — that key belongs to the task's own final answer, and a
+                # prompt settling it makes the answer permanently undeliverable
+                # (ISSUE-489). Ungated so the guarantee cannot come to rest on
+                # `_own_origin_sms` staying the predicate that sets the body;
+                # an id with no body is never read. `.claude/rules/sms.md`
+                # holds the namespace rule and what is still open.
+                post_sms_reference_id = f"confirmation-task:{task_id}"
+                post_whatsapp_reference_id = f"confirmation-task:{task_id}"
+
                 if _own_origin_sms:
                     post_sms_message = (
                         f"{result}\n\nTask #{task_id}. Reply YES or NO."
@@ -3155,14 +3167,6 @@ def process_one_task(
                     post_whatsapp_message = _whatsapp_confirmation_body(
                         config, result, task_id,
                     )
-                    # Set before the notification row exists, so it can never
-                    # fall through to the `task-result:` key below: that key
-                    # belongs to the task's own final answer, and a prompt
-                    # claiming it would settle the row and make the answer
-                    # undeliverable for good once the user said yes. Replaced
-                    # by the notification id when there is one, which is what
-                    # the SMS arm keys on.
-                    post_whatsapp_reference_id = f"confirmation:{task_id}"
 
                 # The durable record of the question, written on this connection
                 # inside the transaction that just parked the task — always,
@@ -3182,14 +3186,12 @@ def process_one_task(
                     body=confirmation_source.body_for(result),
                     room_token=transcript_token,
                 )
-                if _own_origin_sms and held_notification is not None:
-                    post_sms_reference_id = (
+                if held_notification is not None:
+                    notification_reference_id = (
                         f"confirmation:{held_notification.notification_id}"
                     )
-                if _own_origin_whatsapp and held_notification is not None:
-                    post_whatsapp_reference_id = (
-                        f"confirmation:{held_notification.notification_id}"
-                    )
+                    post_sms_reference_id = notification_reference_id
+                    post_whatsapp_reference_id = notification_reference_id
                 # Withheld here, and owed at the tail if that push fails —
                 # see the `talk_undelivered` arm at the end of this function
                 # (ISSUE-404). `held_notification` stays in scope for it.
