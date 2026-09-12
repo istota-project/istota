@@ -4272,6 +4272,19 @@ def _is_valid_timezone(name: object) -> bool:
     return True
 
 
+WHATSAPP_WEBHOOK_PROVIDERS = frozenset({"whatsapp_cloud"})
+"""The adapters that receive over an HTTP callback rather than their own
+transport.
+
+The route-mount half of ``WhatsAppProviderAdapter.parse_webhook is not None``,
+kept here because the three readers outside this process cannot ask an adapter:
+``serve._maybe_mount_webhooks`` could, but the Ansible role's "Resolve webhook
+receiver need" and the ``whatsapp`` compose profile read the config file and
+nothing else. A name set rather than a comparison, so an adapter that later
+arrives with a webhook of its own is one entry.
+"""
+
+
 def whatsapp_webhooks_enabled(config: Config) -> bool:
     """Whether a process has to serve ``/webhooks/whatsapp``.
 
@@ -4292,11 +4305,26 @@ def whatsapp_webhooks_enabled(config: Config) -> bool:
     not a mount decision. This function stays the only mount gate, and the
     four places that must agree on it are unchanged.
 
+    **The selected provider is the second half, and it is not the
+    callback-only list.** ``/webhooks/whatsapp`` is Meta's signed callback and
+    nothing else answers there, so a deployment that selected an adapter
+    receiving over its own transport must not serve it — an unanswerable route
+    on a public hostname is a surface with no purpose. The test is the
+    *active* provider being one that has a webhook at all
+    (``WHATSAPP_WEBHOOK_PROVIDERS``), deliberately not "some built adapter has
+    one": that second reading is ``callback_only_names`` and would keep Meta's
+    route alive on a deployment that switched away from Cloud, which is the SMS
+    rule this surface does not follow. Today's only implemented provider is
+    ``whatsapp_cloud`` and it is the default, so nothing shipped changes.
+
     Named rather than inlined because four places have to agree on it: this
     process gate, ``serve._maybe_mount_webhooks``, the Ansible role's
     ``Resolve webhook receiver need``, and the ``whatsapp`` compose profile.
     """
-    return bool(config.whatsapp.enabled)
+    return bool(
+        config.whatsapp.enabled
+        and config.whatsapp.provider in WHATSAPP_WEBHOOK_PROVIDERS
+    )
 
 
 def whatsapp_missing_credentials(config: Config) -> tuple[str, ...]:

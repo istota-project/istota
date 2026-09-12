@@ -404,8 +404,8 @@ class TestTheRegistry:
         SMS keeps a switched-away provider's routes alive; WhatsApp's rule is
         that turning the block off turns the account off. So a disabled
         deployment holding complete Cloud credentials names an adapter here
-        and still serves no webhook: `whatsapp_webhooks_enabled` never reads
-        this list.
+        and still serves no webhook — `whatsapp_webhooks_enabled` reads
+        `enabled` and the *active* provider, never this list.
         """
         cfg = _cloud_config(enabled=False)
         registry = make_provider_registry(

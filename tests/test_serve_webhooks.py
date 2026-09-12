@@ -314,3 +314,83 @@ class TestServeWebhookMount:
             )
 
         assert resp.status_code == 403
+
+    def test_a_provider_receiving_over_its_own_transport_mounts_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        """``/webhooks/whatsapp`` is Meta's signed callback and nothing else
+        answers there.
+
+        A deployment that selected an adapter with no HTTP callback of its own
+        would publish a route nothing can authenticate — so the mount gate is
+        `enabled` *and* an active provider that has a webhook at all. It is
+        deliberately not "some built adapter has one", which is
+        ``callback_only_names`` and would keep Meta's route alive on a
+        deployment that switched away from Cloud; that is the SMS rule, and
+        this surface's is that turning the block off turns the account off.
+        """
+        from fastapi import FastAPI
+
+        from istota import serve
+        from istota.config import WhatsAppConfig
+
+        monkeypatch.setattr(
+            "istota.web_app._config",
+            self._config(
+                tmp_path,
+                location=False,
+                whatsapp=WhatsAppConfig(enabled=True, provider="baileys"),
+            ),
+            raising=False,
+        )
+        parent = FastAPI()
+        serve._maybe_mount_webhooks(parent)
+
+        assert not [
+            r for r in parent.routes
+            if getattr(r, "path", "").startswith("/webhooks")
+        ]
+
+    def test_the_handlers_refuse_on_the_predicate_the_mount_reads(
+        self, tmp_path, monkeypatch,
+    ):
+        """Asked again at the route rather than left to the mount.
+
+        ``webhook_receiver`` includes its own router unconditionally, so a
+        deployment running the standalone receiver has both handlers attached
+        whatever the provider is — and a combined process can have its config
+        reloaded underneath an already-included router. Both answer 404, which
+        is what the absence of the route answers and what "turning the block
+        off is turning the account off" has always meant.
+        """
+        from fastapi.testclient import TestClient
+
+        from istota import webhook_receiver as wr
+        from istota.config import WhatsAppConfig
+
+        config = self._config(
+            tmp_path,
+            location=False,
+            whatsapp=WhatsAppConfig(
+                enabled=True,
+                provider="baileys",
+                verify_token="verify-placeholder",
+                app_secret="app-secret-placeholder",
+            ),
+        )
+        monkeypatch.setattr(wr, "_config", config, raising=False)
+        client = TestClient(wr.app)
+
+        handshake = client.get("/webhooks/whatsapp", params={
+            "hub.mode": "subscribe",
+            "hub.verify_token": "verify-placeholder",
+            "hub.challenge": "1234",
+        })
+        batch = client.post(
+            "/webhooks/whatsapp",
+            content=b"{}",
+            headers={"content-type": "application/json"},
+        )
+
+        assert handshake.status_code == 404
+        assert batch.status_code == 404
