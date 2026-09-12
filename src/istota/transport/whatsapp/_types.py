@@ -99,12 +99,23 @@ WhatsAppEvent: TypeAlias = InboundWhatsAppEvent | WhatsAppDeliveryEvent
 
 @dataclass(frozen=True)
 class WhatsAppSendRequest:
+    """One Cloud API call, described without a PyWa object in sight.
+
+    `buttons` is a tuple of ``(callback_data, title)`` pairs rather than PyWa
+    `Button` instances, for the reason this whole module exists: `outbound.py`
+    decides that a confirmation prompt carries Yes and No, and `client.py` is
+    the only place allowed to turn that into a PyWa type. The callback data is
+    the confirmation id and the choice and nothing else — never an
+    authorization secret, since it travels in a WhatsApp message on the
+    recipient's own device.
+    """
     to: str
     text: str
     kind: WhatsAppMessageKind
     reply_to_message_id: str | None = None
     template_name: str | None = None
     template_language: str | None = None
+    buttons: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -130,3 +141,20 @@ class WhatsAppSendFailure:
 
 
 WhatsAppSendOutcome: TypeAlias = WhatsAppSendResult | WhatsAppSendFailure
+
+
+@dataclass(frozen=True)
+class WhatsAppDeliveryRecord:
+    """One `sent_whatsapp` row, as every caller outside the ledger sees it.
+
+    Deliberately carries neither the rendered body nor the destination: the
+    task, notification source or command record already owns the content, and
+    the binding is resolved immediately before the send rather than stored.
+    `body_chars` and the row's `body_sha256` are what diagnostics get instead.
+    """
+    logical_key: str
+    status: str
+    send_kind: str = "service"
+    meta_message_id: str | None = None
+    error_code: str | None = None
+    body_chars: int = 0

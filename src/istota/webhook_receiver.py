@@ -433,7 +433,7 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
     from .transport.whatsapp.webhook import (  # noqa: PLC0415
         MAX_WEBHOOK_BODY,
         WhatsAppWebhookError,
-        deliver_pending_alerts,
+        deliver_event_responses,
         handle_whatsapp_batch,
         parse_webhook,
     )
@@ -471,7 +471,7 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
         # than a fix, so it belongs in the spec before it belongs here.
         logger.warning("whatsapp.inbound.database_unavailable", exc_info=True)
         return Response(status_code=503)
-    background.add_task(deliver_pending_alerts, config, results)
+    background.add_task(deliver_event_responses, config, results)
     return Response(status_code=200)
 
 

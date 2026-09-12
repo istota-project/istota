@@ -2872,6 +2872,7 @@ def process_one_task(
     plan_email = plan_has_surface(plan, "email")
     plan_ntfy = plan_has_surface(plan, "ntfy")
     plan_sms = plan_has_surface(plan, "sms")
+    plan_whatsapp = plan_has_surface(plan, "whatsapp")
     plan_file = plan_has_surface(plan, "istota_file")
     plan_web = plan_has_surface(plan, "web")
     # A *push* web destination is a foreign task (e.g. an email reply) routing
@@ -2919,6 +2920,13 @@ def process_one_task(
     post_ntfy = False
     post_sms_message: str | None = None
     post_sms_reference_id: str | None = None
+    post_whatsapp_message: str | None = None
+    post_whatsapp_reference_id: str | None = None
+    # `(callback_data, title)` pairs for a WhatsApp confirmation prompt. Yes and
+    # No as quick replies, so the ordinary answer is a tap rather than a typed
+    # `YES` — the text route stays open beside it, and both land on the same
+    # `confirmations.apply_answer`.
+    post_whatsapp_buttons: tuple[tuple[str, str], ...] = ()
     post_web = False
 
     # Track what to post after DB transaction closes
@@ -2998,10 +3006,12 @@ def process_one_task(
     # deferred-op-skip branches below.
     _own_origin_web = plan_web and task.source_type == "web"
     _own_origin_sms = plan_sms and task.source_type == "sms"
+    _own_origin_whatsapp = plan_whatsapp and task.source_type == "whatsapp"
     _confirmable_surface = (
         (plan_talk and talk_token and not plan_ntfy)
         or _own_origin_web
         or _own_origin_sms
+        or _own_origin_whatsapp
     )
     # A no-final-answer result embeds mid-turn text the model wrote to itself,
     # not to the user, so its "should I proceed?" is not a question awaiting an
@@ -3089,6 +3099,17 @@ def process_one_task(
                     post_sms_message = (
                         f"{result}\n\nTask #{task_id}. Reply YES or NO."
                     )
+                if _own_origin_whatsapp:
+                    # The buttons carry the answer; the sentence carries the
+                    # task id, which is what makes `!confirm <id>` and a later
+                    # typed YES work on a client that renders no buttons.
+                    post_whatsapp_message = (
+                        f"{result}\n\nTask #{task_id}. Reply YES or NO."
+                    )
+                    post_whatsapp_buttons = (
+                        (f"confirm:{task_id}:yes", "Yes"),
+                        (f"confirm:{task_id}:no", "No"),
+                    )
 
                 # The durable record of the question, written on this connection
                 # inside the transaction that just parked the task — always,
@@ -3112,10 +3133,18 @@ def process_one_task(
                     post_sms_reference_id = (
                         f"confirmation:{held_notification.notification_id}"
                     )
+                if _own_origin_whatsapp and held_notification is not None:
+                    post_whatsapp_reference_id = (
+                        f"confirmation:{held_notification.notification_id}"
+                    )
                 # Withheld here, and owed at the tail if that push fails —
                 # see the `talk_undelivered` arm at the end of this function
                 # (ISSUE-404). `held_notification` stays in scope for it.
-                if post_talk_message is None and post_sms_message is None:
+                if (
+                    post_talk_message is None
+                    and post_sms_message is None
+                    and post_whatsapp_message is None
+                ):
                     notification_results.append(held_notification)
                     held_notification = None
             else:
@@ -3291,6 +3320,8 @@ def process_one_task(
                         post_ntfy = True
                     if plan_sms:
                         post_sms_message = delivery_result
+                    if plan_whatsapp:
+                        post_whatsapp_message = delivery_result
                     if web_foreign_dests:
                         post_web = True
                     if plan_file:
@@ -3946,6 +3977,38 @@ def process_one_task(
                     exc_info=True,
                 )
                 sms_undelivered = True
+    whatsapp_undelivered = False
+    if post_whatsapp_message:
+        # `send_record` rather than `deliver`, for the reason the SMS arm above
+        # gives: `Transport.deliver` returns the surface's own message id, which
+        # WhatsApp has none of, so the ledger record this arm has to read was
+        # discarded.
+        whatsapp_transport = registry.get("whatsapp")
+        whatsapp_dest = next((d for d in plan if d.surface == "whatsapp"), None)
+        if whatsapp_transport is None or whatsapp_dest is None:
+            whatsapp_undelivered = True
+        else:
+            # Outside the `try`, so an import failure is not swallowed and
+            # reported as a delivery failure.
+            from .transport.whatsapp._types import REACHED_META
+            try:
+                whatsapp_record = run_coro(whatsapp_transport.send_record(
+                    whatsapp_dest.channel or "", post_whatsapp_message, task=task,
+                    reference_id=(
+                        post_whatsapp_reference_id or f"task-result:{task_id}"
+                    ),
+                    buttons=post_whatsapp_buttons,
+                ))
+                whatsapp_undelivered = (
+                    whatsapp_record is None
+                    or whatsapp_record.status not in REACHED_META
+                )
+            except Exception:
+                logger.warning(
+                    "Could not deliver the WhatsApp leg for task %s", task_id,
+                    exc_info=True,
+                )
+                whatsapp_undelivered = True
     if post_ntfy:
         from .transport._types import DeliveryOptions
         ntfy_title = f"Task {task_id}"
@@ -4016,7 +4079,15 @@ def process_one_task(
     # `held_notification` is deliberately left set — the arm further down reads
     # `held_notification is None` to decide whether a Talk failure still needs
     # its own alert, and clearing it here would fire that for a debt just paid.
-    if held_notification is not None and (talk_undelivered or sms_undelivered):
+    # `whatsapp_undelivered` joins the same owed debt for the same reason: a
+    # WhatsApp-origin confirmation withholds the notification at the park, so a
+    # send that never reached Meta would leave the question pushed nowhere and
+    # the task parked until `expire_stale_confirmations` kills it. The
+    # `whatsapp-failure` task alert `deliver_whatsapp` raises says only that a
+    # message failed, and carries neither the question nor its `!confirm` verbs.
+    if held_notification is not None and (
+        talk_undelivered or sms_undelivered or whatsapp_undelivered
+    ):
         deliver_pending(config, [held_notification])
 
     # A Talk leg that carried the message and posted nothing (ISSUE-404). Last,

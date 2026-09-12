@@ -142,6 +142,273 @@ class TestThePyWaDependencyContract:
         assert {"server", "webhook_endpoint", "callback_url"} <= set(params)
 
 
+class _FakePyWa:
+    """Stands in for `pywa_async.WhatsApp` inside the adapter.
+
+    Coarse, at the one boundary `_types.py` exists to bound, and nowhere else:
+    everything above `client.py` speaks in local records, so this is the only
+    place a double is needed at all.
+    """
+
+    def __init__(self, result=None, raises=None):
+        self.calls: list[dict] = []
+        self._result = result
+        self._raises = raises
+
+    async def send_message(self, **kwargs):
+        self.calls.append(kwargs)
+        if self._raises is not None:
+            raise self._raises
+        return self._result
+
+
+class _Sent:
+    def __init__(self, message_id):
+        self.id = message_id
+
+
+def _adapter(monkeypatch, fake) -> "client.WhatsAppClient":
+    from istota.config import Config, WhatsAppConfig
+
+    config = Config(whatsapp=WhatsAppConfig(
+        enabled=True, waba_id="123456789012345",
+        phone_number_id="223456789012345",
+        business_phone_number="+15551230000",
+        access_token="wa-access-token", app_secret=APP_SECRET,
+        verify_token="wa-verify-token", request_timeout_seconds=7,
+    ))
+    adapter = client.WhatsAppClient(config)
+    monkeypatch.setattr(adapter, "_client", fake)
+    return adapter
+
+
+def _meta_error(code: int, status: int | None, *, transient=False):
+    """A PyWa API error carrying the status an HTTP response would have."""
+    import httpx
+    from pywa import errors as pywa_errors
+
+    response = None
+    if status is not None:
+        response = httpx.Response(status, request=httpx.Request("POST", "https://x"))
+    return pywa_errors.WhatsAppError(
+        raw={"code": code},
+        code=code,
+        message="Meta's own prose, which must never be echoed",
+        details="nor these details",
+        fbtrace_id="ABC",
+        href=None,
+        raw_response=response,
+        subcode=None,
+        type="OAuthException",
+        is_transient=transient,
+        user_title=None,
+        user_msg=None,
+    )
+
+
+class TestTheSendClassification:
+    """Definite versus ambiguous, which is the one bit the ledger reads.
+
+    Definite means Meta processed the request and refused it, so nothing was
+    queued and the row is `failed`. Ambiguous means the request may have been
+    accepted, so the row is `unknown` and — since the Cloud API has no
+    application idempotency token — is never resent. Erring towards ambiguous
+    costs an operator a puzzled look; erring towards definite would be a claim
+    that nothing was delivered when something may have been.
+    """
+
+    async def test_an_accepted_send_returns_metas_message_id(self, monkeypatch):
+        from istota.transport.whatsapp._types import (
+            WhatsAppSendRequest, WhatsAppSendResult,
+        )
+
+        fake = _FakePyWa(result=_Sent("wamid.ok"))
+        adapter = _adapter(monkeypatch, fake)
+
+        outcome = await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="hello", kind="service",
+        ))
+
+        assert outcome == WhatsAppSendResult("wamid.ok")
+        assert fake.calls[0]["to"] == "US.1"
+        assert fake.calls[0]["text"] == "hello"
+        assert fake.calls[0]["sender"] == "223456789012345"
+        assert fake.calls[0]["buttons"] is None
+
+    async def test_buttons_become_pywa_buttons_only_here(self, monkeypatch):
+        from pywa.types import Button
+
+        from istota.transport.whatsapp._types import WhatsAppSendRequest
+
+        fake = _FakePyWa(result=_Sent("wamid.ok"))
+        adapter = _adapter(monkeypatch, fake)
+
+        await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="Proceed?", kind="service",
+            buttons=(("confirm:7:yes", "Yes"), ("confirm:7:no", "No")),
+        ))
+
+        buttons = fake.calls[0]["buttons"]
+        assert [type(b) for b in buttons] == [Button, Button]
+        assert [(b.callback_data, b.title) for b in buttons] == [
+            ("confirm:7:yes", "Yes"), ("confirm:7:no", "No"),
+        ]
+
+    @pytest.mark.parametrize(
+        "status, definite",
+        [(400, True), (401, True), (403, True), (429, True),
+         (500, False), (503, False), (None, False)],
+    )
+    async def test_a_client_error_is_definite_and_nothing_else_is(
+        self, monkeypatch, status, definite,
+    ):
+        from istota.transport.whatsapp._types import WhatsAppSendRequest
+
+        adapter = _adapter(
+            monkeypatch, _FakePyWa(raises=_meta_error(131047, status)),
+        )
+
+        outcome = await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="hi", kind="service",
+        ))
+
+        assert outcome.definite is definite
+        assert outcome.error_code == "131047"
+
+    async def test_a_transient_client_error_stays_definite(self, monkeypatch):
+        # `is_transient` answers whether retrying *later* might work, not
+        # whether this attempt was applied. Reading it as ambiguity would put a
+        # rate-limited send — which certainly reached nobody — into the state
+        # that means "may have been delivered".
+        from istota.transport.whatsapp._types import WhatsAppSendRequest
+
+        adapter = _adapter(
+            monkeypatch, _FakePyWa(raises=_meta_error(4, 429, transient=True)),
+        )
+
+        outcome = await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="hi", kind="service",
+        ))
+
+        assert outcome.definite is True
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "timeout", "connect", "read", "pool", "value",
+        ],
+    )
+    async def test_every_transport_failure_is_ambiguous(self, monkeypatch, error):
+        import httpx
+
+        from istota.transport.whatsapp._types import WhatsAppSendRequest
+
+        raises = {
+            "timeout": httpx.TimeoutException("t"),
+            "connect": httpx.ConnectError("c"),
+            "read": httpx.ReadTimeout("r"),
+            "pool": httpx.PoolTimeout("p"),
+            "value": ValueError("unparseable body"),
+        }[error]
+        adapter = _adapter(monkeypatch, _FakePyWa(raises=raises))
+
+        outcome = await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="hi", kind="service",
+        ))
+
+        assert outcome.definite is False
+        assert outcome.error_code is None
+
+    @pytest.mark.parametrize("value", [None, "", 12345, object()])
+    async def test_a_success_with_no_readable_id_is_ambiguous(
+        self, monkeypatch, value,
+    ):
+        # Meta may well have queued the message; a 200 we cannot read is not
+        # evidence that it did not.
+        from istota.transport.whatsapp._types import WhatsAppSendRequest
+
+        adapter = _adapter(monkeypatch, _FakePyWa(result=_Sent(value)))
+
+        outcome = await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="hi", kind="service",
+        ))
+
+        assert outcome.definite is False
+
+    async def test_a_template_request_is_refused_definitely_and_never_sent(
+        self, monkeypatch,
+    ):
+        # The paid template path is stage four's. `definite` because nothing
+        # opened a socket: `unknown` means "may have reached Meta", and spending
+        # it on a code path that never called would make the one state an
+        # operator cannot resolve mean two different things.
+        from istota.transport.whatsapp._types import WhatsAppSendRequest
+
+        fake = _FakePyWa(result=_Sent("wamid.never"))
+        adapter = _adapter(monkeypatch, fake)
+
+        outcome = await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="hi", kind="template",
+            template_name="istota_result", template_language="en_US",
+        ))
+
+        assert outcome.definite is True
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("status", [400, 500, None])
+    async def test_no_failure_reason_carries_provider_text(self, monkeypatch, status):
+        # Meta's prose, PyWa's exception text and an httpx repr all carry the
+        # request URL, which carries the recipient and the token's path
+        # segment. The reason is chosen from a fixed table by classification.
+        from istota.transport.whatsapp._types import WhatsAppSendRequest
+
+        adapter = _adapter(
+            monkeypatch, _FakePyWa(raises=_meta_error(131047, status)),
+        )
+
+        outcome = await adapter.send(WhatsAppSendRequest(
+            to="US.1", text="hi", kind="service",
+        ))
+
+        assert "prose" not in outcome.safe_reason
+        assert "details" not in outcome.safe_reason
+        assert "US.1" not in outcome.safe_reason
+        assert "wa-access-token" not in outcome.safe_reason
+
+    async def test_the_configured_timeout_bounds_the_session(self, monkeypatch):
+        from istota.config import Config, WhatsAppConfig
+
+        config = Config(whatsapp=WhatsAppConfig(
+            enabled=True, waba_id="1", phone_number_id="2",
+            access_token="t", app_secret="s", verify_token="v",
+            request_timeout_seconds=7,
+        ))
+        adapter = client.WhatsAppClient(config)
+        try:
+            assert adapter._session.timeout.read == 7
+        finally:
+            await adapter.aclose()
+
+    async def test_closing_a_session_the_caller_supplied_is_the_callers_job(
+        self, monkeypatch,
+    ):
+        import httpx
+
+        from istota.config import Config, WhatsAppConfig
+
+        session = httpx.AsyncClient()
+        config = Config(whatsapp=WhatsAppConfig(
+            enabled=True, waba_id="1", phone_number_id="2",
+            access_token="t", app_secret="s", verify_token="v",
+        ))
+        adapter = client.WhatsAppClient(config, session=session)
+
+        await adapter.aclose()
+
+        assert session.is_closed is False
+        await session.aclose()
+
+
 class TestTheAdapterStaysNarrow:
     def test_the_client_module_registers_no_callback_url_and_no_pywa_server(self):
         from tests.support.drift import source_of

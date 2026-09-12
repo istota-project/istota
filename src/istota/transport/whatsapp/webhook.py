@@ -126,6 +126,12 @@ class WhatsAppEventResult:
     response_logical_key: str | None = None
     command_text: str | None = None
     pending_alert: object | None = None
+    # The STOP acknowledgement and nothing else. The spec makes it one
+    # best-effort message *after* the opt-out is stored, so the send has to
+    # pass a gate the opt-out has just closed. A flag on the result rather than
+    # a disposition check at the send site, so the one exception is declared
+    # where it is decided and cannot be widened by a string comparison drifting.
+    response_ignores_opt_out: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +783,7 @@ def _dispatch_inbound(
         return WhatsAppEventResult(
             "stop", user_id=user_id, response_text=STOP_REPLY,
             response_logical_key=f"opt-out:{event.message_id}",
+            response_ignores_opt_out=True,
         )
     if keyword == "START":
         db.set_whatsapp_opt_out(conn, user_id, False)
@@ -873,19 +880,25 @@ def _handle_callback(
 def _handle_delivery(
     conn, config: Config, event: WhatsAppDeliveryEvent
 ) -> WhatsAppEventResult:
-    """Stage 3's seam. Normalized here, applied to the ledger there.
+    """Apply one status callback to the ledger, inside the batch transaction.
 
-    Deliberately inert rather than absent: the normalizer already walks
-    statuses, so a batch mixing messages and statuses is exercised end to end
-    now, and stage 3 fills in the monotonic transition and the pricing
-    observation without moving the transaction boundary they have to commit
-    inside.
+    The monotonic transition itself is `outbound.apply_delivery_event`, which
+    is where the ledger's own rules live. What belongs here is only that the
+    alert it may raise is *buffered* rather than pushed: this runs under the
+    batch's `BEGIN IMMEDIATE`, and a push from in here would open a second
+    connection against the lock this one holds.
+
+    Pricing observation and the billable circuit are stage 4's and are read by
+    nothing yet — the seam is this call, not a second one.
     """
-    logger.debug(
-        "whatsapp.delivery.observed status=%s message=%s",
-        event.status, _message_fingerprint(event.message_id),
+    from .outbound import apply_delivery_event
+
+    disposition, _record, pending_alert = apply_delivery_event(conn, event)
+    return WhatsAppEventResult(
+        disposition,
+        user_id=None,
+        pending_alert=pending_alert,
     )
-    return WhatsAppEventResult("delivery")
 
 
 def handle_whatsapp_batch(
@@ -969,10 +982,54 @@ def deliver_pending_alerts(config: Config, results: Sequence[WhatsAppEventResult
         )
 
 
+async def deliver_event_responses(
+    config: Config, results: Sequence[WhatsAppEventResult]
+) -> None:
+    """Everything one committed batch owes, after the transaction has closed.
+
+    The alerts first, then each result's own reply through the outbound
+    ledger. Both are here rather than in the route because the ordering is a
+    property of the batch: an alert is about a message that produced no reply,
+    so pushing it after a send would report a failure behind the answer that
+    did arrive.
+
+    Every reply is keyed off the *inbound* message id (`help:<id>`,
+    `opt-out:<id>`, `command:<id>`, `unsupported:<id>`,
+    `confirmation-answer:<id>`), which is what makes a redelivered webhook cost
+    nothing: the ledger already holds that logical key in a settled state and
+    refuses a second send. Never raises — the 200 has already gone out, and a
+    reply that cannot be sent is a ledger row and a log line, not a retry Meta
+    would drive by resending the whole batch.
+    """
+    from .outbound import deliver_whatsapp
+
+    deliver_pending_alerts(config, results)
+    for result in results:
+        try:
+            text = await resolve_event_response(config, result)
+        except Exception:
+            logger.warning("whatsapp.outbound.response_failed", exc_info=True)
+            continue
+        if not text or not result.response_logical_key or not result.user_id:
+            continue
+        try:
+            await deliver_whatsapp(
+                config,
+                logical_key=result.response_logical_key,
+                user_id=result.user_id,
+                text=text,
+                task_id=result.task_id,
+                ignore_opt_out=result.response_ignores_opt_out,
+            )
+        except Exception:
+            logger.warning("whatsapp.outbound.response_failed", exc_info=True)
+
+
 __all__ = [
     "MAX_WEBHOOK_BODY",
     "WhatsAppEventResult",
     "WhatsAppWebhookError",
+    "deliver_event_responses",
     "deliver_pending_alerts",
     "handle_whatsapp_batch",
     "normalize_payload",

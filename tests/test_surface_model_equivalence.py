@@ -54,8 +54,8 @@ from istota.surfaces import (
     origin_surface_for_source_type,
 )
 
-# The source-type enumeration, from the one place that states it. Eleven of the
-# twelve are values `tasks.source_type` holds; `playbook` is a
+# The source-type enumeration, from the one place that states it. Thirteen of
+# the fourteen are values `tasks.source_type` holds; `playbook` is a
 # `memory_chunks.source_type` and is kept because an unrecognised value costs
 # one case and must answer the same either way. See that module's comment.
 from tests.test_surface_facts import SHIPPED_SOURCE_TYPES
@@ -63,7 +63,9 @@ from tests.test_surface_facts import SHIPPED_SOURCE_TYPES
 # Every surface name a registry can produce. Held equal to `surfaces.SURFACES`
 # by `test_the_surface_enumeration_covers_the_table` below, so a surface added
 # without a row here fails rather than going unchecked.
-SURFACE_NAMES = ("email", "istota_file", "ntfy", "repl", "sms", "talk", "web")
+SURFACE_NAMES = (
+    "email", "istota_file", "ntfy", "repl", "sms", "talk", "web", "whatsapp",
+)
 
 # Names in the *destination grammar* rather than surface names.
 # `parse_output_target` yields `Destination("room", <token>)` and

@@ -418,6 +418,29 @@ def _send_sms(
     return record is not None and record.status in REACHED_PROVIDER
 
 
+def _send_whatsapp(
+    config: "Config", user_id: str, message: str, reference_id: str | None,
+) -> bool:
+    """Send one notification over WhatsApp. True when Meta took it.
+
+    Through `WhatsAppTransport`, the way `_send_sms` goes through
+    `SmsTransport`, rather than reaching past it to `deliver_whatsapp`: the
+    transport owns how a logical key is derived when the caller supplies none.
+
+    `reference_id` is what makes a repeat raise cost nothing, and on this
+    surface it costs *money* rather than a row — without one every raise mints
+    a fresh ledger key and a fresh billable message.
+    """
+    from .async_runtime import run_coro
+    from .transport.whatsapp import WhatsAppTransport
+    from .transport.whatsapp._types import REACHED_META
+
+    record = run_coro(WhatsAppTransport(config).send_record(
+        "", message, user_id=user_id, reference_id=reference_id,
+    ))
+    return record is not None and record.status in REACHED_META
+
+
 # How long the transcript mirror waits for the write lock before giving up. Well
 # under the 30s default, because a caller holding a transaction is a stall on
 # whatever thread it runs on rather than an error anyone sees. See the note in
@@ -617,12 +640,17 @@ def is_channel_configured(
         from .transport.sms.outbound import is_sms_configured
         return is_sms_configured(config, user_id)
 
+    def _whatsapp_ok() -> bool:
+        from .transport.whatsapp.outbound import is_whatsapp_configured
+        return is_whatsapp_configured(config, user_id)
+
     probes = {
         "talk": _talk_ok,
         "email": _email_ok,
         "ntfy": _ntfy_ok,
         "web": _web_ok,
         "sms": _sms_ok,
+        "whatsapp": _whatsapp_ok,
     }
     dests = parse_output_target(surface)
     if not dests:
@@ -707,6 +735,9 @@ def _dispatch(
                 sent = True
         elif dest.surface == "sms":
             if _send_sms(config, user_id, message or title or "", reference_id):
+                sent = True
+        elif dest.surface == "whatsapp":
+            if _send_whatsapp(config, user_id, message or title or "", reference_id):
                 sent = True
         else:
             logger.warning(

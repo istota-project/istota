@@ -180,6 +180,16 @@ SURFACES: dict[str, SurfaceRoomFacts] = {
     "sms": SurfaceRoomFacts(
         room_role=None, room_view=None, user_turn_mirror=None,
     ),
+    # A WhatsApp exchange is its own external conversation, not a second view
+    # of a Talk or web room, so all three are None: it creates no room, joins
+    # none, writes no canonical `messages` row and is mirrored nowhere. The
+    # durable-place test answers `room_view` the way it answers it for email —
+    # a WhatsApp thread lives on Meta's servers and on handsets we cannot write
+    # into — and `room_role` is `None` rather than email's `guest` because
+    # nothing threads a WhatsApp message back into a room in the first place.
+    "whatsapp": SurfaceRoomFacts(
+        room_role=None, room_view=None, user_turn_mirror=None,
+    ),
 }
 
 _NO_FACTS = SurfaceRoomFacts(
@@ -257,7 +267,7 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
     ``web`` to ``"talk"`` — ``briefing``, ``scheduled``, ``subtask``,
     ``heartbeat``, ``cli``, ``istota_file``, ``doctor`` and the empty string
     included. Asking it *this* question flips False to True for seven of the
-    eleven shipped source types and for the empty string besides, and at the
+    thirteen shipped source types and for the empty string besides, and at the
     scheduler's confirmation gate the predicate is negated: the prompt would be
     suppressed on the mirror leg for cron, briefing and heartbeat tasks, which
     parks them with the question delivered nowhere until
@@ -267,13 +277,13 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
     (The spec that called for this module says six of twelve, and both numbers
     are wrong. Measured: ``istota_file`` and ``doctor`` flip too, and
     ``playbook`` is a ``memory_chunks.source_type`` rather than a task one — no
-    ``create_task`` call passes it — so the denominator is eleven.
+    ``create_task`` call passes it — so the denominator is thirteen.
     `tests/test_surface_facts.py` keeps ``playbook`` in its enumeration anyway,
     since an unrecognised value costs one parametrized case and must answer
     None either way, which is why its flip list carries eight names.)
 
     A scheduled task originates on no surface at all, so the answer is None
-    and both room predicates answer False for it. Across all eleven shipped
+    and both room predicates answer False for it. Across all thirteen shipped
     source types that pair answered exactly what the **two** literals at the two
     scheduler gates answered before the conversion replaced them — they were not
     one literal spelled twice: the `store_turn_message` gate read a bare
@@ -281,9 +291,9 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
     `(task.source_type or "") in ROOM_SURFACES`, and only the second is replaced
     by `is_room_view` rather than `is_room_member`. Both equivalences are pinned
     separately by `tests/test_surface_model_equivalence.py`, which was written
-    and run against those literals. The five that are also surface names
-    (``talk``, ``web``, ``email``, ``repl``, ``istota_file``) pass through; the
-    other six (``briefing``, ``cli``, ``doctor``, ``heartbeat``, ``scheduled``,
+    and run against those literals. The seven that are also surface names
+    (``talk``, ``web``, ``email``, ``repl``, ``istota_file``, ``sms``,
+    ``whatsapp``) pass through; the other six (``briefing``, ``cli``, ``doctor``, ``heartbeat``, ``scheduled``,
     ``subtask``) do not.
 
     Derived from `SURFACES` rather than from a second list so the two cannot

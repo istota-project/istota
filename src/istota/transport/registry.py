@@ -38,6 +38,8 @@ def _surface_for_source_type(source_type: str) -> str:
         return "web"
     if source_type == "sms":
         return "sms"
+    if source_type == "whatsapp":
+        return "whatsapp"
     return "talk"
 
 
@@ -104,6 +106,7 @@ def make_registry(config: "Config") -> TransportRegistry:
     from .sms import SmsTransport
     from .talk import TalkTransport
     from .web import WebTransport
+    from .whatsapp import WhatsAppTransport
 
     transports: dict[str, Transport] = {}
     if config.talk.enabled:
@@ -112,6 +115,8 @@ def make_registry(config: "Config") -> TransportRegistry:
         transports["email"] = EmailTransport(config)
     if config.sms.enabled:
         transports["sms"] = SmsTransport(config)
+    if config.whatsapp.enabled:
+        transports["whatsapp"] = WhatsAppTransport(config)
     transports["ntfy"] = NtfyTransport(config)
     transports["istota_file"] = IstotaFileTransport(config)
     transports["repl"] = ReplTransport(config)
