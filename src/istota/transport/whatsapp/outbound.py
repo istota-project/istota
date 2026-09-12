@@ -33,7 +33,9 @@ import logging
 import re
 import sqlite3
 import unicodedata
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 from ... import db
 from ...config import WHATSAPP_FREE_GUARD_MAX_ATTEMPTS, Config
@@ -46,6 +48,15 @@ from ._types import (
     WhatsAppSendRequest,
     WhatsAppSendResult,
 )
+
+if TYPE_CHECKING:
+    # Type-checking only, and that is the seam property rather than an import
+    # style: this module is the common send path, and it reaches a provider
+    # through the adapter record it is handed. Nothing Meta-specific is
+    # importable from here at run time — `tests/test_whatsapp_providers.py`
+    # holds that as a drift guard, because the two lines that used to reach
+    # `.client` were the whole of what "behind the seam" had to remove.
+    from .providers._types import WhatsAppProviderAdapter, WhatsAppProviderCaps
 
 logger = logging.getLogger(__name__)
 
@@ -436,6 +447,7 @@ def _record(row) -> WhatsAppDeliveryRecord:
 
 def _gate(
     conn, config: Config, user_id: str, *, ignore_opt_out: bool, month: str,
+    caps: "WhatsAppProviderCaps | None",
 ) -> tuple[str, str]:
     """``(status, send_kind)``: the state that blocks this send, or ``pending``.
 
@@ -452,10 +464,27 @@ def _gate(
     window read and the budget count both belong inside the claim's own
     transaction, and the kind is what says which of the two rendered bodies
     goes on the row.
+
+    **Three of the six gates are the provider's rules rather than WhatsApp's,
+    and each reads the capability that names its own precondition.** The
+    billing circuit and the monthly cap are `metered`, the window is
+    `has_service_window`, and the template fall-through is `supports_templates`.
+    A provider with none of them reaches `pending` by the order above running
+    unchanged and skipping the questions that cannot arise — which is the point
+    of the record, and the reason this is not `if provider == …` scattered down
+    the page. Every capability is True for Meta's Cloud API, so the order and
+    the answers here are exactly what they were before the seam.
+
+    `caps is None` is "there is no adapter to send through", which the caller
+    resolves and cannot report any other way. It is `unconfigured` for the same
+    reason a missing credential is: the deployment cannot reach the surface,
+    and nothing was sent.
     """
     from ...config import whatsapp_config_errors
 
     if not config.whatsapp.enabled or whatsapp_config_errors(config):
+        return "unconfigured", "service"
+    if caps is None:
         return "unconfigured", "service"
     binding = db.get_whatsapp_binding(conn, user_id)
     if binding is None or not _destination(binding):
@@ -463,19 +492,26 @@ def _gate(
     if binding.opted_out_at is not None and not ignore_opt_out:
         return "opted_out", "service"
     if (
-        config.whatsapp.billing_policy == "free_guard"
+        caps.metered
+        and config.whatsapp.billing_policy == "free_guard"
         and db.whatsapp_billing_block(conn) is not None
     ):
         return "billing_blocked", "service"
     send_kind = "service"
-    if not service_window_open(binding):
+    if caps.has_service_window and not service_window_open(binding):
         # A template is the only way past a closed window, and `free_guard`
         # forbids one outright — even inside the window — so a free-biased
-        # deployment has nothing to fall through to.
-        if not template_available(config):
+        # deployment has nothing to fall through to. A provider that supports
+        # no templates has nothing to fall through to either, and the two
+        # conditions are kept apart rather than folded into
+        # `template_available`: that one answers about the operator's config,
+        # and this one about what the provider can express at all.
+        if not caps.supports_templates or not template_available(config):
             return "window_closed", "service"
         send_kind = "template"
-    if send_kind == "service" and _service_budget_exhausted(conn, config, month):
+    if caps.metered and send_kind == "service" and _service_budget_exhausted(
+        conn, config, month
+    ):
         # Named for service attempts and counting only those. A template is
         # reachable only under `allow_paid`, which is the operator's explicit
         # acceptance of billing, so this number does not bound it. Pinned by
@@ -493,6 +529,7 @@ def _claim(
     task_id: int | None,
     bodies: dict[str, str],
     ignore_opt_out: bool,
+    caps: "WhatsAppProviderCaps | None",
 ) -> tuple[str, WhatsAppDeliveryRecord]:
     """Insert-or-reuse one ledger row and take it, in one transaction.
 
@@ -535,6 +572,7 @@ def _claim(
             return "settled", _record(row)
         status, send_kind = _gate(
             conn, config, user_id, ignore_opt_out=ignore_opt_out, month=month,
+            caps=caps,
         )
         body = bodies[send_kind]
         digest = hashlib.sha256(body.encode()).hexdigest()
@@ -816,6 +854,37 @@ async def _settle_async(
 # ---------------------------------------------------------------------------
 
 
+def active_adapter(config: Config) -> "WhatsAppProviderAdapter | None":
+    """The adapter this deployment sends through, or ``None``.
+
+    **Never raises**, and that is the whole reason it is a function rather than
+    two lines at each call site. `make_provider_registry` raises on a provider
+    name it does not know, and `_load_builder` on a provider module that cannot
+    be imported; both are config- or install-level faults, and both would
+    otherwise escape from inside `deliver_whatsapp`'s claim-to-settle region,
+    where the wrapper there settles the row `unknown` — the one state an
+    operator can never resolve — for a send that provably never happened. So a
+    failure is `None`, which every caller reads as `unconfigured`: the
+    fail-closed direction, and the same answer a missing credential already
+    gets.
+
+    No database and no client, which is what makes it safe to call on the
+    event loop as both callers do: the registry's builders construct closures,
+    and the Cloud adapter's session is made and closed inside one `send`. The
+    one blocking step is `importlib` reading the provider module, once per
+    process and cached after — `make_registry`'s no-I/O-on-construction rule
+    read strictly, and the same first-call cost every deferred import in this
+    package pays.
+    """
+    try:
+        from .providers.registry import make_provider_registry  # noqa: PLC0415
+
+        return make_provider_registry(config).active()
+    except Exception:
+        logger.warning("whatsapp.outbound.provider_unavailable", exc_info=True)
+        return None
+
+
 async def deliver_whatsapp(
     config: Config,
     *,
@@ -829,6 +898,14 @@ async def deliver_whatsapp(
     client=None,
 ) -> WhatsAppDeliveryRecord:
     """Claim and perform one logical send. At most one Cloud API call.
+
+    `client` is the Cloud client injection this function has always taken, and
+    it is now applied by replacing the resolved adapter's `send` rather than by
+    a branch further down. Same semantics — the caller's client is used and is
+    not closed — and it keeps `_send_claimed` with one send path instead of
+    two. With no adapter resolved there is nothing to send through and the gate
+    records `unconfigured` before the client is ever reached, which is what a
+    misconfigured deployment already did.
 
     `ignore_opt_out` has exactly one caller and must keep exactly one: the
     acknowledgement of a STOP, which the spec makes a single best-effort
@@ -865,10 +942,14 @@ async def deliver_whatsapp(
         ),
         "template": render_template_parameter(text),
     }
+    adapter = active_adapter(config)
+    if adapter is not None and client is not None:
+        adapter = replace(adapter, send=client.send)
     outcome, record = await asyncio.to_thread(
         _claim, config,
         logical_key=logical_key, user_id=user_id, task_id=task_id,
         bodies=bodies, ignore_opt_out=ignore_opt_out,
+        caps=adapter.caps if adapter is not None else None,
     )
     if outcome == "settled":
         return record
@@ -881,7 +962,7 @@ async def deliver_whatsapp(
             config, logical_key=logical_key, user_id=user_id,
             body=bodies[record.send_kind], send_kind=record.send_kind,
             task_id=task_id, buttons=buttons,
-            reply_to_message_id=reply_to_message_id, client=client,
+            reply_to_message_id=reply_to_message_id, adapter=adapter,
         )
     except BaseException:
         # `BaseException`, not `Exception`: this runs as a FastAPI background
@@ -912,18 +993,23 @@ async def _send_claimed(
     task_id: int | None,
     buttons: tuple[tuple[str, str], ...],
     reply_to_message_id: str | None,
-    client,
+    adapter,
 ) -> WhatsAppDeliveryRecord:
     """The body of :func:`deliver_whatsapp` from a claimed row onwards.
 
     Split in two at the one line that matters: everything before
-    `client.send` is provably a message that never left, and everything from
+    `adapter.send` is provably a message that never left, and everything from
     it onwards may have. A failure in the first half settles **`failed`**, not
-    `unknown` — `unknown` says the request may have reached Meta and is the
-    one state an operator can never resolve, so spending it on a case whose
+    `unknown` — `unknown` says the request may have reached the provider and is
+    the one state an operator can never resolve, so spending it on a case whose
     answer is known makes the ledger less useful, not more careful.
+
+    The client's construction moved into the adapter's own `send` with the rest
+    of its lifetime, and the ledger outcome is unchanged by that: a client that
+    cannot be built is a message that never left, so the Cloud adapter returns a
+    *definite* failure and this function settles `failed` exactly where its
+    pre-send arm used to.
     """
-    owned = False
     try:
         # Resolved *after* the claim and immediately before the call, so a
         # binding the operator changed while the task ran is honoured and the
@@ -936,14 +1022,9 @@ async def _send_claimed(
         request = _request(config, destination, body, send_kind, buttons,
                            reply_to_message_id)
         await asyncio.to_thread(_stamp_attempt, config, logical_key)
-        if client is None:
-            from .client import make_client  # noqa: PLC0415
-
-            client = make_client(config)
-            owned = True
     except Exception:
-        # Nothing has reached the network: the binding read, the attempt stamp
-        # and the client construction all run before the first byte. No
+        # Nothing has reached the network: the binding read, the request build
+        # and the attempt stamp all run before the first byte. No
         # `exc_info` on the message itself would carry the body — a traceback
         # prints frames, not locals — so it is kept, since the cause here is
         # a database or a configuration fault an operator has to see.
@@ -955,16 +1036,13 @@ async def _send_claimed(
         return record
 
     try:
-        result = await client.send(request)
+        result = await adapter.send(request)
     except Exception:
-        # `client.send` has its own never-raises contract; this is the backstop
+        # `adapter.send` has its own never-raises contract; this is the backstop
         # for a double that does not, and for anything the adapter's own
         # handler missed. From here the request may have gone out.
         logger.warning("whatsapp.outbound.unknown reason=send_raised")
         result = None
-    finally:
-        if owned:
-            await client.aclose()
 
     if isinstance(result, WhatsAppSendResult):
         # The only branch that can drain: it is the one that writes the id the
@@ -1472,11 +1550,20 @@ def is_whatsapp_configured(config: Config, user_id: str) -> bool:
     The cap is read *against the template*, which is the one subtlety: on a
     paid deployment with an approved template a closed window still has a
     route, so an exhausted service allowance is not the end of the surface.
+
+    The two cost gates read `metered` for the reason `_gate` does, and the
+    template one reads `supports_templates` beside it — this function restates
+    that gate's arms rather than calling it because it deliberately leaves the
+    window out, so it cannot simply be `_gate(...) == "pending"`.
     """
     from ...config import whatsapp_config_errors
 
     if not config.whatsapp.enabled or whatsapp_config_errors(config):
         return False
+    adapter = active_adapter(config)
+    if adapter is None:
+        return False
+    caps = adapter.caps
     try:
         with db.get_db(config.db_path) as conn:
             binding = db.get_whatsapp_binding(conn, user_id)
@@ -1485,11 +1572,13 @@ def is_whatsapp_configured(config: Config, user_id: str) -> bool:
             if binding.opted_out_at is not None:
                 return False
             if (
-                config.whatsapp.billing_policy == "free_guard"
+                caps.metered
+                and config.whatsapp.billing_policy == "free_guard"
                 and db.whatsapp_billing_block(conn) is not None
             ):
                 return False
-            if not template_available(config) and _service_budget_exhausted(
+            has_template = caps.supports_templates and template_available(config)
+            if caps.metered and not has_template and _service_budget_exhausted(
                 conn, config, quota_month(config)
             ):
                 return False
@@ -1505,6 +1594,7 @@ __all__ = [
     "TRUNCATION_SUFFIX",
     "WHATSAPP_INTERACTIVE_BODY_LIMIT",
     "WHATSAPP_TEXT_LIMIT",
+    "active_adapter",
     "apply_delivery_event",
     # Public because `doctor.whatsapp.billing` reads them, and on the precedent
     # `.claude/rules/doctor.md` records for `executor.mask_shadowed_by`: a

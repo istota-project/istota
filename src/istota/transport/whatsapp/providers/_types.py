@@ -10,7 +10,7 @@ adapter record and its capability tuple.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -62,9 +62,19 @@ class WhatsAppProviderAdapter:
     signature scheme would be a thing to refuse loudly rather than to express.
 
     `send` is not optional. A provider that cannot send is not a provider.
+
+    **`send` is awaitable and the other two are not**, which is where this
+    seam departs from the SMS one it copies. There both halves are synchronous
+    because the Twilio and Telnyx SDKs are; here the whole send path from
+    `deliver_whatsapp` down is `async`, the Cloud API is reached over an
+    `httpx.AsyncClient`, and a second provider receiving over a socket will
+    await a round trip for its own reasons. `parse_webhook` and
+    `verify_signature` stay synchronous: both are pure work over bytes already
+    in hand, and the route awaits the body before either is called. Stage 1
+    declared all three alike, before there was an adapter to check it against.
     """
     name: WhatsAppProviderName
     caps: WhatsAppProviderCaps
     parse_webhook: Callable[[WhatsAppWebhookRequest], WhatsAppWebhookResult] | None
-    send: Callable[[WhatsAppSendRequest], WhatsAppSendOutcome]
+    send: Callable[[WhatsAppSendRequest], Awaitable[WhatsAppSendOutcome]]
     verify_signature: Callable[[WhatsAppWebhookRequest], bool] | None

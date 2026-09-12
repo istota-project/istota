@@ -105,6 +105,18 @@ def make_provider_registry(
             raise ValueError(
                 f"WhatsApp adapter registered as {adapter.name!r}, expected {name!r}"
             )
+        if (adapter.parse_webhook is None) != (adapter.verify_signature is None):
+            # The `_types` docstring says an adapter with a webhook and no
+            # signature scheme is "a thing to refuse loudly rather than to
+            # express"; this is where it is refused. Loudly rather than by
+            # dropping the adapter, because the half-declared shape is a
+            # programming error in a provider module and not a deployment
+            # state — and the direction that matters is the one where a route
+            # gets mounted for an adapter with nothing to authenticate with.
+            raise ValueError(
+                f"WhatsApp adapter {name!r} must declare parse_webhook and "
+                "verify_signature together, or neither"
+            )
         adapters[name] = adapter
 
     return WhatsAppProviderRegistry(
