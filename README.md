@@ -299,6 +299,7 @@ The default Python suite omits tests that need live services, Linux sandboxing, 
 - [Documentation](https://istota.cynium.com/docs)
 - [Web interface](https://istota.cynium.com/docs/features/web-interface/)
 - [SMS](https://istota.cynium.com/docs/features/sms/)
+- [WhatsApp](https://istota.cynium.com/docs/features/whatsapp/)
 - [Architecture overview](https://istota.cynium.com/docs/architecture/overview/)
 - [Skills index](https://istota.cynium.com/docs/reference/skills-index/)
 - [Command reference](https://istota.cynium.com/docs/reference/commands/)

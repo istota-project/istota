@@ -117,7 +117,7 @@ When SMS is enabled, the common block and active provider block must be complete
 
 ## `[whatsapp]`
 
-One WhatsApp business phone number through Meta's hosted Cloud API, used directly rather than through a Business Solution Provider. Text only, and outside the room model: a WhatsApp exchange never creates, joins or mirrors into a Talk or web room.
+One WhatsApp business phone number through Meta's hosted Cloud API, used directly rather than through a Business Solution Provider. Text only, and outside the room model: a WhatsApp exchange never creates, joins or mirrors into a Talk or web room. See the [WhatsApp setup guide](../features/whatsapp.md) for the Meta portal steps, the three operating modes, enrollment, and what the billing controls can and cannot see.
 
 | Setting | Default | Description |
 |---|---|---|

@@ -75,6 +75,14 @@ Properties: `effective_smtp_user` (L53), `effective_smtp_password` (L57) — fal
 
 An enabled block requires a public `site.hostname`, exact E.164 service numbers, a default sender from that list, bounded segment and timeout values, and one complete active provider. Any inactive provider block containing a value must also be complete. That rule is what makes it safe to keep an old adapter for signed delivery callbacks during a switch. Ansible loads nested provider fields from provider-qualified `ISTOTA_SMS_*` entries in `secrets.env`; Docker renders the same names into the generated config. See `.claude/rules/sms.md` and `docs/features/sms.md`.
 
+### `WhatsAppConfig`, `WhatsAppTemplateConfig`
+
+`[whatsapp]` is one business phone number on Meta's Cloud API: `enabled`, the two decimal ids `waba_id` and `phone_number_id`, `business_phone_number`, the three credentials, `graph_api_version`, `business_timezone`, `request_timeout_seconds`, `billing_policy` and `monthly_service_attempt_limit`. `[whatsapp.proactive_template]` is the optional approved utility template: `enabled`, `name`, `language`.
+
+**Validation is split in two, and the split is the ISSUE-058 rule.** `whatsapp_structural_config_errors` fails the load: the ids must be decimal, the number exact E.164, the timezone a real IANA zone, the timeout 1 to 30, the policy one of `free_guard` / `allow_paid`, the cap 1 to 1000 under `free_guard`, and a template valid only under `allow_paid` with a name and a language. `whatsapp_credential_errors` does not, because the Ansible role renders `access_token`, `app_secret` and `verify_token` empty on purpose under `istota_use_environment_file` and delivers them through `secrets.env`, which the role's own `command:`/`script:` tasks cannot read — so raising there fails the play on a config the daemon loads fine. Doctor reports them and the transport refuses at send time. `whatsapp_config_errors` returns both.
+
+`graph_api_version` accepts `v25` and `v25.0`; empty follows the version the installed PyWa release pins. `business_timezone` is what the monthly cap's calendar month is computed in, so changing it moves a month boundary. `whatsapp_webhooks_enabled` is `enabled` alone and has no callback-only arm, unlike its SMS sibling. See `.claude/rules/whatsapp.md` and `docs/features/whatsapp.md`.
+
 ### ntfy push notifications
 
 ntfy is a per-user connected service — there is no global `[ntfy]` block or

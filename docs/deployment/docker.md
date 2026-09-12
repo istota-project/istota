@@ -28,7 +28,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-The `.env` file exposes most settings available in the Ansible role: scheduler intervals, conversation tuning, progress updates, sleep cycle, memory search, email, SMS, ntfy, developer skill, and per-user overrides. See [SMS](../features/sms.md) for the provider blocks and webhook setup.
+The `.env` file exposes most settings available in the Ansible role: scheduler intervals, conversation tuning, progress updates, sleep cycle, memory search, email, SMS, WhatsApp, ntfy, developer skill, and per-user overrides. See [SMS](../features/sms.md) for the provider blocks and webhook setup, and [WhatsApp](../features/whatsapp.md) for the Meta Cloud API setup.
 
 ### Forge binaries
 
@@ -253,6 +253,7 @@ The Ansible shape has the actor: a cron watchdog reads `.State.Health.Status` ev
 | `BOT_PASSWORD` | Bot's Nextcloud account |
 | `POSTGRES_PASSWORD` | Database |
 | `ISTOTA_SMS_*` | Common and provider-qualified SMS settings; see [SMS](../features/sms.md) |
+| `ISTOTA_WHATSAPP_*` | Meta Cloud API settings and the three credentials; see [WhatsApp](../features/whatsapp.md) |
 
 ## Upload limits
 
