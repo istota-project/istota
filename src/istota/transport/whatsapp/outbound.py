@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 
 from ... import db
 from ...config import Config
+from . import message_fingerprint
 from ._types import (
     LOCAL_TERMINAL_STATES,
     WhatsAppDeliveryEvent,
@@ -49,6 +50,15 @@ logger = logging.getLogger(__name__)
 
 #: Meta's own cap on a text message body, in Unicode characters.
 WHATSAPP_TEXT_LIMIT = 4096
+
+#: The cap on an **interactive** message's body, which is a quarter of the
+#: plain-text one. A message carrying quick-reply buttons is a different Cloud
+#: API object with a different limit, and rendering a confirmation prompt
+#: against the text limit means Meta refuses every question longer than this
+#: with a 4xx — a definite failure, so the row reads `failed`, the question is
+#: never asked, and the task sits parked until it expires. The model's answer
+#: is unbounded, so that is the ordinary case rather than an edge one.
+WHATSAPP_INTERACTIVE_BODY_LIMIT = 1024
 
 #: What one body parameter of an approved utility template may carry. Well
 #: under Meta's own limit, because the surrounding fixed template text counts
@@ -99,12 +109,20 @@ _TASK_LOG_MESSAGES = {
     "unknown": "WhatsApp delivery unknown",
 }
 
+#: Every state that means a message reached nobody, and the words the alert
+#: uses for it. `opted_out` is in the list on the spec's instruction rather
+#: than by analogy — `## Design > Notifications` names the opt-out among the
+#: five things that must alert: a confirmation prompt blocked here has to reach
+#: the user some other way, or the task parks until `expire_stale_confirmations`
+#: kills it two hours later. Deduplicated on the logical key, so it is one
+#: alert per logical output rather than one per attempt.
 _ALERT_LABELS = {
     "failed": "failed",
     "unknown": "delivery unknown",
     "window_closed": "blocked by a closed service window",
     "budget_exhausted": "blocked by the monthly attempt cap",
     "billing_blocked": "blocked by the billable circuit",
+    "opted_out": "blocked by an opt-out",
     "unconfigured": "unconfigured",
 }
 
@@ -170,8 +188,22 @@ def _truncate(text: str, limit: int, suffix: str) -> str:
     its base without them at the tail of what was kept. So the cut is walked
     back while the *first dropped* character is a combining mark, which lands
     it on that cluster's base and drops the cluster whole.
+
+    **`combining()` is narrower than "grapheme".** It is zero for a
+    zero-width joiner, a variation selector, a skin-tone modifier and a
+    regional indicator, so an emoji sequence can still be cut in half — the
+    halves render as separate emoji rather than as a replacement character, so
+    the cost is cosmetic and bounded. Widening it means a real
+    grapheme-cluster segmenter, which is a dependency for a cosmetic gain.
+
+    A `limit` below the suffix's own length would otherwise return a string
+    *longer* than the limit, which is the one thing both callers' contracts
+    promise it does not; the suffix is cut too rather than dropped, so the
+    reader still sees that something was removed.
     """
-    available = max(0, limit - len(suffix))
+    if limit <= len(suffix):
+        return suffix[:max(0, limit)]
+    available = limit - len(suffix)
     cut = min(available, len(text))
     while 0 < cut < len(text) and unicodedata.combining(text[cut]) != 0:
         cut -= 1
@@ -378,7 +410,11 @@ def _claim(
         ).fetchone()
         record = _record(fresh)
         if status != "pending":
-            _log_transition(conn, record, task_id)
+            # The row's task id, not the caller's. The UPDATE above is
+            # `COALESCE(?, task_id)`, so a pre-existing row keeps its own when
+            # the caller passes None — and `db.log_task` on None writes
+            # nothing, so the blocked state would never reach that task's log.
+            _log_transition(conn, record, fresh["task_id"])
     return ("claimed" if status == "pending" else "blocked"), record
 
 
@@ -415,7 +451,15 @@ def _settle(
             # another row is not something a resend could have caused — nothing
             # here resends — so it is a Meta or a clock anomaly, and the honest
             # record is that we do not know what happened to this one.
-            logger.warning("whatsapp.outbound.unknown reason=duplicate_message_id")
+            #
+            # The accepted id is lost from the row, which is the cost of the
+            # unique index and is why it is fingerprinted into the log instead:
+            # a message Meta took and billed for would otherwise be traceable
+            # from nowhere, and no later status callback can match it either.
+            logger.warning(
+                "whatsapp.outbound.unknown reason=duplicate_message_id message=%s",
+                message_fingerprint(meta_message_id),
+            )
             conn.execute(
                 "UPDATE sent_whatsapp SET status = 'unknown', updated_at = ? "
                 "WHERE logical_key = ?",
@@ -439,15 +483,9 @@ def _log_transition(conn, record: WhatsAppDeliveryRecord, task_id) -> None:
         )
     logger.info(
         "whatsapp.outbound.%s task_id=%s message=%s error_code=%s",
-        record.status, task_id, _message_fingerprint(record.meta_message_id),
+        record.status, task_id, message_fingerprint(record.meta_message_id),
         record.error_code,
     )
-
-
-def _message_fingerprint(value: str | None) -> str:
-    from ...user_profiles import short_fingerprint
-
-    return short_fingerprint("istota-whatsapp-message-v1", value or "", length=12)
 
 
 # ---------------------------------------------------------------------------
@@ -458,27 +496,25 @@ def _message_fingerprint(value: str | None) -> str:
 def _write_failure_alert(conn, record: WhatsAppDeliveryRecord, user_id, task_id):
     """One durable alert row about a WhatsApp send that reached nobody.
 
+    The row itself is `transport._alerts.write_delivery_failure`, shared with
+    the SMS surface for the reason that module's docstring gives — the two
+    were the same sentence, the same `task #N` fallback and the same hashed
+    dedup key on both sides, and only the label table genuinely differs.
     Deduplicated on the logical key, so a repeated attempt at one logical
-    output bumps a row rather than raising a push per try. The row is written
-    here and pushed by the caller after its transaction closes — see
-    `transport._alerts`.
+    output bumps a row rather than raising a push per try; the caller pushes
+    it after its transaction closes.
     """
-    from ...notification_resolvers import task_alert
+    from .._alerts import write_delivery_failure
 
-    label = _ALERT_LABELS.get(record.status)
-    if label is None:
-        return None
-    task_label = f"task #{task_id}" if task_id is not None else "a notification"
-    dedup = hashlib.sha256(record.logical_key.encode()).hexdigest()[:24]
-    return task_alert.write(
-        conn, user_id,
-        dedup_key=f"whatsapp:{dedup}",
-        title=f"WhatsApp delivery {label} — {task_label}",
-        body=(
-            f"The WhatsApp message for {task_label} was not delivered. "
-            f"Its state is {label}."
-        ),
-        params={"task_id": task_id, "status": record.status},
+    return write_delivery_failure(
+        conn,
+        surface_label="WhatsApp",
+        dedup_prefix="whatsapp",
+        user_id=user_id,
+        task_id=task_id,
+        logical_key=record.logical_key,
+        status=record.status,
+        labels=_ALERT_LABELS,
     )
 
 
@@ -535,8 +571,24 @@ async def deliver_whatsapp(
     — the loop the Talk poller runs on — so opening a connection inline would
     wait on the WAL write lock from inside the loop thread and stall the whole
     runtime until the busy timeout expired.
+
+    **Nothing may escape between the claim and the settle.** The claim commits
+    `claimed_at`, and from that instant every later call for this logical key
+    reads the row as settled and returns without sending — so a raise in
+    between leaves a row that is never sent, never settled and never alerted,
+    with the answer lost and nothing saying so. `_send_claimed` is therefore
+    wrapped whole, and an escape lands on `unknown` for the same reason a
+    timeout does: past `_stamp_attempt` the request may have gone out, and
+    from out here there is no way to tell which side of it the failure fell.
     """
-    body = render_whatsapp(text)
+    body = render_whatsapp(
+        text,
+        # A message carrying buttons is an interactive object with a quarter of
+        # the plain-text body limit. Rendering it at 4096 means Meta refuses
+        # every confirmation question longer than 1024 and the row reads
+        # `failed`, so the question is asked nowhere.
+        limit=WHATSAPP_INTERACTIVE_BODY_LIMIT if buttons else WHATSAPP_TEXT_LIMIT,
+    )
     outcome, record = await asyncio.to_thread(
         _claim, config,
         logical_key=logical_key, user_id=user_id, task_id=task_id,
@@ -548,40 +600,105 @@ async def deliver_whatsapp(
         await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
         return record
 
-    # Resolved *after* the claim and immediately before the call, so a binding
-    # the operator changed while the task ran is honoured and the old
-    # destination never receives the answer.
-    destination = await asyncio.to_thread(current_destination, config, user_id)
-    if not destination:
-        record = await asyncio.to_thread(_settle, config, logical_key, "unconfigured")
+    try:
+        return await _send_claimed(
+            config, logical_key=logical_key, user_id=user_id, body=body,
+            task_id=task_id, buttons=buttons,
+            reply_to_message_id=reply_to_message_id, client=client,
+        )
+    except BaseException:
+        # `BaseException`, not `Exception`: this runs as a FastAPI background
+        # task and inside `run_coro`, so a shutdown delivers `CancelledError`
+        # — which would otherwise leave exactly the stuck claimed row this
+        # wrapper exists to prevent, on the one path where the send may
+        # already be on the wire.
+        logger.warning("whatsapp.outbound.unknown reason=deliver_escaped")
+        try:
+            record = await asyncio.to_thread(
+                _settle, config, logical_key, "unknown",
+            )
+            await asyncio.to_thread(
+                _alert_failure, config, record, user_id, task_id,
+            )
+        except Exception:
+            # The row could not be settled either. Nothing further to try; the
+            # original failure is what matters and is re-raised below.
+            logger.warning("whatsapp.outbound.settle_failed", exc_info=True)
+        raise
+
+
+async def _send_claimed(
+    config: Config,
+    *,
+    logical_key: str,
+    user_id: str,
+    body: str,
+    task_id: int | None,
+    buttons: tuple[tuple[str, str], ...],
+    reply_to_message_id: str | None,
+    client,
+) -> WhatsAppDeliveryRecord:
+    """The body of :func:`deliver_whatsapp` from a claimed row onwards.
+
+    Split in two at the one line that matters: everything before
+    `client.send` is provably a message that never left, and everything from
+    it onwards may have. A failure in the first half settles **`failed`**, not
+    `unknown` — `unknown` says the request may have reached Meta and is the
+    one state an operator can never resolve, so spending it on a case whose
+    answer is known makes the ledger less useful, not more careful.
+    """
+    owned = False
+    try:
+        # Resolved *after* the claim and immediately before the call, so a
+        # binding the operator changed while the task ran is honoured and the
+        # old destination never receives the answer.
+        destination = await asyncio.to_thread(current_destination, config, user_id)
+        if not destination:
+            record = await asyncio.to_thread(
+                _settle, config, logical_key, "unconfigured",
+            )
+            await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
+            return record
+        request = WhatsAppSendRequest(
+            to=destination, text=body, kind="service",
+            reply_to_message_id=reply_to_message_id, buttons=tuple(buttons),
+        )
+        await asyncio.to_thread(_stamp_attempt, config, logical_key)
+        if client is None:
+            from .client import make_client  # noqa: PLC0415
+
+            client = make_client(config)
+            owned = True
+    except Exception:
+        # Nothing has reached the network: the binding read, the attempt stamp
+        # and the client construction all run before the first byte. No
+        # `exc_info` on the message itself would carry the body — a traceback
+        # prints frames, not locals — so it is kept, since the cause here is
+        # a database or a configuration fault an operator has to see.
+        logger.warning(
+            "whatsapp.outbound.failed reason=presend_error", exc_info=True,
+        )
+        record = await asyncio.to_thread(_settle, config, logical_key, "failed")
         await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
         return record
 
-    owned = client is None
-    if owned:
-        from .client import make_client  # noqa: PLC0415
-
-        client = make_client(config)
-    request = WhatsAppSendRequest(
-        to=destination, text=body, kind="service",
-        reply_to_message_id=reply_to_message_id, buttons=tuple(buttons),
-    )
     try:
-        await asyncio.to_thread(_stamp_attempt, config, logical_key)
         result = await client.send(request)
     except Exception:
-        logger.warning("whatsapp.outbound.unknown reason=deliver_raised")
+        # `client.send` has its own never-raises contract; this is the backstop
+        # for a double that does not, and for anything the adapter's own
+        # handler missed. From here the request may have gone out.
+        logger.warning("whatsapp.outbound.unknown reason=send_raised")
         result = None
     finally:
         if owned:
             await client.aclose()
 
     if isinstance(result, WhatsAppSendResult):
-        record = await asyncio.to_thread(
+        return await asyncio.to_thread(
             _settle, config, logical_key, "accepted",
             meta_message_id=result.message_id,
         )
-        return record
     definite = bool(getattr(result, "definite", False))
     record = await asyncio.to_thread(
         _settle, config, logical_key,
@@ -638,7 +755,7 @@ def apply_delivery_event(conn, event: WhatsAppDeliveryEvent):
         # conversation.
         logger.warning(
             "whatsapp.delivery.unknown_message message=%s status=%s",
-            _message_fingerprint(event.message_id), event.status,
+            message_fingerprint(event.message_id), event.status,
         )
         return "delivery_unknown", None, None
 
@@ -665,7 +782,7 @@ def apply_delivery_event(conn, event: WhatsAppDeliveryEvent):
     _log_transition(conn, record, updated["task_id"])
     logger.info(
         "whatsapp.delivery.updated task_id=%s message=%s status=%s error_code=%s",
-        updated["task_id"], _message_fingerprint(event.message_id),
+        updated["task_id"], message_fingerprint(event.message_id),
         event.status, event.error_code,
     )
     pending_alert = None

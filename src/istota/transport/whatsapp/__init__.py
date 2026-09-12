@@ -53,6 +53,29 @@ def whatsapp_conversation_token(user_id: str) -> str:
     return "whatsapp-" + digest[:24]
 
 
+def bsuid_fingerprint(value: str) -> str:
+    """The one-way stand-in for a BSUID in a log line or an alert body."""
+    from ...user_profiles import short_fingerprint
+
+    return short_fingerprint("istota-whatsapp-bsuid-v1", value, length=12)
+
+
+def message_fingerprint(value: str | None) -> str:
+    """The one-way stand-in for a Meta message id in a log line.
+
+    Here rather than in each module that logs one, because the **salt domain
+    is load-bearing**: `webhook.py` fingerprints inbound message ids and
+    `outbound.py` fingerprints outbound and delivery ones, and the whole point
+    of the value is that two mentions of one message match. Two copies of the
+    domain string that drifted would leave a send and its own status callback
+    fingerprinting differently, with log correlation silently gone and nothing
+    red to say so.
+    """
+    from ...user_profiles import short_fingerprint
+
+    return short_fingerprint("istota-whatsapp-message-v1", value or "", length=12)
+
+
 class WhatsAppTransport:
     """The `whatsapp` surface: an interactive, user-routable push transport.
 
@@ -123,19 +146,41 @@ class WhatsAppTransport:
         `reference_id` is the caller's stable logical id and is what makes a
         repeated send cost nothing. The random fallback is honest — with no key
         there is nothing to deduplicate against — but every caller without one
-        mints a fresh ledger row and, on a metered surface, a fresh message.
+        mints a fresh ledger row and, on a metered surface, a fresh message,
+        and a failure then writes a fresh alert row and fires a fresh push. It
+        is logged rather than refused, because refusing would turn a caller's
+        oversight into a lost answer; no shipped caller takes that branch.
         """
-        from .outbound import deliver_whatsapp
+        import logging  # noqa: PLC0415
 
+        from .outbound import deliver_whatsapp  # noqa: PLC0415
+
+        log = logging.getLogger(__name__)
         if not user_id:
             user_id = task.user_id if task is not None else None
         if not user_id:
+            # A `deliver()` with no task resolves nobody, which is what keeps
+            # `commands._deliver_result` from sending a command reply a second
+            # time — but it reports `delivered=True` regardless, so silence
+            # here would make a genuine misroute indistinguishable from that.
+            log.warning(
+                "whatsapp.outbound.no_recipient: nothing sent, no ledger row "
+                "written; the caller passed neither a user nor a task",
+            )
             return None
-        logical_key = reference_id or (
-            f"task-result:{task.id}"
-            if task is not None
-            else f"notification:{uuid.uuid4()}"
-        )
+        logical_key = reference_id
+        if not logical_key:
+            logical_key = (
+                f"task-result:{task.id}"
+                if task is not None
+                else f"notification:{uuid.uuid4()}"
+            )
+            if task is None:
+                log.warning(
+                    "whatsapp.outbound.unkeyed_send user=%s: no reference_id, "
+                    "so this send deduplicates against nothing",
+                    user_id,
+                )
         return await deliver_whatsapp(
             self._config, logical_key=logical_key, user_id=user_id, text=text,
             task_id=task.id if task is not None else None,
@@ -168,6 +213,7 @@ class WhatsAppTransport:
 
 __all__ = [
     "LOCAL_TERMINAL_STATES",
+    "bsuid_fingerprint",
     "REACHED_META",
     "InboundWhatsAppEvent",
     "WhatsAppDeliveryEvent",
@@ -180,5 +226,6 @@ __all__ = [
     "WhatsAppSendResult",
     "WhatsAppTransport",
     "WhatsAppUserIdentity",
+    "message_fingerprint",
     "whatsapp_conversation_token",
 ]

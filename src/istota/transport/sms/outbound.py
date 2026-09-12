@@ -442,24 +442,35 @@ def _raise_failure_alert(
     )
 
 
-def _write_failure_alert(conn, record, user_id: str, task_id: int | None):
-    from ...notification_resolvers import task_alert
+_ALERT_LABELS = {
+    "blocked_opt_out": "blocked by opt-out",
+    "unconfigured": "unconfigured",
+    "unknown": "delivery unknown",
+    "failed": "failed",
+}
 
-    label = {
-        "blocked_opt_out": "blocked by opt-out",
-        "unconfigured": "unconfigured",
-        "unknown": "delivery unknown",
-        "failed": "failed",
-    }.get(record.status)
-    if label is None:
-        return None
-    task_label = f"task #{task_id}" if task_id is not None else "a notification"
-    title = f"SMS delivery {label} — {task_label}"
-    body = f"The SMS for {task_label} was not delivered. Its state is {label}."
-    dedup_key = f"sms:{hashlib.sha256(record.logical_key.encode()).hexdigest()[:24]}"
-    return task_alert.write(
-        conn, user_id, dedup_key=dedup_key, title=title, body=body,
-        params={"task_id": task_id, "status": record.status},
+
+def _write_failure_alert(conn, record, user_id: str, task_id: int | None):
+    """One durable alert row about an SMS that reached nobody.
+
+    The row is `transport._alerts.write_delivery_failure`, shared with the
+    WhatsApp surface the way `push_off_surface` already is: the two were the
+    same sentence, the same `task #N` fallback and the same hashed dedup key,
+    and only the label table genuinely differs. The body gains one word
+    ("The SMS message for…" rather than "The SMS for…") so that one sentence
+    reads on both surfaces; nothing asserts on it.
+    """
+    from .._alerts import write_delivery_failure
+
+    return write_delivery_failure(
+        conn,
+        surface_label="SMS",
+        dedup_prefix="sms",
+        user_id=user_id,
+        task_id=task_id,
+        logical_key=record.logical_key,
+        status=record.status,
+        labels=_ALERT_LABELS,
     )
 
 

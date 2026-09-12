@@ -144,14 +144,22 @@ class WhatsAppClient:
     """
 
     def __init__(self, config: "Config", *, session: httpx.AsyncClient | None = None):
+        # The import comes first, before the session exists. It is the failure
+        # a deployment actually meets — a missing or renamed PyWa — and a
+        # session created before it has no owner to `aclose` it and no sync
+        # close to call. What is left after this ordering is a `WhatsApp(...)`
+        # that raises on its own arguments, which leaves behind a client that
+        # has issued no request and therefore holds no connection and no task:
+        # garbage collection reclaims it in silence. Config is validated at
+        # load, so nothing shipped reaches that branch.
+        from pywa_async import WhatsApp  # noqa: PLC0415
+
         whatsapp = config.whatsapp
         self._phone_number_id = whatsapp.phone_number_id
         self._owns_session = session is None
         self._session = session or httpx.AsyncClient(
             timeout=httpx.Timeout(float(whatsapp.request_timeout_seconds)),
         )
-        from pywa_async import WhatsApp  # noqa: PLC0415
-
         kwargs: dict[str, object] = {
             "phone_id": whatsapp.phone_number_id,
             "token": whatsapp.access_token,

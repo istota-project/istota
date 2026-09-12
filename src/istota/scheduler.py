@@ -2444,6 +2444,33 @@ def run_task_inline(
     return success, result
 
 
+def _whatsapp_confirmation_body(result: str, task_id: int) -> str:
+    """A confirmation question plus the sentence that says how to answer it.
+
+    Sized to the **interactive** body limit rather than the plain-text one,
+    because a message carrying quick-reply buttons is a different Cloud API
+    object with a quarter of the room. The question is trimmed to fit and the
+    sentence is appended after, so a long answer loses its own tail rather
+    than losing the task id — which is the address `!confirm <id>` and a later
+    typed `YES` are answered at, and the only route left on a client that
+    renders no buttons.
+
+    The renderer is asked for the budget rather than the arithmetic being
+    repeated here: `render_whatsapp` is what knows the truncation suffix and
+    how not to cut a combining sequence in half.
+    """
+    from .transport.whatsapp.outbound import (
+        WHATSAPP_INTERACTIVE_BODY_LIMIT,
+        render_whatsapp,
+    )
+
+    tail = f"\n\nTask #{task_id}. Reply YES or NO."
+    question = render_whatsapp(
+        result, limit=max(1, WHATSAPP_INTERACTIVE_BODY_LIMIT - len(tail)),
+    )
+    return f"{question}{tail}"
+
+
 def _email_task_from_the_user(config: Config, task: db.Task) -> bool:
     """Whether this email task's own sender is the user it was routed to.
 
@@ -3103,13 +3130,28 @@ def process_one_task(
                     # The buttons carry the answer; the sentence carries the
                     # task id, which is what makes `!confirm <id>` and a later
                     # typed YES work on a client that renders no buttons.
-                    post_whatsapp_message = (
-                        f"{result}\n\nTask #{task_id}. Reply YES or NO."
-                    )
+                    #
+                    # The question is trimmed *here* rather than left to the
+                    # renderer, because a message carrying buttons is an
+                    # interactive object capped at a quarter of the plain-text
+                    # limit — so a long answer would otherwise be cut at the
+                    # renderer's boundary and take the task-id sentence with
+                    # it, leaving a question with no address to answer at.
                     post_whatsapp_buttons = (
                         (f"confirm:{task_id}:yes", "Yes"),
                         (f"confirm:{task_id}:no", "No"),
                     )
+                    post_whatsapp_message = _whatsapp_confirmation_body(
+                        result, task_id,
+                    )
+                    # Set before the notification row exists, so it can never
+                    # fall through to the `task-result:` key below: that key
+                    # belongs to the task's own final answer, and a prompt
+                    # claiming it would settle the row and make the answer
+                    # undeliverable for good once the user said yes. Replaced
+                    # by the notification id when there is one, which is what
+                    # the SMS arm keys on.
+                    post_whatsapp_reference_id = f"confirmation:{task_id}"
 
                 # The durable record of the question, written on this connection
                 # inside the transaction that just parked the task — always,

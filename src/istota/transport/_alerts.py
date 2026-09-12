@@ -14,6 +14,11 @@ filtered, then rejoined into the comma-list grammar `send_notification` parses,
 and a surface that spelled that join differently would silently route to the
 wrong place rather than fail.
 
+`write_delivery_failure` is the row that push carries, and it is here for the
+same reason one step earlier: both ledger-backed push surfaces write it, with
+the same sentence, the same `task #N` fallback and the same hashed dedup key,
+and only their label tables genuinely differ.
+
 **The row is written by the caller, inside its own transaction; only the push
 is here.** `.claude/rules/notifications.md` is the reason — a producer holding
 a write transaction that opens a second connection to deliver waits out the
@@ -31,6 +36,63 @@ if TYPE_CHECKING:
     from ..notification_store import RaiseResult
 
 logger = logging.getLogger(__name__)
+
+
+def write_delivery_failure(
+    conn,
+    *,
+    surface_label: str,
+    dedup_prefix: str,
+    user_id: str,
+    task_id: int | None,
+    logical_key: str,
+    status: str,
+    labels: "dict[str, str]",
+):
+    """The durable row behind a push surface's undelivered message.
+
+    The other half of the pair this module already holds. `push_off_surface`
+    was factored out when the *push* was written twice; the row write was then
+    written twice as well, identical on both surfaces down to the sentence — a
+    label table, a `task #N` or `a notification`, and a dedup key that is a
+    truncated hash of the logical key. Which is exactly the shape that drifts:
+    a fix to one surface's wording or dedup axis lands in one copy.
+
+    What varies is the surface's own name, the prefix its dedup keys are
+    namespaced under, and its label table — a state means something different
+    per surface, and the labels are the only place that shows. `None` for a
+    status with no label is how a caller says "this state is not a failure";
+    an unmapped one writes nothing rather than an alert with a blank in it.
+
+    **The row only, never the push.** `.claude/rules/notifications.md` is the
+    reason: this runs on the caller's connection, inside the caller's write
+    transaction, and a delivery from in here would open a second connection
+    against the lock this one holds. The caller buffers the result and hands
+    it to `push_off_surface` after its `with` block closes.
+
+    The dedup key is the logical key's hash rather than the key itself, so a
+    caller-chosen string of any length and any content cannot become an
+    unbounded, attacker-shaped axis on a uniquely-indexed column.
+    """
+    import hashlib
+
+    from ..notification_resolvers import task_alert
+
+    label = labels.get(status)
+    if label is None:
+        return None
+    task_label = f"task #{task_id}" if task_id is not None else "a notification"
+    digest = hashlib.sha256(logical_key.encode()).hexdigest()[:24]
+    return task_alert.write(
+        conn, user_id,
+        dedup_key=f"{dedup_prefix}:{digest}",
+        title=f"{surface_label} delivery {label} — {task_label}",
+        body=(
+            f"The {surface_label} message for {task_label} was not delivered. "
+            f"Its state is {label}."
+        ),
+        params={"task_id": task_id, "status": status},
+    )
 
 
 def push_off_surface(

@@ -18,6 +18,7 @@ surface that has just proved it cannot reach the user.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 import unicodedata
 from dataclasses import replace
@@ -231,11 +232,28 @@ class TestTheRenderer:
         tail = text[len(body):]
         assert tail and unicodedata.combining(tail[0]) == 0
 
-    def test_astral_characters_are_not_split(self):
-        rendered = render_whatsapp("🙂" * 5000)
+    def test_a_limit_below_the_suffix_still_holds(self):
+        # Both entry points expose `limit`, and the naive arithmetic
+        # (`limit - len(suffix)`, floored at zero) returns the whole suffix —
+        # a string *longer* than the limit, from a function whose contract is
+        # that it is not.
+        for limit in (0, 1, 10, len(TRUNCATION_SUFFIX) - 1):
+            assert len(render_whatsapp("z" * 200, limit=limit)) <= limit
 
-        assert "�" not in rendered
+    def test_an_emoji_sequence_is_the_stated_limitation_not_a_claim(self):
+        # `"🙂" * 5000` asserts nothing about the code: an astral character is
+        # one code point, so no `str` slice can halve it and `"�" not in
+        # rendered` is true of `text[:limit]` too. What `_truncate` actually
+        # guards is `unicodedata.combining`, which is zero for a zero-width
+        # joiner — so a ZWJ sequence *is* cut, and the docstring says so. This
+        # states the real behaviour rather than dressing a tautology up as a
+        # guarantee.
+        family = "\U0001f468‍\U0001f469‍\U0001f467"
+        rendered = render_whatsapp(family * 2000)
+
         assert len(rendered) <= WHATSAPP_TEXT_LIMIT
+        body = rendered[: -len(TRUNCATION_SUFFIX)]
+        assert (family * 2000).startswith(body)
 
     def test_the_template_parameter_is_capped_at_nine_hundred(self):
         rendered = render_template_parameter("c" * 5000)
@@ -336,17 +354,29 @@ class TestTheLedgerClaim:
         "status",
         ["accepted", "sent", "delivered", "read", "failed", *sorted(LOCAL_TERMINAL_STATES)],
     )
+    @pytest.mark.parametrize("claimed", [True, False], ids=["claimed", "unclaimed"])
     async def test_no_state_but_an_unclaimed_pending_is_ever_resent(
-        self, tmp_path, status,
+        self, tmp_path, status, claimed,
     ):
+        """Both halves of the settled test, because they cover different rows.
+
+        With `claimed_at` set, `row["claimed_at"] is not None` alone answers,
+        so the `_NO_RESEND` half of the condition is never reached — delete it
+        and every case here stays green. That matters because `_claim` writes
+        `claimed_at = None` for every *blocked* outcome, so a `window_closed`,
+        `opted_out`, `billing_blocked`, `budget_exhausted` or `unconfigured`
+        row exists with a NULL claim and is protected by `_NO_RESEND` and
+        nothing else. The unclaimed half is the one that exercises it.
+        """
         config = _config(tmp_path)
         _bind(config)
+        stamp = "datetime('now')" if claimed else "NULL"
         with db.get_db(config.db_path) as conn:
             conn.execute(
                 "INSERT INTO sent_whatsapp (logical_key, user_id, send_kind, status, "
-                "body_chars, body_sha256, claimed_at, attempted_at, created_at, "
-                "updated_at) VALUES (?, 'alice', 'service', ?, 4, 'x', "
-                "datetime('now'), datetime('now'), datetime('now'), datetime('now'))",
+                f"body_chars, body_sha256, claimed_at, attempted_at, created_at, "
+                f"updated_at) VALUES (?, 'alice', 'service', ?, 4, 'x', "
+                f"{stamp}, {stamp}, datetime('now'), datetime('now'))",
                 ("task-result:9", status),
             )
         client = _FakeClient()
@@ -397,6 +427,82 @@ class TestTheLedgerClaim:
         assert seen == ["pending"]
         row = _rows(config, "task-result:2")[0]
         assert row["claimed_at"] and row["attempted_at"]
+
+    async def test_a_raise_between_the_claim_and_the_send_settles_the_row(
+        self, tmp_path, monkeypatch,
+    ):
+        """The stuck-row failure the claim makes possible.
+
+        `claimed_at` is committed before anything reaches the network, so from
+        that instant every later call reads the row as settled and returns
+        without sending. A raise in between would leave the answer lost with
+        no row saying so and no alert — worse than any state the ledger can
+        record, because nothing anywhere knows it happened.
+        """
+        config = _config(tmp_path)
+        _bind(config)
+
+        def explode(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(
+            "istota.transport.whatsapp.outbound.current_destination", explode,
+        )
+        client = _FakeClient()
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:20", user_id="alice",
+            text="done", client=client,
+        )
+
+        # `failed`, not `unknown`: the binding read runs before the first byte,
+        # so this is provably a message that never left — and `unknown` is the
+        # one state that says it may have and that nobody can resolve.
+        assert record.status == "failed"
+        assert client.requests == []
+        assert _alerts(config)
+
+    async def test_a_cancellation_mid_send_still_settles_the_row(
+        self, tmp_path,
+    ):
+        # `deliver_event_responses` runs as a FastAPI background task and
+        # `send_record` runs inside `run_coro`, so a shutdown delivers
+        # `CancelledError` — which is not an `Exception` and would otherwise
+        # leave the claimed row stuck on the one path where the send may
+        # already be on the wire.
+        config = _config(tmp_path)
+        _bind(config)
+
+        async def cancelled(_request):
+            raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await deliver_whatsapp(
+                config, logical_key="task-result:21", user_id="alice",
+                text="done", client=_FakeClient(on_send=cancelled),
+            )
+
+        assert [row["status"] for row in _rows(config)] == ["unknown"]
+
+    async def test_a_duplicate_meta_message_id_settles_unknown(self, tmp_path):
+        # `sent_whatsapp` has UNIQUE(meta_message_id). Nothing here resends, so
+        # a collision is a Meta or a clock anomaly rather than our doing, and
+        # the honest record is that we do not know what became of this one.
+        config = _config(tmp_path)
+        _bind(config)
+        await deliver_whatsapp(
+            config, logical_key="task-result:22", user_id="alice", text="a",
+            client=_FakeClient(WhatsAppSendResult("wamid.same")),
+        )
+
+        record = await deliver_whatsapp(
+            config, logical_key="task-result:23", user_id="alice", text="b",
+            client=_FakeClient(WhatsAppSendResult("wamid.same")),
+        )
+
+        assert record.status == "unknown"
+        assert record.meta_message_id is None
+        assert _rows(config, "task-result:22")[0]["status"] == "accepted"
 
     async def test_the_ledger_stores_no_body_and_no_destination(self, tmp_path):
         config = _config(tmp_path)
@@ -537,6 +643,11 @@ class TestTheSend:
 
         assert record.status == "opted_out"
         assert client.requests == []
+        # Alerted, and off WhatsApp. A confirmation prompt blocked here has to
+        # reach the user somewhere, or the task parks until it expires.
+        assert [row["title"] for row in _alerts(config)] == [
+            "WhatsApp delivery blocked by an opt-out — a notification"
+        ]
 
     async def test_the_stop_acknowledgement_is_the_one_send_an_opt_out_allows(
         self, tmp_path,
@@ -668,6 +779,36 @@ class TestTheSend:
         assert client.requests[0].buttons == (
             ("confirm:7:yes", "Yes"), ("confirm:7:no", "No"),
         )
+
+    async def test_a_message_with_buttons_is_capped_at_the_interactive_limit(
+        self, tmp_path,
+    ):
+        """The limit that is not 4,096.
+
+        A message carrying quick-reply buttons is an `interactive` Cloud API
+        object, whose body caps at 1,024 characters. Rendering a confirmation
+        prompt at the plain-text limit means Meta refuses every question longer
+        than that with a 4xx — which `_classify` reads as definite, so the row
+        goes `failed`, the question is asked nowhere, and the task parks until
+        it expires. The model's answer is unbounded, so it is the ordinary case.
+        """
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+
+        await deliver_whatsapp(
+            config, logical_key="confirmation:2", user_id="alice",
+            text="q" * 5000, client=client,
+            buttons=(("confirm:7:yes", "Yes"),),
+        )
+        await deliver_whatsapp(
+            config, logical_key="task-result:2", user_id="alice",
+            text="q" * 5000, client=client,
+        )
+
+        with_buttons, without = client.requests
+        assert len(with_buttons.text) <= 1024
+        assert 1024 < len(without.text) <= WHATSAPP_TEXT_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -1119,6 +1260,158 @@ class TestTheAfterCommitReplies:
         assert [r.disposition for r in results] == ["task"]
         assert client.requests == []
         assert _rows(config) == []
+
+
+class TestSchedulerDelivery:
+    """The scheduler's own leg, driven through `process_one_task`.
+
+    The two arms that had no coverage anywhere else: a completed WhatsApp task
+    delivering its result once through the ledger, and a WhatsApp-origin
+    confirmation parking with a prompt carrying Yes and No buttons. Both go
+    through `send_record` rather than `deliver`, because `Transport.deliver`
+    returns a message id WhatsApp has none of and would discard the record the
+    owed-confirmation arm reads.
+    """
+
+    @staticmethod
+    def _task(config, monkeypatch, client, answer):
+        monkeypatch.setattr(
+            "istota.transport.whatsapp.client.make_client", lambda _config: client,
+        )
+        monkeypatch.setattr(
+            "istota.scheduler.execute_task",
+            lambda *_args, **_kwargs: (True, answer, None, None),
+        )
+        with db.get_db(config.db_path) as conn:
+            return db.create_task(
+                conn, prompt="check", user_id="alice", source_type="whatsapp",
+                conversation_token=whatsapp_conversation_token("alice"),
+                output_target="whatsapp",
+            )
+
+    def test_a_completed_task_delivers_once_through_the_ledger(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        task_id = self._task(config, monkeypatch, client, "Finished the check.")
+
+        assert process_one_task(config) == (task_id, True)
+
+        assert [r.text for r in client.requests] == ["Finished the check."]
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "completed"
+            # No room, no membership, no canonical transcript row: WhatsApp is
+            # its own external conversation and is never a view of a room.
+            for table in ("rooms", "room_bindings", "room_members", "messages"):
+                assert conn.execute(
+                    f"SELECT count(*) FROM {table}"
+                ).fetchone()[0] == 0
+        assert [row["logical_key"] for row in _rows(config)] == [
+            f"task-result:{task_id}"
+        ]
+
+    async def test_a_long_question_keeps_the_task_id_it_is_answered_at(
+        self, tmp_path, monkeypatch,
+    ):
+        # The truncation the interactive limit forces has to cut the question,
+        # never the sentence: the task id is the address `!confirm <id>` and a
+        # typed YES resolve against, and the only route left on a client that
+        # renders no buttons.
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        task_id = self._task(
+            config, monkeypatch, client,
+            "Should I proceed? " + ("detail " * 400),
+        )
+
+        assert process_one_task(config) == (task_id, True)
+
+        request = client.requests[0]
+        assert len(request.text) <= 1024
+        assert request.text.endswith(f"Task #{task_id}. Reply YES or NO.")
+
+    def test_a_confirmation_parks_and_carries_yes_and_no_buttons(
+        self, tmp_path, monkeypatch,
+    ):
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config)
+        client = _FakeClient()
+        task_id = self._task(
+            config, monkeypatch, client,
+            "I need your confirmation before deleting the file.",
+        )
+
+        assert process_one_task(config) == (task_id, True)
+
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+            notification_id = conn.execute(
+                "SELECT id FROM notifications WHERE source = 'confirmation'"
+            ).fetchone()[0]
+        assert len(client.requests) == 1
+        request = client.requests[0]
+        # The buttons carry the answer; the sentence carries the task id, which
+        # is what makes `!confirm <id>` and a typed YES work on a client that
+        # renders no buttons. The callback data holds the id and the choice and
+        # nothing else — never an authorization secret.
+        assert request.buttons == (
+            (f"confirm:{task_id}:yes", "Yes"), (f"confirm:{task_id}:no", "No"),
+        )
+        assert f"Task #{task_id}. Reply YES or NO." in request.text
+        assert len(request.text) <= 1024
+        assert [row["logical_key"] for row in _rows(config)] == [
+            f"confirmation:{notification_id}"
+        ]
+
+    def test_a_blocked_confirmation_still_reaches_the_user_off_whatsapp(
+        self, tmp_path, monkeypatch,
+    ):
+        # The owed debt: the park withholds the notification because the
+        # WhatsApp prompt was going to carry the question, so a send that never
+        # reached Meta would leave it pushed nowhere and the task parked until
+        # `expire_stale_confirmations` kills it two hours later.
+        from istota.scheduler import process_one_task
+
+        config = _config(tmp_path)
+        _bind(config, window=timedelta(hours=30))
+        client = _FakeClient()
+        task_id = self._task(
+            config, monkeypatch, client,
+            "I need your confirmation before deleting the file.",
+        )
+        # The push itself is asserted on the call rather than on
+        # `last_delivered_at`: this user has no configured destination, so a
+        # real push reaches nobody and stamps nothing, and the question under
+        # test is whether the scheduler owed it back at all.
+        pushed = []
+        monkeypatch.setattr(
+            "istota.scheduler.deliver_pending",
+            lambda _config, results: pushed.extend(
+                r for r in results if r is not None
+            ),
+        )
+
+        assert process_one_task(config) == (task_id, True)
+
+        assert client.requests == []
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, task_id).status == "pending_confirmation"
+            sources = [
+                row[0] for row in conn.execute("SELECT source FROM notifications")
+            ]
+        assert "confirmation" in sources
+        assert pushed, "the withheld confirmation was never owed back"
+        # The blocked prompt is recorded, so a retry cannot send it twice.
+        assert [row["status"] for row in _rows(config)] == ["window_closed"]
 
 
 class TestTheNotificationLeg:

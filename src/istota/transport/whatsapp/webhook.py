@@ -44,10 +44,14 @@ from datetime import datetime, timedelta, timezone
 from ... import commands, confirmations, db
 from ...config import Config
 from ...http_headers import header_value
-from ...user_profiles import is_e164, short_fingerprint
+from ...user_profiles import is_e164
 from .._types import IncomingMessage
 from ..ingest import ingest_message
-from . import whatsapp_conversation_token
+from . import (
+    bsuid_fingerprint,
+    message_fingerprint,
+    whatsapp_conversation_token,
+)
 from ._types import (
     InboundWhatsAppEvent,
     WhatsAppDeliveryEvent,
@@ -481,14 +485,6 @@ def _slug(value: str, *, limit: int = 48) -> str:
     return "".join(c if c in _SLUG_KEEP else "-" for c in lowered)
 
 
-def _bsuid_fingerprint(value: str) -> str:
-    return short_fingerprint("istota-whatsapp-bsuid-v1", value, length=12)
-
-
-def _message_fingerprint(value: str) -> str:
-    return short_fingerprint("istota-whatsapp-message-v1", value, length=12)
-
-
 def _sql_datetime(moment: datetime) -> str:
     """The `datetime('now')` spelling every column on the binding holds."""
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -541,7 +537,7 @@ def _write_identity_alert(conn, user_id: str, bsuid: str) -> object | None:
     """
     from ...notification_resolvers import task_alert
 
-    fingerprint = _bsuid_fingerprint(bsuid)
+    fingerprint = bsuid_fingerprint(bsuid)
     return task_alert.write(
         conn, user_id,
         dedup_key=f"whatsapp-identity:{fingerprint}",
@@ -567,7 +563,7 @@ def _write_send_id_alert(conn, user_id: str, bsuid: str) -> object | None:
     """
     from ...notification_resolvers import task_alert
 
-    fingerprint = _bsuid_fingerprint(bsuid)
+    fingerprint = bsuid_fingerprint(bsuid)
     return task_alert.write(
         conn, user_id,
         dedup_key=f"whatsapp-send-id:{fingerprint}",
@@ -704,8 +700,8 @@ def _handle_inbound(
         logger.info(
             "whatsapp.inbound.rejected reason=%s message=%s identity=%s",
             resolution.disposition,
-            _message_fingerprint(event.message_id),
-            _bsuid_fingerprint(event.from_user.bsuid),
+            message_fingerprint(event.message_id),
+            bsuid_fingerprint(event.from_user.bsuid),
         )
         return WhatsAppEventResult(
             resolution.disposition or "unknown_sender",
@@ -719,7 +715,7 @@ def _handle_inbound(
         # leaves nothing in the log to say the 200 was a no-op rather than work.
         logger.info(
             "whatsapp.inbound.duplicate message=%s",
-            _message_fingerprint(event.message_id),
+            message_fingerprint(event.message_id),
         )
         return WhatsAppEventResult("duplicate", user_id=user_id)
 
@@ -748,7 +744,7 @@ def _handle_inbound(
     _set_disposition(conn, event, result.disposition, result.task_id)
     logger.info(
         "whatsapp.inbound.accepted disposition=%s message=%s task_id=%s",
-        result.disposition, _message_fingerprint(event.message_id), result.task_id,
+        result.disposition, message_fingerprint(event.message_id), result.task_id,
     )
     return result
 
@@ -1003,7 +999,15 @@ async def deliver_event_responses(
     """
     from .outbound import deliver_whatsapp
 
-    deliver_pending_alerts(config, results)
+    try:
+        deliver_pending_alerts(config, results)
+    except Exception:
+        # Its own contract is that it does not raise, and that rests on
+        # `push_off_surface`. Guarded anyway, because if it ever did the whole
+        # batch's replies below would be skipped — and the inbound claim has
+        # already marked those messages processed, so Meta's redelivery reads
+        # `duplicate` and they are never sent by anything.
+        logger.warning("whatsapp.alert.batch_failed", exc_info=True)
     for result in results:
         try:
             text = await resolve_event_response(config, result)

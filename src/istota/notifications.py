@@ -737,8 +737,24 @@ def _dispatch(
             if _send_sms(config, user_id, message or title or "", reference_id):
                 sent = True
         elif dest.surface == "whatsapp":
-            if _send_whatsapp(config, user_id, message or title or "", reference_id):
-                sent = True
+            # The one arm with its own guard, and the reason is the surface
+            # rather than the route: `deliver_whatsapp` settles a claimed
+            # ledger row on every path it can, and re-raises whatever it could
+            # not settle so a caller is not told a message went out. An
+            # unguarded raise here would escape `send_notification` — which
+            # most callers treat as never-raising — and skip every remaining
+            # destination in a multi-leg route, so one metered surface being
+            # down would take Talk and email with it.
+            try:
+                if _send_whatsapp(
+                    config, user_id, message or title or "", reference_id,
+                ):
+                    sent = True
+            except Exception:
+                logger.warning(
+                    "WhatsApp notification leg failed (user: %s)", user_id,
+                    exc_info=True,
+                )
         else:
             logger.warning(
                 "Unsupported notification surface %r (user: %s)",
