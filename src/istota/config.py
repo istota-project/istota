@@ -4154,13 +4154,31 @@ WHATSAPP_CREDENTIAL_FIELDS = ("access_token", "app_secret", "verify_token")
 
 
 def _is_valid_timezone(name: object) -> bool:
+    """Whether `name` resolves to a zone, without raising for any input.
+
+    `OSError` is in the tuple because `ZoneInfo` resolves the name as a *path*
+    under the tzdata directories, so a 300-character value raises
+    `ENAMETOOLONG` rather than `ZoneInfoNotFoundError` — and this runs inside
+    `load_config`, where that escaped as a traceback carrying the venv path.
+    `ZoneInfoNotFoundError` subclasses `KeyError` and is named for the reader.
+    """
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
     try:
         ZoneInfo(str(name))
-    except (ZoneInfoNotFoundError, ValueError, KeyError):
+    except (ZoneInfoNotFoundError, ValueError, KeyError, OSError):
         return False
     return True
+
+
+def whatsapp_missing_credentials(config: Config) -> tuple[str, ...]:
+    """Names of the blank Meta secrets. The value is never read, only its
+    emptiness — a caller rendering this into a log or a check result must be
+    able to name the gap without holding the credential."""
+    return tuple(
+        name for name in WHATSAPP_CREDENTIAL_FIELDS
+        if not str(getattr(config.whatsapp, name, "") or "").strip()
+    )
 
 
 def whatsapp_credential_errors(config: Config) -> list[str]:
@@ -4177,10 +4195,7 @@ def whatsapp_credential_errors(config: Config) -> list[str]:
     """
     if not config.whatsapp.enabled:
         return []
-    missing = [
-        name for name in WHATSAPP_CREDENTIAL_FIELDS
-        if not str(getattr(config.whatsapp, name, "") or "").strip()
-    ]
+    missing = whatsapp_missing_credentials(config)
     if not missing:
         return []
     return ["missing credentials: " + ", ".join(missing)]

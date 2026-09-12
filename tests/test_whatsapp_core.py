@@ -260,6 +260,25 @@ class TestWhatsAppConfig:
         with pytest.raises(ValueError, match="WhatsApp"):
             load_config(_write_config(tmp_path, body))
 
+    @pytest.mark.parametrize(
+        "name",
+        ["x" * 300, "/etc/passwd", "../../etc/passwd", "leapseconds", ""],
+    )
+    def test_a_hostile_timezone_name_is_refused_rather_than_raised(
+        self, tmp_path, name
+    ):
+        """`ZoneInfo` resolves the value as a path under the tzdata
+        directories, so a long name raises `ENAMETOOLONG` rather than
+        `ZoneInfoNotFoundError` — which escaped `load_config` as a traceback
+        carrying the venv path."""
+        body = _valid_whatsapp_config().replace(
+            'business_timezone = "America/Los_Angeles"',
+            f'business_timezone = "{name}"',
+        )
+
+        with pytest.raises(ValueError, match="WhatsApp"):
+            load_config(_write_config(tmp_path, body))
+
     def test_missing_credentials_are_reported_rather_than_failing_the_load(
         self, tmp_path
     ):
@@ -467,6 +486,43 @@ class TestWhatsAppSchemaMigration:
             else:
                 pytest.fail("a second row for one logical output was accepted")
 
+    def test_an_inbound_message_id_can_be_claimed_only_once(self, tmp_path):
+        """The whole of inbound deduplication rests on this one constraint."""
+        path = tmp_path / "fresh.db"
+        db.init_db(path)
+        insert = (
+            "INSERT INTO processed_whatsapp (message_id, user_id, disposition, "
+            "message_type, received_at) VALUES ('wamid.1', 'alice', 'received', "
+            "'text', datetime('now'))"
+        )
+
+        with db.get_db(path) as conn:
+            conn.execute(insert)
+            with pytest.raises(sqlite3.IntegrityError, match="message_id"):
+                conn.execute(insert)
+
+    def test_one_meta_message_id_maps_to_one_ledger_row(self, tmp_path):
+        """A status webhook is matched to a row by this id, so two rows
+        carrying it would make the delivery state ambiguous. Rows with no id
+        yet are the ordinary pre-send state and must not collide."""
+        path = tmp_path / "fresh.db"
+        db.init_db(path)
+
+        def row(key, meta_id):
+            return (
+                "INSERT INTO sent_whatsapp (logical_key, meta_message_id, user_id, "
+                "send_kind, status, body_chars, body_sha256, created_at, updated_at) "
+                f"VALUES ('{key}', {meta_id}, 'alice', 'service', 'pending', 3, "
+                "'abc', datetime('now'), datetime('now'))"
+            )
+
+        with db.get_db(path) as conn:
+            conn.execute(row("a", "NULL"))
+            conn.execute(row("b", "NULL"))
+            conn.execute(row("c", "'wamid.1'"))
+            with pytest.raises(sqlite3.IntegrityError, match="meta_message_id"):
+                conn.execute(row("d", "'wamid.1'"))
+
     def test_the_runtime_circuit_is_a_singleton(self, tmp_path):
         path = tmp_path / "fresh.db"
         db.init_db(path)
@@ -552,6 +608,99 @@ class TestWhatsAppBindingStore:
         assert binding.bootstrap_phone_number == "+15557654321"
         assert binding.bsuid == "US.2"
 
+    def _bind_with_state(self, conn, user_id="alice", **fields):
+        """A binding carrying the state a live conversation leaves behind."""
+        db.set_whatsapp_binding(conn, user_id, **fields)
+        conn.execute(
+            "UPDATE whatsapp_user_bindings SET last_user_message_at = ?, "
+            "last_seen_at = ?, opted_out_at = ? WHERE user_id = ?",
+            ("2026-09-11 10:00:00", "2026-09-11 10:00:00",
+             "2026-09-01 00:00:00", user_id),
+        )
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"bootstrap_phone_number": "+15557654321"},
+            {"bsuid": "US.2"},
+            {"bootstrap_phone_number": "+15557654321", "bsuid": "US.2"},
+            {"bootstrap_phone_number": "+15557654321", "bsuid": ""},
+        ],
+        ids=["number", "bsuid", "both", "number-and-cleared-bsuid"],
+    )
+    def test_an_identity_change_discards_the_previous_holders_state(
+        self, tmp_path, change
+    ):
+        """`last_user_message_at` is the one that matters: it is the sole
+        input to the 24-hour service window, so inheriting it would let a
+        free-form message go to somebody who never wrote in. `send_id` is a
+        principal, and the opt-out belongs to whoever set it."""
+        path = self._db(tmp_path)
+
+        with db.get_db(path) as conn:
+            self._bind_with_state(
+                conn,
+                bootstrap_phone_number="+15551234567",
+                bsuid="US.1",
+                send_id="send-1",
+                username="old-name",
+            )
+            db.set_whatsapp_binding(conn, "alice", **change)
+            binding = db.get_whatsapp_binding(conn, "alice")
+
+        assert binding.send_id == ""
+        assert binding.username == ""
+        assert binding.last_user_message_at is None
+        assert binding.last_seen_at is None
+        assert binding.opted_out_at is None
+
+    def test_an_unchanged_identity_keeps_its_conversation_state(self, tmp_path):
+        """The control for the case above: latching a send id on an inbound
+        event must not reset the window it was just observed through."""
+        path = self._db(tmp_path)
+
+        with db.get_db(path) as conn:
+            self._bind_with_state(
+                conn, bootstrap_phone_number="+15551234567", bsuid="US.1",
+            )
+            db.set_whatsapp_binding(conn, "alice", send_id="send-1")
+            binding = db.get_whatsapp_binding(conn, "alice")
+
+        assert binding.send_id == "send-1"
+        assert binding.last_user_message_at == "2026-09-11 10:00:00"
+        assert binding.opted_out_at == "2026-09-01 00:00:00"
+
+    def test_a_replacement_bsuid_is_a_new_enrollment(self, tmp_path):
+        path = self._db(tmp_path)
+
+        with db.get_db(path) as conn:
+            db.set_whatsapp_binding(
+                conn, "alice", bootstrap_phone_number="+15551234567", bsuid="US.1",
+            )
+            conn.execute(
+                "UPDATE whatsapp_user_bindings SET enrolled_at = '2020-01-01 00:00:00' "
+                "WHERE user_id = 'alice'"
+            )
+            db.set_whatsapp_binding(conn, "alice", bsuid="US.2")
+            binding = db.get_whatsapp_binding(conn, "alice")
+
+        assert binding.enrolled_at != "2020-01-01 00:00:00"
+
+    def test_unsetting_the_number_with_no_identity_left_is_refused(self, tmp_path):
+        """`--whatsapp-number ""` would otherwise leave a row naming a user
+        and no way to reach or recognise them, which is what
+        `--clear-whatsapp` is for."""
+        path = self._db(tmp_path)
+
+        with db.get_db(path) as conn:
+            db.set_whatsapp_binding(conn, "alice", bootstrap_phone_number="+15551234567")
+            with pytest.raises(ValueError, match="clear-whatsapp"):
+                db.set_whatsapp_binding(conn, "alice", bootstrap_phone_number="")
+            assert (
+                db.get_whatsapp_binding(conn, "alice").bootstrap_phone_number
+                == "+15551234567"
+            )
+
     def test_reset_clears_only_the_learned_identity(self, tmp_path):
         path = self._db(tmp_path)
 
@@ -569,6 +718,10 @@ class TestWhatsAppBindingStore:
         assert binding.bsuid == ""
         assert binding.send_id == ""
         assert binding.enrolled_at is None
+        # The same discard set `set_whatsapp_binding` applies, so the two
+        # paths cannot disagree about what a learned identity is.
+        assert binding.last_user_message_at is None
+        assert binding.opted_out_at is None
 
     def test_reset_refuses_a_binding_with_no_bootstrap_number_left(self, tmp_path):
         path = self._db(tmp_path)
@@ -780,6 +933,24 @@ class TestWhatsAppOperatorCommands:
         with db.get_db(path) as conn:
             assert db.get_whatsapp_binding(conn, "alice") is None
 
+    def test_a_database_without_the_tables_does_not_traceback(self, tmp_path):
+        """`user ensure` reads the binding on every invocation, whatever flags
+        were passed, and the Ansible role runs it per user on every deploy. A
+        checkout that lands before the migration must not crash a command that
+        has already written the profile row."""
+        from istota.cli import cmd_user_ensure, cmd_user_show
+
+        path, config_path = self._setup(tmp_path)
+        with db.get_db(path) as conn:
+            for table in (
+                "whatsapp_user_bindings", "processed_whatsapp",
+                "sent_whatsapp", "whatsapp_runtime",
+            ):
+                conn.execute(f"DROP TABLE {table}")
+
+        cmd_user_ensure(_ensure_args(config_path, display_name="Alice"))
+        cmd_user_show(SimpleNamespace(config=str(config_path), name="alice"))
+
     def test_user_show_returns_the_complete_binding_for_operator_automation(
         self, tmp_path, capsys
     ):
@@ -867,7 +1038,11 @@ class TestWhatsAppBillingCircuit:
 
         assert blocked.billing_message_id == "wamid.first"
 
-    def test_the_cli_unblocks_and_masks_the_evidence(self, tmp_path, capsys):
+    def test_the_cli_unblocks_and_reports_the_evidence(self, tmp_path, capsys):
+        """The private operator command shows the Meta message id in full.
+        It is the only place the id is readable — this same call clears the
+        row it lives on — and it is what the operator matches against the
+        Meta billing page. Every general surface fingerprints it instead."""
         from istota.cli import cmd_whatsapp_billing_unblock
 
         path = tmp_path / "istota.db"
@@ -879,9 +1054,22 @@ class TestWhatsAppBillingCircuit:
         cmd_whatsapp_billing_unblock(SimpleNamespace(config=str(config_path)))
         output = capsys.readouterr().out
 
-        assert "wamid.evidence" not in output
+        assert "wamid.evidence" in output
         with db.get_db(path) as conn:
             assert db.whatsapp_billing_block(conn) is None
+
+    def test_unblocking_an_open_circuit_says_so_without_inventing_evidence(
+        self, tmp_path, capsys
+    ):
+        from istota.cli import cmd_whatsapp_billing_unblock
+
+        path = tmp_path / "istota.db"
+        db.init_db(path)
+        config_path = _write_config(tmp_path, f'db_path = "{path}"\n')
+
+        cmd_whatsapp_billing_unblock(SimpleNamespace(config=str(config_path)))
+
+        assert "not blocked" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -1004,6 +1192,35 @@ class TestWhatsAppDoctorReadiness:
 
         assert result.status == doctor.FAIL
         assert "WHATSAPP-SENTINEL-SECRET" not in str(result)
+
+    def test_credentials_absent_from_this_process_warn_rather_than_fail(self):
+        """The Ansible shape: `config.toml` carries no secret and
+        `secrets.env` delivers all three to the units. An operator running
+        `istota doctor` from their own shell is reading an environment the
+        daemon has and they do not, so a FAIL would report a working
+        deployment as broken."""
+        cfg = _ready_config()
+        cfg.whatsapp.access_token = ""
+        cfg.whatsapp.app_secret = ""
+        cfg.whatsapp.verify_token = ""
+
+        result = self._results(cfg)["whatsapp.common"]
+
+        assert result.status == doctor.WARN
+        assert result.remedy
+        assert doctor.verdict([result])[0] is True
+
+    def test_a_partial_credential_set_is_still_a_failure(self):
+        """No delivery mechanism supplies one of three, so this is a real
+        mistake rather than an environment this process cannot see."""
+        cfg = _ready_config()
+        cfg.whatsapp.app_secret = ""
+
+        result = self._results(cfg)["whatsapp.common"]
+
+        assert result.status == doctor.FAIL
+        assert "app_secret" in result.detail
+        assert "access_token" not in result.detail
 
     def test_the_template_state_is_reported_as_configured_only(self):
         """Meta owns approval, pause and category, so the local check may only

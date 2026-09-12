@@ -142,39 +142,42 @@ def is_e164(value: object) -> bool:
     return bool(_E164_PATTERN.fullmatch(str(value) if value is not None else ""))
 
 
-def normalize_sms_phone_number(value: object, *, allow_empty: bool = False) -> str:
-    """Validate an exact E.164 number without guessing or rewriting it."""
-    number = str(value) if value is not None else ""
-    if allow_empty and number == "":
-        return ""
-    if not is_e164(number):
-        raise ValueError(
-            "SMS phone number must be exact E.164: '+' followed by 8 to 15 "
-            "digits, with a non-zero country code"
-        )
-    return number
+def normalize_phone_number(
+    value: object, *, label: str, allow_empty: bool = False
+) -> str:
+    """Validate an exact E.164 number without guessing or rewriting it.
 
-
-def normalize_whatsapp_phone_number(value: object, *, allow_empty: bool = False) -> str:
-    """The same rule for a WhatsApp bootstrap number, said in its own words.
-
-    One predicate (:func:`is_e164`), two messages: an operator told "SMS phone
-    number must be exact E.164" after typing `--whatsapp-number` has to work
-    out which of the two bindings the command refused.
-
-    Meta's `wa_id` arrives without the leading `+`, so the inbound path
-    prepends one before asking — it does not clean punctuation or guess a
-    country code, and neither does this.
+    `label` is the only thing the two bindings differ in. An operator told
+    "SMS phone number must be exact E.164" after typing `--whatsapp-number`
+    has to work out which of the two the command refused.
     """
     number = str(value) if value is not None else ""
     if allow_empty and number == "":
         return ""
     if not is_e164(number):
         raise ValueError(
-            "WhatsApp phone number must be exact E.164: '+' followed by 8 to "
-            "15 digits, with a non-zero country code"
+            f"{label} must be exact E.164: '+' followed by 8 to 15 digits, "
+            "with a non-zero country code"
         )
     return number
+
+
+def normalize_sms_phone_number(value: object, *, allow_empty: bool = False) -> str:
+    return normalize_phone_number(
+        value, label="SMS phone number", allow_empty=allow_empty,
+    )
+
+
+def normalize_whatsapp_phone_number(value: object, *, allow_empty: bool = False) -> str:
+    """The bootstrap number for a WhatsApp binding.
+
+    Meta's `wa_id` arrives without the leading `+`, so the inbound path
+    prepends one before asking — it does not clean punctuation or guess a
+    country code, and neither does this.
+    """
+    return normalize_phone_number(
+        value, label="WhatsApp phone number", allow_empty=allow_empty,
+    )
 
 
 def mask_phone_number(number: str) -> str:
@@ -190,20 +193,24 @@ def mask_sms_phone_number(number: str) -> str:
     return mask_phone_number(number)
 
 
-def mask_whatsapp_identifier(value: str) -> str:
-    """A short one-way fingerprint of a BSUID, send id or Meta message id.
+def short_fingerprint(domain: str, value: str, *, length: int = 16) -> str:
+    """A stable, truncated, one-way fingerprint of a private identifier.
 
-    These are not credentials, but they are private operational data that
-    identifies a person to Meta, and every general surface — an operator's
-    terminal, a log line, an alert — shows this instead of the value. It is
-    stable, so two lines about the same identity can be matched up, and it is
-    truncated, so it is short enough to read and no use as an identifier
-    anywhere but here.
+    For a value that is not a credential but still identifies a person — a
+    phone number, a WhatsApp BSUID, a Meta message id — so a log line or an
+    operator's terminal can match two mentions of the same thing without
+    carrying the thing itself. `domain` separates the namespaces: two
+    surfaces fingerprinting the same phone number must not produce the same
+    string, or one surface's log becomes a lookup table for the other's.
     """
     if not value:
         return ""
-    digest = hashlib.sha256(f"istota-whatsapp-id-v1\0{value}".encode())
-    return digest.hexdigest()[:12]
+    return hashlib.sha256(f"{domain}\0{value}".encode()).hexdigest()[:length]
+
+
+def mask_whatsapp_identifier(value: str) -> str:
+    """The fingerprint every general surface shows for a BSUID or send id."""
+    return short_fingerprint("istota-whatsapp-id-v1", value, length=12)
 
 
 def _raise_phone_conflict(exc: sqlite3.IntegrityError) -> None:

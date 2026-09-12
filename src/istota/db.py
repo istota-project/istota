@@ -10221,65 +10221,110 @@ def set_whatsapp_binding(
 ) -> WhatsAppBinding:
     """Create or update one user's binding, writing only what was supplied.
 
-    Changing `bootstrap_phone_number` clears `bsuid` and `send_id` unless the
-    same call supplies a BSUID: a number the operator has just reassigned is
-    either a different person or a recycled line, and carrying the previous
-    principal's learned identity across is the takeover this table exists to
-    prevent. An explicit BSUID in the same call is the operator saying which
-    identity the new number belongs to.
+    **Any change to the identity discards everything learned about the
+    previous holder.** The identity is the bootstrap number and the BSUID
+    together; a change to either means the operator has pointed this Istota
+    user at a different person or a recycled line, and every other column on
+    the row is a fact about whoever held it before — the send id (one of the
+    three that decides which user an authenticated event may act as), the
+    username, `last_seen_at`, the opt-out, and above all
+    `last_user_message_at`, which is the sole input to the 24-hour service
+    window and therefore the thing that authorises a free-form send. Carrying
+    any of them across is the takeover this table exists to prevent, and
+    carrying the window across would let istota message a stranger who never
+    wrote in. `reset_whatsapp_identity` clears exactly the same set.
+
+    Changing the number therefore also clears the BSUID unless the same call
+    supplies one — that is the operator saying which identity the new number
+    belongs to — and clearing the opt-out is deliberate rather than an
+    oversight: it belonged to the previous holder, nothing can be sent to the
+    new one until they open a window of their own, and leaving it would strand
+    them opted out with no verb to undo it.
+
+    A field the caller supplies explicitly always wins over the discard, so
+    the inbound path can latch a fresh BSUID, send id and username in one
+    call.
     """
     from .user_profiles import normalize_whatsapp_phone_number
 
     existing = get_whatsapp_binding(conn, user_id)
-    number = (
-        existing.bootstrap_phone_number if existing else ""
-    ) if bootstrap_phone_number is None else normalize_whatsapp_phone_number(
-        bootstrap_phone_number, allow_empty=True,
-    )
+    old_number = existing.bootstrap_phone_number if existing else ""
+    old_bsuid = existing.bsuid if existing else ""
 
-    new_bsuid = (existing.bsuid if existing else "") if bsuid is None else str(bsuid or "").strip()
-    new_send_id = (
-        (existing.send_id if existing else "") if send_id is None else str(send_id or "").strip()
-    )
-    if (
-        existing is not None
-        and bootstrap_phone_number is not None
-        and number != existing.bootstrap_phone_number
-        and bsuid is None
-    ):
+    number = old_number
+    if bootstrap_phone_number is not None:
+        number = normalize_whatsapp_phone_number(
+            bootstrap_phone_number, allow_empty=True,
+        )
+
+    new_bsuid = old_bsuid
+    if bsuid is not None:
+        new_bsuid = str(bsuid or "").strip()
+    if bootstrap_phone_number is not None and number != old_number and bsuid is None:
         new_bsuid = ""
-        new_send_id = ""
 
-    new_username = (
-        (existing.username if existing else "") if username is None else str(username or "").strip()
+    if bootstrap_phone_number is not None and not number and not new_bsuid:
+        # The end state would be a row naming a user and no way to reach or
+        # recognise them, which is `clear_whatsapp_binding` said less clearly
+        # — and `reset_whatsapp_identity` already refuses to produce it.
+        raise ValueError(
+            "unsetting the WhatsApp bootstrap number leaves no identity; "
+            "use --clear-whatsapp to remove the binding instead"
+        )
+
+    new_send_id = existing.send_id if existing else ""
+    if send_id is not None:
+        new_send_id = str(send_id or "").strip()
+    new_username = existing.username if existing else ""
+    if username is not None:
+        new_username = str(username or "").strip()
+
+    identity_changed = existing is not None and (
+        number != old_number or new_bsuid != old_bsuid
     )
-    # `enrolled_at` records the *first* successful BSUID binding and is never
-    # moved by a later one, so an identity reset followed by a re-enrollment
-    # reads as the new enrollment it is rather than as the original.
+    if identity_changed:
+        if send_id is None:
+            new_send_id = ""
+        if username is None:
+            new_username = ""
+
+    # `enrolled_at` is stamped whenever the BSUID becomes a *different*
+    # non-empty value, so a re-enrollment reads as the new enrollment it is
+    # rather than as the original. Only clearing the BSUID clears it.
     enrolled_at = existing.enrolled_at if existing else None
-    if new_bsuid and not enrolled_at:
-        enrolled_at = sql_datetime_now()
-    elif not new_bsuid:
+    if not new_bsuid:
         enrolled_at = None
+    elif new_bsuid != old_bsuid or not enrolled_at:
+        enrolled_at = sql_datetime_now()
+
+    keep_state = existing is not None and not identity_changed
+    last_user_message_at = existing.last_user_message_at if keep_state else None
+    last_seen_at = existing.last_seen_at if keep_state else None
+    opted_out_at = existing.opted_out_at if keep_state else None
 
     try:
         conn.execute(
             """
             INSERT INTO whatsapp_user_bindings (
                 user_id, bootstrap_phone_number, bsuid, send_id, username,
-                enrolled_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                opted_out_at, last_user_message_at, enrolled_at, last_seen_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 bootstrap_phone_number = excluded.bootstrap_phone_number,
                 bsuid = excluded.bsuid,
                 send_id = excluded.send_id,
                 username = excluded.username,
+                opted_out_at = excluded.opted_out_at,
+                last_user_message_at = excluded.last_user_message_at,
                 enrolled_at = excluded.enrolled_at,
+                last_seen_at = excluded.last_seen_at,
                 updated_at = excluded.updated_at
             """,
             (
                 user_id, number, new_bsuid, new_send_id, new_username,
-                enrolled_at, sql_datetime_now(),
+                opted_out_at, last_user_message_at, enrolled_at, last_seen_at,
+                sql_datetime_now(),
             ),
         )
     except sqlite3.IntegrityError as exc:
@@ -10307,11 +10352,16 @@ def reset_whatsapp_identity(
             "a WhatsApp identity reset needs a bootstrap phone number to keep; "
             "use --clear-whatsapp to remove the binding instead"
         )
+    # The same set `set_whatsapp_binding` discards on an identity change, and
+    # for the same reason. `last_user_message_at` in particular: it is the only
+    # input to the 24-hour service window, so leaving it would let the next
+    # holder of this binding be messaged without having written in.
     conn.execute(
         """
         UPDATE whatsapp_user_bindings
            SET bsuid = '', send_id = '', username = '',
                enrolled_at = NULL, last_user_message_at = NULL,
+               last_seen_at = NULL, opted_out_at = NULL,
                updated_at = ?
          WHERE user_id = ?
         """,

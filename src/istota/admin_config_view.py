@@ -106,6 +106,12 @@ def _mask_phone_number(number: Any) -> str:
 #
 # Keyed on the full dotted path for the reason `NON_SECRET_KEYS` is: a bare
 # name would mask a same-named field in another section, or fail to.
+#
+# `sms.default_sender_number` and `sms.service_numbers` satisfy the same rule
+# and are deliberately not here yet: they are the deployment's own numbers
+# rather than a person's, and adding them is a behaviour change to the SMS
+# surface that belongs with that surface rather than riding in on this one.
+# It is a gap, not a distinction.
 MASKED_KEYS = {
     "whatsapp.business_phone_number": _mask_phone_number,
 }

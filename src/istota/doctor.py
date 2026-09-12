@@ -6956,19 +6956,48 @@ def check_whatsapp_common(config: "Config", probe: bool) -> CheckResult:
     if not config.whatsapp.enabled:
         return CheckResult("whatsapp.common", SKIP, "[whatsapp] enabled = false")
 
-    from .config import whatsapp_config_errors
+    from .config import (
+        WHATSAPP_CREDENTIAL_FIELDS,
+        whatsapp_missing_credentials,
+        whatsapp_structural_config_errors,
+    )
 
-    errors = whatsapp_config_errors(config)
-    if errors:
+    structural = whatsapp_structural_config_errors(config)
+    missing = whatsapp_missing_credentials(config)
+    credential_remedy = (
+        "The three credentials travel through ISTOTA_WHATSAPP_ACCESS_TOKEN, "
+        "ISTOTA_WHATSAPP_APP_SECRET and ISTOTA_WHATSAPP_VERIFY_TOKEN; a shell "
+        "that has not sourced the deployment's environment file sees none of "
+        "them."
+    )
+    if structural or (missing and len(missing) < len(WHATSAPP_CREDENTIAL_FIELDS)):
+        errors = list(structural)
+        if missing:
+            errors.append("missing credentials: " + ", ".join(missing))
         return CheckResult(
             "whatsapp.common",
             FAIL,
             "; ".join(errors),
             remedy=(
-                "Correct the local [whatsapp] values (credentials travel "
-                "through ISTOTA_WHATSAPP_ACCESS_TOKEN, _APP_SECRET and "
-                "_VERIFY_TOKEN) and reload the configuration."
+                "Correct the local [whatsapp] values and reload the "
+                "configuration. " + credential_remedy
             ),
+        )
+    if missing:
+        # All three absent is the shape the Ansible role renders on purpose:
+        # `config.toml` carries no secret and `secrets.env` delivers them to
+        # the units through `EnvironmentFile=`. An operator running `istota
+        # doctor` from their own shell is therefore reading an environment
+        # the daemon has and they do not, so a FAIL here would report a
+        # working deployment as broken — the shape `.claude/rules/doctor.md`
+        # records correcting twice. A partially-filled set above is a real
+        # mistake and still fails: no delivery mechanism supplies one of three.
+        return CheckResult(
+            "whatsapp.common",
+            WARN,
+            "no WhatsApp credentials are visible to this process; the "
+            "deployment may still hold them",
+            remedy=credential_remedy,
         )
 
     whatsapp = config.whatsapp

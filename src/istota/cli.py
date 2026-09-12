@@ -1090,6 +1090,26 @@ def cmd_user_status(args):
         print("  Status: not initialized")
 
 
+def _whatsapp_binding_for_display(db_path, user_id):
+    """The user's WhatsApp binding, or `None` on a database without the table.
+
+    `user ensure` and `user show` read this on *every* invocation, whatever
+    flags were passed, so a database whose `init_db` has not run yet — a
+    deploy or a `git pull` that lands the code before the migration — would
+    otherwise traceback out of a command that had already written the profile
+    row. `user_profiles._row_get` takes the same posture one level down for
+    the same window: an absent column reads as its default rather than as a
+    crash.
+    """
+    try:
+        with db.get_db(db_path) as conn:
+            return db.get_whatsapp_binding(conn, user_id)
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return None
+
+
 def cmd_user_ensure(args):
     """Create or update a user_profiles row (idempotent).
 
@@ -1322,8 +1342,7 @@ def cmd_user_ensure(args):
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-    with db.get_db(db_path) as conn:
-        binding = db.get_whatsapp_binding(conn, user_id)
+    binding = _whatsapp_binding_for_display(db_path, user_id)
     if binding is not None:
         # Masked, always. `istota user show` is the private operator surface
         # that returns these in full.
@@ -1385,8 +1404,7 @@ def cmd_user_show(args):
         print(f"No DB profile row for {args.name!r}")
         return
 
-    with db.get_db(db_path) as conn:
-        binding = db.get_whatsapp_binding(conn, args.name)
+    binding = _whatsapp_binding_for_display(db_path, args.name)
 
     print(json.dumps({
         "user_id": profile.user_id,
@@ -1447,8 +1465,6 @@ def cmd_whatsapp_billing_unblock(args):
     billable, and only a person who has looked at the Meta billing page knows
     whether that was expected.
     """
-    from . import user_profiles
-
     config = load_config(Path(args.config) if args.config else None)
     with db.get_db(config.db_path) as conn:
         blocked = db.whatsapp_billing_block(conn)
@@ -1457,13 +1473,16 @@ def cmd_whatsapp_billing_unblock(args):
     if not cleared:
         print("WhatsApp billing is not blocked; nothing to do.")
         return
-    evidence = user_profiles.mask_whatsapp_identifier(
-        blocked.billing_message_id or "" if blocked else ""
-    )
-    detail = f" (opened {blocked.billing_blocked_at}" if blocked else ""
-    if detail and evidence:
-        detail += f" by message {evidence}"
-    if detail:
+    # The Meta message id in full, not a fingerprint. This is the private
+    # operator command the masking rule exempts — the same exemption
+    # `user show` takes — and it is the only place the id is readable: the
+    # row it lives on is cleared by this very call, and it is what the
+    # operator matches against the Meta billing page.
+    detail = ""
+    if blocked:
+        detail = f" (opened {blocked.billing_blocked_at}"
+        if blocked.billing_message_id:
+            detail += f" by message {blocked.billing_message_id}"
         detail += ")"
     print(f"WhatsApp billing block cleared{detail}.")
 
