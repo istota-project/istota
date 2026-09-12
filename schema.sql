@@ -856,6 +856,50 @@ CREATE TABLE IF NOT EXISTS sent_sms (
 CREATE INDEX IF NOT EXISTS idx_sent_sms_task_id ON sent_sms(task_id);
 CREATE INDEX IF NOT EXISTS idx_sent_sms_status ON sent_sms(status);
 
+-- A status callback that arrived before the message id it names was written.
+-- The provider mints that id in its reply to the send, so between the adapter
+-- returning and `_set_outcome` committing the id there is a window in which a
+-- callback for one of our own messages matches no `sent_sms` row. Discarding
+-- it is harmless for `queued` and `sent`, which a later status supersedes, and
+-- silently wrong for `failed`: the row keeps whatever the provider said at
+-- accept time and no failure alert is ever raised, so the surface reports a
+-- delivery that failed. The WhatsApp twin of this is `whatsapp_parked_status`
+-- (ISSUE-490); this is the same fix on the live surface.
+--
+-- Every field `apply_delivery_event` reads, which happens to be all of
+-- `SmsDeliveryEvent` — so a parked row rebuilds the event exactly rather than
+-- standing in for it. `opted_out` is in that set and is the one whose loss is
+-- not merely a wrong status: the ladder acts on it by storing an opt-out, so a
+-- dropped one keeps texting somebody who asked to stop.
+--
+-- The id is stored as the provider gave it, unlike the WhatsApp table, which
+-- keys on a fingerprint. That is deliberate rather than an oversight: this
+-- module logs `provider_message_id` in full on every transition, so a
+-- fingerprint here would reduce nothing while the logs beside it print the
+-- value. Whether the SMS surface should mask ids the way the WhatsApp one does
+-- is its own question and a wider change than this table.
+--
+-- Bounded twice, because either bound alone leaves a way to fill it. A status
+-- is parked only while one of our own sends for *that provider* sits between
+-- its claim and its settle, so a callback for a message this deployment never
+-- sent is discarded exactly as before; and a row past the window is pruned
+-- whenever the table is touched at all — an attempted park, before its gate,
+-- and a drain — which is what keeps a send killed between those two points
+-- from parking every foreign status for ever.
+CREATE TABLE IF NOT EXISTS sms_parked_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    provider_message_id TEXT NOT NULL,
+    provider_event_id TEXT,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    reported_segments INTEGER,
+    opted_out INTEGER NOT NULL DEFAULT 0,
+    parked_at TEXT NOT NULL,
+    UNIQUE(provider, provider_message_id, status)
+);
+CREATE INDEX IF NOT EXISTS idx_sms_parked_at ON sms_parked_status(parked_at);
+
 -- WhatsApp (Meta Cloud API). Five tables, all `CREATE TABLE IF NOT EXISTS`, so
 -- an existing deployment database gains them at the next `init_db` with no
 -- migration step of its own.

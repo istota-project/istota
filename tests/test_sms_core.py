@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
@@ -1181,3 +1182,439 @@ class TestATextedAnswerResolvesOnlyItsOwnConversation:
         assert result.disposition == "confirmation_answer"
         with db.get_db(config.db_path) as conn:
             assert db.get_task(conn, sms_task).status != "pending_confirmation"
+
+
+# ---------------------------------------------------------------------------
+# A status callback that overtakes our own provider_message_id write
+# ---------------------------------------------------------------------------
+
+
+def _parked(config):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute(
+            "SELECT provider, provider_message_id, status, error_code, "
+            "reported_segments, opted_out, parked_at "
+            "FROM sms_parked_status ORDER BY id"
+        ).fetchall()
+
+
+def _sent_rows(config):
+    with db.get_db(config.db_path) as conn:
+        return conn.execute("SELECT * FROM sent_sms ORDER BY id").fetchall()
+
+
+def _delivery(status="sent", message_id="opaque-1", **changes):
+    values = dict(
+        provider="twilio",
+        provider_event_id=f"event-{status}",
+        provider_message_id=message_id,
+        status=status,
+        error_code=None,
+        reported_segments=None,
+    )
+    values.update(changes)
+    return SmsDeliveryEvent(**values)
+
+
+def _callback_during_send(config, box, *events):
+    """An adapter whose `send` fires status callbacks before it answers.
+
+    The race, made deterministic. At this moment the ledger row is claimed
+    `pending` and the provider's message id has not been written, because the
+    provider mints it in the reply this call has not yet returned.
+    """
+    dispositions: list[str] = []
+
+    def send(_request):
+        for event in events:
+            with db.get_db(config.db_path) as conn:
+                result = handle_provider_event(
+                    conn, config, event, active_provider_ready=True,
+                )
+            dispositions.append(result.disposition)
+        return SmsSendResult("opaque-1", "accepted", 1)
+
+    box.append(_providers(_adapter(send)))
+    return dispositions
+
+
+class TestAnSmsStatusThatOvertakesTheIdWrite:
+    def test_a_failed_status_still_fails_the_row_and_alerts(self, tmp_path):
+        config = _config(tmp_path)
+        box: list = []
+        dispositions = _callback_during_send(
+            config, box, _delivery(status="failed", error_code="30006"),
+        )
+
+        record = asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        assert dispositions == ["delivery_parked"]
+        row = _sent_rows(config)[0]
+        assert row["status"] == "failed"
+        assert row["error_code"] == "30006"
+        # The caller is told the send failed, not that the provider took it.
+        assert record.status == "failed"
+        with db.get_db(config.db_path) as conn:
+            alerts = conn.execute("SELECT source FROM notifications").fetchall()
+        assert [alert["source"] for alert in alerts] == ["task_alert"]
+        assert _parked(config) == []
+
+    def test_parked_statuses_apply_in_arrival_order_and_stop_at_failed(
+        self, tmp_path,
+    ):
+        # Replayed through `apply_delivery_event`, so the monotonic ladder is
+        # what stops the trailing `delivered` reopening a row the `failed`
+        # closed.
+        config = _config(tmp_path)
+        box: list = []
+        dispositions = _callback_during_send(
+            config, box,
+            _delivery(status="sent"),
+            _delivery(status="failed", error_code="30006"),
+            _delivery(status="delivered"),
+        )
+
+        asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        assert dispositions == ["delivery_parked"] * 3
+        row = _sent_rows(config)[0]
+        assert row["status"] == "failed" and row["error_code"] == "30006"
+        with db.get_db(config.db_path) as conn:
+            count = conn.execute("SELECT count(*) FROM notifications").fetchone()[0]
+        assert count == 1
+
+    def test_a_parked_opt_out_still_stores_the_opt_out(self, tmp_path):
+        # `opted_out` is a side effect the ladder performs on the row's own
+        # number, so losing a parked one silently keeps texting somebody who
+        # asked to stop.
+        config = _config(tmp_path)
+        box: list = []
+        _callback_during_send(
+            config, box, _delivery(status="failed", opted_out=True),
+        )
+
+        asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        with db.get_db(config.db_path) as conn:
+            numbers = [
+                row["phone_number"]
+                for row in conn.execute("SELECT phone_number FROM sms_opt_outs")
+            ]
+        assert numbers == [USER_NUMBER]
+
+    def test_a_status_with_no_send_in_flight_is_discarded_as_before(self, tmp_path):
+        # The bound. Parking every unmatched id would hand a number previously
+        # used by another application an unbounded write.
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda _req: SmsSendResult("opaque-1", "accepted", 1),
+        ))
+        asyncio.run(deliver_sms(
+            config, providers, logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        result = asyncio.run(_handle(
+            config, providers, _delivery(status="failed", message_id="nothing"),
+        ))
+
+        assert result.disposition == "delivery_unknown"
+        assert _parked(config) == []
+
+    def test_a_status_for_another_provider_is_not_parked(self, tmp_path):
+        # The in-flight test is scoped by provider, which the SMS ledger can do
+        # and the WhatsApp one cannot: the event names its provider and the
+        # ledger key is the pair.
+        config = _config(tmp_path)
+        box: list = []
+        dispositions = _callback_during_send(
+            config, box, _delivery(status="failed", provider="telnyx"),
+        )
+
+        asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        assert dispositions == ["delivery_unknown"]
+        assert _parked(config) == []
+        assert _sent_rows(config)[0]["status"] == "accepted"
+
+    def test_the_window_is_pruned_even_when_nothing_is_in_flight(self, tmp_path):
+        # The prune runs before the in-flight gate. Behind it, only a
+        # successful park clears the table, so a deployment that went quiet —
+        # where a stranded row is most likely — keeps its rows for good.
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda _req: SmsSendResult("opaque-1", "accepted", 1),
+        ))
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO sms_parked_status (provider, provider_message_id, "
+                "status, parked_at) VALUES (?, ?, ?, datetime('now', '-1 day'))",
+                ("twilio", "stranded", "failed"),
+            )
+
+        result = asyncio.run(_handle(
+            config, providers, _delivery(status="failed", message_id="nothing"),
+        ))
+
+        assert result.disposition == "delivery_unknown"
+        assert _parked(config) == []
+
+    def test_a_settled_row_is_never_reopened_by_a_second_outcome(self, tmp_path):
+        # `_deliver_sms_blocking` writes an outcome on several paths, and a
+        # replayed status can have taken the row terminal in between. The write
+        # refuses a row already terminal rather than trusting its callers.
+        from istota.transport.sms.outbound import _set_outcome
+
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda _req: SmsSendResult("opaque-1", "accepted", 1),
+        ))
+        asyncio.run(deliver_sms(
+            config, providers, logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+        asyncio.run(_handle(
+            config, providers, _delivery(status="failed", error_code="30006"),
+        ))
+
+        record = _set_outcome(config, "task-result:1", "unknown")
+
+        assert record.status == "failed" and record.error_code == "30006"
+        assert _sent_rows(config)[0]["status"] == "failed"
+
+    def test_a_failing_replay_never_costs_the_accepted_id(self, tmp_path, monkeypatch):
+        # The replay is its own transaction, after the outcome has committed.
+        # Sharing one would let a raise in a replay unwind the
+        # `provider_message_id` write, and a message the provider accepted
+        # whose id was never recorded can never be matched by a later status.
+        from istota.transport.sms import outbound as outbound_module
+
+        config = _config(tmp_path)
+        box: list = []
+        _callback_during_send(config, box, _delivery(status="failed"))
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("replay exploded")
+
+        monkeypatch.setattr(outbound_module, "_drain_parked_statuses", boom)
+        record = asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        row = _sent_rows(config)[0]
+        assert row["status"] == "accepted"
+        assert row["provider_message_id"] == "opaque-1"
+        assert record.status == "accepted"
+
+
+    def test_a_drained_failure_alert_is_never_pushed_over_sms(
+        self, tmp_path, monkeypatch,
+    ):
+        # Routing names SMS and nothing else, which is what makes this
+        # discriminate: the surface is filtered out and the push reaches
+        # nobody. `deliver_pending` would send it happily, to the number whose
+        # message just failed. The neighbouring callback test routes alerts to
+        # ntfy, so its "no sms" assertion holds whichever call is used.
+        config = _config(tmp_path)
+        config.users["alice"].routing = {"alert": "sms"}
+        box: list = []
+        _callback_during_send(
+            config, box, _delivery(status="failed", error_code="30006"),
+        )
+        pushed = []
+        monkeypatch.setattr(
+            notifications, "send_notification",
+            lambda *_a, **kw: pushed.append(kw.get("surface")) or True,
+        )
+
+        asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        assert pushed == [], f"an SMS failure was reported over SMS: {pushed}"
+        assert _sent_rows(config)[0]["status"] == "failed"
+
+    def test_a_callback_failure_alert_is_never_pushed_over_sms(
+        self, tmp_path, monkeypatch,
+    ):
+        # The same rule on the webhook's own path, which had the same defect
+        # before this change and was covered by a test that routed away from
+        # SMS.
+        config = _config(tmp_path)
+        config.users["alice"].routing = {"alert": "sms"}
+        providers = _providers(_adapter(
+            lambda _req: SmsSendResult("opaque-1", "accepted", 1),
+        ))
+        asyncio.run(deliver_sms(
+            config, providers, logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+        pushed = []
+        monkeypatch.setattr(
+            notifications, "send_notification",
+            lambda *_a, **kw: pushed.append(kw.get("surface")) or True,
+        )
+
+        asyncio.run(_handle(
+            config, providers, _delivery(status="failed", error_code="30006"),
+        ))
+
+        assert pushed == [], f"an SMS failure was reported over SMS: {pushed}"
+
+    def test_a_second_callback_for_one_status_merges_rather_than_drops(
+        self, tmp_path,
+    ):
+        # Not a redelivery: the same status seen twice, with the error code and
+        # the segment count only on the second. The park must not invert
+        # `apply_delivery_event`'s own latest-non-NULL-wins rule for the length
+        # of the window.
+        config = _config(tmp_path)
+        box: list = []
+        _callback_during_send(
+            config, box,
+            _delivery(status="failed"),
+            _delivery(status="failed", error_code="30006", reported_segments=2),
+        )
+
+        asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        row = _sent_rows(config)[0]
+        assert row["status"] == "failed"
+        assert row["error_code"] == "30006"
+        assert row["reported_segments"] == 2
+
+    def test_a_missing_parked_table_costs_the_status_not_the_request(
+        self, tmp_path,
+    ):
+        # The deployment shape the guard exists for: new code against a
+        # database `init_db` has not re-run over. The park used to be a bare
+        # return and could not fail; it must not now turn a callback the route
+        # answered into a 503 the provider retries into the same failure.
+        config = _config(tmp_path)
+        box: list = []
+        dispositions = _callback_during_send(config, box, _delivery(status="failed"))
+        with db.get_db(config.db_path) as conn:
+            conn.execute("DROP TABLE sms_parked_status")
+
+        asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        assert dispositions == ["delivery_unknown"]
+        assert _sent_rows(config)[0]["status"] == "accepted"
+
+    def test_the_window_is_pruned_on_the_drain_too(self, tmp_path):
+        # Both paths that touch the table prune it. Only the park path is
+        # covered by the sibling above; this one drains without ever parking,
+        # by planting the parked row directly.
+        config = _config(tmp_path)
+        providers = _providers(_adapter(
+            lambda _req: SmsSendResult("opaque-1", "accepted", 1),
+        ))
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "INSERT INTO sms_parked_status (provider, provider_message_id, "
+                "status, parked_at) VALUES (?, ?, ?, datetime('now', '-1 day'))",
+                ("twilio", "stranded", "failed"),
+            )
+            conn.execute(
+                "INSERT INTO sms_parked_status (provider, provider_message_id, "
+                "status, error_code, parked_at) "
+                "VALUES (?, ?, ?, ?, datetime('now'))",
+                ("twilio", "opaque-1", "failed", "30006"),
+            )
+
+        asyncio.run(deliver_sms(
+            config, providers, logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        # The fresh one was drained, the stale one pruned, and neither is left.
+        assert _parked(config) == []
+        assert _sent_rows(config)[0]["status"] == "failed"
+
+    def test_an_unbounded_or_empty_provider_message_id_is_never_parked(
+        self, tmp_path,
+    ):
+        # The inbound branch bounds this field at 255 characters; the delivery
+        # branch validated nothing, and the park is what makes an unbounded
+        # provider-chosen string a durable row on a uniquely-indexed column.
+        config = _config(tmp_path)
+        box: list = []
+        dispositions = _callback_during_send(
+            config, box,
+            _delivery(status="failed", message_id="x" * 256),
+            _delivery(status="failed", message_id=""),
+        )
+
+        asyncio.run(deliver_sms(
+            config, box[0], logical_key="task-result:1", user_id="alice",
+            text="done",
+        ))
+
+        assert dispositions == ["delivery_unknown", "delivery_unknown"]
+        assert _parked(config) == []
+
+    def test_a_status_racing_the_id_write_is_never_lost(self, tmp_path):
+        """Two real threads at the window, rather than an argument about locks.
+
+        The delivery branch takes `BEGIN IMMEDIATE` before its row lookup and
+        holds it through the park; the outcome write needs that same lock. So
+        there are only two orders — the callback commits its park first and the
+        outcome drains it, or it looks up after the outcome committed and finds
+        the row. Either way the `failed` lands.
+        """
+        for attempt in range(12):
+            root = tmp_path / f"race{attempt}"
+            root.mkdir()
+            config = _config(root)
+            barrier = threading.Barrier(2)
+            event = _delivery(status="failed", error_code="30006")
+
+            def send(_request):
+                barrier.wait(5)
+                return SmsSendResult("opaque-1", "accepted", 1)
+
+            providers = _providers(_adapter(send))
+
+            def outbound():
+                return asyncio.run(deliver_sms(
+                    config, providers, logical_key="task-result:1",
+                    user_id="alice", text="done",
+                ))
+
+            def callback():
+                barrier.wait(5)
+                with db.get_db(config.db_path) as conn:
+                    return handle_provider_event(
+                        conn, config, event, active_provider_ready=True,
+                    )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                sending = pool.submit(outbound)
+                delivering = pool.submit(callback)
+                sending.result(10)
+                delivering.result(10)
+
+            row = _sent_rows(config)[0]
+            assert row["status"] == "failed", f"attempt {attempt}"
+            assert row["error_code"] == "30006", f"attempt {attempt}"
+            assert _parked(config) == [], f"attempt {attempt}"

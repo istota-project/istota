@@ -13,7 +13,12 @@ from ... import db
 from ...config import Config
 from ...timestamps import iso_now as _now
 from ._types import RenderedSms, SmsDeliveryRecord
-from .providers._types import SmsSendFailure, SmsSendRequest, SmsSendResult
+from .providers._types import (
+    SmsDeliveryEvent,
+    SmsSendFailure,
+    SmsSendRequest,
+    SmsSendResult,
+)
 from .providers.registry import SmsProviderRegistry
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,11 @@ _TERMINAL_STATUSES = frozenset({
     "delivered", "delivery_unconfirmed", "failed", "blocked_opt_out",
     "unconfigured", "unknown",
 })
+#: The same set as a stable sequence and its placeholder run, for the one place
+#: it has to reach SQL. A `frozenset` has no order, so binding it directly would
+#: produce a different parameter order per process.
+_TERMINAL_STATUSES_ORDER = tuple(sorted(_TERMINAL_STATUSES))
+_TERMINAL_PLACEHOLDERS = ", ".join("?" * len(_TERMINAL_STATUSES_ORDER))
 _TASK_LOG_MESSAGES = {
     "accepted": "SMS accepted by provider",
     "queued": "SMS queued by provider",
@@ -289,7 +299,12 @@ def _deliver_sms_blocking(
     except Exception:
         outcome = SmsSendFailure(False, None, False, "delivery outcome unknown")
     if isinstance(outcome, SmsSendResult):
-        record = _persist_outcome_or_unknown(
+        # The branch that writes the id every parked status is waiting on, so
+        # the only one that can drain. A callback racing that write may have
+        # taken the row straight to `failed` — whether it parked and was
+        # replayed, or landed just after and applied itself — so `record` is
+        # what the row says now rather than the provider's accept-time status.
+        record = _settle_and_drain(
             config, logical_key, outcome.status,
             provider_message_id=outcome.provider_message_id,
             reported_segments=outcome.reported_segments,
@@ -299,7 +314,7 @@ def _deliver_sms_blocking(
         return record
     if outcome.opted_out and number:
         set_opt_out(config, number, True)
-    record = _persist_outcome_or_unknown(
+    record = _settle_and_drain(
         config, logical_key, "failed" if outcome.definite else "unknown",
         error_code=outcome.error_code,
     )
@@ -339,7 +354,14 @@ def _persist_outcome_or_unknown(
             exc_info=True,
         )
         try:
-            return _set_outcome(config, logical_key, "unknown")
+            # Carrying the id through, because losing it is the same permanent
+            # unmatchability the parking exists to prevent: an attempt that
+            # raised *after* the adapter accepted has an id, and settling
+            # `unknown` without it leaves no later status able to find the row.
+            return _set_outcome(
+                config, logical_key, "unknown",
+                provider_message_id=values.get("provider_message_id"),
+            )
         except Exception:
             previous = _existing(config, logical_key)
             if previous is not None:
@@ -368,16 +390,32 @@ def _set_outcome(
         previous = conn.execute(
             "SELECT status, task_id FROM sent_sms WHERE logical_key = ?", (logical_key,),
         ).fetchone()
-        conn.execute(
+        changed = conn.execute(
             "UPDATE sent_sms SET status = ?, provider_message_id = COALESCE(?, provider_message_id), "
             "error_code = ?, reported_segments = COALESCE(?, reported_segments), updated_at = ? "
-            "WHERE logical_key = ?",
-            (status, provider_message_id, error_code, reported_segments, now, logical_key),
-        )
+            f"WHERE logical_key = ? AND status NOT IN ({_TERMINAL_PLACEHOLDERS})",
+            (status, provider_message_id, error_code, reported_segments, now,
+             logical_key, *_TERMINAL_STATUSES_ORDER),
+        ).rowcount
         row = conn.execute(
             "SELECT * FROM sent_sms WHERE logical_key = ?", (logical_key,),
         ).fetchone()
-        if previous is not None and previous["status"] != status:
+        if row is None:
+            # No row for this key at all. `_record` would raise on it a line
+            # below; saying so here is the honest failure rather than a
+            # TypeError out of a logging call.
+            raise ValueError(f"no sent_sms row for logical key {logical_key!r}")
+        if not changed:
+            # Not a transition, so not a transition log line: the row is what
+            # it already was. A replayed status can have taken it terminal
+            # between the send and this write, and `unknown` overwriting a
+            # `failed` the provider reported definitively is the one direction
+            # an operator can never recover from.
+            logger.info(
+                "sms.outbound.settle_refused provider=%s status=%s current=%s",
+                row["provider"], status, row["status"],
+            )
+        elif previous is not None and previous["status"] != status:
             _log_transition_on_connection(conn, _record(row), previous["task_id"])
     return _record(row)
 
@@ -493,6 +531,318 @@ def is_sms_configured(
     return bool(number and not is_opted_out(config, number))
 
 
+#: How long a parked status may wait for the id it names. The race it covers is
+#: the gap between the adapter's reply and the `provider_message_id` write one
+#: statement later, so the real window is sub-second. What it is sized against
+#: is the other end: a send killed between its claim and its settle leaves an
+#: in-flight row nothing will ever clear, and while one exists every unmatched
+#: status for that provider parks.
+PARKED_STATUS_WINDOW_SECONDS = 15 * 60
+
+#: The longest provider message id that may be stored. The inbound branch of
+#: `handle_provider_event` has always bounded this field; the delivery branch
+#: validated nothing, which did not matter while an unmatched id was discarded
+#: and does once it becomes a durable row on a uniquely-indexed column. Named
+#: here rather than left as a second literal so the two branches cannot drift.
+MAX_PROVIDER_MESSAGE_ID = 255
+
+
+def delivery_may_park(conn, event) -> bool:
+    """Whether this callback could reach the park, and so needs the write lock.
+
+    The cheap half of a double check, and it is about cost rather than
+    correctness. Parking rests on a lookup that found no row, so that lookup
+    and the park have to sit under one exclusive transaction or the outcome
+    write can commit the id between them. Taking `BEGIN IMMEDIATE` for *every*
+    callback would pay for that on the common ones too: a provider sends three
+    or four statuses per message and all but the first find their row, and
+    before this they took no write lock at all — a `delivery_stale` was one
+    `SELECT` in autocommit. The route calls this synchronously on the event
+    loop with a 30s busy timeout, so a lock held across the daemon's other
+    writers is a stalled receiver rather than a slow query.
+
+    So: ask without the lock, and take it only when the answer says a park is
+    possible. The authoritative read is `apply_delivery_event`'s own, which
+    then happens *under* the lock — a row appearing in between is found there
+    and applied normally, and a row still absent is parked safely. The only
+    cost of a stale `True` is an exclusive transaction that turns out not to
+    need one.
+    """
+    return conn.execute(
+        "SELECT 1 FROM sent_sms WHERE provider = ? AND provider_message_id = ?",
+        (event.provider, event.provider_message_id),
+    ).fetchone() is None
+
+
+def _send_in_flight(conn, provider: str) -> bool:
+    """Whether a send on this provider sits between its claim and its settle.
+
+    That interval is what `status = 'pending'` with a claim stamped and no
+    provider id means: the claim commits `claimed_at` before the adapter is
+    called, and `_set_outcome` is what moves the row off `pending` and writes
+    the id. An unclaimed `pending` row is not in flight and does not count.
+
+    This is the whole bound on parking. A provider cannot produce a status for
+    a message before we sent it, and the claim is committed before we send, so
+    any status belonging to one of our unsettled sends finds a row here; one
+    that finds none cannot be ours and is discarded as before. Scoped by
+    provider, which this ledger can do and the WhatsApp one cannot — the event
+    names its provider and the row's key is the pair.
+
+    Sound only because the caller holds `BEGIN IMMEDIATE` across its own row
+    lookup and the park, which is what stops `_set_outcome`'s write landing
+    between the two.
+    """
+    return conn.execute(
+        "SELECT 1 FROM sent_sms WHERE provider = ? AND status = 'pending' "
+        "AND claimed_at IS NOT NULL AND provider_message_id IS NULL LIMIT 1",
+        (provider,),
+    ).fetchone() is not None
+
+
+def _prune_parked_statuses(conn) -> int:
+    """Drop every parked status past the window, and say how many there were.
+
+    Called on both paths that touch the table — an attempted park and a drain
+    — and on the attempt *before* its gate, so a quiet deployment still clears
+    itself: a foreign status arriving with nothing in flight prunes and then
+    declines to park. Behind the gate the only thing clearing the table would
+    be a successful park, which is exactly the deployment that has gone quiet
+    keeping its rows for good.
+
+    A pruned row is a status istota held and could not place. Two causes, and
+    they are logged apart because only one is actionable: a row whose id still
+    matches no `sent_sms` was never ours, which is what a number shared with
+    another application looks like, while a row whose id *does* match is a
+    status we parked, failed to drain and have now lost — the defect this
+    table exists to prevent, reappearing by another route.
+    """
+    window = (f"-{PARKED_STATUS_WINDOW_SECONDS} seconds",)
+    matched = conn.execute(
+        "SELECT count(*) FROM sms_parked_status AS p "
+        "WHERE p.parked_at < datetime('now', ?) AND EXISTS ("
+        "  SELECT 1 FROM sent_sms AS s WHERE s.provider = p.provider "
+        "  AND s.provider_message_id = p.provider_message_id)",
+        window,
+    ).fetchone()[0]
+    dropped = conn.execute(
+        "DELETE FROM sms_parked_status WHERE parked_at < datetime('now', ?)",
+        window,
+    ).rowcount
+    if matched:
+        logger.warning(
+            "sms.delivery.parked_lost count=%d: statuses whose row exists and "
+            "which were never drained -- a delivery outcome has been lost",
+            matched,
+        )
+    if dropped - matched > 0:
+        logger.info(
+            "sms.delivery.parked_expired count=%d: statuses for provider "
+            "message ids no send of ours ever claimed",
+            dropped - matched,
+        )
+    return dropped
+
+
+def _park_status(conn, event) -> bool:
+    """Hold one status whose provider message id has not been written yet.
+
+    Returns whether it was parked. `False` means no send was in flight on this
+    provider, so the id cannot become ours and the caller discards the status.
+
+    The upsert merges rather than keeping the first write, matching what
+    `apply_delivery_event` does to a row it can reach: a redelivered batch
+    carries nothing new, but two genuine callbacks sharing a status — a
+    `failed` seen first without its error code — are not a redelivery.
+    `opted_out` is OR-ed rather than overwritten, since it is a request that
+    was made and a later callback omitting it does not withdraw it.
+    """
+    # Housekeeping first, so a refusal below still clears the window.
+    _prune_parked_statuses(conn)
+    if (
+        not event.provider_message_id
+        or len(event.provider_message_id) > MAX_PROVIDER_MESSAGE_ID
+    ):
+        # An id this shape can match no `sent_sms` row — the column is NULL
+        # there, never empty — so parking it would write a row that only ever
+        # expires, keyed on a provider-chosen string of unbounded length.
+        logger.warning(
+            "sms.delivery.unparkable provider=%s reason=message_id_shape",
+            event.provider,
+        )
+        return False
+    if not _send_in_flight(conn, event.provider):
+        return False
+    conn.execute(
+        "INSERT INTO sms_parked_status (provider, provider_message_id, "
+        "provider_event_id, status, error_code, reported_segments, opted_out, "
+        "parked_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now')) "
+        "ON CONFLICT(provider, provider_message_id, status) DO UPDATE SET "
+        "  provider_event_id = COALESCE(excluded.provider_event_id, provider_event_id), "
+        "  error_code = COALESCE(excluded.error_code, error_code), "
+        "  reported_segments = COALESCE(excluded.reported_segments, reported_segments), "
+        "  opted_out = CASE WHEN opted_out = 1 OR excluded.opted_out = 1 THEN 1 ELSE 0 END",
+        (
+            event.provider, event.provider_message_id, event.provider_event_id,
+            event.status, event.error_code, event.reported_segments,
+            1 if event.opted_out else 0,
+        ),
+    )
+    logger.info(
+        "sms.delivery.parked provider=%s provider_message_id=%s status=%s",
+        event.provider, event.provider_message_id, event.status,
+    )
+    return True
+
+
+def _parked_event(row) -> SmsDeliveryEvent:
+    """One parked row as the event it was.
+
+    A real `SmsDeliveryEvent` rather than a stand-in, because every field the
+    dataclass carries is stored — there is nothing to invent.
+    """
+    return SmsDeliveryEvent(
+        provider=row["provider"],
+        provider_event_id=row["provider_event_id"],
+        provider_message_id=row["provider_message_id"],
+        status=row["status"],
+        error_code=row["error_code"],
+        reported_segments=row["reported_segments"],
+        opted_out=bool(row["opted_out"]),
+    )
+
+
+def _drain_parked_statuses(config: Config, provider: str, provider_message_id: str):
+    """Replay the statuses parked for an id that has just been written.
+
+    Returns the record the last replayed status left, or `None` when nothing
+    was parked, and the alerts they owe — buffered rather than pushed, since
+    this holds a write transaction and `.claude/rules/notifications.md` gives
+    the reason a push from inside one waits out its own lock.
+
+    Its own transaction, opened here rather than shared with `_set_outcome`.
+    See `_settle_and_drain` for the ordering that makes that safe and for what
+    sharing one would cost.
+
+    Replayed through `apply_delivery_event`, never written straight to the row,
+    which is what keeps a parked status from resurrecting a settled one: the
+    ladder refuses a row already in `_TERMINAL_STATUSES`, so a `failed` drained
+    ahead of a `delivered` parked after it closes the row and the `delivered`
+    is a duplicate. It is also what performs the opt-out a parked status may
+    carry, which a direct write would drop.
+    """
+    with db.get_db(config.db_path) as conn:
+        _prune_parked_statuses(conn)
+        rows = conn.execute(
+            "SELECT * FROM sms_parked_status WHERE provider = ? "
+            "AND provider_message_id = ? ORDER BY id",
+            (provider, provider_message_id),
+        ).fetchall()
+        if not rows:
+            return None, ()
+        conn.execute(
+            "DELETE FROM sms_parked_status WHERE provider = ? "
+            "AND provider_message_id = ?",
+            (provider, provider_message_id),
+        )
+        record = None
+        alerts = []
+        for row in rows:
+            _disposition, applied, raised = apply_delivery_event(
+                conn, _parked_event(row),
+            )
+            if applied is not None:
+                record = applied
+            if raised is not None:
+                alerts.append(raised)
+        logger.info(
+            "sms.delivery.drained provider=%s provider_message_id=%s statuses=%d",
+            provider, provider_message_id, len(rows),
+        )
+    return record, tuple(alerts)
+
+
+def _settle_and_drain(
+    config: Config, logical_key: str, status: str, **values,
+) -> SmsDeliveryRecord:
+    """Write one row's outcome, then replay whatever was waiting on its id.
+
+    Two transactions, in this order, and the order is the whole of it. The
+    outcome commits on its own, so no failure in the replay can unwind the
+    `provider_message_id` write; the replay then runs against a row that
+    already holds the id, which is what lets it go through
+    `apply_delivery_event` unchanged.
+
+    Sharing one transaction reads better and is wrong. `db.get_db` commits only
+    on a clean exit, so a raise out of any replay — a notification write, an
+    opt-out insert, a parked table a half-upgraded host has not created yet —
+    would unwind the id write with it, and a message the provider accepted
+    whose id was never recorded can never be matched by a later status.
+
+    Nothing between the two transactions can lose a status: a park happens only
+    under the delivery branch's `BEGIN IMMEDIATE`, which holds the write lock
+    across its own row lookup and the park, and the outcome write needs that
+    same lock. So a callback either commits its park before the outcome, and
+    this drains it, or does its lookup after and finds the row.
+
+    The replay is never allowed to raise past here, for the reason
+    `_alert_failure` never does: a delivery path must not fail over the notice
+    about it.
+    """
+    record = _persist_outcome_or_unknown(config, logical_key, status, **values)
+    if not record.provider_message_id:
+        return record
+    try:
+        drained, alerts = _drain_parked_statuses(
+            config, record.provider, record.provider_message_id,
+        )
+    except Exception:
+        logger.warning("sms.outbound.drain_failed", exc_info=True)
+        return record
+    if alerts:
+        _push_drained_alerts(config, alerts)
+    if drained is not None:
+        return drained
+    # Nothing was parked, which does not mean nothing happened: on the other
+    # interleaving the callback did its lookup *after* the outcome committed,
+    # found the row and applied `failed` to it directly. `record` was read
+    # before that and would report the provider's accept-time status, so the
+    # caller would not raise its failure alert. One more read makes the
+    # returned record current whichever order it was.
+    current = _existing(config, logical_key)
+    return _record(current) if current is not None else record
+
+
+def _push_drained_alerts(config: Config, alerts) -> None:
+    """Push the alerts a replayed status owed, once the outcome has committed.
+
+    **Off the SMS route, which is not the same call `deliver_event_response`
+    makes.** That one uses `deliver_pending` and so can deliver "your SMS
+    failed" over SMS, to the number whose message just failed — the loop
+    `transport/_alerts.py` exists to break, and `_raise_failure_alert` a few
+    lines up already obeys. Copying it here would have been worse than
+    inconsistent: for a drained failure this push is the *only* one that
+    happens. `_deliver_sms_blocking` calls `_alert_failure` immediately
+    afterwards with the same logical key, so `write_delivery_failure` bumps
+    rather than inserts, `raised.deliver` is False, and the correctly-excluded
+    push returns without sending. The webhook's copy is the same defect and is
+    fixed with it.
+
+    Never raises: the caller is on a delivery path whose contract is that a
+    failed alert is not a failed send.
+    """
+    from .._alerts import push_off_surface
+
+    for alert in alerts:
+        try:
+            push_off_surface(
+                config, alert,
+                exclude_surface="sms", reference_prefix="sms-failure",
+            )
+        except Exception:
+            logger.warning("sms.delivery.alert_not_delivered", exc_info=True)
+
+
 def apply_delivery_event(conn, event):
     """``(disposition, record, pending_alert)`` for one provider callback.
 
@@ -500,8 +850,11 @@ def apply_delivery_event(conn, event):
     caller's open write transaction, and a push from in here would open a
     second connection against the lock this one holds. The caller sends it
     after the commit.
+
+    Takes a replayed status as readily as a live one — `_parked_event` rebuilds
+    the real `SmsDeliveryEvent`, so the replay is this code path rather than a
+    second account of the rules below.
     """
-    """Apply one canonical callback without regressing or reopening a row."""
     order = {"pending": 0, "accepted": 1, "queued": 2, "sent": 3, "delivered": 4}
     now = _now()
     entered_failed = False
@@ -510,6 +863,36 @@ def apply_delivery_event(conn, event):
         (event.provider, event.provider_message_id),
     ).fetchone()
     if row is None:
+        # The provider mints the message id in its reply to the send, so a
+        # callback for one of our own messages can arrive before
+        # `_set_outcome` has written it. Held rather than discarded while that
+        # is possible, because a `failed` dropped here leaves the row reporting
+        # whatever the provider said at accept time and raises no alert;
+        # `_settle_and_drain` replays it the moment the id lands.
+        #
+        # Guarded, and the guard is the point rather than caution: this branch
+        # used to be a bare return, so it could not fail, and it now writes to
+        # a table `init_db` may not have created yet on a half-upgraded
+        # deployment. The route turns any `sqlite3.Error` into a 503 the
+        # provider retries into the same deterministic failure, so a park that
+        # cannot happen falls through to the discard that was the only
+        # behaviour before.
+        try:
+            parked = _park_status(conn, event)
+        except sqlite3.Error:
+            logger.warning("sms.delivery.park_failed", exc_info=True)
+            parked = False
+        if parked:
+            return "delivery_parked", None, None
+        # Acknowledged and bounded, and now said out loud: this branch was
+        # silent, so a number carrying another application's traffic produced
+        # no signal at all. The id is logged in full, as every other line in
+        # this module logs it.
+        logger.warning(
+            "sms.delivery.unknown_message provider=%s provider_message_id=%s "
+            "status=%s",
+            event.provider, event.provider_message_id, event.status,
+        )
         return "delivery_unknown", None, None
     current = row["status"]
     if current in _TERMINAL_STATUSES:
