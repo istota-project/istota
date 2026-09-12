@@ -253,6 +253,7 @@ def cmd_run(args):
         config.security.skill_proxy_timeout,
         config.security.skill_proxy_timeouts,
         "code_review",
+        config.security.skill_client_wait_seconds,
     )
     # Coerced rather than trusted: nothing in the loader validates either value,
     # and a float from the TOML would land in the envelope as a float where the

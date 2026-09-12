@@ -222,6 +222,17 @@ class TestItRendersSomethingTheLoaderAccepts:
         while this one says the override is what turns the block on."""
         assert "skill_proxy_timeouts" not in parsed["security"]
 
+    def test_the_client_wait_survives_the_round_trip(self, tmp_path, parsed):
+        """ISSUE-450: the client wait is a real deploy variable, rendered
+        unconditionally like the global timeout beside it."""
+        assert parsed["security"]["skill_client_wait_seconds"] == 600
+
+        path = tmp_path / "config.toml"
+        path.write_text(render(
+            istota_security_skill_client_wait_seconds=1200,
+        ))
+        assert load_config(path).security.skill_client_wait_seconds == 1200
+
 
 class TestEveryRenderedKeyIsARealField:
     """The loader ignores unknown keys, so a rename is silent on a host.

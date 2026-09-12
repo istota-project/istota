@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - You can name a place you have already left. `istota-skill location learn NAME --lat L --lon N` saves the coordinates you give it rather than wherever the phone is now, `--from-cluster` snaps them to the nearest discovered cluster and adopts its fitted centroid and radius, and `--backfill` assigns the pings already inside the new geofence so the stop that prompted the naming reads as that place in later day summaries and place stats. The response says which of the three sited the place, and how many pings it moved.
 
+- `security.skill_client_wait_seconds` raises the one bound in the skill-call timeout ladder no deployment could change: the 600s the sandboxed `istota-skill` client waits on the proxy socket. Every skill budget — the global and each `[security.skill_proxy_timeouts]` entry — is capped at this minus a 30s margin, so a skill wanting more than 570 seconds (a long devbox build, say) now needs one config field raised rather than a code edit. The proxy derives its ceiling from the config field; the client reads the exported `ISTOTA_SKILL_CLIENT_WAIT`, which a task can rewrite only to change its own patience.
+
 ### Changed
 
 - **Upgrade note:** the Docker webhook receiver is now reached through nginx at `/webhooks/` instead of binding its own host port. An Overland client pointed at `http://<host>:8765/webhooks/location` needs repointing to `https://<your-domain>/webhooks/location`.

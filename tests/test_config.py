@@ -592,6 +592,31 @@ class TestConfigLoading:
         cfg = load_config(p)
         assert cfg.security.skill_proxy_timeouts == {}
 
+    def test_load_security_skill_client_wait(self, tmp_path):
+        """ISSUE-450: the one bound in the timeout ladder nothing could raise.
+        The field is the host-side truth — the proxy derives its ceiling from
+        it and the sandboxed client reads it as ISTOTA_SKILL_CLIENT_WAIT."""
+        p = tmp_path / "config.toml"
+        p.write_text(
+            '[security]\n'
+            'skill_client_wait_seconds = 1200\n'
+        )
+        cfg = load_config(p)
+        assert cfg.security.skill_client_wait_seconds == 1200
+
+    def test_the_client_wait_defaults_to_what_the_client_ships(self, tmp_path):
+        """600 on both sides: the dataclass default here and the client's own
+        fallback must be the same number, or a deployment that configures
+        nothing has a server ceiling derived from a wait the client isn't
+        arming."""
+        from istota.skill_client import SKILL_CLIENT_WAIT_SECONDS
+        p = tmp_path / "config.toml"
+        p.write_text('[security]\nsandbox_enabled = true\n')
+        cfg = load_config(p)
+        assert cfg.security.skill_client_wait_seconds == 600
+        assert cfg.security.skill_client_wait_seconds == \
+            SKILL_CLIENT_WAIT_SECONDS
+
 
 class TestTheSandboxWithoutTheProxyWarning:
     """`sandbox_enabled` with `skill_proxy_enabled = false` is the one pairing

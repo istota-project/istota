@@ -15,6 +15,7 @@ import pytest
 from istota.config import SecurityConfig
 from istota.skill_client import SKILL_CLIENT_WAIT_SECONDS
 from istota.skill_proxy import (
+    CLIENT_WAIT_MARGIN_SECONDS,
     CONNECTION_SLACK_SECONDS,
     DEFAULT_SKILL_TIMEOUTS,
     MAX_SKILL_TIMEOUT_SECONDS,
@@ -1144,3 +1145,192 @@ class TestPerSkillTimeout:
                 sock_path, {"skill": "code_review", "args": ["run"]}
             )
         assert armed[-1] >= 540
+
+
+class TestTheClientWaitKnob:
+    """ISSUE-450. `SKILL_CLIENT_WAIT_SECONDS` was the one bound in the ladder
+    no deployment could raise: a module constant, compiled into the client that
+    runs inside the sandbox where there is no config to read. The knob is
+    `security.skill_client_wait_seconds` — the host-side truth the proxy
+    derives its ceiling from — exported to the client as
+    `ISTOTA_SKILL_CLIENT_WAIT`. The proxy's ceiling is never derived from the
+    environment variable: that lives in the model's own environment, and a
+    model that rewrites its copy changes only its own patience.
+    """
+
+    def test_a_raised_wait_lets_a_per_skill_entry_past_the_old_ceiling(self):
+        assert resolve_skill_timeout(
+            300, {"devbox": 900}, "devbox", client_wait=1200,
+        ) == 900
+
+    def test_the_clamp_follows_the_configured_wait(self):
+        """Still a clamp — the margin is what keeps the client answering
+        after the subprocess has spent its whole budget."""
+        assert resolve_skill_timeout(
+            300, {"devbox": 5000}, "devbox", client_wait=1200,
+        ) == 1200 - CLIENT_WAIT_MARGIN_SECONDS
+
+    def test_an_omitted_wait_keeps_the_shipped_ceiling(self):
+        assert resolve_skill_timeout(
+            300, {"devbox": 5000}, "devbox",
+        ) == MAX_SKILL_TIMEOUT_SECONDS
+
+    def test_a_junk_wait_falls_back_to_the_default_rather_than_raising(self):
+        """The value comes off a loaded config nothing validates, and this
+        runs on the path of every skill call."""
+        for bad in (0, -5, True, "soon", None):
+            assert resolve_skill_timeout(
+                300, {"devbox": 5000}, "devbox", client_wait=bad,
+            ) == MAX_SKILL_TIMEOUT_SECONDS
+
+    def test_a_lowered_wait_lowers_the_ceiling(self):
+        assert resolve_skill_timeout(
+            300, {}, "email", client_wait=200,
+        ) == 200 - CLIENT_WAIT_MARGIN_SECONDS
+
+    def test_a_wait_under_the_margin_still_yields_a_positive_ceiling(self):
+        """A negative number here reaches `subprocess.run(timeout=...)` and
+        `conn.settimeout(...)`, which turn a misconfiguration into a raise on
+        every call. One second fails fast and loudly instead."""
+        assert resolve_skill_timeout(300, {}, "email", client_wait=20) == 1
+
+    def test_describe_reports_against_the_configured_wait(self):
+        notes = describe_skill_timeouts(900, {}, client_wait=700)
+        assert len(notes) == 1
+        assert "700" in notes[0]
+        assert str(700 - CLIENT_WAIT_MARGIN_SECONDS) in notes[0]
+
+    def test_describe_reports_nothing_when_the_raised_wait_fits(self):
+        assert describe_skill_timeouts(900, {}, client_wait=1200) == []
+        assert describe_skill_timeouts(
+            300, {"devbox": 900}, client_wait=1200,
+        ) == []
+
+    def test_describe_reports_an_unusable_wait(self):
+        notes = describe_skill_timeouts(300, {}, client_wait="soon")
+        assert len(notes) == 1
+        assert "skill_client_wait_seconds" in notes[0]
+        assert str(SKILL_CLIENT_WAIT_SECONDS) in notes[0]
+
+    def test_an_absurd_wait_is_clamped_and_reported(self):
+        """`socket.settimeout` raises `OverflowError` on a large enough value
+        (measured at 10**10), so an unbounded wait would turn a
+        misconfiguration into a raise inside `_handle_connection` on every
+        call. Both ends clamp to the same day-long maximum."""
+        from istota.skill_client import MAX_CLIENT_WAIT_SECONDS
+        assert resolve_skill_timeout(
+            300, {"devbox": 10**10}, "devbox", client_wait=10**10,
+        ) == MAX_CLIENT_WAIT_SECONDS - CLIENT_WAIT_MARGIN_SECONDS
+        notes = describe_skill_timeouts(300, {}, client_wait=10**10)
+        assert len(notes) == 1
+        assert str(MAX_CLIENT_WAIT_SECONDS) in notes[0]
+
+    def test_the_proxy_ceiling_ignores_the_environment_variable(
+        self, monkeypatch, sock_path,
+    ):
+        """The change's security rule, asserted rather than stated: the export
+        lives in the model's own environment, so deriving the server-side cap
+        from it would let a task widen a bound the operator set. The tidy that
+        would regress this — `effective_client_wait` falling back to
+        `skill_client.client_wait_seconds()` instead of the constant — reads
+        as equivalent and is not. Control run recorded 2026-09-12: with that
+        fallback swapped in, this node goes red (at the first assertion) and
+        nothing else in the class does.
+
+        `SkillProxy` is constructed with `client_wait_seconds=None` because
+        that is exactly the state the daemon would be in if it ever trusted
+        the environment: no config value, variable set."""
+        monkeypatch.setenv("ISTOTA_SKILL_CLIENT_WAIT", "99999")
+        assert resolve_skill_timeout(
+            300, {"devbox": 5000}, "devbox",
+        ) == MAX_SKILL_TIMEOUT_SECONDS
+        notes = describe_skill_timeouts(900, {})
+        assert str(MAX_SKILL_TIMEOUT_SECONDS) in notes[0]
+
+        with patch("istota.skill_proxy.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                stdout="{}", stderr="", returncode=0,
+            )
+            with SkillProxy(
+                sock_path, {}, {"PATH": "/usr/bin"},
+                timeout=300, skill_timeouts={"devbox": 5000},
+            ):
+                TestSkillProxyProtocol()._send_request(
+                    sock_path, {"skill": "devbox", "args": ["exec", "true"]}
+                )
+            assert mock_run.call_args.kwargs["timeout"] == \
+                MAX_SKILL_TIMEOUT_SECONDS
+
+    @patch("istota.skill_proxy.subprocess.run")
+    def test_the_proxy_ceiling_comes_from_the_constructor_argument(
+        self, mock_run, sock_path
+    ):
+        """The end the knob is for: a devbox entry past the old 570 reaches
+        `subprocess.run` intact when the deployment raised the wait."""
+        mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+        with SkillProxy(
+            sock_path, {}, {"PATH": "/usr/bin"},
+            timeout=300, skill_timeouts={"devbox": 900},
+            client_wait_seconds=1200,
+        ):
+            TestSkillProxyProtocol()._send_request(
+                sock_path, {"skill": "devbox", "args": ["exec", "true"]}
+            )
+        assert mock_run.call_args.kwargs["timeout"] == 900
+
+
+class TestTheClientSideWait:
+    """The other half of ISSUE-450: what the sandboxed client arms. It cannot
+    read a config, so the operator's value arrives as `ISTOTA_SKILL_CLIENT_WAIT`
+    and anything unusable falls back to the shipped 600."""
+
+    def test_the_export_is_read(self):
+        from istota import skill_client
+        assert skill_client.client_wait_seconds(
+            {"ISTOTA_SKILL_CLIENT_WAIT": "1200"}
+        ) == 1200
+
+    def test_absent_or_junk_falls_back_to_the_default(self):
+        from istota import skill_client
+        for env in (
+            {},
+            {"ISTOTA_SKILL_CLIENT_WAIT": ""},
+            {"ISTOTA_SKILL_CLIENT_WAIT": "soon"},
+            {"ISTOTA_SKILL_CLIENT_WAIT": "0"},
+            {"ISTOTA_SKILL_CLIENT_WAIT": "-5"},
+            {"ISTOTA_SKILL_CLIENT_WAIT": "300.5"},
+        ):
+            assert skill_client.client_wait_seconds(env) == \
+                SKILL_CLIENT_WAIT_SECONDS
+
+    def test_a_huge_value_is_clamped_rather_than_armed(self):
+        """`socket.settimeout(10**10)` raises `OverflowError`, and the value
+        is model-writable — an unbounded parse would replace the call with a
+        traceback, violating the fallback contract above."""
+        from istota import skill_client
+        assert skill_client.client_wait_seconds(
+            {"ISTOTA_SKILL_CLIENT_WAIT": str(10**10)}
+        ) == skill_client.MAX_CLIENT_WAIT_SECONDS
+
+    def test_the_socket_is_armed_at_the_env_value(self, monkeypatch):
+        """`_run_via_proxy` arms the socket before it sends; the arm has to be
+        the exported wait rather than the compiled constant, or the export
+        changes nothing."""
+        from istota import skill_client
+
+        armed = []
+
+        class FakeSock:
+            def settimeout(self, value):
+                armed.append(value)
+
+            def connect(self, path):
+                raise ConnectionRefusedError("stop here")
+
+        monkeypatch.setattr(
+            skill_client.socket, "socket", lambda *a, **k: FakeSock()
+        )
+        monkeypatch.setenv("ISTOTA_SKILL_CLIENT_WAIT", "1234")
+        with pytest.raises(SystemExit):
+            skill_client._run_via_proxy("/nowhere.sock", "email", ["list"])
+        assert armed == [1234]

@@ -287,6 +287,11 @@ def _review_ceiling() -> int:
         _default_int("istota_security_skill_proxy_timeout"),
         overrides,
         "code_review",
+        # The fourth input that decides the ceiling since ISSUE-450: leaving
+        # it at None asserts against the module default rather than the
+        # deploy, so lowering the role variable would clamp the real host
+        # while this stayed green.
+        _default_int("istota_security_skill_client_wait_seconds"),
     )
 
 

@@ -491,6 +491,7 @@ TOML
 sandbox_enabled = ${ISTOTA_SECURITY_SANDBOX_ENABLED:-true}
 skill_proxy_enabled = ${ISTOTA_SECURITY_SKILL_PROXY_ENABLED:-true}
 skill_proxy_timeout = ${ISTOTA_SECURITY_SKILL_PROXY_TIMEOUT:-300}
+skill_client_wait_seconds = ${ISTOTA_SECURITY_SKILL_CLIENT_WAIT_SECONDS:-600}
 sandbox_cache_dir = "${ISTOTA_SECURITY_SANDBOX_CACHE_DIR:-}"
 
 [security.network]
