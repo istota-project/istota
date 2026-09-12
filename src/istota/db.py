@@ -10380,6 +10380,149 @@ def clear_whatsapp_binding(conn: sqlite3.Connection, user_id: str) -> bool:
     return cur.rowcount > 0
 
 
+def get_whatsapp_binding_by_bsuid(
+    conn: sqlite3.Connection, bsuid: str
+) -> WhatsAppBinding | None:
+    """The binding this durable identity belongs to.
+
+    The only lookup an authenticated inbound event may resolve a principal
+    with. `''` matches nothing rather than matching every unbound row — the
+    partial index leaves the column empty for each user with no WhatsApp
+    identity yet, so a truthiness slip here would resolve an unknown sender to
+    whichever of them sorted first.
+    """
+    if not bsuid:
+        return None
+    row = conn.execute(
+        "SELECT * FROM whatsapp_user_bindings WHERE bsuid = ?", (bsuid,),
+    ).fetchone()
+    return None if row is None else _whatsapp_binding_from_row(row)
+
+
+def get_whatsapp_binding_by_phone(
+    conn: sqlite3.Connection, phone_number: str
+) -> WhatsAppBinding | None:
+    """The binding an operator assigned this bootstrap number to.
+
+    Enrollment only. A number is never sufficient identity on its own — see
+    `latch_whatsapp_bsuid` and the caller's recycled-number branch — and `''`
+    matches nothing, for the reason above.
+    """
+    if not phone_number:
+        return None
+    row = conn.execute(
+        "SELECT * FROM whatsapp_user_bindings WHERE bootstrap_phone_number = ?",
+        (phone_number,),
+    ).fetchone()
+    return None if row is None else _whatsapp_binding_from_row(row)
+
+
+def latch_whatsapp_bsuid(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    bsuid: str,
+    send_id: str,
+    username: str = "",
+) -> bool:
+    """Bind a durable identity to a row that has none yet. True when this did.
+
+    Deliberately **not** `set_whatsapp_binding(bsuid=...)`, on two counts.
+    The write is conditional on `bsuid = ''` in the SQL rather than on a value
+    read a moment earlier, so two workers latching the same row concurrently
+    produce one winner and one `False` — the loser fails closed rather than
+    overwriting an identity that was latched between its read and its write.
+    And a `False` is the *only* safe answer for a row that already carries a
+    BSUID: reaching that state means the number was recycled or the identity
+    changed under us, which is a decision for the caller and an operator, never
+    a rebind.
+
+    A `sqlite3.IntegrityError` still escapes, and must: it means another user
+    already holds this BSUID or send id, and the partial unique indexes are
+    what the whole enrollment story rests on.
+    """
+    if not bsuid:
+        return False
+    cur = conn.execute(
+        """
+        UPDATE whatsapp_user_bindings
+           SET bsuid = ?, send_id = ?, username = ?,
+               enrolled_at = ?, last_seen_at = ?, updated_at = ?
+         WHERE user_id = ? AND bsuid = ''
+        """,
+        (
+            bsuid, send_id, username,
+            sql_datetime_now(), sql_datetime_now(), sql_datetime_now(),
+            user_id,
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def touch_whatsapp_binding(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    send_id: str | None = None,
+    username: str | None = None,
+    last_seen_at: str,
+    last_user_message_at: str | None = None,
+) -> None:
+    """Record what an authenticated inbound event taught us about a binding.
+
+    Not `set_whatsapp_binding`: that one treats any change to the number or the
+    BSUID as an identity change and discards the window, the opt-out and the
+    send id, which is right for an operator command and wrong for every
+    ordinary message. This writes only the non-authoritative columns, and
+    touches neither of the two the identity is made of.
+
+    `last_user_message_at` is advanced by a **SQL** comparison rather than a
+    read-modify-write, because it is the sole input to the 24-hour service
+    window and the value the caller holds may be stale by the time it writes.
+    `MAX` over the stored value is what makes a replayed or delayed event
+    unable to move the window backwards; the caller has already clamped the
+    other direction.
+    """
+    conn.execute(
+        """
+        UPDATE whatsapp_user_bindings
+           SET send_id = COALESCE(?, send_id),
+               username = COALESCE(?, username),
+               last_seen_at = ?,
+               last_user_message_at = CASE
+                   WHEN ? IS NULL THEN last_user_message_at
+                   ELSE MAX(COALESCE(last_user_message_at, ''), ?)
+               END,
+               updated_at = ?
+         WHERE user_id = ?
+        """,
+        (
+            send_id, username, last_seen_at,
+            last_user_message_at, last_user_message_at,
+            sql_datetime_now(), user_id,
+        ),
+    )
+
+
+def set_whatsapp_opt_out(
+    conn: sqlite3.Connection, user_id: str, opted_out: bool
+) -> None:
+    """STOP and START, stored on the binding rather than by phone number.
+
+    SMS keys its opt-out table on the number, because a number is all a carrier
+    gives it. Here the durable identity is the BSUID and the number is a
+    bootstrap hint that may be absent altogether, so the state belongs on the
+    row it applies to — and `set_whatsapp_binding` already clears it on an
+    identity change, so a recycled line does not inherit the previous holder's
+    opt-out.
+    """
+    conn.execute(
+        "UPDATE whatsapp_user_bindings SET opted_out_at = ?, updated_at = ? "
+        "WHERE user_id = ?",
+        (sql_datetime_now() if opted_out else None, sql_datetime_now(), user_id),
+    )
+
+
 def whatsapp_billing_block(
     conn: sqlite3.Connection,
 ) -> WhatsAppBillingBlock | None:
