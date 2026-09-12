@@ -70,6 +70,8 @@ name = ""
 language = "en_US"
 ```
 
+**The block above is the deprecated flat spelling and still loads.** Meta's settings now live in `[whatsapp.cloud]`, under a `provider` key on `[whatsapp]` that selects the adapter (`whatsapp_cloud` or `baileys`, defaulting to `baileys`) — see `config/config.example.toml`. A flat block carrying a `waba_id`, a `phone_number_id` or one of the three credentials and no `provider` key is read as a Cloud deployment with those values nested, so nothing needs changing to keep working; move them under `[whatsapp.cloud]` when convenient.
+
 `waba_id` and `phone_number_id` are the decimal ids from the app's WhatsApp product page, not phone numbers. An event carrying any other WABA or phone number id is refused. `graph_api_version` empty follows the version the installed PyWa release pins; set a `v25.0`-style value only for a controlled migration. `business_timezone` is the IANA zone the monthly cap's calendar month is computed in.
 
 `enabled = true` with a malformed id, number, timezone, policy or limit fails the config load. The three credentials do not: they are reported by `istota doctor` and refused at send time, because the Ansible role renders them empty on purpose and delivers them through `secrets.env`.
