@@ -72,6 +72,16 @@
     state: restarted
   when: istota_webhooks_enabled | bool
 
+# Restarting drops the WhatsApp link and the sidecar reconnects, keeping the
+# paired session — the credential is on disk, not in the process. Guarded like
+# the others, since the notifying tasks are all gated on the same fact and a
+# handler firing for a unit the play just removed is an error.
+- name: "restart istota-whatsapp-baileys"
+  systemd:
+    name: "{{ istota_namespace }}-whatsapp-baileys"
+    state: restarted
+  when: istota_whatsapp_baileys_unit_wanted | default(false) | bool
+
 - name: reload nginx
   systemd:
     name: nginx

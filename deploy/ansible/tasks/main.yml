@@ -57,6 +57,17 @@
       - istota_whatsapp_billing_policy in ["free_guard", "allow_paid"]
       - not (istota_whatsapp_template_enabled | bool) or
         istota_whatsapp_billing_policy == "allow_paid"
+      # The single-writer rule, in the one place that can see both halves. Two
+      # Baileys clients against one session directory corrupt the paired
+      # credential — each rotates keys the other then fails to decrypt with —
+      # and this pairing arranges exactly that: the unit runs one and the
+      # daemon spawns another. Neither process can detect the other, which is
+      # why `istota whatsapp pair` refuses a whole running daemon rather than
+      # trying to.
+      - not ((istota_whatsapp_enabled | bool)
+             and istota_whatsapp_provider == "baileys"
+             and (istota_whatsapp_baileys_sidecar_unit | bool)
+             and (istota_whatsapp_baileys_sidecar_command | length > 0))
     fail_msg: |
       The [whatsapp] settings would produce a config.toml the daemon refuses
       to load. istota_whatsapp_provider must be "baileys", "whatsapp_cloud" or
@@ -66,6 +77,11 @@
       disabled); and istota_whatsapp_template_enabled=true needs
       istota_whatsapp_billing_policy="allow_paid" — a proactive template is a
       paid message, so free_guard cannot reach one.
+
+      A Baileys deployment must also not ask for two sidecars: with
+      istota_whatsapp_baileys_sidecar_unit=true the unit runs one, so
+      istota_whatsapp_baileys_sidecar_command must stay empty. Two Baileys
+      clients sharing one session directory corrupt the paired credential.
 
 - name: Resolve webhook receiver need
   set_fact:
@@ -101,6 +117,20 @@
   # ambiguous case provisions a receiver nothing may call, never drops one a
   # Cloud deployment needs. `config.whatsapp_webhooks_enabled` is the
   # authority for whether the routes then serve.
+
+- name: Resolve WhatsApp sidecar need
+  set_fact:
+    istota_whatsapp_baileys_unit_wanted: >-
+      {{ (istota_whatsapp_enabled | bool)
+         and istota_whatsapp_provider == "baileys"
+         and (istota_whatsapp_baileys_sidecar_unit | bool) }}
+  # The mirror image of the receiver condition, and it requires `baileys`
+  # explicitly where that one merely refuses it. The asymmetry is the same
+  # conservatism read from the other end: a receiver nothing calls is inert,
+  # while a sidecar started for a deployment that turns out to be a Cloud one
+  # holds a session directory and dials a socket the daemon never opened. So a
+  # host that wants the Baileys adapter names it, which
+  # `deploy/ansible/defaults/main.yml` says beside the variable.
 
 # ============================================================
 # FULL INSTALL TASKS (skipped when istota_update_only=true)
@@ -888,7 +918,11 @@
       apt:
         name: nodejs
         state: present
-  when: not istota_update_only and not istota_web_only and (istota_nodejs_enabled or istota_web_enabled | default(false))
+  # The WhatsApp sidecar is the third consumer, beside the frontend build and
+  # the developer skill's own uses. Without this arm a host running the Baileys
+  # adapter with the web UI off installs no node, and the unit below fails at
+  # ExecStart with nothing above it to say why.
+  when: not istota_update_only and not istota_web_only and (istota_nodejs_enabled or istota_web_enabled | default(false) or istota_whatsapp_baileys_unit_wanted | bool)
 
 - name: Install Google Workspace CLI (gws)
   shell: |
@@ -3746,6 +3780,128 @@
     path: "/etc/systemd/system/{{ istota_namespace }}-webhooks.service"
     state: absent
   when: not (istota_webhooks_enabled | bool) and not istota_web_only and (webhooks_service_file.stat.exists | default(false))
+  notify:
+    - reload systemd
+
+# ============================================================
+# WHATSAPP BAILEYS SIDECAR (the paired-session adapter)
+# ============================================================
+#
+# A Node program holding one WhatsApp Web session, dialling the daemon's Unix
+# socket. It runs as a unit of its own rather than as a child of the scheduler
+# because systemd restarts one that exited on a logged-out session and the
+# daemon's in-process supervisor deliberately does not — so a re-pair recovers
+# without touching the scheduler.
+
+- name: Ensure the WhatsApp Baileys session directory
+  file:
+    path: "{{ istota_home }}/data/whatsapp-baileys-session"
+    state: directory
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: '0700'
+  # The daemon creates and tightens this itself on every bridge start, and the
+  # play creates it anyway for the reason the exec socket directory is created
+  # in two places: whichever process gets there first decides the owner, and
+  # `ensure_session_dir` *refuses* a directory owned by anyone but the daemon
+  # rather than adopting it. A root-owned one left by a hand-run command is
+  # then a bridge that will not start, with the credential unreadable.
+  #
+  # 0700 because it holds a full WhatsApp account: the paired session sends and
+  # reads as the number, and there is no second factor behind it.
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
+
+- name: Read the WhatsApp sidecar lockfile
+  stat:
+    path: "{{ istota_repo_dir }}/docker/whatsapp-baileys/package-lock.json"
+    checksum_algorithm: sha256
+  register: baileys_lockfile
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
+
+- name: Read the installed WhatsApp sidecar lockfile marker
+  slurp:
+    src: "{{ istota_repo_dir }}/docker/whatsapp-baileys/node_modules/.istota-lockfile-sha256"
+  register: baileys_installed_marker
+  failed_when: false
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
+
+- name: Install the WhatsApp sidecar's dependencies
+  command: npm ci --omit=dev --no-audit --no-fund
+  args:
+    chdir: "{{ istota_repo_dir }}/docker/whatsapp-baileys"
+  become: yes
+  become_user: "{{ istota_user }}"
+  # Gated on the lockfile rather than run every play, and gated on the lockfile
+  # rather than on `creates: node_modules`. `npm ci` deletes node_modules before
+  # it installs, so an unconditional run tears the tree out from under a
+  # running sidecar on every deploy; `creates:` would never reinstall after a
+  # version bump, which is the silent half of the same problem. The marker goes
+  # *inside* node_modules so removing that directory by hand forces a reinstall.
+  when:
+    - istota_whatsapp_baileys_unit_wanted | bool
+    - not istota_web_only
+    - baileys_lockfile.stat.exists | default(false)
+    - (baileys_installed_marker.content | default('') | b64decode | trim) != baileys_lockfile.stat.checksum
+  notify:
+    - "restart istota-whatsapp-baileys"
+
+- name: Record the installed WhatsApp sidecar lockfile
+  copy:
+    content: "{{ baileys_lockfile.stat.checksum }}"
+    dest: "{{ istota_repo_dir }}/docker/whatsapp-baileys/node_modules/.istota-lockfile-sha256"
+    owner: "{{ istota_user }}"
+    group: "{{ istota_group }}"
+    mode: '0644'
+  # After the install, never before: a marker written ahead of a failed `npm ci`
+  # records a tree that is not there and every later play skips the repair.
+  when:
+    - istota_whatsapp_baileys_unit_wanted | bool
+    - not istota_web_only
+    - baileys_lockfile.stat.exists | default(false)
+    - (baileys_installed_marker.content | default('') | b64decode | trim) != baileys_lockfile.stat.checksum
+
+- name: Deploy WhatsApp Baileys sidecar service
+  template:
+    src: istota-whatsapp-baileys.service.j2
+    dest: "/etc/systemd/system/{{ istota_namespace }}-whatsapp-baileys.service"
+    mode: '0644'
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
+  notify:
+    - reload systemd
+    - "restart istota-whatsapp-baileys"
+
+- name: Enable and start WhatsApp Baileys sidecar
+  systemd:
+    name: "{{ istota_namespace }}-whatsapp-baileys"
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
+
+- name: Find existing WhatsApp Baileys sidecar service
+  stat:
+    path: "/etc/systemd/system/{{ istota_namespace }}-whatsapp-baileys.service"
+  register: baileys_service_file
+  when: not (istota_whatsapp_baileys_unit_wanted | bool) and not istota_web_only
+
+- name: Stop and disable WhatsApp Baileys sidecar when not wanted
+  systemd:
+    name: "{{ istota_namespace }}-whatsapp-baileys"
+    enabled: no
+    state: stopped
+  # The teardown is the half that is not bookkeeping. A host switching from
+  # `baileys` to `whatsapp_cloud`, or turning the surface off, otherwise keeps a
+  # sidecar holding the session directory and dialling a socket the daemon no
+  # longer opens — and the moment anyone pairs again, that survivor is the
+  # second Baileys client the whole single-writer rule exists to prevent.
+  when: not (istota_whatsapp_baileys_unit_wanted | bool) and not istota_web_only and (baileys_service_file.stat.exists | default(false))
+  failed_when: false
+
+- name: Remove WhatsApp Baileys sidecar service file when not wanted
+  file:
+    path: "/etc/systemd/system/{{ istota_namespace }}-whatsapp-baileys.service"
+    state: absent
+  when: not (istota_whatsapp_baileys_unit_wanted | bool) and not istota_web_only and (baileys_service_file.stat.exists | default(false))
   notify:
     - reload systemd
 

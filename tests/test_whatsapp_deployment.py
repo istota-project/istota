@@ -731,6 +731,248 @@ class TestTheAnsibleRole:
         assert "--clear-whatsapp" in command
 
 
+class TestTheAnsibleSidecarUnit:
+    """The bare-metal half of the adapter split.
+
+    Nothing here runs the role — that is the `deploy` tier's job and it needs
+    Docker — so these assert the parse, which is what the fourteen
+    `test_ansible_*.py` files do and what they cannot see past.
+    """
+
+    UNIT = ANSIBLE / "templates" / "istota-whatsapp-baileys.service.j2"
+
+    def _tasks(self):
+        return yaml.safe_load(TASKS_FILE.read_text())
+
+    def _named(self, name: str):
+        task = next((t for t in self._tasks() if t.get("name") == name), None)
+        assert task is not None, f"the role has no {name!r} task"
+        return task
+
+    def _unit(self, **overrides) -> str:
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        return _ansible_ish_environment().from_string(self.UNIT.read_text()).render(
+            **{
+                **defaults,
+                "istota_namespace": "istota",
+                "istota_user": "istota",
+                "istota_group": "istota",
+                "istota_home": "/srv/app/istota",
+                "istota_repo_dir": "/srv/app/istota/src",
+                **overrides,
+            }
+        )
+
+    def test_the_unit_is_wanted_only_by_a_baileys_deployment(self):
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        expression = self._named("Resolve WhatsApp sidecar need")["set_fact"][
+            "istota_whatsapp_baileys_unit_wanted"
+        ]
+        template = _ansible_ish_environment().from_string(expression)
+
+        for label, overrides, expected in (
+            ("the defaults", {}, "False"),
+            (
+                "cloud",
+                {"istota_whatsapp_enabled": True,
+                 "istota_whatsapp_provider": "whatsapp_cloud"},
+                "False",
+            ),
+            (
+                "an unnamed provider",
+                {"istota_whatsapp_enabled": True},
+                "False",
+            ),
+            (
+                "baileys",
+                {"istota_whatsapp_enabled": True,
+                 "istota_whatsapp_provider": "baileys"},
+                "True",
+            ),
+            (
+                "baileys with the unit turned off",
+                {"istota_whatsapp_enabled": True,
+                 "istota_whatsapp_provider": "baileys",
+                 "istota_whatsapp_baileys_sidecar_unit": False},
+                "False",
+            ),
+        ):
+            rendered = template.render({**defaults, **overrides}).strip()
+            assert rendered == expected, f"{label} -> {rendered!r}"
+
+    def test_the_unit_is_given_both_variables_the_program_requires(self):
+        rendered = self._unit()
+
+        assert (
+            "Environment=ISTOTA_BAILEYS_SOCKET="
+            "/srv/app/istota/data/whatsapp-baileys.sock" in rendered
+        )
+        assert (
+            "Environment=ISTOTA_BAILEYS_SESSION_DIR="
+            "/srv/app/istota/data/whatsapp-baileys-session" in rendered
+        )
+
+    def test_the_paths_it_is_given_are_where_the_daemon_puts_them(self, tmp_path):
+        """Asked of the product, against this role's own rendered config.
+
+        The socket name has no config override and `session_dir` is left unset
+        in the render, so both resolve from db_path. A unit that drifts from
+        that derivation is a sidecar dialling a socket nobody is listening on,
+        with no error on either side.
+        """
+        from istota.config import load_config
+        from istota.transport.whatsapp.baileys_bridge import (
+            default_session_dir, default_socket_path,
+        )
+
+        home = "/srv/app/istota"
+        path = tmp_path / "config.toml"
+        path.write_text(render_ansible_config(istota_home=home))
+        config = load_config(path)
+        rendered = self._unit(istota_home=home)
+
+        assert f"Environment=ISTOTA_BAILEYS_SOCKET={default_socket_path(config)}" in rendered
+        assert (
+            f"Environment=ISTOTA_BAILEYS_SESSION_DIR={default_session_dir(config)}"
+            in rendered
+        )
+
+    def test_it_restarts_a_sidecar_that_exited_on_a_dead_session(self):
+        """`Restart=always` is the recovery path, not a default copied across.
+
+        A logged-out sidecar exits 1 deliberately so systemd brings it back;
+        the daemon's in-process supervisor refuses to respawn a permanent
+        fatal, so on this shape the unit is what lets a re-pair take effect
+        without restarting the scheduler.
+        """
+        rendered = self._unit()
+
+        assert re.search(r"^Restart=always$", rendered, re.M)
+        assert re.search(r"^RestartSec=\d+$", rendered, re.M)
+
+    def test_a_scheduler_restart_does_not_take_the_session_down(self):
+        """Wants, never Requires.
+
+        `Requires=` propagates a stop, so a scheduler restart would drop the
+        WhatsApp link on every deploy. The sidecar retries a missing socket
+        every two seconds, so the ordering is a courtesy and the dependency is
+        not one.
+        """
+        rendered = self._unit()
+
+        assert "Wants=istota-scheduler.service" in rendered
+        assert "Requires=" not in rendered
+
+    def test_it_discards_the_programs_own_output(self):
+        """stdout is the channel Baileys would be chatty on.
+
+        The program writes nothing there by contract; stderr is kept because
+        what reaches it is Node's rather than the program's — a module that
+        would not load — and a unit that flaps with no message anywhere is the
+        worse failure.
+        """
+        rendered = self._unit()
+
+        assert "StandardOutput=null" in rendered
+        assert "StandardError=journal" in rendered
+
+    def test_the_session_directory_is_created_private_and_owned(self):
+        """0700 and the daemon's, or the bridge refuses to start.
+
+        `ensure_session_dir` refuses a directory owned by another uid rather
+        than adopting it, so a root-owned one left by a hand-run command is a
+        bridge that will not start with the credential unreadable.
+        """
+        task = self._named("Ensure the WhatsApp Baileys session directory")
+
+        assert task["file"]["mode"] == "0700"
+        assert task["file"]["owner"] == "{{ istota_user }}"
+        assert task["file"]["path"].endswith("/data/whatsapp-baileys-session")
+
+    def test_the_dependency_install_is_gated_on_the_lockfile(self):
+        """`npm ci` deletes node_modules before it installs.
+
+        Unconditional, it tears the tree out from under a running sidecar on
+        every deploy; on `creates:` it would never reinstall after a version
+        bump. The gate is the lockfile's own checksum against a marker written
+        after a successful install.
+        """
+        install = self._named("Install the WhatsApp sidecar's dependencies")
+        record = self._named("Record the installed WhatsApp sidecar lockfile")
+        conditions = " ".join(str(c) for c in install["when"])
+
+        assert install["command"].startswith("npm ci")
+        assert "baileys_lockfile.stat.checksum" in conditions
+        assert "restart istota-whatsapp-baileys" in install["notify"]
+        # The marker is written after the install and inside node_modules, so a
+        # failed `npm ci` records nothing and `rm -rf node_modules` forces one.
+        assert "/node_modules/.istota-lockfile-sha256" in record["copy"]["dest"]
+        assert self._tasks().index(record) > self._tasks().index(install)
+
+    def test_the_node_install_reaches_a_baileys_host(self):
+        """Otherwise the unit fails at ExecStart with nothing above it.
+
+        The role installs node for the frontend build and the developer skill;
+        a Baileys host with the web UI off is a third case that had no arm.
+        """
+        install = self._named("Install Node.js for developer skill")
+
+        assert "istota_whatsapp_baileys_unit_wanted" in str(install["when"])
+
+    def test_a_switch_away_tears_the_sidecar_down(self):
+        """The half that is not bookkeeping.
+
+        A host moving to `whatsapp_cloud`, or turning the surface off, would
+        otherwise keep a sidecar holding the session directory — and the moment
+        anyone pairs again that survivor is the second Baileys client the
+        single-writer rule exists to prevent.
+        """
+        stop = self._named("Stop and disable WhatsApp Baileys sidecar when not wanted")
+        remove = self._named(
+            "Remove WhatsApp Baileys sidecar service file when not wanted"
+        )
+
+        assert stop["systemd"]["state"] == "stopped"
+        assert stop["systemd"]["enabled"] is False
+        assert "not (istota_whatsapp_baileys_unit_wanted | bool)" in str(stop["when"])
+        assert remove["file"]["state"] == "absent"
+
+    def test_the_role_refuses_two_sidecars(self):
+        """The single-writer rule, in the one place that can see both halves.
+
+        Neither process can detect the other — which is why `istota whatsapp
+        pair` refuses a whole running daemon rather than trying to — so the
+        pairing has to be refused before it is deployed.
+        """
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        env = _ansible_ish_environment()
+        clauses = [
+            clause
+            for task in self._tasks()
+            if "assert" in task and "whatsapp" in str(task.get("name", "")).lower()
+            for clause in task["assert"]["that"]
+        ]
+        both = {
+            "istota_whatsapp_enabled": True,
+            "istota_whatsapp_provider": "baileys",
+            "istota_whatsapp_baileys_sidecar_command": "/usr/bin/node /opt/s/index.js",
+        }
+        verdicts = [
+            env.from_string("{{ " + clause + " }}").render({**defaults, **both}).strip()
+            for clause in clauses
+        ]
+        assert "False" in verdicts, "nothing refuses a unit plus a spawned sidecar"
+
+        # The control: with the unit turned off, naming a command is exactly
+        # how an operator runs the sidecar somewhere else, and must pass.
+        allowed = {**both, "istota_whatsapp_baileys_sidecar_unit": False}
+        for clause in clauses:
+            rendered = env.from_string("{{ " + clause + " }}").render(
+                {**defaults, **allowed}
+            ).strip()
+            assert rendered == "True", f"{clause!r} -> {rendered!r}"
+
+
 class TestTheMountGateOnALoadedConfig:
     """What the shipped generators produce, loaded, decides the webhook mount.
 

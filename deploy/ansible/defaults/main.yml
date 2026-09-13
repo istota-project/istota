@@ -1008,6 +1008,16 @@ istota_whatsapp_provider: ""
 # sidecar unit below runs it: two Baileys clients against one session directory
 # corrupt the paired credential, and the role refuses the pair outright.
 istota_whatsapp_baileys_sidecar_command: ""
+# Run the sidecar as a systemd unit of its own. On by default, because it is
+# the better shape here: systemd restarts a unit that exited on a logged-out
+# session, which the daemon's in-process supervisor deliberately does not, so a
+# re-pair recovers without touching the scheduler. Turn it off only to run the
+# sidecar somewhere else — and then set istota_whatsapp_baileys_sidecar_command
+# or nothing runs one at all. Ignored unless the Baileys adapter is selected.
+istota_whatsapp_baileys_sidecar_unit: true
+# How much the sidecar writes to sidecar.log inside its 0700 session directory:
+# error | warn | info | debug. It writes nothing to stdout at any level.
+istota_whatsapp_baileys_log_level: "info"
 istota_whatsapp_waba_id: ""                  # decimal WABA id, not a number
 istota_whatsapp_phone_number_id: ""          # decimal phone number id
 istota_whatsapp_business_phone_number: ""    # exact E.164

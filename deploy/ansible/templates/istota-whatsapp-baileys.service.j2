@@ -1,0 +1,61 @@
+[Unit]
+Description={{ istota_namespace | capitalize }} WhatsApp Baileys sidecar
+After=network.target
+# Wants and After rather than Requires, and the difference is the whole of this
+# unit's relationship with the daemon. The scheduler owns the listener, but the
+# sidecar retries a missing socket every two seconds for ever — so it does not
+# need the scheduler to be up, and a scheduler restart must not take the paired
+# WhatsApp session down with it. Ordering it after merely saves a burst of
+# reconnects on a cold boot.
+After={{ istota_namespace }}-scheduler.service
+Wants={{ istota_namespace }}-scheduler.service
+
+[Service]
+Type=simple
+User={{ istota_user }}
+Group={{ istota_group }}
+WorkingDirectory={{ istota_repo_dir }}/docker/whatsapp-baileys
+ExecStart=/usr/bin/node {{ istota_repo_dir }}/docker/whatsapp-baileys/index.js
+
+# Restart=always, including after the sidecar exits 1 on a logged-out session.
+# That is the recovery path the program is written for: the session stays dead
+# and every send is refused until somebody re-pairs, and when they do, this unit
+# comes back and its `ready` frame clears the daemon's latch. The in-process
+# supervisor deliberately does not respawn a permanent fatal, which is why the
+# unit shape is the better one on this deployment.
+Restart=always
+RestartSec=5
+
+# Both are required and the program exits 2 without either — the session
+# directory is where its own log lives, so there is no channel left to complain
+# on. The socket name has no config override at all, and session_dir is left
+# unset in config.toml so it resolves to exactly this path; both are derived
+# from db_path, which config.toml.j2 renders as {{ istota_home }}/data/istota.db.
+Environment=ISTOTA_BAILEYS_SOCKET={{ istota_home }}/data/whatsapp-baileys.sock
+Environment=ISTOTA_BAILEYS_SESSION_DIR={{ istota_home }}/data/whatsapp-baileys-session
+Environment=ISTOTA_BAILEYS_LOG_LEVEL={{ istota_whatsapp_baileys_log_level }}
+Environment=HOME={{ istota_home }}
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# The program writes nothing to stdout and nothing to stderr — Baileys' own
+# logger is set silent and its diagnostics go to sidecar.log inside the 0700
+# session directory, because a chatty WhatsApp client puts phone numbers and
+# message bodies wherever it is pointed. stdout is discarded for that reason;
+# stderr is kept, because what reaches it is not the program's own words but
+# Node's — a module that would not load or an uncaught exception — and a unit
+# that flaps with no message anywhere is the worse failure.
+StandardOutput=null
+StandardError=journal
+SyslogIdentifier={{ istota_namespace }}-whatsapp-baileys
+
+# Security hardening, matching the webhook receiver's. ReadWritePaths covers the
+# session directory, which lives under {{ istota_home }}/data.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths={{ istota_home }}
+
+[Install]
+WantedBy=multi-user.target
