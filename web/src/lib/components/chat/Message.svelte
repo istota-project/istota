@@ -628,6 +628,22 @@
          This is where their events are listened for, not what they are. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="content" onclick={imageClick} onkeydown={imageKeydown}>
+      <!-- The header line a notice does get. The author half of `.meta` stays
+           gone — nobody wrote a notice — but the time was only dropped with it
+           because the two shared that one element, and an alert has a perfectly
+           definite time (ISSUE-502). Without it a delivered alert cannot be
+           ordered against the conversation it landed in: the day divider only
+           renders when a message opens a new calendar day, so one delivered
+           into a room that already has today's messages carried no time signal
+           at all.
+
+           Always visible rather than the gutter's `.hover-time`: the point of a
+           stamp on an alert is scanning a transcript without interacting with
+           it, and a hover affordance is unreachable under a finger until the
+           row is activated. Both elements are inline, so the stamp and the room
+           chip share one line without a wrapper — which also keeps the chip a
+           direct child of the column it is asserted to sit in. -->
+      {#if time}<time class="stamp">{time}</time>{/if}
       {#if showRoomChip}
         <button class="room-chip" onclick={() => onRoomClick?.(message.roomToken!)} type="button">
           {message.roomName}
@@ -1629,6 +1645,15 @@
     position: relative;
   }
   .cmd-row .room-chip {
+    margin-bottom: var(--space-1);
+  }
+  /* Both are inline, so they share the header line; `inline-block` is what
+	   makes the bottom margin count, since a margin on an inline box does not
+	   affect the line box. The trailing gap matches `.meta`'s own, and is inert
+	   on the common row where the stamp is the only thing on the line. */
+  .cmd-row .stamp {
+    display: inline-block;
+    margin-right: var(--space-2);
     margin-bottom: var(--space-1);
   }
   /* The gutter mark. Sized at the avatar's box so it occupies the same column
