@@ -309,7 +309,21 @@ systemctl restart "${NAMESPACE}-webhooks"
 # `BAILEYS_CHANGED` is the literal `unknown-revision` when the marker names a
 # commit this checkout cannot read, which lands here as a restart. That is the
 # safe direction: the runs that know least are the ones that must not skip it.
-if [ -n "$BAILEYS_CHANGED" ]; then
+#
+# ISSUE-494: guarded on the interpreter for the same reason the install arm is
+# guarded on npm. The play refuses up front when the interpreter is missing,
+# but nothing in the play reaches this script — so on a host left with the unit
+# enabled and no node (a pre-fix update-only converge, or node removed out of
+# band) this arm would start an interpreter-less unit every two minutes for
+# ever. `-x` rather than `-e`, so a dangling symlink and a non-executable file
+# are both caught; the cron cannot install node, so it says so and skips, and a
+# full play is what repairs it. The path is the same variable the unit's
+# ExecStart is rendered from, so the guard cannot check one path while systemd
+# execs another.
+BAILEYS_NODE_BIN="{{ istota_whatsapp_baileys_node_bin }}"
+if [ ! -x "$BAILEYS_NODE_BIN" ]; then
+    log "ERROR: ${BAILEYS_NODE_BIN} is missing or not executable; not starting ${NAMESPACE}-whatsapp-baileys (run a full play)"
+elif [ -n "$BAILEYS_CHANGED" ]; then
     log "Restarting ${NAMESPACE}-whatsapp-baileys"
     systemctl restart "${NAMESPACE}-whatsapp-baileys"
 else

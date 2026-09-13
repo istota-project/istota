@@ -63,6 +63,7 @@ VARS = {
     "istota_devbox_users": [],
     "istota_devbox_proxy_enabled": False,
     "istota_whatsapp_baileys_unit_wanted": False,
+    "istota_whatsapp_baileys_node_bin": "",  # filled per-run
 }
 
 STUBS = ("chown", "systemctl", "sqlite3", "uv", "npm")
@@ -158,6 +159,7 @@ class Rig:
         tag_mode: bool = False,
         web_enabled: bool = True,
         baileys: bool = False,
+        node_present: bool = True,
     ):
         self.root = root
         self.origin = root / "origin.git"
@@ -172,6 +174,14 @@ class Rig:
         self.tag_mode = tag_mode
         self.web_enabled = web_enabled
         self.baileys = baileys
+        # ISSUE-494: the sidecar arm refuses to start the unit when the
+        # interpreter it execs is absent, so the rig has to own that path the
+        # way it owns `systemctl`. Pointed inside the throwaway root rather
+        # than at the host's real node: the assertions are about what the
+        # script decides, and reading the developer's machine would make the
+        # sidecar cases pass or fail depending on whether node is installed.
+        self.node_bin = self.bin / "node"
+        self.node_present = node_present
         self._build()
 
     # -- construction ----------------------------------------------------
@@ -216,6 +226,8 @@ class Rig:
                 (self.tools / name).symlink_to(found)
         for name in STUBS:
             self._stub(self.bin / name)
+        if self.node_present:
+            self._stub(self.node_bin)
         self._stub(self.home / ".venv" / "bin" / "python")
         # `flock` is a util-linux binary and macOS has none, so without a
         # stand-in the real script exits 0 at the lock and every assertion
@@ -276,6 +288,7 @@ class Rig:
         variables["istota_home"] = str(self.home)
         variables["istota_web_enabled"] = self.web_enabled
         variables["istota_whatsapp_baileys_unit_wanted"] = self.baileys
+        variables["istota_whatsapp_baileys_node_bin"] = str(self.node_bin)
         if self.tag_mode:
             variables["istota_repo_tag"] = "latest"
         rendered = Environment().from_string(UPDATE_TEMPLATE.read_text()).render(**variables)
