@@ -9,6 +9,9 @@ tests/
 # repo root reaches every image the tiers build. The testbed has no
 # business in the image, and Stage 6 generates a TLS key under it.
 testbed/
+# The documentation site's toolchain, `node_modules` included. Nothing in any
+# image builds or serves it, and it is the largest directory in the tree.
+docs-site/
 deploy/
 data/
 *.egg-info

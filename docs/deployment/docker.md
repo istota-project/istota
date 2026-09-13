@@ -1,7 +1,8 @@
 # Docker deployment
 
-!!! warning "Experimental"
-    The Docker deployment is functional but unstable. For production, use [Ansible](ansible.md) or [bare metal install](../getting-started/quickstart-bare-metal.md).
+:::warning[Experimental]
+The Docker deployment is functional but unstable. For production, use [Ansible](ansible.md) or [bare metal install](../getting-started/quickstart-bare-metal.md).
+:::
 
 ## Stack overview
 

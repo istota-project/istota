@@ -360,11 +360,14 @@ class TestTheTestOnlyDependenciesAreDeclared:
     def test_a_declaration_outside_the_lean_install_does_not_count(self):
         # The control for the check above, and the reason it resolves against
         # the lean closure rather than against every declaration in the file. A
-        # test-only package parked in `docs` reads as declared while being
-        # absent from every lean install — which is where `jinja2` and `pyyaml`
-        # each were, so accepting any declaration anywhere leaves the bug green.
+        # test-only package parked in a heavy extra reads as declared while
+        # being absent from every lean install — which is where `jinja2` and
+        # `pyyaml` each were, so accepting any declaration anywhere leaves the
+        # bug green. `mkdocs` was the third subject here until the docs moved
+        # to Docusaurus and it stopped being declared anywhere, at which point
+        # the assertion could no longer fail and was removed rather than kept
+        # as a line that always passes.
         closure = _lean_install_closure()
-        assert "mkdocs" not in closure
         assert "torch" not in closure
         assert "faster_whisper" not in closure
         # ...while all three routes that do reach a lean install count.
@@ -499,7 +502,8 @@ class TestTheLinuxRunnerInstallsTheDevGroupAndTheTestExtra:
 
     It used to carry `--extra docs` purely for jinja2 and `--extra whisper`
     purely for psutil; both are now in the dev group, and re-adding either extra
-    to fix an import error would hide the declaration bug again.
+    to fix an import error would hide the declaration bug again. The `docs`
+    extra no longer exists at all — the site is Docusaurus, built by npm.
     """
 
     def _dockerfile_sync(self) -> str:
@@ -517,9 +521,9 @@ class TestTheLinuxRunnerInstallsTheDevGroupAndTheTestExtra:
         assert "--extra test" in self._dockerfile_sync()
 
     def test_it_reaches_for_no_extra_beyond_test(self):
-        # `--extra docs` (jinja2), `--extra whisper` (psutil) and
-        # `--extra memory-search` (a heavy import someone moved to module scope)
-        # are the three that would plausibly get added back.
+        # `--extra whisper` (psutil) and `--extra memory-search` (a heavy import
+        # someone moved to module scope) are the two that would plausibly get
+        # added back; `--extra docs` was a third until that extra was retired.
         extras = set(re.findall(r"--extra ([\w-]+)", self._dockerfile_sync()))
         assert extras == {"test"}
 

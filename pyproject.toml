@@ -121,10 +121,8 @@ garmin = [
     # marker keeps 3.11 environments resolvable without the extra.
     "garminconnect>=0.3.3; python_version >= '3.12'",
 ]
-docs = [
-    "mkdocs>=1.6.0",
-    "mkdocs-material>=9.5.0",
-]
+# There is no `docs` extra. The documentation site is Docusaurus and its
+# toolchain is npm, in `docs-site/`; nothing Python builds it.
 # Lean footprint for a local single-user install (`uv tool install 'istota[local]'`):
 # core agent + web UI + light pure-Python modules. Heavy modules (money, health,
 # location, memory-search/torch, whisper, transcribe) stay opt-in. See
