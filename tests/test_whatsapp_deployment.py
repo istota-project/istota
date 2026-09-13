@@ -1076,6 +1076,45 @@ class TestTheAnsibleSidecarUnit:
         entry = next(i for i in task["loop"] if i["name"].endswith("whatsapp-baileys"))
         assert "istota_whatsapp_baileys_unit_wanted" in entry["enabled"]
 
+    def test_the_checkout_task_restarts_it_on_a_source_sync(self):
+        """ISSUE-497's other half: a full play left it on stale code.
+
+        The sidecar runs `index.js` out of the checkout, so it holds its own
+        copy exactly as the Python services hold theirs — and its handler is
+        notified only by the dependency install, gated on the lockfile
+        checksum, and by the unit template. Both are deployment changes rather
+        than source ones, so a commit touching `index.js` alone fired neither
+        and the unit went on running what it loaded at start.
+
+        `Restart services (update-only mode)` covers that one mode with an
+        explicit loop, and a full play had nothing. Nor could the cron repair
+        it: the play writes the deployed marker at the new tip, so every later
+        tick diffs from a point already past the change and sees nothing. The
+        unconditional restart this issue removed was what healed it by
+        accident, which is why the two halves had to be fixed together.
+
+        The rule is the checkout task's own, written for ISSUE-294: every
+        long-running service importing from the checkout is listed there.
+        """
+        task = self._named("Clone or update istota repository (branch checkout)")
+
+        assert "restart istota-whatsapp-baileys" in task["notify"]
+
+    def test_the_baileys_handler_carries_its_own_guard(self):
+        """Which is why the notify site above needs no condition on it.
+
+        A Cloud-adapter or WhatsApp-off host runs no such unit, and the
+        checkout task fires on every source sync.
+        """
+        handlers = yaml.safe_load(
+            (ANSIBLE / "handlers" / "main.yml").read_text()
+        )
+        handler = next(
+            h for h in handlers if h.get("name") == "restart istota-whatsapp-baileys"
+        )
+
+        assert "istota_whatsapp_baileys_unit_wanted" in str(handler.get("when"))
+
     def test_the_auto_update_cron_reaches_it(self):
         """On the reference host the two-minute cron is the deploy path.
 
@@ -1365,6 +1404,115 @@ def _ansible_ish_environment() -> Environment:
     env = Environment()
     env.filters["bool"] = _ansible_bool
     return env
+
+
+class TestTheCronDoesNotBounceALiveSession:
+    """ISSUE-497: an unrelated deploy must not reconnect a paired session.
+
+    The sidecar holds a WhatsApp Web session with a third party, which is a
+    kind of state none of the other units restarted here have: the Python
+    services hold nothing but their own code, so bouncing one costs a few
+    seconds of local downtime, while bouncing this one drops and re-establishes
+    a link WhatsApp is watching for exactly that pattern. The credential
+    survives — it is on disk, not in the process — so what a restart costs is
+    invisible from this side, which is why the original was written
+    unconditional.
+
+    These execute the rendered script rather than scanning it, on the seam
+    `test_ansible_web_build` established, and for the reason that file's own
+    docstring gives: every version of this template contains the string
+    `systemctl restart "${NAMESPACE}-whatsapp-baileys"` — including the one
+    that runs it on every tick. Only a run can tell the two apart.
+    """
+
+    @staticmethod
+    def _rig(tmp_path: Path):
+        from tests.test_ansible_web_build import Rig
+
+        rig = Rig(tmp_path, baileys=True)
+        # The first run only seeds the deployed marker and exits at the
+        # up-to-date check, so it restarts nothing. Clearing after it is what
+        # makes the assertions below about the second run alone.
+        rig.run()
+        rig.clear_calls()
+        return rig
+
+    def test_a_deploy_that_leaves_the_sidecar_alone_does_not_restart_it(self, tmp_path):
+        """The reported defect: a docs commit reconnected a live session."""
+        rig = self._rig(tmp_path)
+        rig.commit({"docs/whatever.md": "prose\n"})
+
+        result = rig.run()
+
+        assert result.returncode == 0, result.stderr
+        assert "Update complete" in rig.log_text()
+        assert "systemctl restart istota-whatsapp-baileys" not in rig.calls()
+
+    def test_it_is_still_started_so_a_stopped_sidecar_comes_back(self, tmp_path):
+        """The property the unconditional restart was defending.
+
+        The install arm above stops the unit before `npm ci`, and an operator
+        or a crash can leave it down too. `start` is a no-op on a running unit
+        and brings back a stopped one, which is what lets the restart be
+        dropped without stranding anything.
+        """
+        rig = self._rig(tmp_path)
+        rig.commit({"docs/whatever.md": "prose\n"})
+
+        result = rig.run()
+
+        assert result.returncode == 0, result.stderr
+        assert "systemctl start istota-whatsapp-baileys" in rig.calls()
+
+    def test_a_commit_under_the_sidecar_restarts_it(self, tmp_path):
+        """The control. Without this the test above passes on a script that
+        never restarts the sidecar at all, which is the opposite defect."""
+        rig = self._rig(tmp_path)
+        rig.commit({"docker/whatsapp-baileys/index.js": "// changed\n"})
+
+        result = rig.run()
+
+        assert result.returncode == 0, result.stderr
+        assert "systemctl restart istota-whatsapp-baileys" in rig.calls()
+
+    def test_a_lockfile_bump_still_stops_installs_and_restarts(self, tmp_path):
+        """The install arm is unchanged, and the restart is what revives it."""
+        rig = self._rig(tmp_path)
+        rig.commit({"docker/whatsapp-baileys/package-lock.json": '{"v": 2}\n'})
+
+        result = rig.run()
+
+        assert result.returncode == 0, result.stderr
+        calls = rig.calls()
+        assert "systemctl stop istota-whatsapp-baileys" in calls
+        assert any(call.startswith("npm ci --omit=dev") for call in calls)
+        assert "systemctl restart istota-whatsapp-baileys" in calls
+        # Ordering matters, and the claim is about the *install* rather than
+        # the stop: a restart landing before `npm ci` re-execs against the tree
+        # that command is about to delete. Comparing against the stop instead
+        # asserts almost nothing, it being a precondition of the install and 60
+        # lines above the restart in a script with no branch between them.
+        install = next(
+            i for i, call in enumerate(calls) if call.startswith("npm ci --omit=dev")
+        )
+        assert install < calls.index("systemctl restart istota-whatsapp-baileys")
+
+    def test_an_unreadable_deployed_sha_restarts_rather_than_assuming(self, tmp_path):
+        """`BAILEYS_CHANGED` is the literal `unknown-revision` when the marker
+        names a commit this checkout does not have, and the gate has to read
+        that as "something moved". Assuming the other way would skip the
+        restart on exactly the runs that know least."""
+        from tests.test_ansible_web_build import Rig
+
+        rig = Rig(tmp_path, baileys=True)
+        rig.run()
+        (rig.state / "last-deployed-sha").write_text("0" * 40 + "\n")
+        rig.clear_calls()
+        rig.commit({"docs/whatever.md": "prose\n"})
+
+        rig.run()
+
+        assert "systemctl restart istota-whatsapp-baileys" in rig.calls()
 
 
 def _ansible_bool(value) -> bool:

@@ -62,6 +62,7 @@ VARS = {
     "istota_web_only": False,
     "istota_devbox_users": [],
     "istota_devbox_proxy_enabled": False,
+    "istota_whatsapp_baileys_unit_wanted": False,
 }
 
 STUBS = ("chown", "systemctl", "sqlite3", "uv", "npm")
@@ -150,7 +151,14 @@ def _git(cwd: Path, *args: str) -> str:
 class Rig:
     """A rendered update script over a throwaway checkout."""
 
-    def __init__(self, root: Path, *, tag_mode: bool = False, web_enabled: bool = True):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        tag_mode: bool = False,
+        web_enabled: bool = True,
+        baileys: bool = False,
+    ):
         self.root = root
         self.origin = root / "origin.git"
         self.src = root / "src"
@@ -163,6 +171,7 @@ class Rig:
         self.tools = root / "tools"
         self.tag_mode = tag_mode
         self.web_enabled = web_enabled
+        self.baileys = baileys
         self._build()
 
     # -- construction ----------------------------------------------------
@@ -178,6 +187,11 @@ class Rig:
         (self.src / "web").mkdir()
         (self.src / "web" / "package-lock.json").write_text("{}\n")
         (self.src / "web" / "app.svelte").write_text("<p>a</p>\n")
+        if self.baileys:
+            sidecar = self.src / "docker" / "whatsapp-baileys"
+            sidecar.mkdir(parents=True)
+            (sidecar / "index.js").write_text("// sidecar\n")
+            (sidecar / "package-lock.json").write_text("{}\n")
         _git(self.src, "add", "-A")
         _git(self.src, "commit", "-m", "a")
         _git(self.src, "remote", "add", "origin", str(self.origin))
@@ -187,6 +201,10 @@ class Rig:
             _git(self.src, "push", "origin", "v1.0.0")
 
         _git(self.root, "clone", str(self.origin), str(self.repo))
+        if self.baileys:
+            (self.repo / "docker" / "whatsapp-baileys" / "node_modules").mkdir(
+                parents=True, exist_ok=True
+            )
 
         (self.home / ".venv" / "bin").mkdir(parents=True)
         self.state.mkdir()
@@ -257,6 +275,7 @@ class Rig:
         variables["istota_repo_dir"] = str(self.repo)
         variables["istota_home"] = str(self.home)
         variables["istota_web_enabled"] = self.web_enabled
+        variables["istota_whatsapp_baileys_unit_wanted"] = self.baileys
         if self.tag_mode:
             variables["istota_repo_tag"] = "latest"
         rendered = Environment().from_string(UPDATE_TEMPLATE.read_text()).render(**variables)
