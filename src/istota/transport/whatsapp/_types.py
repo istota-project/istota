@@ -47,16 +47,31 @@ than a visible unknown.
 
 @dataclass(frozen=True)
 class WhatsAppUserIdentity:
-    """Who sent a message, as WhatsApp 4.x models identity.
+    """Who sent a message, in whichever adapter's terms it arrived.
 
-    `bsuid` is the durable one and the only one authorization may rest on.
+    **Two durable identities, one per adapter, and exactly one of them is
+    authoritative for any given message.** `bsuid` is the Cloud API's, and the
+    only one authorization may rest on there. `jid` is Baileys', and the only
+    one there. Which field is read is decided by the adapter the event came
+    from, never by which happens to be populated — reading whichever is set
+    would let a message from one adapter resolve a principal the other
+    enrolled, which is the cross-adapter takeover `providers/` exists to keep
+    out of common code.
+
     `wa_id` is absent for a user with a username, so it is an enrollment hint
     rather than an identity, and `username` is display-only — never an
-    authentication fallback.
+    authentication fallback. Baileys needs no `wa_id` of its own: the
+    subscriber number is inside the JID, and `identity.jid_number` is what
+    takes it out.
+
+    `jid` defaults to `None` so every Cloud construction — the webhook
+    normalizer's, and a dozen in the suite — is unchanged by the field's
+    arrival.
     """
     bsuid: str
     wa_id: str | None
     username: str | None
+    jid: str | None = None
 
 
 @dataclass(frozen=True)

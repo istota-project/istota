@@ -461,7 +461,14 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
 
     try:
         with db.get_db(config.db_path) as conn:
-            results = handle_whatsapp_batch(conn, config, events)
+            # Named rather than defaulted: this route is Meta's signed
+            # callback and nothing else, so the provenance is a fact about
+            # the route. The gate inside compares it against the *active*
+            # provider, which is what refuses an inbound message arriving for
+            # an adapter this deployment no longer runs.
+            results = handle_whatsapp_batch(
+                conn, config, events, provider=db.WHATSAPP_LEGACY_PROVIDER,
+            )
     except Exception:
         # Every exception, not just `sqlite3.Error`. The transaction rolls back
         # either way — `get_db` closes the connection, which discards an
