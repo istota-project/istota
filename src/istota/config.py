@@ -1255,16 +1255,27 @@ class WhatsAppCloudConfig:
 class WhatsAppBaileysConfig:
     """``[whatsapp.baileys]`` — the little a paired WhatsApp Web session needs.
 
-    Both fields default to empty and are resolved at use rather than here:
-    ``session_dir`` to ``{db_path.parent}/whatsapp-baileys-session`` and
-    ``library_version`` to whatever the shipped sidecar pins. **Neither is a
-    credential and neither belongs in** ``_WHATSAPP_PROVIDER_FIELDS`` — the
-    credential is the paired session on disk, so a defaulted field here would
-    make the provider look configured on every deployment and be kept as a
-    callback-only adapter on a Cloud one.
+    Every field defaults to empty and is resolved at use rather than here:
+    ``session_dir`` to ``{db_path.parent}/whatsapp-baileys-session``,
+    ``library_version`` to whatever the shipped sidecar pins, and
+    ``sidecar_command`` to the shipped Node program if this install can find
+    one. **None is a credential and none belongs in**
+    ``_WHATSAPP_PROVIDER_FIELDS`` — the credential is the paired session on
+    disk, so a defaulted field here would make the provider look configured on
+    every deployment and be kept as a callback-only adapter on a Cloud one.
+
+    ``sidecar_command`` is the argv the daemon spawns, split by shell rules and
+    **not** run through a shell. Empty has two meanings that resolve to the
+    same behaviour and are worth telling apart: on a deployment that runs the
+    sidecar as its own unit or compose service, the daemon should spawn
+    nothing and merely listen — the shape ``BaileysBridge`` calls
+    ``sidecar_argv=()`` — while on a checkout it resolves to the program in
+    the tree. Set it explicitly where the sidecar is installed somewhere this
+    cannot guess.
     """
     session_dir: str = ""
     library_version: str = ""
+    sidecar_command: str = ""
 
 
 @dataclass

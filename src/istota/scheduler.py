@@ -9286,6 +9286,16 @@ def run_daemon(
     # drivers at different cadences would double every fetch, race the module
     # globals in `inbound.py` across their awaits, and leave the sweep clock
     # owned by nobody. Without it the poller is the capability floor, unchanged.
+    # The WhatsApp sidecar bridge, on the same loop and for a sharper reason
+    # than the signaling supervisor's: every WhatsApp send reaches
+    # `deliver_whatsapp` through `run_coro`, so a bridge whose asyncio
+    # primitives bound to any other loop would be awaited across loops from
+    # inside the ledger's claim-to-settle region. Started after the runtime
+    # rather than before, because `start()` is submitted to it.
+    from .transport.whatsapp.baileys_runtime import start_baileys_bridge
+    if start_baileys_bridge(config):
+        logger.info("STARTUP Started the WhatsApp Baileys bridge")
+
     if config.talk.enabled and config.talk.signaling.enabled:
         _start_talk_signaling(config)
         logger.info("STARTUP Started Talk signaling supervisor (poller not started)")

@@ -204,6 +204,67 @@ def default_socket_path(config: Config) -> Path:
     return Path(config.db_path).parent / SOCKET_NAME
 
 
+#: The Node program's entry point inside its own directory.
+SIDECAR_ENTRY = "index.js"
+
+#: Where the shipped sidecar lives relative to this file, on a checkout. Four
+#: parents up from `transport/whatsapp/baileys_bridge.py` is `src/`'s parent,
+#: the repository root.
+_SIDECAR_IN_TREE = Path(__file__).resolve().parents[4] / "docker" / "whatsapp-baileys"
+
+
+def resolve_sidecar_argv(config: Config) -> tuple[str, ...]:
+    """The command that runs the sidecar, or ``()`` for "spawn nothing".
+
+    ``()`` is a first-class answer rather than a failure, and it is the shape
+    two of the three deployment arrangements want: a systemd unit or a compose
+    service runs the sidecar itself and the daemon only listens. The bridge
+    takes that shape directly (`sidecar_argv=()`), and it is strictly better
+    there — systemd restarts a unit that a permanent fatal stopped, which the
+    in-process supervisor deliberately does not.
+
+    Configured wins. `shlex.split` rather than a shell, so nothing in an
+    operator's value is interpreted; a value that will not split is a warning
+    and `()` rather than a raise, since the caller is a boot path.
+
+    Failing that, the program in this checkout, which is what makes
+    `istota whatsapp pair` work on a developer machine and on a standalone
+    install made from a clone with no deployment wiring. `node` is resolved on
+    `PATH` at *this* moment so an install without it answers `()` and says so
+    at one place rather than as a spawn failure per respawn.
+
+    Never raises.
+    """
+    import shlex  # noqa: PLC0415
+    import shutil  # noqa: PLC0415
+
+    configured = (config.whatsapp.baileys.sidecar_command or "").strip()
+    if configured:
+        try:
+            argv = shlex.split(configured)
+        except ValueError:
+            logger.warning(
+                "whatsapp.baileys.sidecar_command_unparseable: "
+                "[whatsapp.baileys] sidecar_command is not a valid command "
+                "line; no sidecar will be spawned",
+            )
+            return ()
+        return tuple(argv)
+
+    entry = _SIDECAR_IN_TREE / SIDECAR_ENTRY
+    if not entry.is_file():
+        return ()
+    node = shutil.which("node")
+    if not node:
+        logger.warning(
+            "whatsapp.baileys.no_node: the Baileys sidecar is in this tree at "
+            "%s and `node` is not on PATH; no sidecar will be spawned",
+            _SIDECAR_IN_TREE,
+        )
+        return ()
+    return (node, str(entry))
+
+
 def ensure_session_dir(path: Path) -> Path:
     """Create or tighten the session directory, and return it.
 
@@ -387,6 +448,7 @@ class BaileysBridge:
         session_dir: Path | None = None,
         send_timeout: float = SEND_TIMEOUT_SECONDS,
         on_qr=None,
+        on_fatal=None,
     ) -> None:
         self._config = config
         self._sidecar_argv = tuple(sidecar_argv)
@@ -394,6 +456,12 @@ class BaileysBridge:
         self._session_dir = Path(session_dir or default_session_dir(config))
         self._send_timeout = send_timeout
         self._on_qr = on_qr
+        # Called once per *transition into* a permanent fatal, with the
+        # reason. The bridge itself never writes a notification row: this
+        # module's contracts are that it never raises and never logs a payload,
+        # and a notification write opens a database connection and delivers to
+        # a surface. The owner that started the bridge does that work.
+        self._on_fatal = on_fatal
 
         self._status = BridgeStatus(
             socket_path=str(self._socket_path), session_dir=str(self._session_dir),
@@ -903,33 +971,54 @@ class BaileysBridge:
                 "`istota whatsapp pair` to link it.",
             )
             return
+        self._call_back(self._on_qr, value, label="qr")
+
+    def _call_back(self, callback, *args, label: str) -> None:
+        """Run one owner-supplied callback off the read loop. Never raises.
+
+        Shared by the `qr` and `fatal` handlers, which need the same three
+        properties and would otherwise each carry them. An `async def`
+        callback returns a coroutine object, which is truthy, raises nothing
+        and — dropped — does its work never, with only a `RuntimeWarning` that
+        `logging` never surfaces; both owners here are plausible async ones
+        (`istota whatsapp pair`, and a notification write on a worker thread).
+        So an awaitable result is scheduled as **its own task** rather than
+        awaited inline, because the read loop must not block on somebody else's
+        terminal or somebody else's database, and it is held in a set so the
+        loop does not garbage-collect it mid-flight.
+
+        No `exc_info`, and that is the constraint rather than the tidiness: a
+        traceback prints frames, and a frame here holds a pairing credential or
+        a fatal payload.
+        """
         try:
-            result = self._on_qr(value)
-            if inspect.isawaitable(result):
-                # An `async def` callback returns a coroutine object, which is
-                # truthy, raises nothing and — dropped — loses the QR with only
-                # a `RuntimeWarning` that `logging` never surfaces. Stage 6's
-                # `istota whatsapp pair` is a plausible async caller, so it is
-                # scheduled rather than refused. It runs as its own task and
-                # not inline, because the read loop must not block on somebody
-                # else's terminal.
-                task = asyncio.ensure_future(result)
-                self._qr_tasks.add(task)
-                task.add_done_callback(self._qr_tasks.discard)
+            result = callback(*args)
         except Exception:
-            # No `exc_info`: a traceback prints frames, and this frame's local
-            # is the QR.
-            logger.warning("whatsapp.baileys.qr_callback_failed")
+            logger.warning("whatsapp.baileys.callback_failed which=%s", label)
+            return
+        if inspect.isawaitable(result):
+            task = asyncio.ensure_future(result)
+            self._qr_tasks.add(task)
+            task.add_done_callback(self._qr_tasks.discard)
 
     def _handle_fatal(self, payload: dict) -> None:
         reason = payload.get("reason")
         reason = reason if isinstance(reason, str) and reason else "unknown"
         permanent = payload.get("permanent") is True or reason in _PERMANENT_FATALS
+        already = self._status.fatal_is_permanent
         self._status.fatal_reason = reason
         self._status.fatal_is_permanent = permanent
         self._status.ready = False
         if permanent:
             self._permanent_fatal.set()
+            if self._on_fatal is not None and not already:
+                # **Only the first of a run.** A sidecar reporting `logged_out`
+                # and then reconnecting to report it again — which it does,
+                # since the session on disk is still the dead one — would
+                # otherwise raise and push one alert per attempt. `ready`
+                # clears the latch, so a re-pair re-arms it, which is the
+                # transition an operator wants to hear about twice.
+                self._call_back(self._on_fatal, reason, label="fatal")
         # Branched, because only the permanent arm refuses anything: `_send`'s
         # gate is `fatal_is_permanent`, so a transient fatal clears `ready` and
         # sends carry on. Telling an operator their sends are blocked when they
