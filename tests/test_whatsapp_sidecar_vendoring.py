@@ -635,6 +635,23 @@ class TestTheSidecarsControlFlow:
         assert "link.onReady = () => session.announceReady();" in source
         assert "if (this.open) this.link.send(MSG_READY, {});" in source
 
+    def test_the_open_flag_is_cleared_only_by_a_real_close(self):
+        """`connection.update` is a **partial** — it fires with no
+        `connection` key at all for a QR rotation and for
+        `receivedPendingNotifications` after the session opens. Clearing the
+        flag above the `!== 'close'` guard marks a live session closed, so the
+        next link reconnect announces nothing and the bridge is back in the
+        state the flag exists to prevent.
+
+        Ordering rather than presence, which is the one thing about this fix a
+        source assertion can still say.
+        """
+        body = _js_method("onConnection")
+        guard = body.index("if (connection !== 'close') return;")
+        clear = body.index("this.open = false;")
+
+        assert clear > guard
+
     def test_a_logged_out_session_exits(self):
         """Staying alive leaves a process holding the session directory with
         a dead socket, and after a re-pair it never re-runs `start()`. The

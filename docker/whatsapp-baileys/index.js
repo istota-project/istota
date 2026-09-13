@@ -356,8 +356,15 @@ class Session {
       this.link.send(MSG_READY, {});
       return;
     }
-    this.open = false;
+    // **Below the guard, not above it.** `connection.update` is a partial:
+    // it fires with no `connection` key at all for a QR rotation and for
+    // `receivedPendingNotifications` after the session opens. Clearing the
+    // flag there marks a live session closed, so the next daemon-link
+    // reconnect finds it false, announces nothing, and the bridge reports
+    // connected-and-never-ready — the state this flag exists to prevent,
+    // reached by another route.
     if (connection !== 'close') return;
+    this.open = false;
 
     const status =
       lastDisconnect &&
