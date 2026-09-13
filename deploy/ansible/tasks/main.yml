@@ -1678,6 +1678,15 @@
     group: "{{ istota_group }}"
   when: not istota_web_only
 
+- name: Install the operator CLI wrapper
+  template:
+    src: istota-cli.sh.j2
+    dest: "/usr/local/bin/{{ istota_namespace }}"
+    owner: root
+    group: root
+    mode: '0755'
+  when: not istota_web_only
+
 - name: "Ensure /etc/{{ istota_namespace }} directory exists"
   file:
     path: "/etc/{{ istota_namespace }}"

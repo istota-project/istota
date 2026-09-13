@@ -239,6 +239,8 @@ The `webhooks` service belongs to the `location`, `sms` and `whatsapp` profiles,
 
 ## Ansible
 
+The role installs the operator CLI at `/usr/local/bin/<namespace>` — `istota` on a default install — so the commands on this page can be typed by name. It is a wrapper that execs the venv's console script with `-c` pointing at the deployed config, because the config search order starts at the working directory and a bare command run from a home directory would otherwise resolve none. An explicit `-c` of your own still wins.
+
 
 Set the matching `istota_whatsapp_*` role variables and vault the three Cloud credentials. They are written to the root-owned `secrets.env` and loaded by the scheduler, web app and webhook receiver; they never reach `config.toml`. The role provisions the webhook receiver when location is on, SMS is on, or WhatsApp is on with an adapter that has a callback.
 
