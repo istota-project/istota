@@ -1598,6 +1598,167 @@ def cmd_whatsapp_billing_unblock(args):
     print(f"WhatsApp billing block cleared{_whatsapp_block_detail(blocked)}.")
 
 
+#: How long `whatsapp pair` waits for somebody to scan, in seconds. WhatsApp
+#: rotates the QR about every twenty, so this is roughly fifteen codes — long
+#: enough to find the phone, short enough that a forgotten terminal does not
+#: hold a sidecar against the session directory all day.
+WHATSAPP_PAIR_TIMEOUT_SECONDS = 300.0
+
+
+def _whatsapp_socket_is_live(path) -> bool:
+    """Whether something is already listening on the bridge's socket.
+
+    A connect, which is the only honest test: the inode outliving its process
+    is exactly what `_unlink_stale` exists to clean up, so its presence says
+    nothing. The connection is closed immediately and sends no `hello`, which
+    a live bridge counts as a rejected connection — one, deliberately, because
+    the alternative is pairing a second Baileys client into a session
+    directory another one is already writing.
+    """
+    import socket as socket_module
+
+    try:
+        with socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            sock.connect(str(path))
+        return True
+    except OSError:
+        return False
+
+
+def _render_qr(payload: str) -> None:
+    """Draw the pairing code in the terminal, or say how to draw it.
+
+    **No new dependency for this.** `qrencode` is a one-package install and is
+    already on most hosts; where it is not, the payload itself is printed with
+    the command that renders it. Printing it is not a leak in the way logging
+    it would be — it is the same credential the QR *is*, on the operator's own
+    terminal, at their explicit request — but it never goes anywhere durable:
+    not through `logging`, not into a file, and the payload is piped to
+    `qrencode` on **stdin** rather than passed as an argument, so it does not
+    reach anybody's `ps` output.
+    """
+    import shutil
+    import subprocess
+
+    binary = shutil.which("qrencode")
+    if binary:
+        try:
+            result = subprocess.run(
+                [binary, "-t", "ANSIUTF8", "-o", "-"],
+                input=payload.encode("utf-8"),
+                capture_output=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            result = None
+        if result is not None and result.returncode == 0 and result.stdout:
+            sys.stdout.buffer.write(result.stdout)
+            sys.stdout.flush()
+            print("Scan this from WhatsApp: Settings, Linked Devices, Link a device.")
+            return
+    print(
+        "Install `qrencode` to have the code drawn here. Until then, render "
+        "this payload locally — it is the pairing credential for the whole "
+        "account, so do not paste it into a website:\n"
+    )
+    print(payload)
+    print("\n  printf %s '<payload>' | qrencode -t ANSIUTF8\n")
+
+
+async def _whatsapp_pair(config, argv) -> int:
+    import asyncio
+
+    from .transport.whatsapp.baileys_bridge import BaileysBridge
+
+    bridge = BaileysBridge(config, sidecar_argv=argv, on_qr=_render_qr)
+    await bridge.start()
+    try:
+        deadline = asyncio.get_running_loop().time() + WHATSAPP_PAIR_TIMEOUT_SECONDS
+        while asyncio.get_running_loop().time() < deadline:
+            status = bridge.status
+            if status.ready:
+                print("\nPaired. The WhatsApp session is linked and open.")
+                print(f"The session lives at {status.session_dir} (0700).")
+                return 0
+            if status.fatal_is_permanent:
+                print(
+                    "\nThe sidecar reported the session cannot be used. Remove "
+                    f"{status.session_dir} and try again.",
+                    file=sys.stderr,
+                )
+                return 1
+            await asyncio.sleep(0.25)
+    finally:
+        await bridge.stop()
+    print(
+        "\nTimed out waiting for the code to be scanned.", file=sys.stderr,
+    )
+    return 1
+
+
+def cmd_whatsapp_pair(args):
+    """Link this deployment's WhatsApp number by scanning a QR code.
+
+    The Baileys equivalent of Meta's business-account setup, and the whole of
+    it: the credential is a paired WhatsApp Web session, so there is nothing
+    to put in `config.toml` and nothing to copy out of a console.
+
+    **It refuses while a daemon is running**, and that is a correctness
+    refusal rather than a courtesy. Two Baileys clients on one auth state
+    corrupt it — each rotates keys the other then fails to decrypt with — so
+    the session directory is a single-writer resource and the daemon's bridge
+    is already its writer. Detected by connecting to the bridge's socket,
+    since the inode outliving its process is ordinary.
+
+    That refusal is also what makes the *recovery* path work, which the
+    bridge's supervisor records as this command's debt: a permanent fatal
+    stops the respawn loop, so on the combined `istota serve` shape nothing is
+    left that could send the `ready` which clears the latch. Stopping the
+    daemon and running this spawns a sidecar of its own, pairs, and the next
+    start comes up clean — the remedy the log line names, working.
+    """
+    config = load_config(Path(args.config) if args.config else None)
+    if config.whatsapp.provider != "baileys":
+        print(
+            f'[whatsapp] provider = "{config.whatsapp.provider}", which pairs '
+            "through Meta's business setup rather than a QR code.",
+            file=sys.stderr,
+        )
+        return 1
+
+    from .transport.whatsapp.baileys_bridge import (
+        default_socket_path, resolve_sidecar_argv,
+    )
+
+    socket_path = default_socket_path(config)
+    if _whatsapp_socket_is_live(socket_path):
+        print(
+            f"Something is already listening on {socket_path}, so a WhatsApp "
+            "sidecar is running. Stop the istota scheduler before pairing — "
+            "two Baileys clients sharing one session directory corrupt it.",
+            file=sys.stderr,
+        )
+        return 1
+
+    argv = resolve_sidecar_argv(config)
+    if not argv:
+        print(
+            "No WhatsApp sidecar command could be resolved. Set "
+            "[whatsapp.baileys] sidecar_command to the command that runs "
+            "docker/whatsapp-baileys/index.js, and make sure its "
+            "dependencies are installed (`npm ci` in that directory).",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("Starting the WhatsApp sidecar. A code will appear below.")
+    print("Open WhatsApp on the phone holding this number, then: Settings, "
+          "Linked Devices, Link a device.\n")
+    import asyncio
+
+    return asyncio.run(_whatsapp_pair(config, argv))
+
+
 def cmd_calendar_discover(args):
     """Discover calendars accessible to the istota bot."""
     config = load_config(Path(args.config) if args.config else None)
@@ -3551,10 +3712,16 @@ def main():
 
     # whatsapp
     whatsapp_parser = subparsers.add_parser(
-        "whatsapp", help="WhatsApp Cloud API operations",
+        # Not "Cloud API" any more: `pair` belongs to the other adapter, and
+        # the two billing verbs are the Cloud-only ones.
+        "whatsapp", help="WhatsApp surface operations",
     )
     whatsapp_subparsers = whatsapp_parser.add_subparsers(
         dest="whatsapp_action", required=True,
+    )
+    whatsapp_subparsers.add_parser(
+        "pair",
+        help="Link this deployment's WhatsApp number by scanning a QR code",
     )
     whatsapp_subparsers.add_parser(
         "billing-status",
@@ -3679,10 +3846,17 @@ def main():
         bot_icon_commands[args.bot_icon_action](args)
     elif args.command == "whatsapp":
         whatsapp_commands = {
+            "pair": cmd_whatsapp_pair,
             "billing-status": cmd_whatsapp_billing_status,
             "billing-unblock": cmd_whatsapp_billing_unblock,
         }
-        whatsapp_commands[args.whatsapp_action](args)
+        # `pair` is the one WhatsApp verb with a failure an operator's script
+        # has to be able to see, so its status is returned rather than
+        # discarded. The two billing verbs report through their own output and
+        # answer `None`, which reads as success exactly as it did before.
+        result = whatsapp_commands[args.whatsapp_action](args)
+        if result:
+            sys.exit(result)
     elif args.command == "experimental":
         experimental_commands = {
             "list": cmd_experimental_list,
