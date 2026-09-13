@@ -23,8 +23,8 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 1c. **Prepare attachments** (image-attachment-vision spec): `_pre_transcribe_attachments()` for audio, then `prepare_image_attachments()` for images — both before skill selection and before `build_prompt`, so selection, assembly and the model all see the same orientation, the same paths and the same OCR text. See "Image attachments" below.
 2. **Merge resources**: DB resources + config resources → `db.UserResource` list
 3. **Load skills**: `load_skill_index()` → `select_skills()` (deterministic matching, the only selection pass) produces the **eager** set → `load_skills(eager)` for the body + `eligible_skill_names(exclude = selected ∪ ⋃ exclude_skills_of_selected)` for the **menu** (the full eligible catalogue) → `build_disclosure_index(menu)` → `skills_index`. Always on, single-axis (selected ⇒ eager, else eligible ⇒ menu); no `progressive_disclosure` flag, no eager/lazy partition. The menu replaced the removed LLM Pass 2; the executor logs `skills: eager=N menu=M`.
-4. **Skills changelog**: fingerprint compare, interactive only
-5. **Context loading**: skip for scheduled/briefing
+4. **Skills changelog**: fingerprint compare, `_SKILLS_CHANGELOG_SOURCE_TYPES` only (talk/email/repl/web) — see "Which source types are interactive" below
+5. **Context loading**: `_INTERACTIVE_SOURCE_TYPES` only, and only with a `conversation_token`
 6. **User memory**: `read_user_memory_v2()`, skip for briefings
 7. **Channel memory**: `read_channel_memory()`, only if `conversation_token`
 8. **CalDAV discovery**: `get_calendars_for_user()`
@@ -42,7 +42,25 @@ Returns `(success, result_text, actions_taken_json, execution_trace_json)`. `act
 15. **Execute**: `make_brain(resolve_brain_kind(task.source_type, config.brain, override=task.brain)).execute(req)` — the room's pin, then the source-type rule, then `[brain] kind`; see `.claude/rules/brain.md`
 16. **Compose result**: `_compose_full_result(result, trace)` reconciles result-text vs trace (CM-aware + terse-result recovery)
 16b. **Image notes**: `_append_vision_dropped_note` when the brain that actually ran cannot see, `unread_images` + `_append_unread_images_note` when a CLI brain skipped a `Read` the directive required
-17. **Update fingerprint**: on success, interactive only
+17. **Update fingerprint**: on success, on the same `_shows_skills_changelog` local step 4 read — the changelog is spent, not merely shown
+
+## Which source types are interactive
+
+Two tuples at the top of `executor.py`, and the second is a subset of the first.
+
+`_INTERACTIVE_SOURCE_TYPES` — `talk`, `email`, `repl`, `web`, `sms`, `whatsapp` — is "a live user is behind this turn", and it gates conversation context and sticky skills, both of which are gated on `task.conversation_token` as well. It does **not** gate personal memory, whatever an older comment on it said: `_recall_memories` keys on `exclude_memory` skill metadata and reads no source type.
+
+`sms` and `whatsapp` were absent from it until ISSUE-500, which meant every text message was answered as a first message — no history, no carried skill, and one INFO line naming the source type. Both rule files describe the mechanism as working (`.claude/rules/sms.md`, `.claude/rules/whatsapp.md`: the stable `<surface>-<user hash>` token "plus task history for context"); the token half was built and what read it back was not. They get the **same depth as Talk and no cap of their own**, deliberately — these surfaces have no room view, so history is the only thing establishing what the conversation is about, which argues for more rather than less.
+
+Nothing downstream needed a change for them, and three of the reasons are non-obvious enough to be worth writing down, since a wrong answer on any one would have left the fix a silent no-op. `_build_db_context`'s `_exclude_types` is a denylist of automated types. `db._messages_caught_up` is scoped to `_CONVERSATIONAL_SOURCE_TYPES` (`talk`, `web`), so a token with only push-surface turns finds no mirrored conversational turn, answers False, and falls through to the `tasks` reconstruction — that fallback *is* the "task history" the two rule files name. And `tasks.withheld_from_room` stays False on these rows, because `ingest` resolves a transcript token only for a registered room and an `sms-<hash>` token names none; had it been True, the four `COALESCE(withheld_from_room, 0) = 0` filters would have excluded every turn and the history would have stayed empty with the tuple correct.
+
+The reply-parent branch of the sticky-skill lookup is inert here rather than guarded: neither webhook sets `platform_message_id` or `reply_to_message_id`, so `reply_to_talk_id` is NULL on every push-surface row and `_detect_notification_reply`, the parent lookup and `_ensure_reply_parent_in_history` are all no-ops. `_build_talk_api_context` is gated on `source_type == "talk"`, so nothing on the newly reachable path opens a socket or touches Talk.
+
+**One consequence to know rather than a defect: conversation triage is now reachable on both push surfaces.** `_build_db_context` calls `select_relevant_context`, which short-circuits only while the history is at or under `conversation.skip_selection_threshold` (default 3) — past that, a turn pays the daemon's highest-frequency model call, which these surfaces never paid before because they took the "not interactive" early return. That is the same cost Talk has always paid and follows from the same-depth decision above, but it lands on a surface where somebody is waiting on a text message. The lever if it proves visible is `skip_selection_threshold`, not the tuple.
+
+`_SKILLS_CHANGELOG_SOURCE_TYPES` — `talk`, `email`, `repl`, `web` — is the narrower gate, and it is spelled out rather than derived by subtraction so the next surface added has to decide rather than inherit. **The changelog is spent, not merely shown**: step 17 writes the user's skills fingerprint on the same local step 4 read, so the first surface to see it is the only one that ever does. A user whose next turn after a skills change happened to be a text message would have had it injected into a prompt whose reply has to fit one SMS segment (or WhatsApp's 1,024-character interactive body), and then marked seen — so it would never appear on Talk, where it is readable. That is the reason the push surfaces are out, and it is sharper than the prompt bytes, which is the cost ISSUE-500 filed. The two sites read **one local** for the same reason: show-without-spend repeats the changelog for ever and spend-without-show burns it invisibly, and the second read sits some eight hundred lines below the first.
+
+Two other hand-typed copies of this question exist and are deliberately not the same list. `transport.routing._INTERACTIVE_SOURCE_TYPES` asks "can a reply be routed back here", a narrower *question* whose set happens to be equal to this one today; every member of it belongs here, and the contract is the subset, held by a test rather than by either list reading off the other. `web_app._INTERACTIVE_SOURCES` asks "is a person doing something", which is wider, and carries `cli` and `istota_file` besides; it is missing `sms` and `whatsapp` under ISSUE-499. `commands.py`'s is a third, narrower again, driving the `!status` / `!stop` split.
 
 ## `build_prompt()`
 ```python
@@ -254,7 +272,7 @@ After `brain.execute()` returns, the executor:
    (CM-aware + terse-result recovery — same logic both brains will need).
 3. On a dropped-pin fallback (see below), appends the visible model note
    **after** composition.
-4. Updates the user skills fingerprint when interactive task succeeded.
+4. Updates the user skills fingerprint when a task that was *shown* the changelog succeeded.
 5. Returns `(success, result, actions_taken_json, execution_trace_json)` —
    shape unchanged from before the refactor.
 

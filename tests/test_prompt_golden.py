@@ -94,11 +94,13 @@ against a stored one. A case for any of these is a case someone can add.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import warnings
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -334,6 +336,29 @@ class Case:
     #: has history to render. Fixed `created_at`, so the rendered `[timestamp]`
     #: is a constant rather than a clock reading.
     history: bool = False
+    #: The seeded prior turn's own `source_type`. Its default is `email` because
+    #: that is what the seed carried before it was a field; a push-surface case
+    #: sets its own so the history it reads back is the history that surface
+    #: actually writes.
+    history_source_type: str = "email"
+    #: Written into the seeded turn's `selected_skills`, which is what
+    #: `get_recent_conversation_skills` reads for skill stickiness.
+    history_selected_skills: list[str] | None = None
+    #: Stamps the seeded turn a few minutes ago instead of at the fixed 2026
+    #: date. Only a sticky-skill case wants this: that lookup has a 30-minute
+    #: window, so the fixed date is outside it by years and a seeded
+    #: `selected_skills` could never be read back. Every golden keeps the fixed
+    #: date, because a clock reading in a snapshot is a golden that rewrites
+    #: itself on every run.
+    history_recent: bool = False
+    #: Writes a `CHANGELOG.md` into the bundled skills dir, which — against a
+    #: user with no stored fingerprint — is what makes the "What's New in
+    #: Skills" section reachable. Off for every matrix case because turning it
+    #: on for one would change that case's golden, and the section is not what
+    #: any of them exists to show. Not a sharing constraint: `_build_config`
+    #: writes the bundled dir under the per-test `tmp_path`, so no case can
+    #: leak into another.
+    skills_changelog: bool = False
     #: The re-executed half of the untrusted-sender confirmation gate.
     confirmed: bool = False
     #: Two settings, not one: it pins `security.sandbox_enabled` *and* the
@@ -447,6 +472,8 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
     skills_dir.mkdir(parents=True, exist_ok=True)
     bundled = tmp_path / "bundled"
     _write_skills(bundled)
+    if case.skills_changelog:
+        (bundled / "CHANGELOG.md").write_text(SKILLS_CHANGELOG + "\n")
 
     if case.emissaries:
         (config_dir / "emissaries.md").write_text(EMISSARIES)
@@ -557,6 +584,13 @@ def _seed_memory(config: Config, case: Case) -> None:
 #: than dropping it, because at level 2 it would close the skill's own `### `
 #: section and leave the rest of the overlay reading as a sibling of the whole
 #: skills reference. The golden is where that is visible as prompt text.
+#: Seeded only by a case that asks for it (`Case.skills_changelog`). The
+#: sentinel is deliberately unlike anything else in the fixture, so a test can
+#: say the section is absent without that claim resting on a substring some
+#: other layer might also produce.
+SKILLS_CHANGELOG = "## 2026-02-08\n\n- SKILLS_CHANGELOG_SENTINEL: the notes skill learned a new verb."
+
+
 OVERLAY = (
     "## Notes rules\n\n"
     "- Never write a new file to the base folder.\n"
@@ -589,22 +623,36 @@ def _seed_history(config: Config, case: Case) -> None:
     """
     if not case.history:
         return
+    # `get_recent_conversation_skills` compares against `datetime('now')`, so a
+    # sticky-skill case has to be seeded against the same clock. Everything
+    # else keeps the fixed date the goldens snapshot.
+    stamp = (
+        (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+        if case.history_recent
+        else "2026-01-05 09:15:00"
+    )
     with db.get_db(config.db_path) as conn:
         conn.execute(
             """
             INSERT INTO tasks (
                 id, created_at, updated_at, status, source_type,
-                conversation_token, user_id, prompt, result
-            ) VALUES (?, ?, ?, 'completed', 'email', ?, ?, ?, ?)
+                conversation_token, user_id, prompt, result, selected_skills
+            ) VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
             """,
             (
                 900,
-                "2026-01-05 09:15:00",
-                "2026-01-05 09:16:00",
+                stamp,
+                stamp,
+                case.history_source_type,
                 case.conversation_token,
                 USER,
                 "What did the release notes say about the migration?",
                 "The migration runs on first boot and is idempotent.",
+                (
+                    json.dumps(case.history_selected_skills)
+                    if case.history_selected_skills
+                    else None
+                ),
             ),
         )
         conn.commit()
@@ -1198,3 +1246,151 @@ def test_a_custom_system_prompt_does_not_change_the_assembled_prompt(
 
     assert custom == plain
     assert "CUSTOM SYSTEM PROMPT" not in custom
+
+
+class TestThePushSurfacesAreInteractive:
+    """ISSUE-500: a WhatsApp or SMS turn assembled with no prior turn in front
+    of it.
+
+    `executor._INTERACTIVE_SOURCE_TYPES` predates both surfaces and was never
+    extended, so `sms` and `whatsapp` fell out of the conversation-context
+    lookup, the sticky-skill lookup and the skills changelog at once. Neither
+    rule file describes that: both say context comes from the stable
+    `<surface>-<user hash>` conversation token plus task history, and the token
+    half was built and works — what reads it back was missing. Every turn was
+    the first turn.
+
+    These go through `execute_task` rather than asserting membership in the
+    tuple, because membership is what was already wrong: the failure is that
+    the prior turn is absent from the assembled prompt, and that is what is
+    asserted here. The tuple's own membership is pinned in
+    `tests/test_executor.py`, where the subset guard against
+    `transport.routing` sits beside it.
+    """
+
+    def _case(self, source_type: str, **kw) -> Case:
+        return Case(
+            name=f"issue500_{source_type}",
+            source_type=source_type,
+            conversation_token=f"{source_type}-abc123",
+            history=True,
+            history_source_type=source_type,
+            **kw,
+        )
+
+    @pytest.mark.parametrize("source_type", ["sms", "whatsapp"])
+    def test_the_previous_turn_reaches_the_prompt(
+        self, source_type, tmp_path, monkeypatch
+    ):
+        """The symptom as filed: a follow-up answered with nothing in front of it.
+
+        The seeded turn is that surface's own, so this also covers the path it
+        takes to get back: these surfaces write no `messages` row, so
+        `_messages_caught_up` finds no completed *conversational* turn for the
+        token and `get_conversation_history` falls through to the `tasks`
+        reconstruction — which is the "task history" both rule files name.
+        """
+        _system, user = split_halves(
+            assemble(self._case(source_type), tmp_path, monkeypatch)
+        )
+
+        assert "What did the release notes say about the migration?" in user
+        assert "The migration runs on first boot and is idempotent." in user
+
+    def test_a_turn_with_no_token_skips_on_the_token_and_not_the_type(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The gate that was doing the real work all along.
+
+        Context is gated on `conversation_token` as well, so widening the
+        tuple must not start a lookup for a turn that has no conversation to
+        look up. Asserting the *absence* of history cannot show that: a case
+        with no token seeds no row either, so "the prior turn is missing" is
+        equally true of a feature that was deleted, and would have passed
+        against the pre-change code. Seeding one under a NULL token does not
+        rescue it — `get_conversation_history` matches on the token, so it
+        finds nothing for a second reason.
+
+        The discriminating fact is *which* skip fired, and the two reasons are
+        a pair: before the fix this said `not interactive`, and a regression
+        would say it again.
+        """
+        caplog.set_level(logging.INFO, logger="istota.executor")
+        assemble(CASES_BY_NAME["source_sms"], tmp_path, monkeypatch)
+
+        skips = [
+            r.getMessage() for r in caplog.records
+            if r.getMessage().startswith("Skipping context lookup:")
+        ]
+        assert skips == ["Skipping context lookup: no conversation_token"]
+
+    def test_a_previous_turn_s_skill_is_carried(self, tmp_path, monkeypatch):
+        """The sticky-skill half, which loses the same gate as context does.
+
+        `developer` is the fixture's never-selected skill: no rule reaches it,
+        so it is a menu entry in every case in the matrix and its body appears
+        in no golden. Seeing `DEVELOPER BODY` in the system half means the only
+        thing that could have put it there — `get_recent_conversation_skills`
+        over the seeded turn — ran. The control below is the same case with the
+        seeded turn's `selected_skills` left NULL.
+        """
+        case = self._case(
+            "whatsapp", history_recent=True, history_selected_skills=["developer"]
+        )
+        system, _user = split_halves(assemble(case, tmp_path, monkeypatch))
+
+        assert "DEVELOPER BODY" in system
+
+    def test_a_previous_turn_with_no_skills_carries_none(self, tmp_path, monkeypatch):
+        """The control for the case above.
+
+        Without it, `DEVELOPER BODY in system` is equally true of a fixture
+        that had made every skill eager, and the sticky lookup would be
+        asserted by nothing.
+        """
+        case = self._case("whatsapp", history_recent=True)
+        system, _user = split_halves(assemble(case, tmp_path, monkeypatch))
+
+        assert "DEVELOPER BODY" not in system
+
+    @pytest.mark.parametrize("source_type", ["sms", "whatsapp"])
+    def test_the_skills_changelog_is_withheld(
+        self, source_type, tmp_path, monkeypatch
+    ):
+        """The one consumer of the tuple these surfaces deliberately do not get.
+
+        The changelog is spent rather than shown: `execute_task` writes the
+        user's skills fingerprint after a successful run on the same predicate
+        that decides whether to inject it, so whichever surface sees it first
+        is the only one that ever sees it. A user whose next turn after a
+        skills change happens to be a text message would have had it injected
+        into a prompt whose reply has to fit one SMS segment, and then marked
+        seen — so it would never appear on Talk, where it is readable. That is
+        a sharper cost than the prompt bytes, and it is why the changelog kept
+        its own narrower tuple instead of riding this one.
+        """
+        system, user = split_halves(
+            assemble(
+                self._case(source_type, skills_changelog=True), tmp_path, monkeypatch
+            )
+        )
+
+        assert "SKILLS_CHANGELOG_SENTINEL" not in system
+        assert "SKILLS_CHANGELOG_SENTINEL" not in user
+
+    def test_a_talk_turn_still_gets_the_skills_changelog(self, tmp_path, monkeypatch):
+        """The control for the case above.
+
+        Without it the withholding assertion passes just as happily against a
+        fixture that never seeded a changelog at all, which is the shape of
+        every vacuous negative in this repository.
+        """
+        case = Case(
+            name="issue500_talk_changelog",
+            source_type="talk",
+            conversation_token="room-token",
+            skills_changelog=True,
+        )
+        system, _user = split_halves(assemble(case, tmp_path, monkeypatch))
+
+        assert "SKILLS_CHANGELOG_SENTINEL" in system

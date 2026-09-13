@@ -93,10 +93,39 @@ from .skills.whisper.out_of_process import transcribe_audio_out_of_process
 logger = logging.getLogger("istota.executor")
 
 # Source types treated as interactive (live user behind the turn): they load
-# conversation context, sticky skills, the skills changelog, and personal
-# memory. The REPL and web chat are full-stack interactive surfaces like
-# talk/email.
-_INTERACTIVE_SOURCE_TYPES = ("talk", "email", "repl", "web")
+# conversation context and sticky skills. The REPL and web chat are full-stack
+# interactive surfaces like talk/email; `sms` and `whatsapp` are push surfaces
+# with no room view at all, which is why they need this more than the others
+# rather than less — history is the only thing establishing what the
+# conversation is about, so they get the same depth and no cap of their own
+# (ISSUE-500). Both were added as surfaces without this tuple being touched,
+# so every text message was answered as a first message.
+#
+# Personal memory is *not* gated here, contrary to what this comment used to
+# claim: `_recall_memories` runs on `exclude_memory` skill metadata and never
+# reads a source type.
+#
+# `transport.routing._INTERACTIVE_SOURCE_TYPES` asks a narrower *question*
+# ("can a reply be routed back here"), so every member of it belongs in this
+# one — the two sets happen to be equal today, and the contract between them
+# is the subset, held by a test rather than by either list being read off the
+# other. `web_app._INTERACTIVE_SOURCES` asks a wider question ("is a person
+# doing something") and carries `cli` and `istota_file` besides.
+_INTERACTIVE_SOURCE_TYPES = ("talk", "email", "repl", "web", "sms", "whatsapp")
+
+# The subset that is also shown the skills changelog. Narrower than the tuple
+# above, and spelled out rather than derived by subtraction, so the next
+# surface added has to decide rather than inherit.
+#
+# The changelog is *spent*, not merely shown: `execute_task` writes the user's
+# skills fingerprint after a successful run on this same predicate, so the
+# first surface to see it is the only one that ever does. A user whose next
+# turn after a skills change happened to be a text message would have had it
+# injected into a prompt whose reply must fit one SMS segment (or WhatsApp's
+# 1,024-character interactive body), and marked seen — so it would never
+# appear on Talk, where it is readable. That, rather than the prompt bytes, is
+# what keeps the push surfaces out.
+_SKILLS_CHANGELOG_SOURCE_TYPES = ("talk", "email", "repl", "web")
 
 
 # Distinct (user_id, tz_str) pairs already warned about, so a persistently
@@ -6764,11 +6793,14 @@ def execute_task(
     _skip_memory = any(m.exclude_memory for m in _selected_metas)
     _skip_persona = any(m.exclude_persona for m in _selected_metas)
 
-    # Skills changelog: detect changes for interactive tasks
+    # Skills changelog: detect changes for the surfaces that can show one.
+    # This gate and the fingerprint write at the end of the run read the same
+    # local deliberately — showing without spending repeats the changelog for
+    # ever, spending without showing burns it invisibly.
     skills_changelog = None
-    _is_interactive = task.source_type in _INTERACTIVE_SOURCE_TYPES
+    _shows_skills_changelog = task.source_type in _SKILLS_CHANGELOG_SOURCE_TYPES
     current_fingerprint = compute_skills_fingerprint(config.skills_dir, bundled_dir=_bundled_dir)
-    if _is_interactive:
+    if _shows_skills_changelog:
         try:
             def _check_fingerprint(c):
                 return db.get_user_skills_fingerprint(c, task.user_id)
@@ -7612,8 +7644,9 @@ def execute_task(
                     )
                     result = _append_unread_images_note(result, _unread)
 
-        # Update skills fingerprint after successful interactive execution
-        if success and _is_interactive:
+        # Update skills fingerprint after a successful run on a surface that
+        # was actually shown the changelog (see `_shows_skills_changelog`).
+        if success and _shows_skills_changelog:
             try:
                 def _update_fp(c):
                     db.set_user_skills_fingerprint(c, task.user_id, current_fingerprint)
