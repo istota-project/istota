@@ -56,8 +56,9 @@ config/config.dev.toml
 # one is a real download rather than a synthetic fixture.
 /*.csv
 
-# MkDocs
-site/
+# Docusaurus (docs-site/). `node_modules/` is covered by the blanket rule below.
+docs-site/build/
+docs-site/.docusaurus/
 
 # Test artifacts
 .pytest_cache/

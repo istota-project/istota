@@ -108,7 +108,7 @@ istota-skill memory_search invalidate <id>           # mark fact as ended (valid
 istota-skill memory_search delete-fact <id>          # permanent removal
 ```
 
-### Layer 6 — Learned playbooks (procedural memory)
+### Layer 6 — Learned playbooks (procedural memory) {#layer-6-learned-playbooks-procedural-memory}
 
 Where the other layers remember *facts*, playbooks remember *how*. The sleep cycle distils a successful multi-step task into a per-user markdown procedure, stored as a `memory_chunks` row with `source_type = "playbook"` and recalled by relevance through the same search path.
 

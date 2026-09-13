@@ -95,8 +95,8 @@ VENV_BIN = "/app/.venv/bin"
 # One import per extra the image claims to install, since the Dockerfile syncs
 # `--extra all`. A deliberate list, like Group C's paths: a new extra means an
 # edit here, and an extra dropped from `all` should fail rather than pass
-# unnoticed. `docs` is excluded — mkdocs is a build-time tool the runtime never
-# imports.
+# unnoticed. A `docs` extra used to be excluded here as a build-time tool; the
+# site is Docusaurus now and there is no Python docs extra at all.
 EXTRA_WITNESSES = {
     "caldav": "calendar",
     "imap_tools": "email",

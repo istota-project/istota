@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Upgrade note:** the documentation site is Docusaurus instead of MkDocs, and the `docs` Python extra is gone with it. Build the site with `npm --prefix docs-site ci && npm --prefix docs-site run build`; `uv sync --extra docs` no longer resolves. The markdown itself has not moved — it is still `docs/` at the repository root, so every path reference in the Ansible defaults, the compose comments and the source docstrings is unchanged. The build now fails on a broken relative link or heading anchor rather than shipping one, which caught one already in the tree.
+
 - **Upgrade note:** WhatsApp now chooses an adapter, and the default is `baileys` rather than Meta's Cloud API. Name yours in `[whatsapp] provider`. A configuration already carrying Meta's ids or credentials is read as `whatsapp_cloud` and keeps working untouched, so nothing breaks if you do nothing — but a deployment that wants Baileys has to say so, and a fresh one gets it unasked.
 
 - **Upgrade note:** Meta's WhatsApp settings now live in `[whatsapp.cloud]` rather than flat on `[whatsapp]`. The flat spelling still loads and is read as a Cloud deployment, so the move is yours to make when convenient; it will be removed in a later release. Moving the keys without also writing `provider = "whatsapp_cloud"` is safe — the adapter is chosen from the values, not from where they are written.

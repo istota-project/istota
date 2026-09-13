@@ -1,0 +1,31 @@
+/* Teal in light, blue grey in dark: the palette mkdocs-material was configured
+   with, carried over so the site does not change colour in the migration. */
+:root {
+  --ifm-color-primary: #00897b;
+  --ifm-color-primary-dark: #007b6f;
+  --ifm-color-primary-darker: #007468;
+  --ifm-color-primary-darkest: #005f56;
+  --ifm-color-primary-light: #009787;
+  --ifm-color-primary-lighter: #009e8d;
+  --ifm-color-primary-lightest: #00b3a0;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #90a4ae;
+  --ifm-color-primary-dark: #7d95a1;
+  --ifm-color-primary-darker: #748d9a;
+  --ifm-color-primary-darkest: #5d7580;
+  --ifm-color-primary-light: #a3b3bb;
+  --ifm-color-primary-lighter: #acbbc2;
+  --ifm-color-primary-lightest: #c5d0d5;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Several reference pages are wide tables that would otherwise push the page
+   body into a horizontal scroll. */
+.markdown table {
+  display: block;
+  overflow-x: auto;
+}

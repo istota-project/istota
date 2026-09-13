@@ -23,8 +23,9 @@ Access Google Drive, Gmail, Calendar, Sheets, Docs, and Chat through the [Google
    ```
 7. Copy the **Client ID** and **Client Secret**
 
-!!! note
-    The redirect URI must match your Istota web interface hostname exactly, including the scheme (`https://`).
+:::note
+The redirect URI must match your Istota web interface hostname exactly, including the scheme (`https://`).
+:::
 
 ### 2. Configure Istota
 
@@ -79,8 +80,9 @@ The card reads the granted scopes back out of the stored token, so it reports wh
 
 Changing the selection requires reconnecting: Google has to ask again. The connect flow already sets `access_type=offline` and `prompt=consent`, so a reconnect issues a fresh refresh token.
 
-!!! note
-    The consent screen appears on every connect, not only the first. The authorization request asks for offline access with `prompt=consent`, because Google returns a refresh token only when both are asked for — and without one, a reconnect (after widening `scopes`, or after the user revokes access from their Google account) would store an access token that expires in an hour and cannot be renewed.
+:::note
+The consent screen appears on every connect, not only the first. The authorization request asks for offline access with `prompt=consent`, because Google returns a refresh token only when both are asked for — and without one, a reconnect (after widening `scopes`, or after the user revokes access from their Google account) would store an access token that expires in an hour and cannot be renewed.
+:::
 
 ## Usage
 
