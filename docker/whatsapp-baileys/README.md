@@ -4,9 +4,11 @@ A small Node program holding one WhatsApp Web session, reached by the daemon
 over a Unix socket. It exists because Baileys is TypeScript with no Python
 port, which is the only reason this is a separate process at all.
 
-`index.js` is the program, `package.json` pins the library. The wire format is
-`src/istota/transport/whatsapp/baileys_protocol.py`; the daemon side of the
-link is `baileys_bridge.py`.
+`index.js` is the program, `package.json` pins the library and
+`package-lock.json` is what `npm ci` installs. `Dockerfile` builds the image the
+`whatsapp-baileys` compose service runs. The wire format is
+`src/istota/transport/whatsapp/baileys_protocol.py`; the daemon side of the link
+is `baileys_bridge.py`.
 
 ## Running it
 
@@ -42,8 +44,16 @@ the devbox and browser images are already separate for the same reason.
 
 The separation costs nothing at run time: the two processes share a Unix
 socket and a directory, and the daemon's `sidecar_argv=()` shape is built for
-exactly this — the daemon listens, something else runs the sidecar. The image
-itself, the compose service and the systemd unit are the deployment stage's.
+exactly this — the daemon listens, something else runs the sidecar.
+
+It costs one thing at setup time, on the compose shape only. `istota whatsapp
+pair` spawns a sidecar of its own, and the istota image ships neither this
+program nor its dependencies — so **pairing is not reachable from inside that
+stack**. Pair from a checkout with node (the Ansible shape, or a developer
+machine) and move the session directory into the `istota_data` volume at
+`/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers
+run as. A listen-only mode for `pair`, which would let the compose sidecar
+supply the QR to a daemon-side listener, is the real fix and is not built.
 
 ## What is not tested here
 

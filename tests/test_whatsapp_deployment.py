@@ -218,6 +218,112 @@ class TestTheComposeStack:
             assert re.search(rf"^{name}=", text, re.M), f"undocumented: {name}"
 
 
+class TestTheBaileysSidecarService:
+    """The compose half of the profile split.
+
+    A profile cannot read `provider` out of a config rendered inside the
+    container, so the two adapters get two profiles rather than one that means
+    different things: `whatsapp` is Meta's receiver and `whatsapp-baileys` is
+    the sidecar. Nothing here builds the image — that is the `image` tier's
+    kind of work and this service is in no tier — so these assert the shape a
+    wrong service would get wrong silently.
+    """
+
+    def _service(self):
+        compose = yaml.safe_load(COMPOSE.read_text())
+        assert "whatsapp-baileys" in compose["services"], (
+            "the whatsapp-baileys service is gone; a Baileys deployment on "
+            "this shape then has a daemon listening on a socket nothing dials"
+        )
+        return compose["services"]["whatsapp-baileys"]
+
+    def test_it_carries_its_own_profile_and_never_the_receivers(self):
+        service = self._service()
+        webhooks = yaml.safe_load(COMPOSE.read_text())["services"]["webhooks"]
+
+        assert service["profiles"] == ["whatsapp-baileys"]
+        # The control for the split: the two must not share a profile, or
+        # selecting either adapter starts both halves and the receiver's two
+        # handlers 404 everything a Baileys deployment has.
+        assert "whatsapp-baileys" not in webhooks["profiles"]
+        assert "whatsapp" not in service["profiles"]
+
+    def test_it_is_given_both_variables_the_program_requires(self):
+        """With either missing the sidecar exits 2 and logs nowhere.
+
+        Its only log destination is a file inside the session directory, which
+        is one of the two values — so a service that withholds them produces a
+        container that restarts for ever with an empty `docker logs`.
+        """
+        environment = self._service()["environment"]
+
+        assert environment["ISTOTA_BAILEYS_SOCKET"]
+        assert environment["ISTOTA_BAILEYS_SESSION_DIR"]
+
+    def test_the_paths_it_is_given_are_where_the_daemon_puts_them(self, tmp_path):
+        """Asked of the product rather than restated.
+
+        The socket has no config override at all and the session directory
+        resolves itself when `session_dir` is empty, which is what the render
+        leaves it as — so both paths are derived from `db_path`, and a compose
+        literal that drifts from that derivation is a sidecar dialling a socket
+        nobody is listening on, with no error on either side.
+        """
+        from istota.config import load_config
+        from istota.transport.whatsapp.baileys_bridge import (
+            default_session_dir, default_socket_path,
+        )
+
+        config = load_config(render_docker_config(tmp_path, **REQUIRED))
+        environment = self._service()["environment"]
+
+        assert environment["ISTOTA_BAILEYS_SOCKET"] == str(default_socket_path(config))
+        assert environment["ISTOTA_BAILEYS_SESSION_DIR"] == str(
+            default_session_dir(config)
+        )
+
+    def test_it_shares_the_data_volume_and_publishes_nothing(self):
+        service = self._service()
+
+        assert "istota_data:/data" in service["volumes"]
+        # Nothing ever dials it: it speaks to the daemon over the volume's
+        # socket and to WhatsApp outbound.
+        assert "ports" not in service
+        assert "expose" not in service
+
+    def test_the_image_runs_the_program_as_the_daemons_user(self):
+        """No USER directive, which is load-bearing here.
+
+        `ensure_session_dir` refuses a session directory owned by another uid,
+        so the sidecar and the daemon have to be the same user. The istota
+        image declares no USER either, so both are root; a `USER node` here
+        leaves this container unable to read the credential the daemon paired.
+        """
+        dockerfile = (REPO / "docker" / "whatsapp-baileys" / "Dockerfile").read_text()
+
+        assert not re.search(r"^USER\s", dockerfile, re.M)
+        assert re.search(r"^FROM node:", dockerfile, re.M)
+        assert re.search(r"^RUN npm ci\b", dockerfile, re.M)
+
+    def test_the_lockfile_is_committed_and_pins_the_library(self):
+        """`npm ci` needs one, and the image's whole install step is `npm ci`.
+
+        Without it the build fails outright — which is the loud direction —
+        but the same lockfile is what makes the pinned version the version
+        actually installed, in the image and in a checkout alike.
+        """
+        import json
+
+        directory = REPO / "docker" / "whatsapp-baileys"
+        lock = json.loads((directory / "package-lock.json").read_text())
+        manifest = json.loads((directory / "package.json").read_text())
+        pinned = manifest["dependencies"]["@whiskeysockets/baileys"]
+
+        entry = lock["packages"]["node_modules/@whiskeysockets/baileys"]
+        assert entry["version"] == pinned
+        assert entry["integrity"]
+
+
 class TestTheDockerNginx:
     def test_the_whatsapp_route_gets_its_own_bounded_location(self):
         """Above istota's own 256 KiB cap and far below the shared 10m.
