@@ -1215,6 +1215,65 @@ class TestTheSupervisor:
         await wait_for(lambda: bridge.status.fatal_reason == "connection_closed")
         assert bridge.status.fatal_is_permanent is False
 
+    async def test_an_unrecorded_backoff_is_latched_from_the_second_frame(
+        self, bridge, sidecar
+    ):
+        """ISSUE-501's surface. The sidecar reports a run it could not record
+        on a *second* `fatal`, because the first one's position is load-bearing
+        — it has to leave before any filesystem work, which on a hung mount
+        could block for ever. So the pair arrives as False then True, and this
+        drives both frames rather than only the one carrying the field."""
+        await sidecar.say(proto.MSG_FATAL, reason="logged_out", permanent=True)
+        await wait_for(lambda: bridge.status.fatal_is_permanent is True)
+        assert bridge.status.fatal_run_unrecorded is False
+
+        await sidecar.say(
+            proto.MSG_FATAL,
+            reason="logged_out", permanent=True, run_unrecorded=True,
+        )
+        await wait_for(lambda: bridge.status.fatal_run_unrecorded is True)
+
+    async def test_a_ready_clears_the_unrecorded_latch(self, bridge, sidecar):
+        """It is a fact about the session that just died, so a session that
+        opens must not leave `doctor` reporting it for the life of the process
+        — the same rule that clears `fatal_reason` and the permanent latch."""
+        await sidecar.say(
+            proto.MSG_FATAL,
+            reason="logged_out", permanent=True, run_unrecorded=True,
+        )
+        await wait_for(lambda: bridge.status.fatal_run_unrecorded is True)
+
+        await sidecar.say(proto.MSG_READY)
+        await wait_for(lambda: bridge.status.ready is True)
+
+        assert bridge.status.fatal_run_unrecorded is False
+
+    async def test_a_frame_that_does_not_claim_it_clears_it(self, bridge, sidecar):
+        """Overwritten per frame, exactly as `fatal_reason` is, so the two
+        always describe the same frame rather than one of them being a
+        high-water mark the other contradicts."""
+        await sidecar.say(
+            proto.MSG_FATAL,
+            reason="logged_out", permanent=True, run_unrecorded=True,
+        )
+        await wait_for(lambda: bridge.status.fatal_run_unrecorded is True)
+
+        await sidecar.say(proto.MSG_FATAL, reason="bad_session", permanent=True)
+        await wait_for(lambda: bridge.status.fatal_reason == "bad_session")
+
+        assert bridge.status.fatal_run_unrecorded is False
+
+    async def test_a_non_boolean_claim_is_not_taken_as_one(self, bridge, sidecar):
+        """`is True`, not truthiness. The payload is JSON off a socket, and
+        every other flag on this frame is read the same way."""
+        await sidecar.say(
+            proto.MSG_FATAL,
+            reason="logged_out", permanent=True, run_unrecorded="yes",
+        )
+        await wait_for(lambda: bridge.status.fatal_is_permanent is True)
+
+        assert bridge.status.fatal_run_unrecorded is False
+
     async def test_stop_asks_before_it_insists(self, config, sockets):
         instance = BaileysBridge(
             config, socket_path=sockets.socket, session_dir=sockets.session,

@@ -7300,10 +7300,36 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
         from .notification_resolvers.task_alert import _slug
 
         fatal = _slug(status.get("fatal_reason"), fallback="unknown")
+        # **The one condition with no other surface** (ISSUE-501). The sidecar
+        # spaces out the doomed logins of an unlinked session on a ladder it
+        # keeps in a file inside the session directory; where that file can be
+        # neither read nor written the ladder cannot advance, and the
+        # deployment retries at its supervisor's own interval — roughly 2,880
+        # real logins a day against an account WhatsApp has already unlinked,
+        # which is the behaviour accounts get banned for. It reads from here
+        # exactly like a deployment backing off correctly, and the sidecar's
+        # own warning about it is appended to a log file *inside* the
+        # directory that cannot be written. So it is said here, on the arm an
+        # operator already reads, rather than in a second check: the action is
+        # the same re-pair either way, with one more thing to fix first.
+        # **The condition, not a guessed cause.** The payload is a bare
+        # boolean, so what the daemon has observed is that the run could not be
+        # recorded and nothing about why. Naming the directory's permissions
+        # was wrong for one of the three shapes that set it — an unreadable
+        # file in a perfectly writable directory, where the write lands on
+        # every cycle — and `.claude/rules/doctor.md` puts the rule for this
+        # arm plainly: a check must not assert something it did not observe.
+        unrecorded = (
+            " Its backoff is not being recorded, so the session is being "
+            "retried far more often than it should be — `logout-backoff.json` "
+            "in the session directory cannot be written, or cannot be read "
+            "back afterwards."
+            if status.get("fatal_run_unrecorded") else ""
+        )
         return CheckResult(
             name, FAIL,
             f"the WhatsApp session ended ({fatal}); every send is "
-            "refused until it is paired again",
+            f"refused until it is paired again.{unrecorded}",
             remedy=(
                 # **`--reset`, because a bare `pair` cannot resolve this
                 # state** (ISSUE-496). The credential on disk names a device
@@ -7316,6 +7342,14 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
                 "the old session as a timestamped sibling rather than deleting "
                 "it — scan the code from WhatsApp's Linked Devices screen, "
                 "then start them again."
+                + (
+                    " Check why first: the session directory is full or "
+                    "read-only, or `logout-backoff.json` itself is a "
+                    "directory, is owned by another account, or has a mode "
+                    "the sidecar cannot read. A re-pair that leaves that file "
+                    "unreadable or unwritable keeps the same retry rate."
+                    if status.get("fatal_run_unrecorded") else ""
+                )
             ),
             scope=DEPLOYMENT,
         )

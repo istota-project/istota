@@ -507,6 +507,26 @@ const LOGOUT_BACKOFF_MS = [0, 30_000, 300_000, 900_000, 1_800_000, 3_600_000];
 // How often the wait looks up to see whether the credential changed under it.
 const CREDENTIAL_POLL_MS = 30_000;
 
+/*
+ * The rung to wait when the run could not be recorded at all (ISSUE-501).
+ *
+ * A run *length* rather than a duration, so a change to the ladder moves this
+ * with it instead of leaving a literal here that used to be mid-ladder. It is
+ * not an array index — `logoutExitDelayMs` reads `LOGOUT_BACKOFF_MS[run - 1]`
+ * — so 3 is the ladder's third rung, five minutes, and "correcting" it to 2
+ * would halve the fallback. Five minutes takes the unbounded case from 2,880
+ * logins a day to about 290 — a bound rather than a cure, which is the right
+ * size for a guess: the count is genuinely unknown on this path, so a rung
+ * near the top would be asserting a long outage on no evidence.
+ *
+ * It cannot hold a working session down, and that is what licenses guessing
+ * at all. A session that opens deletes the file, and a re-pair ends the wait
+ * through the credential watch within one poll — including the documented
+ * `--reset` remedy, which moves the whole directory and so changes the stamp
+ * even where the directory itself is what cannot be written.
+ */
+const LOGOUT_UNKNOWN_RUN = 3;
+
 function logoutExitDelayMs(count) {
   const n = Number(count);
   const run =
@@ -559,12 +579,29 @@ function nextLogoutState(previous, nowIso) {
   };
 }
 
+/*
+ * Read the recorded run, and say whether the answer is a fact or a guess.
+ *
+ * `ENOENT` is the healthy first logout of a run: nought is the true count and
+ * 500ms is the right wait for it. Every other errno means the rung is
+ * *unknowable*, which is a different answer from zero — and reporting it as
+ * zero is half of what pinned the ladder at its floor for ever (ISSUE-501).
+ * A read that succeeds and then fails to *parse* is not unknown: the bytes
+ * were reachable, so the file is one this program can replace, and the write
+ * below will.
+ */
 function readLogoutState() {
-  if (!LOGOUT_STATE_PATH) return { count: 0, first_at: '' };
+  // Not `unknown`: no session directory is a configuration fact rather than a
+  // filesystem failure, and nothing was read badly. The wait is floored all
+  // the same, by the write half — with no path there is nothing to store — so
+  // labelling it here would only attribute it to the wrong cause.
+  if (!LOGOUT_STATE_PATH) return { count: 0, first_at: '', unknown: false };
   try {
     return parseLogoutState(fs.readFileSync(LOGOUT_STATE_PATH, 'utf8'));
   } catch (err) {
-    return { count: 0, first_at: '' };
+    return {
+      count: 0, first_at: '', unknown: !err || err.code !== 'ENOENT',
+    };
   }
 }
 
@@ -579,21 +616,56 @@ function readLogoutState() {
  * costs is that the *next* process starts the run again.
  */
 function recordLogout(nowIso) {
+  const previous = readLogoutState();
   const state = nextLogoutState(
-    readLogoutState(), nowIso || new Date().toISOString(),
+    previous, nowIso || new Date().toISOString(),
   );
+  let stored = false;
   if (LOGOUT_STATE_PATH) {
     try {
       fs.writeFileSync(
         LOGOUT_STATE_PATH, JSON.stringify(state) + '\n', { mode: 0o600 },
       );
+      stored = true;
     } catch (err) {
       log('warn', 'the logged-out run could not be recorded', {
         kind: err && err.code,
       });
     }
   }
+  /*
+   * Whether the count this returns can be believed by the *next* process.
+   *
+   * The two halves are a union rather than a conjunction, and each covers a
+   * shape the other leaves unbounded (ISSUE-501). A write that did not land
+   * means the next process reads what this one read, so a run that started
+   * from nought never leaves the floor — which is the read-only directory
+   * with no file, where the read is a perfectly ordinary `ENOENT`. An
+   * unknowable *read* means the count is a guess even when the write lands,
+   * which is the unreadable file in a writable directory, rewritten to `1` on
+   * every cycle for ever.
+   *
+   * Set after the write and never before: this is a fact about the process's
+   * filesystem rather than about the run, so serializing it would let a
+   * deployment that has since recovered read a stale one back.
+   */
+  if (!stored || previous.unknown) state.unrecorded = true;
   return state;
+}
+
+/*
+ * How long to wait before exiting, given what `recordLogout` could establish.
+ *
+ * `Math.max` rather than a branch, so the fallback is a floor under the
+ * ladder and never a replacement for it: five recorded logouts and an
+ * unwritable file is still a run five long, and taking the fallback rung
+ * there would cut an hour to five minutes at exactly the run length where the
+ * wait matters most.
+ */
+function logoutWaitMs(state) {
+  const recorded = logoutExitDelayMs(state && state.count);
+  if (!state || !state.unrecorded) return recorded;
+  return Math.max(recorded, logoutExitDelayMs(LOGOUT_UNKNOWN_RUN));
 }
 
 function clearLogoutState() {
@@ -712,6 +784,12 @@ class Session {
     // keep reconnecting through a logout wait and must not through a
     // shutdown, and only one of the two states has a verdict to re-announce.
     this.loggedOut = false;
+    // Whether the run behind the wait below reached disk. Carried on the
+    // re-announced verdict as well as on the frame that first reported it,
+    // because the daemon's latch is in memory: a scheduler that restarted
+    // during the wait would otherwise re-learn the logout and not that the
+    // backoff behind it is running on a guess.
+    this.runUnrecorded = false;
   }
 
   announceReady() {
@@ -723,7 +801,11 @@ class Session {
       // report "no sidecar connected" instead of "logged out, re-pair" for
       // all of it. Re-sending is what keeps the reason on the daemon's side
       // for as long as this process is the thing holding the session.
-      this.link.send(MSG_FATAL, { reason: FATAL_LOGGED_OUT, permanent: true });
+      this.link.send(MSG_FATAL, {
+        reason: FATAL_LOGGED_OUT,
+        permanent: true,
+        run_unrecorded: this.runUnrecorded,
+      });
       return;
     }
     if (this.open) this.link.send(MSG_READY, {});
@@ -883,9 +965,25 @@ class Session {
       // the daemon latches the fatal and alerts at the moment the session
       // died rather than at the end of the wait.
       const run = recordLogout();
-      const delay = logoutExitDelayMs(run.count);
+      const delay = logoutWaitMs(run);
+      // **The marker is reported, not just acted on** (ISSUE-501). The only
+      // other signal this condition has is the `warn` line `recordLogout`
+      // writes, and `log()` appends to `sidecar.log` *inside* the directory
+      // that cannot be written — so on the most likely trigger it goes
+      // nowhere at all. A second `fatal` rather than a field on the first,
+      // because the first one's position is load-bearing: it has to leave
+      // before any filesystem work, which on a hung mount could block for
+      // ever. The healthy path sends exactly one frame as before, and the
+      // daemon's once-per-outage alert has already fired on it, so this
+      // updates `doctor`'s answer without paging anybody twice.
+      this.runUnrecorded = run.unrecorded === true;
+      if (this.runUnrecorded) {
+        this.link.send(MSG_FATAL, {
+          reason: FATAL_LOGGED_OUT, permanent: true, run_unrecorded: true,
+        });
+      }
       log('warn', 'the device link ended; waiting before exiting', {
-        run: run.count, wait_ms: delay,
+        run: run.count, wait_ms: delay, unrecorded: this.runUnrecorded,
       });
       scheduleLogoutExit(delay, () => process.exit(1));
       return;
@@ -1247,6 +1345,8 @@ module.exports = {
   recallSent,
   SENT_CACHE_LIMIT,
   logoutExitDelayMs,
+  LOGOUT_UNKNOWN_RUN,
+  logoutWaitMs,
   parseLogoutState,
   nextLogoutState,
   readLogoutState,
