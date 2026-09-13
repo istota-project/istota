@@ -654,8 +654,12 @@ function credentialStamp() {
  * re-pair, ends the wait at the first poll on every rung, and leaves a
  * `logout-backoff.json` whose climbing count says the backoff is working.
  * That is the whole defect wearing a label. What the later baseline costs is
- * that a credential replaced inside the first poll interval is noticed one
- * interval later, against rungs measured in minutes.
+ * a blind window of one `CREDENTIAL_POLL_MS`: a credential replaced before
+ * the first tick is adopted *as* the baseline, so it is never noticed at all
+ * and the rung runs to its full length. Rungs 1 and 2 have no watch whatever,
+ * since `min(delayMs, poll)` makes their single tick also their exit. Against
+ * the rungs where the wait is long enough to matter that window is minutes
+ * out of tens of minutes, and the alternative is the silent defect above.
  *
  * A top-level function taking its exit and its interval rather than a method
  * on `Session`, because `Session` is not exported and a wait loop nothing can
