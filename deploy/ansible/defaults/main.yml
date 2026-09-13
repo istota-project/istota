@@ -1013,9 +1013,21 @@ istota_whatsapp_business_phone_number: ""    # exact E.164
 # credential and neither can detect the other.
 #
 # Turning the sidecar on needs one **full** play: the Node install is gated on
-# `not istota_update_only` and the sidecar's npm ci is not, so flipping a host
-# with `-e istota_update_only=true` reaches the install with no npm on PATH.
+# `not istota_update_only` and the sidecar tasks are not, so flipping a host
+# with `-e istota_update_only=true` would deploy and start a unit whose
+# interpreter the same play declined to install. That converge now refuses up
+# front, at `Assert the WhatsApp sidecar's Node interpreter is installed`,
+# rather than failing at `npm ci` — or, where node_modules already matched the
+# lockfile and npm ci was skipped, at ExecStart with nothing naming the cause.
 istota_whatsapp_baileys_sidecar_unit: true
+# The interpreter the sidecar unit execs, named once because three places need
+# to agree on it: the unit's own ExecStart, the play's pre-flight assert, and
+# the auto-update cron's start arm. Three equal literals would drift, and the
+# drift is silent — the guard would pass while the unit died at exec. Change it
+# only for a host whose node is genuinely elsewhere; NodeSource on Debian puts
+# it here, and the value is rendered into the unit, so moving it restarts the
+# sidecar on the next converge.
+istota_whatsapp_baileys_node_bin: /usr/bin/node
 istota_whatsapp_baileys_sidecar_command: ""
 istota_whatsapp_baileys_log_level: "info"    # error|warn|info|debug, to sidecar.log
 istota_whatsapp_baileys_memory_high: "512M"  # empty omits the directive

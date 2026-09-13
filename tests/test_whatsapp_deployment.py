@@ -1056,7 +1056,9 @@ class TestTheAnsibleSidecarUnit:
         The role installs node for the frontend build and the developer skill;
         a Baileys host with the web UI off is a third case that had no arm.
         """
-        install = self._named("Install Node.js for developer skill")
+        install = self._named(
+            "Install Node.js for the web build, developer skill and WhatsApp sidecar"
+        )
 
         assert "istota_whatsapp_baileys_unit_wanted" in str(install["when"])
 
@@ -1426,16 +1428,45 @@ class TestTheCronDoesNotBounceALiveSession:
     """
 
     @staticmethod
-    def _rig(tmp_path: Path):
+    def _rig(tmp_path: Path, **kwargs):
         from tests.test_ansible_web_build import Rig
 
-        rig = Rig(tmp_path, baileys=True)
+        rig = Rig(tmp_path, baileys=True, **kwargs)
         # The first run only seeds the deployed marker and exits at the
         # up-to-date check, so it restarts nothing. Clearing after it is what
         # makes the assertions below about the second run alone.
         rig.run()
         rig.clear_calls()
         return rig
+
+    def test_it_refuses_to_start_the_unit_without_an_interpreter(self, tmp_path):
+        """ISSUE-494, the half the play cannot reach.
+
+        The play asserts on the interpreter before it deploys the unit, but
+        nothing in the play runs this script — so a host left with the unit
+        enabled and no node (a pre-fix update-only converge, or node removed
+        out of band) had this arm start an interpreter-less unit every two
+        minutes indefinitely, each start logged as success.
+
+        Driven rather than scanned, for this class's own reason: the template
+        contains the start line in every version of itself, including the one
+        that runs it unconditionally.
+        """
+        rig = self._rig(tmp_path, node_present=False)
+        rig.commit({"docker/whatsapp-baileys/index.js": "// changed\n"})
+        result = rig.run()
+
+        assert result.returncode == 0, result.stderr
+        calls = rig.calls()
+        assert not any("whatsapp-baileys" in c and "start" in c for c in calls), (
+            f"started the sidecar with no interpreter: {calls}"
+        )
+        assert not any("whatsapp-baileys" in c and "restart" in c for c in calls)
+        # The rest of the run has to carry on: this is one unit, and holding
+        # the migrations and every other restart back over it would turn a
+        # missing sidecar dependency into a stalled deployment.
+        assert any("systemctl restart istota-scheduler" == c for c in calls)
+        assert "ERROR" in rig.log_text() and "run a full play" in rig.log_text()
 
     def test_a_deploy_that_leaves_the_sidecar_alone_does_not_restart_it(self, tmp_path):
         """The reported defect: a docs commit reconnected a live session."""

@@ -908,7 +908,7 @@
   when: not istota_update_only and not istota_web_only and (istota_browser_enabled or istota_devbox_enabled)
 
 # Node.js — inlined (replace with a dedicated role if you prefer)
-- name: Install Node.js for developer skill
+- name: Install Node.js for the web build, developer skill and WhatsApp sidecar
   block:
     - name: Add NodeSource repository
       shell: curl -fsSL https://deb.nodesource.com/setup_20.x | bash
@@ -3812,6 +3812,55 @@
 # because systemd restarts one that exited on a logged-out session and the
 # daemon's in-process supervisor deliberately does not — so a re-pair recovers
 # without touching the scheduler.
+
+- name: Read the WhatsApp sidecar's Node interpreter
+  stat:
+    path: "{{ istota_whatsapp_baileys_node_bin }}"
+    follow: yes
+  register: baileys_node_bin
+  # The exact path the unit execs, not "is node on PATH": systemd runs
+  # `ExecStart` with no shell, so a node resolvable anywhere else satisfies a
+  # `command -v` probe while the unit still dies at start. `stat` rather than a
+  # `command:` probe also runs under `--check`, where a command is skipped and
+  # leaves its registered result undefined. That is not a claim to be correct
+  # under `--check`: `apt` installs nothing there either, so checking a full
+  # play against a node-less host fails here for a converge that would have
+  # succeeded. Accepted rather than worked around — the sibling lockfile assert
+  # below already fails `--check` on a fresh host for the same reason, and a
+  # `not ansible_check_mode` escape would switch the guard off in the one mode
+  # whose whole purpose is to report what a real run would do.
+  #
+  # `follow: yes` is the guard, not a tidy-up. The module defaults it
+  # false and then calls `lstat`, which *succeeds* on a dangling symlink — so
+  # the default reports `exists: true` for an interpreter whose target is
+  # gone, which is the shape Debian packaging produces and exactly the host
+  # this guard exists for. Measured: default `exists=True`, `follow: yes`
+  # `exists=False`, against a symlink pointing at nothing.
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
+
+- name: Assert the WhatsApp sidecar's Node interpreter is installed
+  assert:
+    that:
+      - baileys_node_bin.stat.exists | default(false)
+      - baileys_node_bin.stat.executable | default(false)
+    fail_msg: |
+      {{ istota_whatsapp_baileys_node_bin }} is missing or not executable, so
+      the WhatsApp Baileys sidecar cannot start. Re-run this play without
+      istota_update_only: the Node install is gated on it, while the sidecar
+      tasks below are not, so an update-only converge deploys, enables and
+      starts a unit whose interpreter it declined to install.
+
+      Usually `npm ci` below fails first and says so. It does not when
+      node_modules already matches the lockfile — the state an operator is left
+      in by pairing with `istota whatsapp pair` before converging — and the
+      failure then arrives as a systemd start error naming nothing.
+  # Deliberately carries no `istota_update_only` term, unlike almost every
+  # other guard in this file. Under a full play the Node install above has
+  # already run and this passes trivially; under update-only it is the whole
+  # point. Asserting ahead of the session directory and the dependency install
+  # so a refused play has mutated nothing and has not stopped a running
+  # sidecar for an install that cannot happen.
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
 
 - name: Ensure the WhatsApp Baileys session directory
   file:
