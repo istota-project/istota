@@ -261,14 +261,40 @@ class TestTheSessionDirectory:
 
 
 class TestTheSocket:
-    async def test_the_inode_is_private_from_the_moment_it_exists(self, bridge, sockets):
-        """0600 by umask rather than by a later `chmod`.
-
-        Between a default-permission create and a narrowing chmod there is a
-        window in which another account on the host can connect — and a
-        connection here is the right to send as this WhatsApp account.
-        """
+    async def test_the_inode_ends_up_private(self, bridge, sockets):
         assert mode_of(sockets.socket) == 0o600
+
+    async def test_it_is_born_private_rather_than_narrowed_afterwards(
+        self, config, sockets, monkeypatch
+    ):
+        """The end state is not the property; *when* it holds is.
+
+        Between a default-permission create and a narrowing `chmod` there is a
+        window in which another account on the host can connect, and a
+        connection here is the right to send as this WhatsApp account. The
+        assertion above cannot see that window — it passes just as happily
+        against a wide umask followed by the chmod, which is what the negative
+        control showed. So the mode is read from inside
+        `asyncio.start_unix_server`'s own return, before the bridge's
+        belt-and-braces `chmod` has run.
+        """
+        observed = {}
+        real_start = asyncio.start_unix_server
+
+        async def recording(*args, **kwargs):
+            server = await real_start(*args, **kwargs)
+            observed["at_creation"] = mode_of(sockets.socket)
+            return server
+
+        monkeypatch.setattr(asyncio, "start_unix_server", recording)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+        )
+        await instance.start()
+        try:
+            assert observed["at_creation"] == 0o600
+        finally:
+            await instance.stop()
 
     async def test_a_stale_socket_is_replaced(self, config, sockets):
         first = BaileysBridge(
@@ -534,6 +560,10 @@ class TestTheInboundReceiver:
         await sidecar.say(proto.MSG_INBOUND, **inbound_line())
 
         await wait_for(lambda: bridge.status.failed_events == 1)
+        # Both halves, and the first is the one that discriminates: reading
+        # the constant alone is true for `INBOUND_ATTEMPTS = 1`, i.e. for the
+        # drop this case exists to refuse.
+        assert len(attempts) > 1
         assert len(attempts) == bridge_module.INBOUND_ATTEMPTS
 
     async def test_a_transient_failure_is_survived(
