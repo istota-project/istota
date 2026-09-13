@@ -6,12 +6,12 @@
   "license": "MIT",
   "main": "index.js",
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "6.7.24"
+    "@whiskeysockets/baileys": "7.0.0-rc14"
   }
 }

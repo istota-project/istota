@@ -760,14 +760,54 @@ class TestThePinnedLibrary:
         manifest = json.loads((SIDECAR_DIR / "package.json").read_text())
         version = manifest["dependencies"]["@whiskeysockets/baileys"]
 
-        assert re.fullmatch(r"\d+\.\d+\.\d+", version), (
+        # A prerelease suffix is allowed because 7.x is where WhatsApp's LID
+        # addressing is implemented and it has published nothing else; what
+        # stays refused is a *range*, which is the thing that makes a sidecar
+        # that worked yesterday stop today. npm's own tags make that concrete
+        # here: `latest` is the 7.0.0 prerelease while `legacy` is 6.7.24, and
+        # a stranded 6.17.16 published before 6.7.18 outranks every real 6.7.x
+        # by semver — so `^6` resolves to a build from seventeen months
+        # earlier. Only an exact string is safe in either line.
+        assert re.fullmatch(r"\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?", version), (
             f"baileys is pinned as {version!r}; an exact version is required"
         )
 
     def test_it_declares_the_node_floor_the_library_needs(self):
+        """Baileys 7 refuses to install below Node 20 — its `preinstall`
+        script exits 1 — so a manifest still claiming 18 promises an install
+        that cannot happen."""
         manifest = json.loads((SIDECAR_DIR / "package.json").read_text())
 
-        assert manifest["engines"]["node"].startswith(">=18")
+        assert manifest["engines"]["node"].startswith(">=20")
+
+    def test_the_library_is_loaded_by_dynamic_import(self):
+        """Baileys 7 is ESM-only, so a CommonJS `require` of it throws
+        `ERR_REQUIRE_ESM` at the first session open — a failure no test
+        reaching for the program's exports would ever see, because they never
+        call this.
+
+        Both halves are pinned. The dynamic `import()` is what makes the
+        library loadable at all; `module.exports` staying is what lets the
+        default suite load the program with no `node_modules` present and run
+        its pure functions, which converting this file to ESM would have
+        cost.
+        """
+        source = PROGRAM.read_text()
+        start = source.index("async function loadBaileys()")
+        body = source[start:source.index("\n}\n", start)]
+
+        assert "import('@whiskeysockets/baileys')" in body
+        assert "require('@whiskeysockets/baileys')" not in PROGRAM.read_text()
+        assert "module.exports" in PROGRAM.read_text()
+
+    def test_the_import_stays_lazy(self):
+        """The specifier is resolved when a session opens, not when the
+        module loads — which is the whole reason the default suite can
+        `require` this program in a tree with no dependencies installed."""
+        source = PROGRAM.read_text()
+
+        assert source.index("async open_()") > source.index("async function loadBaileys()")
+        assert "await loadBaileys()" in _js_body("async open_()")
 
     def test_it_is_private_so_it_cannot_be_published(self):
         manifest = json.loads((SIDECAR_DIR / "package.json").read_text())
@@ -986,9 +1026,31 @@ class TestTheChatAddressUnderLid:
         return json.dumps(fields)
 
     def test_a_lid_chat_is_attributed_to_the_senders_phone_jid(self):
+        """Baileys 7 spells it `remoteJidAlt` — the *other* namespace's address
+        for the same correspondent, which in a LID-addressed chat is the phone
+        JID."""
+        key = self._key(
+            remoteJid="277009032835160@lid",
+            remoteJidAlt="13105551234@s.whatsapp.net",
+        )
+        assert self._call(f"m.chatAddress({key})") == "13105551234@s.whatsapp.net"
+
+    def test_the_6_7_spelling_is_still_read(self):
+        """`senderPn` was 6.7.x's name for it. Kept as a fallback so the
+        function does not depend on which version is installed — a downgrade
+        is then a version change rather than a silent return to the bug this
+        was written for."""
         key = self._key(
             remoteJid="277009032835160@lid",
             senderPn="13105551234@s.whatsapp.net",
+        )
+        assert self._call(f"m.chatAddress({key})") == "13105551234@s.whatsapp.net"
+
+    def test_the_v7_field_wins_when_both_are_present(self):
+        key = self._key(
+            remoteJid="277009032835160@lid",
+            remoteJidAlt="13105551234@s.whatsapp.net",
+            senderPn="19995550000@s.whatsapp.net",
         )
         assert self._call(f"m.chatAddress({key})") == "13105551234@s.whatsapp.net"
 
@@ -998,7 +1060,7 @@ class TestTheChatAddressUnderLid:
         substitution is scoped to the namespace that needs it."""
         key = self._key(
             remoteJid="13105551234@s.whatsapp.net",
-            senderPn="19995550000@s.whatsapp.net",
+            remoteJidAlt="19995550000@lid",
         )
         assert self._call(f"m.chatAddress({key})") == "13105551234@s.whatsapp.net"
 
@@ -1012,7 +1074,9 @@ class TestTheChatAddressUnderLid:
         this adapter, and the honest answer is a named drop rather than
         forwarding a LID the daemon would refuse one layer later."""
         for pn in (None, "", "277009032835160@lid", "not-a-jid", 12345):
-            key = self._key(remoteJid="277009032835160@lid", senderPn=pn)
+            key = self._key(
+                remoteJid="277009032835160@lid", remoteJidAlt=pn, senderPn=pn,
+            )
             assert self._call(f"m.chatAddress({key})") == "", pn
 
     def test_a_missing_or_malformed_key_yields_nothing(self):
@@ -1026,7 +1090,7 @@ class TestTheChatAddressUnderLid:
         down from the one being fixed."""
         key = self._key(
             remoteJid="277009032835160@lid",
-            senderPn="13105551234:7@s.whatsapp.net",
+            remoteJidAlt="13105551234:7@s.whatsapp.net",
         )
         produced = self._call(f"m.chatAddress({key})")
 

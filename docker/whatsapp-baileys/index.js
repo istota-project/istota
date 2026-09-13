@@ -220,9 +220,16 @@ class Link {
  * drift guard does exactly that, and a sidecar that cannot be loaded without
  * `node_modules` is a sidecar nothing in the default suite can check.
  */
-function loadBaileys() {
-  // eslint-disable-next-line global-require
-  return require('@whiskeysockets/baileys');
+async function loadBaileys() {
+  // **`import()` rather than `require`, and that is the v7 upgrade's one
+  // structural cost.** Baileys 7 is ESM-only, which a CommonJS program cannot
+  // `require` at all. Converting this file to ESM was the alternative and is
+  // the worse trade: `module.exports` is what lets the default suite load the
+  // program with no `node_modules` present and execute its pure functions,
+  // and a dynamic import keeps both that and the laziness the drift guard
+  // depends on — the specifier is resolved when a session opens, not when the
+  // module loads.
+  return import('@whiskeysockets/baileys');
 }
 
 const USER_JID_DOMAIN = '@s.whatsapp.net';
@@ -288,9 +295,13 @@ function chatAddress(key) {
   const jid = key && key.remoteJid;
   if (typeof jid !== 'string') return '';
   if (!jid.endsWith(LID_JID_DOMAIN)) return isForwardableJid(jid) ? jid : '';
-  // A contact whose number WhatsApp withholds. It can neither enroll nor
-  // resolve on this adapter, so the honest answer is a named drop.
-  const pn = key.senderPn;
+  // `remoteJidAlt` is Baileys 7's name for it and is the *other* namespace's
+  // address for the same correspondent — the phone JID when the chat is
+  // LID-addressed, which is this branch. `senderPn` is 6.7.x's spelling and is
+  // kept as a fallback so the function does not depend on which version is
+  // installed; a downgrade is then a version change rather than a silent
+  // return to the bug this was written for.
+  const pn = key.remoteJidAlt || key.senderPn;
   return typeof pn === 'string' && pn.endsWith(USER_JID_DOMAIN) ? pn : '';
 }
 
@@ -482,7 +493,7 @@ class Session {
   }
 
   async open_() {
-    const baileys = loadBaileys();
+    const baileys = await loadBaileys();
     const { state, saveCreds } = await baileys.useMultiFileAuthState(SESSION_DIR);
     const logger = silentLogger();
     const sock = baileys.makeWASocket({
