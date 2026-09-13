@@ -76,6 +76,22 @@ class WhatsAppUserIdentity:
 
 @dataclass(frozen=True)
 class InboundWhatsAppEvent:
+    """One inbound message, in whichever adapter's terms it arrived.
+
+    **`waba_id` and `phone_number_id` are Cloud-shaped, and an adapter with no
+    Meta account fills them with `""`.** They are the WhatsApp Business
+    Account and the business phone number id, and `webhook.normalize_payload`
+    checks both against the configured Cloud account *before* it builds the
+    record — so past that point nothing reads either, on any path. Baileys has
+    no honest value for them, and `baileys_protocol.NO_CLOUD_ACCOUNT` is where
+    the empty one is written down with its reasoning.
+
+    They stay **required** rather than gaining a default. A default would let a
+    future Cloud path omit one silently, which is the check above going quiet;
+    growing a per-adapter record for two fields with no reader is the widening
+    Stage 2 of the provider seam declined to make to `WhatsAppProviderCaps` for
+    the same reason.
+    """
     message_id: str
     waba_id: str
     phone_number_id: str
@@ -95,7 +111,14 @@ class WhatsAppDeliveryEvent:
     interpreted: a status payload is evidence *after* a send, not
     authorization before one, and old conversation-pricing names do not
     describe current cost. `billable = None` means Meta said nothing, which is
-    neither free nor paid.
+    neither free nor paid — and it is the honest answer for an adapter with no
+    pricing concept at all, where `False` would assert a fact nobody observed.
+
+    `waba_id`, `phone_number_id` and `recipient_id` follow
+    `InboundWhatsAppEvent`'s rule: Cloud-shaped, `""` for an adapter with no
+    Meta account, required rather than defaulted. `recipient_id` is read
+    nowhere at all — the ledger deliberately stores no destination, since the
+    binding is resolved immediately before each send.
     """
     message_id: str
     waba_id: str
