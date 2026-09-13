@@ -521,14 +521,6 @@ def _window_stamp(sent_at: datetime) -> str:
     return _sql_datetime(sent_at)
 
 
-#: Both re-exported from `identity.py`, which owns them now: the enrollment
-#: rule each carries is per adapter and had to sit beside the other arm. Kept
-#: importable from here because this module is where they were written, and a
-#: reader following the webhook path still looks for them here.
-_e164_from_wa_id = identity_rules._e164_from_wa_id
-_write_identity_alert = identity_rules._write_identity_alert
-
-
 def _alerts(*raised: object) -> tuple[object, ...]:
     """The buffered alerts a result carries, with the nothings dropped.
 
@@ -581,8 +573,9 @@ def _resolve_user(
     `identity.resolve_inbound_identity`, one indirection thick. The five rules
     and the order that makes them safe are stated there, once, because they
     are the same five rules for both adapters and only the field they read
-    differs. This wrapper survives because the name is where a reader of the
-    webhook path looks and because several tests drive it directly.
+    differs. The wrapper survives because the name is where a reader following
+    the webhook path looks for the answer — not because anything else calls
+    it; `_handle_inbound` is the only caller.
     """
     return identity_rules.resolve_inbound_identity(
         conn, event.from_user, provider=provider,
@@ -671,6 +664,20 @@ def _handle_inbound(
         # decision and this is a behaviour one, and they are enforced in
         # different processes. Before identity lookup, because the point is
         # that no principal is resolved at all.
+        #
+        # **The refusal is deliberately not durable.** It returns above
+        # `_claim`, so no `processed_whatsapp` row is written and an operator
+        # who flips the provider back inside the provider's redelivery window
+        # would see the message as new. That is the same shape as the `group`
+        # gate below and it costs nothing in practice — the route answers 200,
+        # so Meta does not redeliver — and the alternative is worse: claiming
+        # a message id under a user id no identity resolution produced.
+        logger.info(
+            "whatsapp.inbound.rejected reason=inactive_provider message=%s "
+            "arrived_for=%s active=%s",
+            message_fingerprint(event.message_id), provider,
+            config.whatsapp.provider,
+        )
         return WhatsAppEventResult("inactive_provider")
     if event.message_type == "group":
         # Before identity lookup, deliberately: a group message is out of scope
@@ -720,18 +727,24 @@ def _handle_inbound(
     )
 
     result = _dispatch_inbound(conn, config, event, user_id, binding)
+    # An alert the *resolution* raised on its way to succeeding — today the
+    # cross-adapter one, where a principal was re-established from the phone
+    # number alone after an adapter switch. The refusal path returns above
+    # with its own alert; this is the accepted-anyway case, and dropping it
+    # here would leave the row in the inbox with nothing pushing it.
+    carried = _alerts(resolution.pending_alert)
     if not send_id_applied:
         # Another user's row already holds this destination. The message still
         # goes through — the sender is authenticated and legitimate, and
         # refusing everything they send over a row that is not theirs would be
-        # a denial of service — but stage 3's send will fall back to the
-        # bootstrap number, so an operator has to be told which two rows
-        # collided. Buffered like every other alert raised in here.
-        result = replace(
-            result,
-            pending_alerts=result.pending_alerts
-            or _alerts(_write_send_id_alert(conn, user_id, event.from_user.bsuid)),
+        # a denial of service — but the send will fall back to the bootstrap
+        # number, so an operator has to be told which two rows collided.
+        # Buffered like every other alert raised in here.
+        carried += _alerts(
+            _write_send_id_alert(conn, user_id, event.from_user.bsuid)
         )
+    if carried:
+        result = replace(result, pending_alerts=result.pending_alerts + carried)
     _set_disposition(conn, event, result.disposition, result.task_id)
     logger.info(
         "whatsapp.inbound.accepted disposition=%s message=%s task_id=%s",

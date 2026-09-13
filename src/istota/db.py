@@ -10187,6 +10187,16 @@ class WhatsAppBinding:
     a NULL column reads as `whatsapp_cloud`, because every row written before
     the column existed was written by the one adapter there was. Nothing else
     applies that default — see `WHATSAPP_LEGACY_PROVIDER`.
+
+    **Read it as "which adapter latched an identity here", and on a row with
+    no identity at all it asserts nothing.** Only a latch writes a name;
+    `set_whatsapp_binding` carries the stored value and the discard returns it
+    to NULL, so a row after `reset_whatsapp_identity` — or one an operator has
+    only ever given a bootstrap number — reports `whatsapp_cloud` while
+    belonging to neither adapter. That is the legacy default doing its job on
+    a row it has nothing to say about, and it is visible in `istota user
+    show`. It is inert: the only consumer is the latch's provider comparison,
+    which is a no-op on a row carrying nothing to discard.
     """
     user_id: str
     bootstrap_phone_number: str = ""
@@ -10313,6 +10323,12 @@ def set_whatsapp_binding(
     unlatch a working Baileys binding — the change-detect tuple in
     `cli._whatsapp_binding_state` is what holds that honest.
 
+    Both are carried in the SQL from the stored row rather than round-tripped
+    through Python, so this function never *writes* a provider name: only a
+    latch knows which adapter established an identity, and stamping one here
+    would rewrite every pre-split NULL on the first converge. The comment on
+    the statement has the rest.
+
     Changing the number therefore also clears the BSUID unless the same call
     supplies one — that is the operator saying which identity the new number
     belongs to — and clearing the opt-out is deliberate rather than an
@@ -10358,9 +10374,6 @@ def set_whatsapp_binding(
     if username is not None:
         new_username = str(username or "").strip()
 
-    new_jid = existing.jid if existing else ""
-    new_provider = existing.provider if existing else WHATSAPP_LEGACY_PROVIDER
-
     identity_changed = existing is not None and (
         number != old_number or new_bsuid != old_bsuid
     )
@@ -10369,12 +10382,6 @@ def set_whatsapp_binding(
             new_send_id = ""
         if username is None:
             new_username = ""
-        # The adapter-native identity of the *other* adapter, discarded for
-        # the reason the docstring gives: it names the previous holder.
-        # `provider` returns to the legacy value rather than to '' so nothing
-        # downstream has to handle a third state.
-        new_jid = ""
-        new_provider = WHATSAPP_LEGACY_PROVIDER
 
     # `enrolled_at` is stamped whenever the BSUID becomes a *different*
     # non-empty value, so a re-enrollment reads as the new enrollment it is
@@ -10389,8 +10396,13 @@ def set_whatsapp_binding(
     # `cli._whatsapp_binding_state` compares it, so each converge also
     # reported `updated` and fired the scheduler and web restart handlers for
     # a change nobody made.
+    # What the row's JID will be after this write, which the SQL below
+    # carries forward rather than reading back: `''` when the identity
+    # changed (the discard) or when there is no row yet.
+    retained_jid = "" if (existing is None or identity_changed) else existing.jid
+
     enrolled_at = existing.enrolled_at if existing else None
-    if not new_bsuid and not new_jid:
+    if not new_bsuid and not retained_jid:
         enrolled_at = None
     elif new_bsuid and (new_bsuid != old_bsuid or not enrolled_at):
         enrolled_at = sql_datetime_now()
@@ -10408,12 +10420,28 @@ def set_whatsapp_binding(
                 send_id, username,
                 opted_out_at, last_user_message_at, enrolled_at, last_seen_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?1, ?2, ?3, '', NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(user_id) DO UPDATE SET
                 bootstrap_phone_number = excluded.bootstrap_phone_number,
                 bsuid = excluded.bsuid,
-                jid = excluded.jid,
-                provider = excluded.provider,
+                -- Carried from the stored row rather than from a value read
+                -- into Python, and cleared only by the identity discard.
+                -- Two reasons, and the second is the one that is easy to
+                -- miss. `provider` records which adapter *latched*, so only
+                -- a latch may write a name into it: a value round-tripped
+                -- through `_whatsapp_binding_from_row`'s legacy default
+                -- would have this function stamp `whatsapp_cloud` onto every
+                -- row it touches, and since the Ansible role re-runs `user
+                -- ensure` on every converge, the first one would rewrite
+                -- every pre-split NULL on the estate — retiring the "NULL
+                -- means this row predates the split" rule the migration
+                -- rests on, on day one, and claiming Cloud provenance for
+                -- every operator-made row on a Baileys deployment. And it
+                -- keeps a re-assert from churning NULL to '' on `jid`.
+                jid = CASE WHEN ?11 THEN '' ELSE whatsapp_user_bindings.jid END,
+                provider = CASE
+                    WHEN ?11 THEN NULL ELSE whatsapp_user_bindings.provider
+                END,
                 send_id = excluded.send_id,
                 username = excluded.username,
                 opted_out_at = excluded.opted_out_at,
@@ -10423,10 +10451,10 @@ def set_whatsapp_binding(
                 updated_at = excluded.updated_at
             """,
             (
-                user_id, number, new_bsuid, new_jid, new_provider,
+                user_id, number, new_bsuid,
                 new_send_id, new_username,
                 opted_out_at, last_user_message_at, enrolled_at, last_seen_at,
-                sql_datetime_now(),
+                sql_datetime_now(), 1 if identity_changed else 0,
             ),
         )
     except sqlite3.IntegrityError as exc:
@@ -10576,17 +10604,35 @@ def latch_whatsapp_bsuid(
     already holds this BSUID or send id, and the partial unique indexes are
     what the whole enrollment story rests on.
 
-    **It also stamps the provider and discards the other adapter's derived
-    state.** The invariant this used to rest on — a row with no BSUID has
-    never carried an authenticated message, so its window and opt-out are
-    NULL already — stopped holding when a second adapter could latch a row of
-    its own: a Baileys row has `bsuid = ''` and a window Meta never opened.
-    So `last_user_message_at` and `opted_out_at` survive only when the row
-    already belonged to this adapter, which is a **no-op on every existing
-    row** (a NULL `provider` reads as this adapter) and therefore changes
-    nothing about the Cloud path in any shipped deployment. `last_seen_at` is
-    not in the discard: it is a fact about the row rather than about a
-    holder, and it is being written by this very call.
+    **It also stamps the provider and discards Meta's service window when the
+    row belonged to the other adapter.** The invariant this used to rest on —
+    a row with no BSUID has never carried an authenticated message, so its
+    window is NULL already — stopped holding when a second adapter could
+    latch a row of its own: a Baileys row has `bsuid = ''` and a
+    `last_user_message_at` Meta never issued a conversation for. So the
+    window survives only when the row already belonged to this adapter, which
+    is a **no-op on every existing row** (a NULL `provider` reads as this
+    adapter) and therefore changes nothing about the Cloud path in any
+    shipped deployment.
+
+    **`opted_out_at` is deliberately *not* in that discard**, and the first
+    version of this had it there. The spec's Design C and its adapter-switch
+    edge case both say opt-outs survive a provider switch — the SMS property
+    restated — and they are right against the argument that the column names
+    a previous holder: on a migration the holder has not changed, only the
+    adapter has. It is also the only field in the set where discarding is the
+    *unsafe* direction. Clearing it silently revokes a STOP and starts
+    messaging somebody who asked not to be, where keeping it merely withholds
+    until they send START. Where the holder genuinely did change — an
+    operator repointing the number, or a recycled line — the discard lives in
+    `set_whatsapp_binding` and the refusal in the resolver's bootstrap arm,
+    which are the paths that know.
+
+    `last_seen_at` is not in the discard either: it is a fact about the row
+    rather than about a holder, and this call is writing it. `enrolled_at`
+    means "when this adapter's identity was latched" and is restamped, so on
+    a row carrying both identities it names the latest latch rather than the
+    principal's first enrollment.
     """
     if not bsuid:
         return False
@@ -10598,10 +10644,6 @@ def latch_whatsapp_bsuid(
                last_user_message_at = CASE
                    WHEN COALESCE(NULLIF(provider, ''), ?7) = ?7
                    THEN last_user_message_at ELSE NULL
-               END,
-               opted_out_at = CASE
-                   WHEN COALESCE(NULLIF(provider, ''), ?7) = ?7
-                   THEN opted_out_at ELSE NULL
                END,
                enrolled_at = ?4, last_seen_at = ?5, updated_at = ?6
          WHERE user_id = ?8 AND bsuid = ''
@@ -10634,14 +10676,23 @@ def latch_whatsapp_jid(
     escapes, because it means another user already holds this JID and the
     partial unique index is what the enrollment rests on.
 
-    Two things differ, and both follow from what a JID is. There is no send id
-    to latch: a Baileys destination *is* the JID, where Meta hands out an
-    opaque one of its own. And the condition is `jid IS NULL OR jid = ''`
-    rather than `bsuid = ''` alone, because the column is nullable — a row
-    that predates the adapter split has NULL there, and `jid = ''` is NULL
-    rather than true for it, so testing only the empty string would refuse to
-    latch every row on an upgraded deployment and no Baileys user would ever
-    enroll.
+    The discard rule is that one's too, including the reason `opted_out_at`
+    is outside it: the spec says an opt-out survives an adapter switch, and
+    discarding is the unsafe direction on that column alone.
+
+    Three things differ, and all three follow from what a JID is. There is no
+    send id to latch: a Baileys destination *is* the JID, where Meta hands out
+    an opaque one of its own. `send_id` is therefore in the discard here and
+    not there — a row switched from Cloud still holds Meta's learned
+    destination, `outbound._destination` *prefers* it over the bootstrap
+    number, and handing a Meta identifier to a socket that cannot address one
+    is a send to nobody. Clearing costs a switch back nothing, since the Cloud
+    resolver writes it again from the first message it authenticates. And the
+    condition is `jid IS NULL OR jid = ''` rather than `bsuid = ''` alone,
+    because the column is nullable — a row that predates the adapter split has
+    NULL there, and `jid = ''` is NULL rather than true for it, so testing
+    only the empty string would refuse to latch every row on an upgraded
+    deployment and no Baileys user would ever enroll.
     """
     if not jid:
         return False
@@ -10654,9 +10705,9 @@ def latch_whatsapp_jid(
                    WHEN COALESCE(NULLIF(provider, ''), ?7) = ?6
                    THEN last_user_message_at ELSE NULL
                END,
-               opted_out_at = CASE
+               send_id = CASE
                    WHEN COALESCE(NULLIF(provider, ''), ?7) = ?6
-                   THEN opted_out_at ELSE NULL
+                   THEN send_id ELSE ''
                END,
                enrolled_at = ?3, last_seen_at = ?4, updated_at = ?5
          WHERE user_id = ?8 AND (jid IS NULL OR jid = '')

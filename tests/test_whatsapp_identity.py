@@ -269,6 +269,10 @@ class TestJidNormalization:
         "alice@s.whatsapp.net",                     # not a number
         "@s.whatsapp.net",
         "1" * 200 + "@s.whatsapp.net",
+        # `str.isdigit()` alone is True for these. The value reaches a
+        # uniquely-indexed identity column, and `is_e164` is explicit ASCII,
+        # so such a JID could be stored as an identity that can never enroll.
+        "١٢٣٤٥٦٧٨@s.whatsapp.net",
     ])
     def test_anything_this_surface_does_not_model_is_refused(self, raw):
         assert identity_rules.normalize_jid(raw) == ""
@@ -535,7 +539,6 @@ class TestTheCrossAdapterDiscard:
         binding = db.get_whatsapp_binding(conn, "alice")
         assert binding.provider == BAILEYS
         assert binding.last_user_message_at is None
-        assert binding.opted_out_at is None
 
     def test_latching_cloud_onto_a_baileys_row_discards_the_window(self, conn):
         """The direction that actually authorizes something.
@@ -554,7 +557,55 @@ class TestTheCrossAdapterDiscard:
         binding = db.get_whatsapp_binding(conn, "alice")
         assert binding.provider == CLOUD
         assert binding.last_user_message_at is None
-        assert binding.opted_out_at is None
+
+    @pytest.mark.parametrize("stored, latch", [
+        (CLOUD, "jid"),
+        (BAILEYS, "bsuid"),
+    ])
+    def test_an_opt_out_survives_an_adapter_switch(self, conn, stored, latch):
+        """The spec says so, and discarding is the unsafe direction.
+
+        Design C: "switching providers preserves user bindings, routes,
+        conversation history, opt-outs, and common ledger rows", and the
+        adapter-switch edge case repeats it. The first version of this stage
+        discarded it along with the window, on the reading that the column
+        names a previous holder — which is wrong on a migration, where only
+        the adapter changed. It is also the one field where being wrong
+        resumes messaging somebody who sent STOP, rather than withholding
+        from somebody who did not.
+        """
+        self._row_with_history(conn, provider=stored)
+
+        if latch == "jid":
+            assert db.latch_whatsapp_jid(conn, "alice", jid=USER_JID)
+        else:
+            assert db.latch_whatsapp_bsuid(
+                conn, "alice", bsuid=USER_BSUID, send_id=USER_BSUID,
+            )
+
+        assert (
+            db.get_whatsapp_binding(conn, "alice").opted_out_at
+            == "2026-01-01 00:00:00"
+        )
+
+    def test_a_baileys_latch_drops_metas_learned_destination(self, conn):
+        """`send_id` is Meta's, and `outbound._destination` prefers it.
+
+        A row switched from Cloud keeps the opaque id Meta issued, which that
+        function returns ahead of the bootstrap number — so a Baileys send
+        would be handed a Meta identifier the socket cannot address. Clearing
+        costs a switch back nothing: the Cloud resolver writes it again from
+        the first message it authenticates.
+        """
+        self._row_with_history(conn, provider=CLOUD)
+        conn.execute(
+            "UPDATE whatsapp_user_bindings SET send_id = ? WHERE user_id = 'alice'",
+            (USER_BSUID,),
+        )
+
+        assert db.latch_whatsapp_jid(conn, "alice", jid=USER_JID)
+
+        assert db.get_whatsapp_binding(conn, "alice").send_id == ""
 
     def test_a_cloud_latch_on_a_cloud_row_keeps_everything(self, conn):
         """The equivalence half, and the reason the discard is provider-compared.
@@ -572,6 +623,85 @@ class TestTheCrossAdapterDiscard:
         binding = db.get_whatsapp_binding(conn, "alice")
         assert binding.last_user_message_at == "2026-01-01 00:00:00"
         assert binding.opted_out_at == "2026-01-01 00:00:00"
+
+    @pytest.mark.parametrize("stored, kwargs, arm", [
+        (USER_BSUID, {"jid": USER_JID}, BAILEYS),
+        (USER_JID, {"bsuid": USER_BSUID, "wa_id": "15551234567"}, CLOUD),
+    ])
+    def test_a_bootstrap_across_adapters_latches_and_alerts(
+        self, conn, stored, kwargs, arm
+    ):
+        """The alarm on a trade this module makes deliberately.
+
+        The bootstrap arm refuses a number whose row already carries a
+        *different* identity — but only of the adapter being resolved. A row
+        enrolled under the other adapter has an empty column here, so after a
+        switch it is bootstrappable from the number alone, which under a single
+        adapter is precisely the recycled-line case the table refuses.
+
+        Refusing is not available: on a genuine migration every row is in that
+        state, so a refusal locks out the deployment, and nothing on the row
+        tells that apart from a recycled number. So the latch happens and the
+        operator is told.
+        """
+        db.set_whatsapp_binding(conn, "alice", bootstrap_phone_number=USER_NUMBER)
+        if arm == BAILEYS:
+            db.set_whatsapp_binding(
+                conn, "alice", bootstrap_phone_number=USER_NUMBER, bsuid=stored,
+            )
+        else:
+            assert db.latch_whatsapp_jid(conn, "alice", jid=stored)
+
+        resolution = identity_rules.resolve_inbound_identity(
+            conn, _event(**kwargs).from_user, provider=arm,
+        )
+
+        assert resolution.user_id == "alice"
+        assert resolution.pending_alert is not None
+        row = conn.execute(
+            "SELECT dedup_key, title FROM notifications WHERE user_id = 'alice'"
+        ).fetchone()
+        assert row["dedup_key"].startswith("whatsapp-cross-adapter:")
+
+    def test_a_first_enrollment_raises_no_cross_adapter_alert(self, conn):
+        """The control: an ordinary bootstrap onto an identity-free row.
+
+        Without this, an alert fired on every user's first message and the
+        alarm would mean nothing.
+        """
+        db.set_whatsapp_binding(conn, "alice", bootstrap_phone_number=USER_NUMBER)
+
+        resolution = identity_rules.resolve_inbound_identity(
+            conn, _event(jid=USER_JID).from_user, provider=BAILEYS,
+        )
+
+        assert resolution.user_id == "alice"
+        assert resolution.pending_alert is None
+        assert conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = 'alice'"
+        ).fetchone()[0] == 0
+
+    def test_the_cross_adapter_alert_is_pushed_not_just_filed(self, tmp_path):
+        """It rides an accepted message, so the refusal path cannot carry it.
+
+        `_handle_inbound` returns early with `pending_alerts` only when the
+        resolution refused. A success-path alert not threaded through leaves
+        the row in the inbox with nothing delivering it.
+        """
+        config = _config(tmp_path, provider=BAILEYS)
+        with db.get_db(config.db_path) as conn:
+            db.set_whatsapp_binding(
+                conn, "alice",
+                bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID,
+            )
+
+        with db.get_db(config.db_path) as conn:
+            results = handle_whatsapp_batch(
+                conn, config, [_event(jid=USER_JID)], provider=BAILEYS,
+            )
+
+        assert [r.disposition for r in results] == ["task"]
+        assert results[0].pending_alerts != ()
 
     def test_a_legacy_null_provider_counts_as_cloud_for_the_discard(self, conn):
         """The same claim against the state an upgraded database is actually in."""
@@ -675,23 +805,40 @@ class TestTheOperatorWrites:
         assert binding.bootstrap_phone_number == USER_NUMBER
 
     def test_the_jid_is_masked_on_the_general_operator_surface(self, tmp_path, capsys):
-        """A JID embeds the number the line above it deliberately masks."""
-        from istota import cli
+        """A JID embeds the number the line above it deliberately masks.
+
+        Driven through the real `user ensure` output rather than by calling
+        the masker. The first version of this called
+        `mask_whatsapp_identifier` directly and asserted a sha256 digest did
+        not contain its own input — true by construction, and green against a
+        `cli.py` that printed the JID raw.
+        """
+        from istota.cli import cmd_user_ensure
+
+        from .test_cli_user_ensure import _FakeArgs
 
         path = tmp_path / "istota.db"
         db.init_db(path)
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            f'db_path = "{path}"\n'
+            f'temp_dir = "{tmp_path / "tmp"}"\n'
+            "\n[users.alice]\n"
+            'display_name = "Alice"\n'
+        )
         with db.get_db(path) as conn:
             db.set_whatsapp_binding(
                 conn, "alice", bootstrap_phone_number=USER_NUMBER,
             )
             db.latch_whatsapp_jid(conn, "alice", jid=USER_JID)
-            binding = db.get_whatsapp_binding(conn, "alice")
 
-        assert binding.jid == USER_JID
-        cli.user_profiles.mask_whatsapp_identifier(binding.jid)
-        masked = cli.user_profiles.mask_whatsapp_identifier(binding.jid)
-        assert "15551234567" not in masked
-        assert "s.whatsapp.net" not in masked
+        capsys.readouterr()
+        cmd_user_ensure(_FakeArgs(config=str(cfg), name="alice"))
+
+        out = capsys.readouterr().out
+        assert "whatsapp_jid:" in out
+        assert "15551234567" not in out
+        assert "s.whatsapp.net" not in out
 
 
 # ---------------------------------------------------------------------------

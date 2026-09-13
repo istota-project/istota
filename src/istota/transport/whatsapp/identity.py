@@ -127,10 +127,17 @@ def normalize_jid(value: object) -> str:
     *different* JID, and trips the recycled-number refusal — a takeover alarm
     and a dropped message per message, for somebody who did nothing.
 
-    The user part must be digits: it is compared against an operator's
-    configured E.164 bootstrap number to decide an enrollment, and a value
-    that is not a phone number gets no benefit of the doubt. Same rule, same
-    reason, as `_e164_from_wa_id` applies to Meta's `wa_id`.
+    The user part must be **ASCII** digits: it is compared against an
+    operator's configured E.164 bootstrap number to decide an enrollment, and
+    a value that is not a phone number gets no benefit of the doubt. Same
+    rule, same reason, as `_e164_from_wa_id` applies to Meta's `wa_id`.
+    `isascii()` as well as `isdigit()`, because the latter is True for
+    Arabic-Indic, Devanagari and a dozen other digit sets — the same pair
+    `webhook.verify_subscription` applies to Meta's challenge, and for the
+    same reason: the value reaches a uniquely-indexed identity column. It
+    fails closed either way, since `is_e164`'s pattern is explicit ASCII
+    classes so such a JID could never match a bootstrap number, but a value
+    that can never enroll should not be storable as an identity.
     """
     text = value if isinstance(value, str) else ""
     text = text.strip().lower()
@@ -141,7 +148,7 @@ def normalize_jid(value: object) -> str:
         return ""
     # The device suffix, dropped before anything compares or stores the value.
     user = user.partition(":")[0]
-    if not user or not user.isdigit():
+    if not user or not user.isascii() or not user.isdigit():
         return ""
     return f"{user}@{JID_USER_DOMAIN}"
 
@@ -240,6 +247,48 @@ def _write_jid_identity_alert(conn, user_id: str, jid: str) -> object | None:
     )
 
 
+def _write_cross_adapter_alert(conn, user_id: str, fingerprint: str) -> object | None:
+    """One operator alert: a principal was re-established from a number alone.
+
+    **The alarm on a trade this module makes deliberately.** The bootstrap arm
+    refuses a number whose row already carries a *different* identity — but
+    only of the adapter being resolved. A row enrolled under the other adapter
+    has an empty column here, so after a switch it is bootstrappable from the
+    phone number, by whoever holds that number now, with no refusal. Under a
+    single adapter that is precisely the recycled-line case the table exists
+    to refuse.
+
+    Refusing it is not the answer: on a genuine migration every user's row
+    carries the old adapter's identity and none carries the new one, so a
+    refusal would lock out the entire deployment and there is nothing in the
+    row that tells that case apart from a recycled number. The number is the
+    operator's own assertion that it belongs to this user, which is what
+    licenses the latch — so the latch happens and the operator is told, rather
+    than the decision being made silently either way.
+
+    Its own dedup namespace, for the reason the other two have theirs: the key
+    is unique per `(user, source, key)` and a bump does not deliver, so a
+    shared prefix would fold this into a mismatch alert and deliver nothing.
+    """
+    from ...notification_resolvers import task_alert
+
+    return task_alert.write(
+        conn, user_id,
+        dedup_key=f"whatsapp-cross-adapter:{fingerprint}",
+        title="WhatsApp identity re-established after an adapter switch",
+        body=(
+            "A WhatsApp message arrived on this user's configured bootstrap "
+            "number from the other messaging adapter, and was accepted: the "
+            "number is what identifies them and this row carried no identity "
+            "for this adapter yet. If the number has changed hands since it "
+            "was configured, this message was not from this user — run "
+            "`istota user ensure <user> --reset-whatsapp-identity` and check "
+            "the number. Expected once per user after a deliberate switch."
+        ),
+        params={"identity_fingerprint": fingerprint},
+    )
+
+
 def _resolve_cloud(conn, identity: WhatsAppUserIdentity) -> Resolution:
     """The Cloud arm: BSUID, then bootstrap by `wa_id`, then refuse."""
     bsuid = identity.bsuid
@@ -258,6 +307,8 @@ def _resolve_cloud(conn, identity: WhatsAppUserIdentity) -> Resolution:
             None, "identity_mismatch",
             _write_identity_alert(conn, candidate.user_id, bsuid),
         )
+    # Read before the latch, which is about to clear it.
+    crossed = bool(candidate.jid)
     try:
         latched = db.latch_whatsapp_bsuid(
             conn, candidate.user_id,
@@ -273,7 +324,16 @@ def _resolve_cloud(conn, identity: WhatsAppUserIdentity) -> Resolution:
     if not latched:
         # The row gained a BSUID between the read above and this write.
         return Resolution(None, "identity_conflict")
-    return Resolution(candidate.user_id, send_id=bsuid)
+    return Resolution(
+        candidate.user_id,
+        send_id=bsuid,
+        pending_alert=(
+            _write_cross_adapter_alert(
+                conn, candidate.user_id, bsuid_fingerprint(bsuid),
+            )
+            if crossed else None
+        ),
+    )
 
 
 def _resolve_baileys(conn, identity: WhatsAppUserIdentity) -> Resolution:
@@ -318,6 +378,8 @@ def _resolve_baileys(conn, identity: WhatsAppUserIdentity) -> Resolution:
             _write_jid_identity_alert(conn, candidate.user_id, jid),
             send_id=None, writes_service_window=False,
         )
+    # Read before the latch, which is about to stamp over the provider.
+    crossed = bool(candidate.bsuid)
     try:
         latched = db.latch_whatsapp_jid(
             conn, candidate.user_id,
@@ -335,6 +397,10 @@ def _resolve_baileys(conn, identity: WhatsAppUserIdentity) -> Resolution:
         )
     return Resolution(
         candidate.user_id, send_id=None, writes_service_window=False,
+        pending_alert=(
+            _write_cross_adapter_alert(conn, candidate.user_id, jid_fingerprint(jid))
+            if crossed else None
+        ),
     )
 
 
