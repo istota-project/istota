@@ -7086,6 +7086,19 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
     name = "whatsapp.billing"
     if not config.whatsapp.enabled:
         return CheckResult(name, SKIP, "[whatsapp] enabled = false")
+    if config.whatsapp.provider != "whatsapp_cloud":
+        # Every sentence this check can produce is a Meta fact — the circuit,
+        # the quota month's calendar, the monthly attempt cap — and none of
+        # them governs a send another adapter makes. It reported "circuit
+        # closed; N service attempts of at most 900" on a deployment where
+        # nothing is metered and there is no cap, which is four claims that
+        # are not true about it. `check_whatsapp_common` draws the same line
+        # two arms up and for the same reason.
+        return CheckResult(
+            name, SKIP,
+            f"the {config.whatsapp.provider} adapter is not metered, so there "
+            "is no billable circuit and no monthly cap",
+        )
 
     import sqlite3
 
@@ -7201,6 +7214,273 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def _baileys_precondition(name: str, config: "Config") -> "CheckResult | None":
+    """The two skips both Baileys checks share, or ``None`` to carry on."""
+    if not config.whatsapp.enabled:
+        return CheckResult(name, SKIP, "[whatsapp] enabled = false", scope=DEPLOYMENT)
+    if config.whatsapp.provider != "baileys":
+        return CheckResult(
+            name, SKIP,
+            f"[whatsapp] provider = \"{config.whatsapp.provider}\", which "
+            "keeps no paired session",
+            scope=DEPLOYMENT,
+        )
+    return None
+
+
+def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
+    """Whether the sidecar is connected, and whether the session is alive.
+
+    The other half of the unlink edge case. A permanent `fatal` refuses every
+    send definitely and raises one alert at the moment it happens; this is
+    what still answers a week later, and it is also the only place a *dropped*
+    link, a run of malformed lines or a queue nothing is draining is visible
+    at all — none of those raises anything.
+
+    Reads in-process counters and makes no request, so `probe` is unused and
+    it is safe under `probe=False`. **It deliberately does not connect to the
+    socket**: the bridge holds one negotiated connection at a time, and a
+    connect that sends no `hello` is a rejected connection counted against the
+    thing being diagnosed.
+
+    `SKIP` in a process with no bridge, which is `talk.signaling_watchers`'
+    rule and is here for its reason: on the Ansible shape the scheduler and
+    the web app are separate units, the bridge lives in the scheduler, and
+    reporting it down from the web process or from an operator's own shell
+    would page somebody about a process that was never meant to have one. The
+    cost is real and is stated rather than hidden — `istota doctor` from a
+    terminal cannot answer this question, and the authoritative surfaces are
+    the boot run, the hourly sweep, `!check` and the admin pane, all of which
+    run inside the daemon.
+    """
+    name = "whatsapp.baileys_bridge"
+    skipped = _baileys_precondition(name, config)
+    if skipped is not None:
+        return skipped
+
+    from .transport.whatsapp.baileys_bridge import read_status
+
+    status = read_status()
+    if status is None:
+        return CheckResult(
+            name, SKIP,
+            "no WhatsApp sidecar bridge is running in this process",
+            scope=DEPLOYMENT,
+        )
+
+    if status.get("fatal_is_permanent"):
+        # Bounded through the same slug the alert body uses, and for the same
+        # reason: the reason comes from the sidecar, a `CheckResult` is
+        # rendered into the boot log and the admin Health pane, and a Baileys
+        # error string is one of the places a number turns up.
+        from .notification_resolvers.task_alert import _slug
+
+        fatal = _slug(status.get("fatal_reason"), fallback="unknown")
+        return CheckResult(
+            name, FAIL,
+            f"the WhatsApp session ended ({fatal}); every send is "
+            "refused until it is paired again",
+            remedy=(
+                "Stop the istota scheduler, run `istota whatsapp pair`, scan "
+                "the code from WhatsApp's Linked Devices screen, then start "
+                "it again."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    counters = (
+        f"{_as_count(status.get('inbound_applied'))} inbound applied, "
+        f"{_as_count(status.get('restarts'))} sidecar restarts, "
+        f"{_as_count(status.get('malformed_lines'))} malformed lines, "
+        f"{_as_count(status.get('dropped_events'))} dropped, "
+        f"{_as_count(status.get('failed_events'))} unwritten"
+    )
+    if not status.get("listening"):
+        return CheckResult(
+            name, FAIL,
+            f"the bridge is not listening on its socket; {counters}",
+            remedy=(
+                "Check the daemon log for `whatsapp.baileys.start_failed` and "
+                "that nothing else holds "
+                f"{status.get('socket_path') or 'the socket path'}."
+            ),
+            scope=DEPLOYMENT,
+        )
+    if not status.get("connected"):
+        return CheckResult(
+            name, WARN,
+            f"no sidecar is connected to the bridge; {counters}",
+            remedy=(
+                "Check that the sidecar process is running — its own log is "
+                "`sidecar.log` inside the session directory — and that "
+                "[whatsapp.baileys] sidecar_command names it if this "
+                "deployment does not run it as a unit of its own."
+            ),
+            scope=DEPLOYMENT,
+        )
+    if not status.get("ready"):
+        # Connected but not paired, or mid-reconnect. Not a failure: an
+        # unpaired deployment is the state every install starts in, and the
+        # refusal at the send is what says so per message.
+        return CheckResult(
+            name, WARN,
+            f"the sidecar is connected and the WhatsApp session is not open; "
+            f"{counters}",
+            remedy=(
+                "If this deployment has never been paired, run `istota "
+                "whatsapp pair`. Otherwise the session is reconnecting; check "
+                "`sidecar.log` in the session directory."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    lost = _as_count(status.get("dropped_events")) + _as_count(
+        status.get("failed_events"),
+    )
+    if lost or _as_count(status.get("malformed_lines")):
+        # A run of any of these is the spec's "trips a doctor warning", and
+        # the three are reported together rather than separately because each
+        # is a message that reached nobody and an operator's action is the
+        # same: read the log.
+        return CheckResult(
+            name, WARN,
+            f"the WhatsApp session is open, and messages have been lost; "
+            f"{counters}",
+            remedy=(
+                "Search the daemon log for `whatsapp.baileys.` — a dropped "
+                "event is a queue that filled, an unwritten one is a database "
+                "that refused the write after every retry, and a malformed "
+                "line is the two ends disagreeing about the protocol."
+            ),
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, OK,
+        f"the WhatsApp session is open; {counters}",
+        scope=DEPLOYMENT,
+    )
+
+
+def check_whatsapp_baileys_session(config: "Config", probe: bool) -> CheckResult:
+    """Whether the paired session directory is private to this account.
+
+    It holds a **full-account credential**: anything that can read it can send
+    and read as the paired WhatsApp number, with no second factor and nothing
+    the account holder would see. It is bound into no sandbox at any path, so
+    what is left to check is the filesystem — that it is a directory this
+    account owns, that its mode is 0700, and that nothing inside it is wider
+    than 0600.
+
+    The predicates are `baileys_bridge`'s own rather than a second copy, on
+    the precedent `.claude/rules/doctor.md` records for
+    `executor.mask_shadowed_by`: `default_session_dir` resolves the same path
+    the bridge uses, and the counters come from `harden_session_files`, which
+    is the function that does the narrowing. A copy here would let this pass
+    while the bridge disagreed.
+
+    Spawns nothing, so it is safe under `probe=False`. It **reads** the
+    filesystem and never writes: `ensure_session_dir` creates and tightens and
+    is deliberately not called from a diagnostic, which must not make the
+    thing it is reporting on.
+    """
+    name = "whatsapp.baileys_session"
+    skipped = _baileys_precondition(name, config)
+    if skipped is not None:
+        return skipped
+
+    from .transport.whatsapp.baileys_bridge import default_session_dir
+
+    path = default_session_dir(config)
+    remedy = (
+        f"Run `chmod 0700 {path}` and `chmod 0600 {path}/*`, or remove the "
+        "directory and re-pair with `istota whatsapp pair`."
+    )
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        # Not a failure. It is the state of every deployment that has not
+        # paired yet, and pairing is what creates it.
+        return CheckResult(
+            name, WARN,
+            f"{path} does not exist, so this deployment has no paired "
+            "WhatsApp session",
+            remedy="Run `istota whatsapp pair` to link the number.",
+            scope=DEPLOYMENT,
+        )
+    except OSError as exc:
+        return CheckResult(
+            name, WARN,
+            f"{path} could not be read ({type(exc).__name__}), so the paired "
+            "session's permissions were not established",
+            remedy=remedy, scope=DEPLOYMENT,
+        )
+
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        # A symlink is the one that matters: it points the credential
+        # somewhere this check never looked, and `lstat` is what sees it.
+        return CheckResult(
+            name, FAIL,
+            f"{path} is not a directory, so the paired WhatsApp session is "
+            "somewhere this deployment did not put it",
+            remedy=(
+                f"Remove {path} and re-pair with `istota whatsapp pair`."
+            ),
+            scope=DEPLOYMENT,
+        )
+    if info.st_uid != os.geteuid():
+        return CheckResult(
+            name, FAIL,
+            f"{path} is owned by uid {info.st_uid} and this process runs as "
+            f"{os.geteuid()}; a full-account WhatsApp credential is readable "
+            "by another account",
+            remedy=(
+                f"Run `chown -R {os.geteuid()} {path}`, or remove it and "
+                "re-pair with `istota whatsapp pair`."
+            ),
+            scope=DEPLOYMENT,
+        )
+    mode = stat.S_IMODE(info.st_mode)
+    if mode != 0o700:
+        return CheckResult(
+            name, FAIL,
+            f"{path} is {mode:04o}, not 0700; a full-account WhatsApp "
+            "credential is reachable by another account",
+            remedy=remedy, scope=DEPLOYMENT,
+        )
+
+    from .transport.whatsapp.baileys_bridge import harden_session_files
+
+    # Reports what it *would* have narrowed as well as what it could not, and
+    # the two are separate numbers for the reason the bridge keeps them apart:
+    # one is a file this ran on, the other is a file that stayed wide.
+    narrowed, unfixed = harden_session_files(path)
+    if unfixed:
+        return CheckResult(
+            name, FAIL,
+            f"{unfixed} file(s) under {path} could not be narrowed to 0600; "
+            "a full-account WhatsApp credential may be readable by another "
+            "account",
+            remedy=remedy, scope=DEPLOYMENT,
+        )
+    if narrowed:
+        return CheckResult(
+            name, WARN,
+            f"{narrowed} file(s) under {path} were wider than 0600 and have "
+            "been narrowed; they may already have been read",
+            remedy=(
+                "Nothing further is needed to close it. If the host is shared, "
+                "re-pair with `istota whatsapp pair` so the exposed session is "
+                "no longer the live one."
+            ),
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, OK,
+        f"the paired WhatsApp session at {path} is 0700 and private",
+        scope=DEPLOYMENT,
+    )
+
+
 # The name is part of the registry rather than only of the result, so `only=`
 # can select *before* invoking. Filtering afterwards would mean running every
 # check to discard most of them — which is exactly what the config-load path
@@ -7242,6 +7522,8 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("sms.telnyx", check_sms_telnyx),
     ("whatsapp.common", check_whatsapp_common),
     ("whatsapp.billing", check_whatsapp_billing),
+    ("whatsapp.baileys_bridge", check_whatsapp_baileys_bridge),
+    ("whatsapp.baileys_session", check_whatsapp_baileys_session),
     ("web.static", check_web_static),
     ("web.build_current", check_web_build_current),
     ("web.basemap", check_basemap),
@@ -7346,6 +7628,11 @@ CHECK_SCOPES: dict[str, str] = {
     "sms.telnyx": DEPLOYMENT,
     "whatsapp.common": DEPLOYMENT,
     "whatsapp.billing": DEPLOYMENT,
+    # Deployment: one reads in-process counters that only the daemon has,
+    # the other a paired credential on disk. A bare `docker run` has
+    # neither.
+    "whatsapp.baileys_bridge": DEPLOYMENT,
+    "whatsapp.baileys_session": DEPLOYMENT,
     "web.static": IMAGE,
     # Deployment, not image: it compares the bundle against the checkout it
     # was built from, and a bare `docker run` has no checkout.
