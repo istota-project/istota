@@ -11,6 +11,7 @@ about what the test was checking. Two of the six had no bound at all.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -213,6 +214,74 @@ class TestTheScopeIsRequired:
         """These run concurrently with an outer `-n auto` session writing the
         same `.pytest_cache` nodeids file."""
         assert "no:cacheprovider" in source_of(nested_pytest.run_nested_pytest)
+
+
+class TestTheChildsRenderingIsPinned:
+    """The child's output is data the caller parses, so the shell must not style it.
+
+    Every caller reads the child's stdout, and pytest colours that stdout when
+    `PY_COLORS=1` or `FORCE_COLOR=1` is exported — which puts an escape between
+    the space and the word in `test_x \\x1b[32mPASSED\\x1b[0m` and in
+    `\\x1b[31mFAILED\\x1b[0m tests/…`. Both spellings are scraped in this tree,
+    and both come back empty rather than wrong, so the guard above them reports
+    the subject broken instead of the reader.
+
+    **Found twice.** ISSUE-365 met the `FAILED` spelling in
+    `tests/test_env_isolation.py` and answered it there, with a `PY_COLORS=0`
+    that reached one caller of six; ISSUE-493 then met the `PASSED` spelling in
+    `tests/test_drift_selection.py`, which had no such defence and spent three
+    failing assertions blaming `source_of`. The pin is in the argv because
+    `--color` outranks every spelling of the variable wherever it came from and
+    a caller passing an `env` of its own cannot undo it — the route it arrived
+    by, an unexamined `dict(os.environ)`. That makes this the authoritative copy
+    and the local setting is gone; `git_hardening` states the same rule for
+    `git`'s `color.ui`.
+
+    Negative control, run and reverted: with `--color=no` out of the argv,
+    `PY_COLORS=1` renders `test_x.py::test_a \\x1b[32mPASSED\\x1b[0m` and nine
+    nodes go red — the four below, the four in `tests/test_drift_selection.py`
+    (on the fixture's liveness assertion, which is the half that now names the
+    harness rather than blaming `source_of`), and
+    `tests/test_env_isolation.py::TestTheScrubHoldsUnderARealRun::test_the_control_goes_red_without_the_scrub`,
+    which is a witness only because ISSUE-493 dropped the local `PY_COLORS=0`
+    that used to make it immune.
+    """
+
+    #: Both spellings, since pytest consults them in that order and stopping at
+    #: the first would leave the other live.
+    FORCING = ({"PY_COLORS": "1"}, {"FORCE_COLOR": "1"})
+
+    @pytest.fixture(scope="class")
+    def project(self, tmp_path_factory) -> Path:
+        project = tmp_path_factory.mktemp("colour")
+        (project / "pytest.ini").write_text("[pytest]\n")
+        (project / "test_x.py").write_text("def test_a():\n    assert True\n")
+        return project
+
+    @pytest.mark.parametrize("forcing", FORCING, ids=lambda f: next(iter(f)))
+    def test_a_forced_colour_does_not_reach_the_output(self, project, forcing):
+        env = dict(os.environ) | {"PYTEST_ADDOPTS": ""} | forcing
+
+        result = nested_pytest.run_nested_pytest(
+            scope=["."], args=["-v"], cwd=project, env=env
+        )
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "\x1b[" not in result.stdout, repr(result.stdout[-1500:])
+
+    @pytest.mark.parametrize("forcing", FORCING, ids=lambda f: next(iter(f)))
+    def test_the_scrape_every_caller_writes_still_matches(self, project, forcing):
+        """The discriminating half: absent escapes is not the same claim as a
+        parseable line, and the callers assert on the second one."""
+        env = dict(os.environ) | {"PYTEST_ADDOPTS": ""} | forcing
+
+        result = nested_pytest.run_nested_pytest(
+            scope=["."], args=["-v"], cwd=project, env=env
+        )
+
+        verbose = [line for line in result.stdout.splitlines() if "::test_a" in line]
+        assert verbose, result.stdout
+        assert all(" PASSED" in line for line in verbose), repr(verbose)
 
 
 class TestNoTestSpawnsPytestOnItsOwn:

@@ -32,6 +32,25 @@ looser one is worse at that job, and raising it buys a fixed amount of headroom
 against something that keeps growing — so it postpones rather than fixes, and
 the next person meets it at a worse moment. Cutting the work is what gives back
 the margin.
+
+**A third defect, found later: the child's stdout is data, and the shell was
+allowed to style it** (ISSUE-493). pytest colours a piped stdout when
+``PY_COLORS=1`` or ``FORCE_COLOR=1`` is exported, and the escape lands between
+the space and the word — ``test_x \x1b[32mPASSED\x1b[0m``,
+``\x1b[31mFAILED\x1b[0m tests/…``, the two spellings scraped in this tree. Both
+then come back **empty rather than wrong**, so the guard reports its subject
+broken instead of its reader: the drift-selection guard spent three failing
+assertions saying ``source_of`` had stopped recording, on runs where testmon had
+selected exactly the right tests and passed them.
+
+**It is the same defect twice, and the second copy is why the pin lives here.**
+ISSUE-365 already met it at the ``FAILED`` spelling and answered it locally, by
+setting ``PY_COLORS=0`` in the one caller that had been bitten
+(``tests/test_env_isolation.py``) — correct, and reaching exactly one of the
+six. ``--color=no`` in the argv is now the authoritative copy: it outranks every
+spelling of the variable wherever it came from, a caller's own ``env`` cannot
+undo it — the route they arrived by — and it covers the callers nobody had been
+bitten by yet. The local setting is gone rather than kept beside it.
 """
 
 from __future__ import annotations
@@ -105,6 +124,17 @@ def run_nested_pytest(
 
     argv = [
         sys.executable, "-m", "pytest",
+        # The child's stdout is data every caller parses, so the ambient shell
+        # must not restyle it (ISSUE-493, and ISSUE-365 before it at the other
+        # spelling). An escape lands between the space and the word —
+        # `test_x \x1b[32mPASSED\x1b[0m`, `\x1b[31mFAILED\x1b[0m tests/…` — so
+        # the scrape comes back *empty* rather than wrong and the guard above
+        # it reports its subject broken instead of its reader. In the argv
+        # rather than in `env`, because `--color` outranks every spelling of
+        # the variable and a caller passing an `env` of its own cannot undo it,
+        # which is the route it arrived by. Same rule `git_hardening` applies
+        # to `color.ui`, and for the same stated reason.
+        "--color=no",
         *(() if cacheprovider else ("-p", "no:cacheprovider")),
         *args, *scope,
     ]

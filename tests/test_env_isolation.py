@@ -439,7 +439,14 @@ class TestTheScrubHoldsUnderARealRun:
         for name in NO_PROXY_NAMES:
             env.pop(name, None)
         env.update(env_extra)
-        env["PY_COLORS"] = "0"
+        # ISSUE-365 forced `PY_COLORS=0` here, because the control below builds
+        # a colour-forcing shell on purpose and an escape inside `FAILED
+        # <node>` made that scrape match nothing. `run_nested_pytest` now pins
+        # `--color=no` in the argv, which outranks every spelling of the
+        # variable and is therefore the authoritative copy of that rule
+        # (ISSUE-493); a second one here would only be a place for the two to
+        # drift. The forcing half stays where it is: it costs nothing and makes
+        # this control a live witness that the pin holds.
         # The selection is the scope, so this one was never at risk of
         # collecting the whole tree — but it *runs* nine tests twice rather than
         # collecting, which makes it the call most exposed to the other half of
@@ -464,8 +471,14 @@ class TestTheScrubHoldsUnderARealRun:
         )
 
     def test_the_control_goes_red_without_the_scrub(self, monkeypatch):
-        # Keep the child dotenv loader from restoring this worktree's explicit
-        # colour default while leaving FORCE_COLOR in control of pytest.
+        # A deterministic colour-forcing shell, which is what ISSUE-365 found
+        # underneath this control: the two empty values are what let
+        # `FORCE_COLOR` win pytest's precedence order rather than whatever the
+        # ambient shell happens to carry. `--color=no` in the argv beats it
+        # (ISSUE-493), so the child's output is plain and the `FAILED <node>`
+        # scrape below matches — which is the point of leaving this here. If
+        # the pin is ever lost, this control goes red beside
+        # `test_nested_pytest.py::TestTheChildsRenderingIsPinned`.
         monkeypatch.setenv("PY_COLORS", "")
         monkeypatch.setenv("NO_COLOR", "")
         monkeypatch.setenv("FORCE_COLOR", "3")
