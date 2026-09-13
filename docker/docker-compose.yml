@@ -440,6 +440,15 @@ services:
       # that signs every webhook body, and the verify token Meta echoes on
       # the subscription handshake.
       ISTOTA_WHATSAPP_ENABLED: ${ISTOTA_WHATSAPP_ENABLED:-false}
+      # Which adapter runs the surface. Empty is not "the default" — it means
+      # the generator writes no `provider` key, so a populated Cloud block
+      # still selects `whatsapp_cloud` and an empty one takes the `baileys`
+      # dataclass default. See render-config.sh.
+      ISTOTA_WHATSAPP_PROVIDER: ${ISTOTA_WHATSAPP_PROVIDER:-}
+      # What the daemon spawns for the Baileys sidecar. Empty on this shape and
+      # meant to stay empty: the `whatsapp-baileys` service runs it, and a
+      # second sidecar against one session directory corrupts the credential.
+      ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND: ${ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND:-}
       ISTOTA_WHATSAPP_WABA_ID: ${ISTOTA_WHATSAPP_WABA_ID:-}
       ISTOTA_WHATSAPP_PHONE_NUMBER_ID: ${ISTOTA_WHATSAPP_PHONE_NUMBER_ID:-}
       ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER: ${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER:-}

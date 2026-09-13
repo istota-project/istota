@@ -179,6 +179,8 @@ ISTOTA_WHATSAPP_BUSINESS_TIMEZONE="$(toml_escape "${ISTOTA_WHATSAPP_BUSINESS_TIM
 ISTOTA_WHATSAPP_BILLING_POLICY="$(toml_escape "${ISTOTA_WHATSAPP_BILLING_POLICY:-free_guard}")"
 ISTOTA_WHATSAPP_TEMPLATE_NAME="$(toml_escape "${ISTOTA_WHATSAPP_TEMPLATE_NAME:-}")"
 ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE="$(toml_escape "${ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE:-en_US}")"
+ISTOTA_WHATSAPP_PROVIDER="$(toml_escape "${ISTOTA_WHATSAPP_PROVIDER:-}")"
+ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND="$(toml_escape "${ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND:-}")"
 
 render_config() {
     echo "[istota] Generating config.toml..."
@@ -463,13 +465,40 @@ TOML
     # rather than a copy of the dataclass: a render defaulting to
     # billing_policy = "allow_paid" would let every Docker deployment send a
     # paid template the moment somebody named one.
+    #
+    # The Meta keys sit under [whatsapp.cloud], which is where the loader has
+    # them. They used to be rendered flat on [whatsapp] and were read as this
+    # block by `config._migrate_whatsapp_flat`; the deprecation note in
+    # config.example.toml asks operators to move them, so the generator that
+    # writes the file has to move them too.
     cat >> "$CONFIG_FILE" <<TOML
 
 [whatsapp]
 enabled = ${ISTOTA_WHATSAPP_ENABLED:-false}
+business_phone_number = "${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER}"
+TOML
+
+    # `provider` is rendered only when the operator names one, and an empty
+    # value must never be written: the loader refuses a provider outside
+    # WHATSAPP_PROVIDER_NAMES whether or not the block is enabled, so
+    # `provider = ""` is a container that will not boot.
+    #
+    # Absent is not the same as the dataclass default here, which is why this
+    # is a condition rather than `${ISTOTA_WHATSAPP_PROVIDER:-baileys}`. With
+    # no key, a [whatsapp.cloud] block carrying a waba_id, a phone_number_id
+    # or one of the three credentials selects `whatsapp_cloud`, which is what
+    # keeps an existing Cloud deployment serving Meta's callback across the
+    # default flip — while a block with none of them takes the `baileys`
+    # default. Writing a value at either default would break one of those two.
+    if [ -n "${ISTOTA_WHATSAPP_PROVIDER}" ]; then
+        echo "provider = \"${ISTOTA_WHATSAPP_PROVIDER}\"" >> "$CONFIG_FILE"
+    fi
+
+    cat >> "$CONFIG_FILE" <<TOML
+
+[whatsapp.cloud]
 waba_id = "${ISTOTA_WHATSAPP_WABA_ID}"
 phone_number_id = "${ISTOTA_WHATSAPP_PHONE_NUMBER_ID}"
-business_phone_number = "${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER}"
 access_token = "${ISTOTA_WHATSAPP_ACCESS_TOKEN}"
 app_secret = "${ISTOTA_WHATSAPP_APP_SECRET}"
 verify_token = "${ISTOTA_WHATSAPP_VERIFY_TOKEN}"
@@ -479,10 +508,18 @@ request_timeout_seconds = ${ISTOTA_WHATSAPP_REQUEST_TIMEOUT_SECONDS:-10}
 billing_policy = "${ISTOTA_WHATSAPP_BILLING_POLICY}"
 monthly_service_attempt_limit = ${ISTOTA_WHATSAPP_MONTHLY_SERVICE_ATTEMPT_LIMIT:-900}
 
-[whatsapp.proactive_template]
+[whatsapp.cloud.proactive_template]
 enabled = ${ISTOTA_WHATSAPP_TEMPLATE_ENABLED:-false}
 name = "${ISTOTA_WHATSAPP_TEMPLATE_NAME}"
 language = "${ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE}"
+
+# The paired-session adapter. session_dir is left to resolve itself, which on
+# this shape is /data/db/whatsapp-baileys-session — the same path the
+# whatsapp-baileys compose service is given, derived from db_path above.
+# sidecar_command is empty by default and means the daemon listens and spawns
+# nothing, which is what a stack running the sidecar as its own service wants.
+[whatsapp.baileys]
+sidecar_command = "${ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND}"
 TOML
 
     cat >> "$CONFIG_FILE" <<TOML

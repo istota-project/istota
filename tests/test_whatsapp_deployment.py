@@ -52,29 +52,79 @@ WHATSAPP_VALUES = {
     "ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE": "en_GB",
 }
 
+#: The two adapter-level variables, kept out of `WHATSAPP_VALUES` on purpose.
+#: That set is the Cloud account, and the mount-gate class below depends on it
+#: naming no provider — a Cloud render that says `whatsapp_cloud` in so many
+#: words stops exercising the compatibility path those tests are about.
+WHATSAPP_ADAPTER_VALUES = {
+    "ISTOTA_WHATSAPP_PROVIDER": "baileys",
+    "ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND": "/usr/bin/node /opt/sidecar/index.js",
+}
+
 
 class TestTheDockerRender:
     def test_it_writes_every_whatsapp_field_the_operator_can_set(self, tmp_path):
         path = render_docker_config(tmp_path, **REQUIRED, **WHATSAPP_VALUES)
         whatsapp = tomllib.loads(path.read_text())["whatsapp"]
 
+        cloud = whatsapp["cloud"]
+
         assert whatsapp["enabled"] is True
-        assert whatsapp["waba_id"] == "100000000000001"
-        assert whatsapp["phone_number_id"] == "100000000000002"
         assert whatsapp["business_phone_number"] == "+15551230000"
-        assert whatsapp["access_token"] == "token-placeholder"
-        assert whatsapp["app_secret"] == "app-secret-placeholder"
-        assert whatsapp["verify_token"] == "verify-placeholder"
-        assert whatsapp["graph_api_version"] == "v25.0"
-        assert whatsapp["business_timezone"] == "Europe/Warsaw"
-        assert whatsapp["request_timeout_seconds"] == 8
-        assert whatsapp["billing_policy"] == "allow_paid"
-        assert whatsapp["monthly_service_attempt_limit"] == 400
-        assert whatsapp["proactive_template"] == {
+        assert cloud["waba_id"] == "100000000000001"
+        assert cloud["phone_number_id"] == "100000000000002"
+        assert cloud["access_token"] == "token-placeholder"
+        assert cloud["app_secret"] == "app-secret-placeholder"
+        assert cloud["verify_token"] == "verify-placeholder"
+        assert cloud["graph_api_version"] == "v25.0"
+        assert cloud["business_timezone"] == "Europe/Warsaw"
+        assert cloud["request_timeout_seconds"] == 8
+        assert cloud["billing_policy"] == "allow_paid"
+        assert cloud["monthly_service_attempt_limit"] == 400
+        assert cloud["proactive_template"] == {
             "enabled": True,
             "name": "istota_result",
             "language": "en_GB",
         }
+
+    def test_the_meta_keys_are_nested_rather_than_flat(self, tmp_path):
+        """The generator writes the shape the loader has.
+
+        They were rendered flat on `[whatsapp]` and read as `[whatsapp.cloud]`
+        by the legacy-flat migration. `config.example.toml` asks operators to
+        move them, so the file istota writes for itself moves them too — and
+        the assertion is about *absence*, since the migration would make a
+        render carrying both spellings look identical from the loaded config.
+        """
+        path = render_docker_config(tmp_path, **REQUIRED, **WHATSAPP_VALUES)
+        whatsapp = tomllib.loads(path.read_text())["whatsapp"]
+
+        assert set(whatsapp) == {"enabled", "business_phone_number", "cloud", "baileys"}
+
+    def test_the_adapter_keys_render_when_the_operator_names_them(self, tmp_path):
+        from istota.config import load_config
+
+        path = render_docker_config(
+            tmp_path, **REQUIRED, **WHATSAPP_ADAPTER_VALUES,
+        )
+        config = load_config(path)
+
+        assert config.whatsapp.provider == "baileys"
+        assert config.whatsapp.baileys.sidecar_command == (
+            "/usr/bin/node /opt/sidecar/index.js"
+        )
+
+    def test_an_unset_provider_renders_no_key_at_all(self, tmp_path):
+        """Never `provider = ""`, which no istota process can load.
+
+        `whatsapp_structural_config_errors` refuses a provider outside the
+        tuple whether or not the block is enabled, and `load_config` raises on
+        it — so on this shape an empty rendered value is a container that will
+        not boot.
+        """
+        path = render_docker_config(tmp_path, **REQUIRED, ISTOTA_WHATSAPP_PROVIDER="")
+
+        assert "provider" not in _whatsapp_section(path.read_text())
 
     def test_the_defaults_render_a_disabled_free_guard_block(self, tmp_path):
         """An operator who sets nothing gets the free-biased shape.
@@ -88,9 +138,9 @@ class TestTheDockerRender:
         whatsapp = tomllib.loads(path.read_text())["whatsapp"]
 
         assert whatsapp["enabled"] is False
-        assert whatsapp["billing_policy"] == "free_guard"
-        assert whatsapp["monthly_service_attempt_limit"] == 900
-        assert whatsapp["proactive_template"]["enabled"] is False
+        assert whatsapp["cloud"]["billing_policy"] == "free_guard"
+        assert whatsapp["cloud"]["monthly_service_attempt_limit"] == 900
+        assert whatsapp["cloud"]["proactive_template"]["enabled"] is False
 
     def test_a_capitalised_boolean_renders_invalid_toml(self, tmp_path):
         """Recorded rather than fixed, so the next reader knows it was decided.
@@ -150,7 +200,7 @@ class TestTheComposeStack:
         compose = yaml.safe_load(COMPOSE.read_text())
         environment = compose["services"]["istota"]["environment"]
 
-        for name in WHATSAPP_VALUES:
+        for name in {**WHATSAPP_VALUES, **WHATSAPP_ADAPTER_VALUES}:
             assert name in environment, f"compose withholds {name}"
 
     def test_the_env_example_documents_the_profile_and_every_setting(self):
@@ -160,7 +210,11 @@ class TestTheComposeStack:
             "the optional-services list at the top of .env.example does not "
             "name the whatsapp profile"
         )
-        for name in WHATSAPP_VALUES:
+        assert re.search(r"^#\s+whatsapp-baileys\s", text, re.M), (
+            "the optional-services list at the top of .env.example does not "
+            "name the whatsapp-baileys profile"
+        )
+        for name in {**WHATSAPP_VALUES, **WHATSAPP_ADAPTER_VALUES}:
             assert re.search(rf"^{name}=", text, re.M), f"undocumented: {name}"
 
 
@@ -258,13 +312,18 @@ class TestTheAnsibleRole:
         parsed = tomllib.loads(render_ansible_config(**overrides))["whatsapp"]
 
         assert parsed["enabled"] is True
-        assert parsed["waba_id"] == "100000000000001"
-        assert parsed["business_timezone"] == "Europe/Warsaw"
+        assert parsed["cloud"]["waba_id"] == "100000000000001"
+        assert parsed["cloud"]["business_timezone"] == "Europe/Warsaw"
+        # The Meta keys are nested, matching where the loader has them; the
+        # role used to render them flat and lean on the legacy-flat migration.
+        assert set(parsed) == {
+            "enabled", "business_phone_number", "cloud", "baileys",
+        }
         # `istota_use_environment_file` defaults on, so the three credentials
         # travel in secrets.env and this file must not name them at all.
-        assert "access_token" not in parsed
-        assert "app_secret" not in parsed
-        assert "verify_token" not in parsed
+        assert "access_token" not in parsed["cloud"]
+        assert "app_secret" not in parsed["cloud"]
+        assert "verify_token" not in parsed["cloud"]
 
     def test_the_rendered_config_loads_in_both_credential_shapes(self, tmp_path):
         """The Docker case next door states the rule; bare metal needs it more.
@@ -344,9 +403,36 @@ class TestTheAnsibleRole:
         }
         parsed = tomllib.loads(render_ansible_config(**overrides))["whatsapp"]
 
-        assert parsed["access_token"] == "token-placeholder"
-        assert parsed["app_secret"] == "app-secret-placeholder"
-        assert parsed["verify_token"] == "verify-placeholder"
+        assert parsed["cloud"]["access_token"] == "token-placeholder"
+        assert parsed["cloud"]["app_secret"] == "app-secret-placeholder"
+        assert parsed["cloud"]["verify_token"] == "verify-placeholder"
+
+    def test_the_adapter_keys_render_when_the_inventory_names_them(self, tmp_path):
+        from istota.config import load_config
+
+        path = tmp_path / "config.toml"
+        path.write_text(render_ansible_config(
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_provider="baileys",
+            istota_whatsapp_baileys_sidecar_command="/usr/bin/node /opt/sidecar/index.js",
+        ))
+        config = load_config(path)
+
+        assert config.whatsapp.provider == "baileys"
+        assert config.whatsapp.baileys.sidecar_command == (
+            "/usr/bin/node /opt/sidecar/index.js"
+        )
+
+    def test_an_unset_provider_renders_no_key_at_all(self, tmp_path):
+        """Never `provider = ""`, which fails the load in every process.
+
+        On this shape that is a play failing at its first CLI task, having
+        already replaced the running deployment's config — the failure the
+        pre-flight assert two tests down exists to prevent.
+        """
+        rendered = render_ansible_config(istota_whatsapp_provider="")
+
+        assert "provider" not in _whatsapp_section(rendered)
 
     def test_the_three_credentials_reach_secrets_env(self):
         overrides = {
@@ -510,8 +596,14 @@ class TestTheMountGateOnALoadedConfig:
 
     Hand-written TOML cannot answer it: the question is about what these two
     files emit, including the shape where the role deliberately omits the three
-    credentials. Neither generator renders `provider` at all yet — that is
-    Stage 7 — so what these assert is precisely the compatibility path.
+    credentials.
+
+    Both generators now write the nested `[whatsapp.cloud]` shape and render a
+    `provider` key only when the operator names one, so these still assert the
+    compatibility path — it is just the nested half of it. That the *nested*
+    read is what answers here rather than the flat one is the property
+    `_WHATSAPP_CLOUD_SIGNAL_KEYS` records being deliberate: moving the keys is
+    a spelling, and their being Meta identifiers is the fact.
     """
 
     def _ansible(self, tmp_path, name: str, **overrides):
@@ -587,14 +679,46 @@ class TestTheMountGateOnALoadedConfig:
         assert config.whatsapp.provider == "baileys"
         assert whatsapp_webhooks_enabled(config) is False
 
-    def test_neither_generator_renders_a_provider_key_yet(self, tmp_path):
-        """States what these tests rest on, so the day Stage 7 renders the key
-        this file says which assertions stopped being about the migration."""
+    def test_neither_generator_renders_a_provider_key_at_its_default(self, tmp_path):
+        """What the four tests above rest on, stated where it can go red.
+
+        Both generators can now render `provider`, and neither does unless the
+        operator names one. If either starts writing a value by default, the
+        Cloud assertions above stop being about the migration and — at the
+        `baileys` default — an existing Cloud deployment loses Meta's callback
+        at the upgrade with nothing in any log saying so.
+        """
         ansible = render_ansible_config()
         docker = render_docker_config(tmp_path, **REQUIRED).read_text()
 
         assert "provider" not in _whatsapp_section(ansible)
         assert "provider" not in _whatsapp_section(docker)
+
+    def test_a_named_provider_outranks_a_populated_cloud_block(self, tmp_path):
+        """The escape hatch from the rule above, on both shapes.
+
+        A deployment switching Cloud to Baileys keeps its Cloud block — the SMS
+        switch rule, so late delivery callbacks still authenticate — and says
+        so explicitly. An explicit value is never overridden by the signal.
+        """
+        from istota.config import load_config, whatsapp_webhooks_enabled
+
+        ansible_path = tmp_path / "ansible.toml"
+        ansible_path.write_text(render_ansible_config(
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_provider="baileys",
+            istota_whatsapp_waba_id="100000000000001",
+            istota_whatsapp_phone_number_id="100000000000002",
+        ))
+        docker_path = render_docker_config(
+            tmp_path / "docker", **REQUIRED, **WHATSAPP_VALUES,
+            ISTOTA_WHATSAPP_PROVIDER="baileys",
+        )
+
+        for path in (ansible_path, docker_path):
+            config = load_config(path)
+            assert config.whatsapp.provider == "baileys", path
+            assert whatsapp_webhooks_enabled(config) is False, path
 
 
 def _whatsapp_section(rendered: str) -> str:

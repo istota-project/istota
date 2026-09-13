@@ -407,18 +407,38 @@ public_key = "{{ istota_sms_telnyx_public_key | istota_toml_escape }}"
 messaging_profile_id = "{{ istota_sms_telnyx_messaging_profile_id | istota_toml_escape }}"
 {% endif %}
 
-{# WhatsApp through Meta's Cloud API. The three credentials go through
-   secrets.env under istota_use_environment_file, like every other secret
-   here: config.toml is world-readable to the daemon user and reaches a
-   task's config path, while the env file is root-owned and handed to the
-   units by systemd. Missing credentials are reported by doctor rather than
-   raised at load, so a role task running before secrets.env is readable does
-   not fail the play (ISSUE-058). #}
+{# One WhatsApp business number, reached through one adapter. The three Meta
+   credentials go through secrets.env under istota_use_environment_file, like
+   every other secret here: config.toml is world-readable to the daemon user
+   and reaches a task's config path, while the env file is root-owned and
+   handed to the units by systemd. Missing credentials are reported by doctor
+   rather than raised at load, so a role task running before secrets.env is
+   readable does not fail the play (ISSUE-058).
+
+   The Meta keys sit under [whatsapp.cloud], which is where the loader has
+   them. They used to be rendered flat on [whatsapp] and were read as this
+   block by `config._migrate_whatsapp_flat`; the deprecation note in
+   config.example.toml asks operators to move them, so the generator that
+   writes the file moves them too.
+
+   `provider` is rendered only when the inventory names one, and never as an
+   empty string: the loader refuses a provider outside WHATSAPP_PROVIDER_NAMES
+   whether or not the block is enabled, so `provider = ""` is a config no
+   istota process can read. Absent is not the same as the dataclass default —
+   with no key, a [whatsapp.cloud] block carrying a waba_id, a phone_number_id
+   or one of the three credentials selects `whatsapp_cloud`, which is what
+   keeps an existing Cloud host serving Meta's callback across the default
+   flip, while a block with none of them takes the `baileys` default. #}
 [whatsapp]
 enabled = {{ istota_whatsapp_enabled | lower }}
+{% if istota_whatsapp_provider %}
+provider = "{{ istota_whatsapp_provider | istota_toml_escape }}"
+{% endif %}
+business_phone_number = "{{ istota_whatsapp_business_phone_number | istota_toml_escape }}"
+
+[whatsapp.cloud]
 waba_id = "{{ istota_whatsapp_waba_id | istota_toml_escape }}"
 phone_number_id = "{{ istota_whatsapp_phone_number_id | istota_toml_escape }}"
-business_phone_number = "{{ istota_whatsapp_business_phone_number | istota_toml_escape }}"
 graph_api_version = "{{ istota_whatsapp_graph_api_version | istota_toml_escape }}"
 business_timezone = "{{ istota_whatsapp_business_timezone | istota_toml_escape }}"
 request_timeout_seconds = {{ istota_whatsapp_request_timeout_seconds }}
@@ -430,10 +450,18 @@ app_secret = "{{ istota_whatsapp_app_secret | istota_toml_escape }}"
 verify_token = "{{ istota_whatsapp_verify_token | istota_toml_escape }}"
 {% endif %}
 
-[whatsapp.proactive_template]
+[whatsapp.cloud.proactive_template]
 enabled = {{ istota_whatsapp_template_enabled | lower }}
 name = "{{ istota_whatsapp_template_name | istota_toml_escape }}"
 language = "{{ istota_whatsapp_template_language | istota_toml_escape }}"
+
+{# The paired-session adapter. session_dir is left to resolve itself — it lands
+   beside db_path above, which is the path the sidecar unit is given — and
+   sidecar_command is empty by default, meaning the daemon listens and spawns
+   nothing while the unit runs the sidecar. Setting both is two Baileys clients
+   on one session directory, which the role asserts against. #}
+[whatsapp.baileys]
+sidecar_command = "{{ istota_whatsapp_baileys_sidecar_command | istota_toml_escape }}"
 
 {# Model alias registry ([models.aliases]) — tiers (fast/general/smart) and
    shortcuts (opus/sonnet/haiku), overlaying the code-shipped defaults, resolved

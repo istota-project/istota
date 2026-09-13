@@ -396,18 +396,19 @@ def _config_declares(section: str) -> bool:
     reports those *because* they are real fields, so field-existence alone is
     the wrong question.
 
-    A section the loader *rewrites* before the walk is declared even though the
-    tree no longer names it: `[whatsapp.proactive_template]`, which this script
-    still renders, is read as `[whatsapp.cloud.proactive_template]`. Asking the
-    dataclass tree alone would report a key the daemon consumes as one it
-    discards — the opposite of this scan's question.
+    There is no accommodation here for the sections the loader *rewrites*
+    before the walk, and there was one until this script stopped needing it:
+    it rendered the pre-adapter flat `[whatsapp]` block, whose sub-table
+    `[whatsapp.proactive_template]` names no field and is read as
+    `[whatsapp.cloud.proactive_template]`. The script renders the nested shape
+    now, so every section it writes is one the tree names. A flat one coming
+    back is a regression rather than a case to re-admit — it would mean the
+    generator relying on a documented-deprecated migration again.
     """
-    from istota.config import _LEGACY_FLAT_WHATSAPP_KEYS, _NOT_CONFIGURATION
+    from istota.config import _NOT_CONFIGURATION
 
     if section in _NOT_CONFIGURATION:
         return False
-    if section in {f"whatsapp.{key}" for key in _LEGACY_FLAT_WHATSAPP_KEYS}:
-        return True
     cls = Config
     for part in section.split("."):
         if not dataclasses.is_dataclass(cls):
@@ -429,10 +430,12 @@ def _unrecognised_keys(config_path: Path) -> list[str]:
     reports is exactly a key the daemon discards. `report_unknown` turns the
     same list into one WARNING line and moves on; here it is the assertion.
 
-    `normalize_legacy_document` is the loader's own pre-walk step and has to run
-    here for the same reason: a key it rewrites is read rather than discarded,
-    and skipping it would report the whole flat `[whatsapp]` block — which both
-    generators still render — as keys nothing consumes.
+    `normalize_legacy_document` is the loader's own pre-walk step and runs here
+    for the same reason: a key it rewrites is read rather than discarded. It is
+    a no-op against what this script renders today — the flat `[whatsapp]`
+    block it used to write is nested now — and it stays, because the question
+    is what the *loader* does with the file and the answer must not depend on
+    the generator happening to write no legacy key.
     """
     from istota.config import (
         _CONFIG_HOOKS,

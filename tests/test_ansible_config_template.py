@@ -282,10 +282,12 @@ def _unknown_keys(section: dict, target, prefix: str) -> list[str]:
     and cannot be checked against a field list.
 
     At the top level the document is first put through the loader's own pre-walk
-    rewrite, so a key the loader *moves* is not reported as one it drops: this
-    template still renders the pre-adapter flat `[whatsapp]` block, which
-    `load_config` reads as `[whatsapp.cloud]`. The copy is because the caller's
-    `parsed` is a module-scoped fixture.
+    rewrite, so a key the loader *moves* is not reported as one it drops. It is
+    a no-op against what this template renders today — the pre-adapter flat
+    `[whatsapp]` block it used to write is nested now — and it stays, because
+    the question is what the *loader* does with the file and the answer must
+    not depend on the template happening to write no legacy key. The copy is
+    because the caller's `parsed` is a module-scoped fixture.
     """
     if prefix == "":
         from copy import deepcopy

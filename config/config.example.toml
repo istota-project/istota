@@ -762,16 +762,19 @@ api_key = ""
 public_key = ""
 messaging_profile_id = ""
 
-# WhatsApp through Meta's hosted Cloud API, used directly rather than through a
-# Business Solution Provider. One business phone number, text only, and never
-# part of a Talk or web room. `access_token`, `app_secret` and `verify_token`
-# are credentials: leave them empty here and deliver them through
-# ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN.
+# One WhatsApp business phone number, text only, and never part of a Talk or
+# web room. `provider` names the adapter that sends and receives: `baileys` is a
+# WhatsApp Web session paired by QR scan, and `whatsapp_cloud` is Meta's hosted
+# Cloud API used directly rather than through a Business Solution Provider.
+# Each adapter's own settings are its block below.
 #
-# `provider` names the adapter that sends and receives. `whatsapp_cloud` is the
-# Meta Cloud API described here and every field below belongs to it. The name
-# `baileys` is reserved for a second adapter and is not implemented yet — it
-# loads, and it does nothing.
+# For the Cloud adapter `access_token`, `app_secret` and `verify_token` are
+# credentials: leave them empty here and deliver them through
+# ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN. The Baileys
+# adapter has no credential in this file at all — the paired session on disk is
+# its credential.
+#
+# The rest of this note is the Cloud adapter's.
 #
 # `billing_policy` decides whether a send can ever cost money.
 #   free_guard — no templates at all, and at most
