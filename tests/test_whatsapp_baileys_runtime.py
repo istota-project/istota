@@ -96,6 +96,18 @@ class TestResolvingTheSidecarCommand:
 
         assert baileys_bridge.resolve_sidecar_argv(cfg) == ()
 
+    def test_the_shipped_program_is_found_in_this_checkout(self, tmp_path,
+                                                           monkeypatch):
+        monkeypatch.setattr(
+            "shutil.which", lambda name: "/usr/bin/node" if name == "node" else None,
+        )
+        cfg = _config(tmp_path)
+
+        argv = baileys_bridge.resolve_sidecar_argv(cfg)
+
+        assert argv[0] == "/usr/bin/node"
+        assert argv[1].endswith("docker/whatsapp-baileys/index.js")
+
     def test_without_node_it_spawns_nothing(self, tmp_path, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda name: None)
         cfg = _config(tmp_path)
