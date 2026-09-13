@@ -44,11 +44,11 @@ from datetime import datetime, timedelta, timezone
 from ... import commands, confirmations, db
 from ...config import Config
 from ...http_headers import header_value
-from ...user_profiles import is_e164
 from .._types import IncomingMessage
 from ..ingest import ingest_message
 from . import (
     bsuid_fingerprint,
+    identity as identity_rules,
     message_fingerprint,
     whatsapp_conversation_token,
 )
@@ -155,8 +155,8 @@ def verify_subscription(config: Config, params: Mapping[str, str]) -> str:
     comparison is, and an empty configured token refuses outright rather than
     matching an empty presented one.
     """
-    whatsapp = config.whatsapp
-    if not whatsapp.verify_token:
+    cloud = config.whatsapp.cloud
+    if not cloud.verify_token:
         raise WhatsAppWebhookError("whatsapp verify token not configured", 503)
     if params.get("hub.mode") != "subscribe":
         raise WhatsAppWebhookError("unsupported hub mode", 400)
@@ -168,7 +168,7 @@ def verify_subscription(config: Config, params: Mapping[str, str]) -> str:
     # exactly this hazard for the signature header; it is the same mistake on
     # the other secret comparison. Encoding is constant time and leaks only the
     # length, which a wrong-length token has already decided.
-    if not hmac.compare_digest(presented.encode(), whatsapp.verify_token.encode()):
+    if not hmac.compare_digest(presented.encode(), cloud.verify_token.encode()):
         raise WhatsAppWebhookError("verify token mismatch", 403)
     challenge = params.get("hub.challenge") or ""
     # `isascii()` as well as `isdecimal()`: the latter is True for Arabic-Indic,
@@ -202,12 +202,13 @@ def parse_webhook(
     content_type = header_value(headers, "content-type").partition(";")[0].strip()
     if content_type.casefold() != "application/json":
         raise WhatsAppWebhookError("unsupported content type", 415)
-    if not config.whatsapp.app_secret:
+    if not config.whatsapp.cloud.app_secret:
         # Refusing to serve, not refusing this request: with no secret the
         # validator would verify an HMAC under an empty key. See `client.py`.
         raise WhatsAppWebhookError("whatsapp app secret not configured", 503)
     if not verify_signature(
-        config.whatsapp.app_secret, raw_body, header_value(headers, SIGNATURE_HEADER),
+        config.whatsapp.cloud.app_secret, raw_body,
+        header_value(headers, SIGNATURE_HEADER),
     ):
         raise WhatsAppWebhookError("invalid signature")
     try:
@@ -430,7 +431,7 @@ def normalize_payload(config: Config, payload: object) -> list[WhatsAppEvent]:
     and yields nothing; a structurally broken one is a 400 and also yields
     nothing, so a partial batch can never be acknowledged.
     """
-    whatsapp = config.whatsapp
+    cloud = config.whatsapp.cloud
     body = _mapping(payload, "webhook body")
     if body.get("object") != "whatsapp_business_account":
         raise WhatsAppWebhookError("unexpected webhook object")
@@ -440,7 +441,7 @@ def normalize_payload(config: Config, payload: object) -> list[WhatsAppEvent]:
         raise WhatsAppWebhookError("invalid entry list", 400)
     for entry in _sequence(entries, "entry list"):
         waba_id = _required_text(entry, "id", "waba id")
-        if waba_id != whatsapp.waba_id:
+        if waba_id != cloud.waba_id:
             raise WhatsAppWebhookError("unexpected whatsapp business account")
         for change in _sequence(entry.get("changes"), "change list"):
             field = _optional_text(change.get("field"))
@@ -462,18 +463,18 @@ def normalize_payload(config: Config, payload: object) -> list[WhatsAppEvent]:
             if value.get("messaging_product") != "whatsapp":
                 raise WhatsAppWebhookError("unexpected messaging product")
             metadata = _mapping(value.get("metadata"), "metadata")
-            if metadata.get("phone_number_id") != whatsapp.phone_number_id:
+            if metadata.get("phone_number_id") != cloud.phone_number_id:
                 raise WhatsAppWebhookError("unexpected business phone number")
             contacts = _sequence(value.get("contacts", []), "contact list")
             for message in _sequence(value.get("messages", []), "message list"):
                 events.append(_inbound_event(
                     message, contacts,
-                    waba_id=waba_id, phone_number_id=whatsapp.phone_number_id,
+                    waba_id=waba_id, phone_number_id=cloud.phone_number_id,
                 ))
             for status in _sequence(value.get("statuses", []), "status list"):
                 delivery = _delivery_event(
                     status,
-                    waba_id=waba_id, phone_number_id=whatsapp.phone_number_id,
+                    waba_id=waba_id, phone_number_id=cloud.phone_number_id,
                 )
                 if delivery is not None:
                     events.append(delivery)
@@ -520,21 +521,6 @@ def _window_stamp(sent_at: datetime) -> str:
     return _sql_datetime(sent_at)
 
 
-def _e164_from_wa_id(wa_id: str | None) -> str:
-    """Meta's `wa_id` as E.164, or `''`.
-
-    A `+` is prepended and nothing else: no country-code guess and no
-    punctuation cleanup, matching `normalize_whatsapp_phone_number`. A value
-    that is not all digits is not a phone number and gets no benefit of the
-    doubt, because the result of this is compared against an operator's
-    configured bootstrap number to decide an enrollment.
-    """
-    if not wa_id or not wa_id.isdigit():
-        return ""
-    candidate = "+" + wa_id
-    return candidate if is_e164(candidate) else ""
-
-
 def _alerts(*raised: object) -> tuple[object, ...]:
     """The buffered alerts a result carries, with the nothings dropped.
 
@@ -547,38 +533,11 @@ def _alerts(*raised: object) -> tuple[object, ...]:
     return tuple(item for item in raised if item is not None)
 
 
-@dataclass(frozen=True)
-class _Resolution:
-    user_id: str | None
-    disposition: str | None = None
-    pending_alert: object | None = None
-
-
-def _write_identity_alert(conn, user_id: str, bsuid: str) -> object | None:
-    """One deduplicated operator alert about a binding that stopped matching.
-
-    Off WhatsApp by construction: `task_alert` rows are pushed by the
-    notification routes, and the caller strips `whatsapp` from them — a surface
-    whose identity is in doubt must not be the surface that reports it.
-    Deduplicated on the *pair*, so a line that keeps sending bumps one row
-    rather than raising a push per message.
-    """
-    from ...notification_resolvers import task_alert
-
-    fingerprint = bsuid_fingerprint(bsuid)
-    return task_alert.write(
-        conn, user_id,
-        dedup_key=f"whatsapp-identity:{fingerprint}",
-        title="WhatsApp identity mismatch",
-        body=(
-            "A WhatsApp message arrived on this user's configured bootstrap "
-            "number from a different WhatsApp identity, so it was ignored. "
-            "Either the number was reassigned or the identity changed. Check "
-            "with the user, then run `istota user ensure <user> "
-            "--reset-whatsapp-identity` or set the new BSUID explicitly."
-        ),
-        params={"identity_fingerprint": fingerprint},
-    )
+#: `identity.Resolution` under the name this module's callers already use.
+#: The record moved with the resolution it describes; nothing here constructs
+#: one any more, so the alias exists for readers and for the type annotations
+#: below rather than as a second declaration.
+_Resolution = identity_rules.Resolution
 
 
 def _write_send_id_alert(conn, user_id: str, bsuid: str) -> object | None:
@@ -606,49 +565,21 @@ def _write_send_id_alert(conn, user_id: str, bsuid: str) -> object | None:
     )
 
 
-def _resolve_user(conn, event: InboundWhatsAppEvent) -> _Resolution:
+def _resolve_user(
+    conn, event: InboundWhatsAppEvent, *, provider: str
+) -> _Resolution:
     """Which Istota user this authenticated message may act as.
 
-    The spec's five rules, in order, and the order is what makes them safe.
-    A BSUID is required first, so a phone number is never sufficient once an
-    identity exists. A matching BSUID wins outright. Only then may a bootstrap
-    number enroll, and only onto a row that carries no BSUID yet. A bootstrap
-    number matching a row that carries a *different* BSUID is the recycled-line
-    case and fails closed with an alert — latching there would hand the Istota
-    principal to whoever holds the number now.
+    `identity.resolve_inbound_identity`, one indirection thick. The five rules
+    and the order that makes them safe are stated there, once, because they
+    are the same five rules for both adapters and only the field they read
+    differs. The wrapper survives because the name is where a reader following
+    the webhook path looks for the answer — not because anything else calls
+    it; `_handle_inbound` is the only caller.
     """
-    bsuid = event.from_user.bsuid
-    if not bsuid:
-        return _Resolution(None, "unknown_sender")
-    bound = db.get_whatsapp_binding_by_bsuid(conn, bsuid)
-    if bound is not None:
-        return _Resolution(bound.user_id)
-
-    number = _e164_from_wa_id(event.from_user.wa_id)
-    candidate = db.get_whatsapp_binding_by_phone(conn, number) if number else None
-    if candidate is None:
-        return _Resolution(None, "unknown_sender")
-    if candidate.bsuid:
-        return _Resolution(
-            None, "identity_mismatch",
-            _write_identity_alert(conn, candidate.user_id, bsuid),
-        )
-    try:
-        latched = db.latch_whatsapp_bsuid(
-            conn, candidate.user_id,
-            bsuid=bsuid,
-            send_id=bsuid,
-            username=event.from_user.username or "",
-        )
-    except sqlite3.IntegrityError:
-        # Another user already holds this BSUID or send id. The partial unique
-        # indexes are the arbiter and this side lost; fail closed rather than
-        # taking an identity the database says is somebody else's.
-        return _Resolution(None, "identity_conflict")
-    if not latched:
-        # The row gained a BSUID between the read above and this write.
-        return _Resolution(None, "identity_conflict")
-    return _Resolution(candidate.user_id)
+    return identity_rules.resolve_inbound_identity(
+        conn, event.from_user, provider=provider,
+    )
 
 
 def _claim(conn, event: InboundWhatsAppEvent, user_id: str, disposition: str) -> bool:
@@ -711,25 +642,56 @@ def _parse_callback(callback_data: str) -> tuple[int, str] | None:
 
 
 def _handle_inbound(
-    conn, config: Config, event: InboundWhatsAppEvent
+    conn, config: Config, event: InboundWhatsAppEvent, *, provider: str
 ) -> WhatsAppEventResult:
     if not config.whatsapp.enabled:
         return WhatsAppEventResult("unconfigured")
     if not event.message_id or len(event.message_id) > 255:
         return WhatsAppEventResult("invalid_message_id")
+    if provider != config.whatsapp.provider:
+        # **An inactive adapter's inbound message creates no task**, which is
+        # the rule `.claude/rules/sms.md` already states for that surface: a
+        # complete-but-unselected provider is kept so a late *delivery*
+        # callback still authenticates across a switch, and delivery events
+        # bypass this gate for exactly that reason. An inbound message is the
+        # other half — a deployment that moved to Baileys but still holds its
+        # Meta credentials would otherwise run two inbound paths at once, each
+        # latching its own identity onto the same bindings.
+        #
+        # Defence in depth rather than the boundary: `whatsapp_webhooks_enabled`
+        # already refuses to mount Meta's route for a non-Cloud provider, so on
+        # a shipped deployment nothing reaches here. The boundary is a mount
+        # decision and this is a behaviour one, and they are enforced in
+        # different processes. Before identity lookup, because the point is
+        # that no principal is resolved at all.
+        #
+        # **The refusal is deliberately not durable.** It returns above
+        # `_claim`, so no `processed_whatsapp` row is written and an operator
+        # who flips the provider back inside the provider's redelivery window
+        # would see the message as new. That is the same shape as the `group`
+        # gate below and it costs nothing in practice — the route answers 200,
+        # so Meta does not redeliver — and the alternative is worse: claiming
+        # a message id under a user id no identity resolution produced.
+        logger.info(
+            "whatsapp.inbound.rejected reason=inactive_provider message=%s "
+            "arrived_for=%s active=%s",
+            message_fingerprint(event.message_id), provider,
+            config.whatsapp.provider,
+        )
+        return WhatsAppEventResult("inactive_provider")
     if event.message_type == "group":
         # Before identity lookup, deliberately: a group message is out of scope
         # whoever sent it, and resolving a principal for one would put a
         # third party's text into that user's task history.
         return WhatsAppEventResult("group")
 
-    resolution = _resolve_user(conn, event)
+    resolution = _resolve_user(conn, event, provider=provider)
     if resolution.user_id is None:
         logger.info(
             "whatsapp.inbound.rejected reason=%s message=%s identity=%s",
             resolution.disposition,
             message_fingerprint(event.message_id),
-            bsuid_fingerprint(event.from_user.bsuid),
+            identity_rules.identity_fingerprint(event.from_user, provider=provider),
         )
         return WhatsAppEventResult(
             resolution.disposition or "unknown_sender",
@@ -748,27 +710,41 @@ def _handle_inbound(
         return WhatsAppEventResult("duplicate", user_id=user_id)
 
     binding = db.get_whatsapp_binding(conn, user_id)
+    # Both values come off the resolution rather than off the event, because
+    # both are per-adapter answers. `send_id` is Meta's opaque destination and
+    # Baileys has none; `last_user_message_at` opens *Meta's* 24-hour service
+    # window, which a Baileys message does not — see `identity.Resolution`.
     send_id_applied = db.touch_whatsapp_binding(
         conn, user_id,
-        send_id=event.from_user.bsuid or None,
+        send_id=resolution.send_id,
         username=event.from_user.username,
         last_seen_at=_sql_datetime(datetime.now(timezone.utc)),
-        last_user_message_at=_window_stamp(event.sent_at),
+        last_user_message_at=(
+            _window_stamp(event.sent_at)
+            if resolution.writes_service_window
+            else None
+        ),
     )
 
     result = _dispatch_inbound(conn, config, event, user_id, binding)
+    # An alert the *resolution* raised on its way to succeeding — today the
+    # cross-adapter one, where a principal was re-established from the phone
+    # number alone after an adapter switch. The refusal path returns above
+    # with its own alert; this is the accepted-anyway case, and dropping it
+    # here would leave the row in the inbox with nothing pushing it.
+    carried = _alerts(resolution.pending_alert)
     if not send_id_applied:
         # Another user's row already holds this destination. The message still
         # goes through — the sender is authenticated and legitimate, and
         # refusing everything they send over a row that is not theirs would be
-        # a denial of service — but stage 3's send will fall back to the
-        # bootstrap number, so an operator has to be told which two rows
-        # collided. Buffered like every other alert raised in here.
-        result = replace(
-            result,
-            pending_alerts=result.pending_alerts
-            or _alerts(_write_send_id_alert(conn, user_id, event.from_user.bsuid)),
+        # a denial of service — but the send will fall back to the bootstrap
+        # number, so an operator has to be told which two rows collided.
+        # Buffered like every other alert raised in here.
+        carried += _alerts(
+            _write_send_id_alert(conn, user_id, event.from_user.bsuid)
         )
+    if carried:
+        result = replace(result, pending_alerts=result.pending_alerts + carried)
     _set_disposition(conn, event, result.disposition, result.task_id)
     logger.info(
         "whatsapp.inbound.accepted disposition=%s message=%s task_id=%s",
@@ -924,9 +900,13 @@ def _handle_delivery(
 
 
 def handle_whatsapp_batch(
-    conn, config: Config, events: Sequence[WhatsAppEvent]
+    conn,
+    config: Config,
+    events: Sequence[WhatsAppEvent],
+    *,
+    provider: str = db.WHATSAPP_LEGACY_PROVIDER,
 ) -> list[WhatsAppEventResult]:
-    """Apply every event of one authenticated POST in one transaction.
+    """Apply every event of one authenticated batch in one transaction.
 
     `BEGIN IMMEDIATE` up front, so the write lock is taken before the first
     read the later writes depend on rather than being upgraded halfway through
@@ -934,6 +914,26 @@ def handle_whatsapp_batch(
     binding read and the latch. Any exception propagates to the caller, whose
     context manager rolls back and answers 503; nothing here swallows a
     database error into a 200.
+
+    **`provider` is provenance: which adapter produced these events.** It is
+    not `config.whatsapp.provider` read a second time — the two are compared
+    against each other in `_handle_inbound`, and collapsing them would make
+    the comparison tautological and the inactive-adapter gate inert. The
+    caller knows the answer because the caller *is* the adapter's route or
+    receiver.
+
+    The default is the only producer that exists today, Meta's signed webhook,
+    which keeps every existing caller unchanged. It is a safe default rather
+    than a convenient one: a future receiver that forgets to name itself
+    claims Cloud provenance, and on the deployment it would be running on —
+    a Baileys one — every message it produced would be gated out as inactive
+    and create no task. That fails loudly on the first message rather than
+    silently resolving principals under the wrong adapter's rules.
+
+    Delivery events take no provider and pass no gate, deliberately: a status
+    callback for a message this deployment sent has to settle its ledger row
+    whether or not the adapter that sent it is still the active one. That is
+    the callback-only case the registry keeps a non-active adapter built for.
     """
     if not events:
         return []
@@ -943,7 +943,7 @@ def handle_whatsapp_batch(
         if isinstance(event, WhatsAppDeliveryEvent):
             results.append(_handle_delivery(conn, config, event))
         else:
-            results.append(_handle_inbound(conn, config, event))
+            results.append(_handle_inbound(conn, config, event, provider=provider))
     return results
 
 

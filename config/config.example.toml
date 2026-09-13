@@ -762,11 +762,19 @@ api_key = ""
 public_key = ""
 messaging_profile_id = ""
 
-# WhatsApp through Meta's hosted Cloud API, used directly rather than through a
-# Business Solution Provider. One business phone number, text only, and never
-# part of a Talk or web room. `access_token`, `app_secret` and `verify_token`
-# are credentials: leave them empty here and deliver them through
-# ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN.
+# One WhatsApp business phone number, text only, and never part of a Talk or
+# web room. `provider` names the adapter that sends and receives: `baileys` is a
+# WhatsApp Web session paired by QR scan, and `whatsapp_cloud` is Meta's hosted
+# Cloud API used directly rather than through a Business Solution Provider.
+# Each adapter's own settings are its block below.
+#
+# For the Cloud adapter `access_token`, `app_secret` and `verify_token` are
+# credentials: leave them empty here and deliver them through
+# ISTOTA_WHATSAPP_ACCESS_TOKEN / _APP_SECRET / _VERIFY_TOKEN. The Baileys
+# adapter has no credential in this file at all — the paired session on disk is
+# its credential.
+#
+# The rest of this note is the Cloud adapter's.
 #
 # `billing_policy` decides whether a send can ever cost money.
 #   free_guard — no templates at all, and at most
@@ -779,9 +787,29 @@ messaging_profile_id = ""
 # set `v23.0`-style only for a controlled migration.
 [whatsapp]
 enabled = false
+# Which adapter sends and receives. "baileys" is the default and needs no Meta
+# account: it pairs with a phone by QR scan, sends are free and unmetered, and
+# there is no 24-hour window and no template. "whatsapp_cloud" is Meta's hosted
+# Cloud API — sanctioned, metered, and configured in [whatsapp.cloud] below.
+provider = "baileys"
+business_phone_number = ""      # exact E.164, e.g. "+15551234567"
+
+# The Meta Cloud API adapter. Read only under provider = "whatsapp_cloud", and
+# every value here is refused at load only under that provider — a Baileys
+# deployment need not carry a WABA id.
+#
+# DEPRECATED: these keys used to sit flat on [whatsapp] itself. A config still
+# writing them there keeps working — they are read as this block, and a block
+# carrying a waba_id, a phone_number_id or one of the three credentials also
+# selects provider = "whatsapp_cloud" when no provider key is present, so an
+# existing Cloud deployment is unchanged by the default above. That holds
+# whichever spelling the values are in, so moving them under [whatsapp.cloud]
+# is safe on its own — writing provider = "whatsapp_cloud" as well is clearer
+# and is what a config written today should say. The flat spelling will be
+# removed.
+[whatsapp.cloud]
 waba_id = ""                    # decimal WhatsApp Business Account id
 phone_number_id = ""            # decimal business phone number id, not the number
-business_phone_number = ""      # exact E.164, e.g. "+15551234567"
 access_token = ""
 app_secret = ""
 verify_token = ""
@@ -795,10 +823,27 @@ monthly_service_attempt_limit = 900
 # customer service window has closed. Paid, reviewed and language-specific:
 # valid only with billing_policy = "allow_paid", and istota never creates,
 # submits or substitutes one.
-[whatsapp.proactive_template]
+[whatsapp.cloud.proactive_template]
 enabled = false
 name = ""
 language = "en_US"
+
+# The Baileys adapter's own settings. The first two resolve themselves when
+# left empty: the session directory to {db_path parent}/whatsapp-baileys-session
+# and the library version to whatever the shipped sidecar pins. The paired
+# session on disk is this adapter's credential; there is none in this file.
+#
+# sidecar_command is the command the daemon spawns to run the Node sidecar,
+# split by shell rules and not run through a shell. Left empty the daemon
+# spawns nothing and only listens on its socket, which is what a deployment
+# running the sidecar as its own systemd unit or compose service wants — and
+# is better there, since systemd restarts a unit a permanent fatal stopped.
+# `istota whatsapp pair` finds the program in a checkout on its own, so this
+# is only needed where the daemon itself has to run one.
+[whatsapp.baileys]
+session_dir = ""
+library_version = ""
+sidecar_command = ""
 
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)

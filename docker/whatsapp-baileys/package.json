@@ -1,0 +1,17 @@
+{
+  "name": "istota-whatsapp-baileys",
+  "version": "1.0.0",
+  "private": true,
+  "description": "istota's WhatsApp sidecar: a Baileys session behind the daemon's line protocol",
+  "license": "MIT",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.24"
+  }
+}

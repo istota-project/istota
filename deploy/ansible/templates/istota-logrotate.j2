@@ -8,3 +8,27 @@
     copytruncate
     create 0640 {{ istota_user }} {{ istota_group }}
 }
+{% if istota_whatsapp_baileys_unit_wanted | default(false) %}
+
+# The WhatsApp sidecar's own log, which is not under /var/log because it is not
+# istota's: the program writes nothing to stdout or stderr — Baileys' logger is
+# chatty about phone numbers and message bodies — so its diagnostics go to a
+# file inside the 0700 session directory, beside the credential.
+#
+# Unbounded without this, and the case that makes it grow is the documented
+# recovery path: a de-paired session is a start-log-exit cycle that runs until
+# somebody scans a code, on a unit set to Restart=always. `copytruncate`
+# because the writer appends with no reopen, and 0600 and the daemon's user
+# because a rotated copy of this file is as private as the original.
+{{ istota_home }}/data/whatsapp-baileys-session/sidecar.log {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    copytruncate
+    su {{ istota_user }} {{ istota_group }}
+    create 0600 {{ istota_user }} {{ istota_group }}
+}
+{% endif %}

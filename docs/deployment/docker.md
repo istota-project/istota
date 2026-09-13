@@ -114,18 +114,24 @@ It refuses rather than guessing when it cannot tell whose clones are whose, and 
 
 ## Optional profiles
 
-There are four: `browser`, `location`, `sms` and `signaling`.
+There are six: `browser`, `location`, `sms`, `whatsapp`, `whatsapp-baileys` and `signaling`.
 
 ```bash
 docker compose --profile browser up -d              # Web browsing
 docker compose --profile location up -d             # GPS tracking
 docker compose --profile sms up -d                  # SMS webhooks
+docker compose --profile whatsapp up -d             # WhatsApp via Meta's Cloud API
+docker compose --profile whatsapp-baileys up -d     # WhatsApp via a paired session
 docker compose --profile browser --profile location up -d  # Combine as needed
 ```
 
 Rather than naming them per command, set `COMPOSE_PROFILES` in `.env` — a comma-separated list every `docker compose` in that directory then picks up. `docker/init.sh` writes it from the answers you give it; a hand-copied `.env.example` leaves it empty, which means the core stack only.
 
-The `location` and `sms` profiles select the same `webhooks` service. Set the matching `ISTOTA_LOCATION_ENABLED` or `ISTOTA_SMS_ENABLED` value in `.env`; the profile starts the shared process, while the setting controls which feature accepts work. Nginx is the public endpoint for `/webhooks/`; the receiver port is exposed only inside the Compose network. Enabling both profiles still runs one receiver.
+The `location`, `sms` and `whatsapp` profiles select the same `webhooks` service. Set the matching `ISTOTA_LOCATION_ENABLED`, `ISTOTA_SMS_ENABLED` or `ISTOTA_WHATSAPP_ENABLED` value in `.env`; the profile starts the shared process, while the setting controls which feature accepts work. Nginx is the public endpoint for `/webhooks/`; the receiver port is exposed only inside the Compose network. Enabling several profiles still runs one receiver.
+
+**The two WhatsApp profiles are alternatives, not a pair.** The surface has two adapters and they need opposite halves of the stack: Meta's Cloud API receives over a signed HTTP callback, so it wants `whatsapp` and the receiver; a paired WhatsApp Web session receives over a Unix socket, so it wants `whatsapp-baileys` and the Node sidecar, and no receiver at all. A profile cannot read the rendered config, so pick the one matching `ISTOTA_WHATSAPP_PROVIDER`. Selecting both costs a receiver whose handlers answer 404, which is inert rather than harmful.
+
+Pairing a Baileys session is not reachable from inside this stack — `istota whatsapp pair` starts a sidecar of its own and the istota image ships neither the program nor its dependencies. Pair on a host with a checkout and node, then move the session directory into the `istota_data` volume at `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers run as.
 
 The browser container requires x86-64 (Chrome has no ARM packages).
 

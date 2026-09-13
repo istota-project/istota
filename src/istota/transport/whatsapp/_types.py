@@ -12,6 +12,7 @@ data, so this module imports nothing from the package and nothing from PyWa.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, TypeAlias
@@ -46,20 +47,51 @@ than a visible unknown.
 
 @dataclass(frozen=True)
 class WhatsAppUserIdentity:
-    """Who sent a message, as WhatsApp 4.x models identity.
+    """Who sent a message, in whichever adapter's terms it arrived.
 
-    `bsuid` is the durable one and the only one authorization may rest on.
+    **Two durable identities, one per adapter, and exactly one of them is
+    authoritative for any given message.** `bsuid` is the Cloud API's, and the
+    only one authorization may rest on there. `jid` is Baileys', and the only
+    one there. Which field is read is decided by the adapter the event came
+    from, never by which happens to be populated — reading whichever is set
+    would let a message from one adapter resolve a principal the other
+    enrolled, which is the cross-adapter takeover `providers/` exists to keep
+    out of common code.
+
     `wa_id` is absent for a user with a username, so it is an enrollment hint
     rather than an identity, and `username` is display-only — never an
-    authentication fallback.
+    authentication fallback. Baileys needs no `wa_id` of its own: the
+    subscriber number is inside the JID, and `identity.jid_number` is what
+    takes it out.
+
+    `jid` defaults to `None` so every Cloud construction — the webhook
+    normalizer's, and a dozen in the suite — is unchanged by the field's
+    arrival.
     """
     bsuid: str
     wa_id: str | None
     username: str | None
+    jid: str | None = None
 
 
 @dataclass(frozen=True)
 class InboundWhatsAppEvent:
+    """One inbound message, in whichever adapter's terms it arrived.
+
+    **`waba_id` and `phone_number_id` are Cloud-shaped, and an adapter with no
+    Meta account fills them with `""`.** They are the WhatsApp Business
+    Account and the business phone number id, and `webhook.normalize_payload`
+    checks both against the configured Cloud account *before* it builds the
+    record — so past that point nothing reads either, on any path. Baileys has
+    no honest value for them, and `baileys_protocol.NO_CLOUD_ACCOUNT` is where
+    the empty one is written down with its reasoning.
+
+    They stay **required** rather than gaining a default. A default would let a
+    future Cloud path omit one silently, which is the check above going quiet;
+    growing a per-adapter record for two fields with no reader is the widening
+    Stage 2 of the provider seam declined to make to `WhatsAppProviderCaps` for
+    the same reason.
+    """
     message_id: str
     waba_id: str
     phone_number_id: str
@@ -79,7 +111,14 @@ class WhatsAppDeliveryEvent:
     interpreted: a status payload is evidence *after* a send, not
     authorization before one, and old conversation-pricing names do not
     describe current cost. `billable = None` means Meta said nothing, which is
-    neither free nor paid.
+    neither free nor paid — and it is the honest answer for an adapter with no
+    pricing concept at all, where `False` would assert a fact nobody observed.
+
+    `waba_id`, `phone_number_id` and `recipient_id` follow
+    `InboundWhatsAppEvent`'s rule: Cloud-shaped, `""` for an adapter with no
+    Meta account, required rather than defaulted. `recipient_id` is read
+    nowhere at all — the ledger deliberately stores no destination, since the
+    binding is resolved immediately before each send.
     """
     message_id: str
     waba_id: str
@@ -114,6 +153,42 @@ class WhatsAppParkedStatus:
 
 
 WhatsAppEvent: TypeAlias = InboundWhatsAppEvent | WhatsAppDeliveryEvent
+
+
+@dataclass(frozen=True)
+class WhatsAppWebhookRequest:
+    """One inbound HTTP callback, before any provider has looked at it.
+
+    `SmsWebhookRequest`'s counterpart, one field short: that record carries a
+    `public_url` because Twilio signs the URL the request arrived at, and no
+    WhatsApp provider does — Meta signs the body alone. A field no adapter
+    reads is a field the next one is tempted to fill in with a guess.
+
+    The headers are the request's as received, so a reader looks a name up
+    case-insensitively (`http_headers.header_value`) rather than indexing.
+    """
+    raw_body: bytes
+    headers: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class WhatsAppWebhookResult:
+    """What one authenticated callback yielded, and what to answer it with.
+
+    `events` is a tuple rather than the SMS seam's single ``event | None``,
+    and that is the one place the two surfaces genuinely differ rather than
+    merely being written twice: a Meta callback carries an entry/change/value
+    tree that can hold several messages and several statuses, and the whole
+    batch is normalized before the common code opens its transaction — so an
+    element it cannot read cannot leave earlier elements applied behind a 200
+    nobody will retry. An empty tuple is an authenticated callback holding
+    nothing this surface models, acknowledged so the provider stops retrying
+    and changing nothing.
+    """
+    events: tuple[WhatsAppEvent, ...]
+    response_status: int
+    response_content_type: str | None
+    response_body: bytes
 
 
 @dataclass(frozen=True)

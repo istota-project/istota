@@ -60,6 +60,26 @@ def bsuid_fingerprint(value: str) -> str:
     return short_fingerprint("istota-whatsapp-bsuid-v1", value, length=12)
 
 
+def jid_fingerprint(value: str) -> str:
+    """The one-way stand-in for a Baileys JID in a log line or an alert body.
+
+    `bsuid_fingerprint`'s twin, and it matters more: a BSUID is an opaque
+    business-scoped identifier, while a JID is `<number>@s.whatsapp.net` with
+    the subscriber's phone number in plain digits. The rotating app log is
+    read back by the admin Logs pane and an alert body reaches a notification
+    surface, so neither may carry one.
+
+    Its own salt domain, for the reason `short_fingerprint` states: two
+    surfaces fingerprinting the same person must not agree, or one log becomes
+    a lookup table for the other. Here that is not hypothetical — the same
+    number can be a user's SMS binding and their WhatsApp bootstrap number, so
+    a shared domain would join the two logs on it.
+    """
+    from ...user_profiles import short_fingerprint
+
+    return short_fingerprint("istota-whatsapp-jid-v1", value, length=12)
+
+
 def message_fingerprint(value: str | None) -> str:
     """The one-way stand-in for a Meta message id in a log line.
 
@@ -226,6 +246,7 @@ __all__ = [
     "WhatsAppSendResult",
     "WhatsAppTransport",
     "WhatsAppUserIdentity",
+    "jid_fingerprint",
     "message_fingerprint",
     "whatsapp_conversation_token",
 ]

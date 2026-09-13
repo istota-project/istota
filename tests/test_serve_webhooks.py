@@ -189,13 +189,13 @@ class TestServeWebhookMount:
         from fastapi import FastAPI
 
         from istota import serve, webhook_receiver as wr
-        from istota.config import WhatsAppConfig
+        from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         monkeypatch.setattr(
             "istota.web_app._config",
             self._config(
-                tmp_path, location=False, whatsapp=WhatsAppConfig(enabled=True),
+                tmp_path, location=False, whatsapp=build_whatsapp_config(enabled=True),
             ),
             raising=False,
         )
@@ -219,14 +219,14 @@ class TestServeWebhookMount:
         from fastapi import FastAPI
 
         from istota import serve
-        from istota.config import WhatsAppConfig
+        from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(
             "istota.web_app._config",
             self._config(
                 tmp_path,
                 location=False,
-                whatsapp=WhatsAppConfig(
+                whatsapp=build_whatsapp_config(
                     waba_id="100000000000001",
                     phone_number_id="100000000000002",
                     business_phone_number="+15551230000",
@@ -251,7 +251,9 @@ class TestServeWebhookMount:
         from fastapi import FastAPI
 
         from istota import serve, webhook_receiver as wr
-        from istota.config import SmsConfig, WhatsAppConfig
+        from istota.config import SmsConfig
+
+        from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         monkeypatch.setattr(
@@ -259,7 +261,7 @@ class TestServeWebhookMount:
             self._config(
                 tmp_path,
                 sms=SmsConfig(enabled=True),
-                whatsapp=WhatsAppConfig(enabled=True),
+                whatsapp=build_whatsapp_config(enabled=True),
             ),
             raising=False,
         )
@@ -290,13 +292,13 @@ class TestServeWebhookMount:
         from fastapi.testclient import TestClient
 
         from istota import serve, webhook_receiver as wr
-        from istota.config import WhatsAppConfig
+        from .support.whatsapp_config import build_whatsapp_config
 
         monkeypatch.setattr(wr, "reload_config", lambda: None)
         config = self._config(
             tmp_path,
             location=False,
-            whatsapp=WhatsAppConfig(enabled=True, verify_token="verify-placeholder"),
+            whatsapp=build_whatsapp_config(enabled=True, verify_token="verify-placeholder"),
         )
         monkeypatch.setattr("istota.web_app._config", config, raising=False)
         monkeypatch.setattr(wr, "_config", config, raising=False)
@@ -314,3 +316,90 @@ class TestServeWebhookMount:
             )
 
         assert resp.status_code == 403
+
+    def test_a_provider_receiving_over_its_own_transport_mounts_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        """``/webhooks/whatsapp`` is Meta's signed callback and nothing else
+        answers there.
+
+        A deployment that selected an adapter with no HTTP callback of its own
+        would publish a route nothing can authenticate — so the mount gate is
+        `enabled` *and* an active provider that has a webhook at all. It is
+        deliberately not "some built adapter has one", which is
+        ``callback_only_names`` and would keep Meta's route alive on a
+        deployment that switched away from Cloud; that is the SMS rule, and
+        this surface's is that turning the block off turns the account off.
+
+        **Live coverage since the per-provider split.** This was a forward pin
+        while the Cloud-only structural arms ran unconditionally under
+        ``enabled``, which made an enabled ``baileys`` block a config
+        ``load_config`` refused and this gate unreachable in production. The
+        split landed with the nested blocks, so the state is now an ordinary
+        `config.toml`; ``TestTheMountGateOnALoadedConfig`` reaches it that way.
+        """
+        from fastapi import FastAPI
+
+        from istota import serve
+        from .support.whatsapp_config import build_whatsapp_config
+
+        monkeypatch.setattr(
+            "istota.web_app._config",
+            self._config(
+                tmp_path,
+                location=False,
+                whatsapp=build_whatsapp_config(enabled=True, provider="baileys"),
+            ),
+            raising=False,
+        )
+        parent = FastAPI()
+        serve._maybe_mount_webhooks(parent)
+
+        assert not [
+            r for r in parent.routes
+            if getattr(r, "path", "").startswith("/webhooks")
+        ]
+
+    def test_the_handlers_refuse_on_the_predicate_the_mount_reads(
+        self, tmp_path, monkeypatch,
+    ):
+        """Asked again at the route rather than left to the mount.
+
+        ``webhook_receiver`` includes its own router unconditionally, so a
+        deployment running the standalone receiver has both handlers attached
+        whatever the provider is — and a combined process can have its config
+        reloaded underneath an already-included router. Both answer 404, which
+        is what the absence of the route answers and what "turning the block
+        off is turning the account off" has always meant.
+        """
+        from fastapi.testclient import TestClient
+
+        from istota import webhook_receiver as wr
+        from .support.whatsapp_config import build_whatsapp_config
+
+        config = self._config(
+            tmp_path,
+            location=False,
+            whatsapp=build_whatsapp_config(
+                enabled=True,
+                provider="baileys",
+                verify_token="verify-placeholder",
+                app_secret="app-secret-placeholder",
+            ),
+        )
+        monkeypatch.setattr(wr, "_config", config, raising=False)
+        client = TestClient(wr.app)
+
+        handshake = client.get("/webhooks/whatsapp", params={
+            "hub.mode": "subscribe",
+            "hub.verify_token": "verify-placeholder",
+            "hub.challenge": "1234",
+        })
+        batch = client.post(
+            "/webhooks/whatsapp",
+            content=b"{}",
+            headers={"content-type": "application/json"},
+        )
+
+        assert handshake.status_code == 404
+        assert batch.status_code == 404

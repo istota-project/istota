@@ -402,13 +402,14 @@ async def verify_whatsapp_subscription(request: Request):
     why nothing here logs the parameters either — not the presented token and
     not the configured one, on any branch.
     """
+    from .config import whatsapp_webhooks_enabled  # noqa: PLC0415
     from .transport.whatsapp.webhook import (  # noqa: PLC0415
         WhatsAppWebhookError,
         verify_subscription,
     )
 
     config = _config
-    if config is None or not config.whatsapp.enabled:
+    if config is None or not whatsapp_webhooks_enabled(config):
         return Response(status_code=404)
     try:
         challenge = verify_subscription(config, dict(request.query_params))
@@ -430,6 +431,7 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
     duplicate that answered anything else would be redelivered for ever.
     """
     from . import db  # noqa: PLC0415
+    from .config import whatsapp_webhooks_enabled  # noqa: PLC0415
     from .transport.whatsapp.webhook import (  # noqa: PLC0415
         MAX_WEBHOOK_BODY,
         WhatsAppWebhookError,
@@ -438,8 +440,15 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
         parse_webhook,
     )
 
+    # The same predicate `serve._maybe_mount_webhooks` mounts on, asked again
+    # here rather than left to the mount: a process can be started with the
+    # router included and its config reloaded underneath it, and both handlers
+    # answering 404 is what "turning the block off is turning the account off"
+    # has always meant. It now also covers a provider that receives over its
+    # own transport, where Meta's signed callback is a route nothing can
+    # authenticate.
     config = _config
-    if config is None or not config.whatsapp.enabled:
+    if config is None or not whatsapp_webhooks_enabled(config):
         return Response(status_code=404)
     raw_body = await _bounded_body(request, MAX_WEBHOOK_BODY)
     if raw_body is None:
@@ -452,7 +461,14 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
 
     try:
         with db.get_db(config.db_path) as conn:
-            results = handle_whatsapp_batch(conn, config, events)
+            # Named rather than defaulted: this route is Meta's signed
+            # callback and nothing else, so the provenance is a fact about
+            # the route. The gate inside compares it against the *active*
+            # provider, which is what refuses an inbound message arriving for
+            # an adapter this deployment no longer runs.
+            results = handle_whatsapp_batch(
+                conn, config, events, provider=db.WHATSAPP_LEGACY_PROVIDER,
+            )
     except Exception:
         # Every exception, not just `sqlite3.Error`. The transaction rolls back
         # either way — `get_db` closes the connection, which discards an

@@ -1,0 +1,11 @@
+# The build context is this directory, so everything here is sent to the daemon
+# unless it is named. `node_modules` is the one that matters: the Ansible role
+# installs it into this same directory in a checkout, so a host that runs both
+# shapes would transfer a few hundred megabytes on every build, for a tree the
+# Dockerfile copies nothing out of and installs from the lockfile instead.
+node_modules
+
+# Documentation and the build recipe itself are not in the image.
+README.md
+Dockerfile
+.dockerignore

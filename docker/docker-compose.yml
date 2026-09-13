@@ -440,6 +440,15 @@ services:
       # that signs every webhook body, and the verify token Meta echoes on
       # the subscription handshake.
       ISTOTA_WHATSAPP_ENABLED: ${ISTOTA_WHATSAPP_ENABLED:-false}
+      # Which adapter runs the surface. Empty is not "the default" — it means
+      # the generator writes no `provider` key, so a populated Cloud block
+      # still selects `whatsapp_cloud` and an empty one takes the `baileys`
+      # dataclass default. See render-config.sh.
+      ISTOTA_WHATSAPP_PROVIDER: ${ISTOTA_WHATSAPP_PROVIDER:-}
+      # What the daemon spawns for the Baileys sidecar. Empty on this shape and
+      # meant to stay empty: the `whatsapp-baileys` service runs it, and a
+      # second sidecar against one session directory corrupts the credential.
+      ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND: ${ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND:-}
       ISTOTA_WHATSAPP_WABA_ID: ${ISTOTA_WHATSAPP_WABA_ID:-}
       ISTOTA_WHATSAPP_PHONE_NUMBER_ID: ${ISTOTA_WHATSAPP_PHONE_NUMBER_ID:-}
       ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER: ${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER:-}
@@ -881,6 +890,44 @@ services:
         # receiver logs each event itself under a stable name, without it.
         exec uv run uvicorn istota.webhook_receiver:app --host 0.0.0.0 --port "$${ISTOTA_WEBHOOKS_PORT}" --no-access-log
     command: []
+    restart: unless-stopped
+
+  whatsapp-baileys:
+    build:
+      # This directory, not the repository root: the program is three files and
+      # needs nothing from the tree.
+      context: whatsapp-baileys
+      dockerfile: Dockerfile
+    # Its own profile, and not `whatsapp`, because the two adapters need
+    # opposite things: Cloud needs the webhook receiver and no sidecar, Baileys
+    # needs the sidecar and no receiver. A compose profile cannot read
+    # `provider` out of the rendered config, so the operator names the one that
+    # matches — `whatsapp` for Meta, `whatsapp-baileys` for a paired session.
+    profiles:
+      - whatsapp-baileys
+    depends_on:
+      # The daemon owns the listener. The sidecar retries a missing socket
+      # every two seconds either way, so this only saves a burst of reconnect
+      # lines on a cold start; `service_started` is all there is to wait for,
+      # since the istota service declares no healthcheck.
+      istota:
+        condition: service_started
+    volumes:
+      # The whole data volume, for one directory and one socket in it. Both
+      # live beside db_path, which render-config.sh writes as
+      # /data/db/istota.db, and both are the daemon's to create — the sidecar
+      # dials the socket and Baileys writes the session files, so this
+      # container must see the same inodes rather than a copy.
+      - istota_data:/data
+    environment:
+      # Derived from db_path above rather than configured: the socket name has
+      # no config override at all, and session_dir is left unset in the render
+      # so it resolves to exactly this path.
+      ISTOTA_BAILEYS_SOCKET: /data/db/whatsapp-baileys.sock
+      ISTOTA_BAILEYS_SESSION_DIR: /data/db/whatsapp-baileys-session
+      ISTOTA_BAILEYS_LOG_LEVEL: ${ISTOTA_BAILEYS_LOG_LEVEL:-info}
+    # No ports and no expose: it speaks to the daemon over the volume's socket
+    # and to WhatsApp outbound, and nothing ever dials it.
     restart: unless-stopped
 
   # No devbox service here, deliberately. The bot could never reach one in

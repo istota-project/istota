@@ -155,22 +155,22 @@ class WhatsAppClient:
         # load, so nothing shipped reaches that branch.
         from pywa_async import WhatsApp  # noqa: PLC0415
 
-        whatsapp = config.whatsapp
-        self._phone_number_id = whatsapp.phone_number_id
+        cloud = config.whatsapp.cloud
+        self._phone_number_id = cloud.phone_number_id
         self._owns_session = session is None
         self._session = session or httpx.AsyncClient(
-            timeout=httpx.Timeout(float(whatsapp.request_timeout_seconds)),
+            timeout=httpx.Timeout(float(cloud.request_timeout_seconds)),
         )
         kwargs: dict[str, object] = {
-            "phone_id": whatsapp.phone_number_id,
-            "token": whatsapp.access_token,
-            "waba_id": whatsapp.waba_id,
-            "app_secret": whatsapp.app_secret,
+            "phone_id": cloud.phone_number_id,
+            "token": cloud.access_token,
+            "waba_id": cloud.waba_id,
+            "app_secret": cloud.app_secret,
             "session": self._session,
         }
-        if whatsapp.graph_api_version:
+        if cloud.graph_api_version:
             # `v25` and `v25.0` both configured; PyWa wants the bare number.
-            kwargs["api_version"] = whatsapp.graph_api_version.lstrip("vV")
+            kwargs["api_version"] = cloud.graph_api_version.lstrip("vV")
         # No `server`, `webhook_endpoint`, `callback_url` or `verify_token`:
         # istota owns the HTTP surface and PyWa is never handed any part of it.
         self._client = WhatsApp(**kwargs)
