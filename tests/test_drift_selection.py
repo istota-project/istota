@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -97,6 +98,18 @@ def _run(project: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     env.pop("ISTOTA_DESELECT_TIERS", None)
     env.pop("TESTMON_DATAFILE", None)
     env["PYTEST_ADDOPTS"] = ""
+    # Forced rather than scrubbed, and it is the regression test for ISSUE-493.
+    # `_reported` scrapes the child's *terminal rendering*, so a shell exporting
+    # `PY_COLORS=1` or `FORCE_COLOR=1` put an escape between the space and the
+    # word — `test_x \x1b[32mPASSED\x1b[0m` — and the scrape came back empty
+    # while the child had selected and passed exactly the right three tests.
+    # The first run's `4 passed` check survived it (colour wraps that phrase
+    # whole), so the fixture went on and the three positive assertions below
+    # failed against an empty set while the negative control passed vacuously:
+    # the guard reported the helper broken when the harness was. Setting it here
+    # keeps `run_nested_pytest`'s `--color=no` under measurement instead of
+    # leaving the guard at the mercy of whichever shell ran the suite.
+    env["PY_COLORS"] = "1"
     return run_nested_pytest(
         # `cacheprovider=True`: testmon reads the `lf` option off the config and
         # aborts the session without it, so this is the one caller that keeps it.
@@ -124,6 +137,46 @@ def _reported(output: str) -> set[str]:
     return names
 
 
+#: The child's closing summary line, and the count in it. Anchored on the rule
+#: rather than on the phrase, which appears in a `-v` run's captured output and
+#: assertion messages as readily as in the line this is about — `re.search`
+#: takes the first match, so an unanchored pattern answers with whichever
+#: occurrence came first.
+_SUMMARY_RE = re.compile(r"^=+ (.*?) =+$", re.M)
+_PASSED_RE = re.compile(r"(\d+) passed")
+
+
+def _passed(output: str) -> int | None:
+    """How many tests the child's closing summary reports as **passed**.
+
+    The second reading of the same run, and the two have to agree. `_reported`
+    scrapes per-test lines and answers the empty set for a rendering it cannot
+    parse; the summary is a different line in a different format, so a scrape
+    that has stopped working disagrees with it rather than looking like a run
+    that selected nothing (ISSUE-493). Passes rather than tests *run*, since
+    `_reported` counts only the ones that passed.
+
+    `None` means the child said `no tests ran` — testmon selected nothing,
+    which is a legitimate outcome here and the real ISSUE-459 regression
+    signal. It is deliberately not the same value as nought passed and not the
+    same as an unreadable summary: the caller has to answer those three
+    differently, and collapsing any pair of them is how this check goes
+    vacuous. A summary that is neither raises, because there is no honest
+    answer to give.
+    """
+    summaries = _SUMMARY_RE.findall(output)
+    if not summaries:
+        raise AssertionError(f"the child printed no summary line:\n{output[-3000:]}")
+    # The last one: `test session starts` is a summary line too.
+    final = summaries[-1]
+    if "no tests ran" in final:
+        return None
+    found = _PASSED_RE.search(final)
+    if not found:
+        raise AssertionError(f"unreadable summary line {final!r}:\n{output[-3000:]}")
+    return int(found.group(1))
+
+
 @pytest.fixture(scope="module")
 def selection(tmp_path_factory) -> set[str]:
     """Names selected by a second run, after one function's body changed."""
@@ -140,7 +193,30 @@ def selection(tmp_path_factory) -> set[str]:
 
     second = _run(project)
     assert second.returncode in (0, 5), second.stdout[-3000:] + second.stderr[-2000:]
-    return _reported(second.stdout)
+
+    names = _reported(second.stdout)
+    # The harness saying it is alive, before any test reads the set. Without
+    # it the three assertions below fail one by one against an empty set, which
+    # reads as `source_of` having stopped recording — the diagnosis ISSUE-493
+    # was filed under, and it took a hand-built probe to rule out.
+    #
+    # Two outcomes, and collapsing them is what makes this check vacuous.
+    # `no tests ran` is testmon selecting nothing — a genuine result, and the
+    # ISSUE-459 regression this file exists to report, so it belongs to the
+    # assertions below rather than here. Anything else must agree with the
+    # scrape. Read the exit status for neither: measured, a run that selects
+    # nothing exits *0* rather than the 5 the obvious version of this asserted,
+    # which would have turned the real regression into a harness error.
+    passed = _passed(second.stdout)
+    if passed is not None:
+        assert len(names) == passed, (
+            "the per-test scrape and the child's own summary disagree, so the "
+            "harness cannot read this run and nothing below it means "
+            f"anything:\nscraped {sorted(names)}\n"
+            + second.stdout[-3000:]
+            + second.stderr[-2000:]
+        )
+    return names
 
 
 def test_the_executing_test_is_selected(selection):
