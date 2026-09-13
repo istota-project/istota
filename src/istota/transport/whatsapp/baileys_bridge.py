@@ -25,10 +25,13 @@ second factor and no revocation short of unlinking the device. It is made 0700
 and *asserted* 0700 on an `O_NOFOLLOW` descriptor every start — `mkdir`'s mode
 applies only to a directory the call creates, and the second run is the case
 that has to be right — and the same descriptor is what refuses one belonging to
-another uid. The sidecar is spawned under `umask 0o077` so its own files land
-0600 and with its stdio discarded so it cannot print into the daemon's log; the
-directory is bound into no sandbox at any path; and neither its contents nor a
-`qr` payload is ever logged, a QR being the pairing credential itself.
+another uid. The sidecar sets `umask 0o077` **on itself** so its own files land
+0600 — the daemon's spawn passes the same umask, but that reaches only the
+`istota serve` shape, and the systemd unit and the compose service were both
+writing 0644 until the program took it over (`applyPrivateUmask`) — and its
+stdio is discarded so it cannot print into the daemon's log; the directory is
+bound into no sandbox at any path; and neither its contents nor a `qr` payload
+is ever logged, a QR being the pairing credential itself.
 
 `sidecar_argv=()` is a first-class mode rather than a test affordance: the
 Ansible shape runs the sidecar as its own systemd unit, so the bridge listens
@@ -742,9 +745,15 @@ class BaileysBridge:
                     *self._sidecar_argv,
                     env=self._child_env(),
                     # The sidecar creates the session files, so its umask is
-                    # the only thing that decides their mode at birth.
-                    # `harden_session_files` corrects a stray one afterwards
-                    # and is the backstop, not the mechanism.
+                    # the only thing that decides their mode at birth. It sets
+                    # the same one on itself, which is what covers the two
+                    # shapes this spawn does not reach — the systemd unit and
+                    # the compose service. Kept here because it binds the child
+                    # from `execve` rather than from its first statement, and
+                    # because nothing outside the program should have to trust
+                    # the program for this. `harden_session_files` corrects a
+                    # stray one afterwards and is the backstop, not either
+                    # mechanism.
                     umask=0o077,
                     cwd=str(self._session_dir),
                     # **Discarded, not inherited.** Inherited, the Node child

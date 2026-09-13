@@ -752,6 +752,72 @@ class TestTheSidecarsControlFlow:
         assert "const mine = () => this.sock === sock;" in source
 
 
+class TestTheSidecarCreatesPrivateFiles:
+    """The session directory holds a full-account WhatsApp credential, and
+    the program is the only place all three of its launch shapes pass through.
+
+    The daemon's own spawn passes `umask=0o077`, which covers exactly one of
+    them. On Ansible the sidecar is a systemd unit, whose default `UMask` is
+    0022; on compose it is a service of its own, and a compose service cannot
+    express a umask at all. So on both deployment shapes every key file
+    Baileys wrote after pairing landed 0644, and `harden_session_files` — which
+    runs once, when the bridge starts — could narrow what was there and not
+    what a live session writes next.
+
+    **Executed, not asserted against the source**, and it is one of the few
+    things here that can be: `applyPrivateUmask` touches nothing Baileys owns,
+    so `require('./index.js')` reaches it with no `node_modules` in the tree.
+    A source assertion would say the call is written and not that a file
+    created after it is private, which is the property.
+    """
+
+    @staticmethod
+    def _file_mode_after(prelude: str, tmp_path) -> int:
+        """Create a file in a child node process and report its mode.
+
+        `prelude` runs first. The child is started under a deliberately wide
+        umask, so a mode of 0600 can only have come from the program.
+        """
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        target = tmp_path / "creds.json"
+        script = (
+            "process.umask(0o022);"
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            f"{prelude}"
+            f"require('fs').writeFileSync({json.dumps(str(target))}, 'x');"
+        )
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        return target.stat().st_mode & 0o777
+
+    def test_a_file_written_after_it_is_private(self, tmp_path):
+        assert self._file_mode_after("m.applyPrivateUmask();", tmp_path) == 0o600
+
+    def test_the_control_says_the_wide_mode_is_reachable(self, tmp_path):
+        """Without the call the same write lands 0644, which is what the two
+        external shapes were doing. A test asserting a mode has to be shown
+        able to see the other one, or it is asserting the ambient umask."""
+        assert self._file_mode_after("", tmp_path) == 0o644
+
+    def test_the_entry_point_applies_it_before_anything_can_write(self):
+        """Exporting it is what makes the test above possible; calling it is
+        what makes it true of the deployment. `main` is the first thing in the
+        program that can create a file, so the call is its first statement —
+        ahead of the exit-2 arm, which has no log destination to write to and
+        no reason to be the one branch outside the invariant."""
+        lines = _js_function("main").splitlines()[1:]
+        statements = [
+            line.strip() for line in lines
+            if line.strip() and not line.strip().startswith(("//", "*", "/*"))
+        ]
+
+        assert statements[0] == "applyPrivateUmask();"
+
+
 class TestThePinnedLibrary:
     def test_baileys_is_pinned_to_an_exact_version(self):
         """A range is what makes a sidecar that worked yesterday stop today:

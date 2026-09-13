@@ -32,6 +32,11 @@
  *      destination JID and, on a Boom error, the whole request. The Python
  *      side maps `reason` through a fixed table, so anything sent must be one
  *      of that table's keys.
+ *   4. **Nothing this process creates is wider than 0600.** The session files
+ *      are a full-account WhatsApp credential and Baileys writes them, so the
+ *      only thing that decides their mode at birth is this process's umask.
+ *      `applyPrivateUmask` is what sets it; see that function for why it is
+ *      set here rather than by whatever started the program.
  *
  * A real connection needs a real WhatsApp account, so none of this is in the
  * default test suite and none of it can be: what is covered here is the wire
@@ -91,8 +96,8 @@ const LOG_PATH = SESSION_DIR ? path.join(SESSION_DIR, 'sidecar.log') : '';
 /*
  * One line to a file inside the session directory, appended, never to stdio.
  *
- * The directory is 0700 and the daemon spawns this with umask 0o077, so the
- * log is as private as the credential beside it — which it has to be, because
+ * The directory is 0700 and `applyPrivateUmask` has run, so the log is as
+ * private as the credential beside it — which it has to be, because
  * a WhatsApp diagnostic is about somebody's conversation. What still must not
  * go in it is a message body or a QR: this takes a fixed message and a small
  * bag of labels, never an arbitrary object, so there is no shape that quietly
@@ -852,7 +857,34 @@ function silentLogger() {
 
 // --- entry point -----------------------------------------------------------
 
+/*
+ * Make every file this process creates private to the account running it.
+ *
+ * The session directory holds a **full-account WhatsApp credential**: anything
+ * that can read it can send and read as the paired number, with no second
+ * factor and nothing the account holder would see. Baileys writes those files,
+ * so the daemon cannot create them at the right mode — the umask of the
+ * process Baileys runs in is the only thing that decides it at birth, and
+ * `harden_session_files` on the Python side runs once when the bridge starts
+ * and so can only narrow what is already there. A live session writes a new
+ * pre-key every few messages.
+ *
+ * Set **here** because the program is the one place all three launch shapes
+ * pass through. The daemon's own spawn already passes `umask=0o077` and covers
+ * exactly one of them: on Ansible this is a systemd unit, whose default
+ * `UMask` is 0022, and on compose it is a service of its own — and a compose
+ * service cannot express a umask at all. Both of those were writing 0644, and
+ * `doctor`'s `whatsapp.baileys_session` check is what said so.
+ *
+ * The unit sets `UMask=0077` as well. That is defence in depth and the half an
+ * operator reading the unit can see; this is the mechanism.
+ */
+function applyPrivateUmask() {
+  process.umask(0o077);
+}
+
 function main() {
+  applyPrivateUmask();
   if (!SOCKET_PATH || !SESSION_DIR) {
     // No log destination either — the session directory is where the log
     // lives. Exiting non-zero is the only channel left, and the daemon's
@@ -901,6 +933,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  applyPrivateUmask,
   PROTOCOL_VERSION,
   MAX_LINE_BYTES,
   MSG_HELLO,

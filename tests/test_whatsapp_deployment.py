@@ -1024,6 +1024,18 @@ class TestTheAnsibleSidecarUnit:
         assert "ReadWritePaths=/srv/app/istota/data" in rendered
         assert "ReadWritePaths=/srv/app/istota\n" not in rendered
 
+    def test_the_unit_creates_nothing_wider_than_the_credential(self):
+        """systemd's default `UMask` is 0022, so every session file Baileys
+        wrote under this unit landed 0644 — a full-account WhatsApp credential
+        readable by every account on the host.
+
+        Defence in depth rather than the mechanism: the program sets its own
+        umask, which is the only thing that reaches the compose shape as well,
+        since a compose service cannot express one. This is the half a reader
+        of the unit can see.
+        """
+        assert "UMask=0077" in self._unit()
+
     def test_the_unit_carries_a_memory_ceiling(self):
         """As on the web and webhook units, and omitted when set empty."""
         assert "MemoryHigh=512M" in self._unit()
