@@ -287,16 +287,15 @@ class TestPairingAgainstARealSidecar:
     ):
         _use_sidecar(monkeypatch, _write_sidecar(sockets, qr="2@PAIRINGPAYLOAD=="))
         path = _config_file(tmp_path, sockets)
-        # `shutil.which` is asked for `qrencode`; without it the payload and
-        # the command that renders it are printed instead, which is the branch
-        # a host without that package takes.
-        monkeypatch.setattr("shutil.which", lambda name: None)
 
         assert cli.cmd_whatsapp_pair(_args(path)) == 0
 
         out = capsys.readouterr().out
-        assert "2@PAIRINGPAYLOAD==" in out
-        assert "qrencode" in out
+        # Drawn, not dictated: the operator sees a code to scan and the
+        # payload never reaches the terminal at all.
+        assert "\u2588" in out
+        assert "2@PAIRINGPAYLOAD==" not in out
+        assert "Linked Devices" in out
 
     def test_a_session_that_cannot_be_used_fails_rather_than_waiting(
         self, tmp_path, sockets, capsys, monkeypatch,
@@ -327,50 +326,49 @@ class TestPairingAgainstARealSidecar:
 
 
 class TestTheCodeIsNeverWrittenDown:
-    def test_rendering_reaches_qrencode_on_stdin_rather_than_argv(
-        self, monkeypatch,
-    ):
-        """A QR is the pairing credential for the whole account. On the
-        operator's own terminal at their own request it is theirs to see; in
-        anybody's `ps` output it is not."""
-        seen = {}
+    def test_the_drawn_code_does_not_carry_the_payload_with_it(self, capsys):
+        """A QR is the pairing credential for the whole account. Drawing it is
+        what the operator asked for; printing the string beside it hands the
+        same credential to anything scraping the terminal, and to the operator
+        pasting an error report."""
+        cli._render_qr("2@SECRET==")
 
-        class _Result:
-            returncode = 0
-            stdout = b"[drawn]"
+        out = capsys.readouterr().out
+        assert "\u2588" in out
+        assert "2@SECRET==" not in out
 
-        def _run(argv, **kwargs):
-            seen["argv"] = argv
-            seen["input"] = kwargs.get("input")
-            return _Result()
+    def test_it_reaches_no_other_process(self, monkeypatch, capsys):
+        """The renderer used to pipe the payload to `qrencode`. Nothing is
+        spawned now, so the credential reaches no argv, no pipe and no
+        process table."""
+        def _refuse(*a, **k):
+            raise AssertionError("_render_qr spawned a subprocess")
 
-        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/qrencode")
-        monkeypatch.setattr("subprocess.run", _run)
+        monkeypatch.setattr("subprocess.run", _refuse)
+        monkeypatch.setattr("subprocess.Popen", _refuse)
 
         cli._render_qr("2@SECRET==")
 
-        assert "2@SECRET==" not in " ".join(seen["argv"])
-        assert seen["input"] == b"2@SECRET=="
+        assert "\u2588" in capsys.readouterr().out
 
-    def test_a_qrencode_that_fails_falls_back_rather_than_raising(
+    def test_a_draw_that_fails_falls_back_rather_than_raising(
         self, monkeypatch, capsys,
     ):
         """`_render_qr` runs on the bridge's read loop through its callback,
         where a raise is swallowed with no `exc_info` — so a failure here
         would lose the code with nothing anywhere saying why."""
-        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/qrencode")
+        import segno
+
         monkeypatch.setattr(
-            "subprocess.run",
-            lambda *a, **k: (_ for _ in ()).throw(OSError("no such file")),
+            segno, "make",
+            lambda *a, **k: (_ for _ in ()).throw(ValueError("too long")),
         )
 
         cli._render_qr("2@SECRET==")
 
         assert "2@SECRET==" in capsys.readouterr().out
 
-    def test_it_writes_the_payload_to_no_log(self, caplog, monkeypatch):
-        monkeypatch.setattr("shutil.which", lambda name: None)
-
+    def test_it_writes_the_payload_to_no_log(self, caplog):
         with caplog.at_level(0):
             cli._render_qr("2@SECRET==")
 

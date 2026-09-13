@@ -1627,39 +1627,53 @@ def _whatsapp_socket_is_live(path) -> bool:
 
 
 def _render_qr(payload: str) -> None:
-    """Draw the pairing code in the terminal, or say how to draw it.
+    """Draw the pairing code in the terminal.
 
-    **No new dependency for this.** `qrencode` is a one-package install and is
-    already on most hosts; where it is not, the payload itself is printed with
-    the command that renders it. Printing it is not a leak in the way logging
-    it would be — it is the same credential the QR *is*, on the operator's own
-    terminal, at their explicit request — but it never goes anywhere durable:
-    not through `logging`, not into a file, and the payload is piped to
-    `qrencode` on **stdin** rather than passed as an argument, so it does not
-    reach anybody's `ps` output.
+    **Drawn in this process, by `segno`.** It used to shell out to `qrencode`
+    and print the raw payload where that package was absent, which made the
+    host's package list decide whether a pairing could be completed at all —
+    on the one host where an operator is least likely to be able to install
+    something, at the moment they need it. A pure-Python renderer with no
+    dependencies of its own costs less than the apt install it replaces.
+
+    Rendering in-process is also the stronger handling of the credential. A QR
+    *is* the pairing credential for the whole account: on the operator's own
+    terminal at their own request it is theirs to see, but it now reaches no
+    other process, no argv and no pipe, and it still goes nowhere durable —
+    not through `logging`, not into a file. On success the payload itself is
+    never printed, only the drawing of it.
+
+    `error="l"` matches what WhatsApp's own client encodes at and keeps the
+    code small enough to scan off an 80-column terminal; `compact=True` halves
+    the line count by drawing two rows per character. A 217-byte payload comes
+    out 31 lines by 61 columns.
+
+    Falling back to the payload is kept for the case where the draw itself
+    fails, because this runs on the bridge's read loop through a callback
+    where a raise is swallowed with no `exc_info` — so a failure here would
+    otherwise lose the code with nothing anywhere saying why.
     """
-    import shutil
-    import subprocess
+    import io
 
-    binary = shutil.which("qrencode")
-    if binary:
-        try:
-            result = subprocess.run(
-                [binary, "-t", "ANSIUTF8", "-o", "-"],
-                input=payload.encode("utf-8"),
-                capture_output=True, timeout=10,
-            )
-        except (OSError, subprocess.SubprocessError):
-            result = None
-        if result is not None and result.returncode == 0 and result.stdout:
-            sys.stdout.buffer.write(result.stdout)
-            sys.stdout.flush()
-            print("Scan this from WhatsApp: Settings, Linked Devices, Link a device.")
-            return
+    try:
+        import segno
+
+        buf = io.StringIO()
+        segno.make(payload, error="l").terminal(out=buf, compact=True)
+        drawing = buf.getvalue()
+    except Exception:
+        drawing = ""
+
+    if drawing:
+        sys.stdout.write(drawing)
+        sys.stdout.flush()
+        print("Scan this from WhatsApp: Settings, Linked Devices, Link a device.")
+        return
+
     print(
-        "Install `qrencode` to have the code drawn here. Until then, render "
-        "this payload locally — it is the pairing credential for the whole "
-        "account, so do not paste it into a website:\n"
+        "The code could not be drawn here. Render this payload locally — it "
+        "is the pairing credential for the whole account, so do not paste it "
+        "into a website:\n"
     )
     print(payload)
     print("\n  printf %s '<payload>' | qrencode -t ANSIUTF8\n")

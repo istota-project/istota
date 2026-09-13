@@ -1,0 +1,25 @@
+#!/bin/sh
+# The operator CLI, on PATH and pointed at this deployment's config.
+#
+# Managed by the {{ istota_namespace }} Ansible role. Do not edit: every
+# converge rewrites it.
+#
+# Two problems, one wrapper. The console script lives in the venv and nothing
+# put that on anybody's PATH, so the CLI had to be typed as an absolute path.
+# And the config search order starts at the working directory, so a command
+# run from anywhere but the repository resolved no config and answered about
+# defaults instead — a relative data/istota.db, a [security] block nobody
+# wrote. `doctor` refuses rather than reporting that; the other verbs would
+# have acted on it. The -c below is the same one every `command:` in this role
+# already passes, so an operator's shell and the role agree on which file they
+# mean.
+#
+# -c goes before "$@" so an explicit one still wins: argparse takes the last
+# occurrence.
+#
+# Named for the namespace rather than the package, like every other entry
+# point this role installs. Two deployments on one host each get their own
+# command instead of one silently repointing the other's.
+exec {{ istota_home }}/.venv/bin/{{ istota_package }} \
+    -c {{ istota_repo_dir }}/config/config.toml \
+    "$@"

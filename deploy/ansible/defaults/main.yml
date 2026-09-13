@@ -986,65 +986,62 @@ istota_sms_telnyx_api_key: ""
 istota_sms_telnyx_public_key: ""
 istota_sms_telnyx_messaging_profile_id: ""
 
-# One WhatsApp business number, text only, and outside the room model. Setup is
-# docs/features/whatsapp.md; for the Cloud adapter the callback URL to register
-# with Meta is https://{{ istota_hostname }}/webhooks/whatsapp.
-#
-# Unlike SMS there is no complete-but-inactive shape: the routes are mounted
-# and the account is live only while istota_whatsapp_enabled is true.
+# WhatsApp. One business number, text only, and outside the room model. Setup
+# is docs/features/whatsapp.md. The account is live only while this is true —
+# unlike SMS there is no complete-but-inactive shape.
 istota_whatsapp_enabled: false
-#
-# Which adapter sends and receives: "baileys" (a WhatsApp Web session paired by
-# QR, free and unmetered, run by the sidecar unit below) or "whatsapp_cloud"
-# (Meta's hosted Cloud API, configured by every istota_whatsapp_* value under
-# this one). **Empty does not mean the default**, and that is why it is empty:
-# the role then renders no `provider` key, so a host carrying a waba_id, a
-# phone_number_id or one of the three credentials keeps the Cloud adapter it has
-# always run, while a host carrying none of them takes the `baileys` dataclass
-# default. A Baileys deployment names it explicitly — the webhook-receiver
-# condition and the sidecar unit both read this value, and neither can infer it.
+
+# Which adapter sends and receives. **Empty is not the default**, and that is
+# why it is empty: the role then renders no provider key, so a host carrying
+# Cloud ids or credentials keeps the Cloud adapter it has always run, and a
+# host carrying none takes the baileys default. Name it explicitly for
+# Baileys — the sidecar unit and the webhook-receiver condition both read it
+# and neither can infer it.
 istota_whatsapp_provider: ""
-# What the *daemon* spawns for the Baileys sidecar. Leave empty wherever the
-# sidecar unit below runs it: two Baileys clients against one session directory
-# corrupt the paired credential, and the role refuses the pair outright.
-istota_whatsapp_baileys_sidecar_command: ""
-# Run the sidecar as a systemd unit of its own. On by default, because it is
-# the better shape here: systemd restarts a unit that exited on a logged-out
-# session, which the daemon's in-process supervisor deliberately does not, so a
-# re-pair recovers without touching the scheduler. Turn it off only to run the
-# sidecar somewhere else — and then set istota_whatsapp_baileys_sidecar_command
-# or nothing runs one at all. Ignored unless the Baileys adapter is selected.
-istota_whatsapp_baileys_sidecar_unit: true
-# How much the sidecar writes to sidecar.log inside its 0700 session directory:
-# error | warn | info | debug. It writes nothing to stdout at any level, so
-# that file and the journal's exit statuses are the whole diagnostic surface;
-# the role rotates it.
-istota_whatsapp_baileys_log_level: "info"
-# Soft memory ceiling for the sidecar unit, as on the web and webhook units.
-# Empty omits the directive entirely.
-istota_whatsapp_baileys_memory_high: "512M"
+
+# The number itself. Required under Cloud, optional under Baileys, where the
+# paired session carries its own.
+istota_whatsapp_business_phone_number: ""    # exact E.164
+
+# --- Baileys adapter (provider = "baileys") ---
 #
-# Note for turning any of this on: enabling the sidecar needs one **full** play
-# first. The Node.js install is gated on `not istota_update_only`, while the
-# sidecar's `npm ci` is not, so flipping a host to Baileys with
-# `-e istota_update_only=true` reaches the install with no npm on PATH. Loud
-# rather than silent, and easily avoided by running the play.
+# sidecar_unit runs the sidecar as its own systemd unit, which is the better
+# shape here: systemd restarts one that exited on a logged-out session, so a
+# re-pair recovers without touching the scheduler. sidecar_command is what the
+# *daemon* spawns instead, for running it elsewhere. Setting both is refused —
+# two Baileys clients against one session directory corrupt the paired
+# credential and neither can detect the other.
+#
+# Turning the sidecar on needs one **full** play: the Node install is gated on
+# `not istota_update_only` and the sidecar's npm ci is not, so flipping a host
+# with `-e istota_update_only=true` reaches the install with no npm on PATH.
+istota_whatsapp_baileys_sidecar_unit: true
+istota_whatsapp_baileys_sidecar_command: ""
+istota_whatsapp_baileys_log_level: "info"    # error|warn|info|debug, to sidecar.log
+istota_whatsapp_baileys_memory_high: "512M"  # empty omits the directive
+
+# --- Cloud adapter (provider = "whatsapp_cloud") ---
+#
+# The callback URL to register with Meta is
+# https://{{ istota_hostname }}/webhooks/whatsapp.
 istota_whatsapp_waba_id: ""                  # decimal WABA id, not a number
 istota_whatsapp_phone_number_id: ""          # decimal phone number id
-istota_whatsapp_business_phone_number: ""    # exact E.164
 istota_whatsapp_graph_api_version: ""        # empty follows the pinned PyWa version
 istota_whatsapp_business_timezone: "UTC"     # IANA zone the quota month uses
 istota_whatsapp_request_timeout_seconds: 10
+
 # free_guard sends no templates, caps its own service-message attempts, and
 # blocks every later send the first time Meta reports one as billable.
 # allow_paid is the explicit opt-in to spending; 0 is no local cap there.
 istota_whatsapp_billing_policy: "free_guard"
 istota_whatsapp_monthly_service_attempt_limit: 900
+
 # One approved Meta utility template for delivering a result after the
 # 24-hour service window closes. Paid, so allow_paid only.
 istota_whatsapp_template_enabled: false
 istota_whatsapp_template_name: ""
 istota_whatsapp_template_language: "en_US"
+
 # Vault these three. They reach the units through secrets.env, never
 # config.toml, while istota_use_environment_file is on.
 istota_whatsapp_access_token: ""
