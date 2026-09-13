@@ -644,6 +644,10 @@ class TestTheSidecarsControlFlow:
 
         assert "chatAddress(message.key)" in body
         assert "if (!jid)" in body
+        # Ordering, not merely presence: the withhold has to sit ahead of the
+        # frame, because what it is protecting is the daemon's dedup claim.
+        assert (body.index("hasReadableContent(message)")
+                < body.index("this.link.send(MSG_INBOUND"))
         assert "isForwardableJid" in _js_function("chatAddress")
         assert "@s.whatsapp.net" in _js_const("USER_JID_DOMAIN")
         assert "@lid" in _js_const("LID_JID_DOMAIN")
@@ -981,6 +985,69 @@ class TestTheChatAddressUnderLid:
 
         assert identity.normalize_jid(produced) == "13105551234@s.whatsapp.net"
         assert identity.jid_number(produced) == "+13105551234"
+
+
+class TestAnUndecryptedMessageIsNotForwarded:
+    """A message Baileys could not decrypt **yet**, and why forwarding one
+    loses the message for good.
+
+    A linked device that cannot decrypt a stanza gets a placeholder rather
+    than nothing: Baileys emits it through `messages.upsert` with
+    `messageStubType = CIPHERTEXT` and no `message` content at all, then sends
+    WhatsApp a retry request, and WhatsApp re-sends **the same message id**
+    re-encrypted. So the placeholder is a promise of a real delivery, not a
+    message.
+
+    Forwarding it was wrong twice over, and the second is the expensive half.
+    The user is told "that WhatsApp message type is not supported yet" about
+    an ordinary text message, which is false. And `_claim` writes the id into
+    `processed_whatsapp` — so every retry that follows, carrying the decrypted
+    text, is refused as a duplicate. Observed on a live deployment: one claim
+    row at `unsupported_type` and three `whatsapp.inbound.duplicate` lines
+    behind it, and the message never arrived.
+
+    Dropping it is what lets the retry through, and it is the direction that
+    fails safe: the worst case is silence on a message WhatsApp never managed
+    to redeliver, against a guaranteed loss the other way.
+    """
+
+    _call = staticmethod(TestTheSidecarsPureFunctions._call)
+
+    @staticmethod
+    def _msg(content) -> str:
+        return json.dumps({"message": content} if content is not None else {})
+
+    @pytest.mark.parametrize("content", [None, {}])
+    def test_a_message_with_no_content_is_not_a_message(self, content):
+        assert self._call(f"m.hasReadableContent({self._msg(content)})") is False
+
+    def test_metadata_alone_is_not_content(self):
+        """`messageContextInfo` and a sender-key distribution ride *alongside*
+        content. Arriving on their own they are the same placeholder in a
+        different spelling, and reading them as a message reintroduces the
+        claim this exists to withhold."""
+        for content in ({"messageContextInfo": {}},
+                        {"senderKeyDistributionMessage": {}},
+                        {"messageContextInfo": {}, "senderKeyDistributionMessage": {}}):
+            assert self._call(f"m.hasReadableContent({self._msg(content)})") is False, content
+
+    def test_a_real_message_is_still_a_message(self):
+        """The control, and it carries the case that must not regress: an
+        `imageMessage` is genuinely an unsupported *type* and has to keep
+        reaching the daemon, which answers for it and claims the id. Only a
+        message that was never received is withheld."""
+        for content in ({"conversation": "hi"},
+                        {"extendedTextMessage": {"text": "hi"}},
+                        {"messageContextInfo": {}, "conversation": "hi"},
+                        {"imageMessage": {}},
+                        {"audioMessage": {}},
+                        {"ephemeralMessage": {"message": {"conversation": "hi"}}}):
+            assert self._call(f"m.hasReadableContent({self._msg(content)})") is True, content
+
+    def test_the_shape_of_an_undecrypted_message_is_reportable(self):
+        """The drop has to say something, or this is the silent discard the
+        LID break already was."""
+        assert self._call("m.messageShape({})") == "none"
 
 
 class TestTheReadmeSaysWhatIsNotCovered:

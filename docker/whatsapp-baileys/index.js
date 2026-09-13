@@ -294,6 +294,47 @@ function chatAddress(key) {
   return typeof pn === 'string' && pn.endsWith(USER_JID_DOMAIN) ? pn : '';
 }
 
+/*
+ * Keys that ride *alongside* a message's content and are never content
+ * themselves. A stanza carrying nothing but these was received but not read.
+ */
+const NON_CONTENT_KEYS = new Set([
+  'messageContextInfo',
+  'senderKeyDistributionMessage',
+]);
+
+/*
+ * Whether this is a message at all, as opposed to a placeholder for one.
+ *
+ * **A linked device that cannot decrypt a stanza is handed a stub, not
+ * nothing.** Baileys emits it through `messages.upsert` with
+ * `messageStubType = CIPHERTEXT` and no content, then asks WhatsApp to resend
+ * — and WhatsApp re-sends *the same message id*, re-encrypted. The stub is
+ * therefore a promise of a delivery still to come.
+ *
+ * Forwarding one is wrong twice, and the second is what makes it expensive.
+ * The daemon has no content to read, so it answers "that WhatsApp message
+ * type is not supported yet" about an ordinary text message. And it claims
+ * the id in `processed_whatsapp` on the way past, so every retry behind it —
+ * the ones carrying the decrypted text — is refused as a duplicate and the
+ * message is lost for good. Measured on a live deployment: one claim at
+ * `unsupported_type`, three duplicates behind it, nothing delivered.
+ *
+ * So a stub is dropped and the retry is what gets forwarded. That direction
+ * fails safe: the cost is silence on a message WhatsApp never redelivered,
+ * against a guaranteed loss the other way.
+ *
+ * **An unsupported *type* is a different thing and still crosses.** An image
+ * or a voice note was received and read; the daemon answers for it and is
+ * right to claim the id. What is withheld here is only a message that has not
+ * arrived yet.
+ */
+function hasReadableContent(message) {
+  const content = message && message.message;
+  if (!content || typeof content !== 'object') return false;
+  return Object.keys(content).some((key) => !NON_CONTENT_KEYS.has(key));
+}
+
 function messageText(message) {
   const content = message && message.message;
   if (!content) return null;
@@ -540,6 +581,17 @@ class Session {
         });
         continue;
       }
+      if (!hasReadableContent(message)) {
+        // Not a message yet. Baileys has already asked WhatsApp to resend it,
+        // and the retry carries the same id — which is exactly why this must
+        // not cross: the daemon would claim that id and refuse the retry.
+        log('info', 'inbound withheld until it decrypts', {
+          shape: messageShape(message),
+          stub: message.messageStubType === undefined
+            ? 'none' : String(message.messageStubType).slice(0, 40),
+        });
+        continue;
+      }
       const group = isGroupJid(jid);
       const text = group ? null : messageText(message);
       if (!group && text === null) {
@@ -779,6 +831,7 @@ module.exports = {
   SEND_REASONS,
   chatAddress,
   encode,
+  hasReadableContent,
   messageShape,
   receiptStatus,
   sendFailureReason,
