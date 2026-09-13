@@ -40,6 +40,8 @@ Recovery is `istota whatsapp pair --reset`. The plain `pair` cannot do it, and t
 
 Until somebody does that, the sidecar keeps starting, is refused, and exits. It spaces those attempts out rather than making one every thirty seconds: no wait on the first, then 30 seconds, 5 minutes, 15, 30, an hour, counted in `logout-backoff.json` inside the session directory. Each attempt is a login against a number WhatsApp has already unlinked, which is exactly the kind of client behaviour the paragraphs above are about, so leaving an unlinked session running for a week is no longer expensive. Re-pairing is not slowed by it — the wait ends as soon as the credential is replaced.
 
+If that counter cannot be written, or cannot be read back on the next attempt, it cannot advance — so the wait holds at five minutes rather than dropping back to none. A read-only directory, a full disk and a counter file the sidecar cannot read all do it. `istota doctor` says so on the same line that reports the unlink, since the sidecar's own warning about it goes into a log file inside the directory it cannot write. Fix that before re-pairing, or the new session inherits the same retry rate.
+
 None of that applies to the Cloud adapter, which is why it stays available. If you cannot afford to lose the number or the surface, use Cloud.
 
 ## Setting up Baileys

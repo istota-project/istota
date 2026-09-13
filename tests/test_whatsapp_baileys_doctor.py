@@ -170,6 +170,50 @@ class TestTheBridgeCheck:
         # code. The remedy named the one command that provably does nothing.
         assert "istota whatsapp pair --reset" in result.remedy
 
+    def test_an_unrecorded_backoff_is_named_on_the_same_arm(self, tmp_path):
+        """ISSUE-501. Where the sidecar can neither read nor write its backoff
+        file the ladder cannot advance, so an unlinked session is retried at
+        the supervisor's own interval — roughly 2,880 real logins a day
+        against an account WhatsApp has already unlinked. From here that looks
+        exactly like a deployment backing off correctly, and the sidecar's own
+        warning about it is appended to a log file *inside* the directory it
+        cannot write, so this is the only surface the condition has.
+
+        On the existing arm rather than a new check: the action is the same
+        re-pair, with one more thing to fix before it — and a re-pair into a
+        directory still unwritable leaves the same retry rate behind it.
+        """
+        baileys_bridge.set_active_bridge(_Status(
+            listening=True, connected=True, ready=False,
+            fatal_reason="logged_out", fatal_is_permanent=True,
+            fatal_run_unrecorded=True,
+        ))
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
+
+        assert result.status == doctor.FAIL
+        assert "retried far more often" in result.detail
+        assert "session directory" in result.remedy
+        # The re-pair is still the fix, so the arm it sits on must not have
+        # lost it.
+        assert "istota whatsapp pair --reset" in result.remedy
+
+    def test_the_control_says_an_ordinary_unlink_does_not_claim_it(self, tmp_path):
+        """The negative control. A deployment whose backoff *is* recording
+        must not be told its session directory cannot be written — that would
+        send an operator looking for a permissions fault that is not there,
+        on the one arm they already read during an outage."""
+        baileys_bridge.set_active_bridge(_Status(
+            listening=True, connected=True, ready=False,
+            fatal_reason="logged_out", fatal_is_permanent=True,
+        ))
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
+
+        assert result.status == doctor.FAIL
+        assert "retried far more often" not in result.detail
+        assert "session directory" not in result.remedy
+
     def test_a_fatal_reason_from_the_sidecar_is_bounded_before_it_renders(
         self, tmp_path,
     ):

@@ -290,9 +290,18 @@ def _js_send_keys(message_const: str) -> set[str]:
     hold nested calls and ternaries, and a non-greedy `{.*?}` stops at the
     first inner brace. Only top-level keys are collected, which is the level
     the daemon's normalizers read.
+
+    **It reads the first send site and asserts there is only one.** Without
+    that count the helper silently covers one of several — `MSG_READY` has two
+    sites today — so a second one could carry any keys at all and every caller
+    would stay green, which is the shape the `MSG_FATAL` assertion was found
+    in and fixed out of. A message type that grows a second site should follow
+    that assertion's pattern rather than loosening this.
     """
     source = PROGRAM.read_text()
     marker = f"this.link.send({message_const}, {{"
+    sites = source.count(marker)
+    assert sites == 1, f"{message_const} has {sites} send sites, not 1"
     start = source.index(marker) + len(marker)
     depth = 1
     index = start
@@ -494,13 +503,29 @@ class TestTheSidecarsPayloadsAreReadable:
     def test_a_qr_payload_carries_the_key_the_bridge_reads(self):
         assert _js_send_keys("MSG_QR") == {"qr"}
 
-    def test_a_fatal_payload_carries_the_two_fields_the_bridge_branches_on(self):
+    def test_a_fatal_payload_carries_the_fields_the_bridge_branches_on(self):
+        """`reason` and `permanent` on every frame, and `run_unrecorded` on the
+        ones that report a backoff running on a guess (ISSUE-501).
+
+        **The match is no longer line-oriented, and the count is asserted.**
+        The previous version required `{ ... }` on a single line, so a frame
+        wrapped across lines was invisible to it — and it kept passing while
+        covering two of the four frames the program sends, which is this
+        repository's recurring "a probe whose success is indistinguishable
+        from a no-op". Comparing against the number of `send(MSG_FATAL` calls
+        is what makes a frame the pattern cannot read a failure here rather
+        than a silent omission.
+        """
         source = PROGRAM.read_text()
-        fatals = re.findall(r"MSG_FATAL, \{ ([^}]*) \}", source)
-        assert fatals, "no fatal frames found"
+        sends = source.count("link.send(MSG_FATAL")
+        fatals = re.findall(r"MSG_FATAL, \{(.*?)\}\)", source, re.S)
+        assert sends and len(fatals) == sends, (len(fatals), sends)
         for body in fatals:
             keys = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*):", body))
-            assert keys == {"reason", "permanent"}, keys
+            assert keys in (
+                {"reason", "permanent"},
+                {"reason", "permanent", "run_unrecorded"},
+            ), keys
 
     def test_the_hello_frame_carries_the_version_field_the_bridge_reads(self):
         source = PROGRAM.read_text()
@@ -979,6 +1004,176 @@ class TestTheLoggedOutBackoff:
         # assertion above is equally true of a write that worked.
         assert json.loads(state_file.read_text())["count"] == 5
 
+    # --- the run that cannot be recorded -----------------------------------
+
+    def test_a_planted_directory_no_longer_switches_the_backoff_off(self, tmp_path):
+        """The both-fail case, and the one ISSUE-501 was filed for.
+
+        `recordLogout` is read-modify-write and both halves swallow their
+        errors, so where the file can be neither read nor written every cycle
+        computes `0 + 1` and waits the 500ms frame-flush floor. The ladder
+        never advances and the deployment is back to roughly 2,880 real logins
+        a day against an account WhatsApp has already unlinked — the exact
+        condition ISSUE-498 was filed to bound, reintroduced by the failure
+        modes most likely to be permanent.
+
+        Driven end to end through `logoutWaitMs(recordLogout())` rather than
+        asserting on the count alone: the count *is* 1 here and correctly so,
+        since one logout really has happened. What went wrong is the wait
+        derived from it, so a test that stopped at the count would pass
+        against the broken program.
+
+        A planted directory rather than a chmod, so this carries no
+        `requires_dac`: `EISDIR` is not a permission check, so it reproduces
+        as root too — where the file-mode cases below silently skip.
+        """
+        (tmp_path / "logout-backoff.json").mkdir()
+        waits = self._call(
+            "Array.from({length: 4}, () => m.logoutWaitMs(m.recordLogout()))",
+            tmp_path,
+        )
+
+        assert waits == [300_000] * 4
+
+    def test_the_control_says_that_directory_is_what_breaks_both_halves(
+        self, tmp_path
+    ):
+        """The negative control for the case above. An assertion about a
+        fallback has to be shown able to see the ordinary ladder, or it is
+        asserting a constant."""
+        waits = self._call(
+            "Array.from({length: 4}, () => m.logoutWaitMs(m.recordLogout()))",
+            tmp_path,
+        )
+
+        assert waits == [500, 30_000, 300_000, 900_000]
+
+    @pytest.mark.requires_dac
+    def test_a_read_only_directory_with_no_file_still_backs_off(self, tmp_path):
+        """On the issue's own repro list, and the case that decides the shape.
+
+        The entry proposed discriminating the read errno — `ENOENT` being
+        "genuinely the first logout of a run" and the unknowable ones meaning
+        something else. That split does not cover this: the read here *is*
+        `ENOENT`, because no file was ever created, and the run is pinned at
+        the floor anyway because the write is what cannot land. The condition
+        has to be that the state did not reach disk, which is why the write is
+        consulted as well as the read.
+        """
+        tmp_path.chmod(0o500)
+        try:
+            waits = self._call(
+                "Array.from({length: 3}, () => m.logoutWaitMs(m.recordLogout()))",
+                tmp_path,
+            )
+        finally:
+            tmp_path.chmod(0o700)
+
+        assert waits == [300_000] * 3
+
+    @pytest.mark.requires_dac
+    def test_an_unreadable_file_that_can_be_rewritten_still_backs_off(
+        self, tmp_path
+    ):
+        """The other half of the same correction, in the opposite direction.
+
+        Here the write lands on every cycle and the read never does, so the
+        file is rewritten to `count: 1` for ever. The entry's shape asked for
+        the read to be unknowable *and* the write to fail; this satisfies only
+        the first and is just as unbounded, which is why the two conditions
+        are a union rather than a conjunction.
+
+        `writeFileSync`'s `mode` applies only to a file it creates, so the
+        0200 survives its own rewrite and the next cycle reads it just as
+        badly — which is what makes this permanent rather than one cycle.
+        """
+        state_file = tmp_path / "logout-backoff.json"
+        state_file.write_text('{"count": 4}')
+        state_file.chmod(0o200)
+        try:
+            waits = self._call(
+                "Array.from({length: 3}, () => m.logoutWaitMs(m.recordLogout()))",
+                tmp_path,
+            )
+        finally:
+            state_file.chmod(0o600)
+
+        assert waits == [300_000] * 3
+
+    def test_the_healthy_first_logout_is_still_the_short_wait(self, tmp_path):
+        """The property the fallback must not cost. A missing file with a
+        writable directory is the common, healthy path — the first logout of a
+        run — and 500ms there is the frame-flush floor rather than a rung.
+        Making that slower would delay every single unlink in order to protect
+        the rare broken deployment."""
+        assert self._call("m.logoutWaitMs(m.recordLogout())", tmp_path) == 500
+
+    @pytest.mark.requires_dac
+    def test_a_failed_write_never_shortens_the_rung_it_read(self, tmp_path):
+        """The fallback is a floor under the ladder, not a replacement for it.
+
+        Five recorded logouts and an unwritable file is still a run five long,
+        and `test_a_write_that_fails_keeps_the_rung_it_read` above is what says
+        the count survives. This says the *wait* does too: taking the fallback
+        rung unconditionally whenever the write failed would cut an hour to
+        five minutes at exactly the run length where the wait matters most,
+        which is the direction this whole mechanism must not fail in.
+        """
+        state_file = tmp_path / "logout-backoff.json"
+        state_file.write_text('{"count": 5, "first_at": "2026-09-01T00:00:00.000Z"}')
+        state_file.chmod(0o400)
+        try:
+            wait = self._call("m.logoutWaitMs(m.recordLogout())", tmp_path)
+        finally:
+            state_file.chmod(0o600)
+
+        assert wait == 3_600_000
+
+    def test_a_corrupt_file_the_program_can_rewrite_keeps_the_short_wait(
+        self, tmp_path
+    ):
+        """A truncated write — a host killed mid-write, a full disk since
+        cleared — is a *content* failure on a file the program can still
+        replace, so the next cycle reads the count it just wrote and the
+        ladder climbs from the floor. That is ISSUE-498's stated direction and
+        the fallback must not quietly take it over: the run genuinely is one
+        long here."""
+        (tmp_path / "logout-backoff.json").write_text("not json")
+        waits = self._call(
+            "Array.from({length: 3}, () => m.logoutWaitMs(m.recordLogout()))",
+            tmp_path,
+        )
+
+        assert waits == [500, 30_000, 300_000]
+
+    def test_the_fallback_rung_is_taken_from_the_ladder(self):
+        """Never a literal. The rung is the ladder's own entry, so a change to
+        the ladder moves the fallback with it rather than leaving a number here
+        that used to be mid-ladder."""
+        assert self._call(
+            "m.logoutWaitMs({count: 1, unrecorded: true})"
+        ) == self._call("m.logoutExitDelayMs(m.LOGOUT_UNKNOWN_RUN)")
+
+    @pytest.mark.requires_dac
+    def test_the_marker_never_reaches_the_file(self, tmp_path):
+        """It is a fact about this process's filesystem rather than about the
+        run, so a deployment that recovers must not read a stale one back.
+
+        The unreadable-file case is the discriminating one: it is the only
+        shape where the marker is set *and* the write lands, so it is the only
+        place a marker set a statement too early could be serialized.
+        """
+        state_file = tmp_path / "logout-backoff.json"
+        state_file.write_text('{"count": 4}')
+        state_file.chmod(0o200)
+        try:
+            self._call("m.recordLogout('2026-09-13T00:00:00.000Z')", tmp_path)
+        finally:
+            state_file.chmod(0o600)
+        written = json.loads(state_file.read_text())
+
+        assert set(written) == {"count", "first_at", "at"}, written
+
     # --- the credential stamp ----------------------------------------------
 
     def test_the_stamp_changes_when_the_credential_is_replaced(self, tmp_path):
@@ -1049,6 +1244,61 @@ class TestTheLoggedOutBackoff:
         branch = body[body.index("if (connection === 'open')"):]
 
         assert "clearLogoutState();" in branch[:branch.index("return;")]
+
+    def test_the_wait_is_derived_from_what_could_be_established(self):
+        """The call-site half of ISSUE-501, and the mutation that otherwise
+        passes this whole class: `logoutExitDelayMs(run.count)` is still a
+        perfectly good expression that compiles, runs, and returns 500 for
+        ever on a deployment that cannot record its run. Everything else here
+        exercises `logoutWaitMs` in isolation and would stay green."""
+        body = _js_method("onConnection")
+
+        assert "const delay = logoutWaitMs(run);" in body
+        assert "logoutExitDelayMs(run.count)" not in body
+
+    def test_the_reported_marker_is_the_one_record_logout_returned(self):
+        """The sibling of the pin above, and the mutation it exists for is a
+        one-word one: `run.unknown` is a real key on the state object — it is
+        what `readLogoutState` sets — so reading it here compiles, runs, and
+        silently reports the wrong half of the union. The unreadable-file shape
+        then still reports (both halves are true there) while the read-only
+        directory, where the read is an ordinary `ENOENT` and only the write
+        failed, reports nothing at all: `doctor` calls that deployment healthy
+        for as long as it lasts. Measured — swapping the word leaves every
+        other test in this file green."""
+        body = _js_method("onConnection")
+
+        assert "this.runUnrecorded = run.unrecorded === true;" in body
+
+    def test_the_unrecorded_run_is_reported_before_the_wait(self):
+        """It has to reach the daemon while the daemon can still be told. The
+        frame goes out before `scheduleLogoutExit`, which on this path does not
+        return for up to an hour."""
+        body = _js_method("onConnection")
+
+        assert (body.index("run_unrecorded: true")
+                < body.index("scheduleLogoutExit("))
+
+    def test_the_first_fatal_still_leaves_before_any_filesystem_work(self):
+        """Why the marker rides a *second* frame rather than the first. The
+        first one's position is load-bearing: `recordLogout` reads and writes a
+        file, which on a hung mount blocks indefinitely, and the daemon must
+        not learn its WhatsApp is down only once that returns."""
+        body = _js_method("onConnection")
+        branch = body[body.index("if (loggedOut) {"):]
+
+        assert branch.index("reason: FATAL_LOGGED_OUT") < branch.index(
+            "recordLogout("
+        )
+
+    def test_the_re_announced_verdict_carries_the_marker(self):
+        """The daemon's latch is in memory, so a scheduler that restarted
+        during the wait re-learns the logout from `announceReady` — and has to
+        re-learn this with it, or `doctor` reports a deployment retrying every
+        thirty seconds as one backing off correctly."""
+        body = _js_method("announceReady")
+
+        assert "run_unrecorded: this.runUnrecorded" in body
 
     def test_the_branch_waits_for_the_delay_it_computed(self):
         """The one thing a substring pin still has to say, and it is the
