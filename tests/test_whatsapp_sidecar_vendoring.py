@@ -752,14 +752,17 @@ class TestTheLockfileInstallsThePinnedLibrary:
     def test_the_git_dependencies_are_named_rather_than_discovered(self):
         """They decide whether either install path needs git at all.
 
-        `libsignal` is Baileys' cryptography and the eslint config is one that
-        package declares under `dependencies` rather than `devDependencies`, so
-        `--omit=dev` keeps both. Both are recorded as
+        `libsignal` is Baileys' cryptography, recorded as
         `git+ssh://git@github.com/…`, which reads like a build needing git and
         a credential — and measurably is not, because npm fetches a *hosted*
         git dependency as a codeload tarball over https. The image therefore
         ships no git, verified by building it with none and finding
         `node_modules/libsignal` present.
+
+        There were two until the 6.7.24 bump: Baileys 6.7.18 declared its own
+        eslint config under `dependencies` rather than `devDependencies`, so
+        `--omit=dev` kept it and every install paid for eslint. The bump drops
+        it, which is most of the tree going from 207 packages to 92.
 
         What that rests on is the set below: a third git dependency, on a forge
         `hosted-git-info` does not know, would put git and an https rewrite back
@@ -771,7 +774,7 @@ class TestTheLockfileInstallsThePinnedLibrary:
             if str(entry.get("resolved", "")).startswith("git+")
         )
 
-        assert git_deps == ["@whiskeysockets/eslint-config", "libsignal"]
+        assert git_deps == ["libsignal"]
 
     def test_it_is_a_lockfile_npm_ci_can_read(self):
         """`npm ci` needs v2 or later; v1 has no `packages` map at all."""

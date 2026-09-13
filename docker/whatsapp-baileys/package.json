@@ -12,6 +12,6 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "6.7.18"
+    "@whiskeysockets/baileys": "6.7.24"
   }
 }
