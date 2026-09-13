@@ -34,7 +34,9 @@ Baileys speaks WhatsApp's Web protocol as a linked device. That is not a support
 
 **Protocol breakage.** WhatsApp changes the Web protocol without notice, and the adapter stops working until the library releases a fix. The library version is pinned in the sidecar's `package.json`; recovering from a break means updating it.
 
-**The device unlinks.** WhatsApp drops a linked device after a long stretch with the phone offline, and the session can also end if you unlink it from the phone. Istota notices: sends refuse rather than silently dropping, `istota doctor --only whatsapp.baileys_bridge` fails, and an alert goes to the admins off the WhatsApp surface. Recovery is `istota whatsapp pair` again.
+**The device unlinks.** WhatsApp drops a linked device after a long stretch with the phone offline, and the session can also end if you unlink it from the phone. Istota notices: sends refuse rather than silently dropping, `istota doctor --only whatsapp.baileys_bridge` fails, and an alert goes to the admins off the WhatsApp surface.
+
+Recovery is `istota whatsapp pair --reset`. The plain `pair` cannot do it, and that is worth understanding rather than remembering: the credential left on disk names a device WhatsApp has unlinked, and the library reads it as a registered account and tries to log in with it rather than offering a code. So every restart is refused and no QR is ever drawn — under systemd that is a restart every thirty seconds, for as long as it takes somebody to notice. `--reset` moves the directory to a timestamped sibling and pairs into a fresh one. It deletes nothing, so a session that turned out to be merely unreachable has lost no keys, and it still refuses to run while a bridge is listening on the socket. Stop the scheduler and any sidecar running as a unit of its own first, as you would for a first pairing; remove the old directory yourself once the new session works.
 
 Until somebody does that, the sidecar keeps starting, is refused, and exits. It spaces those attempts out rather than making one every thirty seconds: no wait on the first, then 30 seconds, 5 minutes, 15, 30, an hour, counted in `logout-backoff.json` inside the session directory. Each attempt is a login against a number WhatsApp has already unlinked, which is exactly the kind of client behaviour the paragraphs above are about, so leaving an unlinked session running for a week is no longer expensive. Re-pairing is not slowed by it — the wait ends as soon as the credential is replaced.
 
@@ -201,6 +203,7 @@ STOP opts the binding out after one acknowledgement, START re-enables it, and HE
 
 ```bash
 istota whatsapp pair                    # Baileys: link the number by QR scan
+istota whatsapp pair --reset            # Baileys: same, after moving an unusable session aside
 istota doctor --only whatsapp.          # local readiness, the session, the billing state
 istota whatsapp billing-status          # Cloud: read the circuit breaker without changing it
 istota whatsapp billing-unblock         # Cloud: clear it, after checking Meta billing
