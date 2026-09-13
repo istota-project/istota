@@ -471,6 +471,60 @@ describe('system rows share the turn geometry', () => {
     expect(container.querySelector('.gutter .fallback')).toBeNull();
     expect(container.querySelector('.meta')).toBeNull();
     expect(container.querySelector('.author')).toBeNull();
+    // The stamp is deliberately *not* in that list any more (ISSUE-502). The
+    // author header went because a notice has no author; the time went with it
+    // only because the two shared one `.meta` element. A notice has a perfectly
+    // definite time, and without it a delivered alert cannot be ordered against
+    // the conversation it landed in.
+    expect(container.querySelector('.stamp')).not.toBeNull();
+  });
+
+  it('renders the delivery time in the content column, always visible', () => {
+    const { container } = render(Message, {
+      message: systemRow(),
+      onConfirm: noop,
+      onReject: noop,
+    });
+
+    // In the content column, beside where a turn's header sits — not in the
+    // gutter, and not the hover-gated `.hover-time` a continuation row uses.
+    // A stamp on an alert exists to be scanned without interacting with the
+    // row, and under a finger a hover affordance is unreachable anyway.
+    expect(container.querySelector('.cmd-row > .content > .stamp')).not.toBeNull();
+    expect(container.querySelector('.hover-time')).toBeNull();
+  });
+
+  it('renders the same stamp a turn gets for the same timestamp', () => {
+    const at = '2026-07-10T12:00:00Z';
+    const sys = render(Message, {
+      message: systemRow({ createdAt: at }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+    const turn = render(Message, {
+      message: finished({ createdAt: at }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+
+    // Compared against the turn branch rather than against a literal: the
+    // rendered text is the runner's own locale and timezone, and a literal
+    // would either pin those or be computed the same way the component does,
+    // which passes just as happily when both sides render nothing.
+    const sysText = sys.container.querySelector('.stamp')?.textContent?.trim();
+    expect(sysText).toMatch(/\d/);
+    expect(sysText).toBe(turn.container.querySelector('.stamp')?.textContent?.trim());
+  });
+
+  it('renders no stamp on a row that carries no timestamp', () => {
+    const { container } = render(Message, {
+      message: systemRow({ createdAt: undefined }),
+      onConfirm: noop,
+      onReject: noop,
+    });
+
+    // An empty `<time>` is worse than none: it holds the header line open and
+    // reads as a stamp that failed to load.
     expect(container.querySelector('.stamp')).toBeNull();
   });
 
