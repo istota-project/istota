@@ -460,6 +460,234 @@ function recallSent(id) {
 const MAX_START_FAILURES = 5;
 const START_RETRY_MS = 5000;
 
+// --- the logged-out backoff ------------------------------------------------
+
+/*
+ * Spacing out the doomed logins a de-paired session would otherwise make for
+ * ever.
+ *
+ * The `loggedOut` branch below exits, and on both shipped deployment shapes
+ * something starts the program again at a fixed interval — `Restart=always`
+ * with `RestartSec=30` on the systemd unit, Docker's own backoff capped at
+ * 60s on compose. Neither can tell an unlinked device from a crash, and both
+ * must keep restarting promptly for the second, so the bound cannot live
+ * there. Nothing bounded it here either: `MAX_START_FAILURES` gates
+ * `reportStartFailure`, which covers a session that could not be
+ * *constructed*, and the `loggedOut` branch is upstream of that counter.
+ *
+ * What that cost is an account, not a log file. Every cycle is a real
+ * websocket and a real authentication attempt against a number WhatsApp has
+ * already unlinked once — roughly 2,400 a day on the unit — and this is a
+ * client WhatsApp does not sanction, whose maintainers removed delivery ACKs
+ * because accounts were being banned for them.
+ *
+ * So the wait goes *before* the exit, which is also what keeps a re-pair
+ * prompt: the supervisor's own interval is untouched, so the start that
+ * finally works is not the one being delayed. The count has to outlive a
+ * process that exits, and the session directory is the only place state
+ * survives one, so it goes in a 0600 file beside `sidecar.log` holding a
+ * count and two timestamps and nothing else.
+ */
+const LOGOUT_STATE_PATH =
+  SESSION_DIR ? path.join(SESSION_DIR, 'logout-backoff.json') : '';
+const CREDS_PATH = SESSION_DIR ? path.join(SESSION_DIR, 'creds.json') : '';
+
+// Long enough for the `fatal` frame to leave the socket before the process
+// goes. It is a floor rather than a rung, so the first logout of a run still
+// behaves exactly as it did before there was a backoff at all.
+const FATAL_FLUSH_MS = 500;
+
+// Indexed by the run length, clamped at the last entry. These are *sleeps*
+// and not effective intervals: the supervisor's own interval is added on top
+// and is deliberately not written down here, because a copy of `RestartSec`
+// in this file would be a second place for one deployment shape's number to
+// live and would be wrong for the other one.
+const LOGOUT_BACKOFF_MS = [0, 30_000, 300_000, 900_000, 1_800_000, 3_600_000];
+
+// How often the wait looks up to see whether the credential changed under it.
+const CREDENTIAL_POLL_MS = 30_000;
+
+function logoutExitDelayMs(count) {
+  const n = Number(count);
+  const run =
+    Number.isFinite(n) && n >= 1
+      ? Math.min(Math.floor(n), LOGOUT_BACKOFF_MS.length)
+      : 1;
+  // `Math.max` rather than a special case for run 1: it is also what stops a
+  // shortened ladder rung from cutting the frame flush, and an index past the
+  // end — `setTimeout(fn, undefined)` fires immediately, switching the
+  // backoff off at exactly the run length where it matters most — is refused
+  // by the clamp above rather than here.
+  return Math.max(FATAL_FLUSH_MS, LOGOUT_BACKOFF_MS[run - 1]);
+}
+
+/*
+ * Read a recorded run out of the file's text. Never raises.
+ *
+ * Anything it cannot read is nought runs, and the direction is the decision:
+ * a truncated write, a hand-edited file or a half-written one on a full disk
+ * degrades to today's prompt retry rather than to an hour of silence. A wait
+ * this file lengthens by mistake is a working session held down.
+ */
+function parseLogoutState(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return { count: 0, first_at: '' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { count: 0, first_at: '' };
+  }
+  const n = Number(parsed.count);
+  return {
+    count: Number.isFinite(n) && n > 0 ? Math.floor(n) : 0,
+    first_at: typeof parsed.first_at === 'string' ? parsed.first_at : '',
+  };
+}
+
+// `first_at` is carried rather than restamped, so the file says how long the
+// session has been unlinked and not merely when it last tried. Nothing reads
+// it yet; `doctor` reporting a duration is the obvious second reader and is
+// why the field is here rather than added later as a schema change.
+function nextLogoutState(previous, nowIso) {
+  const prev = previous || { count: 0, first_at: '' };
+  return {
+    count: prev.count + 1,
+    first_at: prev.first_at || nowIso,
+    at: nowIso,
+  };
+}
+
+function readLogoutState() {
+  if (!LOGOUT_STATE_PATH) return { count: 0, first_at: '' };
+  try {
+    return parseLogoutState(fs.readFileSync(LOGOUT_STATE_PATH, 'utf8'));
+  } catch (err) {
+    return { count: 0, first_at: '' };
+  }
+}
+
+/*
+ * Advance the run and return it. Never raises.
+ *
+ * The caller waits on what this returns, so a failed write still has to hand
+ * back a usable run — a read-only directory or a full disk must not make the
+ * answer `undefined`, which `setTimeout` fires immediately on. That would
+ * switch the backoff off through the one failure mode most likely to be
+ * permanent. The in-memory increment stands either way; what a failed write
+ * costs is that the *next* process starts the run again.
+ */
+function recordLogout(nowIso) {
+  const state = nextLogoutState(
+    readLogoutState(), nowIso || new Date().toISOString(),
+  );
+  if (LOGOUT_STATE_PATH) {
+    try {
+      fs.writeFileSync(
+        LOGOUT_STATE_PATH, JSON.stringify(state) + '\n', { mode: 0o600 },
+      );
+    } catch (err) {
+      log('warn', 'the logged-out run could not be recorded', {
+        kind: err && err.code,
+      });
+    }
+  }
+  return state;
+}
+
+function clearLogoutState() {
+  if (!LOGOUT_STATE_PATH) return;
+  try {
+    fs.unlinkSync(LOGOUT_STATE_PATH);
+  } catch (err) {
+    // The file is absent on every healthy start, so that is the common case
+    // rather than the exception and is not worth a line.
+    if (err && err.code !== 'ENOENT') {
+      log('warn', 'the logged-out run could not be cleared', {
+        kind: err && err.code,
+      });
+    }
+  }
+}
+
+/*
+ * A fingerprint of the paired credential, not its contents.
+ *
+ * What it has to separate is "the file a re-pair just replaced" from "the
+ * file that was refused a minute ago", and mtime with size does that without
+ * reading a full-account credential into this process for no other reason.
+ *
+ * The two failure strings are distinct on purpose. A credential that is
+ * *removed* — the documented remedy for this state, and ISSUE-496's `--reset`
+ * — is as much evidence that the next start is not the doomed one as a
+ * replacement is, so it has to compare unequal to a present file rather than
+ * collapsing into one constant with the no-session-directory case.
+ */
+function credentialStamp() {
+  if (!CREDS_PATH) return 'unconfigured';
+  try {
+    const info = fs.statSync(CREDS_PATH);
+    return `${info.mtimeMs}:${info.size}`;
+  } catch (err) {
+    return 'absent';
+  }
+}
+
+/*
+ * Wait out the backoff, then exit — unless the credential changes first.
+ *
+ * A plain `setTimeout` is the version that does not keep the property the
+ * backoff is supposed to keep. Nothing in the re-pair flow restarts the
+ * systemd unit: `istota whatsapp pair` spawns a sidecar of its own against
+ * the same directory, so a session re-paired partway through an hour-long
+ * wait would sit out the remainder before its first working login — a
+ * working session held down by the machinery meant to protect a dead one.
+ * A changed `creds.json` is exactly the evidence that the next login is no
+ * longer the doomed one, so it ends the wait. Removal counts too, since
+ * moving the directory aside is the documented remedy.
+ *
+ * **The baseline is taken at the first poll rather than here**, and that is
+ * the one subtle thing in this function. `saveCreds` is an async write, so
+ * one started by the login that has just failed can land *after* this is
+ * called — and a baseline taken before it lands reads our own write as a
+ * re-pair, ends the wait at the first poll on every rung, and leaves a
+ * `logout-backoff.json` whose climbing count says the backoff is working.
+ * That is the whole defect wearing a label. What the later baseline costs is
+ * that a credential replaced inside the first poll interval is noticed one
+ * interval later, against rungs measured in minutes.
+ *
+ * A top-level function taking its exit and its interval rather than a method
+ * on `Session`, because `Session` is not exported and a wait loop nothing can
+ * execute is pinned by substring presence alone — under which a deadline
+ * computed wrongly, an inverted comparison and a tick that never reschedules
+ * all stay green.
+ */
+function scheduleLogoutExit(delayMs, onExit, pollMs) {
+  const poll = pollMs || CREDENTIAL_POLL_MS;
+  const deadline = Date.now() + delayMs;
+  let baseline = null;
+  const tick = () => {
+    const stamp = credentialStamp();
+    if (baseline === null) {
+      baseline = stamp;
+    } else if (stamp !== baseline) {
+      log('info', 'the credential changed during the wait; exiting now');
+      onExit();
+      return;
+    }
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      onExit();
+      return;
+    }
+    setTimeout(tick, Math.min(left, poll));
+  };
+  // Not `unref()`ed: the wait is the only thing holding this process open,
+  // and an unreferenced timer would let Node exit immediately instead.
+  setTimeout(tick, Math.min(delayMs, poll));
+}
+
 class Session {
   constructor(link) {
     this.link = link;
@@ -475,9 +703,25 @@ class Session {
     // closes that, and it is why this flag exists rather than being derived
     // from `this.sock`, which is non-null for a socket that is reconnecting.
     this.open = false;
+    // Whether WhatsApp has unlinked the device. Distinct from `stopping`,
+    // which is also what a deliberate shutdown sets: the daemon link has to
+    // keep reconnecting through a logout wait and must not through a
+    // shutdown, and only one of the two states has a verdict to re-announce.
+    this.loggedOut = false;
   }
 
   announceReady() {
+    if (this.loggedOut) {
+      // **The verdict, not the readiness.** The daemon's permanent-fatal
+      // latch is in memory and is set only by this frame, so a scheduler that
+      // restarted during the wait has none — and with the wait now lasting up
+      // to an hour rather than 500ms, `doctor` and the admin alert would
+      // report "no sidecar connected" instead of "logged out, re-pair" for
+      // all of it. Re-sending is what keeps the reason on the daemon's side
+      // for as long as this process is the thing holding the session.
+      this.link.send(MSG_FATAL, { reason: FATAL_LOGGED_OUT, permanent: true });
+      return;
+    }
     if (this.open) this.link.send(MSG_READY, {});
   }
 
@@ -540,7 +784,14 @@ class Session {
     // a whole running daemon to avoid.
     const mine = () => this.sock === sock;
 
-    sock.ev.on('creds.update', saveCreds);
+    // Guarded like its three siblings, which it was not. Two reasons, and the
+    // second is new: an orphan socket writing the auth state is the same
+    // two-writers hazard `mine()` exists for, and after a logout `this.sock`
+    // is nulled — so this guard is what stops a late save from moving
+    // `creds.json` under a wait that fingerprints it to notice a re-pair.
+    sock.ev.on('creds.update', () => {
+      if (mine()) saveCreds();
+    });
     sock.ev.on('connection.update', (update) => {
       if (mine()) this.onConnection(update, baileys);
     });
@@ -562,8 +813,10 @@ class Session {
     if (connection === 'open') {
       log('info', 'the WhatsApp session is open');
       // A session that opened is evidence the credential is usable, so the
-      // run of construction failures below starts again from zero.
+      // run of construction failures below starts again from zero — and so
+      // does the recorded run of logouts, for the same reason one level out.
       this.startFailures = 0;
+      clearLogoutState();
       this.open = true;
       this.link.send(MSG_READY, {});
       return;
@@ -586,6 +839,16 @@ class Session {
     const loggedOut = status === baileys.DisconnectReason.loggedOut;
     log('warn', 'the WhatsApp session closed', { status: status ?? 'unknown' });
     if (loggedOut) {
+      // **One-shot.** `if (this.stopping) return;` sits below this branch, so
+      // it does not guard it, and `mine()` still passes for the socket that
+      // has just closed — so a repeated close carrying the same status would
+      // re-enter. That was harmless when the branch was one `setTimeout`, and
+      // is not now that it writes a persisted count: one duplicate event
+      // would cost a rung, permanently advancing the ladder on the evidence
+      // of a single unlink, which is the direction this whole mechanism must
+      // not fail in.
+      if (this.loggedOut) return;
+      this.loggedOut = true;
       // Permanent: the credential on disk names a device WhatsApp has
       // unlinked, and reconnecting with it will be refused for ever. The
       // daemon latches this, refuses every send definitely and alerts.
@@ -596,9 +859,31 @@ class Session {
       // useless until somebody restarts it by hand. Exiting is also what the
       // bridge's own supervisor docstring assumes on the external-unit shape:
       // systemd restarts the unit, it reconnects, and its `ready` clears the
-      // latch. The delay is for the frame to leave the socket first.
+      // latch.
       this.stopping = true;
-      setTimeout(() => process.exit(1), 500);
+      // **Dropped, not merely stopped.** `send`'s `if (!this.sock)` guard is
+      // the only thing that answers a send with a definite `not_connected`;
+      // with the socket left in place a send reaches `sendMessage` on a dead
+      // one and settles the ledger `unknown`, the one state an operator
+      // cannot resolve. The daemon's own latch should stop a send ever
+      // arriving, but that window was 500ms and is now up to an hour, so it
+      // should not be the only thing standing there. Nulling also makes
+      // `mine()` false for every handler this socket installed, which is what
+      // stops a late `creds.update` writing the credential the wait below
+      // fingerprints.
+      this.sock = null;
+      // Recorded *before* the wait, not after it: a `systemctl restart` or a
+      // SIGTERM partway through a half-hour one must not lose the increment,
+      // or an operator's own intervention resets the ladder to its first rung
+      // and the loop is unbounded again. The frame above has already gone, so
+      // the daemon latches the fatal and alerts at the moment the session
+      // died rather than at the end of the wait.
+      const run = recordLogout();
+      const delay = logoutExitDelayMs(run.count);
+      log('warn', 'the device link ended; waiting before exiting', {
+        run: run.count, wait_ms: delay,
+      });
+      scheduleLogoutExit(delay, () => process.exit(1));
       return;
     }
     if (this.stopping) return;
@@ -913,7 +1198,12 @@ function main() {
   // session, which an exit would throw away along with its warm state.
   link.onReady = () => session.announceReady();
   link.onClose = () => {
-    if (session.stopping) return;
+    // `stopping` alone would stop reconnecting through a logout wait, which
+    // now lasts up to an hour — long enough for a scheduler restart to land
+    // inside one and leave a sidecar that neither reconnects nor exits, with
+    // the unlinked-device verdict reaching nobody. A logout wait reconnects
+    // and re-announces the fatal; a deliberate shutdown still does not.
+    if (session.stopping && !session.loggedOut) return;
     log('warn', 'the daemon link closed; reconnecting');
     setTimeout(() => link.connect(), 2000);
   };
@@ -952,6 +1242,14 @@ module.exports = {
   rememberSent,
   recallSent,
   SENT_CACHE_LIMIT,
+  logoutExitDelayMs,
+  parseLogoutState,
+  nextLogoutState,
+  readLogoutState,
+  recordLogout,
+  clearLogoutState,
+  credentialStamp,
+  scheduleLogoutExit,
   messageShape,
   receiptStatus,
   sendFailureReason,

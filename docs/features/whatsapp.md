@@ -36,6 +36,8 @@ Baileys speaks WhatsApp's Web protocol as a linked device. That is not a support
 
 **The device unlinks.** WhatsApp drops a linked device after a long stretch with the phone offline, and the session can also end if you unlink it from the phone. Istota notices: sends refuse rather than silently dropping, `istota doctor --only whatsapp.baileys_bridge` fails, and an alert goes to the admins off the WhatsApp surface. Recovery is `istota whatsapp pair` again.
 
+Until somebody does that, the sidecar keeps starting, is refused, and exits. It spaces those attempts out rather than making one every thirty seconds: no wait on the first, then 30 seconds, 5 minutes, 15, 30, an hour, counted in `logout-backoff.json` inside the session directory. Each attempt is a login against a number WhatsApp has already unlinked, which is exactly the kind of client behaviour the paragraphs above are about, so leaving an unlinked session running for a week is no longer expensive. Re-pairing is not slowed by it — the wait ends as soon as the credential is replaced.
+
 None of that applies to the Cloud adapter, which is why it stays available. If you cannot afford to lose the number or the surface, use Cloud.
 
 ## Setting up Baileys

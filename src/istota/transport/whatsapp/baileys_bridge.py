@@ -785,6 +785,15 @@ class BaileysBridge:
                     # so it would sit there re-reporting the same fatal, and a
                     # long-lived process never exits on its own for the loop
                     # above to notice.
+                    #
+                    # Asked before it is reaped, which used to be academic and
+                    # is not since ISSUE-498: a logged-out sidecar now waits
+                    # before exiting, so `_reap_process` would spend its whole
+                    # `SHUTDOWN_GRACE_SECONDS` and then SIGTERM a process that
+                    # answers the frame in milliseconds. The frame's handler is
+                    # not gated on the sidecar's own stopping flag, so it
+                    # reaches one mid-wait.
+                    await self._request_shutdown()
                     await self._reap_process()
                     self._process = None
                     logger.error(

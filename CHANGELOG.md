@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A WhatsApp number unlinked from its Baileys session no longer retries the login every 30 seconds for ever. Each of those cycles was a real authentication attempt against an account WhatsApp had already unlinked once — about 2,400 a day under systemd, unbounded under Compose — on a client whose ban risk this project already documents. The sidecar now waits before exiting, growing the wait with the length of the run: nothing on the first, then 30 seconds, 5 minutes, 15, 30, an hour. The first failure is as prompt as before, and re-pairing is too: the wait watches the credential file and ends the moment one is written, so a session re-paired mid-wait is picked up at the next restart rather than after the remaining hour.
+
 - Twelve environment-variable overrides are in the reference now. `docs/reference/environment-variables.md` listed eight of the twenty the loader applies, so the eight `ISTOTA_SMS_*`, the three `ISTOTA_WHATSAPP_*` and `ISTOTA_CALDAV_PASSWORD` could each be set and take effect with nothing on the page saying they existed. Each is written out in full rather than as a shared prefix and a list of suffixes, since that page is what you reach by searching for the variable already sitting in your `secrets.env`.
 
 - The credentials page said CalDAV needs no configuration of its own. That holds with Nextcloud, where the credential is derived from the app password, and not on an install pointed at a CalDAV server of its own: that writes a `[caldav]` section whose password takes `ISTOTA_CALDAV_PASSWORD`, and neither appeared anywhere in a table calling itself the full credential inventory.

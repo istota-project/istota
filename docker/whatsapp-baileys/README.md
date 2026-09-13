@@ -16,7 +16,9 @@ Two environment variables, and nothing else:
 
 - `ISTOTA_BAILEYS_SOCKET` — the socket the daemon is listening on.
 - `ISTOTA_BAILEYS_SESSION_DIR` — the 0700 directory holding the paired
-  credential. The sidecar's own log is `sidecar.log` inside it.
+  credential. The sidecar's own log is `sidecar.log` inside it, and
+  `logout-backoff.json` beside it is how long a run of logged-out starts has
+  been going — see below.
 
 Both are set by the daemon when it spawns the sidecar itself, and have to be
 set by the unit or the compose service otherwise. `ISTOTA_BAILEYS_LOG_LEVEL`
@@ -32,6 +34,26 @@ ISTOTA_BAILEYS_SESSION_DIR=/srv/app/istota/data/whatsapp-baileys-session \
 Pairing is `istota whatsapp pair`, which starts a sidecar of its own and
 renders the QR. Do not run two sidecars against one session directory: two
 Baileys clients on one auth state corrupt it.
+
+## When WhatsApp unlinks the device
+
+The credential on disk names a device that no longer exists, so every start
+reconnects, is refused with a 401 and exits. Whatever is supervising the
+program starts it again, and each of those cycles is a real authentication
+attempt against an account WhatsApp has already unlinked once.
+
+So the program waits before exiting, and the wait grows with the run: no wait
+on the first, then 30 seconds, 5 minutes, 15, 30, an hour. The run is counted
+in `logout-backoff.json` inside the session directory, because every cycle is
+a different process and nothing in memory survives one. A session that opens
+deletes the file.
+
+The wait is here rather than in the unit's `RestartSec` or compose's restart
+policy because neither can tell an unlinked device from a crash, and both have
+to keep restarting promptly for the second. It also watches `creds.json` while
+it waits: a re-pair that replaces the credential, or a session directory moved
+aside, ends the wait immediately rather than holding a working session down
+for the rest of an hour.
 
 ## Why this is its own image rather than a stage in istota's
 
