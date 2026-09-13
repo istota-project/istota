@@ -2009,7 +2009,17 @@ def _scan_db_backups(backups_dir: Path) -> tuple[int, str | None]:
 # ``executor._INTERACTIVE_SOURCE_TYPES`` / ``transport.routing``'s — those
 # answer "can a reply be routed back to this surface", which ``cli`` and
 # ``istota_file`` fail while still being a person doing something.
-_INTERACTIVE_SOURCES = frozenset({"talk", "email", "istota_file", "cli", "web", "repl"})
+#
+# Wider in one direction only, which a test now holds rather than a comment:
+# routing's set is a *subset* of this one, since a surface a reply can be
+# routed back to is a person by construction. ``sms`` and ``whatsapp`` were in
+# routing's from the day each landed and in neither this set nor the hand-typed
+# list in its own positive control, so both stayed missing for a month
+# (ISSUE-499) — that control duplicates the list to catch a member no writer
+# produces, and cannot catch one no author thought of.
+_INTERACTIVE_SOURCES = frozenset(
+    {"talk", "email", "istota_file", "cli", "web", "repl", "sms", "whatsapp"}
+)
 _AUTOMATED_SOURCES = frozenset({"scheduled", "briefing", "heartbeat", "subtask"})
 
 

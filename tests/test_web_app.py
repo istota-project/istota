@@ -1606,9 +1606,16 @@ class TestAdminStats:
         ``_INTERACTIVE_SOURCES``: the point is to catch the set drifting from
         what the tree actually stores. ``tasks_file`` sat in that set for
         months and matched nothing, because the poller writes ``istota_file``.
+
+        That shape catches a *wrong* member and cannot catch a *missing* one,
+        since this list and the set were written together — which is how
+        ``sms`` and ``whatsapp`` stayed out of both for a month (ISSUE-499).
+        ``test_every_routable_interactive_source_is_interactive_here`` covers
+        the missing direction by comparing against a set with other writers.
         """
         from istota import db, web_app
-        for source in ("talk", "email", "web", "cli", "repl", "istota_file"):
+        for source in ("talk", "email", "web", "cli", "repl", "istota_file",
+                       "sms", "whatsapp"):
             root = tmp_path / source
             root.mkdir()
             config = self._config_with_admin(root)
@@ -1628,6 +1635,32 @@ class TestAdminStats:
                 alice = next(u for u in resp.json()["users"] if u["username"] == "alice")
                 assert alice["last_active"] == "2026-04-01T12:00:00Z", source
                 assert web_app._classify_source(source) == "interactive", source
+
+    async def test_every_routable_interactive_source_is_interactive_here(self):
+        """The routing seam's interactive set is a floor for this one.
+
+        Both lists are hand-typed, so both drift; what stops them drifting
+        *together* is that they have different authors and different reasons.
+        ``transport.routing._INTERACTIVE_SOURCE_TYPES`` answers "can a reply
+        be routed back to this surface" and is maintained by whoever adds a
+        surface, while ``web_app._INTERACTIVE_SOURCES`` answers "is a person
+        doing something" and is deliberately wider — ``cli`` and
+        ``istota_file`` fail the first and pass the second. Wider in one
+        direction only: a source type a reply can be routed back to is a
+        person by construction, so the narrower set must be a subset.
+
+        ``sms`` and ``whatsapp`` were in routing's set from the day each
+        surface landed and in neither this one nor its positive control
+        (ISSUE-499), so a user whose only traffic was either read as never
+        active and had their messages booked as scheduler ticks.
+        """
+        from istota import web_app
+        from istota.transport import routing
+        missing = routing._INTERACTIVE_SOURCE_TYPES - web_app._INTERACTIVE_SOURCES
+        assert not missing, (
+            f"routable interactive source types missing from "
+            f"web_app._INTERACTIVE_SOURCES: {sorted(missing)}"
+        )
 
     async def test_admin_stats_last_active_is_oldest_interactive_row(self, tmp_path):
         """Newer automated rows must not bury an older interactive one."""
