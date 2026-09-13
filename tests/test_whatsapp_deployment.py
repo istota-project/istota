@@ -934,6 +934,53 @@ class TestTheAnsibleSidecarUnit:
 
         assert "istota_whatsapp_baileys_unit_wanted" in str(install["when"])
 
+    def test_the_update_only_mode_restarts_it(self):
+        """Handlers cannot reach it, so the explicit loop has to.
+
+        The only task that notifies its restart is the dependency install,
+        which is gated on the lockfile checksum — so a commit touching
+        `index.js` alone reports no change anywhere and nothing fires. The
+        unit would go on running the copy it loaded at start, under the mode
+        whose whole job is "pull latest code, restart services".
+        """
+        task = self._named("Restart services (update-only mode)")
+        names = [item["name"] for item in task["loop"]]
+
+        assert "{{ istota_namespace }}-whatsapp-baileys" in names
+        entry = next(i for i in task["loop"] if i["name"].endswith("whatsapp-baileys"))
+        assert "istota_whatsapp_baileys_unit_wanted" in entry["enabled"]
+
+    def test_the_auto_update_cron_reaches_it(self):
+        """On the reference host the two-minute cron is the deploy path.
+
+        It restarts the Python units because they hold their code in memory;
+        the sidecar is a Node program run out of the same checkout and holds
+        its own the same way. Its dependencies are the worse half — a
+        cron-delivered lockfile bump leaves node_modules matching the old one,
+        and the failure surfaces at the next unrelated restart, disconnected
+        from the commit that caused it. This is ISSUE-428's class on a second
+        non-Python artifact.
+        """
+        cron = (ANSIBLE / "templates" / "istota-update.sh.j2").read_text()
+
+        assert 'systemctl restart "${NAMESPACE}-whatsapp-baileys"' in cron
+        assert "docker/whatsapp-baileys/package-lock.json" in cron
+        assert "npm ci --omit=dev" in cron
+        # Stopped before the install for the reason the play stops it: `npm ci`
+        # deletes node_modules first and the unit is Restart=always.
+        assert 'systemctl stop "${NAMESPACE}-whatsapp-baileys"' in cron
+
+    def test_the_cron_arms_are_gated_on_the_same_fact_as_the_unit(self):
+        """Otherwise a Cloud host's cron restarts a unit that is not there."""
+        cron = (ANSIBLE / "templates" / "istota-update.sh.j2").read_text()
+
+        for line in cron.splitlines():
+            if "whatsapp-baileys" in line and line.strip().startswith("{%"):
+                assert "istota_whatsapp_baileys_unit_wanted" in line
+        assert cron.count(
+            "{% if istota_whatsapp_baileys_unit_wanted | default(false) %}"
+        ) == 2
+
     def test_a_switch_away_tears_the_sidecar_down(self):
         """The half that is not bookkeeping.
 

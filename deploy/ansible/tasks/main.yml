@@ -4162,6 +4162,12 @@
     - { name: "{{ istota_namespace }}-scheduler", enabled: true }
     - { name: "{{ istota_namespace }}-web", enabled: "{{ istota_web_enabled | default(false) }}" }
     - { name: "{{ istota_namespace }}-webhooks", enabled: "{{ istota_webhooks_enabled | bool }}" }
+    # The sidecar runs a Node program straight out of the checkout, so it holds
+    # stale code exactly as the Python units do — and it is worse served by the
+    # handlers than they are: the only task that notifies its restart is the
+    # dependency install, which is gated on the lockfile checksum, so an
+    # `index.js`-only commit reports no change anywhere and nothing fires.
+    - { name: "{{ istota_namespace }}-whatsapp-baileys", enabled: "{{ istota_whatsapp_baileys_unit_wanted | bool }}" }
   when: istota_update_only and (item.enabled | bool)
 
 # ISSUE-428: the auto-update cron's early exit compares against this marker

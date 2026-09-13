@@ -215,6 +215,44 @@ if [ -n "$WEB_CHANGED" ]; then
     fi
 fi
 {% endif %}
+{% if istota_whatsapp_baileys_unit_wanted | default(false) %}
+
+# The WhatsApp sidecar is the second thing in this checkout that is not Python
+# and therefore not picked up by restarting the units below. It is a Node
+# program a systemd unit runs from the tree, so a commit to index.js lands in
+# the checkout and the running process keeps the copy it loaded at start,
+# indefinitely, until somebody runs the play — ISSUE-428's class, on the
+# surface where the two-minute cron *is* the deploy path.
+#
+# Its dependencies are the worse half. A cron-delivered lockfile bump leaves
+# node_modules matching the old one; the sidecar survives on modules it has
+# already required, and the next unrelated restart fails `require` and enters
+# the exit-3 loop — disconnected in time from the commit that caused it. So the
+# install runs on the same rule the web one does, and the sidecar is restarted
+# whenever anything under its directory moved.
+if git cat-file -e "${DEPLOYED}^{commit}" 2>/dev/null; then
+    BAILEYS_CHANGED=$(git diff --name-only "$DEPLOYED" "$TARGET" -- docker/whatsapp-baileys/)
+    BAILEYS_LOCK_CHANGED=$(git diff --name-only "$DEPLOYED" "$TARGET" -- docker/whatsapp-baileys/package-lock.json)
+else
+    BAILEYS_CHANGED="unknown-revision"
+    BAILEYS_LOCK_CHANGED="unknown-revision"
+fi
+
+if [ -n "$BAILEYS_CHANGED" ]; then
+    if ! command -v npm > /dev/null 2>&1; then
+        log "ERROR: the WhatsApp sidecar changed but npm is not on PATH; skipping"
+    elif [ -n "$BAILEYS_LOCK_CHANGED" ] || [ ! -d "${REPO_DIR}/docker/whatsapp-baileys/node_modules" ]; then
+        log "Installing WhatsApp sidecar dependencies"
+        # Stopped first: `npm ci` deletes node_modules before it installs, and
+        # the unit is Restart=always — so a crash inside that window re-execs
+        # against a half-populated tree and loops on exit 3 until the install
+        # finishes. The restart below is what brings it back.
+        systemctl stop "${NAMESPACE}-whatsapp-baileys" || true
+        (cd "${REPO_DIR}/docker/whatsapp-baileys" && npm ci --omit=dev --no-audit --no-fund)
+        chown -R "${USER}:${GROUP}" "${REPO_DIR}/docker/whatsapp-baileys/node_modules"
+    fi
+fi
+{% endif %}
 
 # Run DB migrations
 log "Running database migrations"
@@ -239,6 +277,14 @@ systemctl restart "${NAMESPACE}-web"
 {% if istota_webhooks_enabled | default(false) %}
 log "Restarting ${NAMESPACE}-webhooks"
 systemctl restart "${NAMESPACE}-webhooks"
+{% endif %}
+{% if istota_whatsapp_baileys_unit_wanted | default(false) %}
+# Unconditional, like the units above, rather than gated on BAILEYS_CHANGED: a
+# stopped sidecar (the install branch above stops one) has to come back whether
+# or not this tick changed anything, and restarting a running one costs a
+# reconnect — the paired session is on disk, not in the process.
+log "Restarting ${NAMESPACE}-whatsapp-baileys"
+systemctl restart "${NAMESPACE}-whatsapp-baileys"
 {% endif %}
 {% if istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0) %}
 # The credential proxy imports from the checkout as well, and it is a security
