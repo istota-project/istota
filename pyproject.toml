@@ -15,6 +15,12 @@ dependencies = [
     # attachment, so Pillow + HEIC support live in core, not an extra.
     "Pillow>=10.0.0",
     "pillow-heif>=0.16.0",
+    # `istota whatsapp pair` draws the pairing QR itself. Pure Python and no
+    # runtime dependencies of its own, which is what makes it cheaper than the
+    # `qrencode` package it replaces: a code the operator cannot render is a
+    # pairing they cannot complete, and an apt install is not available on
+    # every host at the moment they need it.
+    "segno>=1.6.0",
 ]
 
 [project.optional-dependencies]

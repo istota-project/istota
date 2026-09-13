@@ -45,7 +45,7 @@ You need a phone with WhatsApp on the number Istota will use, a host with Node, 
 1. Set `provider = "baileys"` and `enabled = true` in `[whatsapp]`, and `business_phone_number` to the number in E.164 form. Nothing else is required; `[whatsapp.baileys]` defaults are fine.
 2. Stop the Istota scheduler, **and any sidecar running as a unit or compose service of its own**. Two Baileys clients against one session directory corrupt it, and Istota can only detect one of the two.
 3. Install the sidecar's dependencies: `npm ci` in `docker/whatsapp-baileys/`.
-4. Run `istota whatsapp pair`. It renders a QR code — through `qrencode` if that is installed, otherwise it prints the payload and the command that draws it. On the phone, open WhatsApp, go to Linked Devices, and scan. The code rotates every twenty seconds or so until you do.
+4. Run `istota whatsapp pair`. It draws a QR code in the terminal — nothing to install, and the code is redrawn each time WhatsApp rotates it, which is every twenty seconds or so. On the phone, open WhatsApp, go to Linked Devices, and scan.
 5. When pairing reports the session is ready, start the scheduler and whatever runs the sidecar. **The daemon spawns no sidecar by default**: with `[whatsapp.baileys] sidecar_command` empty it only listens, which is what a deployment running the sidecar as its own unit or compose service wants. Set `sidecar_command` if you want the daemon to spawn it instead.
 6. Check it: `istota doctor --only whatsapp.` should report `whatsapp.baileys_session` ok. The bridge check answers only inside the process holding the bridge, so read `whatsapp.baileys_bridge` from the admin Health pane or `!check` rather than from a shell.
 7. Bind a user and message the number from their phone.
@@ -238,6 +238,7 @@ The `webhooks` service belongs to the `location`, `sms` and `whatsapp` profiles,
 **Pairing a Baileys session is not reachable from inside this stack.** `istota whatsapp pair` starts a sidecar of its own, and the istota image ships neither the sidecar program nor its dependencies. Pair on a host with a checkout and Node, then move the session directory into the `istota_data` volume at `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers run as.
 
 ## Ansible
+
 
 Set the matching `istota_whatsapp_*` role variables and vault the three Cloud credentials. They are written to the root-owned `secrets.env` and loaded by the scheduler, web app and webhook receiver; they never reach `config.toml`. The role provisions the webhook receiver when location is on, SMS is on, or WhatsApp is on with an adapter that has a callback.
 
