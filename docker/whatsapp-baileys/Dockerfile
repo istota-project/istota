@@ -13,37 +13,28 @@
 # enough that using it would dominate the build.
 FROM node:20-slim
 
-# **git, and it is not optional.** Two of Baileys' own *runtime* dependencies
-# are git dependencies rather than registry tarballs — `libsignal`, which is the
-# cryptography, and `@whiskeysockets/eslint-config`, which that package declares
-# under `dependencies` rather than `devDependencies` — so `npm ci` shells out to
-# git for both. The slim images carry none, and without this the build fails at
-# the install step rather than at run time.
-RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 
 # Lock first, so a change to the program does not re-resolve the tree. `npm ci`
 # rather than `npm install`: it installs exactly what package-lock.json pins and
 # fails rather than silently resolving something else, which for a program that
 # holds a full WhatsApp account is the property worth having. `--omit=dev`
-# leaves out nothing of ours — this manifest declares no devDependencies — and
-# note that it does *not* drop the two above, which are runtime dependencies of
-# a package that mislabelled one of them.
+# leaves out nothing of ours — this manifest declares no devDependencies.
 #
-# The lockfile records those two as `git+ssh://git@github.com/…`, which is how
-# npm writes a `github:` shorthand and which GitHub serves only to an
-# authenticated key. A build container has none, so git is told to reach the
-# same repositories over https. Through GIT_CONFIG_* rather than a
-# `git config --global`, so it applies to this layer and leaves no state in the
-# image — the same mechanism the developer skill uses to hand git a per-task
-# credential helper.
+# **No git here, and that is measured rather than assumed.** Two of Baileys'
+# own *runtime* dependencies are git dependencies rather than registry
+# tarballs — `libsignal`, which is the cryptography, and an eslint config that
+# package declares under `dependencies` — and the lockfile records both as
+# `git+ssh://git@github.com/…`, which GitHub serves only to an authenticated
+# key. That reads like a build needing git and an https rewrite, and this image
+# carried both for one commit. It does not: npm fetches a *hosted* git
+# dependency as a codeload tarball over https and only shells out to git when
+# that fails, so the install succeeds on this base, which ships no git at all.
+# Verified by building with neither and checking `node_modules/libsignal` is
+# there. A git dependency on a forge `hosted-git-info` does not know would need
+# both back.
 COPY package.json package-lock.json ./
-RUN GIT_CONFIG_COUNT=1 \
-    GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf \
-    GIT_CONFIG_VALUE_0=ssh://git@github.com/ \
-    npm ci --omit=dev
+RUN npm ci --omit=dev
 
 COPY index.js ./
 

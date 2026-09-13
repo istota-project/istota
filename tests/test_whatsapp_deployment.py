@@ -126,6 +126,39 @@ class TestTheDockerRender:
 
         assert "provider" not in _whatsapp_section(path.read_text())
 
+    def test_a_provider_the_loader_refuses_fails_the_render(self, tmp_path):
+        """The Ansible side asserts this and the render had nothing.
+
+        An unrecognised provider fails `load_config` in every istota process
+        and does so whether or not the block is enabled, so `cloud` for
+        `whatsapp_cloud` — or a value with a stray space, which `-n` calls
+        non-empty and the loader's membership test does not — would write a
+        config that crash-loops the scheduler, the web app and the webhook
+        receiver alike, on a traceback naming neither the variable nor this
+        file. A failed render is survivable: the entrypoint keeps the previous
+        config and re-renders next boot.
+        """
+        for bad in ("cloud", "Baileys", "whatsapp cloud"):
+            proc = _render_docker(tmp_path / f"bad-{bad.replace(' ', '-')}", bad)
+
+            assert proc.returncode != 0, f"{bad!r} rendered without complaint"
+            assert "ISTOTA_WHATSAPP_PROVIDER" in proc.stderr
+
+    def test_a_provider_with_surrounding_space_still_renders(self, tmp_path):
+        """The refusal above must not catch an operator's trailing newline.
+
+        `.env` files and shell exports pick up whitespace routinely, and the
+        value is one of three fixed words rather than anything meaningful —
+        so it is trimmed and accepted rather than refused.
+        """
+        from istota.config import load_config
+
+        proc = _render_docker(tmp_path / "spaced", "  baileys\t")
+        assert proc.returncode == 0, proc.stderr
+
+        config = load_config(tmp_path / "spaced" / "config.toml")
+        assert config.whatsapp.provider == "baileys"
+
     def test_the_defaults_render_a_disabled_free_guard_block(self, tmp_path):
         """An operator who sets nothing gets the free-biased shape.
 
@@ -871,22 +904,6 @@ class TestTheAnsibleSidecarUnit:
         assert task["file"]["owner"] == "{{ istota_user }}"
         assert task["file"]["path"].endswith("/data/whatsapp-baileys-session")
 
-    def test_the_dependency_install_can_reach_the_git_dependencies(self):
-        """Two of Baileys' runtime dependencies come from GitHub over git.
-
-        The lockfile records them as `git+ssh://git@github.com/…`, which
-        GitHub serves only to an authenticated key. The daemon user has none,
-        so the install has to reach the same repositories over https or it
-        fails on every host — and nothing in the default suite runs `npm ci`,
-        so this is the only thing that would say so.
-        """
-        install = self._named("Install the WhatsApp sidecar's dependencies")
-        environment = install["environment"]
-
-        assert environment["GIT_CONFIG_KEY_0"] == "url.https://github.com/.insteadOf"
-        assert environment["GIT_CONFIG_VALUE_0"] == "ssh://git@github.com/"
-        assert environment["GIT_CONFIG_COUNT"] == "1"
-
     def test_the_dependency_install_is_gated_on_the_lockfile(self):
         """`npm ci` deletes node_modules before it installs.
 
@@ -1106,6 +1123,32 @@ class TestTheMountGateOnALoadedConfig:
             config = load_config(path)
             assert config.whatsapp.provider == "baileys", path
             assert whatsapp_webhooks_enabled(config) is False, path
+
+
+def _render_docker(directory: Path, provider: str):
+    """`render-config.sh` run without asserting it succeeded.
+
+    `tests.test_render_config.render` requires exit 0, which is the whole
+    question for a refusal, so this is the same call with that assertion
+    removed — and with the environment built from scratch for the reason that
+    helper states: a developer host exports `ISTOTA_*` variables routinely.
+    """
+    import os
+    import subprocess
+
+    directory.mkdir(parents=True, exist_ok=True)
+    return subprocess.run(
+        ["bash", str(REPO / "docker" / "istota" / "render-config.sh")],
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "CONFIG_FILE": str(directory / "config.toml"),
+            **REQUIRED,
+            "ISTOTA_WHATSAPP_PROVIDER": provider,
+        },
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
 
 
 def _whatsapp_section(rendered: str) -> str:

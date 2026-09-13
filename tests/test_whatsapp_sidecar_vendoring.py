@@ -749,14 +749,20 @@ class TestTheLockfileInstallsThePinnedLibrary:
         assert unpinned == []
 
     def test_the_git_dependencies_are_named_rather_than_discovered(self):
-        """They decide what the image and the role have to carry.
+        """They decide whether either install path needs git at all.
 
         `libsignal` is Baileys' cryptography and the eslint config is one that
-        package declares under `dependencies` rather than `devDependencies`,
-        so `--omit=dev` keeps both and `npm ci` shells out to git for both.
-        That is why the Dockerfile installs git and why both install paths
-        rewrite GitHub's ssh URL to https. A third one appearing, or these two
-        becoming registry packages, changes what those two files need.
+        package declares under `dependencies` rather than `devDependencies`, so
+        `--omit=dev` keeps both. Both are recorded as
+        `git+ssh://git@github.com/…`, which reads like a build needing git and
+        a credential — and measurably is not, because npm fetches a *hosted*
+        git dependency as a codeload tarball over https. The image therefore
+        ships no git, verified by building it with none and finding
+        `node_modules/libsignal` present.
+
+        What that rests on is the set below: a third git dependency, on a forge
+        `hosted-git-info` does not know, would put git and an https rewrite back
+        into the Dockerfile and the role. This is the assertion that says so.
         """
         git_deps = sorted(
             name.removeprefix("node_modules/")
@@ -828,21 +834,19 @@ class TestTheImageCopiesWhatTheProgramNeeds:
         assert re.search(r"\bnpm ci\b", self._directives())
         assert not re.search(r"\bnpm install\b", self._directives())
 
-    def test_it_can_install_the_git_dependencies(self):
-        """Two runtime dependencies come from git, so two things are needed.
+    def test_it_installs_nothing_beyond_the_node_base(self):
+        """The install step is `npm ci` and nothing else.
 
-        The slim base carries no git at all, so the install step fails outright
-        without it. And the lockfile records those two as
-        `git+ssh://git@github.com/…`, which GitHub serves only to an
-        authenticated key — a build container has none, so git has to be told
-        to reach the same repositories over https. Both are invisible until a
-        build runs, and no tier here builds this image.
+        Recorded because this image carried an `apt-get install git` and a
+        GitHub ssh-to-https rewrite for one commit, on the reading that its two
+        git dependencies needed them. A build with neither, checked for
+        `node_modules/libsignal`, says otherwise — npm fetches a hosted git
+        dependency as a codeload tarball. Nothing here can measure that, so
+        what this holds is the smaller claim: if either comes back, it comes
+        back with a reason, rather than by habit.
         """
-        directives = self._directives()
-
-        assert re.search(r"apt-get install[^\n]*\bgit\b", directives)
-        assert "url.https://github.com/.insteadOf" in directives
-        assert "ssh://git@github.com/" in directives
+        assert not re.search(r"\bapt-get\b", self._directives())
+        assert "GIT_CONFIG" not in self._directives()
 
     def test_it_runs_the_entry_point_the_bridge_names(self):
         from istota.transport.whatsapp.baileys_bridge import SIDECAR_ENTRY

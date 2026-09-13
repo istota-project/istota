@@ -179,7 +179,22 @@ ISTOTA_WHATSAPP_BUSINESS_TIMEZONE="$(toml_escape "${ISTOTA_WHATSAPP_BUSINESS_TIM
 ISTOTA_WHATSAPP_BILLING_POLICY="$(toml_escape "${ISTOTA_WHATSAPP_BILLING_POLICY:-free_guard}")"
 ISTOTA_WHATSAPP_TEMPLATE_NAME="$(toml_escape "${ISTOTA_WHATSAPP_TEMPLATE_NAME:-}")"
 ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE="$(toml_escape "${ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE:-en_US}")"
-ISTOTA_WHATSAPP_PROVIDER="$(toml_escape "${ISTOTA_WHATSAPP_PROVIDER:-}")"
+# Refused here rather than escaped and written, because an unrecognised
+# provider fails `load_config` in *every* istota process and does so whether or
+# not the block is enabled — so `ISTOTA_WHATSAPP_PROVIDER=cloud`, or a value
+# with a stray space, is three containers crash-looping on a traceback that
+# names neither the variable nor this file. The Ansible side has an assert for
+# exactly this shape and this side had nothing. Trimmed first, since `-n` is
+# true for a space and the loader's membership test is not.
+ISTOTA_WHATSAPP_PROVIDER="$(printf '%s' "${ISTOTA_WHATSAPP_PROVIDER:-}" | tr -d '[:space:]')"
+case "${ISTOTA_WHATSAPP_PROVIDER}" in
+    ""|baileys|whatsapp_cloud) ;;
+    *)
+        echo "[istota] ERROR: ISTOTA_WHATSAPP_PROVIDER must be 'baileys' or" \
+             "'whatsapp_cloud' (or empty to let the WhatsApp values decide)." >&2
+        exit 1
+        ;;
+esac
 ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND="$(toml_escape "${ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND:-}")"
 
 render_config() {
