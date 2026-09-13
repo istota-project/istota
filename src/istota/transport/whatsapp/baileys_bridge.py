@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import inspect
 import logging
 import os
@@ -127,6 +128,63 @@ _CHILD_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "NODE_ENV")
 #: and so neither value shows up in `ps` output.
 ENV_SOCKET = "ISTOTA_BAILEYS_SOCKET"
 ENV_SESSION_DIR = "ISTOTA_BAILEYS_SESSION_DIR"
+
+
+# ---------------------------------------------------------------------------
+# The one bridge this process holds
+# ---------------------------------------------------------------------------
+
+#: Set by whatever started a bridge, read by `providers/baileys.py`'s `send`
+#: and by `doctor`. A module global rather than something threaded through,
+#: for the reason the adapter seam forces: `make_provider_registry` builds a
+#: fresh adapter per send and may do no I/O, so `build_adapter` cannot make a
+#: bridge — it can only find the one already running. `signaling._STATS_SOURCE`
+#: is the same arrangement for the same reason one surface over.
+_ACTIVE_BRIDGE: "BaileysBridge | None" = None
+
+
+def set_active_bridge(bridge: "BaileysBridge | None") -> None:
+    """Publish the bridge this process's sends go through.
+
+    Called by the owner that started it, after `start()` has returned — before
+    that, a send resolved through here would be written to a socket nothing is
+    listening on yet, and the adapter's honest answer while there is no bridge
+    is a *definite* local failure rather than a lost message.
+    """
+    global _ACTIVE_BRIDGE
+    _ACTIVE_BRIDGE = bridge
+
+
+def clear_active_bridge() -> None:
+    """Unpublish. The owner's shutdown path, and test teardown."""
+    global _ACTIVE_BRIDGE
+    _ACTIVE_BRIDGE = None
+
+
+def active_bridge() -> "BaileysBridge | None":
+    return _ACTIVE_BRIDGE
+
+
+def read_status() -> dict | None:
+    """The bridge's counters as a plain dict, or ``None`` in a process with no
+    bridge.
+
+    `doctor`'s reader, shaped like `signaling.read_stats` and for its reasons.
+    Two of them are worth restating here. It answers `None` rather than a set
+    of zeros in the web process, the CLI and behind `!check`, because on the
+    deployment shape where those are separate processes the bridge lives in
+    the daemon and reporting it down as well would page an operator about a
+    process that was never meant to have one. And it never raises: a
+    diagnostic that fails on its own instrument reports the wrong subsystem.
+    """
+    bridge = _ACTIVE_BRIDGE
+    if bridge is None:
+        return None
+    try:
+        return dataclasses.asdict(bridge.status)
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not raise
+        logger.debug("whatsapp.baileys.status_unreadable %s", type(exc).__name__)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1161,8 +1219,12 @@ __all__ = [
     "SEND_TIMEOUT_SECONDS",
     "SESSION_DIR_NAME",
     "SOCKET_NAME",
+    "active_bridge",
+    "clear_active_bridge",
     "default_session_dir",
     "default_socket_path",
     "ensure_session_dir",
     "harden_session_files",
+    "read_status",
+    "set_active_bridge",
 ]

@@ -47,7 +47,7 @@ from istota.transport.whatsapp._types import (
     WhatsAppWebhookRequest,
     WhatsAppWebhookResult,
 )
-from istota.transport.whatsapp.providers import whatsapp_cloud
+from istota.transport.whatsapp.providers import baileys, whatsapp_cloud
 from istota.transport.whatsapp.providers._types import (
     WhatsAppProviderAdapter,
     WhatsAppProviderCaps,
@@ -803,6 +803,167 @@ class TestTheCloudAdapter:
         assert outcome.error_code is None
         # Local text from a fixed table; no provider prose, no request URL.
         assert "pywa" not in outcome.safe_reason
+
+
+class TestTheBaileysAdapter:
+    """The second adapter, and the first one with no HTTP callback at all.
+
+    Its lifecycle is `baileys_bridge.py`'s and is covered in
+    `tests/test_whatsapp_baileys_bridge.py` against real sockets. What is here
+    is the seam: what it declares, that it makes nothing at build, and what a
+    send does when no bridge is running — which is the state every deployment
+    is in until its owner starts one, and the state the whole ledger argument
+    turns on.
+    """
+
+    @staticmethod
+    def _config():
+        return _cloud_config(provider="baileys")
+
+    def test_it_declares_the_absence_of_every_cloud_rule(self):
+        """Spelled out rather than compared against `baileys.BAILEYS_CAPS`,
+        for the reason the Cloud twin gives: a literal is what goes red when
+        the record grows a field and this adapter's answer is guessed at."""
+        adapter = baileys.build_adapter(self._config())
+
+        assert adapter.name == "baileys"
+        assert adapter.caps == WhatsAppProviderCaps(
+            metered=False,
+            has_service_window=False,
+            supports_templates=False,
+            delivery_receipts=True,
+            address_field="jid",
+            service_body_limit=4096,
+            interactive_body_limit=4096,
+        )
+
+    def test_it_declares_no_webhook_and_no_signature_together(self):
+        """Both `None`, which is what the contract check requires and what
+        stops an adapter declaring a callback it cannot authenticate."""
+        adapter = baileys.build_adapter(self._config())
+
+        assert adapter.parse_webhook is None
+        assert adapter.verify_signature is None
+
+    def test_it_satisfies_its_own_registry_contract(self):
+        adapter = baileys.build_adapter(self._config())
+
+        assert asyncio.iscoroutinefunction(adapter.send)
+        assert (adapter.parse_webhook is None) == (adapter.verify_signature is None)
+
+    def test_building_one_opens_no_socket_and_starts_no_process(self, monkeypatch):
+        """`make_registry`'s no-I/O-on-construction rule, and here it is
+        load-bearing rather than tidy: `outbound.active_adapter` builds a
+        registry per send, so a builder that made a bridge would make one per
+        message."""
+        def _explode(*args, **kwargs):
+            raise AssertionError("build_adapter touched the bridge")
+
+        monkeypatch.setattr(
+            "istota.transport.whatsapp.baileys_bridge.BaileysBridge", _explode,
+        )
+        monkeypatch.setattr(
+            "istota.transport.whatsapp.baileys_bridge.ensure_session_dir", _explode,
+        )
+
+        adapter = baileys.build_adapter(self._config())
+
+        assert adapter.name == "baileys"
+
+    def test_the_registry_builds_it_with_no_builders_supplied(self):
+        """The `builders=None` arm for this provider — the only one production
+        uses, and the thing that retires "a loadable config with no
+        implementation"."""
+        registry = make_provider_registry(self._config())
+
+        active = registry.active()
+        assert active is not None
+        assert active.name == "baileys"
+        assert active.caps.metered is False
+
+    def test_a_send_with_no_bridge_running_is_refused_definitely(self):
+        """`definite` is the whole ledger decision, and this case is the one
+        that is unambiguous: nothing was published to send through, so no line
+        reached any socket and the row is `failed` rather than the `unknown`
+        an operator can never resolve."""
+        from istota.transport.whatsapp import baileys_bridge
+
+        baileys_bridge.clear_active_bridge()
+        adapter = baileys.build_adapter(self._config())
+
+        outcome = asyncio.run(adapter.send(
+            WhatsAppSendRequest(to="15551234567@s.whatsapp.net",
+                                text="hello", kind="service"),
+        ))
+
+        assert isinstance(outcome, WhatsAppSendFailure)
+        assert outcome.definite is True
+        assert outcome.safe_reason == baileys.REASON_NO_BRIDGE
+
+    def test_a_send_goes_to_whatever_bridge_is_published(self):
+        from istota.transport.whatsapp import baileys_bridge
+
+        seen = []
+
+        class _Bridge:
+            async def send(self, request):
+                seen.append(request)
+                return WhatsAppSendResult(message_id="BAE5F00D")
+
+        baileys_bridge.set_active_bridge(_Bridge())
+        try:
+            adapter = baileys.build_adapter(self._config())
+            request = WhatsAppSendRequest(
+                to="15551234567@s.whatsapp.net", text="hello", kind="service",
+            )
+            outcome = asyncio.run(adapter.send(request))
+        finally:
+            baileys_bridge.clear_active_bridge()
+
+        assert seen == [request]
+        assert isinstance(outcome, WhatsAppSendResult)
+        assert outcome.message_id == "BAE5F00D"
+
+    def test_a_template_request_is_refused_rather_than_sent_as_text(self):
+        """Unreachable through `_gate`, which never chooses `template` under
+        `supports_templates=False` — refused here anyway, because turning a
+        request this adapter cannot express into a different message is the one
+        thing the one-send ledger cannot recover from."""
+        from istota.transport.whatsapp import baileys_bridge
+
+        class _Bridge:
+            async def send(self, request):
+                raise AssertionError("a template reached the socket")
+
+        baileys_bridge.set_active_bridge(_Bridge())
+        try:
+            adapter = baileys.build_adapter(self._config())
+            outcome = asyncio.run(adapter.send(WhatsAppSendRequest(
+                to="15551234567@s.whatsapp.net", text="hello", kind="template",
+                template_name="istota_notice", template_language="en",
+            )))
+        finally:
+            baileys_bridge.clear_active_bridge()
+
+        assert isinstance(outcome, WhatsAppSendFailure)
+        assert outcome.definite is True
+
+    def test_the_refusal_reason_is_local_text_naming_no_destination(self):
+        """Every WhatsApp failure reason comes from a fixed table for one
+        reason: a destination or a message body reaching a ledger column is a
+        private conversation written down."""
+        from istota.transport.whatsapp import baileys_bridge
+
+        baileys_bridge.clear_active_bridge()
+        adapter = baileys.build_adapter(self._config())
+
+        outcome = asyncio.run(adapter.send(WhatsAppSendRequest(
+            to="15551234567@s.whatsapp.net", text="secret words",
+            kind="service",
+        )))
+
+        assert "15551234567" not in outcome.safe_reason
+        assert "secret words" not in outcome.safe_reason
 
 
 class TestTheMountNameSetTracksTheAdapters:

@@ -232,6 +232,26 @@ class TestTheConfirmationBodyBudget:
             outbound.TEMPLATE_PARAMETER_LIMIT
         )
 
+    def test_baileys_gets_the_whole_text_message(self, tmp_path):
+        """Not Meta's 1024. There is no interactive object on this adapter, so
+        the quarter-budget cliff the Cloud number exists for cannot arise, and
+        inheriting it would silently discard three quarters of every question.
+        """
+        config = _config(tmp_path, provider="baileys")
+
+        assert outbound.confirmation_body_budget(config) == 4096
+
+    def test_a_template_configured_under_baileys_does_not_narrow_it(self, tmp_path):
+        """`supports_templates` is False, so the template branch is unreachable
+        — a stale `[whatsapp.cloud]` block left behind by a switch must not
+        shrink a budget it has nothing to do with."""
+        config = _config(tmp_path, provider="baileys", billing_policy="allow_paid")
+        config.whatsapp.cloud.proactive_template.enabled = True
+        config.whatsapp.cloud.proactive_template.name = "istota_notice"
+        config.whatsapp.cloud.proactive_template.language = "en"
+
+        assert outbound.confirmation_body_budget(config) == 4096
+
     def test_it_survives_an_adapter_that_cannot_be_built(self, tmp_path,
                                                          monkeypatch):
         """The scheduler calls this while parking a task; a raise here would
