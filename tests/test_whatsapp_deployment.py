@@ -291,37 +291,19 @@ class TestTheBaileysSidecarService:
         assert "ports" not in service
         assert "expose" not in service
 
-    def test_the_image_runs_the_program_as_the_daemons_user(self):
-        """No USER directive, which is load-bearing here.
+    def test_the_service_builds_the_image_beside_the_program(self):
+        """The Dockerfile itself is pinned one file over.
 
-        `ensure_session_dir` refuses a session directory owned by another uid,
-        so the sidecar and the daemon have to be the same user. The istota
-        image declares no USER either, so both are root; a `USER node` here
-        leaves this container unable to read the credential the daemon paired.
+        `tests/test_whatsapp_sidecar_vendoring.py` owns every entry under
+        `docker/whatsapp-baileys/`, including what the Dockerfile copies, how
+        it installs and that it declares no USER. What belongs here is only
+        that this service is the thing that builds it, and from the small
+        context rather than the repository root.
         """
-        dockerfile = (REPO / "docker" / "whatsapp-baileys" / "Dockerfile").read_text()
+        build = self._service()["build"]
 
-        assert not re.search(r"^USER\s", dockerfile, re.M)
-        assert re.search(r"^FROM node:", dockerfile, re.M)
-        assert re.search(r"^RUN npm ci\b", dockerfile, re.M)
-
-    def test_the_lockfile_is_committed_and_pins_the_library(self):
-        """`npm ci` needs one, and the image's whole install step is `npm ci`.
-
-        Without it the build fails outright — which is the loud direction —
-        but the same lockfile is what makes the pinned version the version
-        actually installed, in the image and in a checkout alike.
-        """
-        import json
-
-        directory = REPO / "docker" / "whatsapp-baileys"
-        lock = json.loads((directory / "package-lock.json").read_text())
-        manifest = json.loads((directory / "package.json").read_text())
-        pinned = manifest["dependencies"]["@whiskeysockets/baileys"]
-
-        entry = lock["packages"]["node_modules/@whiskeysockets/baileys"]
-        assert entry["version"] == pinned
-        assert entry["integrity"]
+        assert build["context"] == "whatsapp-baileys"
+        assert build["dockerfile"] == "Dockerfile"
 
 
 class TestTheDockerNginx:
@@ -888,6 +870,22 @@ class TestTheAnsibleSidecarUnit:
         assert task["file"]["mode"] == "0700"
         assert task["file"]["owner"] == "{{ istota_user }}"
         assert task["file"]["path"].endswith("/data/whatsapp-baileys-session")
+
+    def test_the_dependency_install_can_reach_the_git_dependencies(self):
+        """Two of Baileys' runtime dependencies come from GitHub over git.
+
+        The lockfile records them as `git+ssh://git@github.com/…`, which
+        GitHub serves only to an authenticated key. The daemon user has none,
+        so the install has to reach the same repositories over https or it
+        fails on every host — and nothing in the default suite runs `npm ci`,
+        so this is the only thing that would say so.
+        """
+        install = self._named("Install the WhatsApp sidecar's dependencies")
+        environment = install["environment"]
+
+        assert environment["GIT_CONFIG_KEY_0"] == "url.https://github.com/.insteadOf"
+        assert environment["GIT_CONFIG_VALUE_0"] == "ssh://git@github.com/"
+        assert environment["GIT_CONFIG_COUNT"] == "1"
 
     def test_the_dependency_install_is_gated_on_the_lockfile(self):
         """`npm ci` deletes node_modules before it installs.

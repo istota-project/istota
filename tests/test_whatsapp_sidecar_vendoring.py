@@ -63,6 +63,8 @@ PROGRAM = SIDECAR_DIR / "index.js"
 _PINS = {
     "index.js": "TestTheSidecarSpeaksTheSameProtocol",
     "package.json": "TestThePinnedLibrary",
+    "package-lock.json": "TestTheLockfileInstallsThePinnedLibrary",
+    "Dockerfile": "TestTheImageCopiesWhatTheProgramNeeds",
     "README.md": "TestTheReadmeSaysWhatIsNotCovered",
 }
 
@@ -704,6 +706,156 @@ class TestThePinnedLibrary:
         from istota.transport.whatsapp.baileys_bridge import SIDECAR_ENTRY
 
         assert manifest["main"] == SIDECAR_ENTRY
+
+
+class TestTheLockfileInstallsThePinnedLibrary:
+    """`npm ci` is the install verb everywhere, and it reads only this file.
+
+    The manifest's exact version above is a fact about the commit only if the
+    tree actually installed from it: `npm ci` refuses to resolve anything and
+    takes the lockfile verbatim, so a lockfile naming a different version is
+    the pin silently not holding. It is also what makes the install
+    reproducible — 205 integrity hashes rather than whatever the registry
+    serves today, for a program that holds a full WhatsApp account.
+    """
+
+    def _lock(self) -> dict:
+        return json.loads((SIDECAR_DIR / "package-lock.json").read_text())
+
+    def test_it_installs_the_version_the_manifest_pins(self):
+        manifest = json.loads((SIDECAR_DIR / "package.json").read_text())
+        entry = self._lock()["packages"]["node_modules/@whiskeysockets/baileys"]
+
+        assert entry["version"] == manifest["dependencies"]["@whiskeysockets/baileys"]
+
+    def test_every_package_is_pinned_by_a_hash_of_some_kind(self):
+        """Integrity for a registry tarball, a commit sha for a git one.
+
+        npm records no `integrity` for a git dependency, and this tree has
+        two of them — so a flat integrity assertion is a test that would have
+        to be weakened rather than a rule. What pins a git dependency is the
+        40-character commit its URL fragment names, a git object being
+        addressed by its own content. An entry with neither is a download
+        nothing verifies at all.
+        """
+        unpinned = sorted(
+            name
+            for name, entry in self._lock()["packages"].items()
+            if entry.get("resolved")
+            and not entry.get("integrity")
+            and not re.search(r"#[0-9a-f]{40}$", entry["resolved"])
+        )
+
+        assert unpinned == []
+
+    def test_the_git_dependencies_are_named_rather_than_discovered(self):
+        """They decide what the image and the role have to carry.
+
+        `libsignal` is Baileys' cryptography and the eslint config is one that
+        package declares under `dependencies` rather than `devDependencies`,
+        so `--omit=dev` keeps both and `npm ci` shells out to git for both.
+        That is why the Dockerfile installs git and why both install paths
+        rewrite GitHub's ssh URL to https. A third one appearing, or these two
+        becoming registry packages, changes what those two files need.
+        """
+        git_deps = sorted(
+            name.removeprefix("node_modules/")
+            for name, entry in self._lock()["packages"].items()
+            if str(entry.get("resolved", "")).startswith("git+")
+        )
+
+        assert git_deps == ["@whiskeysockets/eslint-config", "libsignal"]
+
+    def test_it_is_a_lockfile_npm_ci_can_read(self):
+        """`npm ci` needs v2 or later; v1 has no `packages` map at all."""
+        lock = self._lock()
+
+        assert lock["lockfileVersion"] >= 2
+        assert lock["name"] == json.loads(
+            (SIDECAR_DIR / "package.json").read_text()
+        )["name"]
+
+
+class TestTheImageCopiesWhatTheProgramNeeds:
+    """The Dockerfile is the devbox guard's own lesson one directory over.
+
+    A Dockerfile can COPY a manifest, a lockfile or a script out of here as
+    readily as a module, so it is the file most likely to fall out of step
+    with the directory: a leaf added and not copied is an image that builds
+    and then fails at require time, and a copy of something no longer here is
+    a build that fails outright.
+    """
+
+    def _dockerfile(self) -> str:
+        return (SIDECAR_DIR / "Dockerfile").read_text()
+
+    def _directives(self) -> str:
+        """The file with its comments removed.
+
+        The comments in there name `npm install` and `USER node` in order to
+        say why neither is used, so a scan of the whole text answers the
+        opposite of the question being asked.
+        """
+        return "\n".join(
+            line for line in self._dockerfile().splitlines()
+            if not line.lstrip().startswith("#")
+        )
+
+    def _copied(self) -> set[str]:
+        names: set[str] = set()
+        for line in self._dockerfile().splitlines():
+            match = re.match(r"^COPY\s+(?!--from)(.+)$", line.strip())
+            if match:
+                # The last word is the destination.
+                names.update(match.group(1).split()[:-1])
+        return names
+
+    def test_everything_it_copies_is_in_this_directory(self):
+        for name in sorted(self._copied()):
+            assert (SIDECAR_DIR / name).exists(), (
+                f"the Dockerfile copies {name!r}, which is not in "
+                "docker/whatsapp-baileys/ — the build fails outright"
+            )
+
+    def test_it_copies_the_program_and_both_manifest_files(self):
+        """The runtime set, and it is not "every entry": README.md and the
+        Dockerfile itself are deliberately not in the image."""
+        assert self._copied() == {"index.js", "package.json", "package-lock.json"}
+
+    def test_it_installs_from_the_lockfile(self):
+        """`npm install` would resolve afresh and quietly install a version
+        this repository never pinned."""
+        assert re.search(r"\bnpm ci\b", self._directives())
+        assert not re.search(r"\bnpm install\b", self._directives())
+
+    def test_it_can_install_the_git_dependencies(self):
+        """Two runtime dependencies come from git, so two things are needed.
+
+        The slim base carries no git at all, so the install step fails outright
+        without it. And the lockfile records those two as
+        `git+ssh://git@github.com/…`, which GitHub serves only to an
+        authenticated key — a build container has none, so git has to be told
+        to reach the same repositories over https. Both are invisible until a
+        build runs, and no tier here builds this image.
+        """
+        directives = self._directives()
+
+        assert re.search(r"apt-get install[^\n]*\bgit\b", directives)
+        assert "url.https://github.com/.insteadOf" in directives
+        assert "ssh://git@github.com/" in directives
+
+    def test_it_runs_the_entry_point_the_bridge_names(self):
+        from istota.transport.whatsapp.baileys_bridge import SIDECAR_ENTRY
+
+        assert f'CMD ["node", "/app/{SIDECAR_ENTRY}"]' in self._dockerfile()
+
+    def test_it_declares_no_user(self):
+        """`ensure_session_dir` refuses a session directory owned by another
+        uid rather than adopting it, so the sidecar and the daemon have to run
+        as the same user — and the istota image declares no USER either. A
+        `USER node` here builds cleanly and then cannot read the credential
+        the daemon paired."""
+        assert not re.search(r"^USER\s", self._directives(), re.M)
 
 
 class TestTheReadmeSaysWhatIsNotCovered:
