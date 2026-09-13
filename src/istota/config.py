@@ -4562,20 +4562,28 @@ def whatsapp_webhooks_enabled(config: Config) -> bool:
     one": that second reading is ``callback_only_names`` and would keep Meta's
     route alive on a deployment that switched away from Cloud, which is the SMS
     rule this surface does not follow. Today's only implemented provider is
-    ``whatsapp_cloud`` and it is the default, so nothing shipped changes.
+    ``whatsapp_cloud``, and it stays the answer for a deployment configured for
+    Meta whether or not its file names a provider.
 
     Named rather than inlined because four places have to agree on it: this
     process gate, ``serve._maybe_mount_webhooks``, the Ansible role's
-    ``Resolve webhook receiver need``, and the ``whatsapp`` compose profile.
-    **Two of the four cannot express the provider half yet**, and that is an
-    outstanding gap rather than a subtlety: the role gates on
-    ``istota_whatsapp_enabled`` alone and the compose profile is a static
-    name, while neither ``templates/config.toml.j2`` nor ``render-config.sh``
-    renders ``provider`` at all. So on both shipped shapes the key takes its
-    default and all four agree by unreachability. They stop agreeing the day
-    ``provider`` becomes settable, and the failure is benign but silly — a
-    provisioned receiver whose two handlers 404 everything — so the render
-    passthrough and these two predicates land together.
+    ``Resolve webhook receiver need``, and the compose profile. **Three of the
+    four express the provider half; the fourth cannot, and is split in two
+    instead.** Both generators render ``provider`` when the operator names one,
+    and the role's condition reads it — as a refusal of ``baileys`` rather than
+    a requirement of ``whatsapp_cloud``, because an unnamed provider is resolved
+    from the Meta values by :func:`_migrate_whatsapp_flat` and reproducing that
+    rule in Jinja would be a second copy of it, going stale against this module
+    with nothing to say so. Conservative in the direction that matters: the
+    ambiguous case provisions a receiver nothing may call, never drops one a
+    Cloud deployment needs, and this function is still what decides whether the
+    routes serve.
+
+    A compose profile is a static name and can read no config at all, so there
+    is one per adapter — ``whatsapp`` starts the webhook receiver and
+    ``whatsapp-baileys`` starts the sidecar — and the operator names the one
+    matching the provider they set. That is the residual: nothing stops a stack
+    selecting both, which costs a receiver whose two handlers 404 everything.
     """
     return bool(
         config.whatsapp.enabled
