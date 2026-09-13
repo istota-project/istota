@@ -159,9 +159,12 @@ istota email test                            # Test email configuration
 ### WhatsApp
 
 ```bash
-istota whatsapp billing-status               # Read the billable circuit breaker
-istota whatsapp billing-unblock              # Clear it, after checking Meta billing
+istota whatsapp pair                         # Baileys: link the number by scanning a QR code
+istota whatsapp billing-status               # Cloud: read the billable circuit breaker
+istota whatsapp billing-unblock              # Cloud: clear it, after checking Meta billing
 ```
+
+`pair` belongs to the `baileys` adapter. It draws the QR code in the terminal, redrawing it each time WhatsApp rotates it, and returns when the session is ready; it is also how you recover a session WhatsApp has unlinked. The two billing verbs belong to `whatsapp_cloud` and report nothing under Baileys, which has no per-message charge.
 
 `billing-status` reads and prints; `billing-unblock` destroys the evidence row along with the block, which is why the two are separate. Both print the Meta message id in full — this is the private operator surface. See [WhatsApp](../features/whatsapp.md).
 

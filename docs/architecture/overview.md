@@ -2,7 +2,7 @@
 
 Istota is a self-hosted personal AI operating system. It combines a durable agent runtime with native applications for health, location, money, feeds, briefings, chat, and memory. Each module owns its schema and per-user storage, while a common skill interface lets an authorized task query more than one module without merging all personal data into one store.
 
-Each agent task runs through a pluggable **Brain**. Three brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model), and `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (subscription billing; it composes `ClaudeCodeBrain` for model resolution). Swapping brains does not change executor orchestration. Messages arrive from Nextcloud Talk, the in-app web chat, email, file-based task queues, scheduled jobs, the interactive REPL, or the CLI. Each surface sits behind a uniform [Transport](#input-channels) seam. Requests flow through a SQLite task queue, are claimed by per-user worker threads, and produce responses for the originating channel. Nextcloud can supply files, calendars, contacts, login, notifications, and Talk, but the standalone shape uses local storage and needs no Nextcloud server.
+Each agent task runs through a pluggable **Brain**. Three brains ship behind the same protocol: `ClaudeCodeBrain` (the default) wraps Anthropic's Claude Code CLI as a subprocess, `NativeBrain` runs Istota's own in-process agent loop against any OpenAI-compatible endpoint (Anthropic, OpenRouter, or a local model), and `TmuxClaudeBrain` drives the interactive Claude TUI in a detached tmux session (subscription billing; it composes `ClaudeCodeBrain` for model resolution). Swapping brains does not change executor orchestration. Messages arrive from Nextcloud Talk, the in-app web chat, WhatsApp, SMS, email, file-based task queues, scheduled jobs, the interactive REPL, or the CLI. Each surface sits behind a uniform [Transport](#input-channels) seam. Requests flow through a SQLite task queue, are claimed by per-user worker threads, and produce responses for the originating channel. Nextcloud can supply files, calendars, contacts, login, notifications, and Talk, but the standalone shape uses local storage and needs no Nextcloud server.
 
 ```mermaid
 flowchart TB
@@ -40,7 +40,7 @@ flowchart TB
     brain --> plan["resolve_delivery_plan"]
     cmd --> plan
     skill --> plan
-    plan --> out["Transports<br/>Talk · Web · Email · ntfy · TASKS.md"]
+    plan --> out["Transports<br/>Talk · Web · WhatsApp · SMS · Email · ntfy · TASKS.md"]
 ```
 
 Tool calling, function dispatch, and the agent loop live in the brain, not the executor — and which code runs them depends on the brain. With `ClaudeCodeBrain` (the default) they are Claude Code's job, so new Claude Code capabilities (tool use, model improvements) come for free. With `NativeBrain` they are Istota's own: an in-process loop that dispatches tools, compacts context, and retries against any OpenAI-compatible model. Either way the executor's job is the same — it constructs the prompt and hands off a `BrainRequest`.
@@ -104,9 +104,11 @@ Guardrails on this path: subtask creation is **admin-only**, prompt-only (never 
 
 | Module | Purpose |
 |---|---|
-| `transport/` | Uniform seam over messaging surfaces: `IncomingMessage` / `Transport` protocol / `TransportRegistry` / `ingest_message` (inbound) + `resolve_delivery_plan` (outbound). Six transports ship — Talk, Email, Ntfy, IstotaFile, Repl, Web |
+| `transport/` | Uniform seam over messaging surfaces: `IncomingMessage` / `Transport` protocol / `TransportRegistry` / `ingest_message` (inbound) + `resolve_delivery_plan` (outbound). Eight transports ship — Talk, Web, WhatsApp, Sms, Email, Ntfy, IstotaFile, Repl |
 | `transport/talk/inbound.py` | Long-polls Talk conversations, creates tasks, intercepts `!commands`, handles confirmations (the TalkTransport inbound body) |
 | `transport/email/inbound.py` | Polls INBOX via IMAP, creates tasks from known senders, downloads attachments (the EmailTransport inbound body) |
+| `transport/whatsapp/` | One business phone number behind a provider seam: `whatsapp_cloud` (Meta's Cloud API webhook) or `baileys` (a paired WhatsApp Web session driven by a Node sidecar). Inbound resolves the sender to a user binding; outbound is one message per logical response |
+| `transport/sms/` | One service number through Twilio or Telnyx. Signed provider webhooks create tasks; outbound is segment-budgeted and tracked through delivery callbacks |
 | `web_app.py` (`/api/chat/*`) | In-app web chat: POST → `ingest_message` creates a `source_type="web"` task; SSE tails `task_events` |
 | `repl/` | Interactive terminal loop (`istota repl`); each line is an inline `source_type="repl"` task streamed to the terminal |
 | `tasks_file_poller.py` | Watches TASKS.md files for changes, identifies tasks by SHA-256 content hash |
