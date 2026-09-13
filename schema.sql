@@ -900,28 +900,43 @@ CREATE TABLE IF NOT EXISTS sms_parked_status (
 );
 CREATE INDEX IF NOT EXISTS idx_sms_parked_at ON sms_parked_status(parked_at);
 
--- WhatsApp (Meta Cloud API). Five tables, all `CREATE TABLE IF NOT EXISTS`, so
--- an existing deployment database gains them at the next `init_db` with no
--- migration step of its own.
+-- WhatsApp. Five tables, all `CREATE TABLE IF NOT EXISTS`, so an existing
+-- deployment database gains them at the next `init_db` with no migration step
+-- of its own.
 --
 -- The binding is its own table rather than columns on `user_profiles` because
--- BSUID, send id, service-window time and opt-out state are transport runtime
--- data rather than profile text. User deletion follows the project's existing
--- profile cleanup rule.
+-- the adapter-native identity, the send id, the service-window time and the
+-- opt-out state are transport runtime data rather than profile text. User
+-- deletion follows the project's existing profile cleanup rule.
 --
--- Three partial unique indexes, not three UNIQUE columns: '' is the unbound
--- value on all three, and a plain UNIQUE would let the second user with no
--- WhatsApp identity fail to insert. Each of the three decides which Istota
--- user an authenticated inbound event may act as, so a second user holding the
--- same value is a principal takeover rather than a duplicate row.
+-- Four partial unique indexes, not four UNIQUE columns: the unbound value is
+-- '' (and, for the two columns added by migration, NULL), and a plain UNIQUE
+-- would let the second user with no WhatsApp identity fail to insert. Each of
+-- the four decides which Istota user an authenticated inbound event may act
+-- as, so a second user holding the same value is a principal takeover rather
+-- than a duplicate row. `<> ''` excludes a NULL too, because `NULL <> ''` is
+-- NULL rather than true — which is exactly the wanted answer for a row from
+-- before `jid` existed.
+--
+-- `provider` and `jid` are the adapter split (whatsapp-baileys-adapter spec).
+-- They are declared here for a fresh install and added by
+-- `db._run_migrations` for an existing one; both are nullable with no
+-- backfill, and a NULL `provider` reads as `whatsapp_cloud` — every row that
+-- predates the column was written by the one adapter there was. The identity
+-- is per adapter: Cloud resolves an inbound message by `bsuid`, Baileys by
+-- `jid`, and `provider` records which of the two this row's identity belongs
+-- to so a deployment that switched adapters does not read a stale identity of
+-- the wrong kind.
 CREATE TABLE IF NOT EXISTS whatsapp_user_bindings (
     user_id TEXT PRIMARY KEY,
     bootstrap_phone_number TEXT NOT NULL DEFAULT '',  -- E.164; first binding and fallback only
-    bsuid TEXT NOT NULL DEFAULT '',                   -- durable Business-Scoped User ID
+    bsuid TEXT NOT NULL DEFAULT '',                   -- durable Business-Scoped User ID (Cloud)
+    jid TEXT,                                         -- `<number>@s.whatsapp.net` (Baileys)
+    provider TEXT,                                    -- which adapter owns the identity; NULL = whatsapp_cloud
     send_id TEXT NOT NULL DEFAULT '',                 -- current opaque destination
     username TEXT NOT NULL DEFAULT '',                -- display only, never an auth fallback
     opted_out_at TEXT,
-    last_user_message_at TEXT,                        -- opens the 24-hour service window
+    last_user_message_at TEXT,                        -- opens Meta's 24-hour service window
     enrolled_at TEXT,
     last_seen_at TEXT,
     updated_at TEXT NOT NULL
@@ -932,6 +947,9 @@ WHERE bootstrap_phone_number <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_binding_bsuid
 ON whatsapp_user_bindings(bsuid)
 WHERE bsuid <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_binding_jid
+ON whatsapp_user_bindings(jid)
+WHERE jid <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_binding_send_id
 ON whatsapp_user_bindings(send_id)
 WHERE send_id <> '';

@@ -415,6 +415,28 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # Processed emails migrations
     _add_columns(conn, "processed_emails", {"routing_method": "TEXT"})
 
+    # WhatsApp bindings: the adapter split (whatsapp-baileys-adapter spec).
+    # `jid` is the Baileys-native identity and `provider` says which adapter
+    # the row's identity belongs to.
+    #
+    # No backfill, and the absence is the migration's whole safety argument: a
+    # NULL `provider` reads as `whatsapp_cloud` (`_whatsapp_binding_from_row`),
+    # which is what every existing row is — there was one adapter when they
+    # were written. Writing the name in would claim the rows had been examined.
+    # `jid` stays NULL for the same reason: no Cloud row has one, and a
+    # Baileys identity is latched by an authenticated message, never guessed
+    # from a number an operator typed.
+    #
+    # Ahead of `schema.sql`, which is what the ordering at the top of this
+    # function exists for: `idx_whatsapp_binding_jid` names `jid`, so on an
+    # upgraded database the column has to be there before `executescript`
+    # reaches that CREATE INDEX or the whole script aborts on "no such
+    # column" — taking every table declared after it with it.
+    _add_columns(conn, "whatsapp_user_bindings", {
+        "jid": "TEXT",
+        "provider": "TEXT",
+    })
+
     # Memory chunks metadata columns
     _add_columns(conn, "memory_chunks", {
         "topic": "TEXT",
@@ -10128,15 +10150,43 @@ def prune_old_usage(conn: sqlite3.Connection, retention_days: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+WHATSAPP_LEGACY_PROVIDER = "whatsapp_cloud"
+"""What a binding with no `provider` recorded belongs to.
+
+Every row written before the column existed was written by the one adapter
+there was, so the migration adds the column and backfills nothing and this is
+the value a NULL means. The same rule the config loader applies to a flat
+`[whatsapp]` block with no `provider` key, restated here because the two are
+read at different times by different processes and neither can import the
+other's answer — `config` must not import `db`, and `db` must not import
+`transport`. `tests/test_whatsapp_identity.py` holds this equal to
+`config.WHATSAPP_PROVIDER_NAMES`' Cloud entry, which is what stops the two
+spellings drifting.
+
+It is deliberately *not* a `Literal`: this module is below the transport and
+does not police which adapter names exist, only what an unrecorded one means.
+"""
+
+WHATSAPP_BAILEYS_PROVIDER = "baileys"
+"""The other one, for the latch that stamps it. Same drift guard."""
+
+
 @dataclass(frozen=True)
 class WhatsAppBinding:
     """One Istota user's WhatsApp identity.
 
-    `bsuid` is the durable one — PyWa 4.x documents that `wa_id` may be absent
-    for a user with a username, and a recycled phone number must never take
-    over an existing principal. `bootstrap_phone_number` is the operator's way
-    in and an outbound fallback, never the authentication field once a BSUID is
-    latched.
+    **There are two durable identities, one per adapter, and `provider` says
+    which one this row's is.** `bsuid` is Cloud's — PyWa 4.x documents that
+    `wa_id` may be absent for a user with a username, and a recycled phone
+    number must never take over an existing principal. `jid` is Baileys',
+    `<number>@s.whatsapp.net`. `bootstrap_phone_number` is the operator's way
+    in and an outbound fallback under Cloud, never the authentication field
+    once either identity is latched.
+
+    `provider` is never empty when read through `_whatsapp_binding_from_row`:
+    a NULL column reads as `whatsapp_cloud`, because every row written before
+    the column existed was written by the one adapter there was. Nothing else
+    applies that default — see `WHATSAPP_LEGACY_PROVIDER`.
     """
     user_id: str
     bootstrap_phone_number: str = ""
@@ -10148,6 +10198,14 @@ class WhatsAppBinding:
     enrolled_at: str | None = None
     last_seen_at: str | None = None
     updated_at: str = ""
+    # Appended rather than placed beside `bsuid`, so no positional
+    # construction anywhere moves. Both carry the *reader's* default rather
+    # than the column's, which is why `provider` defaults to the legacy name
+    # rather than to `""`: the per-adapter resolution compares this field
+    # against an adapter name, and a `""` from a hand-built binding would
+    # compare unequal to both and read as some third adapter's row.
+    jid: str = ""
+    provider: str = WHATSAPP_LEGACY_PROVIDER
 
 
 @dataclass(frozen=True)
@@ -10158,13 +10216,14 @@ class WhatsAppBillingBlock:
     updated_at: str
 
 
-# The three columns whose partial unique index decides which Istota user an
+# The four columns whose partial unique index decides which Istota user an
 # authenticated inbound event may act as. The message names the column in
 # operator words, because a raw "UNIQUE constraint failed" tells the operator
-# nothing about which of the three collided.
+# nothing about which of the four collided.
 _WHATSAPP_IDENTITY_CONFLICTS = (
     ("bootstrap_phone_number", "WhatsApp phone number is already assigned to another user"),
     ("bsuid", "WhatsApp BSUID is already assigned to another user"),
+    ("jid", "WhatsApp JID is already assigned to another user"),
     ("send_id", "WhatsApp send id is already assigned to another user"),
 )
 
@@ -10178,10 +10237,20 @@ def _raise_whatsapp_conflict(exc: sqlite3.IntegrityError) -> None:
 
 
 def _whatsapp_binding_from_row(row: Any) -> WhatsAppBinding:
+    """The row as every caller sees it, with the legacy default applied once.
+
+    `provider` is the only field whose stored NULL means something other than
+    "empty": it means the row predates the adapter split, which is
+    `WHATSAPP_LEGACY_PROVIDER`. Applied here rather than at each reader so a
+    caller cannot forget the rule — after this, `binding.provider` always
+    names an adapter and a comparison against one is safe.
+    """
     return WhatsAppBinding(
         user_id=row["user_id"],
         bootstrap_phone_number=row["bootstrap_phone_number"] or "",
         bsuid=row["bsuid"] or "",
+        jid=row["jid"] or "",
+        provider=row["provider"] or WHATSAPP_LEGACY_PROVIDER,
         send_id=row["send_id"] or "",
         username=row["username"] or "",
         opted_out_at=row["opted_out_at"],
@@ -10226,13 +10295,23 @@ def set_whatsapp_binding(
     together; a change to either means the operator has pointed this Istota
     user at a different person or a recycled line, and every other column on
     the row is a fact about whoever held it before — the send id (one of the
-    three that decides which user an authenticated event may act as), the
+    four that decides which user an authenticated event may act as), the
     username, `last_seen_at`, the opt-out, and above all
     `last_user_message_at`, which is the sole input to the 24-hour service
     window and therefore the thing that authorises a free-form send. Carrying
     any of them across is the takeover this table exists to prevent, and
     carrying the window across would let istota message a stranger who never
     wrote in. `reset_whatsapp_identity` clears exactly the same set.
+
+    **The JID goes with them, and the `provider` stamp with it.** This
+    function has no `jid` parameter — no operator types one, it is latched by
+    an authenticated message — so a discard here can only ever clear it, which
+    is the safe direction: a stale Baileys identity left on a row whose
+    operator-facing identity has just been repointed would keep resolving the
+    previous holder's messages to this user. Only the discard clears it, so an
+    operator re-asserting the same number on every Ansible converge does not
+    unlatch a working Baileys binding — the change-detect tuple in
+    `cli._whatsapp_binding_state` is what holds that honest.
 
     Changing the number therefore also clears the BSUID unless the same call
     supplies one — that is the operator saying which identity the new number
@@ -10279,6 +10358,9 @@ def set_whatsapp_binding(
     if username is not None:
         new_username = str(username or "").strip()
 
+    new_jid = existing.jid if existing else ""
+    new_provider = existing.provider if existing else WHATSAPP_LEGACY_PROVIDER
+
     identity_changed = existing is not None and (
         number != old_number or new_bsuid != old_bsuid
     )
@@ -10287,14 +10369,30 @@ def set_whatsapp_binding(
             new_send_id = ""
         if username is None:
             new_username = ""
+        # The adapter-native identity of the *other* adapter, discarded for
+        # the reason the docstring gives: it names the previous holder.
+        # `provider` returns to the legacy value rather than to '' so nothing
+        # downstream has to handle a third state.
+        new_jid = ""
+        new_provider = WHATSAPP_LEGACY_PROVIDER
 
     # `enrolled_at` is stamped whenever the BSUID becomes a *different*
     # non-empty value, so a re-enrollment reads as the new enrollment it is
-    # rather than as the original. Only clearing the BSUID clears it.
+    # rather than as the original.
+    #
+    # **It is cleared when the row carries no identity at all, not when it
+    # carries no BSUID**, and the difference only appeared with a second
+    # adapter: a Baileys row has an empty BSUID and a latched JID, so the
+    # narrower test read it as unenrolled and blanked the stamp on every
+    # write. The Ansible role re-runs `user ensure` with the same number on
+    # every converge, so that was a column cleared daily on the estate — and
+    # `cli._whatsapp_binding_state` compares it, so each converge also
+    # reported `updated` and fired the scheduler and web restart handlers for
+    # a change nobody made.
     enrolled_at = existing.enrolled_at if existing else None
-    if not new_bsuid:
+    if not new_bsuid and not new_jid:
         enrolled_at = None
-    elif new_bsuid != old_bsuid or not enrolled_at:
+    elif new_bsuid and (new_bsuid != old_bsuid or not enrolled_at):
         enrolled_at = sql_datetime_now()
 
     keep_state = existing is not None and not identity_changed
@@ -10306,13 +10404,16 @@ def set_whatsapp_binding(
         conn.execute(
             """
             INSERT INTO whatsapp_user_bindings (
-                user_id, bootstrap_phone_number, bsuid, send_id, username,
+                user_id, bootstrap_phone_number, bsuid, jid, provider,
+                send_id, username,
                 opted_out_at, last_user_message_at, enrolled_at, last_seen_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 bootstrap_phone_number = excluded.bootstrap_phone_number,
                 bsuid = excluded.bsuid,
+                jid = excluded.jid,
+                provider = excluded.provider,
                 send_id = excluded.send_id,
                 username = excluded.username,
                 opted_out_at = excluded.opted_out_at,
@@ -10322,7 +10423,8 @@ def set_whatsapp_binding(
                 updated_at = excluded.updated_at
             """,
             (
-                user_id, number, new_bsuid, new_send_id, new_username,
+                user_id, number, new_bsuid, new_jid, new_provider,
+                new_send_id, new_username,
                 opted_out_at, last_user_message_at, enrolled_at, last_seen_at,
                 sql_datetime_now(),
             ),
@@ -10343,6 +10445,15 @@ def reset_whatsapp_identity(
     Refuses a binding with no bootstrap number left, because the result would
     be a row naming a user and no way to reach or recognise them — which is
     `clear_whatsapp_binding`, said less clearly.
+
+    **Both adapters' identities go, not the active adapter's alone.** The
+    operator reaches this through `istota user ensure
+    --reset-whatsapp-identity`, which takes no adapter argument and is a
+    statement that the learned identity on this row is wrong — and a
+    half-reset leaves the other adapter's identity to resolve the previous
+    holder silently the moment the deployment switches back. Refusing to
+    guess which half they meant would cost them the one verb every identity
+    alert tells them to run.
     """
     existing = get_whatsapp_binding(conn, user_id)
     if existing is None:
@@ -10359,7 +10470,8 @@ def reset_whatsapp_identity(
     conn.execute(
         """
         UPDATE whatsapp_user_bindings
-           SET bsuid = '', send_id = '', username = '',
+           SET bsuid = '', jid = '', provider = NULL,
+               send_id = '', username = '',
                enrolled_at = NULL, last_user_message_at = NULL,
                last_seen_at = NULL, opted_out_at = NULL,
                updated_at = ?
@@ -10395,6 +10507,29 @@ def get_whatsapp_binding_by_bsuid(
         return None
     row = conn.execute(
         "SELECT * FROM whatsapp_user_bindings WHERE bsuid = ?", (bsuid,),
+    ).fetchone()
+    return None if row is None else _whatsapp_binding_from_row(row)
+
+
+def get_whatsapp_binding_by_jid(
+    conn: sqlite3.Connection, jid: str
+) -> WhatsAppBinding | None:
+    """The binding this Baileys identity belongs to.
+
+    `get_whatsapp_binding_by_bsuid`'s twin, one adapter over, and it carries
+    the same rule for the same reason: `''` matches nothing rather than
+    matching every unbound row. The column is NULL on a row from before the
+    adapter split and `''` on one this adapter has never latched, and a
+    truthiness slip here would resolve an unknown sender to whichever of them
+    sorted first. The caller is expected to have normalized the JID through
+    `identity.normalize_jid` first — comparing a device-suffixed form against
+    the bare stored one is how a legitimate user trips the recycled-number
+    refusal.
+    """
+    if not jid:
+        return None
+    row = conn.execute(
+        "SELECT * FROM whatsapp_user_bindings WHERE jid = ?", (jid,),
     ).fetchone()
     return None if row is None else _whatsapp_binding_from_row(row)
 
@@ -10440,20 +10575,96 @@ def latch_whatsapp_bsuid(
     A `sqlite3.IntegrityError` still escapes, and must: it means another user
     already holds this BSUID or send id, and the partial unique indexes are
     what the whole enrollment story rests on.
+
+    **It also stamps the provider and discards the other adapter's derived
+    state.** The invariant this used to rest on — a row with no BSUID has
+    never carried an authenticated message, so its window and opt-out are
+    NULL already — stopped holding when a second adapter could latch a row of
+    its own: a Baileys row has `bsuid = ''` and a window Meta never opened.
+    So `last_user_message_at` and `opted_out_at` survive only when the row
+    already belonged to this adapter, which is a **no-op on every existing
+    row** (a NULL `provider` reads as this adapter) and therefore changes
+    nothing about the Cloud path in any shipped deployment. `last_seen_at` is
+    not in the discard: it is a fact about the row rather than about a
+    holder, and it is being written by this very call.
     """
     if not bsuid:
         return False
     cur = conn.execute(
         """
         UPDATE whatsapp_user_bindings
-           SET bsuid = ?, send_id = ?, username = ?,
-               enrolled_at = ?, last_seen_at = ?, updated_at = ?
-         WHERE user_id = ? AND bsuid = ''
+           SET bsuid = ?1, send_id = ?2, username = ?3,
+               provider = ?7,
+               last_user_message_at = CASE
+                   WHEN COALESCE(NULLIF(provider, ''), ?7) = ?7
+                   THEN last_user_message_at ELSE NULL
+               END,
+               opted_out_at = CASE
+                   WHEN COALESCE(NULLIF(provider, ''), ?7) = ?7
+                   THEN opted_out_at ELSE NULL
+               END,
+               enrolled_at = ?4, last_seen_at = ?5, updated_at = ?6
+         WHERE user_id = ?8 AND bsuid = ''
         """,
         (
             bsuid, send_id, username,
             sql_datetime_now(), sql_datetime_now(), sql_datetime_now(),
-            user_id,
+            WHATSAPP_LEGACY_PROVIDER, user_id,
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def latch_whatsapp_jid(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    jid: str,
+    username: str = "",
+) -> bool:
+    """`latch_whatsapp_bsuid` one adapter over. True when this call latched.
+
+    Every rule that one carries applies here for the same reasons, and the
+    docstring there is the long form: the write is conditional in the SQL
+    rather than on a value read a moment earlier, so two workers latching one
+    row produce a winner and a `False`; a `False` for a row that already
+    carries a JID is the *only* safe answer, because reaching that state means
+    the number was recycled or the identity changed under us — a decision for
+    the caller and an operator, never a rebind; and an `IntegrityError` still
+    escapes, because it means another user already holds this JID and the
+    partial unique index is what the enrollment rests on.
+
+    Two things differ, and both follow from what a JID is. There is no send id
+    to latch: a Baileys destination *is* the JID, where Meta hands out an
+    opaque one of its own. And the condition is `jid IS NULL OR jid = ''`
+    rather than `bsuid = ''` alone, because the column is nullable — a row
+    that predates the adapter split has NULL there, and `jid = ''` is NULL
+    rather than true for it, so testing only the empty string would refuse to
+    latch every row on an upgraded deployment and no Baileys user would ever
+    enroll.
+    """
+    if not jid:
+        return False
+    cur = conn.execute(
+        """
+        UPDATE whatsapp_user_bindings
+           SET jid = ?1, username = ?2,
+               provider = ?6,
+               last_user_message_at = CASE
+                   WHEN COALESCE(NULLIF(provider, ''), ?7) = ?6
+                   THEN last_user_message_at ELSE NULL
+               END,
+               opted_out_at = CASE
+                   WHEN COALESCE(NULLIF(provider, ''), ?7) = ?6
+                   THEN opted_out_at ELSE NULL
+               END,
+               enrolled_at = ?3, last_seen_at = ?4, updated_at = ?5
+         WHERE user_id = ?8 AND (jid IS NULL OR jid = '')
+        """,
+        (
+            jid, username,
+            sql_datetime_now(), sql_datetime_now(), sql_datetime_now(),
+            WHATSAPP_BAILEYS_PROVIDER, WHATSAPP_LEGACY_PROVIDER, user_id,
         ),
     )
     return cur.rowcount > 0

@@ -868,11 +868,13 @@ class TestWhatsAppSchemaMigration:
         for name in (
             "idx_whatsapp_binding_phone",
             "idx_whatsapp_binding_bsuid",
+            "idx_whatsapp_binding_jid",
             "idx_whatsapp_binding_send_id",
         ):
             assert binding_indexes[name] == 1, f"{name} is not unique"
         assert {
-            "user_id", "bootstrap_phone_number", "bsuid", "send_id", "username",
+            "user_id", "bootstrap_phone_number", "bsuid", "jid", "provider",
+            "send_id", "username",
             "opted_out_at", "last_user_message_at", "enrolled_at", "last_seen_at",
             "updated_at",
         } == binding

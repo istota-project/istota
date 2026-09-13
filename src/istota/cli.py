@@ -1132,6 +1132,8 @@ def _whatsapp_binding_state(binding) -> tuple | None:
     return (
         binding.bootstrap_phone_number,
         binding.bsuid,
+        binding.jid,
+        binding.provider,
         binding.send_id,
         binding.username,
         binding.opted_out_at,
@@ -1420,6 +1422,15 @@ def cmd_user_ensure(args):
                 "  whatsapp_bsuid: "
                 + user_profiles.mask_whatsapp_identifier(binding.bsuid)
             )
+        if binding.jid:
+            # Masked for a stronger reason than the BSUID is: a JID embeds the
+            # subscriber's phone number in plain digits, so printing it raw
+            # would put on this surface exactly what the line above it
+            # deliberately masks.
+            print(
+                "  whatsapp_jid: "
+                + user_profiles.mask_whatsapp_identifier(binding.jid)
+            )
         if binding.opted_out_at:
             print("  whatsapp: opted out")
     if profile.log_channel:
@@ -1481,6 +1492,8 @@ def cmd_user_show(args):
         "whatsapp": None if binding is None else {
             "bootstrap_phone_number": binding.bootstrap_phone_number,
             "bsuid": binding.bsuid,
+            "jid": binding.jid,
+            "provider": binding.provider,
             "send_id": binding.send_id,
             "username": binding.username,
             "opted_out_at": binding.opted_out_at,
