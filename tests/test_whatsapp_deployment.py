@@ -473,6 +473,42 @@ class TestTheAnsibleRole:
             {**base, "istota_whatsapp_enabled": False},
         ).strip() == "False"
 
+    def test_a_baileys_deployment_starts_no_webhook_receiver(self):
+        """The adapter half of the same arm.
+
+        Baileys takes its inbound over a Unix socket, so `whatsapp_
+        webhooks_enabled` is False for it and a receiver provisioned here
+        would be a unit whose two handlers 404 everything. The `whatsapp_cloud`
+        and empty cases both provision one — empty because the role cannot
+        read the Meta values without copying the loader's signal rule, and
+        provisioning a receiver nothing calls is the harmless direction.
+        """
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        derive = next(
+            task for task in tasks
+            if task.get("name") == "Resolve webhook receiver need"
+        )
+        template = _ansible_ish_environment().from_string(
+            derive["set_fact"]["istota_webhooks_enabled"]
+        )
+        base = {
+            **defaults,
+            "istota_location_enabled": False,
+            "istota_sms_enabled": False,
+            "istota_whatsapp_enabled": True,
+        }
+
+        for provider, expected in (
+            ("baileys", "False"),
+            ("whatsapp_cloud", "True"),
+            ("", "True"),
+        ):
+            rendered = template.render(
+                {**base, "istota_whatsapp_provider": provider},
+            ).strip()
+            assert rendered == expected, f"{provider!r} -> {rendered!r}"
+
     def test_the_role_refuses_the_two_configs_the_loader_raises_on(self):
         """A pre-flight assert, because the alternative fails half-way through.
 
@@ -499,6 +535,10 @@ class TestTheAnsibleRole:
         )
         assert "istota_whatsapp_billing_policy" in conditions
         assert "istota_whatsapp_template_enabled" in conditions
+        # A third value reaches the loader the same way: an unknown provider
+        # is refused whether or not the block is enabled, so a typo in the
+        # inventory is a config no istota process can read.
+        assert "istota_whatsapp_provider" in conditions
 
         # The assert has to run whatever `enabled` says, because an unknown
         # billing policy fails the load on a disabled block too.
@@ -532,6 +572,7 @@ class TestTheAnsibleRole:
         for label, bad in (
             ("typo in the policy", {"istota_whatsapp_billing_policy": "free-guard"}),
             ("template under free_guard", {"istota_whatsapp_template_enabled": True}),
+            ("typo in the provider", {"istota_whatsapp_provider": "whatsapp-cloud"}),
         ):
             verdicts = [
                 env.from_string("{{ " + clause + " }}").render({**defaults, **bad}).strip()

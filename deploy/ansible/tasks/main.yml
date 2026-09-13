@@ -53,14 +53,17 @@
 - name: Assert WhatsApp settings the config loader accepts
   assert:
     that:
+      - istota_whatsapp_provider in ["", "baileys", "whatsapp_cloud"]
       - istota_whatsapp_billing_policy in ["free_guard", "allow_paid"]
       - not (istota_whatsapp_template_enabled | bool) or
         istota_whatsapp_billing_policy == "allow_paid"
     fail_msg: |
       The [whatsapp] settings would produce a config.toml the daemon refuses
-      to load. istota_whatsapp_billing_policy must be "free_guard" or
-      "allow_paid" (it is checked even when WhatsApp is disabled), and
-      istota_whatsapp_template_enabled=true needs
+      to load. istota_whatsapp_provider must be "baileys", "whatsapp_cloud" or
+      empty (empty renders no provider key, leaving the choice to whether a
+      Meta account is configured); istota_whatsapp_billing_policy must be
+      "free_guard" or "allow_paid" (it is checked even when WhatsApp is
+      disabled); and istota_whatsapp_template_enabled=true needs
       istota_whatsapp_billing_policy="allow_paid" — a proactive template is a
       paid message, so free_guard cannot reach one.
 
@@ -77,20 +80,27 @@
          or ((istota_sms_telnyx_api_key | length > 0)
              and (istota_sms_telnyx_public_key | length > 0)
              and (istota_sms_telnyx_messaging_profile_id | length > 0))
-         or (istota_whatsapp_enabled | bool) }}
-  # WhatsApp is the plain arm. The two SMS provider arms exist because a
-  # complete-but-inactive block keeps its delivery callbacks authenticating
-  # across a provider switch; WhatsApp has one account, and both its handlers
-  # refuse every request while `enabled` is false.
+         or ((istota_whatsapp_enabled | bool)
+             and istota_whatsapp_provider != "baileys") }}
+  # The two SMS provider arms exist because a complete-but-inactive block keeps
+  # its delivery callbacks authenticating across a provider switch; WhatsApp
+  # has one account, and both its handlers refuse every request while
+  # `enabled` is false.
   #
-  # `config.whatsapp_webhooks_enabled` is no longer this expression, and the
-  # difference is outstanding rather than settled: it also requires the active
-  # `provider` to be one with an HTTP callback. This role renders no
-  # `provider` key, so the config always takes its `whatsapp_cloud` default
-  # and the two agree today. Add the provider condition here in the same
-  # change that renders `istota_whatsapp_provider` — otherwise a deployment
-  # selecting a socket-based adapter provisions a receiver whose two handlers
-  # 404 everything.
+  # The WhatsApp arm also asks which adapter is running, because only one of
+  # them receives over an HTTP callback at all: a Baileys deployment takes its
+  # inbound over a Unix socket, so a receiver provisioned for it is a unit
+  # whose two handlers 404 everything.
+  #
+  # It refuses `baileys` rather than requiring `whatsapp_cloud`, and the
+  # asymmetry is deliberate. An empty provider is the ordinary state of every
+  # host that has not been told which adapter it runs, and the config resolves
+  # it from the Meta values — which this expression cannot read without
+  # copying `_is_whatsapp_cloud_signal` into Jinja, where it would go stale
+  # against the loader. Conservative in the direction that matters: the
+  # ambiguous case provisions a receiver nothing may call, never drops one a
+  # Cloud deployment needs. `config.whatsapp_webhooks_enabled` is the
+  # authority for whether the routes then serve.
 
 # ============================================================
 # FULL INSTALL TASKS (skipped when istota_update_only=true)
