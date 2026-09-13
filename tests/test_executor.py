@@ -4375,6 +4375,91 @@ class TestReplInteractiveGate:
         assert "talk" in _INTERACTIVE_SOURCE_TYPES
         assert "email" in _INTERACTIVE_SOURCE_TYPES
 
+    def test_the_push_surfaces_are_interactive(self):
+        """ISSUE-500. Membership rather than behaviour: what a text message
+        loses by being absent from this tuple is asserted through the
+        assembled prompt in `tests/test_prompt_golden.py`.
+        """
+        from istota.executor import _INTERACTIVE_SOURCE_TYPES
+        assert "sms" in _INTERACTIVE_SOURCE_TYPES
+        assert "whatsapp" in _INTERACTIVE_SOURCE_TYPES
+
+
+class TestTheInteractiveSourceTypeSets:
+    """The two hand-typed sets that have to move together, and the one that
+    does not.
+
+    ISSUE-500 and ISSUE-499 are the same class twice: `sms` and `whatsapp`
+    were added as surfaces and three separate spellings of "which source types
+    are interactive" were left as they were. A membership test catches a
+    spelling no writer produces; it cannot catch a missing one, because the
+    test's list and the product's list get written by the same person on the
+    same day. These are the subset relations instead, which a missing member
+    does break.
+    """
+
+    def test_routing_s_interactive_set_is_covered_by_the_executor_s(self):
+        """A surface whose reply must never be silently dropped is by
+        definition a live conversation, so `routing`'s membership forces this
+        one. Subset rather than equality: `executor` could legitimately widen
+        (a `cli` turn carrying a conversation token) without `routing`
+        following, and that would be a decision rather than drift.
+        """
+        from istota.executor import _INTERACTIVE_SOURCE_TYPES
+        from istota.transport.routing import (
+            _INTERACTIVE_SOURCE_TYPES as _ROUTING_INTERACTIVE,
+        )
+
+        missing = set(_ROUTING_INTERACTIVE) - set(_INTERACTIVE_SOURCE_TYPES)
+        assert not missing, (
+            f"{sorted(missing)} can be routed a reply but loads no conversation "
+            "context, sticky skills or changelog (ISSUE-500)"
+        )
+
+    def test_the_changelog_set_is_a_subset_of_the_interactive_one(self):
+        """The changelog is one consumer of the interactive tuple, not a wider
+        gate: a source type that shows it must also be one that loads context.
+        The other direction is open on purpose — `sms` and `whatsapp` are
+        interactive and deliberately do not show it.
+        """
+        from istota.executor import (
+            _INTERACTIVE_SOURCE_TYPES,
+            _SKILLS_CHANGELOG_SOURCE_TYPES,
+        )
+
+        assert set(_SKILLS_CHANGELOG_SOURCE_TYPES) <= set(_INTERACTIVE_SOURCE_TYPES)
+        assert set(_SKILLS_CHANGELOG_SOURCE_TYPES) != set(_INTERACTIVE_SOURCE_TYPES), (
+            "the two tuples have converged; if that is deliberate the changelog "
+            "no longer needs its own, and if it is not, a push surface has "
+            "started spending the changelog on a turn that cannot show it"
+        )
+
+    def test_showing_the_changelog_and_spending_it_read_one_predicate(self):
+        """`execute_task` injects the changelog and, after a successful run,
+        writes the user's skills fingerprint. The two gates must be the same
+        predicate: show-without-spend repeats the changelog on every turn for
+        ever, and spend-without-show burns it invisibly, which is ISSUE-500's
+        own defect with the surfaces swapped. One local, read twice, so there
+        is nothing to drift — asserted here because the second read sits
+        roughly eight hundred lines below the first.
+        """
+        from tests.support.drift import source_of
+        from istota.executor import execute_task
+
+        src = source_of(execute_task)
+        assert "_shows_skills_changelog = task.source_type in " in src
+        # Both sites, not just the write: re-gating the injection on a fresh
+        # inline `task.source_type in _SKILLS_CHANGELOG_SOURCE_TYPES` would
+        # keep every other assertion here green while restoring exactly the
+        # two-reads-can-drift shape this test exists to refuse.
+        assert src.count("if _shows_skills_changelog:") == 1
+        assert src.count("if success and _shows_skills_changelog:") == 1
+        assert "set_user_skills_fingerprint" in src
+        assert "_is_interactive" not in src, (
+            "the changelog gate is not the interactive gate any more; a local "
+            "called `_is_interactive` beside it will be read as one"
+        )
+
 
 class TestWorkspacePlaceholderDoesNotClobberSandboxBind:
     """Regression: the {workspace} display string must not clobber the
