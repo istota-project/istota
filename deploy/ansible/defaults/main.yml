@@ -1016,8 +1016,19 @@ istota_whatsapp_baileys_sidecar_command: ""
 # or nothing runs one at all. Ignored unless the Baileys adapter is selected.
 istota_whatsapp_baileys_sidecar_unit: true
 # How much the sidecar writes to sidecar.log inside its 0700 session directory:
-# error | warn | info | debug. It writes nothing to stdout at any level.
+# error | warn | info | debug. It writes nothing to stdout at any level, so
+# that file and the journal's exit statuses are the whole diagnostic surface;
+# the role rotates it.
 istota_whatsapp_baileys_log_level: "info"
+# Soft memory ceiling for the sidecar unit, as on the web and webhook units.
+# Empty omits the directive entirely.
+istota_whatsapp_baileys_memory_high: "512M"
+#
+# Note for turning any of this on: enabling the sidecar needs one **full** play
+# first. The Node.js install is gated on `not istota_update_only`, while the
+# sidecar's `npm ci` is not, so flipping a host to Baileys with
+# `-e istota_update_only=true` reaches the install with no npm on PATH. Loud
+# rather than silent, and easily avoided by running the play.
 istota_whatsapp_waba_id: ""                  # decimal WABA id, not a number
 istota_whatsapp_phone_number_id: ""          # decimal phone number id
 istota_whatsapp_business_phone_number: ""    # exact E.164

@@ -65,6 +65,7 @@ _PINS = {
     "package.json": "TestThePinnedLibrary",
     "package-lock.json": "TestTheLockfileInstallsThePinnedLibrary",
     "Dockerfile": "TestTheImageCopiesWhatTheProgramNeeds",
+    ".dockerignore": "TestTheImageCopiesWhatTheProgramNeeds",
     "README.md": "TestTheReadmeSaysWhatIsNotCovered",
 }
 
@@ -852,6 +853,25 @@ class TestTheImageCopiesWhatTheProgramNeeds:
         from istota.transport.whatsapp.baileys_bridge import SIDECAR_ENTRY
 
         assert f'CMD ["node", "/app/{SIDECAR_ENTRY}"]' in self._dockerfile()
+
+    def test_the_context_excludes_the_dependency_tree(self):
+        """The role installs node_modules into this same directory.
+
+        The compose build context *is* this directory, so on a host that has
+        run the play — or on any checkout where somebody ran `npm ci` by hand
+        — a build would transfer a few hundred megabytes the Dockerfile copies
+        nothing out of. It installs from the lockfile instead.
+        """
+        ignored = {
+            line.strip()
+            for line in (SIDECAR_DIR / ".dockerignore").read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        }
+
+        assert "node_modules" in ignored
+        # Nothing the Dockerfile copies may be ignored, or the build fails on
+        # a file the context no longer carries.
+        assert not (ignored & self._copied())
 
     def test_it_declares_no_user(self):
         """`ensure_session_dir` refuses a session directory owned by another

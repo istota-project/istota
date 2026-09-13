@@ -643,17 +643,8 @@ class TestTheAnsibleRole:
         toggles, and its comment there asks for the same treatment.
         """
         tasks = yaml.safe_load(TASKS_FILE.read_text())
-        asserts = [
-            task for task in tasks
-            if "assert" in task and "whatsapp" in str(task.get("name", "")).lower()
-        ]
-        assert asserts, "the role has no WhatsApp pre-flight assert"
+        conditions = " ".join(_preflight_clauses(tasks))
 
-        conditions = " ".join(
-            str(clause)
-            for task in asserts
-            for clause in task["assert"]["that"]
-        )
         assert "istota_whatsapp_billing_policy" in conditions
         assert "istota_whatsapp_template_enabled" in conditions
         # A third value reaches the loader the same way: an unknown provider
@@ -663,8 +654,8 @@ class TestTheAnsibleRole:
 
         # The assert has to run whatever `enabled` says, because an unknown
         # billing policy fails the load on a disabled block too.
-        for task in asserts:
-            assert "istota_whatsapp_enabled" not in str(task.get("when", ""))
+        task = next(t for t in tasks if t.get("name") == PREFLIGHT_ASSERT)
+        assert "istota_whatsapp_enabled" not in str(task.get("when", ""))
 
     def test_the_whatsapp_asserts_pass_on_the_defaults(self):
         """Otherwise every deploy that never touched WhatsApp fails."""
@@ -672,23 +663,15 @@ class TestTheAnsibleRole:
         tasks = yaml.safe_load(TASKS_FILE.read_text())
         env = _ansible_ish_environment()
 
-        for task in tasks:
-            if "assert" not in task or "whatsapp" not in str(task.get("name", "")).lower():
-                continue
-            for clause in task["assert"]["that"]:
-                rendered = env.from_string("{{ " + clause + " }}").render(defaults)
-                assert rendered.strip() == "True", f"{clause!r} -> {rendered!r}"
+        for clause in _preflight_clauses(tasks):
+            rendered = env.from_string("{{ " + clause + " }}").render(defaults)
+            assert rendered.strip() == "True", f"{clause!r} -> {rendered!r}"
 
     def test_the_whatsapp_asserts_catch_both_bad_shapes(self):
         defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
         tasks = yaml.safe_load(TASKS_FILE.read_text())
         env = _ansible_ish_environment()
-        clauses = [
-            clause
-            for task in tasks
-            if "assert" in task and "whatsapp" in str(task.get("name", "")).lower()
-            for clause in task["assert"]["that"]
-        ]
+        clauses = _preflight_clauses(tasks)
 
         for label, bad in (
             ("typo in the policy", {"istota_whatsapp_billing_policy": "free-guard"}),
@@ -914,15 +897,146 @@ class TestTheAnsibleSidecarUnit:
         """
         install = self._named("Install the WhatsApp sidecar's dependencies")
         record = self._named("Record the installed WhatsApp sidecar lockfile")
-        conditions = " ".join(str(c) for c in install["when"])
+        resolve = self._named(
+            "Resolve whether the WhatsApp sidecar needs a dependency install"
+        )
+        fact = resolve["set_fact"]["istota_whatsapp_baileys_install_needed"]
 
-        assert install["command"].startswith("npm ci")
-        assert "baileys_lockfile.stat.checksum" in conditions
+        assert "npm ci" in install["command"]
+        assert "baileys_lockfile.stat.checksum" in fact
+        assert "baileys_installed_marker.content" in fact
         assert "restart istota-whatsapp-baileys" in install["notify"]
         # The marker is written after the install and inside node_modules, so a
         # failed `npm ci` records nothing and `rm -rf node_modules` forces one.
         assert "/node_modules/.istota-lockfile-sha256" in record["copy"]["dest"]
         assert self._tasks().index(record) > self._tasks().index(install)
+
+    def test_a_missing_lockfile_refuses_rather_than_skips(self):
+        """A skip here is a flapping unit and a green play.
+
+        The install is gated on the lockfile existing, so a repo directory
+        that is not a checkout skipped it silently — and the unit is deployed,
+        enabled and started on a condition that never mentions node_modules.
+        `index.js` exits 3 on a missing module under `Restart=always`, so the
+        result is one exit every restart interval for the life of the host
+        while `ansible-playbook` reports ok.
+        """
+        task = self._named("Assert the WhatsApp sidecar lockfile is present")
+
+        assert "baileys_lockfile.stat.exists" in str(task["assert"]["that"])
+        assert "istota_whatsapp_baileys_unit_wanted" in str(task["when"])
+        # Ahead of the install and therefore ahead of the unit.
+        install = self._named("Install the WhatsApp sidecar's dependencies")
+        assert self._tasks().index(task) < self._tasks().index(install)
+
+    def test_the_sidecar_is_stopped_for_its_own_reinstall(self):
+        """`npm ci` deletes node_modules before it installs.
+
+        The running process survives on modules it has already required, but
+        `Restart=always` means a crash inside that window re-execs against a
+        half-populated tree and loops on exit 3 until the install finishes.
+        The three tasks share one fact rather than one condition spelled three
+        times, because the stop, the install and the marker have to agree.
+        """
+        stop = self._named("Stop the WhatsApp sidecar for its dependency install")
+        install = self._named("Install the WhatsApp sidecar's dependencies")
+        record = self._named("Record the installed WhatsApp sidecar lockfile")
+
+        assert stop["systemd"]["state"] == "stopped"
+        for task in (stop, install, record):
+            assert "istota_whatsapp_baileys_install_needed" in str(task["when"])
+        assert self._tasks().index(stop) < self._tasks().index(install)
+
+    def test_the_install_takes_the_roles_own_update_lock(self):
+        """Every other mutating build command in the role takes it.
+
+        The auto-update cron reinstalls this same directory, so without the
+        lock a play landing inside a cron run can be part-way through its own
+        `npm ci` against the tree this one is deleting.
+        """
+        install = self._named("Install the WhatsApp sidecar's dependencies")
+
+        assert "flock -w" in install["command"]
+        assert "-update.lock" in install["command"]
+
+    def test_the_unit_backs_off_between_restarts(self):
+        """The steady state of the documented recovery path is a restart loop.
+
+        A de-paired session is start-log-exit until a person scans a code, and
+        the only place the sidecar writes is a file inside the 0700 credential
+        directory that nothing else surfaces. At five seconds that is twelve
+        entries a minute for as long as the account stays unlinked.
+        """
+        rendered = self._unit()
+        seconds = re.search(r"^RestartSec=(\d+)$", rendered, re.M)
+
+        assert seconds and int(seconds.group(1)) >= 30
+
+    def test_the_sidecar_log_is_rotated(self):
+        """It is not under /var/log, so the existing glob does not reach it."""
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        rendered = _ansible_ish_environment().from_string(
+            (ANSIBLE / "templates" / "istota-logrotate.j2").read_text()
+        ).render(
+            **{
+                **defaults,
+                "istota_namespace": "istota",
+                "istota_user": "istota",
+                "istota_group": "istota",
+                "istota_home": "/srv/app/istota",
+                "istota_whatsapp_baileys_unit_wanted": True,
+            }
+        )
+
+        assert "/srv/app/istota/data/whatsapp-baileys-session/sidecar.log" in rendered
+        assert "create 0600 istota istota" in rendered
+        # The writer appends and never reopens, so a rename would leave it
+        # writing to an unlinked inode. Counted as directives rather than as
+        # occurrences, since the stanza's comment names the keyword too.
+        directives = [
+            line.strip() for line in rendered.splitlines()
+            if line.strip() == "copytruncate"
+        ]
+        assert len(directives) == 2
+
+    def test_the_sidecar_log_stanza_goes_with_the_unit(self):
+        """A rotate entry for a file no deployment has is harmless and
+        misleading; logrotate would report a missing file on every host."""
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        rendered = _ansible_ish_environment().from_string(
+            (ANSIBLE / "templates" / "istota-logrotate.j2").read_text()
+        ).render(**{**defaults, "istota_namespace": "istota",
+                    "istota_user": "istota", "istota_group": "istota",
+                    "istota_home": "/srv/app/istota"})
+
+        assert "whatsapp-baileys-session" not in rendered
+
+    def test_the_unit_writes_no_wider_than_it_needs(self):
+        """Narrower than the sibling units', deliberately.
+
+        Those run istota's own code; this one runs a third-party dependency
+        tree while holding a full WhatsApp account, and everything it writes is
+        under the data directory. Naming the parent would hand it the framework
+        database, every module database and the checkout it executes from.
+        """
+        rendered = self._unit()
+
+        assert "ReadWritePaths=/srv/app/istota/data" in rendered
+        assert "ReadWritePaths=/srv/app/istota\n" not in rendered
+
+    def test_the_unit_carries_a_memory_ceiling(self):
+        """As on the web and webhook units, and omitted when set empty."""
+        assert "MemoryHigh=512M" in self._unit()
+        assert "MemoryHigh" not in self._unit(istota_whatsapp_baileys_memory_high="")
+
+    def test_the_teardown_says_the_credential_is_still_there(self):
+        """Said rather than done: deleting a credential on an operator's
+        behalf during a routine converge is the wrong default, and leaving it
+        unnamed is how it stays on disk unnoticed."""
+        task = self._named("Note the WhatsApp session left behind")
+
+        assert "whatsapp-baileys-session" in task["debug"]["msg"]
+        assert "not (istota_whatsapp_baileys_unit_wanted | bool)" in str(task["when"])
 
     def test_the_node_install_reaches_a_baileys_host(self):
         """Otherwise the unit fails at ExecStart with nothing above it.
@@ -1008,12 +1122,7 @@ class TestTheAnsibleSidecarUnit:
         """
         defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
         env = _ansible_ish_environment()
-        clauses = [
-            clause
-            for task in self._tasks()
-            if "assert" in task and "whatsapp" in str(task.get("name", "")).lower()
-            for clause in task["assert"]["that"]
-        ]
+        clauses = _preflight_clauses(self._tasks())
         both = {
             "istota_whatsapp_enabled": True,
             "istota_whatsapp_provider": "baileys",
@@ -1170,6 +1279,27 @@ class TestTheMountGateOnALoadedConfig:
             config = load_config(path)
             assert config.whatsapp.provider == "baileys", path
             assert whatsapp_webhooks_enabled(config) is False, path
+
+
+#: The pre-flight assert's own name. The three walks below evaluate its clauses
+#: against `defaults/main.yml` alone, which is what makes them meaningful — it
+#: runs before anything is registered and reads nothing but inventory. There is
+#: now a second WhatsApp assert, `Assert the WhatsApp sidecar lockfile is
+#: present`, whose clause reads a `stat` result; rendering that against defaults
+#: raises `UndefinedError`, and admitting it would make these tests fail for a
+#: reason unrelated to what they check. Named rather than filtered, so a walk
+#: cannot quietly stop covering the assert it exists for.
+PREFLIGHT_ASSERT = "Assert WhatsApp settings the config loader accepts"
+
+
+def _preflight_clauses(tasks: list) -> list[str]:
+    task = next((t for t in tasks if t.get("name") == PREFLIGHT_ASSERT), None)
+    assert task is not None, (
+        f"the role has no {PREFLIGHT_ASSERT!r} task; an inventory value the "
+        "config loader refuses would then be met by the first CLI task, with "
+        "the running deployment's config already replaced"
+    )
+    return [str(clause) for clause in task["assert"]["that"]]
 
 
 def _render_docker(directory: Path, provider: str):

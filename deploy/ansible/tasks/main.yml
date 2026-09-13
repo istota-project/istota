@@ -3818,6 +3818,19 @@
   register: baileys_lockfile
   when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
 
+- name: Assert the WhatsApp sidecar lockfile is present
+  assert:
+    that:
+      - baileys_lockfile.stat.exists | default(false)
+    fail_msg: |
+      {{ istota_repo_dir }}/docker/whatsapp-baileys/package-lock.json is
+      missing, so the sidecar's dependencies cannot be installed. A refusal
+      rather than a skip: without it the play would go on to enable and start
+      a unit whose first `require` fails, which exits 3 and — under
+      Restart=always — repeats every five seconds for the life of the host
+      while ansible-playbook reports ok.
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
+
 - name: Read the installed WhatsApp sidecar lockfile marker
   slurp:
     src: "{{ istota_repo_dir }}/docker/whatsapp-baileys/node_modules/.istota-lockfile-sha256"
@@ -3825,28 +3838,60 @@
   failed_when: false
   when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
 
+- name: Resolve whether the WhatsApp sidecar needs a dependency install
+  set_fact:
+    istota_whatsapp_baileys_install_needed: >-
+      {{ (baileys_installed_marker.content | default('') | b64decode | trim)
+         != baileys_lockfile.stat.checksum }}
+  # One fact rather than the same four-clause `when:` on three tasks, because
+  # the three have to agree: the unit is stopped exactly when the install runs,
+  # and the marker is written exactly then too.
+  when: istota_whatsapp_baileys_unit_wanted | bool and not istota_web_only
+
+- name: Stop the WhatsApp sidecar for its dependency install
+  systemd:
+    name: "{{ istota_namespace }}-whatsapp-baileys"
+    state: stopped
+  # `npm ci` deletes node_modules before it installs. The running process
+  # survives on modules it has already required, but the unit is
+  # Restart=always, so any crash inside that window re-execs against a
+  # half-populated tree and loops on exit 3 until the install finishes. The
+  # restart handler below brings it back at the end of the play; the gap is
+  # one install rather than however long the rest of the play takes, because
+  # the daemon holds the listener and inbound resumes on reconnect.
+  when:
+    - istota_whatsapp_baileys_unit_wanted | bool
+    - not istota_web_only
+    - istota_whatsapp_baileys_install_needed | default(false) | bool
+  failed_when: false
+
 - name: Install the WhatsApp sidecar's dependencies
-  command: npm ci --omit=dev --no-audit --no-fund
+  command: >-
+    flock -w {{ istota_update_lock_wait }} /tmp/{{ istota_namespace }}-update.lock
+    npm ci --omit=dev --no-audit --no-fund
   args:
     chdir: "{{ istota_repo_dir }}/docker/whatsapp-baileys"
   become: yes
   become_user: "{{ istota_user }}"
-  # No GIT_CONFIG rewrite here either; see the Dockerfile's note. Two of
-  # Baileys' runtime dependencies are recorded as `git+ssh://git@github.com/…`
-  # and npm fetches a hosted git dependency as a codeload tarball over https,
-  # so neither install path needs git or a key. Measured on the image, which
-  # ships no git at all.
-  # Gated on the lockfile rather than run every play, and gated on the lockfile
-  # rather than on `creates: node_modules`. `npm ci` deletes node_modules before
-  # it installs, so an unconditional run tears the tree out from under a
-  # running sidecar on every deploy; `creates:` would never reinstall after a
-  # version bump, which is the silent half of the same problem. The marker goes
-  # *inside* node_modules so removing that directory by hand forces a reinstall.
+  # Under the same lock as `uv sync`, the web `npm ci` and the web build, so
+  # the auto-update cron cannot be part-way through its own reinstall of this
+  # directory while this one runs.
+  #
+  # No GIT_CONFIG rewrite; see the Dockerfile's note. Two of Baileys' runtime
+  # dependencies are recorded as `git+ssh://git@github.com/…` and npm fetches a
+  # hosted git dependency as a codeload tarball over https, so neither install
+  # path needs git or a key. Measured on the image, which ships no git at all.
+  #
+  # Gated on the lockfile rather than run every play, and rather than on
+  # `creates: node_modules`: an unconditional run tears the tree out from under
+  # a running sidecar on every deploy, while `creates:` would never reinstall
+  # after a version bump, which is the silent half of the same problem. The
+  # marker goes *inside* node_modules so removing that directory by hand forces
+  # a reinstall.
   when:
     - istota_whatsapp_baileys_unit_wanted | bool
     - not istota_web_only
-    - baileys_lockfile.stat.exists | default(false)
-    - (baileys_installed_marker.content | default('') | b64decode | trim) != baileys_lockfile.stat.checksum
+    - istota_whatsapp_baileys_install_needed | default(false) | bool
   notify:
     - "restart istota-whatsapp-baileys"
 
@@ -3862,8 +3907,7 @@
   when:
     - istota_whatsapp_baileys_unit_wanted | bool
     - not istota_web_only
-    - baileys_lockfile.stat.exists | default(false)
-    - (baileys_installed_marker.content | default('') | b64decode | trim) != baileys_lockfile.stat.checksum
+    - istota_whatsapp_baileys_install_needed | default(false) | bool
 
 - name: Deploy WhatsApp Baileys sidecar service
   template:
@@ -3909,6 +3953,19 @@
   when: not (istota_whatsapp_baileys_unit_wanted | bool) and not istota_web_only and (baileys_service_file.stat.exists | default(false))
   notify:
     - reload systemd
+
+- name: Note the WhatsApp session left behind
+  debug:
+    msg: >-
+      The WhatsApp Baileys sidecar has been removed, and the paired session at
+      {{ istota_home }}/data/whatsapp-baileys-session is left in place. That is
+      deliberate — a switch back re-uses it rather than needing a re-pair — but
+      it is a full WhatsApp account credential sitting dormant on disk. Remove
+      the directory if the switch is permanent.
+  # Said rather than done. Deleting a credential on an operator's behalf during
+  # a routine converge is the wrong default, and leaving it with nothing
+  # naming it is how it stays there unnoticed for the life of the host.
+  when: not (istota_whatsapp_baileys_unit_wanted | bool) and not istota_web_only and (baileys_service_file.stat.exists | default(false))
 
 # ============================================================
 # WEB INTERFACE (authenticated OIDC)
