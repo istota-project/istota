@@ -77,6 +77,14 @@ MemoryAccounting=yes
 # directory and its own log — is under {{ istota_home }}/data. Naming the parent
 # would hand it the framework database, every module database and the checkout
 # its own ExecStart reads from.
+#
+# UMask, because systemd's default is 0022 and Baileys writes the session files
+# itself: every key file written after pairing landed 0644, which is a
+# full-account WhatsApp credential readable by every account on the host. The
+# program sets the same umask on itself, which is what reaches the compose
+# shape — a compose service cannot express one — so this is defence in depth
+# and the half an operator reading the unit can see.
+UMask=0077
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
