@@ -36,7 +36,8 @@
  * A real connection needs a real WhatsApp account, so none of this is in the
  * default test suite and none of it can be: what is covered here is the wire
  * constants and the module's shape. The connection itself is exercised by
- * hand at deployment, which `docs/features/whatsapp.md` documents.
+ * hand at deployment. The operator-facing writeup of that is the docs
+ * stage's; until it lands, `README.md` beside this file is where it is.
  */
 
 'use strict';
@@ -240,11 +241,19 @@ function quotedId(message) {
   return context && typeof context.stanzaId === 'string' ? context.stanzaId : null;
 }
 
+// How many consecutive failures to *construct* a session before calling the
+// credential unusable. One is a transient fault — a half-written auth file
+// mid-rotation, a DNS blip inside the library — and declaring that permanent
+// refuses every send and pages the operator to re-pair a session that is fine.
+const MAX_START_FAILURES = 5;
+const START_RETRY_MS = 5000;
+
 class Session {
   constructor(link) {
     this.link = link;
     this.sock = null;
     this.stopping = false;
+    this.startFailures = 0;
   }
 
   async start() {
@@ -262,10 +271,24 @@ class Session {
     });
     this.sock = sock;
 
+    // Every handler is bound to the socket that installed it and bails once
+    // that is no longer the live one. A closed socket can still deliver a
+    // queued event, and an orphan's `connection: close` scheduling a second
+    // reconnect is how one process ends up holding two Baileys clients
+    // against one auth state — the corruption `istota whatsapp pair` refuses
+    // a whole running daemon to avoid.
+    const mine = () => this.sock === sock;
+
     sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (update) => this.onConnection(update, baileys));
-    sock.ev.on('messages.upsert', (event) => this.onMessages(event));
-    sock.ev.on('messages.update', (updates) => this.onReceipts(updates));
+    sock.ev.on('connection.update', (update) => {
+      if (mine()) this.onConnection(update, baileys);
+    });
+    sock.ev.on('messages.upsert', (event) => {
+      if (mine()) this.onMessages(event);
+    });
+    sock.ev.on('messages.update', (updates) => {
+      if (mine()) this.onReceipts(updates);
+    });
   }
 
   onConnection(update, baileys) {
@@ -277,6 +300,9 @@ class Session {
     }
     if (connection === 'open') {
       log('info', 'the WhatsApp session is open');
+      // A session that opened is evidence the credential is usable, so the
+      // run of construction failures below starts again from zero.
+      this.startFailures = 0;
       this.link.send(MSG_READY, {});
       return;
     }
@@ -306,10 +332,32 @@ class Session {
   }
 
   reportStartFailure(err) {
-    // A session that cannot be constructed at all is a credential problem
-    // rather than a network one: a corrupt or half-written auth state.
+    if (this.stopping) return;
+    // **A missing dependency tree is not an unlinked device.** `loadBaileys`
+    // is lazy, so a checkout with node and no `npm ci` fails here — and
+    // reporting that permanent pages every admin that "the device link ended"
+    // on a deployment that has never paired. It exits instead, which the
+    // daemon's supervisor reports as a sidecar that will not stay up.
+    if (err && err.code === 'MODULE_NOT_FOUND') {
+      log('error', 'the Baileys library is not installed', { kind: err.code });
+      process.exit(3);
+    }
+    this.startFailures += 1;
+    // One failure is a transient fault — a half-written auth file mid-
+    // rotation, a blip inside the library — and calling that permanent
+    // refuses every send and asks an operator to re-pair a session that is
+    // fine. A *run* of them is the credential problem the state names.
+    if (this.startFailures < MAX_START_FAILURES) {
+      log('warn', 'the WhatsApp session could not be started; retrying', {
+        kind: err && err.name, attempt: this.startFailures,
+      });
+      setTimeout(() => {
+        this.start().catch((again) => this.reportStartFailure(again));
+      }, START_RETRY_MS);
+      return;
+    }
     log('error', 'the WhatsApp session could not be started', {
-      kind: err && err.name,
+      kind: err && err.name, attempts: this.startFailures,
     });
     this.link.send(MSG_FATAL, { reason: FATAL_BAD_SESSION, permanent: true });
   }

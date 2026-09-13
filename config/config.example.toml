@@ -825,13 +825,22 @@ enabled = false
 name = ""
 language = "en_US"
 
-# The Baileys adapter's own settings, both of which resolve themselves when
+# The Baileys adapter's own settings. The first two resolve themselves when
 # left empty: the session directory to {db_path parent}/whatsapp-baileys-session
 # and the library version to whatever the shipped sidecar pins. The paired
 # session on disk is this adapter's credential; there is none in this file.
+#
+# sidecar_command is the command the daemon spawns to run the Node sidecar,
+# split by shell rules and not run through a shell. Left empty the daemon
+# spawns nothing and only listens on its socket, which is what a deployment
+# running the sidecar as its own systemd unit or compose service wants — and
+# is better there, since systemd restarts a unit a permanent fatal stopped.
+# `istota whatsapp pair` finds the program in a checkout on its own, so this
+# is only needed where the daemon itself has to run one.
 [whatsapp.baileys]
 session_dir = ""
 library_version = ""
+sidecar_command = ""
 
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)

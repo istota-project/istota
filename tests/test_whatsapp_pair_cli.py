@@ -130,9 +130,16 @@ def _sidecar_error(sockets) -> str:
 
 
 def _use_sidecar(monkeypatch, argv):
+    """Both resolvers, because `pair` asks both.
+
+    The configured command first and the in-tree program second — and that
+    second one resolves for real in this checkout, so patching only the first
+    spawns the shipped sidecar against a tree with no `node_modules`.
+    """
     monkeypatch.setattr(
         baileys_bridge, "resolve_sidecar_argv", lambda config: argv,
     )
+    monkeypatch.setattr(baileys_bridge, "in_tree_sidecar_argv", lambda: ())
 
 
 @pytest.fixture(autouse=True)
@@ -222,6 +229,26 @@ class TestTheRefusals:
 
         assert cli.cmd_whatsapp_pair(_args(path)) == 1
         assert "sidecar_command" in capsys.readouterr().err
+
+    def test_it_falls_back_to_the_program_in_this_checkout(
+        self, tmp_path, sockets, monkeypatch,
+    ):
+        """The fallback the daemon deliberately does not have. Pairing on a
+        developer machine and on a clone with no deployment wiring is what it
+        is for, and it is also what gets a logged-out deployment out of the
+        one-way door a permanent fatal closes."""
+        path = _config_file(tmp_path, sockets)
+        monkeypatch.setattr(
+            baileys_bridge, "resolve_sidecar_argv", lambda config: (),
+        )
+        monkeypatch.setattr(
+            baileys_bridge, "in_tree_sidecar_argv", lambda: ("/bin/true",),
+        )
+
+        # Reaches the wait rather than the refusal, which is the discriminating
+        # answer: `/bin/true` exits at once and nobody scans.
+        assert cli.cmd_whatsapp_pair(_args(path)) == 1
+        assert not (sockets.path / "whatsapp-baileys.sock").exists()
 
 
 class TestPairingAgainstARealSidecar:

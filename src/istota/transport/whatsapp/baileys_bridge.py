@@ -214,55 +214,67 @@ _SIDECAR_IN_TREE = Path(__file__).resolve().parents[4] / "docker" / "whatsapp-ba
 
 
 def resolve_sidecar_argv(config: Config) -> tuple[str, ...]:
-    """The command that runs the sidecar, or ``()`` for "spawn nothing".
+    """The command the **daemon** spawns for the sidecar, or ``()``.
 
-    ``()`` is a first-class answer rather than a failure, and it is the shape
-    two of the three deployment arrangements want: a systemd unit or a compose
-    service runs the sidecar itself and the daemon only listens. The bridge
-    takes that shape directly (`sidecar_argv=()`), and it is strictly better
-    there — systemd restarts a unit that a permanent fatal stopped, which the
-    in-process supervisor deliberately does not.
+    ``()`` is a first-class answer rather than a failure, and it is the
+    default: a deployment running the sidecar as its own systemd unit or
+    compose service wants the daemon to listen and supervise nothing
+    (`sidecar_argv=()`), and that shape is strictly better there — systemd
+    restarts a unit a permanent fatal stopped, which the in-process supervisor
+    deliberately does not.
 
-    Configured wins. `shlex.split` rather than a shell, so nothing in an
-    operator's value is interpreted; a value that will not split is a warning
-    and `()` rather than a raise, since the caller is a boot path.
+    **There is no in-tree fallback on this path, and that is the point rather
+    than an omission.** One exists in `cli._pair_sidecar_argv`, where a
+    developer's checkout is the case it serves. Here it would fire on exactly
+    the canonical deployment: the Ansible shape installs from a checkout, so
+    `docker/whatsapp-baileys/index.js` is present and `node` is usually on
+    PATH, and the daemon would spawn a second sidecar beside the unit's —
+    two Baileys clients on one auth state, which is the corruption
+    `istota whatsapp pair` refuses one whole process to avoid.
 
-    Failing that, the program in this checkout, which is what makes
-    `istota whatsapp pair` work on a developer machine and on a standalone
-    install made from a clone with no deployment wiring. `node` is resolved on
-    `PATH` at *this* moment so an install without it answers `()` and says so
-    at one place rather than as a spawn failure per respawn.
+    `shlex.split` rather than a shell, so nothing in an operator's value is
+    interpreted; a value that will not split is a warning and `()` rather than
+    a raise, since the caller is a boot path.
 
     Never raises.
     """
     import shlex  # noqa: PLC0415
-    import shutil  # noqa: PLC0415
 
     configured = (config.whatsapp.baileys.sidecar_command or "").strip()
-    if configured:
-        try:
-            argv = shlex.split(configured)
-        except ValueError:
-            logger.warning(
-                "whatsapp.baileys.sidecar_command_unparseable: "
-                "[whatsapp.baileys] sidecar_command is not a valid command "
-                "line; no sidecar will be spawned",
-            )
-            return ()
-        return tuple(argv)
-
-    entry = _SIDECAR_IN_TREE / SIDECAR_ENTRY
-    if not entry.is_file():
+    if not configured:
         return ()
-    node = shutil.which("node")
-    if not node:
+    try:
+        argv = shlex.split(configured)
+    except ValueError:
         logger.warning(
-            "whatsapp.baileys.no_node: the Baileys sidecar is in this tree at "
-            "%s and `node` is not on PATH; no sidecar will be spawned",
-            _SIDECAR_IN_TREE,
+            "whatsapp.baileys.sidecar_command_unparseable: "
+            "[whatsapp.baileys] sidecar_command is not a valid command "
+            "line; no sidecar will be spawned",
         )
         return ()
-    return (node, str(entry))
+    return tuple(argv)
+
+
+def in_tree_sidecar_argv() -> tuple[str, ...]:
+    """The shipped Node program in this checkout, or ``()``.
+
+    `istota whatsapp pair`'s fallback, and **only** its fallback. Pairing
+    needs a sidecar of its own — it is what makes the command work on a
+    developer machine and on a standalone install made from a clone with no
+    deployment wiring, and it is what gets a logged-out deployment out of the
+    one-way door a permanent fatal closes. The daemon must not take it; see
+    `resolve_sidecar_argv`.
+
+    `node` is resolved on `PATH` at *this* moment, so an install without it
+    answers `()` and the caller says so once rather than the supervisor
+    reporting a spawn failure per respawn.
+    """
+    import shutil  # noqa: PLC0415
+
+    entry = _SIDECAR_IN_TREE / SIDECAR_ENTRY
+    if not entry.is_file() or shutil.which("node") is None:
+        return ()
+    return (str(shutil.which("node")), str(entry))
 
 
 def ensure_session_dir(path: Path) -> Path:

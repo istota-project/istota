@@ -96,23 +96,40 @@ class TestResolvingTheSidecarCommand:
 
         assert baileys_bridge.resolve_sidecar_argv(cfg) == ()
 
-    def test_the_shipped_program_is_found_in_this_checkout(self, tmp_path,
-                                                           monkeypatch):
+    def test_the_shipped_program_is_found_in_this_checkout(self, monkeypatch):
         monkeypatch.setattr(
             "shutil.which", lambda name: "/usr/bin/node" if name == "node" else None,
         )
-        cfg = _config(tmp_path)
 
-        argv = baileys_bridge.resolve_sidecar_argv(cfg)
+        argv = baileys_bridge.in_tree_sidecar_argv()
 
         assert argv[0] == "/usr/bin/node"
         assert argv[1].endswith("docker/whatsapp-baileys/index.js")
 
-    def test_without_node_it_spawns_nothing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("shutil.which", lambda name: None)
-        cfg = _config(tmp_path)
+    def test_the_daemon_never_takes_the_in_tree_program(self, tmp_path,
+                                                        monkeypatch):
+        """The fallback would fire on exactly the canonical deployment: the
+        Ansible shape installs from a checkout, so the program is present and
+        `node` is usually on PATH — and the daemon would then spawn a second
+        sidecar beside the systemd unit's, against one session directory.
 
-        assert baileys_bridge.resolve_sidecar_argv(cfg) == ()
+        Driven with the program genuinely present in this tree, which is what
+        makes the assertion about the *decision* rather than about the file
+        being absent.
+        """
+        monkeypatch.setattr(
+            "shutil.which", lambda name: "/usr/bin/node" if name == "node" else None,
+        )
+        assert baileys_bridge.in_tree_sidecar_argv() != ()
+
+        assert baileys_bridge.resolve_sidecar_argv(_config(tmp_path)) == ()
+
+    def test_without_node_the_in_tree_fallback_resolves_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr("shutil.which", lambda name: None)
+
+        assert baileys_bridge.in_tree_sidecar_argv() == ()
 
 
 class TestStartingTheBridge:

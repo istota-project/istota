@@ -51,6 +51,17 @@ A real Baileys connection needs a real WhatsApp account and a phone to scan
 with, so it is in no automated tier and cannot be. What the default suite
 holds is the wire constants, pinned against the Python module in
 `tests/test_whatsapp_sidecar_vendoring.py` — the two ends disagreeing about
-the protocol is the failure with no error message. The connection is exercised
-by hand at deployment; `docs/features/whatsapp.md` is where that is written
-down.
+the protocol is the failure with no error message.
+
+The connection is exercised by hand at deployment. `docs/features/whatsapp.md`
+does not cover this adapter yet — the spec assigns that to its documentation
+stage — so the procedure is written here until it does:
+
+1. Stop the istota scheduler.
+2. `npm ci` in this directory.
+3. `istota whatsapp pair`, and scan the code from WhatsApp's Linked Devices
+   screen.
+4. Start the scheduler. `istota doctor --only whatsapp.` should report
+   `whatsapp.baileys_session` ok; the bridge check answers only inside the
+   daemon, so read that one from the admin Health pane or `!check`.
+5. Message the number from a bound user's phone and confirm a reply arrives.

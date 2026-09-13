@@ -1743,7 +1743,7 @@ def cmd_whatsapp_pair(args):
         return 1
 
     from .transport.whatsapp.baileys_bridge import (
-        default_socket_path, resolve_sidecar_argv,
+        default_socket_path, in_tree_sidecar_argv, resolve_sidecar_argv,
     )
 
     socket_path = default_socket_path(config)
@@ -1756,13 +1756,19 @@ def cmd_whatsapp_pair(args):
         )
         return 1
 
-    argv = resolve_sidecar_argv(config)
+    # The configured command first, then the program in this checkout. The
+    # daemon takes only the first — an in-tree fallback there would spawn a
+    # second sidecar beside a unit-run one on the Ansible shape, which is two
+    # Baileys clients on one auth state. Pairing is the case the fallback is
+    # for: a developer machine, or a clone with no deployment wiring.
+    argv = resolve_sidecar_argv(config) or in_tree_sidecar_argv()
     if not argv:
         print(
             "No WhatsApp sidecar command could be resolved. Set "
             "[whatsapp.baileys] sidecar_command to the command that runs "
-            "docker/whatsapp-baileys/index.js, and make sure its "
-            "dependencies are installed (`npm ci` in that directory).",
+            "docker/whatsapp-baileys/index.js, and make sure `node` is "
+            "installed and its dependencies are present (`npm ci` in that "
+            "directory).",
             file=sys.stderr,
         )
         return 1
