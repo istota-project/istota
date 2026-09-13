@@ -15,7 +15,7 @@ Type=simple
 User={{ istota_user }}
 Group={{ istota_group }}
 WorkingDirectory={{ istota_repo_dir }}/docker/whatsapp-baileys
-ExecStart=/usr/bin/node {{ istota_repo_dir }}/docker/whatsapp-baileys/index.js
+ExecStart={{ istota_whatsapp_baileys_node_bin }} {{ istota_repo_dir }}/docker/whatsapp-baileys/index.js
 
 # Restart=always, including after the sidecar exits 1 on a logged-out session.
 # That is the recovery path the program is written for: the session stays dead
