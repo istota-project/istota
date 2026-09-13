@@ -19,7 +19,7 @@ It runs on your own server (or laptop) and unifies your calendar, email, files, 
 
 Istota can reconstruct a day from appointments, places, and purchases; prepare you for a meeting from mail, documents, and past decisions; or turn unread feeds and newsletters into a briefing delivered every morning.
 
-It has a curated skillset, durable tasks, schedules, persistent memory, human approvals, and secure defaults. A full web app gives chat, health, location, money, feeds, briefings, notifications, and administration proper interfaces of their own. Talk to the agent there, over email, or in Nextcloud Talk.
+It has a curated skillset, durable tasks, schedules, persistent memory, human approvals, and secure defaults. A full web app gives chat, health, location, money, feeds, briefings, notifications, and administration proper interfaces of their own. Talk to the agent there, over email, WhatsApp, SMS, or in Nextcloud Talk.
 
 Istota works with Claude through the [Claude Code](https://docs.anthropic.com/en/docs/build-with-claude/claude-code) CLI or with any OpenAI-compatible endpoint, including OpenRouter and local model servers. It can run as a private single-user app on your own machine or as a multi-user service backed by Nextcloud.
 
@@ -156,7 +156,7 @@ Istota does not hand the model a pile of unrelated integrations. A task receives
 
 - **Proactive work.** A conversation can become a reminder, a recurring prompt, or a deterministic scheduled command. Heartbeat checks watch files, URLs, deadlines, calendar conflicts, commands, and Istota itself. Cooldowns, quiet hours, failure tracking, notifications, and delivery rules let Istota act again when something changes or comes due.
 
-- **Several ways to talk.** The same task system accepts web chat, Nextcloud Talk, SMS, threaded email, watched `TASKS.md` files, a terminal REPL, and direct CLI requests. Web chat and Talk share a room model, while SMS remains a separate external conversation.
+- **Several ways to talk.** The same task system accepts web chat, Nextcloud Talk, WhatsApp, SMS, threaded email, watched `TASKS.md` files, a terminal REPL, and direct CLI requests. Web chat and Talk share a room model; WhatsApp and SMS stay separate external conversations, each reached through one number.
 
 - **Durable execution.** Every request enters a SQLite queue before it runs. Foreground and background worker pools are separate for each user, so a long report or overnight job does not block an active conversation. Retries, confirmations, streamed events, cancellations, and usage records follow the task through one lifecycle.
 
@@ -194,20 +194,39 @@ These controls depend on the deployment shape. Bubblewrap on Linux is the suppor
 
 ## How a request runs
 
+Every surface is a transport in front of one task queue. A message arrives, becomes a task with an identity and a brain, and its result is delivered back to the surface it came from and to any other destination the task was given.
+
 ```text
-Web chat ──────────┐
-Nextcloud Talk ────┤
-SMS ───────────────┤
-Email ─────────────┤
-TASKS.md ──────────┼──> durable task queue ──> prompt + relevant data ──> Brain
-CLI / REPL ────────┤                                  │              │
-Scheduled jobs ────┤                                  │              ├──> skills and connected services
-Heartbeat checks ──┘                                  │              ├──> native modules
-                                                      │              └──> streamed response
-                                                      └──> memory, resources, room history
+Web chat ──────────┐                                                                         ┌──> Web chat
+Nextcloud Talk ────┤                                                                         ├──> Nextcloud Talk
+WhatsApp ──────────┤                                                                         ├──> WhatsApp
+SMS ───────────────┤                                                                         ├──> SMS
+Email ─────────────┼──> durable task queue ──> prompt + relevant data ──> Brain ──> result ──┼──> Email
+TASKS.md ──────────┤                                     │                  │                ├──> ntfy push
+CLI / REPL ────────┤                                     │                  │                ├──> TASKS.md
+Scheduled jobs ────┤                                     │                  │                └──> CLI / REPL
+Heartbeat checks ──┘                                     │                  │
+                                                         │                  ├──> skills and connected services
+                                                         │                  └──> native modules
+                                                         └──> memory, resources, room history
 ```
 
-The scheduler claims a task, selects its brain, assembles two prompt layers, starts the task runtime, and streams structured events to the relevant surfaces. The system layer contains standing instructions and skill documentation. User-controlled material such as memories, retrieved facts, conversation history, and attachments stays in the user layer. A task keeps the brain and permissions it had when it was queued, even if room settings change while it is running.
+The scheduler claims a task, selects its brain, assembles two prompt layers, starts the task runtime, and streams structured events to the surfaces that can show them. The system layer contains standing instructions and skill documentation. User-controlled material such as memories, retrieved facts, conversation history, and attachments stays in the user layer. A task keeps the brain and permissions it had when it was queued, even if room settings change while it is running.
+
+Scheduled jobs and heartbeat checks are task sources rather than transports; their results are delivered over whichever surface the job names. The surfaces themselves differ in what they can carry:
+
+| Surface | Inbound | Delivery | Room model |
+| --- | --- | --- | --- |
+| **Web chat** | Requests, attachments, voice notes | Streamed, with offline queueing | Canonical room view |
+| **Nextcloud Talk** | Requests and attachments in any room the agent is in | Progress acknowledgements, edited in place | External room view, mirrored with web chat |
+| **Email** | Mail sent to the agent's own address, including replies in a thread | Reply in the same thread | Joins an existing room's transcript, never creates one |
+| **WhatsApp** | Text messages to one number, through a paired session or Meta's Cloud API | Final reply, with buttons for confirmations where the adapter has them | Outside the room model |
+| **SMS** | Text messages to one number, through Twilio or Telnyx | Final reply, sized to the segment budget | Outside the room model |
+| **ntfy** | None; delivery only | Push notification to the user's own topic | Outside the room model |
+| **TASKS.md** | Lines added to a watched file | Written back to the line it came from | Outside the room model |
+| **CLI / REPL** | `istota task` and an interactive terminal | Streamed to the terminal | Outside the room model |
+
+WhatsApp and SMS carry the answer rather than the conversation: the exchange stays in task history under a stable per-user conversation token instead of in a room, and a confirmation sent there can be answered there. ntfy is delivery only. A reply can be pointed at any of the three explicitly.
 
 ## Install
 
