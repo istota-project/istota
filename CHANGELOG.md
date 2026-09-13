@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A WhatsApp session that WhatsApp has unlinked can be re-paired without deleting anything by hand. `istota whatsapp pair --reset` moves the dead session to a timestamped sibling directory and pairs into a fresh one; the plain `pair` could not get past it, because the credential left on disk reads as a registered account and the library logs in with it rather than offering a code, so no QR was ever drawn and every restart met the same refusal. The old directory is kept, not deleted, and the flag still refuses to run while a bridge is listening on the socket. The three places that used to tell you to run `istota whatsapp pair` in this state — the doctor check, the alert sent to admins, and the sidecar's own log line — now name the flag.
+
 - Twelve environment-variable overrides are in the reference now. `docs/reference/environment-variables.md` listed eight of the twenty the loader applies, so the eight `ISTOTA_SMS_*`, the three `ISTOTA_WHATSAPP_*` and `ISTOTA_CALDAV_PASSWORD` could each be set and take effect with nothing on the page saying they existed. Each is written out in full rather than as a shared prefix and a list of suffixes, since that page is what you reach by searching for the variable already sitting in your `secrets.env`.
 
 - The credentials page said CalDAV needs no configuration of its own. That holds with Nextcloud, where the credential is derived from the app password, and not on an install pointed at a CalDAV server of its own: that writes a `[caldav]` section whose password takes `ISTOTA_CALDAV_PASSWORD`, and neither appeared anywhere in a table calling itself the full credential inventory.

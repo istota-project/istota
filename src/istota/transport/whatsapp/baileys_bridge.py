@@ -50,6 +50,7 @@ import os
 import secrets
 import stat
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ...config import Config
@@ -108,9 +109,21 @@ RESPAWN_RESET_SECONDS = 120.0
 SHUTDOWN_GRACE_SECONDS = 5.0
 TERMINATE_GRACE_SECONDS = 5.0
 
+#: How long `reset_session` waits for the supervisor loop to finish before it
+#: gives up rather than moving the session directory anyway. The loop is
+#: already returning by then — a permanent fatal is what got us here — so this
+#: bounds `_reap_process`'s own two grace periods and nothing else.
+RESET_SETTLE_SECONDS = SHUTDOWN_GRACE_SECONDS + TERMINATE_GRACE_SECONDS + 2.0
+
+#: How many names `_reset_destination` will probe before giving up. The stamp
+#: is one second wide, so a collision means two resets inside one second and a
+#: handful of suffixes covers it; the ceiling is there because an unbounded
+#: walk is a hang wherever a stat is answering wrongly.
+_RESET_NAME_ATTEMPTS = 1000
+
 #: A `fatal` naming one of these is not retried by respawning. The session is
-#: gone and only `istota whatsapp pair` brings it back, so a respawn loop would
-#: burn a process every few seconds while changing nothing. An explicit
+#: gone and only `istota whatsapp pair --reset` brings it back, so a respawn
+#: loop would burn a process every few seconds while changing nothing. An explicit
 #: ``"permanent": true`` on the line says the same thing without this table
 #: having to know the name.
 _PERMANENT_FATALS = frozenset({"logged_out", "unpaired", "bad_session"})
@@ -476,6 +489,32 @@ class _WriteMark:
     written: bool = False
 
 
+class SessionResetRefused(Exception):
+    """`reset_session` declined, and the session directory is untouched.
+
+    Raised rather than reported through a return value, because the caller's
+    next step differs by reason and none of the reasons lets it carry on: the
+    directory holds a full WhatsApp account, and each refusal below is a way
+    that moving it would either destroy a credential that was coming back on
+    its own or move one out from under a live Baileys client.
+    """
+
+
+class SessionResetIncomplete(Exception):
+    """The old session moved and could be neither replaced nor put back.
+
+    Its own class rather than a `SessionResetRefused`, because the two ask
+    opposite things of whoever catches them: a refusal means nothing happened
+    and the operator can retry, while this means a full-account credential is
+    sitting at a path nothing else names. `moved_to` carries that path so the
+    caller can print it — the one thing that has to reach a human here.
+    """
+
+    def __init__(self, message: str, *, moved_to: Path) -> None:
+        super().__init__(message)
+        self.moved_to = moved_to
+
+
 @dataclass
 class BridgeStatus:
     """What the bridge will tell `doctor` and `istota whatsapp pair`.
@@ -561,6 +600,14 @@ class BaileysBridge:
         self._process: asyncio.subprocess.Process | None = None
         self._qr_tasks: set[asyncio.Task] = set()
         self._stopping = False
+        # One reset per bridge. ISSUE-497 established that a sidecar restart
+        # drops and rebuilds a link WhatsApp watches for churn, and that the
+        # cost is invisible from our side because the credential is on disk
+        # rather than in the process. Once per pairing incident is fine; a
+        # caller free to ask again on the next fatal is a retry loop against
+        # exactly that, so the bound sits on the primitive rather than on
+        # whoever happens to call it.
+        self._reset_used = False
         self._write_lock = asyncio.Lock()
         # Set by a permanent `fatal`, and waited on beside the child's exit.
         # Checking it only at the top of the respawn loop would leave a
@@ -639,6 +686,225 @@ class BaileysBridge:
             with contextlib.suppress(OSError):
                 if stat.S_ISSOCK(self._socket_path.lstat().st_mode):
                     self._socket_path.unlink()
+
+    def _reset_destination(self) -> Path:
+        """Where a dead session directory goes: a timestamped sibling.
+
+        A **sibling**, because the move has to be one `rename(2)` inside one
+        directory — a copy-then-delete has a window where the credential
+        exists twice and a crash where it exists nowhere, and a destination on
+        another filesystem turns the rename into exactly that. Timestamped
+        rather than a fixed `.old`, so the second logout of a deployment's
+        life does not overwrite the record of the first.
+
+        The stamp is one second wide, so the name is settled by probing rather
+        than by trusting the clock to be distinct: what stands at the
+        destination is the only copy of what was in the session directory, and
+        `rename(2)` onto an empty one would take it silently. **The probe is
+        the whole of that guarantee** — there is no `RENAME_NOREPLACE` behind
+        it, so a directory created at the chosen name between the `lexists`
+        and the rename is still taken. Not a live hazard on either shipped
+        shape, where the parent is the operator's own state directory, but it
+        is the probe rather than the syscall that holds.
+
+        Bounded at `_RESET_NAME_ATTEMPTS`, matching `session_log`'s solution
+        to the identical problem: a walk with no ceiling is a hang where a
+        stat is answering wrongly, and both callers would rather fail.
+        """
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        base = self._session_dir.parent / f"{self._session_dir.name}.{stamp}"
+        candidate = base
+        suffix = 1
+        # `lexists`, not `exists`: a broken symlink standing at the name is
+        # something, and `rename(2)` would replace it.
+        while os.path.lexists(candidate) and suffix < _RESET_NAME_ATTEMPTS:
+            candidate = base.with_name(f"{base.name}-{suffix}")
+            suffix += 1
+        return candidate
+
+    async def reset_session(self) -> Path | None:
+        """Move a dead session aside so the sidecar can offer a code again.
+
+        The recovery ISSUE-496 found there was no path to. A `logged_out`
+        session leaves `creds.json` naming a device WhatsApp has unlinked, and
+        `useMultiFileAuthState` reads a registered account there and attempts
+        a login rather than emitting a QR — so the one thing that could
+        resolve the state is the one thing that cannot happen while the file
+        is there, and every restart, `istota whatsapp pair` included, met the
+        same refusal. The remedy an operator was left with was composing an
+        `rm -rf` against a full-account credential directory, as root, on a
+        host where WhatsApp was already down.
+
+        **The move is the easy part; the guards are the change.** Four
+        refusals stand in front of it, and each is a way the rename would be
+        worse than the state it fixes:
+
+        - *A live session is never reset.* Without the `fatal_is_permanent`
+          gate this destroys a credential that was merely unreachable and
+          about to reconnect on its own.
+        - *A bridge that is stopping refuses.* `stop()` cancels the supervisor
+          and reaps concurrently, so the two would race for the same child and
+          the same directory.
+        - *A bridge that does not run the sidecar refuses outright.* On the
+          Ansible and compose shapes the sidecar is its own unit and this
+          process supervises nothing, so it can establish nothing about
+          whether that unit still holds the directory — and `Restart=always`
+          means it is coming back whatever we observed. Moving a directory a
+          second Baileys client is writing is the auth-state corruption every
+          other guard in this module exists to prevent. The operator stops
+          that unit and runs `istota whatsapp pair --reset`, which supervises
+          its own.
+        - *Once per bridge.* See `_reset_used`.
+
+        **Then the child goes before the directory does, and that ordering is
+        the property to keep.** A permanent fatal has already ended the
+        supervisor loop, which reaps on its way out, so this waits for that
+        task rather than racing it — shielded, so a timeout here does not
+        cancel a reap in flight. Both waits carry their own bound: neither the
+        supervisor nor `_reap_process` is bounded from the inside, and without
+        one the refusals below are unreachable rather than merely slow. A
+        supervisor or a process that survives all of it is a refusal rather
+        than a rename, and so is a latch that cleared while we waited.
+
+        Returns where the old directory went, or `None` where there was
+        nothing to move — a `bad_session` fatal on a deployment whose
+        directory somebody has already removed by hand reaches here, and
+        recreating it is the whole of what that needs. Never partially
+        applied: every refusal leaves the directory, the latch and the
+        supervisor exactly as they were.
+        """
+        if self._reset_used:
+            raise SessionResetRefused(
+                "this bridge has already moved its session aside once; asking "
+                "again is a retry loop against a link WhatsApp watches for "
+                "churn. Run `istota whatsapp pair --reset` afresh."
+            )
+        if self._stopping:
+            raise SessionResetRefused("the bridge is stopping")
+        if not self._sidecar_argv:
+            raise SessionResetRefused(
+                "this process does not run the WhatsApp sidecar, so it cannot "
+                "establish that nothing else holds the session directory. "
+                "Stop the sidecar's own unit or compose service and run "
+                "`istota whatsapp pair --reset`."
+            )
+        if not self._status.fatal_is_permanent:
+            raise SessionResetRefused(
+                "the session has reported no permanent fault, so there is "
+                "nothing to move aside"
+            )
+
+        supervisor = self._supervisor
+        if supervisor is not None and not supervisor.done():
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    asyncio.shield(supervisor), timeout=RESET_SETTLE_SECONDS,
+                )
+        # **A supervisor that outlived the wait is a refusal, and the process
+        # check below cannot stand in for it.** `_await_child_or_fatal` sets
+        # `self._process = None` itself on the exit arm, so an abandoned loop
+        # sleeping between respawns presents no process at all. It is reachable
+        # rather than theoretical: that arm is taken whenever the child's exit
+        # and the fatal complete in one iteration of the event loop, since
+        # `exited.done()` is tested first — and the loop then sleeps its
+        # backoff *before* re-reading the latch, which from the fifth
+        # consecutive fast crash is longer than this wait. Falling through
+        # would clear the latch and create a second supervisor while the first
+        # is still sleeping; it would wake, read the cleared latch and spawn a
+        # sidecar into the directory the new one is already pairing into. Two
+        # Baileys clients on one auth state is the corruption this whole
+        # method is arranged to avoid.
+        if supervisor is not None and not supervisor.done():
+            raise SessionResetRefused(
+                "the WhatsApp sidecar supervisor did not stop, so a second "
+                "sidecar could be spawned into the session directory"
+            )
+        # **Bounded here rather than inside `_reap_process`.** That one's last
+        # phase is `kill()` and then an unbounded `wait()`, which is right for
+        # `stop()` and wrong for this caller: a child that will not reap — an
+        # uninterruptible sleep, a descendant holding the transport — would
+        # hang `istota whatsapp pair --reset` for ever instead of producing
+        # the refusal below, which is the only thing that makes that refusal
+        # reachable at all. The bound is this call's, so `stop()`'s shutdown
+        # semantics are untouched.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                self._reap_process(), timeout=RESET_SETTLE_SECONDS,
+            )
+        process = self._process
+        if process is not None and process.returncode is None:
+            raise SessionResetRefused(
+                "the WhatsApp sidecar process could not be stopped, so the "
+                "session directory still has a writer"
+            )
+        # **Both gates are re-read, because this is the last statement before
+        # the rename and everything after it is synchronous.** They were
+        # answered before two awaits, and during those the read loop can
+        # dispatch a `ready` — which clears the latch — or another caller can
+        # start `stop()`. Renaming on the strength of a stale answer moves the
+        # directory of a session that has just come back.
+        if self._stopping:
+            raise SessionResetRefused("the bridge is stopping")
+        if not self._status.fatal_is_permanent:
+            raise SessionResetRefused(
+                "the WhatsApp session recovered while the sidecar was being "
+                "stopped, so there is nothing to move aside"
+            )
+        self._process = None
+        self._supervisor = None
+        # The peer is provably dead, and `_on_connect` refuses a second
+        # connection while a writer is live — so a link left standing here
+        # would have the respawned sidecar counted as a rejected connection
+        # and the reset would wedge with nothing saying why.
+        self._close_link(proto.REASON_LINK_LOST)
+
+        destination: Path | None = self._reset_destination()
+        try:
+            os.rename(self._session_dir, destination)
+        except FileNotFoundError:
+            destination = None
+        try:
+            ensure_session_dir(self._session_dir)
+            (
+                self._status.session_files_hardened,
+                self._status.session_files_unfixed,
+            ) = harden_session_files(self._session_dir)
+        except Exception:
+            # **Put it back, or say where it went.** `ensure_session_dir`
+            # raises rather than degrading, by its own docstring, and by here
+            # the credential has already moved — so an unguarded raise leaves
+            # the reset half-applied and the caller reporting that the session
+            # "could not be moved aside", which is the opposite of what
+            # happened. Restoring returns the bridge to the state every
+            # refusal above leaves it in; where even that fails, the operator
+            # is told the one thing they need, which is the path the only copy
+            # of their credential is now at.
+            if destination is not None:
+                try:
+                    os.rename(destination, self._session_dir)
+                except OSError as restore_error:
+                    raise SessionResetIncomplete(
+                        f"the old WhatsApp session was moved to {destination} "
+                        "and neither a new session directory nor a restore "
+                        f"could be made: {type(restore_error).__name__}",
+                        moved_to=destination,
+                    ) from restore_error
+            raise
+
+        # The latch goes before the supervisor is recreated, or the new loop
+        # reads it at its own first statement and returns without spawning.
+        self._status.ready = False
+        self._status.fatal_reason = None
+        self._status.fatal_is_permanent = False
+        self._permanent_fatal.clear()
+        self._reset_used = True
+        self._supervisor = asyncio.create_task(self._supervise())
+        logger.warning(
+            "whatsapp.baileys.session_reset moved_to=%s: the sidecar will "
+            "offer a new pairing code",
+            destination if destination is not None else "nothing to move",
+        )
+        return destination
 
     async def _listen(self) -> None:
         path = self._socket_path
@@ -719,23 +985,23 @@ class BaileysBridge:
         cost a process every few seconds and change nothing; the status carries
         the reason for `doctor` to report and for the operator to act on.
 
-        **On this shape that is a one-way door, and Stage 6 owes the way out.**
-        With an argv, ending the loop means no child, so nothing can send the
-        `ready` that `_dispatch` clears the latch on — the clearing arm is
-        unreachable here, and there is no `resume()`. The remedy the log line
-        names has to supply its own sidecar: `istota whatsapp pair` spawning
-        one of its own satisfies this, and a `resume()` on the bridge is the
-        alternative. Neither is written yet, and a method with no caller is a
-        seam with no user, so the requirement is recorded rather than guessed
-        at. On the `sidecar_argv=()` shape there is no gap: systemd restarts
-        the unit, it reconnects, and its `ready` clears the latch.
+        **On this shape the way out is `reset_session`.** With an argv, ending
+        the loop means no child, so nothing can send the `ready` that
+        `_dispatch` clears the latch on — the clearing arm is unreachable from
+        in here. `reset_session` is the resume this used to record as owed: it
+        waits for *this task* to finish, moves the dead session aside, clears
+        the latch and creates a fresh supervisor. `istota whatsapp pair
+        --reset` is its one caller. On the `sidecar_argv=()` shape there is no
+        gap and no reset: systemd restarts the unit, it reconnects, and its
+        `ready` clears the latch — but its session directory is the unit's to
+        hold, not this process's to move.
         """
         delay = RESPAWN_BASE_SECONDS
         while not self._stopping:
             if self._status.fatal_is_permanent:
                 logger.error(
                     "whatsapp.baileys.not_respawning reason=%s: re-pair with "
-                    "`istota whatsapp pair`",
+                    "`istota whatsapp pair --reset`",
                     self._status.fatal_reason,
                 )
                 return
@@ -789,7 +1055,7 @@ class BaileysBridge:
                     self._process = None
                     logger.error(
                         "whatsapp.baileys.not_respawning reason=%s: re-pair "
-                        "with `istota whatsapp pair`",
+                        "with `istota whatsapp pair --reset`",
                         self._status.fatal_reason,
                     )
                     return
@@ -1408,6 +1674,8 @@ __all__ = [
     "SEND_TIMEOUT_SECONDS",
     "SESSION_DIR_NAME",
     "SOCKET_NAME",
+    "SessionResetIncomplete",
+    "SessionResetRefused",
     "active_bridge",
     "clear_active_bridge",
     "default_session_dir",

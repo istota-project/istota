@@ -160,11 +160,12 @@ istota email test                            # Test email configuration
 
 ```bash
 istota whatsapp pair                         # Baileys: link the number by scanning a QR code
+istota whatsapp pair --reset                 # Baileys: move an unusable session aside first
 istota whatsapp billing-status               # Cloud: read the billable circuit breaker
 istota whatsapp billing-unblock              # Cloud: clear it, after checking Meta billing
 ```
 
-`pair` belongs to the `baileys` adapter. It draws the QR code in the terminal, redrawing it each time WhatsApp rotates it, and returns when the session is ready; it is also how you recover a session WhatsApp has unlinked. The two billing verbs belong to `whatsapp_cloud` and report nothing under Baileys, which has no per-message charge.
+`pair` belongs to the `baileys` adapter. It draws the QR code in the terminal, redrawing it each time WhatsApp rotates it, and returns when the session is ready. Recovering a session WhatsApp has unlinked takes `--reset`: the credential left on disk reads as a registered account, so the sidecar keeps trying to log in with it and no code is ever offered. The flag moves that directory to a timestamped sibling and pairs into a fresh one, deleting nothing. Both forms refuse to run while a bridge is listening on the socket, so stop the scheduler and any sidecar running as a unit of its own first. The two billing verbs belong to `whatsapp_cloud` and report nothing under Baileys, which has no per-message charge.
 
 `billing-status` reads and prints; `billing-unblock` destroys the evidence row along with the block, which is why the two are separate. Both print the Meta message id in full — this is the private operator surface. See [WhatsApp](../features/whatsapp.md).
 

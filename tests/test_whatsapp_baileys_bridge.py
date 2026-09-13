@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1305,3 +1306,445 @@ class TestWhatALogLineMaySay:
 
         assert "my medication" not in caplog.text
         assert "15559990000" not in caplog.text
+
+
+@pytest.fixture
+def frozen_stamp(monkeypatch):
+    """One fixed UTC second for `_reset_destination`'s stamp.
+
+    A collision between two resets is a real state and a one-second window, so
+    a test that waits for the clock to produce one either never gets it or
+    gets it intermittently. Only `now` is replaced; the class is otherwise the
+    real one, since `strftime` is what formats the result.
+    """
+    fixed = datetime(2026, 9, 13, 20, 45, 12, tzinfo=timezone.utc)
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is None else fixed.astimezone(tz)
+
+    monkeypatch.setattr(bridge_module, "datetime", _Frozen)
+    return fixed
+
+
+class TestTheSessionReset:
+    """Moving a dead session aside so the sidecar can offer a code again.
+
+    A logged-out session is the one state nothing in the deployment could
+    recover from: `useMultiFileAuthState` finds a registered account on disk
+    and attempts a login rather than emitting a QR, so the only thing that
+    could clear the state is the one thing that cannot happen while the file
+    is there. The remedy was "delete a full-account credential directory by
+    hand, as root", composed under time pressure on a host where WhatsApp is
+    already down (ISSUE-496).
+
+    Every case here is about a guard rather than about the rename. The rename
+    is three lines; what makes it safe is that nothing else holds the
+    directory when it happens, that a live session can never reach it, and
+    that it cannot be asked for twice.
+    """
+
+    async def test_a_live_session_is_never_reset(self, config, sockets):
+        """The gate. A reset on a session that is merely unreachable throws
+        away a credential that was about to come back on its own."""
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        marker = sockets.session / "creds.json"
+        marker.write_text("{}")
+        try:
+            with pytest.raises(
+                bridge_module.SessionResetRefused, match="no permanent fault",
+            ):
+                await instance.reset_session()
+            assert marker.exists()
+        finally:
+            await instance.stop()
+
+    async def test_a_bridge_that_owns_no_sidecar_refuses(self, config, sockets):
+        """The external-unit shape. The bridge listens and supervises nothing
+        there, so it cannot establish that the unit's own sidecar has stopped
+        — and moving a directory a second Baileys client still holds is the
+        corruption every other guard in this module exists to prevent."""
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+        )
+        await instance.start()
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                with pytest.raises(
+                    bridge_module.SessionResetRefused, match="does not run the WhatsApp sidecar",
+                ):
+                    await instance.reset_session()
+        finally:
+            await instance.stop()
+
+    async def test_a_dead_session_moves_aside_and_the_sidecar_comes_back(
+        self, config, sockets, monkeypatch,
+    ):
+        """The whole flow: the credential survives as a sibling, the directory
+        the sidecar reopens is fresh and private, the latch is cleared and
+        supervision is running again so a code can arrive."""
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        (sockets.session / "creds.json").write_text('{"me":"dead"}')
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                moved = await instance.reset_session()
+
+            assert moved.parent == sockets.session.parent
+            assert moved.name.startswith(sockets.session.name + ".")
+            assert (moved / "creds.json").read_text() == '{"me":"dead"}'
+
+            assert sockets.session.is_dir()
+            assert list(sockets.session.iterdir()) == []
+            assert mode_of(sockets.session) == 0o700
+
+            assert instance.status.fatal_is_permanent is False
+            assert instance.status.fatal_reason is None
+            assert instance._supervisor is not None
+            assert not instance._supervisor.done()
+        finally:
+            await instance.stop()
+
+    async def test_the_child_is_gone_before_the_directory_moves(
+        self, config, sockets, monkeypatch,
+    ):
+        """The single-writer property, asserted at the moment it matters.
+
+        Asserting the child is dead *after* `reset_session` returns would pass
+        against an implementation that renamed first and reaped second, which
+        is a directory moved out from under a live Baileys client — exactly
+        the auth-state corruption `istota whatsapp pair` refuses a whole
+        running daemon to avoid. So the probe rides on the rename itself.
+        """
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        await wait_for(lambda: instance._process is not None, timeout=5.0)
+        child = instance._process
+        assert child is not None
+
+        alive_at_rename = []
+        real_rename = os.rename
+
+        def recording(src, dst, *args, **kwargs):
+            alive_at_rename.append(child.returncode is None)
+            return real_rename(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "rename", recording)
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                await instance.reset_session()
+            assert alive_at_rename == [False]
+        finally:
+            monkeypatch.setattr(os, "rename", real_rename)
+            await instance.stop()
+
+    async def test_the_reset_happens_once_per_bridge(
+        self, config, sockets, monkeypatch,
+    ):
+        """ISSUE-497 established that a sidecar restart drops and rebuilds a
+        link WhatsApp watches for churn, and that the cost is invisible from
+        our side. Once per pairing incident is fine; a caller that can ask
+        again on the next fatal is a retry loop against that, so the bound is
+        a property of the primitive rather than of whoever calls it."""
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                await instance.reset_session()
+
+            await wait_for(lambda: instance.status.connected is False, timeout=5.0)
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                with pytest.raises(
+                    bridge_module.SessionResetRefused, match="already moved its session aside",
+                ):
+                    await instance.reset_session()
+        finally:
+            await instance.stop()
+
+    async def test_the_moved_directory_never_overwrites_an_earlier_one(
+        self, config, sockets, monkeypatch, frozen_stamp,
+    ):
+        """The stamp is one second wide, so two resets can want one name — and
+        what stands at that name is the only copy of an earlier credential.
+
+        **The clock is frozen, and without that this case asserts nothing.**
+        Written against the real one it passed with the collision-probing loop
+        deleted, because the second that elapsed between arranging the
+        occupied directory and performing the reset gave the two a different
+        stamp and there was no collision to survive.
+        """
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        (sockets.session / "creds.json").write_text("first")
+        occupied = instance._reset_destination()
+        occupied.mkdir()
+        (occupied / "creds.json").write_text("earlier")
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                moved = await instance.reset_session()
+            assert moved != occupied
+            assert (occupied / "creds.json").read_text() == "earlier"
+            assert (moved / "creds.json").read_text() == "first"
+        finally:
+            await instance.stop()
+
+    async def test_a_supervisor_that_will_not_stop_refuses(
+        self, config, sockets, monkeypatch,
+    ):
+        """The refusal the single-writer property actually rests on.
+
+        `_await_child_or_fatal` nulls `_process` itself on the exit arm, so a
+        supervisor sleeping out its backoff between respawns presents no
+        process at all and the liveness check below it sees nothing wrong.
+        Falling through would clear the latch and start a second supervisor
+        while the first is still sleeping; it wakes, reads the cleared latch
+        and spawns a sidecar into the directory the new one is pairing into.
+        """
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        monkeypatch.setattr(bridge_module, "RESET_SETTLE_SECONDS", 0.05)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        (sockets.session / "creds.json").write_text("held")
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                # The state the defect actually lives in: a loop sleeping out
+                # its backoff, with **no process** — `_await_child_or_fatal`
+                # nulls `_process` on the exit arm, so the liveness check
+                # below the supervisor guard sees nothing wrong and waves it
+                # through. Leaving the real process in place instead makes
+                # that second guard fire and the case passes without the one
+                # under test, which is what the control on it showed.
+                child, instance._process = instance._process, None
+                stuck = asyncio.ensure_future(asyncio.sleep(30))
+                instance._supervisor = stuck
+                try:
+                    with pytest.raises(
+                        bridge_module.SessionResetRefused, match="supervisor did not stop",
+                    ):
+                        await instance.reset_session()
+                finally:
+                    stuck.cancel()
+                    instance._process = child
+
+            assert (sockets.session / "creds.json").read_text() == "held"
+            assert instance.status.fatal_is_permanent is True
+            assert instance._reset_used is False
+        finally:
+            instance._supervisor = None
+            await instance.stop()
+
+    async def test_a_bridge_that_is_stopping_refuses(
+        self, config, sockets, monkeypatch,
+    ):
+        """`stop()` cancels the supervisor and reaps concurrently, so the two
+        would race for the same child and the same directory."""
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        (sockets.session / "creds.json").write_text("held")
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                instance._stopping = True
+                with pytest.raises(
+                    bridge_module.SessionResetRefused, match="bridge is stopping",
+                ):
+                    await instance.reset_session()
+                instance._stopping = False
+            assert (sockets.session / "creds.json").read_text() == "held"
+        finally:
+            await instance.stop()
+
+    async def test_nothing_to_move_recreates_the_directory_and_answers_none(
+        self, config, sockets, monkeypatch,
+    ):
+        """A `bad_session` fatal on a deployment whose directory somebody has
+        already removed by hand. Recreating it is the whole of what that
+        needs, and `None` is what says no credential was set aside — which is
+        what the caller renders instead of naming a path that does not
+        exist."""
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="bad_session")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                shutil.rmtree(sockets.session)
+                assert await instance.reset_session() is None
+
+            assert sockets.session.is_dir()
+            assert mode_of(sockets.session) == 0o700
+            assert instance.status.fatal_is_permanent is False
+            assert not [
+                entry for entry in sockets.session.parent.iterdir()
+                if entry.name.startswith(sockets.session.name + ".")
+            ]
+        finally:
+            await instance.stop()
+
+    async def test_a_new_directory_that_cannot_be_made_puts_the_old_one_back(
+        self, config, sockets, monkeypatch,
+    ):
+        """`ensure_session_dir` raises rather than degrading, by its own
+        docstring, and by then the credential has already moved — so an
+        unguarded raise leaves the reset half-applied while the caller reports
+        that the session could not be moved aside, which is the opposite of
+        what happened."""
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        (sockets.session / "creds.json").write_text("the only copy")
+
+        def refuse(path):
+            raise PermissionError("no")
+
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                monkeypatch.setattr(bridge_module, "ensure_session_dir", refuse)
+                with pytest.raises(PermissionError):
+                    await instance.reset_session()
+
+            assert (sockets.session / "creds.json").read_text() == "the only copy"
+            assert not [
+                entry for entry in sockets.session.parent.iterdir()
+                if entry.name.startswith(sockets.session.name + ".")
+            ]
+        finally:
+            monkeypatch.undo()
+            await instance.stop()
+
+    async def test_a_restore_that_also_fails_names_where_the_credential_went(
+        self, config, sockets, monkeypatch,
+    ):
+        """The one failure where a path has to reach a human: the credential
+        is no longer where the operator left it and nothing else names where
+        it went. Its own exception type rather than a refusal, because the two
+        ask opposite things of whoever catches them."""
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        (sockets.session / "creds.json").write_text("the only copy")
+
+        real_rename = os.rename
+
+        def one_way(src, dst, *args, **kwargs):
+            if Path(dst) == sockets.session:
+                raise PermissionError("no restore")
+            return real_rename(src, dst, *args, **kwargs)
+
+        def refuse(path):
+            raise PermissionError("no")
+
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+                monkeypatch.setattr(bridge_module, "ensure_session_dir", refuse)
+                monkeypatch.setattr(os, "rename", one_way)
+                with pytest.raises(bridge_module.SessionResetIncomplete) as caught:
+                    await instance.reset_session()
+
+            monkeypatch.undo()
+            moved = caught.value.moved_to
+            assert (moved / "creds.json").read_text() == "the only copy"
+            assert str(moved) in str(caught.value)
+        finally:
+            monkeypatch.undo()
+            await instance.stop()
+
+    async def test_a_session_that_recovers_while_we_wait_is_not_moved(
+        self, config, sockets, monkeypatch,
+    ):
+        """The gates are answered before two awaits and re-read after them.
+
+        During those the read loop can dispatch a `ready`, which clears the
+        latch — and renaming on the strength of the stale answer moves the
+        session directory of a session that has just come back. Driven through
+        the reap rather than through a real `ready` because the window is what
+        is under test, not the route into it; everything after this point is
+        synchronous, so closing it here closes it completely.
+        """
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 30"),
+        )
+        await instance.start()
+        (sockets.session / "creds.json").write_text("recovered")
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_FATAL, reason="logged_out")
+                await wait_for(lambda: instance.status.fatal_is_permanent is True)
+
+                real_reap = instance._reap_process
+
+                async def recover_mid_reap():
+                    await real_reap()
+                    instance._status.fatal_is_permanent = False
+                    instance._permanent_fatal.clear()
+
+                monkeypatch.setattr(instance, "_reap_process", recover_mid_reap)
+                with pytest.raises(
+                    bridge_module.SessionResetRefused, match="recovered while",
+                ):
+                    await instance.reset_session()
+
+            assert (sockets.session / "creds.json").read_text() == "recovered"
+            assert instance._reset_used is False
+        finally:
+            monkeypatch.undo()
+            await instance.stop()

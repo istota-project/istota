@@ -1679,12 +1679,15 @@ def _render_qr(payload: str) -> None:
     print("\n  printf %s '<payload>' | qrencode -t ANSIUTF8\n")
 
 
-async def _whatsapp_pair(config, argv) -> int:
+async def _whatsapp_pair(config, argv, *, reset: bool = False) -> int:
     import asyncio
 
-    from .transport.whatsapp.baileys_bridge import BaileysBridge
+    from .transport.whatsapp.baileys_bridge import (
+        BaileysBridge, SessionResetIncomplete, SessionResetRefused,
+    )
 
     bridge = BaileysBridge(config, sidecar_argv=argv, on_qr=_render_qr)
+    reset_done = False
     try:
         # `start()` is **inside** the `try`, which is the shape the bridge's
         # own `stop()` is written for: it opens the socket before it creates
@@ -1711,9 +1714,69 @@ async def _whatsapp_pair(config, argv) -> int:
                 print(f"The session lives at {status.session_dir} (0700).")
                 return 0
             if status.fatal_is_permanent:
+                if reset and not reset_done:
+                    # **Once, and the bridge holds that bound as well.** A
+                    # second fatal after a reset is a fresh session directory
+                    # that also failed, which another move cannot fix — and
+                    # spinning on it is the reconnect churn ISSUE-497 removed,
+                    # reintroduced one level up.
+                    try:
+                        moved = await bridge.reset_session()
+                    except SessionResetIncomplete as exc:
+                        # The one failure where a path has to reach the
+                        # operator: the credential is no longer where they
+                        # left it and nothing else will name where it went.
+                        print(
+                            f"\n{exc}\nThe old WhatsApp session is at "
+                            f"{exc.moved_to}. Nothing was deleted.",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    except (SessionResetRefused, OSError) as exc:
+                        print(
+                            f"\nThe session could not be moved aside: {exc}",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    reset_done = True
+                    print(
+                        "\nThe unusable session was moved to "
+                        f"{moved}. Nothing was deleted; remove it yourself "
+                        "once the new pairing works."
+                        if moved is not None else
+                        "\nThere was no session directory to move aside.",
+                    )
+                    print("A new code will appear below.\n")
+                    # A fresh deadline, because the operator has not been
+                    # shown a code yet: the one that just expired was spent
+                    # waiting for the sidecar to report a session that could
+                    # never open.
+                    deadline = (
+                        asyncio.get_running_loop().time()
+                        + WHATSAPP_PAIR_TIMEOUT_SECONDS
+                    )
+                    continue
+                if reset_done:
+                    # **Not the `--reset` remedy again.** The old credential
+                    # is already out of the way and this is a *fresh* session
+                    # directory failing, so the fault is not the one the flag
+                    # fixes and another move would be the retry loop it is
+                    # bounded to prevent. Naming `status.session_dir` here
+                    # would also name the new directory rather than the one
+                    # that was set aside.
+                    print(
+                        "\nThe new session could not be used either, so the "
+                        "old credential was not the problem. Check the "
+                        "sidecar's own log, `sidecar.log` in the session "
+                        "directory, before pairing again.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 print(
-                    "\nThe sidecar reported the session cannot be used. Remove "
-                    f"{status.session_dir} and try again.",
+                    "\nThe sidecar reported the session cannot be used. Run "
+                    "`istota whatsapp pair --reset` to move "
+                    f"{status.session_dir} aside — it is kept, not deleted — "
+                    "and pair again.",
                     file=sys.stderr,
                 )
                 return 1
@@ -1756,6 +1819,18 @@ def cmd_whatsapp_pair(args):
     left that could send the `ready` which clears the latch. Stopping the
     daemon and running this spawns a sidecar of its own, pairs, and the next
     start comes up clean — the remedy the log line names, working.
+
+    **`--reset` is what makes it work on the state it most often fails on**
+    (ISSUE-496). A `logged_out` session leaves `creds.json` naming a device
+    WhatsApp has unlinked, and `useMultiFileAuthState` reads that as a
+    registered account and attempts a login rather than emitting a code — so
+    the one thing that could resolve the state is the one thing that cannot
+    happen while the file is there, and this command met the same wall as
+    every restart did, printing the remedy rather than performing it. The flag
+    moves the directory to a timestamped sibling and pairs into a fresh one.
+    It sits **behind** the live-socket refusal rather than beside it, and it
+    deletes nothing: an operator who reaches for it on a session that was only
+    unreachable has lost no keys.
     """
     config = load_config(Path(args.config) if args.config else None)
     if config.whatsapp.provider != "baileys":
@@ -1808,7 +1883,7 @@ def cmd_whatsapp_pair(args):
           "Linked Devices, Link a device.\n")
     import asyncio
 
-    return asyncio.run(_whatsapp_pair(config, argv))
+    return asyncio.run(_whatsapp_pair(config, argv, reset=args.reset))
 
 
 def cmd_calendar_discover(args):
@@ -3771,9 +3846,17 @@ def main():
     whatsapp_subparsers = whatsapp_parser.add_subparsers(
         dest="whatsapp_action", required=True,
     )
-    whatsapp_subparsers.add_parser(
+    whatsapp_pair_parser = whatsapp_subparsers.add_parser(
         "pair",
         help="Link this deployment's WhatsApp number by scanning a QR code",
+    )
+    whatsapp_pair_parser.add_argument(
+        "--reset",
+        action="store_true",
+        help=(
+            "If the session reports that it cannot be used, move it to a "
+            "timestamped sibling directory and pair again. Nothing is deleted"
+        ),
     )
     whatsapp_subparsers.add_parser(
         "billing-status",

@@ -36,7 +36,7 @@ from istota.transport.whatsapp import baileys_bridge
 from .support.baileys_sidecar import SocketDir
 
 _SIDECAR_TEMPLATE = """\
-import json, socket, time, traceback
+import json, os, socket, time, traceback
 
 CONFIG = {config}
 
@@ -48,6 +48,18 @@ try:
         sock.sendall((json.dumps(fields) + "\\n").encode())
 
     say(type="hello", protocol_version=1)
+    # The spawn sets `cwd` to the session directory, so the marker is how this
+    # fake models the state ISSUE-496 is about: a credential on disk naming a
+    # device WhatsApp has unlinked, which `useMultiFileAuthState` reads as a
+    # registered account and logs in with rather than emitting a code. Moving
+    # the directory aside is what makes the next run offer one.
+    if CONFIG["fatal_marker"] and os.path.exists(CONFIG["fatal_marker"]):
+        say(type="fatal", reason="logged_out", permanent=True)
+        # Then exit, as the shipped sidecar does 500ms after that frame.
+        # `os._exit` rather than a raise: the handler below writes a traceback
+        # for every `BaseException`, and a deliberate exit is not a fault.
+        time.sleep(0.2)
+        os._exit(1)
     if CONFIG["qr"]:
         say(type="qr", qr=CONFIG["qr"])
     if CONFIG["fatal"]:
@@ -75,7 +87,7 @@ def sockets():
     directory.cleanup()
 
 
-def _write_sidecar(sockets, *, qr=None, fatal=False):
+def _write_sidecar(sockets, *, qr=None, fatal=False, fatal_marker=None):
     path = sockets.path / "fake_sidecar.py"
     # `repr`, not `json.dumps`: a JSON `null` or `false` is a Python
     # SyntaxError, and the child then dies at compile time — before its own
@@ -85,6 +97,7 @@ def _write_sidecar(sockets, *, qr=None, fatal=False):
         "socket": str(sockets.path / "whatsapp-baileys.sock"),
         "qr": qr,
         "fatal": fatal,
+        "fatal_marker": fatal_marker,
         "log": str(sockets.path / "sidecar-errors.log"),
     })))
     return (sys.executable, str(path))
@@ -120,8 +133,8 @@ def _config_file(tmp_path, sockets, *, provider="baileys", sidecar_command=""):
     return path
 
 
-def _args(config_path):
-    return argparse.Namespace(config=str(config_path))
+def _args(config_path, *, reset=False):
+    return argparse.Namespace(config=str(config_path), reset=reset)
 
 
 def _sidecar_error(sockets) -> str:
@@ -395,3 +408,119 @@ class TestTheSocketLivenessTest:
         path.write_text("")
 
         assert cli._whatsapp_socket_is_live(path) is False
+
+
+class TestTheResetFlag:
+    """`--reset`: the recovery ISSUE-496 found there was no path to.
+
+    A logged-out session is the one state nothing in the deployment could get
+    out of. The credential on disk names a device WhatsApp has unlinked, so
+    every reconnect is refused and no code is ever offered — and `pair` itself
+    met the same wall, printing the remedy rather than performing it. What the
+    operator was left with was composing an `rm -rf` against a full-account
+    credential directory, as root, on a host where WhatsApp was already down.
+
+    Two properties the issue names explicitly are asserted here rather than
+    left to the bridge's own cases, because both are about the order this
+    command does things in: the live-socket refusal still runs first, and a
+    bare `pair` still refuses.
+    """
+
+    @staticmethod
+    def _session(sockets):
+        """Where `pair` will actually look.
+
+        Derived from `db_path`, not from `SocketDir.session` — the config file
+        these cases write names the socket directory as the database's parent,
+        so the bridge's own `default_session_dir` puts the credential at
+        `SESSION_DIR_NAME` beside it. Seeding `sockets.session` instead leaves
+        the sidecar finding no marker, pairing on its first run, and the case
+        passing while asserting nothing about a reset.
+        """
+        return sockets.path / baileys_bridge.SESSION_DIR_NAME
+
+    def _seed_dead_session(self, sockets):
+        session = self._session(sockets)
+        baileys_bridge.ensure_session_dir(session)
+        (session / "creds.json").write_text('{"me":"unlinked"}')
+        return session
+
+    def test_a_bare_pair_still_refuses_and_names_the_flag(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """The issue's second property. Without the flag in the message the
+        operator is back to reading the source or the docs to find out that
+        anything short of `rm -rf` exists."""
+        self._seed_dead_session(sockets)
+        _use_sidecar(monkeypatch, _write_sidecar(sockets, fatal_marker="creds.json"))
+        path = _config_file(tmp_path, sockets)
+
+        assert cli.cmd_whatsapp_pair(_args(path)) == 1
+
+        err = capsys.readouterr().err
+        assert "--reset" in err
+        assert (self._session(sockets) / "creds.json").exists(), _sidecar_error(sockets)
+
+    def test_reset_moves_the_dead_session_aside_and_pairs(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """End to end, against a real socket and a real subprocess: the fatal
+        arrives, the directory moves, the respawned sidecar finds no
+        credential and offers a code, and the pairing completes."""
+        self._seed_dead_session(sockets)
+        _use_sidecar(monkeypatch, _write_sidecar(
+            sockets, qr="2@PAIRINGPAYLOAD==", fatal_marker="creds.json",
+        ))
+        path = _config_file(tmp_path, sockets)
+
+        assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 0, _sidecar_error(sockets)
+
+        session = self._session(sockets)
+        moved = [
+            entry for entry in sockets.path.iterdir()
+            if entry.name.startswith(session.name + ".")
+        ]
+        assert len(moved) == 1
+        assert (moved[0] / "creds.json").read_text() == '{"me":"unlinked"}'
+        assert not (session / "creds.json").exists()
+        assert stat.S_IMODE(session.lstat().st_mode) == 0o700
+
+        out = capsys.readouterr().out
+        assert str(moved[0]) in out
+        assert "Paired" in out
+
+    def test_the_live_socket_refusal_runs_before_the_reset(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """The issue's first property, and the one that matters most.
+
+        Moving a session directory a second Baileys client is holding is the
+        auth-state corruption the refusal exists to prevent, so `--reset` has
+        to sit behind it rather than beside it — and the credential has to
+        still be there afterwards, which is what separates a refusal from a
+        reset that happened and then reported a problem.
+
+        **A sidecar is configured deliberately, though none is ever spawned.**
+        Without one the argv resolution refuses a line later, so removing the
+        live-socket check still leaves the directory untouched and this case
+        goes red on the message alone — measured. With one, the only thing
+        between `--reset` and the rename is the refusal under test.
+        """
+        self._seed_dead_session(sockets)
+        _use_sidecar(monkeypatch, _write_sidecar(sockets, fatal_marker="creds.json"))
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(sockets.path / "whatsapp-baileys.sock"))
+        listener.listen(1)
+        path = _config_file(tmp_path, sockets)
+        try:
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 1
+        finally:
+            listener.close()
+
+        assert "already listening" in capsys.readouterr().err
+        session = self._session(sockets)
+        assert (session / "creds.json").read_text() == '{"me":"unlinked"}'
+        assert not [
+            entry for entry in sockets.path.iterdir()
+            if entry.name.startswith(session.name + ".")
+        ]
