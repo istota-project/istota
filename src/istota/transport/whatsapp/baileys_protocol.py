@@ -90,6 +90,20 @@ MAX_LINE_BYTES = 256 * 1024
 #: inbound` applies the same 255 to Meta's.
 MAX_MESSAGE_ID_CHARS = 255
 
+#: WhatsApp's own protocol ceiling for a text message. Bounded here because
+#: **this is the first surface where it is not bounded upstream**: Meta refuses
+#: a Cloud message past 4,096 characters before it ever reaches
+#: `webhook.normalize_payload`, while a Baileys `inbound` line is bounded only
+#: by `MAX_LINE_BYTES` — so a quarter-megabyte body could reach a task prompt.
+#: Past this the line is refused rather than truncated: a message longer than
+#: WhatsApp itself permits did not come from WhatsApp, and silently cutting a
+#: person's words is worse than refusing a frame that cannot be genuine.
+MAX_INBOUND_TEXT_CHARS = 65536
+
+#: A display name, bounded for the same reason one field over. It reaches
+#: `db.touch_whatsapp_binding`'s `username` column and no further.
+MAX_USERNAME_CHARS = 256
+
 #: Baileys' receipt vocabulary mapped onto the ledger's. A status this surface
 #: does not model yields `None` and the caller drops the receipt — inventing a
 #: state would put a row where no transition rule covers it, which is the rule
@@ -125,6 +139,11 @@ REASON_SESSION_FATAL = "the WhatsApp session needs re-pairing"
 REASON_SEND_TIMEOUT = "the sidecar did not answer the send"
 REASON_LINK_LOST = "the sidecar connection dropped during the send"
 REASON_ENCODE_FAILED = "the send could not be encoded"
+#: The catch-all for a send that failed before its line entered the socket and
+#: for no reason above. It is its own string rather than `REASON_LINK_LOST`
+#: because the two settle the ledger differently — this one is `definite`, so
+#: an operator reading the row needs to be able to tell them apart.
+REASON_NOT_WRITTEN = "the send failed before it reached the sidecar"
 
 
 class BaileysProtocolError(ValueError):
@@ -207,6 +226,28 @@ def _optional_text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _bounded_text(value: object, name: str, limit: int) -> str | None:
+    """An optional string, refused rather than truncated past `limit`."""
+    text = _optional_text(value)
+    if text is not None and len(text) > limit:
+        raise BaileysProtocolError(f"{name} exceeds {limit} characters")
+    return text
+
+
+def _error_code(value: object) -> str | None:
+    """A provider error code as text, or `None`.
+
+    `bool` is excluded explicitly because it is a subclass of `int`, so the
+    obvious `isinstance(value, (int, str))` renders `true` as the string
+    `"True"` into `sent_whatsapp.error_code` and every operator surface reading
+    it. `_event_time` and `hello_version` guard the same way for the same
+    reason.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    return str(value) or None
+
+
 def _event_time(values: dict[str, Any]) -> datetime:
     """`timestamp`, epoch seconds, as an aware UTC datetime.
 
@@ -271,8 +312,10 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
     history.
     """
     message_type = _optional_text(payload.get("message_type")) or "unknown"
-    text = payload.get("text")
-    callback_data = _optional_text(payload.get("callback_data"))
+    text = _bounded_text(payload.get("text"), "text", MAX_INBOUND_TEXT_CHARS)
+    callback_data = _bounded_text(
+        payload.get("callback_data"), "callback_data", MAX_MESSAGE_ID_CHARS,
+    )
     if payload.get("group") is True:
         message_type = "group"
         text = None
@@ -284,11 +327,13 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         from_user=WhatsAppUserIdentity(
             bsuid="",
             wa_id=None,
-            username=_optional_text(payload.get("username")),
+            username=_bounded_text(
+                payload.get("username"), "username", MAX_USERNAME_CHARS,
+            ),
             jid=_text(payload, "jid"),
         ),
         message_type=message_type,
-        text=text if isinstance(text, str) else None,
+        text=text,
         callback_data=callback_data,
         reply_to_message_id=_optional_text(payload.get("reply_to_message_id")),
         sent_at=_event_time(payload),
@@ -309,7 +354,6 @@ def delivery_event(payload: dict[str, Any]) -> WhatsAppDeliveryEvent | None:
     )
     if mapped is None:
         return None
-    error_code = payload.get("error_code")
     return WhatsAppDeliveryEvent(
         message_id=_message_id(payload),
         waba_id=NO_CLOUD_ACCOUNT,
@@ -317,7 +361,7 @@ def delivery_event(payload: dict[str, Any]) -> WhatsAppDeliveryEvent | None:
         recipient_id=NO_CLOUD_ACCOUNT,
         status=mapped,
         occurred_at=_event_time(payload),
-        error_code=str(error_code) if isinstance(error_code, (int, str)) else None,
+        error_code=_error_code(payload.get("error_code")),
         billable=None,
         pricing_model=None,
         pricing_category=None,
@@ -339,10 +383,9 @@ def send_outcome(payload: dict[str, Any]) -> WhatsAppSendOutcome:
     if payload.get("ok") is True:
         return WhatsAppSendResult(message_id=_message_id(payload))
     reason_key = (_optional_text(payload.get("reason")) or "").strip().lower()
-    error_code = payload.get("error_code")
     return WhatsAppSendFailure(
         definite=payload.get("definite") is True,
-        error_code=str(error_code) if isinstance(error_code, (int, str)) else None,
+        error_code=_error_code(payload.get("error_code")),
         safe_reason=_SEND_REASONS.get(reason_key, _UNKNOWN_SEND_REASON),
     )
 
@@ -393,8 +436,10 @@ def result_request_id(payload: dict[str, Any]) -> str:
 __all__ = [
     "BaileysProtocolError",
     "DOWN_MESSAGES",
+    "MAX_INBOUND_TEXT_CHARS",
     "MAX_LINE_BYTES",
     "MAX_MESSAGE_ID_CHARS",
+    "MAX_USERNAME_CHARS",
     "MSG_FATAL",
     "MSG_HELLO",
     "MSG_INBOUND",
@@ -408,6 +453,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "REASON_ENCODE_FAILED",
     "REASON_LINK_LOST",
+    "REASON_NOT_WRITTEN",
     "REASON_NO_SIDECAR",
     "REASON_SEND_TIMEOUT",
     "REASON_SESSION_FATAL",

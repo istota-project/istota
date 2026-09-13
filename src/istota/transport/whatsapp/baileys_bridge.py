@@ -21,11 +21,14 @@ notch weaker because this one has a name. That is why the Baileys adapter's
 
 **The session directory is a full-account credential.** Whoever holds
 `{session_dir}` can send and read as the paired WhatsApp account, with no
-second factor and no revocation short of unlinking the device. It is created
-0700 by `os.open`/`fchmod`, the sidecar is spawned under `umask 0o077` so its
-own files land 0600, it is bound into no sandbox at any path, and neither its
-contents nor a `qr` payload is ever logged — a QR is the pairing credential
-itself.
+second factor and no revocation short of unlinking the device. It is made 0700
+and *asserted* 0700 on an `O_NOFOLLOW` descriptor every start — `mkdir`'s mode
+applies only to a directory the call creates, and the second run is the case
+that has to be right — and the same descriptor is what refuses one belonging to
+another uid. The sidecar is spawned under `umask 0o077` so its own files land
+0600 and with its stdio discarded so it cannot print into the daemon's log; the
+directory is bound into no sandbox at any path; and neither its contents nor a
+`qr` payload is ever logged, a QR being the pairing credential itself.
 
 `sidecar_argv=()` is a first-class mode rather than a test affordance: the
 Ansible shape runs the sidecar as its own systemd unit, so the bridge listens
@@ -37,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import secrets
@@ -68,6 +72,13 @@ MAX_SOCKET_PATH_BYTES = 100
 #: resolve, so waiting is cheaper than guessing.
 SEND_TIMEOUT_SECONDS = 45.0
 
+#: How long `drain()` may hold the write lock. Its own bound rather than the
+#: send's, because it is held across the lock and a peer that connects and
+#: stops reading never lets it return — so this is what decides how long one
+#: wedged sidecar can stall every other send, and it should be well under
+#: `SEND_TIMEOUT_SECONDS`.
+DRAIN_TIMEOUT = 10.0
+
 #: Pending inbound events. Deliberately large and deliberately *dropping* past
 #: it rather than blocking the reader: the worker's own work can include a
 #: reply, which awaits a `send_result` only the reader can deliver, so a reader
@@ -81,9 +92,12 @@ INBOUND_QUEUE_MAX = 1024
 INBOUND_ATTEMPTS = 4
 INBOUND_RETRY_BASE_SECONDS = 0.5
 
-#: Sidecar respawn backoff, doubling to the ceiling.
+#: Sidecar respawn backoff, doubling to the ceiling — and how long a child has
+#: to run before its exit counts as a fresh fault rather than a continuing one,
+#: which is what returns the backoff to the floor.
 RESPAWN_BASE_SECONDS = 1.0
 RESPAWN_MAX_SECONDS = 60.0
+RESPAWN_RESET_SECONDS = 120.0
 
 #: How long `stop()` gives a sidecar to exit after `shutdown` before SIGTERM,
 #: and then before SIGKILL.
@@ -163,6 +177,20 @@ def ensure_session_dir(path: Path) -> Path:
             raise NotADirectoryError(
                 f"whatsapp baileys session path is not a directory: {path}"
             )
+        # **Ours, not merely private.** A directory already at 0700 skips the
+        # `fchmod`, and with it the `EPERM` that would otherwise be the only
+        # thing to notice another uid owns it — so a 0700 directory planted at
+        # the configured path is adopted in silence and a full WhatsApp account
+        # is paired into it. `session_dir` is operator-settable, so the parent
+        # is not always the daemon's own state directory.
+        # `executor._ensure_control_level` makes the same check after the same
+        # `O_NOFOLLOW | O_DIRECTORY` open, and its docstring names this hazard:
+        # a type check says the path is a directory, not that it is ours.
+        if info.st_uid != os.geteuid():
+            raise PermissionError(
+                f"whatsapp baileys session directory belongs to uid "
+                f"{info.st_uid}, not to this process: {path}"
+            )
         if stat.S_IMODE(info.st_mode) != 0o700:
             os.fchmod(fd, 0o700)
     finally:
@@ -170,48 +198,77 @@ def ensure_session_dir(path: Path) -> Path:
     return path
 
 
-def harden_session_files(path: Path) -> int:
-    """Narrow any session file wider than 0600, and say how many there were.
+def harden_session_files(path: Path) -> tuple[int, int]:
+    """Narrow any session file wider than 0600. Returns `(narrowed, failed)`.
 
     Defence in depth behind the child's `umask`, which is the real mechanism:
     the sidecar writes these files, so the daemon cannot create them at the
-    right mode and can only correct one afterwards. The count is what a
-    `doctor` check reports; a non-zero one means the sidecar is running under
-    a umask that is not this module's.
+    right mode and can only correct one afterwards. A non-zero `narrowed`
+    means the sidecar is running under a umask that is not this module's; a
+    non-zero `failed` is the one `doctor` should be loud about.
+
+    **Two counts rather than one**, because they mean opposite things and an
+    earlier version conflated them: it incremented before the `fchmod` and
+    caught the `lstat` in the same handler, so a file that merely vanished
+    between the listing and the stat was reported as a session possibly
+    readable by other accounts, while one that could *not* be narrowed was
+    counted as though it had been. The number `doctor` reads has to be the one
+    that happened.
 
     Never raises and never follows a symlink — it runs on the start path,
     where a failure to tidy must not stop a deployment from receiving
-    messages. A file it could not narrow is counted and logged by name,
-    because the name is a path and not a secret; the contents never are.
+    messages. A failure is logged by name, because the name is a path and not
+    a secret; the contents never are.
     """
-    widened = 0
+    narrowed = 0
+    failed = 0
     try:
         entries = sorted(path.iterdir())
     except OSError:
-        return 0
+        return 0, 0
     for entry in entries:
         try:
             info = entry.lstat()
-            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) == 0o600:
-                continue
-            widened += 1
+        except OSError:
+            # Gone between the listing and the stat, or unreadable. Neither is
+            # a widened session file.
+            continue
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) == 0o600:
+            continue
+        try:
             fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW)
             try:
                 os.fchmod(fd, 0o600)
             finally:
                 os.close(fd)
         except OSError:
+            failed += 1
             logger.warning(
                 "whatsapp.baileys.session_mode_unfixed path=%s: the paired "
                 "session may be readable by other accounts on this host",
                 entry,
             )
-    return widened
+            continue
+        narrowed += 1
+    return narrowed, failed
 
 
 # ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class _WriteMark:
+    """Whether one send's line reached `writer.write`.
+
+    A mutable flag rather than a return value, because the question is asked
+    from the `except` clause of the *caller* — which sees an exception and has
+    no other way to know which side of the socket it fell on, and whose answer
+    is the ledger's `failed`-against-`unknown` decision.
+    """
+
+    written: bool = False
 
 
 @dataclass
@@ -238,6 +295,7 @@ class BridgeStatus:
     inbound_applied: int = 0
     queue_depth: int = 0
     session_files_hardened: int = 0
+    session_files_unfixed: int = 0
     rejected_connections: int = 0
     socket_path: str = ""
     session_dir: str = ""
@@ -289,6 +347,7 @@ class BaileysBridge:
         self._worker: asyncio.Task | None = None
         self._supervisor: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
+        self._qr_tasks: set[asyncio.Task] = set()
         self._stopping = False
         self._write_lock = asyncio.Lock()
         # Set by a permanent `fatal`, and waited on beside the child's exit.
@@ -315,7 +374,10 @@ class BaileysBridge:
         """
         self._stopping = False
         ensure_session_dir(self._session_dir)
-        self._status.session_files_hardened = harden_session_files(self._session_dir)
+        (
+            self._status.session_files_hardened,
+            self._status.session_files_unfixed,
+        ) = harden_session_files(self._session_dir)
         await self._listen()
         self._worker = asyncio.create_task(self._drain_inbound())
         if self._sidecar_argv:
@@ -329,6 +391,7 @@ class BaileysBridge:
         already in use.
         """
         self._stopping = True
+        listened = self._status.listening
         await self._request_shutdown()
         if self._supervisor is not None:
             self._supervisor.cancel()
@@ -354,8 +417,16 @@ class BaileysBridge:
                 )
             self._server = None
         self._status.listening = False
-        with contextlib.suppress(OSError):
-            self._socket_path.unlink(missing_ok=True)
+        # Only an inode this bridge created, and only if it is still a socket.
+        # `_unlink_stale` refuses to delete a non-socket at the name on the
+        # grounds that it is somebody else's; `stop()` is reachable after a
+        # failed `start()` — the `try/finally` shape every caller uses — so an
+        # unconditional unlink here deletes exactly the file that refusal just
+        # protected.
+        if listened:
+            with contextlib.suppress(OSError):
+                if stat.S_ISSOCK(self._socket_path.lstat().st_mode):
+                    self._socket_path.unlink()
 
     async def _listen(self) -> None:
         path = self._socket_path
@@ -373,6 +444,17 @@ class BaileysBridge:
         # the right to send as this WhatsApp account. The explicit `chmod` is
         # for a platform whose umask handling differs, which is what
         # `devbox_proxy` says at the same line.
+        #
+        # The accepted cost, stated rather than left to be rediscovered: the
+        # umask is process-global and is held across an await, so anything else
+        # on this loop — and any `to_thread` worker — that creates a file
+        # during that one iteration gets 0600, and a *directory* 0600, which is
+        # not traversable. Under `istota serve` the web app shares the process.
+        # Binding the socket by hand and passing `sock=` would close the window
+        # entirely; it is not done because the mode would then be set before
+        # `start_unix_server` is reached, which is the only point a test can
+        # observe, and a control that cannot fail is worse than this window.
+        # Precedented by `devbox_proxy.serve`, which takes the same trade.
         previous_umask = os.umask(0o177)
         try:
             self._server = await asyncio.start_unix_server(
@@ -424,6 +506,17 @@ class BaileysBridge:
         session is gone and only a re-pair brings it back, so respawning would
         cost a process every few seconds and change nothing; the status carries
         the reason for `doctor` to report and for the operator to act on.
+
+        **On this shape that is a one-way door, and Stage 6 owes the way out.**
+        With an argv, ending the loop means no child, so nothing can send the
+        `ready` that `_dispatch` clears the latch on — the clearing arm is
+        unreachable here, and there is no `resume()`. The remedy the log line
+        names has to supply its own sidecar: `istota whatsapp pair` spawning
+        one of its own satisfies this, and a `resume()` on the bridge is the
+        alternative. Neither is written yet, and a method with no caller is a
+        seam with no user, so the requirement is recorded rather than guessed
+        at. On the `sidecar_argv=()` shape there is no gap: systemd restarts
+        the unit, it reconnects, and its `ready` clears the latch.
         """
         delay = RESPAWN_BASE_SECONDS
         while not self._stopping:
@@ -434,6 +527,7 @@ class BaileysBridge:
                     self._status.fatal_reason,
                 )
                 return
+            started = asyncio.get_running_loop().time()
             try:
                 self._process = await asyncio.create_subprocess_exec(
                     *self._sidecar_argv,
@@ -444,6 +538,19 @@ class BaileysBridge:
                     # and is the backstop, not the mechanism.
                     umask=0o077,
                     cwd=str(self._session_dir),
+                    # **Discarded, not inherited.** Inherited, the Node child
+                    # writes into the daemon's own stdout and stderr, which is
+                    # the journal and the rotating log the admin Logs pane
+                    # reads back — and Baileys' logger is chatty about JIDs and
+                    # message bodies. This module's "never logged" rule binds
+                    # its own `logger` calls and binds nothing the child
+                    # prints, so the child is given nowhere to print. `PIPE`
+                    # with no reader is worse than either: the child blocks
+                    # once the pipe buffer fills. The sidecar owning its own
+                    # log destination — inside the 0700 session directory — is
+                    # Stage 6's, with the Node program.
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
                 )
             except Exception:
                 logger.warning(
@@ -470,6 +577,15 @@ class BaileysBridge:
                     return
                 logger.warning("whatsapp.baileys.sidecar_exited code=%s", code)
                 self._status.restarts += 1
+                # **A child that ran for a while resets the backoff.** Without
+                # this the doubling is monotonic for the life of the process,
+                # so a sidecar crashing once a day reaches the ceiling after
+                # six crashes and every later one costs a full minute of
+                # unreachability rather than a second — the opposite of what a
+                # backoff is for. The tight crash-loop case is unaffected,
+                # since a child that dies immediately never passes the bar.
+                if asyncio.get_running_loop().time() - started >= RESPAWN_RESET_SECONDS:
+                    delay = RESPAWN_BASE_SECONDS
             await asyncio.sleep(delay)
             delay = min(delay * 2, RESPAWN_MAX_SECONDS)
 
@@ -542,18 +658,56 @@ class BaileysBridge:
             with contextlib.suppress(Exception):
                 writer.close()
             return
-        self._writer = writer
-        self._status.connected = True
         try:
+            # **The writer is adopted only after version negotiation passes.**
+            # `_send`'s liveness gate is "is there a writer", so adopting at
+            # accept means a `send` can be written to a peer whose protocol
+            # version is unknown or refused — the write direction of exactly
+            # what `_accept_hello` guards in the read direction. A peer that
+            # connects and never speaks holds nothing open but itself.
+            if not await self._negotiate(reader):
+                return
+            self._writer = writer
+            self._status.connected = True
             await self._read_loop(reader)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("whatsapp.baileys.link_error", exc_info=True)
         finally:
-            self._close_link(proto.REASON_LINK_LOST)
+            if self._writer is writer:
+                self._close_link(proto.REASON_LINK_LOST)
             with contextlib.suppress(Exception):
                 writer.close()
+
+    async def _negotiate(self, reader: asyncio.StreamReader) -> bool:
+        """Read lines until a `hello` settles the version, or give up.
+
+        A malformed line before the `hello` is counted and skipped, matching
+        the read loop; anything else with a type is the peer talking before it
+        has introduced itself, and the connection goes.
+        """
+        while True:
+            try:
+                line = await reader.readline()
+            except (asyncio.LimitOverrunError, ValueError):
+                self._status.malformed_lines += 1
+                logger.warning("whatsapp.baileys.line_too_long")
+                return False
+            if not line:
+                return False
+            try:
+                payload = proto.decode(line)
+            except proto.BaileysProtocolError as exc:
+                self._status.malformed_lines += 1
+                logger.warning("whatsapp.baileys.malformed_line reason=%s", exc)
+                continue
+            if payload["type"] != proto.MSG_HELLO:
+                logger.warning(
+                    "whatsapp.baileys.hello_expected got=%s", payload["type"],
+                )
+                return False
+            return self._accept_hello(payload)
 
     def _close_link(self, reason: str) -> None:
         """Drop the connection and settle everything that was riding on it.
@@ -595,7 +749,6 @@ class BaileysBridge:
         in a reply, and a reply awaits a `send_result` that only this loop can
         deliver — so anything slower than a queue `put` happens on the worker.
         """
-        first = True
         while True:
             try:
                 line = await reader.readline()
@@ -615,22 +768,23 @@ class BaileysBridge:
                 self._status.malformed_lines += 1
                 logger.warning("whatsapp.baileys.malformed_line reason=%s", exc)
                 continue
-            message_type = payload["type"]
-            if first:
-                if message_type != proto.MSG_HELLO or not self._accept_hello(payload):
-                    return
-                first = False
-                continue
-            self._dispatch(message_type, payload)
+            self._dispatch(payload["type"], payload)
 
     def _accept_hello(self, payload: dict) -> bool:
         """Whether this sidecar speaks a version this daemon understands.
 
         A refusal drops the connection rather than carrying on, because the
         alternative is reading an older shape's fields out of a newer frame
-        and resolving a principal from whatever came out. The supervisor's
-        backoff bounds the reconnect loop that follows, and the log line names
-        both versions so an operator can see which half is stale.
+        and resolving a principal from whatever came out.
+
+        **Nothing here bounds the reconnect that follows**, and an earlier
+        draft of this docstring claimed the supervisor's backoff did. It does
+        not: a refused `hello` kills the connection and not the child, so a
+        mismatched sidecar reconnects as fast as its own client loop allows,
+        and on the `sidecar_argv=()` shape there is no supervisor at all. The
+        bound is the sidecar's, which is the right place for it — but it means
+        a version mismatch can be a log flood, so the line names both versions
+        and an operator has something to act on.
         """
         try:
             version = proto.hello_version(payload)
@@ -692,7 +846,18 @@ class BaileysBridge:
             )
             return
         try:
-            self._on_qr(value)
+            result = self._on_qr(value)
+            if inspect.isawaitable(result):
+                # An `async def` callback returns a coroutine object, which is
+                # truthy, raises nothing and — dropped — loses the QR with only
+                # a `RuntimeWarning` that `logging` never surfaces. Stage 6's
+                # `istota whatsapp pair` is a plausible async caller, so it is
+                # scheduled rather than refused. It runs as its own task and
+                # not inline, because the read loop must not block on somebody
+                # else's terminal.
+                task = asyncio.ensure_future(result)
+                self._qr_tasks.add(task)
+                task.add_done_callback(self._qr_tasks.discard)
         except Exception:
             # No `exc_info`: a traceback prints frames, and this frame's local
             # is the QR.
@@ -707,10 +872,16 @@ class BaileysBridge:
         self._status.ready = False
         if permanent:
             self._permanent_fatal.set()
+        # Branched, because only the permanent arm refuses anything: `_send`'s
+        # gate is `fatal_is_permanent`, so a transient fatal clears `ready` and
+        # sends carry on. Telling an operator their sends are blocked when they
+        # are not is how a real outage gets read as the usual noise.
         logger.error(
-            "whatsapp.baileys.fatal reason=%s permanent=%s: WhatsApp sends are "
-            "refused until this resolves",
+            "whatsapp.baileys.fatal reason=%s permanent=%s: %s",
             reason, permanent,
+            "WhatsApp sends are refused until the session is re-paired"
+            if permanent else
+            "the session reported a fault; sends are still attempted",
         )
 
     def _resolve_send(self, payload: dict) -> None:
@@ -882,18 +1053,32 @@ class BaileysBridge:
         `BaseException` backstop settles the row and re-raises, and swallowing
         a cancellation here would hide a shutdown from the path designed to
         handle it.
+
+        **The catch-all reads the mark rather than assuming a side of the
+        line.** Every exception that can reach it today is provably pre-write —
+        the post-write ones are all handled inside `_send` — so a fixed
+        `definite=False` here spent `unknown` on a message that never left, and
+        the test that drove it pinned the wrong answer rather than catching it.
+        A fixed `definite=True` would be the same mistake waiting for the next
+        refactor to move a post-write failure onto this path, so the mark is
+        what decides, and it is set at the one statement that matters.
         """
+        mark = _WriteMark()
         try:
-            return await self._send(request)
+            return await self._send(request, mark)
         except asyncio.CancelledError:
             raise
         except Exception:
             # No `exc_info`: the frames hold the request, and the request holds
             # the destination and the message body.
-            logger.warning("whatsapp.baileys.send_error")
-            return proto.local_failure(proto.REASON_LINK_LOST, definite=False)
+            logger.warning("whatsapp.baileys.send_error written=%s", mark.written)
+            if mark.written:
+                return proto.local_failure(proto.REASON_LINK_LOST, definite=False)
+            return proto.local_failure(proto.REASON_NOT_WRITTEN, definite=True)
 
-    async def _send(self, request: WhatsAppSendRequest) -> WhatsAppSendOutcome:
+    async def _send(
+        self, request: WhatsAppSendRequest, mark: "_WriteMark"
+    ) -> WhatsAppSendOutcome:
         if self._status.fatal_is_permanent:
             return proto.local_failure(proto.REASON_SESSION_FATAL, definite=True)
         request_id = secrets.token_hex(8)
@@ -908,11 +1093,22 @@ class BaileysBridge:
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         try:
-            # The lock covers the registration and the write together. Without
+            # **Both waits are bounded, and neither bound is the other's.**
+            # The lock covers the registration and the write together — without
             # it a `send_result` for this id could be read and dropped as late
-            # before the future is in the map — the reader runs on the same
-            # loop, and `drain()` is a suspension point.
-            async with self._write_lock:
+            # before the future is in the map, since the reader runs on this
+            # same loop and `drain()` is a suspension point. But a sidecar that
+            # connects and stops reading never lets `drain()` return: the
+            # transport's buffer stays above its high-water mark, one line near
+            # `MAX_LINE_BYTES` is enough to cross it, and `deliver_whatsapp`
+            # awaits `adapter.send` with no timeout of its own. Unbounded, the
+            # first such send holds the lock for ever and every later one
+            # queues behind it, leaving rows claimed and unsettled — which also
+            # holds the parked-status gate open for the whole deployment.
+            await asyncio.wait_for(
+                self._write_lock.acquire(), timeout=self._send_timeout,
+            )
+            try:
                 writer = self._writer
                 if writer is None or writer.is_closing():
                     return proto.local_failure(
@@ -928,18 +1124,29 @@ class BaileysBridge:
                     return proto.local_failure(
                         proto.REASON_NO_SIDECAR, definite=True,
                     )
+                mark.written = True
                 try:
-                    await writer.drain()
+                    await asyncio.wait_for(writer.drain(), timeout=DRAIN_TIMEOUT)
                 except Exception:
                     # Past `write`. The bytes may already be in the socket, so
-                    # the outcome is ambiguous however this ends.
+                    # the outcome is ambiguous however this ends — including a
+                    # drain that timed out, which is why this is swallowed and
+                    # the answer is left to the wait below.
                     logger.warning("whatsapp.baileys.send_drain_failed")
+            finally:
+                self._write_lock.release()
             return await asyncio.wait_for(future, timeout=self._send_timeout)
         except asyncio.TimeoutError:
             logger.warning(
-                "whatsapp.baileys.send_timeout request=%s", request_id,
+                "whatsapp.baileys.send_timeout request=%s written=%s",
+                request_id, mark.written,
             )
-            return proto.local_failure(proto.REASON_SEND_TIMEOUT, definite=False)
+            if mark.written:
+                return proto.local_failure(
+                    proto.REASON_SEND_TIMEOUT, definite=False,
+                )
+            # The lock was never acquired, so this send never reached a socket.
+            return proto.local_failure(proto.REASON_NOT_WRITTEN, definite=True)
         finally:
             self._pending.pop(request_id, None)
 

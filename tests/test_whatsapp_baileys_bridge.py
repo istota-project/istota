@@ -33,6 +33,8 @@ import contextlib
 import os
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -214,6 +216,30 @@ class TestTheSessionDirectory:
         with pytest.raises(OSError):
             ensure_session_dir(sockets.session)
 
+    def test_a_directory_owned_by_another_account_is_refused(self, sockets):
+        """Private is not the same as ours, and 0700 is the case that hides it.
+
+        The `fchmod` is skipped for a directory already at 0700, and with it
+        the `EPERM` that is otherwise the only thing to notice another uid owns
+        the path — so a planted 0700 directory is adopted in silence and a full
+        WhatsApp account is paired into it. `session_dir` is operator-settable,
+        so the parent is not always the daemon's own state directory.
+        """
+        sockets.session.mkdir(mode=0o700)
+        real_fstat = os.fstat
+
+        def foreign(fd):
+            info = real_fstat(fd)
+            return os.stat_result(
+                (info.st_mode, info.st_ino, info.st_dev, info.st_nlink,
+                 os.geteuid() + 1, info.st_gid, info.st_size,
+                 int(info.st_atime), int(info.st_mtime), int(info.st_ctime))
+            )
+
+        with mock.patch.object(os, "fstat", foreign):
+            with pytest.raises(PermissionError):
+                ensure_session_dir(sockets.session)
+
     def test_a_file_at_the_name_is_refused(self, sockets):
         sockets.session.write_text("not a directory")
         with pytest.raises(NotADirectoryError):
@@ -233,10 +259,33 @@ class TestTheSessionDirectory:
         (sockets.session / "already-tight.json").write_text("{}")
         os.chmod(sockets.session / "already-tight.json", 0o600)
 
-        widened = harden_session_files(sockets.session)
+        narrowed, failed = harden_session_files(sockets.session)
 
-        assert widened == 1
+        assert (narrowed, failed) == (1, 0)
         assert mode_of(creds) == 0o600
+
+    def test_a_file_that_vanished_is_not_reported_as_an_exposure(self, sockets):
+        """The two counts mean opposite things and neither may absorb the other.
+
+        An entry gone between the listing and the stat is not a session file
+        readable by other accounts, and one that could not be narrowed is not a
+        file that was narrowed. An earlier version answered both with the same
+        increment and the same alarming log line.
+        """
+        ensure_session_dir(sockets.session)
+        (sockets.session / "creds.json").write_text("{}")
+        os.chmod(sockets.session / "creds.json", 0o644)
+        real_lstat = Path.lstat
+
+        def vanishing(self):
+            if self.name == "creds.json":
+                raise FileNotFoundError(self)
+            return real_lstat(self)
+
+        with mock.patch.object(Path, "lstat", vanishing):
+            narrowed, failed = harden_session_files(sockets.session)
+
+        assert (narrowed, failed) == (0, 0)
 
     async def test_start_makes_the_directory_before_anything_can_pair(
         self, config, sockets
@@ -326,6 +375,12 @@ class TestTheSocket:
         )
         with pytest.raises(FileExistsError):
             await instance.start()
+        assert sockets.socket.read_text() == "someone else's file"
+
+        # And `stop()` must not delete what `start()` just refused to touch.
+        # Every caller wraps the pair in `try/finally`, so the cleanup path is
+        # reached with the third party's file still there.
+        await instance.stop()
         assert sockets.socket.read_text() == "someone else's file"
 
     async def test_an_over_long_path_is_refused_by_name(self, config, sockets):
@@ -424,8 +479,53 @@ class TestTheHelloFrame:
     async def test_a_good_hello_records_the_version(self, bridge, sidecar):
         await wait_for(lambda: bridge.status.protocol_version == proto.PROTOCOL_VERSION)
 
+    async def test_no_send_crosses_before_the_version_is_settled(
+        self, bridge, sockets
+    ):
+        """The write direction of the guard `_accept_hello` makes in the read one.
+
+        `_send`'s liveness gate is "is there a writer", so adopting the writer
+        at accept means a v1 `send` line can be handed to a peer whose version
+        is unknown — or to one that would be refused. A peer that connects and
+        says nothing is exactly that state, held open indefinitely.
+        """
+        fake = FakeSidecar(sockets.socket)
+        await fake.connect(hello=False)
+        try:
+            # `open_unix_connection` returns before the server callback has
+            # run, so the accept is given a moment — otherwise the refusal
+            # below would be "nothing has connected yet" rather than "this peer
+            # has not introduced itself", and the case would pass either way.
+            await asyncio.sleep(0.05)
+            outcome = await bridge.send(
+                WhatsAppSendRequest(to=USER_JID, text="hi", kind="service")
+            )
+            assert outcome.definite is True
+            assert outcome.safe_reason == proto.REASON_NO_SIDECAR
+            assert bridge.status.connected is False
+            # And the line reached nobody. This is the half that discriminates:
+            # the outcome alone is the same value an unaccepted connection
+            # produces, while a peer that was handed a `send` has it to read.
+            with pytest.raises(asyncio.TimeoutError):
+                await fake.next_message(timeout=0.3)
+        finally:
+            await fake.close()
+
 
 class TestMalformedLines:
+    async def test_an_over_long_line_drops_the_connection(self, bridge, sidecar):
+        """The one branch where the stream offset becomes unknown.
+
+        `readline` past the `StreamReader` limit raises rather than returning,
+        and the reader is then part-way through a line it cannot see the end
+        of — so carrying on would parse the tail of one line as the head of the
+        next. The connection is the only safe thing to discard.
+        """
+        await sidecar.write_raw(b"x" * (proto.MAX_LINE_BYTES + 8192) + b"\n")
+
+        await wait_for(lambda: bridge.status.malformed_lines >= 1)
+        await wait_for(lambda: bridge.status.connected is False)
+
     async def test_a_bad_line_is_counted_and_the_link_survives(self, bridge, sidecar):
         """The spec's rule: logged and dropped, with a run of them visible to
         `doctor` — which is what the counter is for."""
@@ -723,8 +823,27 @@ class TestTheDefiniteLine:
     ):
         """The line was written, so the bytes may be on WhatsApp's servers.
         Reporting `failed` for a message that arrived is the error the
-        `unknown` state exists to avoid."""
+        `unknown` state exists to avoid.
+
+        **The row alone cannot tell this apart from the timeout below**, which
+        is the next case: `sent_whatsapp` has no reason column, so both land on
+        `unknown` and an inert `_fail_pending` would pass this by falling
+        through to the send timeout. So the outcome's own `safe_reason` is
+        asserted beside the row, and the elapsed time is required to be well
+        inside `send_timeout`.
+        """
         bind_user(config)
+        use_bridge_as_adapter(monkeypatch, bridge)
+        started = asyncio.get_running_loop().time()
+        outcome_seen = []
+        real_send = bridge.send
+
+        async def watched(request):
+            outcome = await real_send(request)
+            outcome_seen.append(outcome)
+            return outcome
+
+        monkeypatch.setattr(bridge, "send", watched)
         use_bridge_as_adapter(monkeypatch, bridge)
         task = asyncio.ensure_future(
             outbound.deliver_whatsapp(
@@ -735,8 +854,11 @@ class TestTheDefiniteLine:
         await sidecar.drop()
 
         record = await asyncio.wait_for(task, timeout=5.0)
+        elapsed = asyncio.get_running_loop().time() - started
         assert record.status == "unknown"
         assert ledger_row(config, "task-result:4")["status"] == "unknown"
+        assert outcome_seen[0].safe_reason == proto.REASON_LINK_LOST
+        assert elapsed < 2.0  # the fixture's send_timeout, not reached
 
     async def test_a_send_the_sidecar_never_answers_settles_unknown(
         self, bridge, sidecar, config, monkeypatch
@@ -786,9 +908,19 @@ class TestTheDefiniteLine:
         record = await asyncio.wait_for(task, timeout=5.0)
         assert record.status == "unknown"
 
-    async def test_send_never_raises_even_when_the_link_misbehaves(self, bridge):
-        """The adapter contract. A raise inside the claim-to-settle region
-        settles the row `unknown` for a message that was never sent."""
+    async def test_send_never_raises_and_a_pre_write_escape_is_definite(
+        self, bridge
+    ):
+        """The adapter contract, and the half the first version got backwards.
+
+        `send` must not raise: a raise inside the claim-to-settle region
+        settles the row `unknown` for a message that was never sent. But the
+        catch-all answered `definite=False` unconditionally, which spends that
+        same `unknown` on exactly the case it exists to avoid — every escape
+        reaching it is above `writer.write`. The test pinned the wrong answer
+        rather than catching it, which is why the assertion is inverted here
+        and the mark is asserted rather than the constant.
+        """
         class Exploding:
             def is_closing(self):
                 raise RuntimeError("transport gone")
@@ -798,7 +930,36 @@ class TestTheDefiniteLine:
             WhatsAppSendRequest(to=USER_JID, text="hi", kind="service")
         )
 
+        assert outcome.definite is True
+        assert outcome.safe_reason == proto.REASON_NOT_WRITTEN
+
+    async def test_a_post_write_escape_stays_ambiguous(self, bridge, sidecar):
+        """The other side of the same line, so the mark is what decides.
+
+        Driven by making the *wait* explode after the line has gone out —
+        `definite=True` here would report a message the sidecar may already
+        have sent as one that never left.
+        """
+        real_wait_for = asyncio.wait_for
+        calls = []
+
+        async def exploding_wait(awaitable, timeout=None):
+            # Three waits, in this order: the write lock, the drain, the
+            # answer. The third is the first one past `writer.write`.
+            calls.append(timeout)
+            if len(calls) == 3:
+                raise RuntimeError("the loop went away")
+            return await real_wait_for(awaitable, timeout)
+
+        with mock.patch.object(asyncio, "wait_for", exploding_wait):
+            outcome = await bridge.send(
+                WhatsAppSendRequest(to=USER_JID, text="hi", kind="service")
+            )
+
+        assert len(calls) == 3
+        await sidecar.expect(proto.MSG_SEND)
         assert outcome.definite is False
+        assert outcome.safe_reason == proto.REASON_LINK_LOST
 
     async def test_the_bound_method_satisfies_the_registry_contract(self, bridge):
         """`_contract_fault` refuses a synchronous `send` because one raises
@@ -952,6 +1113,101 @@ class TestTheSupervisor:
         finally:
             await instance.stop()
 
+    async def test_the_child_gets_the_umask_that_makes_session_files_private(
+        self, config, sockets, monkeypatch
+    ):
+        """The mechanism, not just its backstop.
+
+        `harden_session_files` narrows a stray file afterwards and is covered;
+        the thing that decides the mode at birth is the child's umask, and a
+        credential property whose backstop is tested and whose mechanism is not
+        is the wrong way round. The spawn already sets `cwd` to the session
+        directory, so a child creating a file there is the whole probe.
+        """
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.01)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "touch creds.json; sleep 30"),
+        )
+        await instance.start()
+        try:
+            written = sockets.session / "creds.json"
+            await wait_for(written.exists, timeout=5.0)
+            assert mode_of(written) == 0o600
+        finally:
+            await instance.stop()
+
+    async def test_the_child_cannot_print_into_the_daemons_log(
+        self, config, sockets, capfd
+    ):
+        """Inherited stdio is a route into the journal this module cannot gate.
+
+        Baileys' own logger is chatty about JIDs and message bodies, and the
+        daemon's stdout is the rotating log the admin Logs pane reads back — so
+        the never-log rule would hold for every `logger` call here and be
+        bypassed entirely by the child. `capfd` captures at the file
+        descriptor, which is what a subprocess writes to.
+        """
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=(
+                "/bin/sh", "-c",
+                "echo LEAKEDJID; echo LEAKEDERR >&2; sleep 30",
+            ),
+        )
+        capfd.readouterr()
+        await instance.start()
+        try:
+            await asyncio.sleep(0.3)
+        finally:
+            await instance.stop()
+
+        captured = capfd.readouterr()
+        assert "LEAKEDJID" not in captured.out
+        assert "LEAKEDERR" not in captured.err
+
+    async def test_a_long_lived_child_resets_the_backoff(
+        self, config, sockets, monkeypatch
+    ):
+        """Monotonic doubling is the wrong shape for a rare crash.
+
+        Without a reset a sidecar that crashes once a day reaches the ceiling
+        after six crashes and stays there for the life of the process, so every
+        later crash costs a full minute of unreachability rather than a second.
+        The tight crash-loop case, which is the one the existing test drives,
+        cannot see this because its child never runs long enough to qualify.
+        """
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.01)
+        monkeypatch.setattr(bridge_module, "RESPAWN_RESET_SECONDS", 0.05)
+        # The backoff delay is a local in the supervisor loop, so the only way
+        # to observe it is the sleep it is passed to. The test-side poller
+        # sleeps 0.005, well under the base, so the supervisor's are the ones
+        # at or above it.
+        delays = []
+        real_sleep = asyncio.sleep
+
+        async def recording(delay, *args, **kwargs):
+            delays.append(delay)
+            return await real_sleep(delay, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "sleep", recording)
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            sidecar_argv=("/bin/sh", "-c", "sleep 0.2"),
+        )
+        await instance.start()
+        try:
+            await wait_for(lambda: instance.status.restarts >= 3, timeout=8.0)
+        finally:
+            await instance.stop()
+
+        backoffs = [d for d in delays if d >= bridge_module.RESPAWN_BASE_SECONDS]
+        assert len(backoffs) >= 3
+        # Every child outlived the reset bar, so none of them is a continuing
+        # fault and the delay never leaves the floor. Monotonic doubling gives
+        # 0.01, 0.02, 0.04 here.
+        assert max(backoffs) == pytest.approx(bridge_module.RESPAWN_BASE_SECONDS)
+
     async def test_a_transient_fatal_leaves_the_loop_alone(self, bridge, sidecar):
         await sidecar.say(proto.MSG_FATAL, reason="connection_closed")
         await wait_for(lambda: bridge.status.fatal_reason == "connection_closed")
@@ -990,6 +1246,34 @@ class TestTheQrPayload:
 
         assert seen == ["2@SECRETPAIRINGPAYLOAD=="]
         assert "SECRETPAIRINGPAYLOAD" not in caplog.text
+
+    async def test_an_async_callback_is_scheduled_rather_than_dropped(
+        self, config, sockets
+    ):
+        """A coroutine object is truthy, raises nothing, and loses the QR.
+
+        Stage 6's `istota whatsapp pair` is a plausible `async def` caller, and
+        the only trace of the loss would be a `RuntimeWarning` that `logging`
+        never surfaces — for the credential that pairs the whole account.
+        """
+        seen = []
+
+        async def collect(value):
+            seen.append(value)
+
+        instance = BaileysBridge(
+            config, socket_path=sockets.socket, session_dir=sockets.session,
+            on_qr=collect,
+        )
+        await instance.start()
+        try:
+            async with connected(instance, sockets) as fake:
+                await fake.say(proto.MSG_QR, qr="2@SECRETPAIRINGPAYLOAD==")
+                await wait_for(lambda: len(seen) == 1)
+        finally:
+            await instance.stop()
+
+        assert seen == ["2@SECRETPAIRINGPAYLOAD=="]
 
     async def test_with_no_callback_it_says_so_without_its_contents(
         self, bridge, sidecar, caplog

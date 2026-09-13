@@ -169,6 +169,29 @@ class TestTheInboundEvent:
                 _inbound(message_id="x" * (proto.MAX_MESSAGE_ID_CHARS + 1))
             )
 
+    def test_a_body_longer_than_whatsapp_allows_is_refused(self):
+        """The first surface where the body is not bounded upstream.
+
+        Meta refuses a Cloud message past 4,096 characters before it ever
+        reaches `normalize_payload`; a Baileys line is bounded only by the
+        256 KiB frame cap, so a quarter-megabyte body would reach a task
+        prompt. Refused rather than truncated — a message longer than WhatsApp
+        itself permits did not come from WhatsApp, and cutting somebody's words
+        silently is worse than dropping a frame that cannot be genuine.
+        """
+        with pytest.raises(proto.BaileysProtocolError):
+            proto.inbound_event(_inbound(text="x" * (proto.MAX_INBOUND_TEXT_CHARS + 1)))
+
+    def test_a_body_at_the_limit_is_taken(self):
+        event = proto.inbound_event(_inbound(text="x" * proto.MAX_INBOUND_TEXT_CHARS))
+        assert len(event.text) == proto.MAX_INBOUND_TEXT_CHARS
+
+    def test_an_over_long_display_name_is_refused(self):
+        with pytest.raises(proto.BaileysProtocolError):
+            proto.inbound_event(
+                _inbound(username="n" * (proto.MAX_USERNAME_CHARS + 1))
+            )
+
     @pytest.mark.parametrize("timestamp", [None, "1767225600", True, 10**20])
     def test_an_unusable_timestamp_is_refused_rather_than_defaulted(self, timestamp):
         """It reaches `webhook._window_stamp`, which clamps a wrong value. A
@@ -213,6 +236,19 @@ class TestTheReceipt:
     def test_an_error_code_survives_as_text(self):
         event = proto.delivery_event(_receipt(status="failed", error_code=408))
         assert event.error_code == "408"
+
+    @pytest.mark.parametrize("code", [True, False])
+    def test_a_boolean_is_not_an_error_code(self, code):
+        """`bool` is a subclass of `int`, so the obvious isinstance check
+        renders `true` as the string `"True"` into `sent_whatsapp.error_code`
+        and every operator surface reading it. `_event_time` and
+        `hello_version` guard the same way."""
+        event = proto.delivery_event(_receipt(status="failed", error_code=code))
+        assert event.error_code is None
+
+    def test_the_send_outcome_applies_the_same_rule(self):
+        outcome = proto.send_outcome({"ok": False, "error_code": True})
+        assert outcome.error_code is None
 
 
 class TestTheSendOutcome:
