@@ -387,6 +387,56 @@ function quotedId(message) {
   return context && typeof context.stanzaId === 'string' ? context.stanzaId : null;
 }
 
+/*
+ * The last few message bodies this process sent, so a recipient that could not
+ * decrypt one can be answered.
+ *
+ * **Signal encryption is per device and per session, and the first message
+ * after a session goes stale routinely fails on the far side.** WhatsApp's
+ * remedy is a retry receipt: the recipient asks for the message again, and the
+ * sender re-encrypts it against a fresh session. Baileys implements the
+ * receiving half of that and delegates the one thing only the caller has — the
+ * body — to `getMessage`, whose default is `async () => undefined` and whose
+ * source carries the matching TODO. With no hook, `sendMessagesAgain` logs
+ * "message not available" and relays nothing, so the recipient's client sits
+ * on "Waiting for this message. This may take a while." for ever.
+ *
+ * Measured on a live deployment across three sidecar restarts in ten minutes:
+ * the two replies sent on sessions fresh from pairing reached `read`, and
+ * every reply after them stuck at `accepted` with nothing delivered. The
+ * self-heal WhatsApp designed for that state was simply switched off.
+ *
+ * **In memory and nowhere else.** The value is a person's message body, and
+ * the session directory holds a full-account credential rather than a
+ * transcript — nothing in this program writes content to disk and a resend
+ * cache is not the place to start. The cost is that a retry arriving after a
+ * restart finds an empty cache and that message stays unreadable; the
+ * alternative is a plaintext message store beside the credential.
+ *
+ * 256 is Baileys' own number, from the TODO this implements. A `Map` keeps
+ * insertion order, so eviction is the oldest key.
+ */
+const SENT_CACHE_LIMIT = 256;
+
+const sentMessages = new Map();
+
+function rememberSent(id, content) {
+  if (typeof id !== 'string' || !id || !content) return;
+  // Delete before set so a resend of a known id refreshes its position rather
+  // than keeping the original one — otherwise a retry loop against a single
+  // message ages out everything sent after it.
+  sentMessages.delete(id);
+  sentMessages.set(id, content);
+  while (sentMessages.size > SENT_CACHE_LIMIT) {
+    sentMessages.delete(sentMessages.keys().next().value);
+  }
+}
+
+function recallSent(id) {
+  if (typeof id !== 'string' || !id) return undefined;
+  return sentMessages.get(id);
+}
+
 // How many consecutive failures to *construct* a session before calling the
 // credential unusable. One is a transient fault — a half-written auth file
 // mid-rotation, a DNS blip inside the library — and declaring that permanent
@@ -434,12 +484,32 @@ class Session {
   async open_() {
     const baileys = loadBaileys();
     const { state, saveCreds } = await baileys.useMultiFileAuthState(SESSION_DIR);
+    const logger = silentLogger();
     const sock = baileys.makeWASocket({
-      auth: state,
+      // **Not `auth: state` directly.** `useMultiFileAuthState` reads each
+      // Signal key back off the disk on demand, so a key written and then
+      // immediately read again can miss — and a session that reads as absent
+      // is a session Baileys re-establishes with a fresh PreKey handshake it
+      // did not need, which is one of the ways the far side ends up unable to
+      // decrypt. The wrapper is Baileys' own answer to that race and is what
+      // its README passes.
+      auth: {
+        creds: state.creds,
+        keys: baileys.makeCacheableSignalKeyStore(state.keys, logger),
+      },
       // Off, and this is the point of rule 1 rather than a preference:
       // Baileys' default logger writes JIDs and message content to stdout.
       printQRInTerminal: false,
-      logger: silentLogger(),
+      logger,
+      // Answering a retry receipt. Without this Baileys has the protocol and
+      // not the body, so it relays nothing and the recipient waits for ever.
+      getMessage: async (key) => {
+        const found = recallSent(key && key.id);
+        log('info', 'a recipient asked for a message again', {
+          served: Boolean(found),
+        });
+        return found;
+      },
       // The daemon composes and bounds its own bodies; nothing here should
       // mark a conversation read on the account's behalf.
       markOnlineOnConnect: false,
@@ -667,6 +737,9 @@ class Session {
     try {
       const sent = await this.sock.sendMessage(payload.to, { text: payload.text });
       const id = sent && sent.key && sent.key.id;
+      // `sent.message` is the generated content, which is what `relayMessage`
+      // re-encrypts on a retry — the `{ text }` handed in above is not.
+      rememberSent(id, sent && sent.message);
       if (typeof id !== 'string' || !id) {
         // Sent, and we cannot name what. Not definite — the message may be on
         // somebody's phone, and the daemon settles that as `unknown`, which is
@@ -832,6 +905,9 @@ module.exports = {
   chatAddress,
   encode,
   hasReadableContent,
+  rememberSent,
+  recallSent,
+  SENT_CACHE_LIMIT,
   messageShape,
   receiptStatus,
   sendFailureReason,

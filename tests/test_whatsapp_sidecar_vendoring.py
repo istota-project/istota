@@ -257,6 +257,23 @@ def _js_method(name: str) -> str:
     return source[start:end]
 
 
+def _js_body(declaration: str) -> str:
+    """The body of one method, named by its **declaration** rather than its
+    name.
+
+    `_js_method` takes a bare name and finds the first match, which is two
+    kinds of wrong here: it cannot see an `async` method at all, and `send`
+    is declared on both `Link` and `Session` — so it silently returned the
+    wrong one and an assertion about the send path passed or failed against a
+    method that has nothing to do with it. Naming the declaration is
+    unambiguous in both cases.
+    """
+    source = PROGRAM.read_text()
+    start = source.index(f"  {declaration}")
+    end = source.index("\n  }\n", start)
+    return source[start:end]
+
+
 def _js_function(name: str) -> str:
     """The body of one top-level function of the sidecar, as text."""
     source = PROGRAM.read_text()
@@ -651,6 +668,36 @@ class TestTheSidecarsControlFlow:
         assert "isForwardableJid" in _js_function("chatAddress")
         assert "@s.whatsapp.net" in _js_const("USER_JID_DOMAIN")
         assert "@lid" in _js_const("LID_JID_DOMAIN")
+
+    def test_the_socket_is_given_a_way_to_answer_a_retry(self):
+        """The cache is inert unless Baileys is handed it. `getMessage`
+        defaults to `async () => undefined`, so an unwired cache is exactly
+        the defect with tests passing over it."""
+        body = _js_body("async open_()")
+
+        assert "getMessage:" in body
+        assert "recallSent(" in body
+
+    def test_the_send_path_remembers_what_it_sent(self):
+        """And it caches the *generated* content rather than the `{ text }`
+        handed in, because the generated content is what `relayMessage`
+        re-encrypts on a retry."""
+        body = _js_body("async send(payload)")
+
+        assert "rememberSent(id, sent && sent.message)" in body
+
+    def test_the_signal_keys_are_read_through_a_cache(self):
+        """`useMultiFileAuthState` reads each key back off the disk, so a key
+        written and immediately re-read can miss — and a session that reads as
+        absent is re-established with a PreKey handshake it did not need,
+        which is one of the ways the far side ends up unable to decrypt.
+
+        Pinned as the absence of the raw form as well as the presence of the
+        wrapper, since `auth: state` is what it silently reverts to."""
+        body = _js_body("async open_()")
+
+        assert "makeCacheableSignalKeyStore(state.keys" in body
+        assert "auth: state," not in body
 
     def test_ready_is_re_announced_when_the_daemon_link_returns(self):
         """The daemon clears `ready` on every link drop and only a `ready`
@@ -1048,6 +1095,92 @@ class TestAnUndecryptedMessageIsNotForwarded:
         """The drop has to say something, or this is the silent discard the
         LID break already was."""
         assert self._call("m.messageShape({})") == "none"
+
+
+class TestTheSentMessageCacheServesARetry:
+    """Answering the recipient's "I could not decrypt that" — and why not
+    answering it leaves the message unreadable for good.
+
+    Signal encryption is per device and per session, and the first message
+    after a session goes stale routinely fails to decrypt on the far side.
+    WhatsApp's own remedy is a **retry receipt**: the recipient asks for the
+    message again, the sender re-encrypts against a fresh session and relays
+    it. Baileys implements the receiving half and delegates the one thing only
+    the caller has — the message body — to a `getMessage` hook, whose default
+    is `async () => undefined` and whose source carries the matching TODO
+    ("implement a cache to store the last 256 sent messages"). The sidecar
+    passed no hook, so `sendMessagesAgain` logged "message not available" and
+    relayed nothing.
+
+    Observed on a live deployment across three sidecar restarts in ten
+    minutes: the first two replies reached `read` on sessions fresh from
+    pairing, and every reply after them stuck at `accepted` with the recipient
+    showing "Waiting for this message. This may take a while." for ever. The
+    self-heal WhatsApp designed for exactly that state was switched off.
+
+    **In memory and nowhere else.** The value is a person's message body, and
+    the session directory holds a full-account credential rather than a
+    transcript — nothing in this program writes content to disk, and a
+    resend cache is not the thing to start with. The cost is the residual in
+    `whatsapp.md`: a retry arriving after a restart finds an empty cache.
+    """
+
+    _call = staticmethod(TestTheSidecarsPureFunctions._call)
+
+    def test_a_sent_message_can_be_recalled_by_its_id(self):
+        assert self._call(
+            '(() => { m.rememberSent("A1", {conversation: "hi"});'
+            ' return m.recallSent("A1"); })()'
+        ) == {"conversation": "hi"}
+
+    def test_an_unknown_id_recalls_nothing(self):
+        """`undefined` rather than a stub: Baileys branches on falsy and
+        relays nothing, which is the honest answer for a message this process
+        never sent or no longer holds."""
+        assert self._call('m.recallSent("nope") === undefined') is True
+
+    @pytest.mark.parametrize("bad", ["null", '""', "42", "undefined"])
+    def test_an_unusable_id_is_neither_stored_nor_recalled(self, bad):
+        assert self._call(
+            f'(() => {{ m.rememberSent({bad}, {{conversation: "hi"}});'
+            f' return m.recallSent({bad}) === undefined; }})()'
+        ) is True
+
+    def test_a_send_with_no_content_is_not_cached(self):
+        """A `sendMessage` result carrying no `message` is nothing to relay,
+        and storing the absence would answer a retry with a falsy value the
+        cache had to hold a slot for."""
+        assert self._call(
+            '(() => { m.rememberSent("A2", undefined);'
+            ' return m.recallSent("A2") === undefined; })()'
+        ) is True
+
+    def test_the_cache_is_bounded_and_evicts_the_oldest(self):
+        """Unbounded, this is a process that never restarts holding every
+        message body it ever sent. 256 is Baileys' own number, from the TODO
+        this implements."""
+        limit = self._call("m.SENT_CACHE_LIMIT")
+        assert limit == 256
+
+        assert self._call(
+            "(() => {"
+            f" for (let i = 0; i < {limit} + 1; i++)"
+            '  m.rememberSent("id" + i, {conversation: String(i)});'
+            ' return {'
+            '  first: m.recallSent("id0") === undefined,'
+            f'  second: m.recallSent("id1") !== undefined,'
+            f'  last: m.recallSent("id{limit}") !== undefined,'
+            ' }; })()'
+        ) == {"first": True, "second": True, "last": True}
+
+    def test_re_sending_an_id_does_not_grow_the_cache(self):
+        """A repeat of a known id refreshes rather than occupying a second
+        slot, or a retry loop against one message evicts everything else."""
+        assert self._call(
+            '(() => { for (let i = 0; i < 400; i++)'
+            '  m.rememberSent("same", {conversation: String(i)});'
+            ' return m.recallSent("same"); })()'
+        ) == {"conversation": "399"}
 
 
 class TestTheReadmeSaysWhatIsNotCovered:
