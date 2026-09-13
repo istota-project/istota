@@ -49,6 +49,7 @@ from pathlib import Path
 import pytest
 
 from istota.transport.whatsapp import baileys_protocol as proto
+from istota.transport.whatsapp import identity
 
 REPO = Path(__file__).resolve().parents[1]
 SIDECAR_DIR = REPO / "docker" / "whatsapp-baileys"
@@ -253,6 +254,14 @@ def _js_method(name: str) -> str:
     source = PROGRAM.read_text()
     start = source.index(f"  {name}(")
     end = source.index("\n  }\n", start)
+    return source[start:end]
+
+
+def _js_function(name: str) -> str:
+    """The body of one top-level function of the sidecar, as text."""
+    source = PROGRAM.read_text()
+    start = source.index(f"function {name}(")
+    end = source.index("\n}\n", start)
     return source[start:end]
 
 
@@ -623,9 +632,21 @@ class TestTheSidecarsControlFlow:
     def test_inbound_is_filtered_to_the_chats_this_surface_models(self):
         """`status@broadcast` and `@newsletter` arrive like any other message
         and on an active account never stop, each costing a queue slot, a
-        thread and a write transaction that then resolves no sender."""
-        assert "isForwardableJid(jid)" in _js_method("onMessages")
+        thread and a write transaction that then resolves no sender.
+
+        The filter is `chatAddress` rather than `isForwardableJid` directly,
+        because a LID chat is *translated* rather than passed through — but
+        the discard is still the one gate, so it is the falsy return that is
+        pinned here and `TestTheChatAddressUnderLid` that drives what it
+        answers.
+        """
+        body = _js_method("onMessages")
+
+        assert "chatAddress(message.key)" in body
+        assert "if (!jid)" in body
+        assert "isForwardableJid" in _js_function("chatAddress")
         assert "@s.whatsapp.net" in _js_const("USER_JID_DOMAIN")
+        assert "@lid" in _js_const("LID_JID_DOMAIN")
 
     def test_ready_is_re_announced_when_the_daemon_link_returns(self):
         """The daemon clears `ready` on every link drop and only a `ready`
@@ -883,6 +904,83 @@ class TestTheImageCopiesWhatTheProgramNeeds:
         `USER node` here builds cleanly and then cannot read the credential
         the daemon paired."""
         assert not re.search(r"^USER\s", self._directives(), re.M)
+
+
+class TestTheChatAddressUnderLid:
+    """Which address an inbound message is attributed to.
+
+    WhatsApp addresses an ordinary one-to-one chat by **LID** — a durable
+    per-contact id in its own namespace, carrying no phone number — and puts
+    the sender's phone-number JID on the message key as `senderPn`. The
+    daemon's whole Baileys identity story is the phone JID: `normalize_jid`
+    accepts `@s.whatsapp.net` alone, `jid_number` takes the E.164 out of it to
+    compare against the operator's configured bootstrap number, and
+    `address_for_binding` renders that same spelling back as a destination. A
+    LID therefore resolves to nothing the daemon can act on.
+
+    Observed on a live deployment: a paired session, a message delivered, and
+    `remoteJid` ending `@lid` with `senderPn` populated — dropped by the
+    sidecar's own forwardable-JID filter, silently, so neither side logged a
+    thing.
+
+    Driven through `node` rather than read off the source, because the
+    substitution decides **which principal an inbound message acts as** and a
+    source assertion about that is a second copy of the rule.
+    """
+
+    _call = staticmethod(TestTheSidecarsPureFunctions._call)
+
+    @staticmethod
+    def _key(**fields) -> str:
+        return json.dumps(fields)
+
+    def test_a_lid_chat_is_attributed_to_the_senders_phone_jid(self):
+        key = self._key(
+            remoteJid="277009032835160@lid",
+            senderPn="13105551234@s.whatsapp.net",
+        )
+        assert self._call(f"m.chatAddress({key})") == "13105551234@s.whatsapp.net"
+
+    def test_a_phone_addressed_chat_keeps_its_own_address(self):
+        """The control. A chat WhatsApp still addresses by number must not
+        start being attributed to a different field of the same key — the
+        substitution is scoped to the namespace that needs it."""
+        key = self._key(
+            remoteJid="13105551234@s.whatsapp.net",
+            senderPn="19995550000@s.whatsapp.net",
+        )
+        assert self._call(f"m.chatAddress({key})") == "13105551234@s.whatsapp.net"
+
+    def test_a_group_keeps_its_own_address(self):
+        key = self._key(remoteJid="120363000000000000@g.us", senderPn=None)
+        assert self._call(f"m.chatAddress({key})") == "120363000000000000@g.us"
+
+    def test_a_lid_chat_with_no_phone_jid_yields_nothing(self):
+        """The residual, held as a test so it stays a decision. A contact
+        whose number WhatsApp withholds cannot enroll and cannot resolve on
+        this adapter, and the honest answer is a named drop rather than
+        forwarding a LID the daemon would refuse one layer later."""
+        for pn in (None, "", "277009032835160@lid", "not-a-jid", 12345):
+            key = self._key(remoteJid="277009032835160@lid", senderPn=pn)
+            assert self._call(f"m.chatAddress({key})") == "", pn
+
+    def test_a_missing_or_malformed_key_yields_nothing(self):
+        for expression in ("m.chatAddress(null)", "m.chatAddress({})",
+                           "m.chatAddress({remoteJid: 42})"):
+            assert self._call(expression) == "", expression
+
+    def test_the_phone_domain_it_produces_is_the_one_the_daemon_accepts(self):
+        """Driven both ways: a spelling this side invents is a message the
+        daemon refuses at `normalize_jid`, which is the silent drop one layer
+        down from the one being fixed."""
+        key = self._key(
+            remoteJid="277009032835160@lid",
+            senderPn="13105551234:7@s.whatsapp.net",
+        )
+        produced = self._call(f"m.chatAddress({key})")
+
+        assert identity.normalize_jid(produced) == "13105551234@s.whatsapp.net"
+        assert identity.jid_number(produced) == "+13105551234"
 
 
 class TestTheReadmeSaysWhatIsNotCovered:

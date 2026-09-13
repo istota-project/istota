@@ -227,6 +227,10 @@ function loadBaileys() {
 
 const USER_JID_DOMAIN = '@s.whatsapp.net';
 const GROUP_JID_DOMAIN = '@g.us';
+// Not a forwardable domain of its own — `chatAddress` translates a chat in it
+// to the phone JID beside it, and nothing in this namespace ever crosses the
+// socket.
+const LID_JID_DOMAIN = '@lid';
 
 function isGroupJid(jid) {
   return typeof jid === 'string' && jid.endsWith(GROUP_JID_DOMAIN);
@@ -251,6 +255,43 @@ function jidDomain(jid) {
   if (typeof jid !== 'string') return 'not-a-string';
   const at = jid.lastIndexOf('@');
   return at === -1 ? 'no-domain' : jid.slice(at + 1, at + 33);
+}
+
+/*
+ * The address an inbound message is attributed to, or `''` for one this
+ * surface cannot place.
+ *
+ * **WhatsApp addresses an ordinary one-to-one chat by LID.** A LID is a
+ * durable per-contact id in a namespace of its own and it carries no phone
+ * number, so `remoteJid` on a live account is routinely `<lid>@lid` — which
+ * is not a thing the daemon can resolve: `identity.normalize_jid` accepts
+ * `@s.whatsapp.net` alone, `jid_number` takes the E.164 out of it to compare
+ * against the operator's configured bootstrap number, and
+ * `address_for_binding` renders that same spelling back as a destination.
+ * Forwarding the LID would move the silent drop one layer down rather than
+ * fix it.
+ *
+ * The number is not missing, it is on a different field: Baileys stamps the
+ * sender's phone JID onto the key as `senderPn`, from the server's own
+ * `sender_pn` stanza attribute. That is the same channel and the same
+ * authenticator `remoteJid` always came from, so trusting it changes which
+ * field the resolution reads and not how far the resolution trusts the
+ * stanza.
+ *
+ * **Substituted only for `@lid`**, deliberately: a chat WhatsApp still
+ * addresses by number keeps `remoteJid`, so every path that worked before is
+ * byte for byte the path it was. And **selection only** — the spelling stays
+ * the daemon's to own, device suffix included, because one spelling rule in
+ * one place is what `normalize_jid` exists to be.
+ */
+function chatAddress(key) {
+  const jid = key && key.remoteJid;
+  if (typeof jid !== 'string') return '';
+  if (!jid.endsWith(LID_JID_DOMAIN)) return isForwardableJid(jid) ? jid : '';
+  // A contact whose number WhatsApp withholds. It can neither enroll nor
+  // resolve on this adapter, so the honest answer is a named drop.
+  const pn = key.senderPn;
+  return typeof pn === 'string' && pn.endsWith(USER_JID_DOMAIN) ? pn : '';
 }
 
 function messageText(message) {
@@ -452,17 +493,17 @@ class Session {
     for (const message of event.messages) {
       // `fromMe` is our own send echoed back. Ingesting it would put the
       // bot's own answer into the user's task history as their next request.
+      // Debug rather than info: this fires once per outbound message, for
+      // ever, and it explains nothing a reader of this log wants explained.
       if (!message || !message.key) continue;
       if (message.key.fromMe) {
-        log('info', 'inbound dropped', { why: 'from_me' });
+        log('debug', 'inbound dropped', { why: 'from_me' });
         continue;
       }
-      const jid = message.key.remoteJid;
-      if (!isForwardableJid(jid)) {
+      const jid = chatAddress(message.key);
+      if (!jid) {
         log('info', 'inbound dropped', {
-          why: 'jid_not_forwardable', domain: jidDomain(jid),
-          has_sender_pn: Boolean(message.key.senderPn),
-          has_sender_lid: Boolean(message.key.senderLid),
+          why: 'no_usable_address', domain: jidDomain(message.key.remoteJid),
         });
         continue;
       }
@@ -698,6 +739,7 @@ module.exports = {
   MSG_SEND,
   MSG_SHUTDOWN,
   SEND_REASONS,
+  chatAddress,
   encode,
   receiptStatus,
   sendFailureReason,

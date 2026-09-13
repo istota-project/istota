@@ -65,10 +65,19 @@ logger = logging.getLogger(__name__)
 #: `s.whatsapp.net` carries a phone number, which is what the bootstrap latch
 #: compares against an operator's configured bootstrap number — so `@g.us` (a
 #: group), `@broadcast` (a list) and `@lid` (WhatsApp's number-hiding linked-id
-#: namespace) are refused rather than parsed. `@lid` is the one worth naming:
-#: it is a durable per-contact id like the BSUID, so it is a plausible future
-#: identity and is deliberately not one today — nothing in the enrollment story
-#: could bootstrap it, since it carries no number to match.
+#: namespace) are refused rather than parsed.
+#:
+#: **`@lid` is the one worth naming, and it is not the rare case it reads as.**
+#: WhatsApp addresses an ordinary one-to-one chat that way, so on a live
+#: account it is what the socket reports for nearly every message. It stays
+#: refused here — it is a durable per-contact id like the BSUID, so it is a
+#: plausible future identity and deliberately not one today, since nothing in
+#: the enrollment story could bootstrap it. What makes that refusal survivable
+#: rather than a dead surface is that it is never reached on the happy path:
+#: the number is not absent, it arrives on a different field of the same
+#: stanza (`sender_pn`), and the sidecar's `chatAddress` translates a LID chat
+#: to that phone JID before the frame crosses the socket. The exclusion is
+#: therefore a backstop, and the translation is the mechanism.
 JID_USER_DOMAIN = "s.whatsapp.net"
 
 #: A JID's user part may be bounded before it reaches a query or a fingerprint.
