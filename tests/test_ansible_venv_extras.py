@@ -204,10 +204,11 @@ class TestAllCoversEveryExtra:
         for entry in extras["all"]:
             covered.update(re.findall(r"istota\[([\w-]+)\]", entry))
 
-        # Five groups are deliberately outside `all`: `all` itself, the `dev`
-        # and `test` aggregates, `docs` (builds the site rather than running
-        # the daemon) and `local` (the other deployment shape). Note this says
-        # nothing about what a deployment installs — the `dev` *extra* here is
-        # a different thing from the `[dependency-groups] dev` table, which uv
-        # installs by default and which neither `uv sync` in the role declines.
-        assert declared - covered - {"all", "dev", "test", "docs", "local"} == set()
+        # Four groups are deliberately outside `all`: `all` itself, the `dev`
+        # and `test` aggregates, and `local` (the other deployment shape). A
+        # `docs` extra was a fifth until the site moved to Docusaurus, whose
+        # toolchain is npm. Note this says nothing about what a deployment
+        # installs — the `dev` *extra* here is a different thing from the
+        # `[dependency-groups] dev` table, which uv installs by default and
+        # which neither `uv sync` in the role declines.
+        assert declared - covered - {"all", "dev", "test", "local"} == set()

@@ -6,8 +6,9 @@ The workspace is a plain local folder (default `~/.istota`). The web UI runs on 
 
 ## Trust model — read this first
 
-!!! warning "A local install runs unsandboxed"
-    There is no bubblewrap isolation, no skill proxy, and no network proxy. The agent's subprocesses run with **your user account's full privileges** — full filesystem access and open network. A prompt injection carried in ingested content (an email, a browsed page, a feed item) therefore has real reach.
+:::warning[A local install runs unsandboxed]
+There is no bubblewrap isolation, no skill proxy, and no network proxy. The agent's subprocesses run with **your user account's full privileges** — full filesystem access and open network. A prompt injection carried in ingested content (an email, a browsed page, a feed item) therefore has real reach.
+:::
 
 Only give a local instance content and instructions you trust. The content-trust guardrails (`untrusted_input` companion on the ingest skills, `sensitive_actions`) stay in place, but they are about content provenance, not process isolation.
 
@@ -39,8 +40,9 @@ uv tool install 'istota[local,money,location,memory-search,whisper,transcribe]'
 
 A module whose extra isn't installed hides itself — the app skips it and its web UI tab doesn't appear rather than showing a broken tab.
 
-!!! note "weasyprint (invoice PDFs)"
-    The `money` extra pulls weasyprint, whose native libs (pango/cairo) are only touched when you *render an invoice PDF*. Everything else in the money module — the ledger, queries, balances, the Money tab — works without them. On macOS that one path needs `brew install pango`; until then invoice-PDF generation is the only thing that errors.
+:::note[weasyprint (invoice PDFs)]
+The `money` extra pulls weasyprint, whose native libs (pango/cairo) are only touched when you *render an invoice PDF*. Everything else in the money module — the ledger, queries, balances, the Money tab — works without them. On macOS that one path needs `brew install pango`; until then invoice-PDF generation is the only thing that errors.
+:::
 
 ## Set up
 
@@ -105,8 +107,9 @@ Pulls the latest code from the checkout `install.sh` recorded in `~/.config/isto
 
 By default `update` follows the **stable** channel — the latest tagged release. To ride the development branch instead (newer, less tested), run `istota update --channel main`; switch back with `istota update --channel stable`. The choice is remembered, so you set it once. (An install made before this option existed keeps tracking `main` until you pick a channel.)
 
-!!! note "Standalone only"
-    `update` applies to this standalone shape and needs the install record `install.sh` writes; a hand-run `uv tool install` won't have it, so re-run `install.sh --standalone` once. A server (Nextcloud/auth) deployment is updated separately and `update` declines to run there.
+:::note[Standalone only]
+`update` applies to this standalone shape and needs the install record `install.sh` writes; a hand-run `uv tool install` won't have it, so re-run `install.sh --standalone` once. A server (Nextcloud/auth) deployment is updated separately and `update` declines to run there.
+:::
 
 ## What works, what's off
 

@@ -1,4 +1,4 @@
-# Talk integration
+# Nextcloud Talk
 
 Istota communicates through Nextcloud Talk using the regular user API (not the bot API). The bot authenticates as an ordinary Nextcloud user, polling conversations it's a member of.
 

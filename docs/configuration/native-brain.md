@@ -94,19 +94,20 @@ istota_brain_source_type_overrides:
 
 The full variable set is documented in `deploy/ansible/defaults/main.yml`: `istota_brain_native_{provider,model,effort,base_url,extra_headers,context_window,max_turns,max_tokens,model_catalog_fetch,model_catalog_cache_ttl_hours,prompt_caching,bash_spill_full_output,turn_budget_nudge,turn_budget_nudge_early_percent,turn_budget_nudge_remaining,soft_deadline_percent,api_key}`, the `istota_brain_native_web_fetch_*` family, and `istota_brain_source_type_overrides`. `istota_brain_native_prompt_caching` defaults to `""` (derive from `base_url`); set it to `true`/`false` only to force.
 
-!!! warning "The Ansible defaults are not the code defaults"
-    Several Ansible variables ship opinionated values rather than mirroring the dataclass:
+:::warning[The Ansible defaults are not the code defaults]
+Several Ansible variables ship opinionated values rather than mirroring the dataclass:
 
-    | Variable | Ansible default | Code default |
-    |---|---|---|
-    | `istota_brain_native_model` | `z-ai/glm-5.2` | `""` |
-    | `istota_brain_native_base_url` | `https://openrouter.ai/api/v1` | `https://api.anthropic.com/v1` |
-    | `istota_brain_native_effort` | `medium` | `""` |
-    | `istota_brain_native_max_tokens` | `32000` | `16384` |
-    | `istota_brain_fallback_cooldown_seconds` | `3600` | `900` |
-    | `istota_brain_fallback` | `claude_code` when `istota_brain_kind` is `tmux_claude`, `""` otherwise | `""` |
+| Variable | Ansible default | Code default |
+|---|---|---|
+| `istota_brain_native_model` | `z-ai/glm-5.2` | `""` |
+| `istota_brain_native_base_url` | `https://openrouter.ai/api/v1` | `https://api.anthropic.com/v1` |
+| `istota_brain_native_effort` | `medium` | `""` |
+| `istota_brain_native_max_tokens` | `32000` | `16384` |
+| `istota_brain_fallback_cooldown_seconds` | `3600` | `900` |
+| `istota_brain_fallback` | `claude_code` when `istota_brain_kind` is `tmux_claude`, `""` otherwise | `""` |
 
-    The base_url one has a consequence worth spelling out: because a stock Ansible deploy points at OpenRouter, the "prompt caching defaults off for a non-Anthropic base_url" note above applies to it. Set `istota_brain_native_prompt_caching: true` if you want caching there.
+The base_url one has a consequence worth spelling out: because a stock Ansible deploy points at OpenRouter, the "prompt caching defaults off for a non-Anthropic base_url" note above applies to it. Set `istota_brain_native_prompt_caching: true` if you want caching there.
+:::
 
 ## `[brain.native.web_fetch]`
 
