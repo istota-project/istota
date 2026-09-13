@@ -7305,9 +7305,17 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
             f"the WhatsApp session ended ({fatal}); every send is "
             "refused until it is paired again",
             remedy=(
+                # **`--reset`, because a bare `pair` cannot resolve this
+                # state** (ISSUE-496). The credential on disk names a device
+                # WhatsApp has unlinked and `useMultiFileAuthState` reads it
+                # as a registered account, so every start attempts a login and
+                # no code is ever offered. This remedy named the one command
+                # that could not work.
                 "Stop the istota scheduler and any sidecar running as a unit "
-                "of its own, run `istota whatsapp pair`, scan the code from "
-                "WhatsApp's Linked Devices screen, then start them again."
+                "of its own, run `istota whatsapp pair --reset` — which keeps "
+                "the old session as a timestamped sibling rather than deleting "
+                "it — scan the code from WhatsApp's Linked Devices screen, "
+                "then start them again."
             ),
             scope=DEPLOYMENT,
         )

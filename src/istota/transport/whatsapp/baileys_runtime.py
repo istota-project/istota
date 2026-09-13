@@ -199,8 +199,9 @@ def _alert_body(reason: str) -> str:
         f"The WhatsApp device link ended ({_slug(reason, fallback='unknown')}), so every "
         "WhatsApp send is refused until the session is paired again. Stop the "
         "istota daemon and any sidecar running as a unit of its own, run "
-        "`istota whatsapp pair`, scan the code from WhatsApp's Linked Devices "
-        "screen, then start them again."
+        "`istota whatsapp pair --reset`, scan the code from WhatsApp's Linked "
+        "Devices screen, then start them again. The old session is kept as a "
+        "timestamped sibling directory, not deleted."
     )
 
 

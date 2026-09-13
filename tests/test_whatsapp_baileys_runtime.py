@@ -406,7 +406,11 @@ class TestTheUnlinkAlert:
         assert [row["user_id"] for row in rows] == ["alice", "bob"]
         for row in rows:
             assert row["dedup_key"] == "whatsapp:baileys-unlinked"
-            assert "istota whatsapp pair" in row["body"]
+            # The flag, not just the command: this alert fires on a session a
+            # bare `pair` cannot recover, so naming it alone sends the
+            # operator round the loop the sidecar is already stuck in
+            # (ISSUE-496).
+            assert "istota whatsapp pair --reset" in row["body"]
             # The reason is a bounded label, never the sidecar's own words: a
             # Baileys error string is one of the places a number turns up, and
             # this body renders on the notification panel.

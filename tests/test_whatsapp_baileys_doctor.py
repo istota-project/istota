@@ -163,7 +163,12 @@ class TestTheBridgeCheck:
 
         assert result.status == doctor.FAIL
         assert "logged_out" in result.detail
-        assert "istota whatsapp pair" in result.remedy
+        # **The flag, not just the command** (ISSUE-496). This arm fires on
+        # exactly the state a bare `pair` cannot get out of: the credential on
+        # disk names an unlinked device, `useMultiFileAuthState` reads it as a
+        # registered account, and every start logs in rather than offering a
+        # code. The remedy named the one command that provably does nothing.
+        assert "istota whatsapp pair --reset" in result.remedy
 
     def test_a_fatal_reason_from_the_sidecar_is_bounded_before_it_renders(
         self, tmp_path,
