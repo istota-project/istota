@@ -243,6 +243,16 @@ function isForwardableJid(jid) {
     (jid.endsWith(USER_JID_DOMAIN) || jid.endsWith(GROUP_JID_DOMAIN));
 }
 
+// The domain half of a JID, and nothing else. A dropped message has to be
+// explicable — silence is what made a whole surface look dead — but the local
+// part is the correspondent, so only the part after the last `@` is ever
+// logged. An unparseable value reports its shape rather than its content.
+function jidDomain(jid) {
+  if (typeof jid !== 'string') return 'not-a-string';
+  const at = jid.lastIndexOf('@');
+  return at === -1 ? 'no-domain' : jid.slice(at + 1, at + 33);
+}
+
 function messageText(message) {
   const content = message && message.message;
   if (!content) return null;
@@ -432,12 +442,30 @@ class Session {
 
   onMessages(event) {
     if (!event || !Array.isArray(event.messages)) return;
+    // Both filters below drop a message and return nothing, so a surface that
+    // is receiving and discarding everything is indistinguishable from one
+    // receiving nothing at all — on either side of the socket. The arrival
+    // itself is therefore recorded before any of them run.
+    log('info', 'messages.upsert arrived', {
+      count: event.messages.length, kind: event.type || 'none',
+    });
     for (const message of event.messages) {
       // `fromMe` is our own send echoed back. Ingesting it would put the
       // bot's own answer into the user's task history as their next request.
-      if (!message || !message.key || message.key.fromMe) continue;
+      if (!message || !message.key) continue;
+      if (message.key.fromMe) {
+        log('info', 'inbound dropped', { why: 'from_me' });
+        continue;
+      }
       const jid = message.key.remoteJid;
-      if (!isForwardableJid(jid)) continue;
+      if (!isForwardableJid(jid)) {
+        log('info', 'inbound dropped', {
+          why: 'jid_not_forwardable', domain: jidDomain(jid),
+          has_sender_pn: Boolean(message.key.senderPn),
+          has_sender_lid: Boolean(message.key.senderLid),
+        });
+        continue;
+      }
       const group = isGroupJid(jid);
       const text = group ? null : messageText(message);
       // The `group` flag is read off the chat rather than inferred from the
