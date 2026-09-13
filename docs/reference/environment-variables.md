@@ -15,6 +15,7 @@ Set for every task:
 | `ISTOTA_CONVERSATION_TOKEN` | Talk room token (if set) |
 | `ISTOTA_DEFERRED_DIR` | Temp directory for deferred JSON writes |
 | `ISTOTA_SKILL_PROXY_SOCK` | Skill proxy socket path (if proxy enabled) |
+| `ISTOTA_SKILL_CLIENT_WAIT` | `security.skill_client_wait_seconds`, set alongside the socket when the proxy is enabled. The sandboxed `istota-skill` client cannot read a config, so this is how an operator's value reaches it; it falls back to 600 when unset. The proxy derives its own ceiling from the config field and never from this export, so a task rewriting its copy changes only its own patience |
 | `ISTOTA_SANDBOXED` | `1` when the task is really running under bwrap (sandbox and skill proxy both enabled *and* bwrap present), otherwise unset. `istota-skill` reads it to fail closed instead of running a skill module in-process: inside the sandbox the databases are masked out, so a direct run would report a missing table rather than the misconfiguration it is |
 | `ISTOTA_BOT_DIR_NAME` | `config.bot_dir_name` — the per-user bot directory (`Users/<user>/<bot_dir_name>/`) skills write into |
 | `ISTOTA_CONFIG_PATH` | Config file path (propagated to subprocess children so module-skill jobs find the config) |
@@ -164,6 +165,7 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | Env var | Config field |
 |---|---|
 | `ISTOTA_NEXTCLOUD_APP_PASSWORD` | `nextcloud.app_password` |
+| `ISTOTA_CALDAV_PASSWORD` | `caldav.password` (the no-Nextcloud shape's calendar credential) |
 | `ISTOTA_EMAIL_IMAP_PASSWORD` | `email.imap_password` |
 | `ISTOTA_EMAIL_SMTP_PASSWORD` | `email.smtp_password` |
 | `ISTOTA_DEVELOPER_GITLAB_TOKEN` | `developer.gitlab_token` |
@@ -172,5 +174,8 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SESSION_SECRET_KEY` | `web.session_secret_key` |
 | `ISTOTA_BRAIN_NATIVE_API_KEY` | `brain.native.api_key` (native brain provider key; kept out of TOML) |
+| `ISTOTA_SMS_TWILIO_ACCOUNT_SID` / `_AUTH_TOKEN` / `_API_KEY_SID` / `_API_KEY_SECRET` / `_MESSAGING_SERVICE_SID` | `sms.twilio.*` |
+| `ISTOTA_SMS_TELNYX_API_KEY` / `_PUBLIC_KEY` / `_MESSAGING_PROFILE_ID` | `sms.telnyx.*` |
+| `ISTOTA_WHATSAPP_ACCESS_TOKEN` / `_APP_SECRET` / `_VERIFY_TOKEN` | `whatsapp.cloud.*`. The names kept their un-nested spelling when the block moved under `cloud`, so an existing `secrets.env` keeps working across that upgrade |
 
 See [credentials](../configuration/credentials.md) for what each override covers and the full env var → config mapping.
