@@ -1671,8 +1671,24 @@ async def _whatsapp_pair(config, argv) -> int:
     from .transport.whatsapp.baileys_bridge import BaileysBridge
 
     bridge = BaileysBridge(config, sidecar_argv=argv, on_qr=_render_qr)
-    await bridge.start()
     try:
+        # `start()` is **inside** the `try`, which is the shape the bridge's
+        # own `stop()` is written for: it opens the socket before it creates
+        # the worker, so a failure past that point leaves the inode behind and
+        # the next attempt meets the live-socket refusal its own predecessor
+        # left. An exception here is also an operator's traceback rather than
+        # a sentence, so it is caught and named.
+        try:
+            await bridge.start()
+        except Exception as exc:
+            print(
+                f"The WhatsApp sidecar bridge could not start: "
+                f"{type(exc).__name__}. Check that nothing else holds "
+                f"{bridge.status.socket_path} and that its directory is "
+                "writable.",
+                file=sys.stderr,
+            )
+            return 1
         deadline = asyncio.get_running_loop().time() + WHATSAPP_PAIR_TIMEOUT_SECONDS
         while asyncio.get_running_loop().time() < deadline:
             status = bridge.status

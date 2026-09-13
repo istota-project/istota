@@ -195,6 +195,25 @@ class TestTheRefusals:
         assert "sidecar_command" in err
         assert "Stop the istota scheduler" not in err
 
+    def test_a_bridge_that_cannot_start_reports_it_rather_than_raising(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """`start()` opens the socket before it creates its worker, so a
+        failure past that point leaves the inode behind — and the next attempt
+        then meets the live-socket refusal its own predecessor left. An
+        uncaught one is also a traceback where an operator wants a sentence.
+        """
+        _use_sidecar(monkeypatch, ("/bin/true",))
+        path = _config_file(tmp_path, sockets)
+
+        async def _explode(self):
+            raise OSError("address already in use")
+
+        monkeypatch.setattr(baileys_bridge.BaileysBridge, "start", _explode)
+
+        assert cli.cmd_whatsapp_pair(_args(path)) == 1
+        assert "could not start" in capsys.readouterr().err
+
     def test_no_resolvable_sidecar_says_which_setting_names_one(
         self, tmp_path, sockets, capsys, monkeypatch,
     ):
