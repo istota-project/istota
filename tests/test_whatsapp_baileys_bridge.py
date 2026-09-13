@@ -62,12 +62,13 @@ USER_NUMBER = "+15551234567"
 USER_JID = "15551234567@s.whatsapp.net"
 BAILEYS = db.WHATSAPP_BAILEYS_PROVIDER
 
-#: What the Baileys adapter will declare at Stage 6. Restated here rather than
-#: imported from a module that does not exist yet; the gates it drives are
-#: Stage 2's and are asserted there.
+#: What the Baileys adapter declares. Restated rather than imported so this
+#: file's ledger cases keep saying which capabilities they rest on; the
+#: adapter's own answers are asserted in `tests/test_whatsapp_providers.py`.
 BAILEYS_CAPS = WhatsAppProviderCaps(
     metered=False, has_service_window=False,
     supports_templates=False, delivery_receipts=True,
+    address_field="jid", service_body_limit=4096, interactive_body_limit=4096,
 )
 
 

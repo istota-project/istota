@@ -171,6 +171,88 @@ def jid_number(jid: str) -> str:
     return candidate if is_e164(candidate) else ""
 
 
+def jid_from_number(number: object) -> str:
+    """A configured E.164 number as the JID a Baileys socket can address.
+
+    `jid_number`'s inverse, and the two are kept next to each other because a
+    disagreement between them is silent: the bootstrap latch compares a
+    *parsed* number against the operator's configured one, and this builds a
+    *destination* out of that same configured value — so a spelling that
+    round-trips through one and not the other enrolls a user the deployment
+    can then never message.
+
+    Refuses anything that is not E.164 rather than stripping punctuation into
+    shape. The value goes onto the wire as a destination, and a number this
+    function guessed at addresses somebody.
+    """
+    text = number if isinstance(number, str) else ""
+    text = text.strip()
+    if not is_e164(text):
+        return ""
+    return f"{text[1:]}@{JID_USER_DOMAIN}"
+
+
+def address_for_binding(binding, address_field: str) -> str:
+    """Where a message to this binding goes under an adapter, or ``""``.
+
+    The adapter-native identity first, and the operator-configured bootstrap
+    number rendered into that adapter's own spelling as the fallback — which
+    is what the fallback is for on both adapters alike: a binding enrolled by
+    number and not yet written in from, and (on Cloud) one whose send id
+    collided with another user's row.
+
+    **The two spellings live here rather than on the capability record**, one
+    level up from `outbound._destination`, which now reads
+    `caps.address_field` and knows nothing else. They are here specifically
+    because this module owns the JID grammar and the E.164 rule that the
+    bootstrap comparison uses: a rendering that disagreed with `normalize_jid`
+    would produce a destination no later inbound message could ever match back
+    to its own row. One table, in the module that has to agree with itself,
+    rather than a branch in the send path — which is the distinction the
+    spec's "no `if provider == …` scattered through common code" draws.
+
+    An `address_field` this function does not know yields `""` rather than
+    guessing, which every caller reads as "not enrolled" — the fail-closed
+    direction, and the same answer a missing binding gets. It is reachable
+    only from a provider module naming a column that does not exist.
+    """
+    if binding is None:
+        return ""
+    native = (getattr(binding, address_field, "") or "")
+    native = native.strip() if isinstance(native, str) else ""
+    if native:
+        return native
+    bootstrap = (binding.bootstrap_phone_number or "").strip()
+    if not bootstrap:
+        return ""
+    if address_field == "send_id":
+        # Meta accepts the E.164 number as a destination directly.
+        return bootstrap
+    if address_field == "jid":
+        return jid_from_number(bootstrap)
+    return ""
+
+
+def any_identity(binding) -> str:
+    """Whatever identity this row holds, for the existence question alone.
+
+    Not a destination. `outbound.current_destination` is asked "is this user
+    enrolled at all" by `WhatsAppTransport.resolve_target` on a deployment
+    whose adapter could not be built — there is no `address_field` to read
+    there and no send that could use the answer, and returning `""` would
+    silently drop the WhatsApp leg from a delivery plan for a reason that is
+    about the adapter rather than about the user.
+    """
+    if binding is None:
+        return ""
+    for value in (binding.send_id, getattr(binding, "jid", ""),
+                  binding.bootstrap_phone_number):
+        text = (value or "").strip() if isinstance(value, str) else ""
+        if text:
+            return text
+    return ""
+
+
 def _e164_from_wa_id(wa_id: str | None) -> str:
     """Meta's `wa_id` as E.164, or `''`.
 

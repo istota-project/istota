@@ -71,12 +71,18 @@ CLOUD_CAPS = WhatsAppProviderCaps(
     has_service_window=True,
     supports_templates=True,
     delivery_receipts=True,
+    address_field="send_id",
+    service_body_limit=4096,
+    interactive_body_limit=1024,
 )
 BAILEYS_CAPS = WhatsAppProviderCaps(
     metered=False,
     has_service_window=False,
     supports_templates=False,
     delivery_receipts=True,
+    address_field="jid",
+    service_body_limit=4096,
+    interactive_body_limit=4096,
 )
 
 
@@ -651,8 +657,14 @@ class TestTheCloudAdapter:
     """The port's own subject: Meta's API reachable only through the record."""
 
     def test_it_declares_every_constraint_the_rules_file_records(self):
-        """All four are Cloud API facts rather than WhatsApp facts, which is
-        the premise the whole seam rests on."""
+        """Every one is a Cloud API fact rather than a WhatsApp fact, which is
+        the premise the whole seam rests on.
+
+        Spelled out rather than compared against `whatsapp_cloud.CLOUD_CAPS`,
+        which would be tautological: the literal is what goes red when a field
+        is added to the record and this adapter's answer is guessed at rather
+        than decided.
+        """
         adapter = whatsapp_cloud.build_adapter(_cloud_config())
 
         assert adapter.name == "whatsapp_cloud"
@@ -661,6 +673,9 @@ class TestTheCloudAdapter:
             has_service_window=True,
             supports_templates=True,
             delivery_receipts=True,
+            address_field="send_id",
+            service_body_limit=4096,
+            interactive_body_limit=1024,
         )
 
     def test_it_satisfies_its_own_registry_contract(self):

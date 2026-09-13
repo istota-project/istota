@@ -2447,36 +2447,28 @@ def run_task_inline(
 def _whatsapp_confirmation_body(config: Config, result: str, task_id: int) -> str:
     """A confirmation question plus the sentence that says how to answer it.
 
-    Sized to the **interactive** body limit rather than the plain-text one,
-    because a message carrying quick-reply buttons is a different Cloud API
-    object with a quarter of the room. The question is trimmed to fit and the
-    sentence is appended after, so a long answer loses its own tail rather
-    than losing the task id — which is the address `!confirm <id>` and a later
-    typed `YES` are answered at, and the only route left on a client that
-    renders no buttons.
+    The question is trimmed to fit and the sentence is appended after, so a
+    long answer loses its own tail rather than losing the task id — which is
+    the address `!confirm <id>` and a later typed `YES` are answered at, and
+    the only route left on a client that renders no buttons.
 
-    With a paid proactive template configured the same body may instead go out
-    as a **template parameter**, whose cap is smaller again — and which of the
-    two carries it is decided by the service window, inside the ledger claim,
-    long after this. So the smaller budget is taken whenever the template
-    exists: it is the only one that cannot lose the sentence, and 124
-    characters of question is a cheap price for a question that stays
-    answerable. Nothing changes for a deployment with no template.
+    **The budget is the adapter's, asked for rather than computed here.** It
+    used to be Meta's interactive cap, narrowed to the template-parameter one
+    where a template existed — three Cloud API facts spelled out in the
+    scheduler, and wrong for a provider that has neither an interactive object
+    nor templates. `outbound.confirmation_body_budget` folds all three
+    together behind the seam; it never raises.
 
-    The renderer is asked for the budget rather than the arithmetic being
+    The renderer is asked to apply it rather than the arithmetic being
     repeated here: `render_whatsapp` is what knows the truncation suffix and
     how not to cut a combining sequence in half.
     """
     from .transport.whatsapp.outbound import (
-        TEMPLATE_PARAMETER_LIMIT,
-        WHATSAPP_INTERACTIVE_BODY_LIMIT,
+        confirmation_body_budget,
         render_whatsapp,
-        template_available,
     )
 
-    budget = WHATSAPP_INTERACTIVE_BODY_LIMIT
-    if template_available(config):
-        budget = min(budget, TEMPLATE_PARAMETER_LIMIT)
+    budget = confirmation_body_budget(config)
     tail = f"\n\nTask #{task_id}. Reply YES or NO."
     question = render_whatsapp(result, limit=max(1, budget - len(tail)))
     return f"{question}{tail}"

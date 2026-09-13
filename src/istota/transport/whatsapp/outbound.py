@@ -255,6 +255,51 @@ def render_whatsapp(text: str, *, limit: int = WHATSAPP_TEXT_LIMIT) -> str:
     return _truncate(cleaned, limit, TRUNCATION_SUFFIX)
 
 
+def _body_budget(
+    caps: "WhatsAppProviderCaps | None", *, interactive: bool
+) -> int:
+    """How many characters one service message body may carry.
+
+    The adapter's number, falling back to Meta's when there is no adapter to
+    ask — which is only reachable on a path that then records `unconfigured`
+    and sends nothing, so the fallback is about not crashing rather than about
+    being right. Meta's is the conservative one of the two anyway.
+    """
+    if caps is None:
+        return WHATSAPP_INTERACTIVE_BODY_LIMIT if interactive else WHATSAPP_TEXT_LIMIT
+    return caps.interactive_body_limit if interactive else caps.service_body_limit
+
+
+def confirmation_body_budget(config: Config) -> int:
+    """What a confirmation question plus its answer sentence has to fit in.
+
+    The scheduler's, and it is here rather than there so the arithmetic sits
+    beside the gate that decides which kind of message actually carries the
+    body. Three facts it folds together, none of which the scheduler should
+    know: a confirmation carries quick-reply buttons, so it is sized against
+    the **interactive** budget; a deployment with an approved proactive
+    template may instead send the same body as a template parameter, whose cap
+    is smaller again and is chosen inside the claim long after this; and a
+    provider that supports no templates can never take that branch.
+
+    The smaller budget is taken whenever both are possible, because it is the
+    only one that cannot lose the tail sentence — which is the address
+    `!confirm <id>` and a typed `YES` are answered at, and on a client that
+    renders no buttons it is the only route left.
+
+    Never raises: `active_adapter` answers `None` rather than raising, and
+    `_body_budget` then falls back to Meta's numbers. A question sized to the
+    conservative budget on a deployment whose adapter is broken is sent
+    nowhere anyway.
+    """
+    caps = active_adapter(config)
+    caps = caps.caps if caps is not None else None
+    budget = _body_budget(caps, interactive=True)
+    if (caps is None or caps.supports_templates) and template_available(config):
+        budget = min(budget, TEMPLATE_PARAMETER_LIMIT)
+    return budget
+
+
 def render_template_parameter(
     text: str, *, limit: int = TEMPLATE_PARAMETER_LIMIT
 ) -> str:
@@ -318,21 +363,31 @@ def service_window_open(binding, *, now: datetime | None = None) -> bool:
     return (now or datetime.now(timezone.utc)) < opened + SERVICE_WINDOW
 
 
-def _destination(binding) -> str:
+def _destination(binding, caps: "WhatsAppProviderCaps | None") -> str:
     """Where a message to this binding goes, resolved at the last moment.
 
-    The send id first — it is the opaque destination Meta itself handed us and
-    the one that survives a username-only user with no `wa_id`. The bootstrap
-    number is the fallback, which is what it is for: a binding whose send id
-    collided with another user's row keeps working through it (see
-    `db.touch_whatsapp_binding`), and so does one enrolled by number and not
-    yet written in from.
+    **The adapter decides which column that is.** This used to return
+    ``send_id or bootstrap_phone_number`` for every provider, which is Meta's
+    answer written as though it were WhatsApp's: a Baileys row is latched by
+    JID and carries no `send_id` at all, so the fallback fired and the send
+    resolved to a bare E.164 number the socket cannot address. `address_field`
+    names the column and `identity.address_for_binding` owns the two
+    spellings, including how a configured bootstrap number is rendered into
+    each.
+
+    `caps is None` means no adapter could be built, and the answer is then
+    whatever identity the row holds — the existence question, never a
+    destination. `_gate` returns `unconfigured` before it reaches this on that
+    path, so the only reader is `current_destination` answering
+    `WhatsAppTransport.resolve_target`; see `identity.any_identity`.
     """
+    from .identity import address_for_binding, any_identity  # noqa: PLC0415
+
     if binding is None:
         return ""
-    return (binding.send_id or "").strip() or (
-        binding.bootstrap_phone_number or ""
-    ).strip()
+    if caps is None:
+        return any_identity(binding)
+    return address_for_binding(binding, caps.address_field)
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +542,7 @@ def _gate(
     if caps is None:
         return "unconfigured", "service"
     binding = db.get_whatsapp_binding(conn, user_id)
-    if binding is None or not _destination(binding):
+    if binding is None or not _destination(binding, caps):
         return "unconfigured", "service"
     if binding.opted_out_at is not None and not ignore_opt_out:
         return "opted_out", "service"
@@ -957,6 +1012,14 @@ async def deliver_whatsapp(
     timeout does: past `_stamp_attempt` the request may have gone out, and
     from out here there is no way to tell which side of it the failure fell.
     """
+    # Resolved before the bodies, because the body budget is now the adapter's
+    # answer rather than a constant. `active_adapter` never raises and does no
+    # I/O, so moving it above costs nothing and the ordering is what stops a
+    # Baileys send being rendered against Meta's interactive cap.
+    adapter = active_adapter(config)
+    if adapter is not None and client is not None:
+        adapter = replace(adapter, send=client.send)
+    caps = adapter.caps if adapter is not None else None
     # Both renderings, because only the claim's own transaction can read the
     # service window and therefore decide which one this send is. Both are
     # pure functions of `text`, so computing the unused one costs two regex
@@ -964,22 +1027,21 @@ async def deliver_whatsapp(
     bodies = {
         "service": render_whatsapp(
             text,
-            # A message carrying buttons is an interactive object with a
-            # quarter of the plain-text body limit. Rendering it at 4096 means
-            # Meta refuses every confirmation question longer than 1024 and the
-            # row reads `failed`, so the question is asked nowhere.
-            limit=WHATSAPP_INTERACTIVE_BODY_LIMIT if buttons else WHATSAPP_TEXT_LIMIT,
+            # A message carrying buttons is a different object on Meta's API
+            # with a quarter of the plain-text body limit, and rendering it at
+            # 4096 means Meta refuses every confirmation question longer than
+            # 1024 — a definite failure, so the question is asked nowhere. A
+            # provider with no interactive object declares the two budgets
+            # equal and loses nothing. With no adapter the numbers are unused:
+            # the gate below records `unconfigured` and nothing is sent.
+            limit=_body_budget(caps, interactive=bool(buttons)),
         ),
         "template": render_template_parameter(text),
     }
-    adapter = active_adapter(config)
-    if adapter is not None and client is not None:
-        adapter = replace(adapter, send=client.send)
     outcome, record = await asyncio.to_thread(
         _claim, config,
         logical_key=logical_key, user_id=user_id, task_id=task_id,
-        bodies=bodies, ignore_opt_out=ignore_opt_out,
-        caps=adapter.caps if adapter is not None else None,
+        bodies=bodies, ignore_opt_out=ignore_opt_out, caps=caps,
     )
     if outcome == "settled":
         return record
@@ -1044,7 +1106,9 @@ async def _send_claimed(
         # Resolved *after* the claim and immediately before the call, so a
         # binding the operator changed while the task ran is honoured and the
         # old destination never receives the answer.
-        destination = await asyncio.to_thread(current_destination, config, user_id)
+        destination = await asyncio.to_thread(
+            current_destination, config, user_id, adapter.caps,
+        )
         if not destination:
             record = await _settle_async(config, logical_key, "unconfigured")
             await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
@@ -1123,7 +1187,9 @@ def _request(
     )
 
 
-def current_destination(config: Config, user_id: str) -> str:
+def current_destination(
+    config: Config, user_id: str, caps: "WhatsAppProviderCaps | None" = None,
+) -> str:
     """The user's WhatsApp destination right now, or ``""``.
 
     Public because two callers outside the send path ask the same question for
@@ -1131,9 +1197,17 @@ def current_destination(config: Config, user_id: str) -> str:
     whether a destination exists at all before the planner keeps the leg, and
     it must not learn what the destination *is* — the answer it returns is the
     conversation token.
+
+    `caps` is **passed in** by `_send_claimed`, which is already holding the
+    adapter it is about to send through, and omitted by `resolve_target`,
+    which is asking the existence question and has no adapter in scope. It is
+    deliberately not resolved here when absent: building a registry inside
+    this function would put an import and a provider-module load behind a
+    database read on the delivery planner's path, and the answer to the
+    existence question does not need one.
     """
     with db.get_db(config.db_path) as conn:
-        return _destination(db.get_whatsapp_binding(conn, user_id))
+        return _destination(db.get_whatsapp_binding(conn, user_id), caps)
 
 
 # ---------------------------------------------------------------------------
@@ -1597,7 +1671,7 @@ def is_whatsapp_configured(config: Config, user_id: str) -> bool:
     try:
         with db.get_db(config.db_path) as conn:
             binding = db.get_whatsapp_binding(conn, user_id)
-            if binding is None or not _destination(binding):
+            if binding is None or not _destination(binding, caps):
                 return False
             if binding.opted_out_at is not None:
                 return False
@@ -1631,6 +1705,7 @@ __all__ = [
     # check asks the owning module's own predicate rather than reaching through
     # an underscore or keeping a copy, so a rename here breaks visibly.
     "attempt_limit",
+    "confirmation_body_budget",
     "current_destination",
     "deliver_whatsapp",
     "is_whatsapp_configured",

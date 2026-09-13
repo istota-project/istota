@@ -44,6 +44,7 @@ from .._types import (
     WhatsAppWebhookRequest,
     WhatsAppWebhookResult,
 )
+from ..outbound import WHATSAPP_INTERACTIVE_BODY_LIMIT, WHATSAPP_TEXT_LIMIT
 from ._types import WhatsAppProviderAdapter, WhatsAppProviderCaps
 
 if TYPE_CHECKING:
@@ -56,15 +57,26 @@ CLOUD_CAPS = WhatsAppProviderCaps(
     has_service_window=True,
     supports_templates=True,
     delivery_receipts=True,
+    address_field="send_id",
+    service_body_limit=WHATSAPP_TEXT_LIMIT,
+    interactive_body_limit=WHATSAPP_INTERACTIVE_BODY_LIMIT,
 )
 """Every constraint `.claude/rules/whatsapp.md` records, declared as this
 provider's own.
 
-All four are true of Meta's hosted API and none of them is true of WhatsApp:
-the 24-hour service window, approved templates, the monthly attempt cap and
-the billing circuit are the Cloud API's rules. Declaring them here is what lets
-`outbound.py`'s gate order stay provider-agnostic while behaving, for this
-adapter, exactly as the hard-coded version did.
+All four behavioural flags are true of Meta's hosted API and none of them is
+true of WhatsApp: the 24-hour service window, approved templates, the monthly
+attempt cap and the billing circuit are the Cloud API's rules. Declaring them
+here is what lets `outbound.py`'s gate order stay provider-agnostic while
+behaving, for this adapter, exactly as the hard-coded version did.
+
+The three added at Stage 6 restate what the common path used to hard-code, and
+each is Meta's number rather than WhatsApp's: `send_id` is the opaque
+destination Meta itself hands back, and the two budgets are the plain-text and
+interactive caps `outbound` declares. Imported from there rather than spelled
+again — a second copy of 1024 would be a second thing to get wrong, and this
+module is the Cloud boundary, so importing Cloud constants from the common
+module is the direction that already holds.
 """
 
 #: A client that could not be built is a message that provably never left, so

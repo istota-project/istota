@@ -37,25 +37,52 @@ class WhatsAppProviderCaps:
     through common code. A gate reads the field that names its own
     precondition and skips itself where the precondition cannot arise.
 
-    No defaults, on purpose: a third adapter answers all four questions
-    rather than inheriting whichever answers happened to suit the first two.
+    No defaults, on purpose: a third adapter answers every question rather
+    than inheriting whichever answers happened to suit the first two. That is
+    also why widening this record is a deliberate seam change — the three
+    fields below the original four were added at Stage 6, and both shipped
+    adapters had to answer them in the same diff.
 
     `delivery_receipts` is the one that is easy to guess wrong in the
     optimistic direction — it says the provider reports a *handset* state
     back, not that a send was accepted. Every provider reports the latter.
 
     **`delivery_receipts` is declared ahead of its reader and nothing reads it
-    yet.** `outbound._gate` reads the other three; the parked-status table, the
-    monotonic status ladder and the failure alert are unconditional, so
-    declaring this `False` disables none of them today. It is here rather than
-    added later because a capability record answered by two adapters and then
-    widened is a record whose existing answers were never considered — but an
-    adapter author must not read the field's presence as a switch.
+    yet.** `outbound._gate` reads the cost and window fields; the parked-status
+    table, the monotonic status ladder and the failure alert are
+    unconditional, so declaring this `False` disables none of them today. It is
+    here rather than added later because a capability record answered by two
+    adapters and then widened is a record whose existing answers were never
+    considered — but an adapter author must not read the field's presence as a
+    switch.
+
+    `address_field` names the `whatsapp_user_bindings` column holding this
+    provider's own destination for a user, and it is the field that turned a
+    deferral into a defect: `outbound._destination` returned
+    ``send_id or bootstrap_phone_number`` for every provider, and a
+    JID-latched row has no `send_id` by design, so a Baileys send resolved to
+    a bare E.164 number its socket cannot address. Declared rather than
+    branched on the provider name, for this record's own reason; the two
+    spellings themselves live in `identity.address_for_binding`, beside the
+    JID parser they have to agree with.
+
+    `service_body_limit` and `interactive_body_limit` are the two body
+    budgets, and the second is why they are here rather than being constants.
+    Meta caps an **interactive** message — one carrying quick-reply buttons —
+    at a quarter of a plain one, and `.claude/rules/whatsapp.md` records what
+    rendering a confirmation prompt at the wrong one cost: Meta refused every
+    question past 1,024 characters and the task parked until it expired. A
+    provider that has no interactive object has no such cliff and must not
+    inherit Meta's number, so the budget is the adapter's answer and the
+    scheduler asks for it (`outbound.confirmation_body_budget`).
     """
     metered: bool
     has_service_window: bool
     supports_templates: bool
     delivery_receipts: bool
+    address_field: str
+    service_body_limit: int
+    interactive_body_limit: int
 
 
 @dataclass(frozen=True)
