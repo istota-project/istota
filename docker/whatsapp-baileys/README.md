@@ -48,6 +48,16 @@ in `logout-backoff.json` inside the session directory, because every cycle is
 a different process and nothing in memory survives one. A session that opens
 deletes the file.
 
+When the run cannot be written down, or the previous one cannot be read back —
+a read-only directory, a full disk, something standing at the file's path, a
+file the sidecar cannot read — the count cannot advance. The wait is floored at
+the five-minute rung instead of collapsing to the first one. It is a floor and
+not a rung of its own, so a run already further up the ladder keeps its own
+longer wait; what such a deployment does not do is climb, so it holds where it
+is rather than reaching the hourly rung. The sidecar says so on the `fatal`
+frame and `istota doctor` reports it beside the unlink, because the warning
+about it is written into the directory that cannot be written.
+
 The wait is here rather than in the unit's `RestartSec` or compose's restart
 policy because neither can tell an unlinked device from a crash, and both have
 to keep restarting promptly for the second. It also watches `creds.json` while

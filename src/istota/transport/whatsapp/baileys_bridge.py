@@ -532,6 +532,13 @@ class BridgeStatus:
     ready: bool = False
     fatal_reason: str | None = None
     fatal_is_permanent: bool = False
+    #: Whether the sidecar's logged-out backoff is running on a guess because
+    #: it could not record the run (ISSUE-501). The condition's only other
+    #: signal is a warning the sidecar appends to `sidecar.log` *inside* the
+    #: directory it cannot write, so without this it reaches no operator at
+    #: all — and a deployment retrying every 30s looks from here exactly like
+    #: one backing off correctly.
+    fatal_run_unrecorded: bool = False
     restarts: int = 0
     malformed_lines: int = 0
     dropped_events: int = 0
@@ -896,6 +903,7 @@ class BaileysBridge:
         self._status.ready = False
         self._status.fatal_reason = None
         self._status.fatal_is_permanent = False
+        self._status.fatal_run_unrecorded = False
         self._permanent_fatal.clear()
         self._reset_used = True
         self._supervisor = asyncio.create_task(self._supervise())
@@ -1304,6 +1312,7 @@ class BaileysBridge:
             self._status.ready = True
             self._status.fatal_reason = None
             self._status.fatal_is_permanent = False
+            self._status.fatal_run_unrecorded = False
             self._permanent_fatal.clear()
             logger.info("whatsapp.baileys.ready")
         elif message_type == proto.MSG_QR:
@@ -1374,6 +1383,12 @@ class BaileysBridge:
         permanent = payload.get("permanent") is True or reason in _PERMANENT_FATALS
         already = self._status.fatal_is_permanent
         self._status.fatal_reason = reason
+        # Overwritten per frame, exactly as `fatal_reason` is, so the two
+        # always describe the same frame. The sidecar reports this on a
+        # *second* `fatal` rather than on the first — the first one's position
+        # is load-bearing, since it has to leave before any filesystem work —
+        # so the pair arrives as False then True, and a `ready` clears both.
+        self._status.fatal_run_unrecorded = payload.get("run_unrecorded") is True
         self._status.ready = False
         # **Only `ready` clears a permanent latch.** Assigning `permanent`
         # here unconditionally meant a *transient* fatal arriving after a
