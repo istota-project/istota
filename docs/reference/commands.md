@@ -1,6 +1,6 @@
 # Commands
 
-Commands prefixed with `!` are intercepted before task creation and handled synchronously — no Claude Code invocation; they execute immediately. They are **surface-agnostic**: the same set works in Nextcloud Talk, web chat, and the CLI. `commands.dispatch(...)` runs each handler over a `CommandContext` and delivers the result via the resolved transport. On a push surface (Talk) the result is delivered as a new message; on a stream surface (web) it is returned inline and rendered as a text card.
+Commands prefixed with `!` are intercepted before task creation and handled synchronously — no Claude Code invocation; they execute immediately. They are **surface-agnostic**: the same set works in Nextcloud Talk, web chat, SMS and WhatsApp. SMS and WhatsApp sit outside the room model, so the room-scoped commands (`!room`, `!brain`) have no room to read or pin there; everything else behaves the same. `commands.dispatch(...)` runs each handler over a `CommandContext` and delivers the result via the resolved transport. On a push surface (Talk) the result is delivered as a new message; on a stream surface (web) it is returned inline and rendered as a text card.
 
 ## Available commands
 
@@ -89,7 +89,7 @@ Settable from the web room settings too, under the same admin gate and the same 
 
 ## Model override prefix
 
-`!model <alias> <prompt>` is a per-task model override parsed before task creation on every surface (Talk and web alike). It is not a `!command` — it resolves the alias, sets the model (and optionally effort) on the task row, and passes the remaining text as the prompt. If the alias is unknown, it replies with usage help instead of creating a task.
+`!model <alias> <prompt>` is a per-task model override parsed before task creation on Talk and web chat. It is not a `!command` — it resolves the alias, sets the model (and optionally effort) on the task row, and passes the remaining text as the prompt. If the alias is unknown, it replies with usage help instead of creating a task.
 
 Aliases are base names: role tiers (`fast`, `general`, `smart`, plus any operator-defined custom aliases from `[models.aliases]`), provider shortcuts (`opus`, `sonnet`, `haiku`), and `default`. Bare `opus` resolves to the current-latest Opus. Effort is an orthogonal `:effort` modifier appended to any name — `opus:high`, `smart:low`, `claude-opus-5:xhigh`, with `:effort` ∈ `low|medium|high|xhigh|max`. A prior-version pin is the canonical id plus the modifier (`claude-opus-4-7:high`). Use `!models` to see the resolved alias table.
 

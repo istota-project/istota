@@ -174,8 +174,18 @@ These env vars override TOML config values (for use with systemd `EnvironmentFil
 | `ISTOTA_WEB_OAUTH2_CLIENT_SECRET` | `web.oauth2_client_secret` |
 | `ISTOTA_WEB_SESSION_SECRET_KEY` | `web.session_secret_key` |
 | `ISTOTA_BRAIN_NATIVE_API_KEY` | `brain.native.api_key` (native brain provider key; kept out of TOML) |
-| `ISTOTA_SMS_TWILIO_ACCOUNT_SID` / `_AUTH_TOKEN` / `_API_KEY_SID` / `_API_KEY_SECRET` / `_MESSAGING_SERVICE_SID` | `sms.twilio.*` |
-| `ISTOTA_SMS_TELNYX_API_KEY` / `_PUBLIC_KEY` / `_MESSAGING_PROFILE_ID` | `sms.telnyx.*` |
-| `ISTOTA_WHATSAPP_ACCESS_TOKEN` / `_APP_SECRET` / `_VERIFY_TOKEN` | `whatsapp.cloud.*`. The names kept their un-nested spelling when the block moved under `cloud`, so an existing `secrets.env` keeps working across that upgrade |
+| `ISTOTA_SMS_TWILIO_ACCOUNT_SID` | `sms.twilio.account_sid` |
+| `ISTOTA_SMS_TWILIO_AUTH_TOKEN` | `sms.twilio.auth_token` |
+| `ISTOTA_SMS_TWILIO_API_KEY_SID` | `sms.twilio.api_key_sid` |
+| `ISTOTA_SMS_TWILIO_API_KEY_SECRET` | `sms.twilio.api_key_secret` |
+| `ISTOTA_SMS_TWILIO_MESSAGING_SERVICE_SID` | `sms.twilio.messaging_service_sid` |
+| `ISTOTA_SMS_TELNYX_API_KEY` | `sms.telnyx.api_key` |
+| `ISTOTA_SMS_TELNYX_PUBLIC_KEY` | `sms.telnyx.public_key` |
+| `ISTOTA_SMS_TELNYX_MESSAGING_PROFILE_ID` | `sms.telnyx.messaging_profile_id` |
+| `ISTOTA_WHATSAPP_ACCESS_TOKEN` | `whatsapp.cloud.access_token` |
+| `ISTOTA_WHATSAPP_APP_SECRET` | `whatsapp.cloud.app_secret` |
+| `ISTOTA_WHATSAPP_VERIFY_TOKEN` | `whatsapp.cloud.verify_token` |
+
+The three WhatsApp names kept their un-nested spelling when the block moved under `cloud`, so an existing `secrets.env` keeps working across that upgrade. Each variable is listed in full rather than as a shared prefix and a list of suffixes: this is the page you reach by searching for the variable already sitting in your `secrets.env`, and a suffix matches nothing.
 
 See [credentials](../configuration/credentials.md) for what each override covers and the full env var → config mapping.

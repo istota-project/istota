@@ -94,10 +94,18 @@ class TransportRegistry:
 def make_registry(config: "Config") -> TransportRegistry:
     """Build the registry from config. No network on construction.
 
-    Talk is registered when ``talk.enabled`` and email when ``email.enabled``;
-    ntfy and istota_file are registered unconditionally (per-user gating happens
-    in their ``resolve_target`` / ``deliver``, not at construction). Adding
-    Matrix or web chat is one more ``if`` here plus the transport class.
+    Four are gated on their own ``enabled`` flag — talk, email, sms and
+    whatsapp — and four are registered unconditionally: ntfy, istota_file, repl
+    and web, whose per-user gating happens in their ``resolve_target`` /
+    ``deliver`` rather than at construction. Adding a surface is one more entry
+    here plus the transport class.
+
+    The eight registrations are also the subject of a drift guard
+    (``tests/test_docs_inventories.py``), which reads them out of this
+    function's *source* rather than calling it — a registry built from a
+    default ``Config`` is missing the four gated ones. A ninth transport
+    therefore wants a line in ``docs/architecture/overview.md`` and, if
+    anything arrives over it, the input-channel diagram in ``docs/index.md``.
     """
     from .email import EmailTransport
     from .istota_file import IstotaFileTransport
