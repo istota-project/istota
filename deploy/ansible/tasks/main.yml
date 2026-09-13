@@ -1499,12 +1499,23 @@
   # bypass survived its own fix on a host that had already been deployed. The
   # handlers carry their own devbox/web-only guards, so no condition is needed
   # at the notify site.
+  #
+  # The WhatsApp sidecar is the same shape in Node and was missing from this
+  # list until ISSUE-497. Its handler is notified only by the dependency
+  # install, which is gated on the lockfile checksum, and by the unit template
+  # — both deployment changes rather than source ones — so a commit touching
+  # `index.js` alone reached it through neither and the unit went on running
+  # the copy it loaded at start. `Restart services (update-only mode)` covers
+  # that mode with an explicit loop; a full play had nothing. The cron's own
+  # arm diffs the sidecar directory between the deployed marker and the target,
+  # which cannot see a change this play already marked as deployed.
   notify:
     - "restart istota-scheduler"
     - "restart istota-browser"
     - "restart istota-web"
     - "restart istota-webhooks"
     - "restart istota-devbox-proxy"
+    - "restart istota-whatsapp-baileys"
 
 - name: Read back the repository remote URL
   command: "git -C {{ istota_repo_dir }} config --get remote.origin.url"

@@ -279,12 +279,43 @@ log "Restarting ${NAMESPACE}-webhooks"
 systemctl restart "${NAMESPACE}-webhooks"
 {% endif %}
 {% if istota_whatsapp_baileys_unit_wanted | default(false) %}
-# Unconditional, like the units above, rather than gated on BAILEYS_CHANGED: a
-# stopped sidecar (the install branch above stops one) has to come back whether
-# or not this tick changed anything, and restarting a running one costs a
-# reconnect — the paired session is on disk, not in the process.
-log "Restarting ${NAMESPACE}-whatsapp-baileys"
-systemctl restart "${NAMESPACE}-whatsapp-baileys"
+# Restarted only when something under the sidecar's own directory moved, and
+# otherwise started. Unlike every unit above it, this one holds a WhatsApp Web
+# session, and a restart drops that link and builds a new one. That is free
+# from this side — the paired credential is on disk rather than in the process,
+# which is what made the original unconditional — and it is not free from
+# WhatsApp's: the adapter emulates a client it does not sanction, so reconnect
+# churn is the kind of signal that gets a device unlinked. ISSUE-497 watched a
+# docs commit and a same-sha tick each bounce a live session, half an hour
+# before WhatsApp returned 401 and ended it.
+#
+# `start` rather than nothing, because the property the unconditional restart
+# was defending is real: the install arm above stops the unit before `npm ci`
+# and it has to come back on the same tick, and a crash can leave it down too.
+# `start` is a no-op on a running unit. The one state it must not revive is a
+# unit an operator stopped in order to re-pair — `istota whatsapp pair` spawns
+# a sidecar of its own and detects only a running *bridge*, so a tick landing
+# in that window is the second Baileys client the single-writer rule exists to
+# prevent. That hazard is unchanged from the unconditional restart and is owed
+# a session lock on the Node side; `.claude/rules/whatsapp.md` carries it.
+#
+# This does not make the two deploy paths identical, and the difference is the
+# other half of ISSUE-497: a code-only commit notifies neither of the play's
+# handlers, so `Clone or update istota repository` had to list this unit the
+# way it lists every other service running out of the checkout. With that in
+# place the play restarts on a source sync and this arm restarts on a sidecar
+# diff, and neither leaves the unit on code the checkout no longer holds.
+#
+# `BAILEYS_CHANGED` is the literal `unknown-revision` when the marker names a
+# commit this checkout cannot read, which lands here as a restart. That is the
+# safe direction: the runs that know least are the ones that must not skip it.
+if [ -n "$BAILEYS_CHANGED" ]; then
+    log "Restarting ${NAMESPACE}-whatsapp-baileys"
+    systemctl restart "${NAMESPACE}-whatsapp-baileys"
+else
+    log "Ensuring ${NAMESPACE}-whatsapp-baileys is running"
+    systemctl start "${NAMESPACE}-whatsapp-baileys"
+fi
 {% endif %}
 {% if istota_devbox_enabled and not istota_web_only and (istota_devbox_users | length > 0) %}
 # The credential proxy imports from the checkout as well, and it is a security
