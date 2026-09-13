@@ -304,6 +304,39 @@ function messageText(message) {
   return null;
 }
 
+/*
+ * The **shape** of a message this side could find no text in — the protobuf
+ * field names WhatsApp used, and nothing else.
+ *
+ * A message typed `unsupported` reaches the user as "that WhatsApp message
+ * type is not supported yet", which names no type and leaves nobody able to
+ * say which one it was: the body is the one thing that must never be logged,
+ * so the answer cannot be read out of the transcript afterwards either. The
+ * field names are the message's schema rather than its content, so they can
+ * be. One level of nesting is walked because WhatsApp wraps rather than
+ * replaces — a disappearing or edited message carries the real content under
+ * its own key — and a wrapper reported as a wrapper says nothing useful.
+ *
+ * Every name is bounded and the count is capped: these come off the wire.
+ */
+function messageShape(message) {
+  const content = message && message.message;
+  if (!content || typeof content !== 'object') return 'none';
+  const describe = (node, depth) => {
+    const keys = Object.keys(node).slice(0, 8);
+    return keys.map((key) => {
+      const label = key.slice(0, 40);
+      const child = node[key];
+      if (depth > 0 && child && typeof child === 'object' && child.message &&
+          typeof child.message === 'object') {
+        return `${label}(${describe(child.message, depth - 1)})`;
+      }
+      return label;
+    }).join(',');
+  };
+  return describe(content, 1) || 'empty';
+}
+
 function quotedId(message) {
   const context =
     message &&
@@ -509,6 +542,11 @@ class Session {
       }
       const group = isGroupJid(jid);
       const text = group ? null : messageText(message);
+      if (!group && text === null) {
+        log('info', 'inbound has no text this side can read', {
+          shape: messageShape(message),
+        });
+      }
       // The `group` flag is read off the chat rather than inferred from the
       // JID's spelling on the daemon's side, which is why it is sent: the
       // daemon refuses a group message before any identity lookup.
@@ -741,6 +779,7 @@ module.exports = {
   SEND_REASONS,
   chatAddress,
   encode,
+  messageShape,
   receiptStatus,
   sendFailureReason,
 };
