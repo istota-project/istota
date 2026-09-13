@@ -64,8 +64,8 @@ holds is the wire constants, pinned against the Python module in
 the protocol is the failure with no error message.
 
 The connection is exercised by hand at deployment. `docs/features/whatsapp.md`
-does not cover this adapter yet — the spec assigns that to its documentation
-stage — so the procedure is written here until it does:
+is the operator-facing writeup, including the setup steps and the trade this
+adapter carries. The short version, for somebody already in this directory:
 
 1. Stop the istota scheduler, and any sidecar running as a unit of its own.
 2. `npm ci` in this directory.

@@ -36,8 +36,9 @@
  * A real connection needs a real WhatsApp account, so none of this is in the
  * default test suite and none of it can be: what is covered here is the wire
  * constants and the module's shape. The connection itself is exercised by
- * hand at deployment. The operator-facing writeup of that is the docs
- * stage's; until it lands, `README.md` beside this file is where it is.
+ * hand at deployment. The operator-facing writeup is
+ * `docs/features/whatsapp.md`; `README.md` beside this file is the build and
+ * run detail under it.
  */
 
 'use strict';
