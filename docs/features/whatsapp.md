@@ -38,6 +38,8 @@ Baileys speaks WhatsApp's Web protocol as a linked device. That is not a support
 
 Recovery is `istota whatsapp pair --reset`. The plain `pair` cannot do it, and that is worth understanding rather than remembering: the credential left on disk names a device WhatsApp has unlinked, and the library reads it as a registered account and tries to log in with it rather than offering a code. So every restart is refused and no QR is ever drawn — under systemd that is a restart every thirty seconds, for as long as it takes somebody to notice. `--reset` moves the directory to a timestamped sibling and pairs into a fresh one. It deletes nothing, so a session that turned out to be merely unreachable has lost no keys, and it still refuses to run while a bridge is listening on the socket. Stop the scheduler and any sidecar running as a unit of its own first, as you would for a first pairing; remove the old directory yourself once the new session works.
 
+Until somebody does that, the sidecar keeps starting, is refused, and exits. It spaces those attempts out rather than making one every thirty seconds: no wait on the first, then 30 seconds, 5 minutes, 15, 30, an hour, counted in `logout-backoff.json` inside the session directory. Each attempt is a login against a number WhatsApp has already unlinked, which is exactly the kind of client behaviour the paragraphs above are about, so leaving an unlinked session running for a week is no longer expensive. Re-pairing is not slowed by it — the wait ends as soon as the credential is replaced.
+
 None of that applies to the Cloud adapter, which is why it stays available. If you cannot afford to lose the number or the surface, use Cloud.
 
 ## Setting up Baileys

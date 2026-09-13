@@ -41,6 +41,7 @@ in the module docstring of the program itself rather than left as an absence.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -731,13 +732,19 @@ class TestTheSidecarsControlFlow:
         """Staying alive leaves a process holding the session directory with
         a dead socket, and after a re-pair it never re-runs `start()`. The
         bridge's supervisor docstring assumes the exit on the external-unit
-        shape: systemd restarts it and its `ready` clears the latch."""
-        # The *use* rather than the declaration — the constant is declared at
-        # the top of the file, hundreds of lines from the branch that sends it.
-        source = PROGRAM.read_text()
-        index = source.index("reason: FATAL_LOGGED_OUT")
+        shape: systemd restarts it and its `ready` clears the latch.
 
-        assert "process.exit(1)" in source[index:index + 900]
+        Followed through the call rather than scanned for within a window of
+        the branch: the exit moved behind `scheduleLogoutExit` when the
+        backoff went in, and a character count from `FATAL_LOGGED_OUT` is a
+        bound on how much prose may sit between the two — which is a thing
+        nobody editing this file would think to check.
+        """
+        branch = _js_method("onConnection")
+        branch = branch[branch.index("reason: FATAL_LOGGED_OUT"):]
+
+        assert "scheduleLogoutExit(" in branch
+        assert "onExit();" in _js_function("scheduleLogoutExit")
 
     def test_starting_a_session_is_guarded_against_reentry(self):
         """Two `connection: close` events before the reconnect timer fires
@@ -750,6 +757,449 @@ class TestTheSidecarsControlFlow:
         assert "if (this.starting || this.stopping) return;" in source
         assert "this.starting = true;" in source
         assert "const mine = () => this.sock === sock;" in source
+
+
+class TestTheLoggedOutBackoff:
+    """A permanent 401 must not become an unbounded run of failed logins.
+
+    The `loggedOut` branch sends `fatal` and exits, and neither
+    `MAX_START_FAILURES` nor `START_RETRY_MS` is upstream of it — those gate
+    `reportStartFailure`, which covers a session that could not be
+    *constructed*. So on both shipped deployment shapes the exit is answered
+    by a supervisor that starts the program again at a fixed interval:
+    `Restart=always` with `RestartSec=30` on the unit, Docker's own backoff
+    capped at 60s on compose. Each cycle is a real websocket and a real
+    authentication attempt against an account WhatsApp has already unlinked
+    once, which `.claude/rules/whatsapp.md` records as the behaviour class
+    the maintainers found accounts being banned for.
+
+    The counter has to survive a process that exits, so it lives in a file
+    beside `sidecar.log` — inside the same 0700 directory, holding a count and
+    two timestamps and nothing else. The sleep goes *before* the exit rather
+    than into the supervisor's interval, because the supervisor cannot tell
+    "unlinked" from "crashed" and has to keep restarting promptly for the
+    second.
+
+    Executed rather than asserted against the source wherever it can be:
+    `loadBaileys()` is lazy, so `require('./index.js')` reaches all of this
+    with no `node_modules` in the tree.
+    """
+
+    @staticmethod
+    def _node() -> str:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        return node
+
+    @classmethod
+    def _run(cls, script: str, session_dir=None, timeout: int = 30):
+        """Run a script against the program and parse what it wrote.
+
+        `env=` replaces the whole environment rather than adding to it, so the
+        copy is not optional — without `PATH` the child cannot resolve its own
+        interpreter's neighbours, and without the rest `node` itself behaves
+        differently enough to be its own bug hunt.
+
+        **The child's umask is deliberately wide.** `main()` does not run under
+        `require`, so `applyPrivateUmask` has not, and a mode assertion in a
+        child that inherited this suite's own 077 would be asserting the
+        ambient umask rather than the program — which is the failure class
+        `.claude/rules/testbed.md` catalogues and the class twenty lines below
+        already guards against the same way.
+        """
+        env = dict(os.environ)
+        if session_dir is not None:
+            env["ISTOTA_BAILEYS_SESSION_DIR"] = str(session_dir)
+            env["ISTOTA_BAILEYS_SOCKET"] = str(session_dir / "sock")
+        result = subprocess.run(
+            [cls._node(), "-e", f"process.umask(0o022);{script}"],
+            capture_output=True, text=True, timeout=timeout, env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    @classmethod
+    def _call(cls, expression: str, session_dir=None):
+        """Evaluate one expression against the program."""
+        return cls._run(
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            f"process.stdout.write(JSON.stringify({expression}));",
+            session_dir,
+        )
+
+    # --- the ladder --------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "count,expected_ms",
+        [
+            # The first logout is unchanged: 500ms is the existing floor that
+            # lets the `fatal` frame leave the socket before the exit, and a
+            # single unlink must not become slower than it is today.
+            (1, 500),
+            (2, 30_000),
+            (3, 300_000),
+            (4, 900_000),
+            (5, 1_800_000),
+            (6, 3_600_000),
+            # Clamped, not indexed past the end — `undefined` here would be
+            # `setTimeout(fn, undefined)`, which fires immediately and turns
+            # the whole backoff off at exactly the run length where it matters
+            # most.
+            (7, 3_600_000),
+            (999, 3_600_000),
+        ],
+    )
+    def test_the_wait_grows_with_the_run_and_then_stops_growing(
+        self, count, expected_ms
+    ):
+        assert self._call(f"m.logoutExitDelayMs({count})") == expected_ms
+
+    @pytest.mark.parametrize("garbage", ["0", "-3", "1.5", "'x'", "null", "NaN"])
+    def test_a_count_it_cannot_read_degrades_to_todays_behaviour(self, garbage):
+        """The direction matters more than the value. The count comes off a
+        file inside the directory a full-account credential lives in, and the
+        safe failure is the *short* wait: a longer one delays the start that
+        would have worked after a re-pair, which is the one property the issue
+        asked to keep."""
+        assert self._call(f"m.logoutExitDelayMs({garbage})") == 500
+
+    # --- the state file ----------------------------------------------------
+
+    def test_a_run_of_logouts_accumulates_across_processes(self, tmp_path):
+        """The point of a file rather than a field on `Session`: every one of
+        these cycles is a *different process*, so in-memory state resets to
+        zero on each and the backoff never leaves its first rung."""
+        first = self._call("m.recordLogout('2026-09-13T00:00:00.000Z')", tmp_path)
+        second = self._call("m.recordLogout('2026-09-13T00:01:00.000Z')", tmp_path)
+
+        assert first["count"] == 1
+        assert second["count"] == 2
+        # `first_at` is carried rather than restamped, so the file says how
+        # long the session has been unlinked and not merely when it last tried.
+        assert second["first_at"] == "2026-09-13T00:00:00.000Z"
+        assert second["at"] == "2026-09-13T00:01:00.000Z"
+
+    def test_the_state_file_is_private(self, tmp_path):
+        """It sits inside the 0700 credential directory, so it is as private
+        as the credential beside it — and `harden_session_files` walks the
+        whole directory, so a wide one would be reported as a session possibly
+        readable by other accounts.
+
+        `_run` puts the child under a deliberately wide umask, so a mode of
+        0600 can only have come from the program's own `{ mode: 0o600 }`.
+        """
+        self._call("m.recordLogout('2026-09-13T00:00:00.000Z')", tmp_path)
+        written = [p for p in tmp_path.iterdir() if p.is_file()]
+
+        assert len(written) == 1, [p.name for p in written]
+        assert written[0].stat().st_mode & 0o777 == 0o600
+
+    def test_the_control_says_the_wide_mode_is_reachable(self, tmp_path):
+        """Without the explicit mode the same write lands 0644 in the same
+        child. A test asserting a mode has to be shown able to see the other
+        one, or it is asserting the ambient umask — this class's own
+        `applyPrivateUmask` neighbour is the precedent."""
+        target = tmp_path / "logout-backoff.json"
+        self._run(
+            f"require('fs').writeFileSync({json.dumps(str(target))}, 'x');"
+            "process.stdout.write('null');",
+            tmp_path,
+        )
+
+        assert target.stat().st_mode & 0o777 == 0o644
+
+    def test_a_session_that_opens_clears_the_run(self, tmp_path):
+        """The existing `startFailures = 0` rule one level up: a session that
+        opened is evidence the credential is usable, so the next unlink starts
+        again from the first rung rather than from an hour."""
+        self._call("m.recordLogout('2026-09-13T00:00:00.000Z')", tmp_path)
+        after = self._call("(m.clearLogoutState(), m.readLogoutState())", tmp_path)
+
+        assert after["count"] == 0
+        assert not [p for p in tmp_path.iterdir() if p.is_file()]
+
+    def test_clearing_a_run_that_was_never_recorded_is_not_an_error(self, tmp_path):
+        """It runs on the `open` transition, which is the ordinary path on
+        every healthy start — so the missing file is the common case rather
+        than the exception."""
+        assert self._call(
+            "(m.clearLogoutState(), m.readLogoutState().count)", tmp_path
+        ) == 0
+
+    @pytest.mark.parametrize(
+        "content",
+        ["", "not json", "[]", "null", '{"count": "seven"}', '{"count": -2}'],
+    )
+    def test_a_file_it_cannot_read_reads_as_no_runs(self, tmp_path, content):
+        """Same direction as the garbage counts above, one layer out. A
+        truncated write — a full disk, a host killed mid-write — must degrade
+        to today's prompt retry rather than to an hour of silence."""
+        (tmp_path / "logout-backoff.json").write_text(content)
+
+        assert self._call("m.readLogoutState().count", tmp_path) == 0
+
+    def test_a_corrupt_file_still_advances_the_run(self, tmp_path):
+        """Reading it as zero must not mean *staying* at zero: the write that
+        follows is what stops the next cycle from being unbounded."""
+        (tmp_path / "logout-backoff.json").write_text("not json")
+        state = self._call("m.recordLogout('2026-09-13T00:00:00.000Z')", tmp_path)
+
+        assert state["count"] == 1
+        assert self._call("m.readLogoutState().count", tmp_path) == 1
+
+    @pytest.mark.requires_dac
+    def test_a_write_that_fails_keeps_the_rung_it_read(self, tmp_path):
+        """`recordLogout` is read-modify-write, and the caller waits on what it
+        returns. A write it cannot make must not turn that into `undefined`,
+        which `setTimeout` fires immediately on — the backoff switched off by
+        the one failure mode most likely to be permanent.
+
+        The rung it keeps is the one it *read*, not the first: five recorded
+        logouts and an unwritable file is still a run five long, and collapsing
+        to 500ms there would make the ladder disappear exactly when the disk
+        filled. What the failure costs is the next process's increment.
+
+        The file is read-only rather than the directory, which is the
+        difference that makes this test able to fail at all: directory write
+        permission governs creating and removing a name, so `writeFileSync`
+        over an existing file in a 0500 directory succeeds.
+        """
+        state_file = tmp_path / "logout-backoff.json"
+        state_file.write_text('{"count": 5, "first_at": "2026-09-01T00:00:00.000Z"}')
+        state_file.chmod(0o400)
+        try:
+            state = self._call("m.recordLogout('2026-09-13T00:00:00.000Z')", tmp_path)
+        finally:
+            state_file.chmod(0o600)
+
+        assert state["count"] == 6
+        # The write is what failed, so the file is untouched — which is how
+        # this separates a failed write from a successful one. Without it the
+        # assertion above is equally true of a write that worked.
+        assert json.loads(state_file.read_text())["count"] == 5
+
+    # --- the credential stamp ----------------------------------------------
+
+    def test_the_stamp_changes_when_the_credential_is_replaced(self, tmp_path):
+        """What ends the wait early. A re-pair replaces `creds.json`, and from
+        that moment the next login is no longer the doomed one the backoff
+        exists to space out — so holding a working session down for the rest
+        of an hour is the opposite of what the wait is for.
+
+        mtime and size rather than the contents: this is a full-account
+        credential, and a fingerprint that never reads it cannot leak it.
+        """
+        creds = tmp_path / "creds.json"
+        creds.write_text('{"me": 1}')
+        before = self._call("m.credentialStamp()", tmp_path)
+        # A distinct size, so the assertion does not rest on filesystem mtime
+        # granularity — coarse enough on some filesystems that two writes in
+        # one test share a timestamp.
+        creds.write_text('{"me": 2, "paired": "again"}')
+
+        assert self._call("m.credentialStamp()", tmp_path) != before
+
+    def test_the_stamp_is_stable_while_nothing_touches_the_credential(self, tmp_path):
+        """The control. A stamp that changed on its own would exit every
+        process at the first poll and leave the backoff unreachable — which
+        looks exactly like the bug being fixed."""
+        (tmp_path / "creds.json").write_text('{"me": 1}')
+
+        assert (self._call("m.credentialStamp()", tmp_path)
+                == self._call("m.credentialStamp()", tmp_path))
+
+    def test_a_credential_that_is_removed_ends_the_wait_too(self, tmp_path):
+        """The documented remedy for this state is to move the session
+        directory aside, and ISSUE-496's `--reset` is the same primitive. Both
+        are evidence the next start is not the doomed one, so both end the
+        wait — and an absent credential must not read the same as a present
+        one, which is what a bare `try`/`catch` returning a constant would do.
+        """
+        creds = tmp_path / "creds.json"
+        creds.write_text('{"me": 1}')
+        present = self._call("m.credentialStamp()", tmp_path)
+        creds.unlink()
+
+        assert self._call("m.credentialStamp()", tmp_path) != present
+
+    # --- the wiring --------------------------------------------------------
+
+    def test_the_run_is_recorded_before_the_process_sleeps(self):
+        """A `systemctl restart` or a SIGTERM during a half-hour wait must not
+        lose the increment — otherwise the operator's own intervention resets
+        the ladder to its first rung and the loop is unbounded again."""
+        body = _js_method("onConnection")
+
+        assert body.index("recordLogout(") < body.index("scheduleLogoutExit(")
+
+    def test_the_fatal_frame_leaves_before_the_wait_begins(self):
+        """The daemon latches the permanent fatal and alerts on it. Delaying
+        the frame by the length of the backoff would mean a deployment learns
+        its WhatsApp is down an hour after it went down."""
+        body = _js_method("onConnection")
+
+        assert (body.index("reason: FATAL_LOGGED_OUT")
+                < body.index("scheduleLogoutExit("))
+
+    def test_the_open_transition_clears_the_run(self):
+        """Beside `startFailures = 0`, which is the same rule for the
+        in-process counter."""
+        body = _js_method("onConnection")
+        branch = body[body.index("if (connection === 'open')"):]
+
+        assert "clearLogoutState();" in branch[:branch.index("return;")]
+
+    def test_the_branch_waits_for_the_delay_it_computed(self):
+        """The one thing a substring pin still has to say, and it is the
+        mutation that otherwise passes the whole of this class: passing
+        `run.count` where `delay` belongs makes the wait 1 to 6 milliseconds,
+        the deadline already past at the first tick, and the backoff off
+        entirely — while every assertion above stays green, because each one
+        exercises `logoutExitDelayMs` in isolation and nothing else looks at
+        what reaches the wait."""
+        body = _js_method("onConnection")
+
+        assert "scheduleLogoutExit(delay, () => process.exit(1));" in body
+
+    # --- the wait loop, executed -------------------------------------------
+
+    def _wait_outcome(self, session_dir, delay_ms, poll_ms, change_after_ms=None):
+        """Run the real wait loop and report when it decided to exit.
+
+        A top-level function taking its own exit and interval is what makes
+        this possible: as a `Session` method it was unreachable, since
+        `Session` is not exported, and the loop is the one piece of this work
+        whose failure modes — an inverted comparison, a deadline computed
+        wrongly, a tick that never reschedules — are invisible to a substring
+        pin.
+        """
+        creds = session_dir / "creds.json"
+        creds.write_text('{"me": 1}')
+        change = (
+            "setTimeout(() => require('fs').writeFileSync("
+            f"{json.dumps(str(creds))}, '{{\"me\": 2, \"paired\": \"again\"}}'), "
+            f"{change_after_ms});"
+            if change_after_ms is not None else ""
+        )
+        outcome = self._run(
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "const started = Date.now();"
+            "const say = (v) => {process.stdout.write(JSON.stringify(v));"
+            "process.exit(0);};"
+            f"{change}"
+            # The give-up timer is what separates "waited out the deadline"
+            # from "never rescheduled and is still sitting there".
+            f"setTimeout(() => say(null), {delay_ms + 3000});"
+            f"m.scheduleLogoutExit({delay_ms}, "
+            "() => say(Date.now() - started), "
+            f"{poll_ms});",
+            session_dir,
+            timeout=60,
+        )
+        return outcome
+
+    def test_a_stable_credential_waits_out_the_whole_delay(self, tmp_path):
+        """The control for the two below. Without it, a loop that exited at
+        its first tick would satisfy every early-exit assertion in this file
+        while having no backoff in it at all."""
+        elapsed = self._wait_outcome(tmp_path, delay_ms=1200, poll_ms=50)
+
+        assert elapsed is not None, "the wait never ended"
+        assert elapsed >= 1200, elapsed
+
+    def test_a_credential_replaced_mid_wait_ends_it_early(self, tmp_path):
+        """The issue's first property, driven rather than asserted. Nothing in
+        the re-pair flow restarts the systemd unit, so without this a session
+        re-paired two minutes into an hour-long wait sits out the other
+        fifty-eight."""
+        elapsed = self._wait_outcome(
+            tmp_path, delay_ms=30_000, poll_ms=50, change_after_ms=200,
+        )
+
+        assert elapsed is not None, "the wait never ended"
+        assert elapsed < 5_000, elapsed
+
+    def test_a_write_landing_before_the_first_poll_does_not_end_the_wait(
+        self, tmp_path
+    ):
+        """The regression control for why the baseline is taken at the first
+        poll rather than at schedule time.
+
+        `saveCreds` is an async write, so one started by the login that has
+        just failed can land after `scheduleLogoutExit` is called. With the
+        baseline taken up front, that write reads as a re-pair and ends the
+        wait at the first poll — on every rung, every cycle, capping the
+        effective interval at the supervisor's own while `logout-backoff.json`
+        keeps climbing and looks like a working backoff. Exactly the "success
+        indistinguishable from a no-op" shape `.claude/rules/testbed.md`
+        catalogues.
+
+        Seeding the baseline at schedule time instead turns this red and
+        leaves the two tests above green.
+        """
+        elapsed = self._wait_outcome(
+            tmp_path, delay_ms=1200, poll_ms=400, change_after_ms=30,
+        )
+
+        assert elapsed is not None, "the wait never ended"
+        assert elapsed >= 1200, elapsed
+
+    # --- the link through the wait -----------------------------------------
+
+    def test_the_daemon_link_reconnects_through_the_wait(self):
+        """`stopping` alone would stop it: the flag is set before the wait and
+        is also what a deliberate shutdown sets. With the wait now up to an
+        hour, a scheduler restart landing inside one would otherwise leave a
+        sidecar that neither reconnects nor exits."""
+        source = PROGRAM.read_text()
+
+        assert "if (session.stopping && !session.loggedOut) return;" in source
+
+    def test_the_verdict_is_re_announced_on_a_reconnected_link(self):
+        """The daemon's permanent-fatal latch is in memory and only this frame
+        sets it, so a scheduler that restarted during the wait has none —
+        `doctor` and the admin alert would say "no sidecar connected" rather
+        than "logged out, re-pair" for the rest of the rung."""
+        body = _js_method("announceReady")
+
+        assert "if (this.loggedOut)" in body
+        assert body.index("FATAL_LOGGED_OUT") < body.index("MSG_READY")
+
+    def test_a_second_logged_out_close_does_not_advance_the_ladder(self):
+        """`if (this.stopping) return;` sits below this branch, and `mine()`
+        still passes for the socket that just closed, so a repeated close
+        carrying the same status re-enters. Harmless while the branch was one
+        `setTimeout`; a rung per duplicate event now that it writes a
+        persisted count."""
+        body = _js_method("onConnection")
+        branch = body[body.index("if (loggedOut) {"):]
+
+        assert branch.index("if (this.loggedOut) return;") < branch.index(
+            "recordLogout("
+        )
+
+    def test_the_dead_socket_is_dropped_before_the_wait(self):
+        """`send`'s `if (!this.sock)` guard is the only thing answering a send
+        with a definite `not_connected`; left in place, a send during the wait
+        reaches `sendMessage` on a dead socket and settles the ledger
+        `unknown`. It is also what makes `mine()` false, which is what stops a
+        late `creds.update` moving the credential the wait fingerprints."""
+        body = _js_method("onConnection")
+        branch = body[body.index("if (loggedOut) {"):]
+
+        assert branch.index("this.sock = null;") < branch.index(
+            "scheduleLogoutExit("
+        )
+
+    def test_the_credential_writer_is_bound_to_the_live_socket(self):
+        """Its three siblings are guarded and it was not. After a logout the
+        socket is nulled, so this guard is what keeps a late save from moving
+        `creds.json` under a wait that watches it."""
+        body = _js_body("async open_()")
+
+        assert "sock.ev.on('creds.update', () => {" in body
+        assert "if (mine()) saveCreds();" in body
 
 
 class TestTheSidecarCreatesPrivateFiles:

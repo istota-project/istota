@@ -32,6 +32,16 @@ ExecStart={{ istota_whatsapp_baileys_node_bin }} {{ istota_repo_dir }}/docker/wh
 # — for however long the account stays unlinked. The same cycle covers a tree
 # with no node_modules (exit 3). StartLimit is left off deliberately: entering
 # `failed` would make a re-pair need a `systemctl start` as well as a scan.
+#
+# This interval is no longer the whole cadence of that cycle, and it must not
+# become one. A logged-out sidecar now waits before it exits, growing the wait
+# with the length of the run (ISSUE-498) — what that bounds is the number of
+# real authentication attempts made against an account WhatsApp has already
+# unlinked, which this interval alone left unbounded at roughly 2,400 a day.
+# The wait lives in the program because this unit cannot tell an unlinked
+# device from a crash and has to keep restarting promptly for the second, so
+# lengthening RestartSec is not the same fix and would slow the second case
+# down for nothing.
 Restart=always
 RestartSec=30
 
