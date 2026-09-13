@@ -171,7 +171,13 @@ def _unlink_readers(config: "Config") -> list[str]:
         logger.warning("whatsapp.baileys.admins_unreadable", exc_info=True)
         admins = set()
     if admins:
-        return sorted(admins & set(config.users)) or sorted(admins)
+        # The intersection, falling back to **every configured user** rather
+        # than to the raw admin list: an admins file naming somebody who is
+        # not in `config.users` — a stale entry, a renamed account — would
+        # otherwise write a row and attempt a push for a user with no
+        # configuration at all. Same answer as the empty-admins arm below, and
+        # for the same reason.
+        return sorted(admins & set(config.users)) or sorted(config.users)
     return sorted(config.users)
 
 
@@ -192,8 +198,9 @@ def _alert_body(reason: str) -> str:
     return (
         f"The WhatsApp device link ended ({_slug(reason, fallback='unknown')}), so every "
         "WhatsApp send is refused until the session is paired again. Stop the "
-        "istota daemon, run `istota whatsapp pair`, scan the code from "
-        "WhatsApp's Linked Devices screen, then start the daemon again."
+        "istota daemon and any sidecar running as a unit of its own, run "
+        "`istota whatsapp pair`, scan the code from WhatsApp's Linked Devices "
+        "screen, then start them again."
     )
 
 

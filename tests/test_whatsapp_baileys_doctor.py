@@ -149,6 +149,7 @@ class TestTheBridgeCheck:
 
         assert result.status == doctor.OK
         assert "7 inbound applied" in result.detail
+        assert "refused connections" in result.detail
 
     def test_an_unlinked_device_fails_with_the_re_pair_remedy(self, tmp_path):
         """The doctor half of the unlink edge case, which was implemented by
@@ -209,6 +210,49 @@ class TestTheBridgeCheck:
 
         assert result.status == doctor.WARN
         assert "istota whatsapp pair" in result.remedy
+
+    def test_a_refused_connection_warns_with_its_own_remedy(self, tmp_path):
+        """The counter behind the corruption this whole stage refuses a
+        running daemon to avoid: the bridge accepts one sidecar, so a refused
+        connection means a second one dialled. Its own arm rather than a row
+        in the lost-message one, because its remedy is "leave exactly one
+        sidecar running" and not "read the log"."""
+        baileys_bridge.set_active_bridge(_Status(
+            listening=True, connected=True, ready=True, rejected_connections=2,
+        ))
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
+
+        assert result.status == doctor.WARN
+        assert "second WhatsApp sidecar" in result.detail
+        assert "sidecar_command" in result.remedy
+
+    def test_a_configured_library_version_is_checked_against_the_shipped_pin(
+        self, tmp_path,
+    ):
+        """`[whatsapp.baileys] library_version` had no reader at all: loaded,
+        documented in config.example.toml, settable, and acted on by nothing.
+
+        The arm runs **before** the in-process skip, because it is a config
+        string against a file and therefore answerable from an operator's own
+        shell."""
+        cfg = _config(tmp_path)
+        cfg.whatsapp.baileys.library_version = "0.0.1"
+
+        result = _run(cfg, "whatsapp.baileys_bridge")
+
+        assert result.status == doctor.WARN
+        assert "0.0.1" in result.detail
+        assert baileys_bridge.shipped_library_version() in result.detail
+
+    def test_a_matching_library_version_says_nothing(self, tmp_path):
+        cfg = _config(tmp_path)
+        cfg.whatsapp.baileys.library_version = (
+            baileys_bridge.shipped_library_version()
+        )
+
+        # Falls through to the no-bridge skip, which is the next arm.
+        assert _run(cfg, "whatsapp.baileys_bridge").status == doctor.SKIP
 
     @pytest.mark.parametrize(
         "field", ["malformed_lines", "dropped_events", "failed_events"],
@@ -288,10 +332,17 @@ class TestTheSessionCheck:
         assert result.status == doctor.FAIL
         assert "another account" in result.detail
 
-    def test_a_wide_file_inside_it_is_narrowed_and_reported(self, tmp_path):
-        """The check reads and the narrowing is `harden_session_files`' own —
-        asked rather than copied, so this cannot pass while the bridge
-        disagrees about what private means."""
+    def test_a_wide_file_inside_it_fails_and_is_left_alone(self, tmp_path):
+        """**Reported, not repaired.** The check used to call the bridge's
+        narrowing pass, which made a diagnostic the second writer of a
+        full-account credential's permissions — and then self-cleared, so the
+        hourly sweep's transition alerting could see the exposure once and an
+        operator rerunning the command to confirm saw a clean tree.
+
+        The predicate is still the bridge's own (`survey_session_files` and
+        `harden_session_files` walk one implementation), so this cannot pass
+        while the bridge disagrees about what private means.
+        """
         path = self._paired(tmp_path)
         exposed = path / "app-state-sync-key.json"
         exposed.write_text("{}")
@@ -299,9 +350,23 @@ class TestTheSessionCheck:
 
         result = _run(_config(tmp_path), "whatsapp.baileys_session")
 
-        assert result.status == doctor.WARN
-        assert "narrowed" in result.detail
-        assert stat.S_IMODE(exposed.stat().st_mode) == 0o600
+        assert result.status == doctor.FAIL
+        assert stat.S_IMODE(exposed.stat().st_mode) == 0o644
+
+    def test_it_keeps_reporting_a_wide_file_on_a_second_run(self, tmp_path):
+        """The half a self-clearing check could not do. A condition that is
+        still true has to still be reported, or the only surface that can act
+        on it is whichever process happened to run first."""
+        path = self._paired(tmp_path)
+        exposed = path / "app-state-sync-key.json"
+        exposed.write_text("{}")
+        os.chmod(exposed, 0o644)
+
+        first = _run(_config(tmp_path), "whatsapp.baileys_session")
+        second = _run(_config(tmp_path), "whatsapp.baileys_session")
+
+        assert first.status == doctor.FAIL
+        assert second.status == doctor.FAIL
 
     def test_it_creates_nothing(self, tmp_path):
         """A diagnostic must not make the thing it reports on.
@@ -311,3 +376,30 @@ class TestTheSessionCheck:
         _run(_config(tmp_path), "whatsapp.baileys_session")
 
         assert not (tmp_path / "whatsapp-baileys-session").exists()
+
+    def test_running_as_root_does_not_fail_a_daemon_owned_directory(
+        self, tmp_path, monkeypatch,
+    ):
+        """`sudo istota doctor` is an ordinary invocation, and there the
+        directory belongs to the daemon's account while `geteuid()` is 0 — so
+        the ownership arm failed a correct install, and the remedy it printed
+        (`chown -R 0 …`) makes the credential unreadable by the daemon and
+        `ensure_session_dir` refuse it on the next start."""
+        self._paired(tmp_path)
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_session")
+
+        assert result.status == doctor.OK
+
+    def test_the_ownership_remedy_never_names_this_processs_uid(
+        self, tmp_path, monkeypatch,
+    ):
+        self._paired(tmp_path)
+        monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1000)
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_session")
+
+        assert result.status == doctor.FAIL
+        assert "chown" not in result.remedy
+        assert "the account the istota daemon runs as" in result.remedy

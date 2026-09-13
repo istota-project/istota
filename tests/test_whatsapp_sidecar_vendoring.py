@@ -16,12 +16,20 @@ owner of the pin.
 
 What the pin can and cannot reach is worth being exact about, because the
 gap is where a reader will assume coverage that is not there. It reaches the
-**wire constants**: the protocol version, the message-type vocabulary, the
-line cap, and the failure-reason keys. Those are the values a disagreement
-shows up in with no error message anywhere — a version mismatch is refused
-loudly, but a message type spelled differently is a frame counted as
-malformed and dropped, and a `reason` outside the daemon's table renders as
-the generic sentence for ever.
+**wire constants** — the protocol version, the message-type vocabulary, the
+line cap, the failure-reason keys — and the **payload field names** of every
+frame the sidecar sends. Both are values a disagreement shows up in with no
+error message anywhere: a version mismatch is refused loudly, but a message
+type spelled differently is a frame counted as malformed and dropped, a
+renamed field is `BaileysProtocolError("missing jid")` counted and dropped one
+layer down, and a `reason` outside the daemon's table renders as the generic
+sentence for ever.
+
+The field-name half is driven rather than compared. Pulling the object literal
+out of each `link.send(MSG_X, {...})` call gives the key set the sidecar
+emits; feeding that set to the matching normalizer with filler values is what
+says the daemon can read it. A list of expected names here would be a third
+place for the protocol to be written down, which is the thing being avoided.
 
 It does **not** reach behaviour. Executing the sidecar needs Node and a
 ``node_modules`` tree, and a real Baileys connection needs a real WhatsApp
@@ -34,6 +42,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -57,15 +67,24 @@ _PINS = {
 }
 
 
-def _sidecar_files() -> list[str]:
-    """Every file, not every ``*.js``.
+#: A directory that is generated rather than vendored, and is refused on its
+#: own terms below rather than classified.
+_GENERATED_DIRS = {"node_modules"}
 
-    The devbox guard learned this one level down: a Dockerfile can COPY a JSON
-    manifest, a lockfile or a shell script out of here just as readily as a
-    module, and a guard that only sees programs is the same blind spot one
-    file type over.
+
+def _sidecar_entries() -> list[str]:
+    """Every entry, not every file, and not every ``*.js``.
+
+    Two widenings of the same blind spot. The devbox guard learned the first
+    one level down — a Dockerfile can COPY a JSON manifest, a lockfile or a
+    shell script out of here as readily as a module — and this one adds the
+    second: a `lib/`, a `proto/` or a `src/` is exactly the shape the devbox
+    context already has, and a guard that lists only files would never see it.
     """
-    return sorted(p.name for p in SIDECAR_DIR.iterdir() if p.is_file())
+    return sorted(
+        entry.name for entry in SIDECAR_DIR.iterdir()
+        if entry.name not in _GENERATED_DIRS
+    )
 
 
 def _js_const(name: str) -> str:
@@ -96,8 +115,8 @@ class TestTheDirectoryIsFullyAccountedFor:
                 "defined in this module"
             )
 
-    def test_every_file_is_pinned(self):
-        unpinned = [name for name in _sidecar_files() if name not in _PINS]
+    def test_every_entry_is_pinned(self):
+        unpinned = [name for name in _sidecar_entries() if name not in _PINS]
         assert unpinned == [], (
             f"{unpinned} under docker/whatsapp-baileys/ is pinned by nothing. "
             "Add it to _PINS here with a test that holds it to whatever in "
@@ -108,7 +127,7 @@ class TestTheDirectoryIsFullyAccountedFor:
     def test_no_file_is_a_symlink(self):
         """A symlink passes every content comparison and fails `docker build`
         with "COPY failed: … outside the build context"."""
-        for name in _sidecar_files():
+        for name in _sidecar_entries():
             assert not (SIDECAR_DIR / name).is_symlink(), name
 
     def test_no_dependency_tree_is_committed(self):
@@ -224,6 +243,421 @@ class TestTheSidecarSpeaksTheSameProtocol:
                                source)
 
         assert offenders == [], offenders
+
+
+def _js_method(name: str) -> str:
+    """The body of one method of the sidecar's `Session` class, as text."""
+    source = PROGRAM.read_text()
+    start = source.index(f"  {name}(")
+    end = source.index("\n  }\n", start)
+    return source[start:end]
+
+
+def _js_send_keys(message_const: str) -> set[str]:
+    """The payload keys of one ``this.link.send(MSG_X, { ... })`` call.
+
+    A brace walk rather than a regular expression: the object literals here
+    hold nested calls and ternaries, and a non-greedy `{.*?}` stops at the
+    first inner brace. Only top-level keys are collected, which is the level
+    the daemon's normalizers read.
+    """
+    source = PROGRAM.read_text()
+    marker = f"this.link.send({message_const}, {{"
+    start = source.index(marker) + len(marker)
+    depth = 1
+    index = start
+    while depth:
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+        index += 1
+    body = source[start:index - 1]
+
+    keys = set()
+    depth = 0
+    for chunk in body.split(","):
+        stripped = chunk.strip()
+        if depth == 0 and stripped:
+            # `name: value` and ES6 shorthand `name` both count — the sidecar
+            # uses both, and a scan that saw only the first missed `jid`,
+            # `text` and `group`, which is three of the fields that matter
+            # most.
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(:|$)", stripped)
+            if match:
+                keys.add(match.group(1))
+        depth += stripped.count("{") + stripped.count("[")
+        depth -= stripped.count("}") + stripped.count("]")
+    return keys
+
+
+class TestTheSidecarsPayloadsAreReadable:
+    """The field names, driven through the daemon's own normalizers.
+
+    The envelope tests above pin the constants; this pins what is inside one.
+    A renamed or dropped field is the quieter of the two failures — the frame
+    decodes, the normalizer raises `BaileysProtocolError`, `_dispatch` counts
+    it malformed and drops it, and both ends carry on with nothing arriving.
+
+    Each case builds a payload from the keys the sidecar actually emits, fills
+    them with values of the right shape, and requires the normalizer to accept
+    it. The keys come from the program; the acceptance comes from the product.
+    Neither side is restated here, which is what stops this becoming a third
+    copy of the protocol.
+    """
+
+    @staticmethod
+    def _filled(keys: set[str], values: dict) -> dict:
+        missing = keys - set(values)
+        assert not missing, (
+            f"index.js sends {sorted(missing)}, which this case has no filler "
+            "for — add one and check the normalizer reads it"
+        )
+        return {key: values[key] for key in keys}
+
+    def test_an_inbound_payload_normalizes(self):
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, {
+            "message_id": "BAE5F00D",
+            "jid": "15551234567@s.whatsapp.net",
+            "username": "Alice",
+            "message_type": "text",
+            "text": "check the backup",
+            "callback_data": None,
+            "reply_to_message_id": None,
+            "group": False,
+            "timestamp": 1757000000,
+        })
+
+        event = proto.inbound_event(payload)
+
+        assert event.from_user.jid == "15551234567@s.whatsapp.net"
+        assert event.text == "check the backup"
+
+    def test_the_group_flag_is_read_from_the_key_the_sidecar_sends(self):
+        """The one inbound field with a *behavioural* reader rather than a
+        stored one: it types the message before any identity lookup, so a
+        rename does not merely drop a field, it admits a group message."""
+        keys = _js_send_keys("MSG_INBOUND")
+        assert "group" in keys
+
+        payload = self._filled(keys, {
+            "message_id": "BAE5F00D",
+            "jid": "15551234567@s.whatsapp.net",
+            "username": None,
+            "message_type": "text",
+            "text": "hello",
+            "callback_data": None,
+            "reply_to_message_id": None,
+            "group": True,
+            "timestamp": 1757000000,
+        })
+
+        assert proto.inbound_event(payload).message_type == "group"
+
+    def test_a_receipt_payload_normalizes(self):
+        keys = _js_send_keys("MSG_RECEIPT")
+        payload = self._filled(keys, {
+            "message_id": "BAE5F00D",
+            "status": "delivered",
+            "timestamp": 1757000000,
+            "error_code": None,
+        })
+
+        event = proto.delivery_event(payload)
+
+        assert event is not None
+        assert event.status == "delivered"
+
+    def test_every_receipt_status_the_sidecar_can_send_is_one_the_daemon_maps(self):
+        """The map the daemon drops an unknown value from, against the values
+        the sidecar can produce. A status this side invents is a receipt that
+        vanishes."""
+        source = PROGRAM.read_text()
+        by_number = re.search(
+            r"const RECEIPT_BY_NUMBER = \{(.*?)\};", source, re.DOTALL,
+        )
+        by_name = re.search(r"const RECEIPT_BY_NAME = \[(.*?)\];", source, re.DOTALL)
+        assert by_number and by_name
+        produced = set(re.findall(r"'([^']+)'", by_number.group(1)))
+        produced |= set(re.findall(r"'([^']+)'", by_name.group(1)))
+        produced.add("failed")
+
+        assert produced <= set(proto._STATUS_MAP)
+
+    def test_the_error_status_is_mapped_rather_than_dropped(self):
+        """`proto.WebMessageInfo.Status.ERROR` is **0**, so it fell through a
+        `byNumber[status] || null` and then through the caller's falsy guard —
+        a handset-level failure the ledger never heard about, which is the
+        class the parked-status table exists for."""
+        assert "0: 'failed'" in PROGRAM.read_text().replace('"', "'")
+
+    def test_a_send_result_payload_normalizes_both_ways(self):
+        """`answer` spreads `{request_id}` over its caller's fields, so the
+        two shapes are its call sites rather than one literal — and both have
+        to satisfy `send_outcome`, whose `definite` bit is the ledger's
+        `failed`-against-`unknown` decision."""
+        source = PROGRAM.read_text()
+        assert "Object.assign({ request_id: requestId }, fields)" in source
+        shapes = re.findall(r"this\.answer\(requestId, \{ ([^}]*) \}\)", source)
+        assert shapes, "no answer() call sites found"
+
+        for shape in shapes:
+            keys = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*):", shape))
+            fillers = {
+                "ok": "ok: true" in shape,
+                "message_id": "BAE5F00D",
+                "reason": "not_connected",
+                "definite": True,
+            }
+            missing = keys - set(fillers)
+            assert not missing, (
+                f"answer() sends {sorted(missing)}, which this case has no "
+                "filler for — add one and check `send_outcome` reads it"
+            )
+            payload = {"request_id": "a1"}
+            payload.update({key: fillers[key] for key in keys})
+
+            outcome = proto.send_outcome(payload)
+
+            # Both shapes have to carry which one they are. A success with no
+            # id and a failure read as a success are the two ways this frame
+            # settles the wrong ledger row.
+            assert (outcome.message_id if fillers["ok"] else None) == (
+                "BAE5F00D" if fillers["ok"] else None
+            )
+
+        ok = proto.send_outcome({"request_id": "a1", "ok": True,
+                                 "message_id": "BAE5F00D"})
+        bad = proto.send_outcome({"request_id": "a1", "ok": False,
+                                  "reason": "not_connected", "definite": True})
+
+        assert ok.message_id == "BAE5F00D"
+        assert bad.definite is True
+        assert bad.safe_reason == proto._SEND_REASONS["not_connected"]
+
+    def test_the_send_handler_reads_every_field_the_daemon_sends(self):
+        """`send_payload` is the daemon's half. A field it emits and the
+        sidecar never reads is a silently ignored instruction — `kind` is the
+        one that matters, since ignoring it would send a service message for a
+        row the ledger records as a template."""
+        from istota.transport.whatsapp._types import WhatsAppSendRequest
+
+        emitted = set(proto.send_payload("a1", WhatsAppSendRequest(
+            to="15551234567@s.whatsapp.net", text="hi", kind="service",
+        )))
+        source = PROGRAM.read_text()
+
+        unread = {
+            key for key in emitted
+            if f"payload.{key}" not in source and f"CONFIG['{key}']" not in source
+        }
+        # Two are deliberately unread and both are recorded rather than
+        # filtered out of the emitter. `buttons`: this adapter has no
+        # interactive object, the caps say so, and the answer travels in the
+        # body. `reply_to_message_id`: a quoted reply needs the whole original
+        # message, which the sidecar does not keep, and the synthetic stub it
+        # used to pass could be refused — which would settle `unknown` on a
+        # message that never left, for a thread marker.
+        assert unread == {"buttons", "reply_to_message_id"}, unread
+
+    def test_a_qr_payload_carries_the_key_the_bridge_reads(self):
+        assert _js_send_keys("MSG_QR") == {"qr"}
+
+    def test_a_fatal_payload_carries_the_two_fields_the_bridge_branches_on(self):
+        source = PROGRAM.read_text()
+        fatals = re.findall(r"MSG_FATAL, \{ ([^}]*) \}", source)
+        assert fatals, "no fatal frames found"
+        for body in fatals:
+            keys = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*):", body))
+            assert keys == {"reason", "permanent"}, keys
+
+    def test_the_hello_frame_carries_the_version_field_the_bridge_reads(self):
+        source = PROGRAM.read_text()
+        assert "MSG_HELLO, { protocol_version: PROTOCOL_VERSION }" in source
+        # `hello_version` is what refuses a mismatch, and it reads that key.
+        assert proto.hello_version({"protocol_version": 1}) == 1
+
+
+class TestTheSidecarsPureFunctions:
+    """The one part of the program the default suite can **execute**.
+
+    `loadBaileys()` is lazy, so `require('./index.js')` succeeds with no
+    `node_modules` in the tree — which is what makes running its exported pure
+    functions possible here at all. The alternative was a source assertion,
+    and a source assertion about a lookup table is a second copy of the table.
+
+    Skipped rather than failed without `node`: this is a Python suite, and a
+    developer without a Node runtime should not see a red test about a program
+    they cannot run. That is the same trade `requires_dac` takes.
+    """
+
+    @staticmethod
+    def _call(expression: str) -> str:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        script = (
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            f"process.stdout.write(JSON.stringify({expression}));"
+        )
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            # `proto.WebMessageInfo.Status`: ERROR, PENDING, SERVER_ACK,
+            # DELIVERY_ACK, READ, PLAYED.
+            (0, "failed"),
+            (1, None),
+            (2, "sent"),
+            (3, "delivered"),
+            (4, "read"),
+            (5, "read"),
+            (99, None),
+        ],
+    )
+    def test_each_enum_member_maps_the_way_the_ledger_needs(self, status, expected):
+        """**0 is ERROR**, and dropping it is a delivery that failed and was
+        never reported — the row stays `accepted` with no alert behind it.
+
+        **1 is PENDING**, which is before the server acknowledged anything, so
+        it maps to nothing: calling it `sent` advances the monotonic status
+        ladder ahead of the fact.
+        """
+        assert self._call(f"m.receiptStatus({status})") == expected
+
+    @pytest.mark.parametrize(
+        "name,expected",
+        [("error", "failed"), ("delivered", "delivered"), ("played", None)],
+    )
+    def test_the_name_form_agrees_with_the_numeric_one(self, name, expected):
+        assert self._call(f"m.receiptStatus({json.dumps(name)})") == expected
+
+    def test_every_status_it_can_produce_is_one_the_daemon_maps(self):
+        """Driven rather than read: a status this side invents is a receipt
+        the daemon drops, silently."""
+        produced = {
+            self._call(f"m.receiptStatus({value})")
+            for value in list(range(-1, 8))
+        }
+        produced |= {
+            self._call(f"m.receiptStatus({json.dumps(name)})")
+            for name in ("sent", "delivered", "read", "failed", "error", "nonsense")
+        }
+
+        assert (produced - {None}) <= set(proto._STATUS_MAP)
+
+    def test_every_failure_reason_it_can_produce_is_one_the_daemon_knows(self):
+        """`sendFailureReason` against the daemon's fixed table. A key outside
+        it renders as the generic sentence for ever, which is the diagnostic
+        being lost rather than the message."""
+        cases = [
+            "{output: {statusCode: 401}}",
+            "{output: {statusCode: 403}}",
+            "{output: {statusCode: 408}}",
+            "{output: {statusCode: 500}}",
+            "{message: 'that number is not on whatsapp'}",
+            "{}",
+            "null",
+        ]
+        produced = {self._call(f"m.sendFailureReason({case})") for case in cases}
+
+        assert produced <= set(proto._SEND_REASONS)
+
+    def test_a_frame_it_builds_is_one_the_daemon_decodes(self):
+        """`encode` on one side, `proto.decode` on the other, over a value
+        that needs escaping. `JSON.stringify` escaping an embedded newline is
+        what stops a payload forging a frame boundary, and this is the only
+        place that claim is executed."""
+        line = self._call(
+            "m.encode('inbound', {text: 'one\\ntwo', jid: 'x@s.whatsapp.net'})"
+            ".toString('utf8')"
+        )
+
+        assert line.count("\n") == 1
+        assert proto.decode(line) == {
+            "type": "inbound", "text": "one\ntwo", "jid": "x@s.whatsapp.net",
+        }
+
+    def test_it_refuses_a_frame_past_the_cap_rather_than_writing_it(self):
+        """Both ends cap. A cap only on the reader lets a writer build a line
+        it can never deliver."""
+        threw = self._call(
+            "(() => { try { m.encode('inbound', {text: 'x'.repeat(300000)}); "
+            "return false; } catch (e) { return true; } })()"
+        )
+
+        assert threw is True
+
+
+class TestTheSidecarsControlFlow:
+    """Properties the static pin reaches only as source shape, and says so.
+
+    Each of these is a guard whose absence is silent — a receipt for somebody
+    else's message, a status forwarded for a chat this surface does not model,
+    a `ready` that is never re-announced, a logged-out process that never
+    exits, two sessions started at once. Executing them needs a live Baileys
+    connection, which needs a real WhatsApp account, so what is available is
+    an assertion that the guard is still written. That is a weaker claim than
+    the class above and is separated from it for that reason: it catches a
+    deletion and not a subtle change.
+    """
+
+    def test_receipts_are_filtered_to_our_own_sends(self):
+        """The inverse of `onMessages`' filter. `messages.update` fires in
+        both directions, and a receipt for an inbound message matches no
+        ledger row — so the daemon parks it against whatever send is in flight
+        and prunes it later as foreign traffic."""
+        body = _js_method("onReceipts")
+
+        assert "!item.key.fromMe" in body
+
+    def test_inbound_is_filtered_to_the_chats_this_surface_models(self):
+        """`status@broadcast` and `@newsletter` arrive like any other message
+        and on an active account never stop, each costing a queue slot, a
+        thread and a write transaction that then resolves no sender."""
+        assert "isForwardableJid(jid)" in _js_method("onMessages")
+        assert "@s.whatsapp.net" in _js_const("USER_JID_DOMAIN")
+
+    def test_ready_is_re_announced_when_the_daemon_link_returns(self):
+        """The daemon clears `ready` on every link drop and only a `ready`
+        frame sets it back, while a WhatsApp session that never closed emits
+        no second `open` — so without this the bridge reports `connected` and
+        not `ready` for ever and pairing can never finish."""
+        source = PROGRAM.read_text()
+
+        assert "this.onReady();" in source
+        assert "link.onReady = () => session.announceReady();" in source
+        assert "if (this.open) this.link.send(MSG_READY, {});" in source
+
+    def test_a_logged_out_session_exits(self):
+        """Staying alive leaves a process holding the session directory with
+        a dead socket, and after a re-pair it never re-runs `start()`. The
+        bridge's supervisor docstring assumes the exit on the external-unit
+        shape: systemd restarts it and its `ready` clears the latch."""
+        # The *use* rather than the declaration — the constant is declared at
+        # the top of the file, hundreds of lines from the branch that sends it.
+        source = PROGRAM.read_text()
+        index = source.index("reason: FATAL_LOGGED_OUT")
+
+        assert "process.exit(1)" in source[index:index + 900]
+
+    def test_starting_a_session_is_guarded_against_reentry(self):
+        """Two `connection: close` events before the reconnect timer fires
+        would schedule two `start()`s, and two live sockets both write the
+        session directory through `creds.update` — the auth-state corruption
+        the pair command refuses a whole running daemon to avoid, reached from
+        inside one process."""
+        source = PROGRAM.read_text()
+
+        assert "if (this.starting || this.stopping) return;" in source
+        assert "this.starting = true;" in source
+        assert "const mine = () => this.sock === sock;" in source
 
 
 class TestThePinnedLibrary:

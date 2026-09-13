@@ -7258,7 +7258,31 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
     if skipped is not None:
         return skipped
 
-    from .transport.whatsapp.baileys_bridge import read_status
+    from .transport.whatsapp.baileys_bridge import (
+        read_status, shipped_library_version,
+    )
+
+    # **Before the in-process skip, because this arm needs no bridge.** It is
+    # a configured string against a file, so it answers from an operator's own
+    # shell — which is the half of this check a process with no bridge can
+    # still be useful about. `[whatsapp.baileys] library_version` had no
+    # reader at all, which is the shape `.claude/rules/leaf-modules.md`
+    # records `config_mapper` being written to catch: declared, documented,
+    # settable, and acted on by nothing.
+    wanted = (config.whatsapp.baileys.library_version or "").strip()
+    shipped = shipped_library_version()
+    if wanted and shipped and wanted != shipped:
+        return CheckResult(
+            name, WARN,
+            f"[whatsapp.baileys] library_version is {wanted} and the sidecar "
+            f"in this tree pins {shipped}",
+            remedy=(
+                "Either clear library_version, or bring the two into line — "
+                "the sidecar's own package.json is what a build installs, so "
+                "the configured value is a statement about which it should be."
+            ),
+            scope=DEPLOYMENT,
+        )
 
     status = read_status()
     if status is None:
@@ -7281,9 +7305,9 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
             f"the WhatsApp session ended ({fatal}); every send is "
             "refused until it is paired again",
             remedy=(
-                "Stop the istota scheduler, run `istota whatsapp pair`, scan "
-                "the code from WhatsApp's Linked Devices screen, then start "
-                "it again."
+                "Stop the istota scheduler and any sidecar running as a unit "
+                "of its own, run `istota whatsapp pair`, scan the code from "
+                "WhatsApp's Linked Devices screen, then start them again."
             ),
             scope=DEPLOYMENT,
         )
@@ -7293,7 +7317,8 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
         f"{_as_count(status.get('restarts'))} sidecar restarts, "
         f"{_as_count(status.get('malformed_lines'))} malformed lines, "
         f"{_as_count(status.get('dropped_events'))} dropped, "
-        f"{_as_count(status.get('failed_events'))} unwritten"
+        f"{_as_count(status.get('failed_events'))} unwritten, "
+        f"{_as_count(status.get('rejected_connections'))} refused connections"
     )
     if not status.get("listening"):
         return CheckResult(
@@ -7330,6 +7355,26 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
                 "If this deployment has never been paired, run `istota "
                 "whatsapp pair`. Otherwise the session is reconnecting; check "
                 "`sidecar.log` in the session directory."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    refused = _as_count(status.get("rejected_connections"))
+    if refused:
+        # **Its own arm, because its remedy is not "read the log".** The
+        # bridge accepts one sidecar at a time, so a refused connection means
+        # a second one dialled -- two Baileys clients against one session
+        # directory, the corruption `istota whatsapp pair` refuses a whole
+        # running daemon to avoid. Nothing else in the deployment reports it
+        # above a single log line.
+        return CheckResult(
+            name, WARN,
+            f"a second WhatsApp sidecar has tried to connect; {counters}",
+            remedy=(
+                "Two sidecars against one session directory corrupt the "
+                "paired credential. Check whether both [whatsapp.baileys] "
+                "sidecar_command and a separate unit or compose service are "
+                "running one, and leave exactly one."
             ),
             scope=DEPLOYMENT,
         )
@@ -7427,15 +7472,23 @@ def check_whatsapp_baileys_session(config: "Config", probe: bool) -> CheckResult
             ),
             scope=DEPLOYMENT,
         )
-    if info.st_uid != os.geteuid():
+    # **Skipped under root, and the remedy never names this process's uid.**
+    # `sudo istota doctor` is an ordinary invocation, and there `geteuid()` is
+    # 0 while the directory belongs to the daemon's account -- so the arm
+    # FAILed a correctly-installed deployment, and the remedy it printed
+    # (`chown -R 0 ...`) makes the credential unreadable by the daemon and
+    # `ensure_session_dir` refuse it on the next start. Root can read the
+    # directory whatever its owner, so there is nothing this arm can tell an
+    # operator from there that is both true and useful.
+    if os.geteuid() != 0 and info.st_uid != os.geteuid():
         return CheckResult(
             name, FAIL,
             f"{path} is owned by uid {info.st_uid} and this process runs as "
-            f"{os.geteuid()}; a full-account WhatsApp credential is readable "
-            "by another account",
+            f"{os.geteuid()}; a full-account WhatsApp credential belongs to "
+            "another account",
             remedy=(
-                f"Run `chown -R {os.geteuid()} {path}`, or remove it and "
-                "re-pair with `istota whatsapp pair`."
+                f"Give {path} back to the account the istota daemon runs as, "
+                "or remove it and re-pair with `istota whatsapp pair`."
             ),
             scope=DEPLOYMENT,
         )
@@ -7448,31 +7501,22 @@ def check_whatsapp_baileys_session(config: "Config", probe: bool) -> CheckResult
             remedy=remedy, scope=DEPLOYMENT,
         )
 
-    from .transport.whatsapp.baileys_bridge import harden_session_files
+    from .transport.whatsapp.baileys_bridge import survey_session_files
 
-    # Reports what it *would* have narrowed as well as what it could not, and
-    # the two are separate numbers for the reason the bridge keeps them apart:
-    # one is a file this ran on, the other is a file that stayed wide.
-    narrowed, unfixed = harden_session_files(path)
-    if unfixed:
+    # **The survey, never `harden_session_files`.** This ran the narrowing
+    # pass, which made a diagnostic the second writer of a full-account
+    # credential's permissions -- from whichever of four processes happened to
+    # run first -- and then self-cleared: the second run reported `OK`, so the
+    # hourly sweep's transition alerting could see the exposure once and an
+    # operator rerunning the command to confirm saw a clean tree. The bridge
+    # still narrows on its own start path, which is where a repair belongs.
+    wide = survey_session_files(path)
+    if wide:
         return CheckResult(
             name, FAIL,
-            f"{unfixed} file(s) under {path} could not be narrowed to 0600; "
-            "a full-account WhatsApp credential may be readable by another "
-            "account",
+            f"{wide} file(s) under {path} are wider than 0600; a "
+            "full-account WhatsApp credential is readable by another account",
             remedy=remedy, scope=DEPLOYMENT,
-        )
-    if narrowed:
-        return CheckResult(
-            name, WARN,
-            f"{narrowed} file(s) under {path} were wider than 0600 and have "
-            "been narrowed; they may already have been read",
-            remedy=(
-                "Nothing further is needed to close it. If the host is shared, "
-                "re-pair with `istota whatsapp pair` so the exposed session is "
-                "no longer the live one."
-            ),
-            scope=DEPLOYMENT,
         )
     return CheckResult(
         name, OK,

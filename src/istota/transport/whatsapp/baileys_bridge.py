@@ -224,8 +224,9 @@ def resolve_sidecar_argv(config: Config) -> tuple[str, ...]:
     deliberately does not.
 
     **There is no in-tree fallback on this path, and that is the point rather
-    than an omission.** One exists in `cli._pair_sidecar_argv`, where a
-    developer's checkout is the case it serves. Here it would fire on exactly
+    than an omission.** `in_tree_sidecar_argv` below is that fallback and
+    `cli.cmd_whatsapp_pair` is its one caller, where a developer's checkout is
+    the case it serves. Here it would fire on exactly
     the canonical deployment: the Ansible shape installs from a checkout, so
     `docker/whatsapp-baileys/index.js` is present and `node` is usually on
     PATH, and the daemon would spawn a second sidecar beside the unit's —
@@ -272,9 +273,46 @@ def in_tree_sidecar_argv() -> tuple[str, ...]:
     import shutil  # noqa: PLC0415
 
     entry = _SIDECAR_IN_TREE / SIDECAR_ENTRY
-    if not entry.is_file() or shutil.which("node") is None:
+    if not entry.is_file():
         return ()
-    return (str(shutil.which("node")), str(entry))
+    # Bound once. Two `PATH` walks with a gap between them can answer
+    # differently, and the second answering `None` renders the string "None"
+    # into the argv.
+    node = shutil.which("node")
+    if node is None:
+        return ()
+    if not (_SIDECAR_IN_TREE / "node_modules" / "@whiskeysockets" / "baileys").is_dir():
+        # The library is required lazily inside the sidecar, so without this
+        # the program starts and fails at its first import. That used to reach
+        # the daemon as a permanent `bad_session`, which pages every admin
+        # about an unlinked device on a deployment that has never paired; the
+        # sidecar classifies it now, and declining to name the argv is the
+        # earlier and quieter half of the same answer.
+        logger.warning(
+            "whatsapp.baileys.dependencies_missing: the sidecar is in this "
+            "tree at %s and its dependencies are not installed (`npm ci`)",
+            _SIDECAR_IN_TREE,
+        )
+        return ()
+    return (node, str(entry))
+
+
+def shipped_library_version() -> str:
+    """The Baileys version this checkout's sidecar pins, or ``""``.
+
+    Read out of `package.json` rather than imported, since nothing in Python
+    imports the sidecar. `""` on any failure — a wheel install has no
+    `docker/` directory at all, and a diagnostic that cannot read the file has
+    not learned that two versions disagree.
+    """
+    import json  # noqa: PLC0415
+
+    try:
+        manifest = json.loads((_SIDECAR_IN_TREE / "package.json").read_text())
+        pinned = manifest["dependencies"]["@whiskeysockets/baileys"]
+    except Exception:
+        return ""
+    return pinned if isinstance(pinned, str) else ""
 
 
 def ensure_session_dir(path: Path) -> Path:
@@ -329,6 +367,51 @@ def ensure_session_dir(path: Path) -> Path:
     return path
 
 
+def _wide_session_files(path: Path):
+    """Every regular file in the session directory wider than 0600.
+
+    The walk both the narrowing pass and the read-only survey run, written
+    once so a diagnostic and a repair cannot disagree about what "wide" means
+    — `.claude/rules/doctor.md`'s rule that a check asks the owning module's
+    own predicate rather than keeping a copy.
+
+    `lstat`, so a symlink is judged as the link rather than as its target, and
+    an entry that vanished between the listing and the stat is skipped: it is
+    not a widened session file, and counting it as one is what an earlier
+    version of the narrowing pass got wrong.
+
+    Never raises. An unreadable directory yields nothing.
+    """
+    try:
+        entries = sorted(path.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            info = entry.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) == 0o600:
+            continue
+        yield entry
+
+
+def survey_session_files(path: Path) -> int:
+    """How many session files are wider than 0600, changing nothing.
+
+    `harden_session_files`' read-only twin, and it exists because `doctor` may
+    not be the second writer of a full-account credential's permissions. It
+    was: the session check called the narrowing pass, so the exposure was
+    repaired from whichever of four processes happened to run a diagnostic
+    first — and then *self-cleared*, so the hourly sweep's transition alerting
+    could observe it once and an operator who reran the command to confirm saw
+    a clean tree. A check that repairs is a check that cannot report.
+
+    Never raises, for the reason every `doctor` helper does not.
+    """
+    return sum(1 for _ in _wide_session_files(path))
+
+
 def harden_session_files(path: Path) -> tuple[int, int]:
     """Narrow any session file wider than 0600. Returns `(narrowed, failed)`.
 
@@ -353,19 +436,7 @@ def harden_session_files(path: Path) -> tuple[int, int]:
     """
     narrowed = 0
     failed = 0
-    try:
-        entries = sorted(path.iterdir())
-    except OSError:
-        return 0, 0
-    for entry in entries:
-        try:
-            info = entry.lstat()
-        except OSError:
-            # Gone between the listing and the stat, or unreadable. Neither is
-            # a widened session file.
-            continue
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) == 0o600:
-            continue
+    for entry in _wide_session_files(path):
         try:
             fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW)
             try:
@@ -1019,9 +1090,17 @@ class BaileysBridge:
         permanent = payload.get("permanent") is True or reason in _PERMANENT_FATALS
         already = self._status.fatal_is_permanent
         self._status.fatal_reason = reason
-        self._status.fatal_is_permanent = permanent
         self._status.ready = False
+        # **Only `ready` clears a permanent latch.** Assigning `permanent`
+        # here unconditionally meant a *transient* fatal arriving after a
+        # permanent one re-opened the send gate against a session that is
+        # gone, left `_permanent_fatal` set so the supervisor still refused to
+        # respawn, and re-armed the once-per-outage alert. Nothing the shipped
+        # sidecar sends reaches that today — both its fatals are permanent —
+        # but the branch is written as though a transient one exists, and any
+        # other sidecar has one.
         if permanent:
+            self._status.fatal_is_permanent = True
             self._permanent_fatal.set()
             if self._on_fatal is not None and not already:
                 # **Only the first of a run.** A sidecar reporting `logged_out`
@@ -1326,6 +1405,9 @@ __all__ = [
     "default_socket_path",
     "ensure_session_dir",
     "harden_session_files",
+    "in_tree_sidecar_argv",
     "read_status",
     "set_active_bridge",
+    "shipped_library_version",
+    "survey_session_files",
 ]

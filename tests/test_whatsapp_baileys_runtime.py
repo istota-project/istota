@@ -96,15 +96,69 @@ class TestResolvingTheSidecarCommand:
 
         assert baileys_bridge.resolve_sidecar_argv(cfg) == ()
 
-    def test_the_shipped_program_is_found_in_this_checkout(self, monkeypatch):
+    @staticmethod
+    def _installed_checkout(tmp_path, monkeypatch, *, deps=True):
+        """A stand-in for a checkout with `npm ci` run in it.
+
+        The real tree has no `node_modules` — it is gitignored, and the
+        vendoring guard refuses one — so the state this resolver is about
+        cannot be produced in place.
+        """
+        tree = tmp_path / "whatsapp-baileys"
+        tree.mkdir()
+        (tree / "index.js").write_text("// sidecar\n")
+        if deps:
+            (tree / "node_modules" / "@whiskeysockets" / "baileys").mkdir(parents=True)
+        monkeypatch.setattr(baileys_bridge, "_SIDECAR_IN_TREE", tree)
         monkeypatch.setattr(
             "shutil.which", lambda name: "/usr/bin/node" if name == "node" else None,
         )
+        return tree
+
+    def test_the_shipped_program_is_found_in_this_checkout(self, tmp_path,
+                                                           monkeypatch):
+        tree = self._installed_checkout(tmp_path, monkeypatch)
 
         argv = baileys_bridge.in_tree_sidecar_argv()
 
-        assert argv[0] == "/usr/bin/node"
-        assert argv[1].endswith("docker/whatsapp-baileys/index.js")
+        assert argv == ("/usr/bin/node", str(tree / "index.js"))
+
+    def test_the_real_tree_names_the_program_the_resolver_looks_for(self):
+        """The half the stand-in above cannot assert: that the path this
+        resolver builds is the file that ships."""
+        entry = (
+            baileys_bridge._SIDECAR_IN_TREE / baileys_bridge.SIDECAR_ENTRY
+        )
+
+        assert entry.is_file()
+        assert entry.name == "index.js"
+
+    def test_a_checkout_with_no_dependencies_resolves_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        """The library is required lazily inside the sidecar, so without this
+        the program starts and dies at its first import — which used to reach
+        the daemon as a permanent `bad_session` and page every admin about an
+        unlinked device on a deployment that has never paired."""
+        self._installed_checkout(tmp_path, monkeypatch, deps=False)
+
+        assert baileys_bridge.in_tree_sidecar_argv() == ()
+
+    def test_node_is_resolved_once(self, tmp_path, monkeypatch):
+        """Two `PATH` walks with a gap between them can answer differently,
+        and a second answer of `None` renders the string "None" into the
+        argv."""
+        tree = tmp_path / "whatsapp-baileys"
+        tree.mkdir()
+        (tree / "index.js").write_text("// sidecar\n")
+        (tree / "node_modules" / "@whiskeysockets" / "baileys").mkdir(parents=True)
+        monkeypatch.setattr(baileys_bridge, "_SIDECAR_IN_TREE", tree)
+        answers = iter(["/usr/bin/node", None])
+        monkeypatch.setattr("shutil.which", lambda name: next(answers))
+
+        argv = baileys_bridge.in_tree_sidecar_argv()
+
+        assert argv == ("/usr/bin/node", str(tree / "index.js"))
 
     def test_the_daemon_never_takes_the_in_tree_program(self, tmp_path,
                                                         monkeypatch):
@@ -113,13 +167,10 @@ class TestResolvingTheSidecarCommand:
         `node` is usually on PATH — and the daemon would then spawn a second
         sidecar beside the systemd unit's, against one session directory.
 
-        Driven with the program genuinely present in this tree, which is what
-        makes the assertion about the *decision* rather than about the file
-        being absent.
+        Driven with the fallback genuinely resolving, which is what makes the
+        assertion about the *decision* rather than about a file being absent.
         """
-        monkeypatch.setattr(
-            "shutil.which", lambda name: "/usr/bin/node" if name == "node" else None,
-        )
+        self._installed_checkout(tmp_path, monkeypatch)
         assert baileys_bridge.in_tree_sidecar_argv() != ()
 
         assert baileys_bridge.resolve_sidecar_argv(_config(tmp_path)) == ()
@@ -127,6 +178,7 @@ class TestResolvingTheSidecarCommand:
     def test_without_node_the_in_tree_fallback_resolves_nothing(
         self, tmp_path, monkeypatch,
     ):
+        self._installed_checkout(tmp_path, monkeypatch)
         monkeypatch.setattr("shutil.which", lambda name: None)
 
         assert baileys_bridge.in_tree_sidecar_argv() == ()
@@ -219,6 +271,41 @@ class TestStartingTheBridge:
         assert baileys_bridge.active_bridge() is None
 
 
+class TestWhoTheUnlinkAlertReaches:
+    def test_an_admin_who_is_not_a_configured_user_does_not_take_the_alert(
+        self, tmp_path, monkeypatch,
+    ):
+        """A stale or renamed entry in the admins file would otherwise write a
+        row and attempt a push for a user with no configuration at all. The
+        fallback is every configured user, matching the empty-admins arm."""
+        config = _config(tmp_path)
+        config.users["bob"] = UserConfig()
+        monkeypatch.setattr(
+            "istota.config.load_admin_users", lambda: {"someone-who-left"},
+        )
+
+        assert baileys_runtime._unlink_readers(config) == ["alice", "bob"]
+
+    def test_an_admin_who_is_a_configured_user_takes_it_alone(
+        self, tmp_path, monkeypatch,
+    ):
+        config = _config(tmp_path)
+        config.users["bob"] = UserConfig()
+        monkeypatch.setattr("istota.config.load_admin_users", lambda: {"bob"})
+
+        assert baileys_runtime._unlink_readers(config) == ["bob"]
+
+    def test_an_empty_admin_file_means_everybody(self, tmp_path, monkeypatch):
+        """`Config.is_admin` reads an empty file as "every user is an admin",
+        which is the single-user install's ordinary state — so an empty set
+        has to fan out rather than reach nobody."""
+        config = _config(tmp_path)
+        config.users["bob"] = UserConfig()
+        monkeypatch.setattr("istota.config.load_admin_users", lambda: set())
+
+        assert baileys_runtime._unlink_readers(config) == ["alice", "bob"]
+
+
 class TestTheUnlinkAlert:
     def test_the_first_permanent_fatal_calls_the_owner_back(self, tmp_path):
         seen = []
@@ -260,6 +347,24 @@ class TestTheUnlinkAlert:
         bridge._handle_fatal({"reason": "logged_out"})
 
         assert seen == ["logged_out", "logged_out"]
+
+    def test_a_transient_fatal_does_not_reopen_the_send_gate(self, tmp_path):
+        """Only `ready` clears a permanent latch. Assigning the flag
+        unconditionally let a transient fatal arriving after a permanent one
+        re-open sends against a session that is gone, while
+        `_permanent_fatal` stayed set so the supervisor still refused to
+        respawn — and it re-armed the once-per-outage alert."""
+        seen = []
+        bridge = baileys_bridge.BaileysBridge(
+            _config(tmp_path), on_fatal=seen.append,
+        )
+
+        bridge._handle_fatal({"reason": "logged_out"})
+        bridge._handle_fatal({"reason": "stream_error"})
+
+        assert bridge.status.fatal_is_permanent is True
+        bridge._handle_fatal({"reason": "logged_out"})
+        assert seen == ["logged_out"]
 
     def test_a_transient_fatal_announces_nothing(self, tmp_path):
         """`_send`'s gate is `fatal_is_permanent` alone, so a transient fatal

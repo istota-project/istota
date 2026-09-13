@@ -130,6 +130,11 @@ class Link {
     this.buffer = '';
     this.onMessage = () => {};
     this.onClose = () => {};
+    // Called after every `hello`. The daemon clears `ready` whenever the link
+    // drops, and only a `ready` frame sets it back — so a session that never
+    // closed has to say so again, or the bridge reports `connected` and not
+    // `ready` for ever and `istota whatsapp pair` can never finish.
+    this.onReady = () => {};
   }
 
   connect() {
@@ -139,6 +144,7 @@ class Link {
     socket.on('connect', () => {
       log('info', 'connected to the daemon');
       this.send(MSG_HELLO, { protocol_version: PROTOCOL_VERSION });
+      this.onReady();
     });
     socket.on('data', (chunk) => this.feed(chunk));
     socket.on('error', (err) => log('warn', 'socket error', { code: err.code }));
@@ -218,8 +224,22 @@ function loadBaileys() {
   return require('@whiskeysockets/baileys');
 }
 
+const USER_JID_DOMAIN = '@s.whatsapp.net';
+const GROUP_JID_DOMAIN = '@g.us';
+
 function isGroupJid(jid) {
-  return typeof jid === 'string' && jid.endsWith('@g.us');
+  return typeof jid === 'string' && jid.endsWith(GROUP_JID_DOMAIN);
+}
+
+// A chat this surface models at all. `status@broadcast` and `@newsletter`
+// arrive through `messages.upsert` like any other message and on an active
+// account they never stop, so forwarding them costs a queue slot, a thread
+// and a write transaction each, every one of which then fails to resolve a
+// sender. A group still crosses — the daemon refuses it before any identity
+// lookup, and that refusal has to stay a path something drives.
+function isForwardableJid(jid) {
+  return typeof jid === 'string' &&
+    (jid.endsWith(USER_JID_DOMAIN) || jid.endsWith(GROUP_JID_DOMAIN));
 }
 
 function messageText(message) {
@@ -254,9 +274,38 @@ class Session {
     this.sock = null;
     this.stopping = false;
     this.startFailures = 0;
+    this.starting = false;
+    // Whether WhatsApp is connected *now*, as distinct from whether the
+    // daemon has been told. `ready` used to be sent on the `open` transition
+    // alone, so a daemon restart — or any link blip — left the bridge
+    // reporting `connected` and never `ready`, permanently, because no second
+    // `open` fires for a session that never closed. `announceReady` is what
+    // closes that, and it is why this flag exists rather than being derived
+    // from `this.sock`, which is non-null for a socket that is reconnecting.
+    this.open = false;
+  }
+
+  announceReady() {
+    if (this.open) this.link.send(MSG_READY, {});
   }
 
   async start() {
+    // Two `connection: close` events before the reconnect timer fires would
+    // otherwise schedule two `start()`s, and two live sockets both write
+    // `SESSION_DIR` through `creds.update` — the auth-state corruption the
+    // pair command refuses a whole running daemon to avoid, reached from
+    // inside one process. The `mine()` guard below handles a *late* event
+    // from an orphan; this handles the overlap.
+    if (this.starting || this.stopping) return;
+    this.starting = true;
+    try {
+      await this.open_();
+    } finally {
+      this.starting = false;
+    }
+  }
+
+  async open_() {
     const baileys = loadBaileys();
     const { state, saveCreds } = await baileys.useMultiFileAuthState(SESSION_DIR);
     const sock = baileys.makeWASocket({
@@ -303,9 +352,11 @@ class Session {
       // A session that opened is evidence the credential is usable, so the
       // run of construction failures below starts again from zero.
       this.startFailures = 0;
+      this.open = true;
       this.link.send(MSG_READY, {});
       return;
     }
+    this.open = false;
     if (connection !== 'close') return;
 
     const status =
@@ -320,6 +371,15 @@ class Session {
       // unlinked, and reconnecting with it will be refused for ever. The
       // daemon latches this, refuses every send definitely and alerts.
       this.link.send(MSG_FATAL, { reason: FATAL_LOGGED_OUT, permanent: true });
+      // **And then it exits.** Staying alive leaves a process holding the
+      // session directory with a dead socket, reporting `connected` and not
+      // `ready` — and after a re-pair it never re-runs `start()`, so it is
+      // useless until somebody restarts it by hand. Exiting is also what the
+      // bridge's own supervisor docstring assumes on the external-unit shape:
+      // systemd restarts the unit, it reconnects, and its `ready` clears the
+      // latch. The delay is for the frame to leave the socket first.
+      this.stopping = true;
+      setTimeout(() => process.exit(1), 500);
       return;
     }
     if (this.stopping) return;
@@ -369,7 +429,7 @@ class Session {
       // bot's own answer into the user's task history as their next request.
       if (!message || !message.key || message.key.fromMe) continue;
       const jid = message.key.remoteJid;
-      if (typeof jid !== 'string' || !jid) continue;
+      if (!isForwardableJid(jid)) continue;
       const group = isGroupJid(jid);
       const text = group ? null : messageText(message);
       // The `group` flag is read off the chat rather than inferred from the
@@ -392,8 +452,15 @@ class Session {
   onReceipts(updates) {
     if (!Array.isArray(updates)) return;
     for (const item of updates) {
-      const id = item && item.key && item.key.id;
-      const status = item && item.update && item.update.status;
+      // **The inverse of `onMessages`' filter, and it has to be here.**
+      // `messages.update` fires in both directions — a message we marked
+      // read, a revoked incoming one — and a receipt for somebody else's
+      // message matches no ledger row, so the daemon *parks* it against the
+      // next send that is mid-flight and prunes it later as foreign traffic.
+      // An id collision with a real row would be worse than the noise.
+      if (!item || !item.key || !item.key.fromMe) continue;
+      const id = item.key.id;
+      const status = item.update && item.update.status;
       if (typeof id !== 'string' || !id || status === undefined) continue;
       const mapped = receiptStatus(status);
       if (!mapped) continue;
@@ -423,14 +490,15 @@ class Session {
       this.answer(requestId, { ok: false, reason: 'not_connected', definite: true });
       return;
     }
-    const options = {};
-    if (typeof payload.reply_to_message_id === 'string' && payload.reply_to_message_id) {
-      // Best effort: a quoted reply needs the original message, which this
-      // process may no longer hold. The id alone is what Baileys accepts.
-      options.quoted = { key: { id: payload.reply_to_message_id, remoteJid: payload.to } };
-    }
+    // **`reply_to_message_id` is carried on the wire and not applied here.**
+    // A quoted reply needs the whole original `WAMessage`, which this process
+    // does not keep, and the obvious synthetic stub — a bare `{key: {id}}` —
+    // is a shape the library was not given and may refuse. A refusal would
+    // land in the catch below as an *ambiguous* failure, spending `unknown`
+    // on a message that never left, for a cosmetic thread marker. Dropping
+    // it costs the quote and nothing else.
     try {
-      const sent = await this.sock.sendMessage(payload.to, { text: payload.text }, options);
+      const sent = await this.sock.sendMessage(payload.to, { text: payload.text });
       const id = sent && sent.key && sent.key.id;
       if (typeof id !== 'string' || !id) {
         // Sent, and we cannot name what. Not definite — the message may be on
@@ -476,16 +544,40 @@ class Session {
   }
 }
 
+// `proto.WebMessageInfo.Status`, mapped onto the ledger's own vocabulary here
+// rather than on the daemon's side, which should not learn a library's enum.
+//
+// **0 is ERROR and dropping it is a delivery that failed and was never
+// reported.** `byNumber[0]` was absent, `undefined` fell through the caller's
+// falsy guard, and the row stayed `accepted` — the exact class the parked
+// status table was built for, with no alert behind it. The string branch has
+// always mapped `error`; the numeric branch is the live one.
+//
+// 1 is PENDING, which is *before* the server acknowledged anything, so it maps
+// to nothing: calling it `sent` advances the monotonic ladder ahead of the
+// fact. 5 is PLAYED, which this surface does not model past `read`.
+const RECEIPT_BY_NUMBER = {
+  0: 'failed',
+  2: 'sent',
+  3: 'delivered',
+  4: 'read',
+  5: 'read',
+};
+const RECEIPT_BY_NAME = ['sent', 'delivered', 'read', 'failed'];
+
 function receiptStatus(status) {
-  // Baileys reports a numeric enum and, on some paths, its name. Both are
-  // mapped here rather than on the daemon's side, whose table is the ledger's
-  // own vocabulary and should not learn a library's enum.
-  const byNumber = { 1: 'sent', 2: 'sent', 3: 'delivered', 4: 'read', 5: 'read' };
-  if (typeof status === 'number') return byNumber[status] || null;
+  // `|| null` would be wrong here even with 0 mapped, since the map's own
+  // values are all truthy strings — but the explicit test is what says the
+  // zero key is deliberate.
+  if (typeof status === 'number') {
+    return Object.prototype.hasOwnProperty.call(RECEIPT_BY_NUMBER, status)
+      ? RECEIPT_BY_NUMBER[status]
+      : null;
+  }
   if (typeof status !== 'string') return null;
   const name = status.toLowerCase();
   if (name === 'error') return 'failed';
-  return ['sent', 'delivered', 'read', 'failed'].includes(name) ? name : null;
+  return RECEIPT_BY_NAME.includes(name) ? name : null;
 }
 
 function sendFailureReason(err) {
@@ -536,6 +628,7 @@ function main() {
   // The daemon's listener outlives any one sidecar, so a dropped link is a
   // reconnect rather than an exit — and reconnecting keeps the WhatsApp
   // session, which an exit would throw away along with its warm state.
+  link.onReady = () => session.announceReady();
   link.onClose = () => {
     if (session.stopping) return;
     log('warn', 'the daemon link closed; reconnecting');

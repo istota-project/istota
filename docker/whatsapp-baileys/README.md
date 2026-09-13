@@ -57,11 +57,18 @@ The connection is exercised by hand at deployment. `docs/features/whatsapp.md`
 does not cover this adapter yet — the spec assigns that to its documentation
 stage — so the procedure is written here until it does:
 
-1. Stop the istota scheduler.
+1. Stop the istota scheduler, and any sidecar running as a unit of its own.
 2. `npm ci` in this directory.
 3. `istota whatsapp pair`, and scan the code from WhatsApp's Linked Devices
-   screen.
-4. Start the scheduler. `istota doctor --only whatsapp.` should report
+   screen. Pairing finds the program in a checkout by itself; it needs no
+   configuration.
+4. Arrange for something to run the sidecar. Either set `[whatsapp.baileys]
+   sidecar_command` so the daemon spawns it, or start the unit or compose
+   service that does. **The daemon spawns nothing by default** — with
+   `sidecar_command` empty it only listens, which is what a deployment
+   running its own sidecar wants and is why step 5 would otherwise report no
+   sidecar connected.
+5. Start the scheduler. `istota doctor --only whatsapp.` should report
    `whatsapp.baileys_session` ok; the bridge check answers only inside the
    daemon, so read that one from the admin Health pane or `!check`.
-5. Message the number from a bound user's phone and confirm a reply arrives.
+6. Message the number from a bound user's phone and confirm a reply arrives.

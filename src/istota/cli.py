@@ -1726,6 +1726,16 @@ def cmd_whatsapp_pair(args):
     is already its writer. Detected by connecting to the bridge's socket,
     since the inode outliving its process is ordinary.
 
+    **The refusal reaches one of the two shapes, and the gap is stated rather
+    than papered over.** The daemon owns the listener, so with the daemon
+    stopped the socket is gone and the probe is silent — while a sidecar run
+    as its own systemd unit or compose service is still running and still
+    holding the session directory. Every message this command and the two
+    doctor/alert remedies print therefore names the sidecar as well as the
+    daemon. A real guard is an advisory lock inside the session directory
+    taken by whichever process opens it, which needs a lock on the Node side
+    and belongs with the unit that runs it.
+
     That refusal is also what makes the *recovery* path work, which the
     bridge's supervisor records as this command's debt: a permanent fatal
     stops the respawn loop, so on the combined `istota serve` shape nothing is
@@ -1750,7 +1760,8 @@ def cmd_whatsapp_pair(args):
     if _whatsapp_socket_is_live(socket_path):
         print(
             f"Something is already listening on {socket_path}, so a WhatsApp "
-            "sidecar is running. Stop the istota scheduler before pairing — "
+            "bridge is running. Stop the istota scheduler before pairing, and "
+            "any sidecar running as a unit or compose service of its own — "
             "two Baileys clients sharing one session directory corrupt it.",
             file=sys.stderr,
         )
@@ -1774,6 +1785,11 @@ def cmd_whatsapp_pair(args):
         return 1
 
     print("Starting the WhatsApp sidecar. A code will appear below.")
+    print(
+        "If a sidecar runs as a unit of its own on this host, stop it first: "
+        "two Baileys clients sharing one session directory corrupt it, and "
+        "only a bridge listening on the socket above is detected here.",
+    )
     print("Open WhatsApp on the phone holding this number, then: Settings, "
           "Linked Devices, Link a device.\n")
     import asyncio
