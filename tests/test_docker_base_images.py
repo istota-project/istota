@@ -103,6 +103,7 @@ BASE_OWNING_DOCKERFILES = (
     Path("docker/test/Dockerfile"),
     Path("docker/test/Dockerfile.deploy"),
     Path("docker/devbox/Dockerfile"),
+    Path("docker/whatsapp-baileys/Dockerfile"),
 )
 
 # Vendored from another repository, which owns the base. Listed rather than

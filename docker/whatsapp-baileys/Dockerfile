@@ -11,7 +11,12 @@
 # The build context is this directory, not the repository root: the program is
 # three files and needs nothing from the tree, and the root context is large
 # enough that using it would dominate the build.
-FROM node:20-slim
+# `node:20-trixie-slim` rather than `node:20-slim`, which tracks bookworm: this
+# is a runtime image whose Debian release is this repository's decision, and
+# every other image it owns is on trixie. The web builder in
+# docker/istota/Dockerfile stays on the untagged variant because it copies
+# static JS out and contributes no library to the runtime.
+FROM node:20-trixie-slim
 
 WORKDIR /app
 
@@ -21,18 +26,18 @@ WORKDIR /app
 # holds a full WhatsApp account is the property worth having. `--omit=dev`
 # leaves out nothing of ours — this manifest declares no devDependencies.
 #
-# **No git here, and that is measured rather than assumed.** Two of Baileys'
-# own *runtime* dependencies are git dependencies rather than registry
-# tarballs — `libsignal`, which is the cryptography, and an eslint config that
-# package declares under `dependencies` — and the lockfile records both as
-# `git+ssh://git@github.com/…`, which GitHub serves only to an authenticated
-# key. That reads like a build needing git and an https rewrite, and this image
+# **No git here, and that is measured rather than assumed.** One of Baileys'
+# own *runtime* dependencies is a git dependency rather than a registry
+# tarball — `libsignal`, which is the cryptography — and the lockfile records
+# it as `git+ssh://git@github.com/…`, which GitHub serves only to an
+# authenticated key. That reads like a build needing git and an https rewrite, and this image
 # carried both for one commit. It does not: npm fetches a *hosted* git
 # dependency as a codeload tarball over https and only shells out to git when
 # that fails, so the install succeeds on this base, which ships no git at all.
 # Verified by building with neither and checking `node_modules/libsignal` is
 # there. A git dependency on a forge `hosted-git-info` does not know would need
-# both back.
+# both back. There were two such dependencies until the 6.7.24 bump: 6.7.18
+# also declared an eslint config under `dependencies`.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
