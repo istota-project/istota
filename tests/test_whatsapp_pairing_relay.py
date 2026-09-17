@@ -1209,19 +1209,60 @@ class TestTheWatchdog:
         assert bridge.last_pairing_outcome.state == pairing_relay.STATE_FAILED
         assert "watchdog" in bridge.last_pairing_outcome.message
 
-    async def test_a_late_sidecar_still_pairs(self, bridge, sidecar):
-        await bridge.open_pairing_window(USER)
-        await wait_for(
-            lambda: bridge.status.pairing_state
-            == pairing_relay.STATE_SIDECAR_ABSENT,
-            timeout=3.0,
+    async def test_a_late_sidecar_still_pairs(self, config, sockets):
+        """The demotion is not a close: a code arriving after it still pairs.
+
+        **Its own instance, with a window far longer than the demotion
+        deadline, and that gap is what keeps the test honest rather than
+        merely green.** The shared `bridge` fixture pairs a 1.5s window with
+        this test's own 3.0s wait for the demotion, so on a loaded host the
+        window expires before the QR is sent, `_handle_qr` correctly takes its
+        no-window path, and `awaiting_scan` never arrives — the test goes red
+        over its own timing rather than over the behaviour it names (observed
+        once in a 27588-test run, and green six times beside it). The TTL is
+        incidental here: what is asserted is that `sidecar_absent` is reached
+        and that a later code lifts it, so the window is given room to outlast
+        the wait and the short `sidecar_return_timeout` is what the demotion
+        still races.
+        """
+        instance = BaileysBridge(
+            config,
+            socket_path=sockets.socket,
+            session_dir=sockets.session,
+            pairing_relay_path=sockets.path / "relay.json",
+            pairing_window_seconds=30.0,
+            sidecar_return_timeout=0.2,
         )
-        await sidecar.say(proto.MSG_QR, qr=QR)
-        await wait_for(
-            lambda: bridge.status.pairing_state == pairing_relay.STATE_AWAITING_SCAN
-        )
-        read = pairing_relay.read_relay(relay_path(bridge))
-        assert read["qr"] == QR
+        await instance.start()
+        try:
+            fake = FakeSidecar(sockets.socket)
+            await fake.connect()
+            await wait_for(lambda: instance.status.connected is True)
+            await instance.open_pairing_window(USER)
+            await wait_for(
+                lambda: instance.status.pairing_state
+                == pairing_relay.STATE_SIDECAR_ABSENT,
+                timeout=3.0,
+            )
+            await fake.say(proto.MSG_QR, qr=QR)
+            # **Wait on the file, not on the state**, which is this file's
+            # established idiom (`test_it_publishes_0600_with_the_window_id`)
+            # and the reason is a real ordering rather than a style: the state
+            # is stamped on the read loop synchronously and the relay write is
+            # queued to a worker thread, so `awaiting_scan` is observable
+            # before the payload has landed. Asserting the file off the state
+            # is a `KeyError: 'qr'` about one run in sixteen.
+            await wait_for(
+                lambda: (
+                    pairing_relay.read_relay(relay_path(instance)) or {}
+                ).get("qr")
+            )
+            read = pairing_relay.read_relay(relay_path(instance))
+            assert read["state"] == pairing_relay.STATE_AWAITING_SCAN
+            assert read["qr"] == QR
+            await fake.close()
+        finally:
+            await instance.stop()
 
     async def test_a_qr_already_in_hand_is_not_demoted(self, config, sockets):
         """The demotion applies only to a window still awaiting a sidecar."""
