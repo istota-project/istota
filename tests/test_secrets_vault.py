@@ -1530,6 +1530,38 @@ class TestApply:
         assert secrets_store.get_secret(
             db_path, "alice", "karakeep", "api_key") == "ak-old"
 
+    def test_a_near_miss_title_with_an_empty_password_holds_the_deletion_too(
+        self, tmp_path, db_path, secret_key_env
+    ):
+        """The shape the first version of the hold missed.
+
+        An unknown key only reaches `skipped` if it carried a value, so a
+        near-miss title whose password field is *empty* is dropped at parse,
+        lands in no skip list, and its spelling is exactly what keeps the real
+        key out of `entry_titles` — measured before the fix: the credential was
+        deleted and `skipped` was empty, so the user got neither the value nor a
+        word about losing the old one. Two fat-fingers in one entry is not an
+        exotic case; it is the same entry the empty-password rule already calls
+        the likeliest mistake in the format, typed with the caps lock on.
+
+        The hold therefore reads the group's titles rather than this pass's
+        skips, which also covers a duplicated near-miss."""
+        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        karakeep = kp.add_group(root, "karakeep")
+        kp.add_entry(karakeep, "API_KEY", "", "")
+        kp.save()
+        read, _ = _read(path)
+
+        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
+
+        assert read.services["karakeep"] == {}
+        assert ("karakeep", "api_key", SKIP_DELETE_HELD) in result.skipped
+        assert result.deleted == 0
+        assert secrets_store.get_secret(
+            db_path, "alice", "karakeep", "api_key") == "ak-old"
+
     def test_a_case_variant_entry_title_holds_the_deletion_too(
         self, db_path, secret_key_env
     ):

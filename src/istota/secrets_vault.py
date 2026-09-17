@@ -547,7 +547,7 @@ def apply_vault(
                     _label(key),
                 )
                 continue
-            if _near_miss_title(key, service, result.skipped):
+            if _near_miss_title(key, titles):
                 # An entry titled `api_key ` or `API_KEY` is refused above as a
                 # key this service does not declare, and would then be followed
                 # by a delete of the very credential it was meant to set —
@@ -587,21 +587,30 @@ def apply_vault(
     return result
 
 
-def _near_miss_title(key: str, service: str,
-                     skipped: list[tuple[str, str, str]]) -> bool:
-    """Whether some title refused in this group was meant to be ``key``.
+def _near_miss_title(key: str, titles: frozenset[str]) -> bool:
+    """Whether some title in this group was probably meant to be ``key``.
 
     Compares on the two axes a phone keyboard moves: surrounding whitespace and
     case. §3 matches entry titles exactly and reports a mismatch as a typo,
     which is the right rule for deciding what to *write*; this is the narrower
     question of whether a deletion licensed by that same mismatch should go
     ahead, and there the answer that costs nothing is to hold.
+
+    **Asked of the group's titles rather than of the skips this pass recorded**,
+    which is wider by two shapes and was the first version's gap. An unknown key
+    only reaches ``skipped`` if it carried a value, so a near-miss title with an
+    *empty* password — or a duplicated one — is dropped at parse, lands in no
+    skip list, and its spelling is exactly what keeps the real key out of
+    ``entry_titles``: measured, `API_KEY` with a blank password beside a stored
+    `api_key` deleted the credential and put nothing in ``skipped``, so the user
+    got neither the new value nor a word about losing the old one. The evidence
+    the hold rests on is "the group holds a title that was probably meant to be
+    this key", which is a property of the titles, so that is what it reads.
+
+    A title equal to the key never reaches here: it would be in ``titles``, and
+    a key in ``titles`` is not a deletion candidate at all.
     """
-    return any(
-        s == service and reason == SKIP_UNKNOWN_KEY
-        and title.strip().casefold() == key.casefold()
-        for s, title, reason in skipped
-    )
+    return any(title.strip().casefold() == key.casefold() for title in titles)
 
 
 def _service_refusal(service: str, eligible: frozenset[str]) -> str | None:
