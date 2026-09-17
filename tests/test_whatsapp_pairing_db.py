@@ -416,6 +416,33 @@ class TestTheStateWrite:
             row = db.read_whatsapp_pairing(conn)
         assert row["state"] == state
 
+    @pytest.mark.parametrize("empty", ["", None])
+    def test_an_empty_window_id_is_refused_rather_than_compared(
+        self, db_path, empty
+    ):
+        """SQL equality against `''` never matches a NULL column, so an id-less
+        row would be unwritable by every caller here. Refused explicitly so the
+        caller sees a decision rather than a lost race.
+
+        **This case is documentation, not a control**, and it says so because
+        the distinction is the thing this repo keeps finding: removing the
+        refusal turns nothing red, since the UPDATE's `pairing_window_id = ''`
+        matches no ordinary row either way. What actually closes the hazard is
+        in the poll — `tests/test_whatsapp_pairing_poll.py::TestTheClosureCleanup
+        ::test_an_id_less_row_is_cleared_rather_than_left_stuck` — because a
+        non-terminal id-less row blocks every later request and the refusal
+        alone would only make that block explicit.
+        """
+        with db.get_db(db_path) as conn:
+            db.request_whatsapp_pairing(conn, USER)
+            assert not db.record_whatsapp_pairing_state(
+                conn, empty, db.WHATSAPP_PAIRING_SERVICING,
+            )
+            assert (
+                db.read_whatsapp_pairing(conn)["state"]
+                == db.WHATSAPP_PAIRING_REQUESTED
+            )
+
     def test_a_window_open_adopts_the_bridges_id_and_deadline(self, db_path):
         """The row's id at `requested` is the *request's* own, because the
         bridge mints its window id only when it actually opens one. The relay

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -319,6 +320,13 @@ def poll_pairing_request(config: "Config") -> None:
     """
     try:
         _poll_pairing_request(config)
+    except sqlite3.OperationalError as exc:
+        # A contended write lock, which `_POLL_BUSY_TIMEOUT_MS` turns into this
+        # rather than a 30s block. A lost tick costs nothing — the next is a
+        # poll interval away — so it is a skipped tick and not a fault, and at
+        # `fixed_interval=0` a WARNING with a traceback would be one per tick
+        # for as long as the other writer holds its transaction.
+        logger.debug("whatsapp.pairing.poll_skipped reason=%s", exc)
     except Exception:
         logger.warning("whatsapp.pairing.poll_failed", exc_info=True)
 
@@ -374,12 +382,93 @@ def _poll_pairing_request(config: "Config") -> None:
                 claim = (row["window_id"], row["requested_by"])
 
     if closure is not None:
-        if closure.unlink_relay and bridge is not None:
-            pairing_relay.clear_relay(bridge.pairing_relay_path)
-        _announce_pairing(config, closure)
+        _clean_up_after_closure(config, bridge, closure)
+        # Off the dispatch thread, like every other blocking thing here. The
+        # announce opens its own connection and then makes a network send per
+        # admin — `send_notification`'s Talk leg is a blocking `run_coro` and
+        # its email leg is synchronous SMTP — which is exactly the stall
+        # `_POLL_BUSY_TIMEOUT_MS` exists to keep off this loop. The sibling
+        # producer `_announce_unlink` already does both halves in threads; this
+        # one had been left synchronous.
+        _spawn_pairing_announce(config, closure)
         return
     if claim is not None:
         _spawn_pairing_service(config, bridge, claim[0], claim[1])
+
+
+def _clean_up_after_closure(
+    config: "Config", bridge, closure: "_PairingClosure",
+) -> None:
+    """Remove what a closed row leaves behind: the window, then the relay.
+
+    **A row closing while its window is still live is the case this exists
+    for.** The row's deadline is wall-clock and the window's is the loop's
+    monotonic clock, and both are sized from the same TTL — so a row picked up
+    late reaches its deadline while `repair_session` is still running or moments
+    after it armed a window. With the window left alone the next QR rotation
+    (about twenty seconds) republishes the relay file this function just
+    removed, and nothing closes the row a second time, so a live pairing code
+    sits on disk for the rest of the window's TTL after the operator has been
+    told it expired. `cancel_pairing` is the primitive for it: it drops the
+    window, cancels the watchdog and unlinks under `_relay_lock`, all three.
+
+    **Scheduled on the runtime loop rather than awaited**, because the bridge's
+    asyncio primitives are bound to it and this runs on the scheduler's
+    dispatch thread. Scoped to the window id, since by the time it runs the
+    window could have closed and a fresh one opened.
+
+    The relay path is taken from the **config** when no bridge is in hand, not
+    skipped: the deadline arm runs in a process whose bridge failed to start
+    too, and there the file is a pairing code with no window and no durable row
+    left to drive a later sweep.
+    """
+    if not closure.unlink_relay:
+        return
+    live = None if bridge is None else bridge.pairing_window
+    if live is not None and live.window_id == closure.window_id:
+        from ...async_runtime import spawn_task  # noqa: PLC0415
+
+        try:
+            spawn_task(
+                bridge.cancel_pairing(window_id=closure.window_id),
+                name="whatsapp-pairing-cancel",
+            )
+            return
+        except Exception:
+            # The runtime is stopping, so nothing will run the cancel. Fall
+            # through to the unlink: the credential matters more than the
+            # window, which is going away with the process anyway.
+            logger.warning(
+                "whatsapp.pairing.cancel_unscheduled window=%s",
+                closure.window_id,
+            )
+    if bridge is not None:
+        # Through the bridge, so the unlink is serialized against a write this
+        # bridge may still have in flight on a worker thread — the
+        # precondition `pairing_relay.clear_relay` states for itself.
+        bridge.clear_relay_file()
+        return
+    pairing_relay.clear_relay(
+        baileys_bridge.default_pairing_relay_path(config)
+    )
+
+
+def _spawn_pairing_announce(config: "Config", closure: "_PairingClosure") -> None:
+    from ...async_runtime import spawn_task  # noqa: PLC0415
+
+    try:
+        spawn_task(
+            asyncio.to_thread(_announce_pairing, config, closure),
+            name="whatsapp-pairing-announce",
+        )
+    except Exception:
+        # Nothing to fall back to that would not be the stall this avoids. The
+        # durable row already carries the outcome, which is the record that
+        # matters; the notification is the convenience on top.
+        logger.warning(
+            "whatsapp.pairing.announce_unscheduled window=%s state=%s",
+            closure.window_id, closure.state,
+        )
 
 
 def _expire_stale_pairing(conn, bridge, row: dict) -> "_PairingClosure | None":
@@ -418,6 +507,24 @@ def _expire_stale_pairing(conn, bridge, row: dict) -> "_PairingClosure | None":
     window_id = row["window_id"]
     in_window = state in db.WHATSAPP_PAIRING_WINDOW_STATES
 
+    if not window_id:
+        # **A row with no id is addressable by nothing else here**, and it is a
+        # stuck row rather than a curiosity: every write in this module is
+        # guarded on `pairing_window_id`, SQL equality never matches NULL, and
+        # `request_whatsapp_pairing`'s own guard is on the *state* — so such a
+        # row would refuse every later pairing request for the life of the
+        # deployment with nothing able to close it. No writer produces one
+        # today; Stage 4 adds routes that write this table directly, which is
+        # the moment a defensive note stops being enough. `clear_whatsapp_
+        # pairing` carries no id guard and is the one thing that can reach it.
+        if db.clear_whatsapp_pairing(conn):
+            logger.warning(
+                "whatsapp.pairing.row_without_id_cleared state=%s — a pairing "
+                "row with no window id can be addressed by nothing else",
+                state,
+            )
+        return None
+
     deadline = row["expires_at"]
     if deadline and deadline <= db.sql_datetime_now():
         # Both sides are `sql_datetime_now`'s fixed-width UTC format, where a
@@ -453,6 +560,20 @@ def _expire_stale_pairing(conn, bridge, row: dict) -> "_PairingClosure | None":
     outcome = bridge.last_pairing_outcome
     if outcome is not None and outcome.window_id == window_id:
         state_out, message = outcome.state, outcome.message
+        # The bridge's five close sites all pass a terminal state today, so
+        # this coercion is latent — and it is the difference between a latent
+        # defect and a live one. A non-terminal value would land the row
+        # non-terminal with no window behind it, and since every write also
+        # stamps `updated_at` the `rowcount` is 1 every time: this arm would
+        # then return a fresh closure on every tick, one relay clear, one log
+        # line and one alert per poll interval until the deadline.
+        if state_out not in db.WHATSAPP_PAIRING_TERMINAL_STATES:
+            logger.warning(
+                "whatsapp.pairing.outcome_not_terminal window=%s state=%s — "
+                "recorded as failed",
+                window_id, state_out,
+            )
+            state_out = db.WHATSAPP_PAIRING_FAILED
     else:
         state_out, message = db.WHATSAPP_PAIRING_FAILED, _orphan_message(row)
     if not db.record_whatsapp_pairing_state(
@@ -493,8 +614,17 @@ def _mirror_pairing_window(conn, bridge, row: dict) -> None:
         or live.state not in db.WHATSAPP_PAIRING_WINDOW_STATES
     ):
         return
+    # **The message is preserved verbatim and this function never writes one.**
+    # The row's message is the durable archive record — the only place a later
+    # process can learn which `.old-<timestamp>` sibling this attempt made —
+    # and the bridge sets `window.message` to its own prose on the
+    # `sidecar_absent` demotion, so taking the live one destroyed the path on
+    # the ordinary `awaiting_sidecar` -> `sidecar_absent` -> restart -> orphan
+    # sequence. The live prose is not lost to anybody who needs it: the relay
+    # file carries it, and the relay file is what the admin UI reads for a
+    # window that is still open.
     db.record_whatsapp_pairing_state(
-        conn, row["window_id"], live.state, live.message or row["message"],
+        conn, row["window_id"], live.state, row["message"] or None,
     )
 
 
@@ -517,12 +647,20 @@ def _spawn_pairing_service(
     """
     from ...async_runtime import spawn_task  # noqa: PLC0415
 
+    # The coroutine is built outside the `try` so the failure path can close
+    # it. `spawn` closes it itself on the `RuntimeError` it raises, but not on
+    # anything else, and an un-awaited coroutine is a `RuntimeWarning` in a
+    # place nobody is watching for one.
+    coro = _service_pairing_request(config, bridge, request_id, requested_by)
     try:
-        spawn_task(
-            _service_pairing_request(config, bridge, request_id, requested_by),
-            name="whatsapp-pairing",
-        )
-    except RuntimeError as exc:
+        spawn_task(coro, name="whatsapp-pairing")
+    except Exception as exc:  # noqa: BLE001 — the claim must not be stranded
+        # `RuntimeError` is the documented case (the runtime is stopping or was
+        # never started) and deliberately not the only one caught: anything at
+        # all out of the spawn leaves a row claimed with nothing running, which
+        # only the deadline arm would close, minutes later and with a message
+        # about a bridge that never picked it up.
+        coro.close()
         logger.warning(
             "whatsapp.pairing.spawn_refused window=%s reason=%s — the claim is "
             "reverted and the next poll will retry",
@@ -562,14 +700,27 @@ async def _service_pairing_request(
     this flow is for; carrying an operator's confirmed `force` across the row
     belongs with the routes that collect it.
     """
-    result = await bridge.repair_session(requested_by)
+    try:
+        result = await bridge.repair_session(requested_by)
+    except asyncio.CancelledError:
+        # `repair_session` re-raises cancellation, and `AsyncRuntime._shutdown`
+        # cancels pending tasks — so a daemon stopping mid-repair would leave
+        # the row `servicing` with nothing to close it but the deadline arm,
+        # minutes later and under a message about a bridge that never picked it
+        # up. The attempt may already have moved the credential aside, so the
+        # row is the only place that could say so. Recorded synchronously and
+        # with the bounded timeout, because there is no thread hop left during
+        # cancellation; then re-raised, per the runtime's own contract.
+        _record_pairing_interrupted(config, request_id)
+        raise
     expires_at: float | None = None
     window = bridge.pairing_window
     if window is not None and window.window_id == result.window_id:
         expires_at = window.expires_at_wall
     try:
         closure = await asyncio.to_thread(
-            _write_pairing_outcome, config, request_id, result, expires_at,
+            _write_pairing_outcome,
+            config, request_id, result, expires_at, requested_by,
         )
     except Exception:
         logger.warning("whatsapp.pairing.outcome_write_failed", exc_info=True)
@@ -582,8 +733,29 @@ async def _service_pairing_request(
         logger.warning("whatsapp.pairing.announce_failed", exc_info=True)
 
 
+def _record_pairing_interrupted(config: "Config", request_id: str) -> None:
+    from ... import db  # noqa: PLC0415
+
+    try:
+        with db.get_db(
+            config.db_path, busy_timeout_ms=_POLL_BUSY_TIMEOUT_MS
+        ) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, request_id, db.WHATSAPP_PAIRING_FAILED,
+                "the daemon stopped while pairing WhatsApp, so the attempt "
+                "did not finish. Check `doctor`'s `whatsapp.baileys_session` "
+                "for where the session directory stands, then re-pair.",
+            )
+    except Exception:
+        logger.warning("whatsapp.pairing.interrupt_record_failed", exc_info=True)
+
+
 def _write_pairing_outcome(
-    config: "Config", request_id: str, result, expires_at: float | None,
+    config: "Config",
+    request_id: str,
+    result,
+    expires_at: float | None,
+    requested_by: str = "",
 ) -> "_PairingClosure | None":
     """Record what `repair_session` did. A closure to announce, or `None`.
 
@@ -599,13 +771,29 @@ def _write_pairing_outcome(
     from ... import db  # noqa: PLC0415
 
     if result.ok and result.window_id:
-        with db.get_db(config.db_path) as conn:
-            db.record_whatsapp_pairing_state(
+        with db.get_db(
+            config.db_path, busy_timeout_ms=_POLL_BUSY_TIMEOUT_MS
+        ) as conn:
+            adopted = db.record_whatsapp_pairing_state(
                 conn, request_id,
                 db.WHATSAPP_PAIRING_AWAITING_SIDECAR,
                 _window_open_message(result),
                 adopt_window_id=result.window_id,
                 expires_at=expires_at,
+            )
+        if not adopted:
+            # The row went terminal while the sequence ran — the deadline arm
+            # is the case `record_whatsapp_pairing_state`'s terminal guard
+            # exists for. A live window with no durable row behind it is why
+            # this is said out loud rather than dropped: the next request
+            # dead-ends on `repair_session`'s `already_pairing` while the
+            # operator has been told this one expired. The poll's own closure
+            # cleanup cancels the window on that path, so the recovery is one
+            # tick away rather than a TTL.
+            logger.warning(
+                "whatsapp.pairing.window_untracked request=%s window=%s — the "
+                "row closed while the re-pair ran",
+                request_id, result.window_id,
             )
         return None
 
@@ -614,7 +802,9 @@ def _write_pairing_outcome(
     )
     if result.moved_to is not None:
         message = f"{message} The previous session is at {result.moved_to}."
-    with db.get_db(config.db_path) as conn:
+    with db.get_db(
+        config.db_path, busy_timeout_ms=_POLL_BUSY_TIMEOUT_MS
+    ) as conn:
         applied = db.record_whatsapp_pairing_state(
             conn, request_id, db.WHATSAPP_PAIRING_FAILED, message,
         )
@@ -628,55 +818,88 @@ def _write_pairing_outcome(
         window_id=request_id,
         state=db.WHATSAPP_PAIRING_FAILED,
         message=message,
-        requested_by="",
+        # Carried from the caller rather than left empty: the poll's own
+        # closures pass it, and `_write_pairing_alerts` appends "Requested by
+        # …" only when it is set — so the same notification read differently
+        # depending on which path closed the row.
+        requested_by=requested_by,
         unlink_relay=False,
     )
 
 
 def _window_open_message(result) -> str:
-    """What the row says while a window is open.
+    """What the row carries while a window is open: the archive path, alone.
 
-    It names the archive, and that is durable state rather than prose: the
+    **Durable state rather than prose, which is why it is only the path.** The
     orphan arm runs in a *later* process, which has no `PairingResult` and no
-    way to know which of the `.old-<timestamp>` siblings this re-pair made. So
-    the path is written down here, while it is known, and carried forward by
-    `_orphan_message`.
+    way to know which of the `.old-<timestamp>` siblings this re-pair made, so
+    the path is written down here while it is known and carried forward by
+    whichever arm closes the row. The remedy that belongs beside it — scan the
+    code — is live-window copy and lives on the relay file, which is what the
+    admin UI reads; carrying it on the row put it in front of an operator
+    reading a *terminal* row, telling them to scan a code from a window that
+    had just closed.
     """
-    base = (
-        "a pairing window is open. Scan the code from WhatsApp's Linked "
-        "Devices screen."
-    )
     if result.moved_to is None:
-        return base
-    return f"{base} The previous session was moved aside to {result.moved_to}."
+        return ""
+    return f"The previous session was moved aside to {result.moved_to}."
 
 
 def _deadline_message(row: dict) -> str:
     from ... import db  # noqa: PLC0415
 
-    if row["state"] in (
-        db.WHATSAPP_PAIRING_REQUESTED, db.WHATSAPP_PAIRING_SERVICING,
-    ):
+    state = row["state"]
+    if state == db.WHATSAPP_PAIRING_REQUESTED:
         return (
             "no bridge picked this pairing request up before it expired. "
             "Check that the istota scheduler is running and that the WhatsApp "
             "surface is set to the baileys provider, then request it again."
         )
-    carried = row["message"]
+    if state == db.WHATSAPP_PAIRING_SERVICING:
+        # Its own prose, because the `requested` message above is false on
+        # every count for a row a bridge *did* claim: the scheduler was
+        # running and the provider was right, and the process that took the
+        # row went away before it could report.
+        return (
+            "a bridge claimed this pairing request and did not report back "
+            "before it expired — the process it was running in most likely "
+            "restarted. Request a re-pair again."
+        )
     base = (
         "the pairing window expired with no code scanned, so WhatsApp is "
         "still unpaired."
     )
-    return f"{base} {carried}" if carried else base
+    return _with_archive(base, row)
 
 
 def _orphan_message(row: dict) -> str:
+    """Why an orphaned row closed, and a remedy that actually works.
+
+    **Not "request a re-pair again".** After the restart this arm exists for,
+    the session directory is the empty one the previous attempt created: the
+    respawned sidecar sits in it in pairing mode, so nothing re-latches a
+    permanent fatal, and `repair_session`'s confirmation gate then refuses the
+    next request as `session_live` — the durable channel carries no `force`, so
+    the unforced default is all the poll can ask for. The remedy has to be one
+    of the two surfaces that *can* confirm.
+    """
     base = (
         "the process that was pairing WhatsApp restarted before a code was "
-        "scanned, so the window is gone. Request a re-pair again — it reuses "
-        "the session directory this attempt already emptied rather than "
-        "archiving a second time."
+        "scanned, so the window is gone and the session directory is empty. "
+        "Re-pair from the admin Connections pane, confirming the unlink, or "
+        "stop the istota daemon and any sidecar unit and run `istota whatsapp "
+        "pair`."
     )
+    return _with_archive(base, row)
+
+
+def _with_archive(base: str, row: dict) -> str:
+    """`base`, plus the archive clause the row is carrying, if any.
+
+    Only ever the clause — `_window_open_message` is what keeps the row's
+    message down to that, so appending it cannot contradict the sentence in
+    front of it.
+    """
     carried = row["message"]
     return f"{base} {carried}" if carried else base
 
@@ -719,7 +942,9 @@ def _write_pairing_alerts(
         body = f"{body} Requested by {_slug(outcome.requested_by)}."
     key = f"whatsapp:baileys-pairing:{_slug(outcome.window_id, fallback='unknown')}"
     raised = []
-    with db.get_db(config.db_path) as conn:
+    with db.get_db(
+        config.db_path, busy_timeout_ms=_POLL_BUSY_TIMEOUT_MS
+    ) as conn:
         for reader in _unlink_readers(config):
             raised.append(task_alert.write(
                 conn, reader,

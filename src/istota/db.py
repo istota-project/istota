@@ -11016,9 +11016,9 @@ def request_whatsapp_pairing(
     carries the live circuit breaker and a pairing request must not clear it.
     """
     now = sql_datetime_now()
-    expires_at = (
-        datetime.now(timezone.utc) + timedelta(seconds=float(window_seconds))
-    ).strftime("%Y-%m-%d %H:%M:%S")
+    expires_at = sql_datetime_from_epoch(
+        datetime.now(timezone.utc).timestamp() + float(window_seconds)
+    )
     request_id = uuid.uuid4().hex
     terminal = sorted(WHATSAPP_PAIRING_TERMINAL_STATES)
     placeholders = ", ".join("?" * len(terminal))
@@ -11105,7 +11105,16 @@ def record_whatsapp_pairing_state(
     `expires_at` (epoch seconds) onto that window's own deadline. Both are for
     the one transition that opens a real window; every other caller leaves the
     request's id and request-time deadline alone.
+
+    An empty `window_id` is refused rather than compared, because SQL equality
+    against `''` never matches a NULL column — so a row whose id was somehow
+    NULL would be unwritable by every caller here, which is the stuck-row class
+    this whole channel exists to avoid. `request_whatsapp_pairing` is the only
+    writer today and always sets one; Stage 4 adds routes that call this
+    directly. `clear_whatsapp_pairing` carries no id guard and is the escape.
     """
+    if not str(window_id):
+        return False
     sets = [
         "pairing_state = ?",
         "pairing_message = ?",

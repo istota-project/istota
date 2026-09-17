@@ -1074,16 +1074,44 @@ class BaileysBridge:
             return None
         return window
 
-    async def cancel_pairing(self) -> bool:
+    def clear_relay_file(self) -> bool:
+        """Unlink the relay under `_relay_lock`, synchronously. Never raises.
+
+        For a caller on another thread that has to remove a relay this bridge
+        is not going to remove itself — `baileys_runtime.poll_pairing_request`
+        closing a durable row whose window belonged to a process that is gone.
+        `pairing_relay.clear_relay`'s own docstring names serialization behind
+        this lock as the precondition that makes it safe beside a live writer,
+        so a caller reaching for that function directly would be removing a
+        staging file another thread is mid-rename on.
+
+        A `threading.Lock`, so this is callable from any thread and blocks only
+        for the length of one file operation. Not for the loop: everything in
+        here already goes through `_clear_relay`'s thread hop.
+        """
+        self._clear_relay_under_lock()
+        return not self._pairing_relay_path.exists()
+
+    async def cancel_pairing(self, *, window_id: str | None = None) -> bool:
         """Close an open window and unlink the relay. `False` if none was open.
 
         Does **not** restore a session directory an earlier step moved aside:
         the sidecar may already have written a partial new session into the
         recreated one, and choosing between the two is an operator's call
         rather than a heuristic's.
+
+        `window_id` scopes the close to one window and is what a caller from
+        another thread must pass. `poll_pairing_request` decides to cancel from
+        a read of `pairing_window` taken on the dispatch thread and then
+        schedules this on the runtime loop, so by the time it runs the window it
+        meant could have closed and a fresh one opened — an unscoped close
+        would then cancel a pairing somebody is mid-scan on. `None` keeps the
+        unscoped behaviour for a caller holding the loop.
         """
         window = self._pairing_window
         if window is None:
+            return False
+        if window_id is not None and window.window_id != window_id:
             return False
         await self._close_pairing_window(
             window,
@@ -1109,10 +1137,23 @@ class BaileysBridge:
         """
         if self._pairing_window is not window:
             return False
-        self._pairing_window = None
+        # **The outcome is published before the window is dropped**, and the
+        # order is load-bearing rather than cosmetic. `poll_pairing_request`
+        # reads these two from the scheduler's dispatch thread, in the
+        # opposite order — `pairing_window` first, then
+        # `last_pairing_outcome` — to tell a close this process performed from
+        # a window a dead process left behind. These are two separate stores
+        # with a dataclass construction between them, which the GIL does not
+        # fuse, so with the old order a read landing in the gap saw no window
+        # and no matching outcome and recorded a *successful* pairing as
+        # `failed`, durably and with an admin alert behind it. Published this
+        # way round the gap shows a live window instead, which that reader
+        # leaves alone until the next tick. The idempotency guard above is
+        # unaffected: it tests the window's identity, not these two writes.
         self._last_pairing_outcome = PairingOutcome(
             window_id=window.window_id, state=state, message=message,
         )
+        self._pairing_window = None
         watchdog, self._pairing_watchdog = self._pairing_watchdog, None
         if watchdog is not None and watchdog is not asyncio.current_task():
             watchdog.cancel()

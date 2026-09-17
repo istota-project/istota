@@ -39,6 +39,7 @@ import pytest
 
 from istota.config import Config, UserConfig
 from istota.transport.whatsapp import baileys_protocol as proto
+from istota.transport.whatsapp import baileys_bridge as baileys_bridge_module
 from istota.transport.whatsapp import pairing_relay
 from istota.transport.whatsapp.baileys_bridge import (
     PAIRING_WINDOW_SECONDS,
@@ -697,6 +698,57 @@ class TestClosingAWindow:
         assert outcome.state == pairing_relay.STATE_PAIRED
         assert bridge.status.pairing_state is None
 
+    async def test_a_scoped_cancel_refuses_another_windows_id(
+        self, bridge, sidecar
+    ):
+        """`poll_pairing_request` decides to cancel from a read taken on the
+        dispatch thread and then schedules the cancel on the runtime loop, so
+        by the time it runs the window it meant could have closed and a fresh
+        one opened. An unscoped close would then end a pairing somebody is
+        mid-scan on.
+
+        Negative control: dropping the id comparison in `cancel_pairing` turns
+        this red — the window closes and the relay is unlinked.
+        """
+        window = await bridge.open_pairing_window(USER)
+        await sidecar.say(proto.MSG_QR, qr=QR)
+        await wait_for(lambda: relay_path(bridge).exists())
+
+        assert await bridge.cancel_pairing(window_id="some-other-window") is False
+        assert bridge.pairing_window is window
+        assert relay_path(bridge).exists()
+
+        assert await bridge.cancel_pairing(window_id=window.window_id) is True
+        assert bridge.pairing_window is None
+        assert not relay_path(bridge).exists()
+
+    async def test_the_lock_held_clear_removes_the_relay(self, bridge, sidecar):
+        """The seam `poll_pairing_request` reaches for from another thread.
+
+        `pairing_relay.clear_relay`'s own docstring names serialization behind
+        `_relay_lock` as the precondition that makes it safe beside a live
+        writer, and the poll runs on a thread that lock never sees — so it must
+        not call that function directly.
+
+        **What this case pins is the seam and its idempotency, not the lock.**
+        Measured: replacing the body with a bare `pairing_relay.clear_relay`
+        turns nothing red, because from one thread taking the lock or not is
+        observationally identical. What rules the bypass out is on the other
+        side — `tests/test_whatsapp_pairing_poll.py::TestTheClosureCleanup::
+        test_a_relay_is_cleared_through_the_bridges_lock` requires the poll to
+        come through here rather than reach for that function — plus the
+        bridge's own pre-existing discipline, which this method delegates to.
+        """
+        await bridge.open_pairing_window(USER)
+        await sidecar.say(proto.MSG_QR, qr=QR)
+        await wait_for(lambda: relay_path(bridge).exists())
+
+        assert bridge.clear_relay_file() is True
+        assert not relay_path(bridge).exists()
+        # Idempotent, because the poll can reach it for a window that is
+        # already gone.
+        assert bridge.clear_relay_file() is True
+
     async def test_cancelling_closes_it_and_unlinks_the_relay(self, bridge, sidecar):
         await bridge.open_pairing_window(USER)
         await sidecar.say(proto.MSG_QR, qr=QR)
@@ -905,6 +957,53 @@ class TestTheGuardsWithNoTestBehindThem:
         ) is False
         assert bridge.last_pairing_outcome.state == pairing_relay.STATE_PAIRED
         assert bridge.last_pairing_outcome.message == "first"
+
+    async def test_the_outcome_is_published_before_the_window_is_dropped(
+        self, bridge
+    ):
+        """The order of those two stores, asserted from inside the gap.
+
+        `poll_pairing_request` reads them the other way round from the
+        scheduler's dispatch thread — `pairing_window` first, then
+        `last_pairing_outcome` — to tell a close this process performed from a
+        window a dead process left behind. These are two separate stores with a
+        dataclass construction between them, which the GIL does not fuse, so a
+        read landing in the gap under the old order saw no window and no
+        matching outcome and recorded a *successful* pairing as `failed`,
+        durably and with an admin alert behind it.
+
+        Driven through the `PairingOutcome` constructor, which is what runs
+        between the two stores, rather than with a thread — a thread would make
+        this a timing test for a property that is an ordering.
+
+        Negative control: swapping the two assignments back turns this red on
+        `observed`, which is then `(None, None)`.
+        """
+        window = await bridge.open_pairing_window(USER)
+        observed: list[tuple[object, object]] = []
+        real = baileys_bridge_module.PairingOutcome
+
+        def spy(**kwargs):
+            observed.append(
+                (bridge.pairing_window, bridge.last_pairing_outcome)
+            )
+            return real(**kwargs)
+
+        baileys_bridge_module.PairingOutcome = spy
+        try:
+            assert bridge._end_pairing_window(
+                window, pairing_relay.STATE_PAIRED, "scanned",
+            ) is True
+        finally:
+            baileys_bridge_module.PairingOutcome = real
+
+        assert len(observed) == 1
+        # At the moment the outcome is built, the window is still published —
+        # so the dispatch-thread reader's first question answers "live" and it
+        # leaves the row alone until the next tick, rather than seeing neither.
+        assert observed[0][0] is window
+        assert bridge.pairing_window is None
+        assert bridge.last_pairing_outcome.state == pairing_relay.STATE_PAIRED
 
     async def test_settled_relay_jobs_do_not_accumulate(self, bridge, sidecar):
         """Held so the loop cannot collect them mid-flight, discarded after."""
