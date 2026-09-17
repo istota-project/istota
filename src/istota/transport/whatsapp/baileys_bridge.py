@@ -335,8 +335,43 @@ def sidecar_return_timeout(restart_interval_seconds) -> float:
 _return_timeout_for = sidecar_return_timeout
 
 
+def configured_pairing_window_seconds(config: Config) -> float:
+    """The window TTL the operator declared, or the shipped default.
+
+    Clamped rather than validated at load, which is this block's posture for
+    every numeric key it has: `load_config` runs in the scheduler, the web
+    app, the webhook receiver and every host-side skill CLI spawn, so a typo
+    on a knob that bounds one admin operation must not stop any of them from
+    starting. A non-positive or non-finite value is the shipped 300s, and so
+    is anything that is not a number at all — `sidecar_return_timeout` falls
+    back the same way and for the same reason.
+
+    There is deliberately no ceiling. The window is the span in which a
+    full-account credential is relayable, so a long one is a decision an
+    operator is entitled to make and to see in their own config file; what
+    would be wrong is silently shortening it, since a window cut under
+    somebody mid-scan reads as a pairing that simply did not work.
+    """
+    try:
+        declared = float(config.whatsapp.baileys.pairing_window_seconds)
+    except (TypeError, ValueError):
+        return PAIRING_WINDOW_SECONDS
+    if not math.isfinite(declared) or declared <= 0:
+        return PAIRING_WINDOW_SECONDS
+    return declared
+
+
 def default_pairing_relay_path(config: Config) -> Path:
     """Where the QR relay file goes unless the operator named somewhere else.
+
+    **`[whatsapp.baileys] pairing_relay_path` wins when it is set**, read here
+    rather than at each caller — `default_session_dir`'s arrangement, and the
+    reason is the same: the bridge's constructor, the poll's no-bridge relay
+    clear and the web routes all have to agree on one answer, and a key read
+    at only some of them is a deployment whose orphan sweep misses the file it
+    is meant to remove. A set value is taken as written, with `~` expanded and
+    nothing resolved, so a relative one follows each process's own cwd and an
+    absolute path is what to write.
 
     `{db_path.parent}` on both server shapes: the deployment's state root,
     which the socket and — unless the operator pointed `session_dir`
@@ -361,6 +396,9 @@ def default_pairing_relay_path(config: Config) -> Path:
     would still land inside a bound root belongs to the sequence that opens a
     window, which is where the task's own bind list is known.
     """
+    configured = (config.whatsapp.baileys.pairing_relay_path or "").strip()
+    if configured:
+        return Path(configured).expanduser()
     db_parent = Path(config.db_path).parent
     workspace = config.workspace_path
     if workspace is not None and _same_directory(workspace, db_parent):

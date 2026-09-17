@@ -460,8 +460,24 @@ language = "{{ istota_whatsapp_template_language | istota_toml_escape }}"
    sidecar_command is empty by default, meaning the daemon listens and spawns
    nothing while the unit runs the sidecar. Setting both is two Baileys clients
    on one session directory, which the role asserts against. #}
+{# restart_interval_seconds comes from istota_whatsapp_baileys_restart_sec, the
+   same variable that fills RestartSec= in the sidecar unit — one value, two
+   files, so the daemon's idea of how long a restart takes cannot drift from
+   what systemd is actually doing. It gates nothing; it only sizes how long a
+   re-pair waits before reporting the sidecar missing.
+
+   Both numbers are `| int`, and that is not decoration: systemd accepts a time
+   span in RestartSec= ("30s", "1min"), and the same value written bare here is
+   TOML no istota process can parse — the play would then fail at its first CLI
+   task having already replaced the running deployment's config. The role
+   asserts both are integers, so a time span fails the converge loudly; the
+   filter is what keeps the failure from being an unloadable config. #}
 [whatsapp.baileys]
 sidecar_command = "{{ istota_whatsapp_baileys_sidecar_command | istota_toml_escape }}"
+pairing_enabled = {{ istota_whatsapp_baileys_pairing_enabled | lower }}
+pairing_window_seconds = {{ istota_whatsapp_baileys_pairing_window_seconds | int }}
+pairing_relay_path = "{{ istota_whatsapp_baileys_pairing_relay_path | istota_toml_escape }}"
+restart_interval_seconds = {{ istota_whatsapp_baileys_restart_sec | int }}
 
 {# Model alias registry ([models.aliases]) — tiers (fast/general/smart) and
    shortcuts (opus/sonnet/haiku), overlaying the code-shipped defaults, resolved

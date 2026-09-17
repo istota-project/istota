@@ -200,6 +200,32 @@ class TestTheGateRow:
         assert gate.enabled(cfg) is wanted
         assert gate.enabled(cfg) is runtime.baileys_bridge_wanted(cfg)
 
+    def test_the_web_flows_own_switch_does_not_gate_the_poll(self, tmp_path):
+        """`pairing_enabled` gates the **routes** and nothing else.
+
+        The CLI's attach mode writes the same request row and depends on this
+        poll, so gating it here would silently disable `istota whatsapp pair`
+        on the shape where it matters most — an operator who turned the web
+        flow off is exactly the one who will be on a terminal.
+
+        Its own case rather than a row in the table above, because that one
+        leaves `pairing_enabled` at its default `True`, where the conjunction
+        agrees with the predicate and the mistake is invisible. Negative
+        control: `and c.whatsapp.baileys.pairing_enabled` on the gate turns
+        this red and leaves the table green, which is what says the table
+        could not have covered it.
+        """
+        cfg = Config(
+            db_path=tmp_path / "istota.db",
+            whatsapp=build_whatsapp_config(
+                enabled=True, provider="baileys", pairing_enabled=False,
+            ),
+        )
+        gate = gate_row(cfg)
+
+        assert runtime.baileys_bridge_wanted(cfg) is True
+        assert gate.enabled(cfg) is True
+
     def test_a_backwards_clock_step_does_not_skip_a_tick(self, config, monkeypatch):
         """`fixed_interval=0` bypasses the clock rather than comparing against
         it. `now` is wall-clock, so a backwards NTP step leaves the stored clock
@@ -1136,3 +1162,430 @@ def test_the_gate_body_reaches_the_poll(config, monkeypatch):
     )
     _tick_interval_gates([gate_row(config)], {GATE: 0.0}, config, 1.0, {})
     assert seen == [config]
+
+
+# ---------------------------------------------------------------------------
+# The forced path, carried on the row
+# ---------------------------------------------------------------------------
+
+
+class TestTheForcedPath:
+    """`pairing_force` is the whole carrier of an operator's confirmation.
+
+    The route collects `force` and `confirm_disconnect`; the *poll* is what
+    calls `repair_session`, and it is not the process the operator spoke to.
+    With nothing on the row to say a confirmation happened, the poll could only
+    ever ask unforced — so a live-session re-pair is refused `session_live` and
+    recorded `failed`, and the whole `force` half of the design is unreachable
+    through the durable channel. Stage 3 deferred the column and this is where
+    it lands.
+
+    Deriving the answer here instead was considered and refused: a request
+    written while a fatal was latched, serviced after the session recovered,
+    would disconnect a working session nobody agreed to disconnect.
+    """
+
+    def _forced_calls(self, config, bridge, monkeypatch) -> list[bool]:
+        seen: list[bool] = []
+
+        async def repair(requested_by: str, *, force: bool = False):
+            seen.append(force)
+            return bridge.result
+
+        monkeypatch.setattr(bridge, "repair_session", repair)
+
+        def run(coro, *, name: str):
+            asyncio.run(coro)
+            return None
+
+        monkeypatch.setattr(async_runtime, "spawn_task", run)
+        runtime.poll_pairing_request(config)
+        return seen
+
+    def test_an_unforced_row_asks_unforced(self, config, bridge, monkeypatch):
+        request(config.db_path)
+        assert self._forced_calls(config, bridge, monkeypatch) == [False]
+
+    def test_a_forced_row_asks_forced(self, config, bridge, monkeypatch):
+        """Negative control: dropping `force=claim[2]` from the hand-off turns
+        this red while its sibling above stays green, which is what says the
+        column is read rather than defaulted."""
+        request(config.db_path, force=True)
+        assert self._forced_calls(config, bridge, monkeypatch) == [True]
+
+    def test_a_legacy_row_with_no_column_value_asks_unforced(
+        self, config, bridge, monkeypatch
+    ):
+        """An upgraded deployment reads NULL there. Three spellings of the same
+        answer — NULL, 0 and False — and the gate must read them alike, in the
+        safe direction."""
+        request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            conn.execute(
+                "UPDATE whatsapp_runtime SET pairing_force = NULL WHERE singleton = 1"
+            )
+        assert row(config.db_path)["force"] is False
+        assert self._forced_calls(config, bridge, monkeypatch) == [False]
+
+    def test_clearing_the_request_clears_the_confirmation(self, config):
+        """Otherwise a confirmation outlives the request it belonged to and the
+        next window inherits permission nobody granted it."""
+        request(config.db_path, force=True)
+        with db.get_db(config.db_path) as conn:
+            assert db.clear_whatsapp_pairing(conn)
+            value = conn.execute(
+                "SELECT pairing_force FROM whatsapp_runtime WHERE singleton = 1"
+            ).fetchone()[0]
+        assert value is None
+
+    def test_a_fresh_unforced_request_over_a_forced_one_is_unforced(self, config):
+        """The upsert's conflict branch writes the column rather than leaving
+        it, so a forced row that closed cannot lend its confirmation to the
+        next request."""
+        first = request(config.db_path, force=True)
+        with db.get_db(config.db_path) as conn:
+            assert db.record_whatsapp_pairing_state(
+                conn, first, db.WHATSAPP_PAIRING_PAIRED, "paired",
+            )
+        request(config.db_path)
+        assert row(config.db_path)["force"] is False
+
+
+# ---------------------------------------------------------------------------
+# The orphaned-window cancel
+# ---------------------------------------------------------------------------
+
+
+class TestTheOrphanedWindowCancel:
+    """A terminal row with a live window behind it, which is what a cancel
+    written by the web process looks like from here.
+
+    That process holds no bridge on the Ansible deployment, so `DELETE` can
+    only stamp the row and leave the window to whoever owns it. Left alone, the
+    next QR rotation republishes the relay about twenty seconds after the
+    operator was told the pairing was over, for the rest of the window's TTL.
+
+    The poll's cheap read returns early on a terminal row, so this arm has to
+    sit on that path — which is also what closes Stage 3's stated residual, a
+    window whose adopt write was refused and whose id therefore never reached
+    the row at all.
+    """
+
+    def _arm_window(self, bridge, window_id: str) -> None:
+        bridge.pairing_window = baileys_bridge.PairingWindow(
+            window_id=window_id,
+            opened_at=0.0,
+            expires_at=1_000.0,
+            expires_at_wall=time.time() + 300.0,
+            requested_by=USER,
+            destructive=True,
+        )
+
+    def test_a_terminal_row_cancels_the_live_window(
+        self, config, bridge, spawns
+    ):
+        window = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            assert db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_FAILED, "cancelled from the UI",
+            )
+        self._arm_window(bridge, window)
+
+        runtime.poll_pairing_request(config)
+
+        assert spawns == [CANCEL]
+
+    def test_the_cancel_is_scoped_to_the_window_the_bridge_actually_holds(
+        self, config, bridge, monkeypatch
+    ):
+        """The live window's id, not the row's. A window whose adopt write was
+        refused never put its id on the row, and an unscoped close would cancel
+        whatever window happened to be open by the time it ran."""
+        row_id = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, row_id, db.WHATSAPP_PAIRING_EXPIRED, "expired",
+            )
+        self._arm_window(bridge, "window-the-row-never-saw")
+
+        def run(coro, *, name: str):
+            asyncio.run(coro)
+            return None
+
+        monkeypatch.setattr(async_runtime, "spawn_task", run)
+        runtime.poll_pairing_request(config)
+
+        assert bridge.cancelled == ["window-the-row-never-saw"]
+
+    def test_a_terminal_row_with_no_window_cancels_nothing(
+        self, config, bridge, spawns
+    ):
+        """The control. A paired window is already closed by the bridge, so
+        this arm must not fire on every tick for the rest of the deployment's
+        life."""
+        window = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_PAIRED, "paired",
+            )
+
+        runtime.poll_pairing_request(config)
+
+        assert spawns == []
+
+    def test_no_row_at_all_cancels_nothing(self, config, bridge, spawns):
+        runtime.poll_pairing_request(config)
+        assert spawns == []
+
+    def test_a_refused_spawn_costs_the_cancel_and_nothing_else(
+        self, config, bridge, monkeypatch, caplog
+    ):
+        """The runtime is stopping, so nothing will run the cancel — and a poll
+        tick must not raise whatever happens here. The window's own watchdog is
+        still the backstop."""
+        window = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_FAILED, "cancelled",
+            )
+        self._arm_window(bridge, window)
+
+        def refuse(coro, *, name: str):
+            coro.close()
+            raise RuntimeError("the runtime is stopping")
+
+        monkeypatch.setattr(async_runtime, "spawn_task", refuse)
+        with caplog.at_level("WARNING"):
+            runtime.poll_pairing_request(config)
+
+        assert "orphan_cancel_unscheduled" in caplog.text
+
+
+class TestTheOrphanPredicate:
+    """Which row states let a live window be read as a leftover.
+
+    Its own class because the answer is not "terminal": a fresh request written
+    over a closed one is `requested`, and without that arm the previous
+    window survives, `repair_session` refuses the new request
+    `already_pairing` against it, and every retry fails for the rest of its
+    TTL. `servicing` is the state that must stay out, because a healthy
+    re-pair spends it with the row's id and the window's id genuinely
+    different.
+    """
+
+    @pytest.mark.parametrize(
+        "state,orphaned",
+        [
+            (None, True),
+            (db.WHATSAPP_PAIRING_PAIRED, True),
+            (db.WHATSAPP_PAIRING_EXPIRED, True),
+            (db.WHATSAPP_PAIRING_FAILED, True),
+            (db.WHATSAPP_PAIRING_REQUESTED, True),
+            (db.WHATSAPP_PAIRING_SERVICING, False),
+            (db.WHATSAPP_PAIRING_AWAITING_SIDECAR, False),
+            (db.WHATSAPP_PAIRING_AWAITING_SCAN, False),
+            (db.WHATSAPP_PAIRING_SIDECAR_ABSENT, False),
+        ],
+    )
+    def test_the_predicate_covers_every_state(self, state, orphaned):
+        row = None if state is None else {"state": state, "window_id": "w"}
+        assert runtime._pairing_row_owns_no_window(row) is orphaned
+
+    def test_a_fresh_request_cancels_the_previous_window(
+        self, config, bridge, spawns
+    ):
+        """The feature the `requested` arm exists for.
+
+        Negative control: dropping that arm from the predicate turns this red
+        and leaves the terminal cases green — the row is non-terminal, so the
+        tick would skip the orphan check entirely and `repair_session` would
+        refuse the new request against a window nobody owns.
+        """
+        first = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, first, db.WHATSAPP_PAIRING_EXPIRED, "expired",
+            )
+        bridge.pairing_window = baileys_bridge.PairingWindow(
+            window_id=first,
+            opened_at=0.0,
+            expires_at=1_000.0,
+            expires_at_wall=time.time() + 300.0,
+            requested_by=USER,
+            destructive=True,
+        )
+        request(config.db_path)
+
+        runtime.poll_pairing_request(config)
+
+        assert CANCEL in spawns
+
+    def test_a_window_being_serviced_is_left_alone(self, config, bridge, spawns):
+        """The control for the arm above, and the one that matters most: the
+        row carries the *request* id and the window its own for the whole span
+        between `open_pairing_window` and the adopt write, so an id comparison
+        here would cancel the window it is servicing."""
+        window = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_SERVICING,
+            )
+        bridge.pairing_window = baileys_bridge.PairingWindow(
+            window_id="a-different-id-the-row-has-not-adopted",
+            opened_at=0.0,
+            expires_at=1_000.0,
+            expires_at_wall=time.time() + 300.0,
+            requested_by=USER,
+            destructive=True,
+        )
+
+        runtime.poll_pairing_request(config)
+
+        assert CANCEL not in spawns
+        assert bridge.cancelled == []
+
+
+class TestTheOrphanedRelaySweep:
+    """A relay file that outlived the row, with no window left to cancel.
+
+    The case is a scheduler restart mid-window followed by a `DELETE`: the new
+    bridge has no window, so there is nothing to cancel, and
+    `_clean_up_after_closure` — the sibling that would have unlinked the file —
+    never runs again, because its closure is computed past the terminal early
+    return and the deadline arm only looks at non-terminal rows. Left alone the
+    last pairing code sits at 0600 for the life of the deployment.
+    """
+
+    def _publish(self, path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert pairing_relay.write_relay(
+            path,
+            pairing_relay.build_payload(
+                window_id="gone",
+                state=pairing_relay.STATE_AWAITING_SCAN,
+                expires_at=time.time() + 300.0,
+                qr="2@fake-payload",
+                qr_seq=1,
+            ),
+        )
+
+    def test_a_terminal_row_with_no_window_sweeps_the_relay(
+        self, config, bridge, relay_file, spawns
+    ):
+        window = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_FAILED, "cancelled from the UI",
+            )
+        self._publish(relay_file)
+
+        runtime.poll_pairing_request(config)
+
+        assert bridge.relay_clears == 1
+        assert spawns == []
+
+    def test_nothing_is_swept_when_no_file_is_there(
+        self, config, bridge, relay_file
+    ):
+        """The cost control. This runs on the dispatch thread on every tick for
+        as long as the row stays closed, and `clear_relay` globs the directory
+        for staging files — so the existence test has to come first or a
+        long-closed deployment pays a directory listing per tick for ever."""
+        window = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_PAIRED, "paired",
+            )
+
+        runtime.poll_pairing_request(config)
+
+        assert bridge.relay_clears == 0
+
+    def test_a_live_window_is_cancelled_rather_than_swept(
+        self, config, bridge, relay_file, spawns
+    ):
+        """Two leftovers, two remedies, and the cancel is the one that also
+        unlinks — under the bridge's own lock, which a direct sweep from this
+        thread would bypass."""
+        window = request(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_FAILED, "cancelled",
+            )
+        self._publish(relay_file)
+        bridge.pairing_window = baileys_bridge.PairingWindow(
+            window_id=window,
+            opened_at=0.0,
+            expires_at=1_000.0,
+            expires_at_wall=time.time() + 300.0,
+            requested_by=USER,
+            destructive=True,
+        )
+
+        runtime.poll_pairing_request(config)
+
+        assert spawns == [CANCEL]
+        assert bridge.relay_clears == 0
+
+    def test_with_no_bridge_the_configured_path_is_swept(
+        self, tmp_path, config, monkeypatch
+    ):
+        """**The configured path, not the default one**, which is Stage 3's
+        fourth handoff and was discharged by construction rather than by a
+        test. `default_pairing_relay_path` is the single resolver and every
+        caller inherits the key through it; this is what says so for the arm
+        that has no bridge to ask.
+        """
+        from istota.transport.whatsapp import baileys_bridge as bb
+
+        relay = tmp_path / "elsewhere" / "qr.json"
+        cfg = replace(
+            config,
+            whatsapp=build_whatsapp_config(
+                enabled=True, provider="baileys",
+                pairing_relay_path=str(relay),
+            ),
+        )
+        monkeypatch.setattr(bb, "active_bridge", lambda: None)
+        window = request(cfg.db_path)
+        with db.get_db(cfg.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_FAILED, "cancelled",
+            )
+        self._publish(relay)
+        assert relay.exists()
+
+        runtime.poll_pairing_request(cfg)
+
+        assert not relay.exists()
+
+    def test_a_relay_at_the_default_path_is_left_alone_when_one_is_configured(
+        self, tmp_path, config, monkeypatch
+    ):
+        """The control for the case above: without the key being read, the
+        sweep would go to `{db_path.parent}` and miss the operator's file."""
+        from istota.transport.whatsapp import baileys_bridge as bb
+
+        configured = tmp_path / "elsewhere" / "qr.json"
+        default = Path(config.db_path).parent / bb.PAIRING_RELAY_NAME
+        cfg = replace(
+            config,
+            whatsapp=build_whatsapp_config(
+                enabled=True, provider="baileys",
+                pairing_relay_path=str(configured),
+            ),
+        )
+        monkeypatch.setattr(bb, "active_bridge", lambda: None)
+        window = request(cfg.db_path)
+        with db.get_db(cfg.db_path) as conn:
+            db.record_whatsapp_pairing_state(
+                conn, window, db.WHATSAPP_PAIRING_FAILED, "cancelled",
+            )
+        self._publish(default)
+
+        runtime.poll_pairing_request(cfg)
+
+        assert default.exists(), (
+            "the sweep went to the default path, so the configured key is not "
+            "being read"
+        )

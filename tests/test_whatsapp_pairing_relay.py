@@ -415,6 +415,70 @@ class TestTheDefaultRelayPath:
             workspace / "tmp" / "whatsapp-pairing.json"
         )
 
+    def test_the_configured_key_wins_over_both_derivations(self, tmp_path):
+        """**One resolver, so every caller inherits the key.** The bridge's
+        constructor default, the web routes and the poll's no-bridge relay
+        sweep all reach the path through this function, which is what makes an
+        operator-set `pairing_relay_path` reach the sweep as well as the write
+        — a key read at only some of the callers is a deployment whose orphan
+        clear misses the file it exists to remove.
+
+        Negative control: dropping the configured branch turns this red and
+        turns both `sandbox_bound_reason` refusals in
+        `tests/test_whatsapp_pairing_web.py` red with it.
+        """
+        from istota.config import WhatsAppBaileysConfig, WhatsAppConfig
+
+        config = Config(
+            db_path=tmp_path / "state" / "istota.db",
+            workspace_path=tmp_path / "workspace",
+            temp_dir=tmp_path / "tmp",
+            whatsapp=WhatsAppConfig(
+                provider="baileys",
+                baileys=WhatsAppBaileysConfig(
+                    pairing_relay_path="/srv/relay/qr.json",
+                ),
+            ),
+        )
+
+        assert default_pairing_relay_path(config) == Path("/srv/relay/qr.json")
+
+    def test_a_tilde_in_the_configured_path_is_expanded(self, tmp_path):
+        """`~` is what an operator writes and what no syscall understands."""
+        from istota.config import WhatsAppBaileysConfig, WhatsAppConfig
+
+        config = Config(
+            db_path=tmp_path / "state" / "istota.db",
+            temp_dir=tmp_path / "tmp",
+            whatsapp=WhatsAppConfig(
+                provider="baileys",
+                baileys=WhatsAppBaileysConfig(pairing_relay_path="~/qr.json"),
+            ),
+        )
+        resolved = default_pairing_relay_path(config)
+
+        assert "~" not in str(resolved)
+        assert resolved.is_absolute()
+
+    def test_whitespace_alone_falls_back_to_the_derivation(self, tmp_path):
+        """An operator who cleared the key in a generated file leaves a space,
+        and a path of one space is not what they asked for."""
+        from istota.config import WhatsAppBaileysConfig, WhatsAppConfig
+
+        config = Config(
+            db_path=tmp_path / "state" / "istota.db",
+            workspace_path=tmp_path / "workspace",
+            temp_dir=tmp_path / "tmp",
+            whatsapp=WhatsAppConfig(
+                provider="baileys",
+                baileys=WhatsAppBaileysConfig(pairing_relay_path="   "),
+            ),
+        )
+
+        assert default_pairing_relay_path(config) == (
+            tmp_path / "state" / "whatsapp-pairing.json"
+        )
+
 
 class TestTheTwoWaits:
     """`SIDECAR_RETURN_TIMEOUT` is additive; only one of its terms scales.

@@ -889,7 +889,7 @@ class TestWhatsAppSchemaMigration:
             "claimed_at", "attempted_at",
         } <= sent
         # Exact rather than a subset, so a column arriving here is a decision
-        # somebody made rather than one that rode in. The six `pairing_*` are
+        # somebody made rather than one that rode in. The seven `pairing_*` are
         # the pairing request channel (`.claude/rules/whatsapp.md`), added to
         # this same table because it is the deployment-wide singleton and a
         # pairing request is deployment-wide state; `db.WHATSAPP_PAIRING_COLUMNS`

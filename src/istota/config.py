@@ -1272,10 +1272,42 @@ class WhatsAppBaileysConfig:
     ``sidecar_argv=()`` — while on a checkout it resolves to the program in
     the tree. Set it explicitly where the sidecar is installed somewhere this
     cannot guess.
+
+    The four ``pairing_*`` / ``restart_*`` keys configure re-pairing from the
+    admin web UI. ``pairing_enabled`` is the operator's off switch and **gates
+    the routes and nothing else**: the ``whatsapp-pairing`` scheduler gate
+    stays on ``baileys_bridge_wanted`` alone, because ``istota whatsapp pair``
+    writes the same request row and depends on the same poll — so gating the
+    poll here would silently disable the CLI on the shape where it matters
+    most, an operator who turned the web flow off being exactly the one who
+    will be on a terminal.
+
+    ``restart_interval_seconds`` is the deployment's declaration that its
+    supervisor restarts the sidecar on a fixed interval of about this length.
+    It **gates nothing** — it lives in a unit file the daemon never reads, and
+    it supplies only the scaling term of
+    ``baileys_bridge.sidecar_return_timeout``, so a wrong value costs an
+    inaccurate ``sidecar_absent`` deadline rather than permission to act. ``0``
+    means undeclared, which is what compose renders, since Docker's sub-second
+    backoff is not an interval. Ansible renders it from
+    ``istota_whatsapp_baileys_restart_sec``, the same variable that fills
+    ``RestartSec=`` in the unit template, so the two cannot disagree.
+
+    **None of these belongs in** ``_WHATSAPP_PROVIDER_FIELDS`` either, and two
+    of them have truthy defaults, which is the way that rule could quietly
+    break: an always-populated entry there would make this adapter look
+    configured on every deployment and be built as a callback-only adapter on
+    a Cloud one. That map is an explicit field list rather than a truthiness
+    scan over the block, so adding a field here changes nothing —
+    ``tests/test_whatsapp_pairing_web.py`` holds the emptiness.
     """
     session_dir: str = ""
     library_version: str = ""
     sidecar_command: str = ""
+    pairing_enabled: bool = True
+    pairing_window_seconds: int = 300
+    pairing_relay_path: str = ""
+    restart_interval_seconds: int = 0
 
 
 @dataclass

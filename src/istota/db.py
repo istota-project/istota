@@ -29,6 +29,18 @@ WHATSAPP_PAIRING_COLUMNS: dict[str, str] = {
     "pairing_requested_at": "TEXT",
     "pairing_expires_at": "TEXT",
     "pairing_message": "TEXT",
+    # The record that an operator confirmed disconnecting a working session.
+    # **A record of a confirmation, not a second place to grant one**: the
+    # route writes 1 only where it saw both `force` and `confirm_disconnect`,
+    # and the poll passes `force=True` only where it reads 1. Without it the
+    # poll can only call `repair_session` unforced — it is not the process the
+    # operator spoke to — so a live-session re-pair is refused `session_live`
+    # end to end and the whole `force` half of the design is unreachable
+    # through the durable channel. Deriving it from the bridge's live state
+    # instead was considered and refused: a request written while a fatal was
+    # latched, serviced after the session recovered, would disconnect a
+    # working session nobody confirmed.
+    "pairing_force": "INTEGER",
 }
 
 #: The request row's state vocabulary. Six of these are
@@ -503,7 +515,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # migration's safety argument: nothing is backfilled, so a deployment that
     # has never paired through this flow reads NULL everywhere and behaves
     # exactly as it did — and a build rolled back to before this change ignores
-    # six columns it never selects. `whatsapp_runtime` carries the live billing
+    # seven columns it never selects. `whatsapp_runtime` carries the live billing
     # circuit breaker, so this must add and never rewrite: `_add_columns` reads
     # the schema rather than catching `OperationalError`, which is what closes
     # the check-then-ALTER race two connections reach at a first post-upgrade
@@ -10984,11 +10996,44 @@ def sql_datetime_from_epoch(when: float) -> str:
     )
 
 
+def sql_epoch_from_datetime(value: object) -> float | None:
+    """The inverse of :func:`sql_datetime_from_epoch`, or `None`.
+
+    Beside it deliberately. That function's docstring is the record of why one
+    converter exists at all — the pairing deadline crosses two clocks, and
+    without a single spelling the two are compared by whichever caller got
+    there first — and the reverse direction is the same argument read
+    backwards: the column stores text so the poll's deadline arm can compare it
+    in SQL, and a browser drawing a countdown needs the absolute instant.
+
+    **This is the authoritative epoch-direction parser for this format**, and
+    it is worth naming because there are already three partial copies in the
+    tree, each answering a slightly different question:
+    `transport/whatsapp/outbound._parse_sql_datetime` returns a `datetime` and
+    is the stricter of them, `_normalise_first_seen` in this module returns
+    ISO-Z text and falls back to now, and `briefings/sources/kv` has its own.
+    A caller wanting epoch seconds uses this one; a caller wanting a
+    `datetime` in the WhatsApp transport uses `outbound`'s.
+
+    Never raises, for any input: the columns it reads are nullable and a legacy
+    row can hold anything. `None` means "no usable instant", which every
+    caller renders rather than acting on.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+
 def request_whatsapp_pairing(
     conn: sqlite3.Connection,
     user_id: str,
     *,
     window_seconds: float = WHATSAPP_PAIRING_WINDOW_SECONDS,
+    force: bool = False,
 ) -> str | None:
     """Write a pending pairing request. The request id, or `None` if one is open.
 
@@ -11012,6 +11057,13 @@ def request_whatsapp_pairing(
     window's own deadline once one is open, or the sequence's own wait would
     eat into the time somebody has to scan.
 
+    `force` records that the caller collected an operator's confirmation to
+    disconnect a *working* session, and it is written verbatim rather than
+    inferred: the poll passes `repair_session(force=True)` only where this
+    column reads 1, so it is the whole carrier of that confirmation across the
+    two processes. Its caller is the one that must never default it — see the
+    web route, which requires `force` and `confirm_disconnect` together.
+
     The billing columns are preserved on the conflict branch. This table
     carries the live circuit breaker and a pairing request must not clear it.
     """
@@ -11027,8 +11079,8 @@ def request_whatsapp_pairing(
         INSERT INTO whatsapp_runtime (
             singleton, pairing_state, pairing_window_id, pairing_requested_by,
             pairing_requested_at, pairing_expires_at, pairing_message,
-            updated_at
-        ) VALUES (1, ?, ?, ?, ?, ?, NULL, ?)
+            pairing_force, updated_at
+        ) VALUES (1, ?, ?, ?, ?, ?, NULL, ?, ?)
         ON CONFLICT(singleton) DO UPDATE SET
             pairing_state = excluded.pairing_state,
             pairing_window_id = excluded.pairing_window_id,
@@ -11036,6 +11088,7 @@ def request_whatsapp_pairing(
             pairing_requested_at = excluded.pairing_requested_at,
             pairing_expires_at = excluded.pairing_expires_at,
             pairing_message = NULL,
+            pairing_force = excluded.pairing_force,
             updated_at = excluded.updated_at
          WHERE whatsapp_runtime.pairing_state IS NULL
             OR whatsapp_runtime.pairing_state IN (PLACEHOLDERS)
@@ -11046,6 +11099,7 @@ def request_whatsapp_pairing(
             str(user_id),
             now,
             expires_at,
+            1 if force else 0,
             now,
             *terminal,
         ),
@@ -11065,7 +11119,8 @@ def read_whatsapp_pairing(conn: sqlite3.Connection) -> dict | None:
     """
     row = conn.execute(
         "SELECT pairing_state, pairing_window_id, pairing_requested_by, "
-        "pairing_requested_at, pairing_expires_at, pairing_message, updated_at "
+        "pairing_requested_at, pairing_expires_at, pairing_message, "
+        "pairing_force, updated_at "
         "FROM whatsapp_runtime WHERE singleton = 1"
     ).fetchone()
     if row is None or not row["pairing_state"]:
@@ -11077,6 +11132,10 @@ def read_whatsapp_pairing(conn: sqlite3.Connection) -> dict | None:
         "requested_at": row["pairing_requested_at"] or "",
         "expires_at": row["pairing_expires_at"] or "",
         "message": row["pairing_message"] or "",
+        # `bool`, because a legacy row written before the column existed reads
+        # NULL and an unforced request writes 0 — three spellings of the same
+        # answer, and the poll's gate must read them alike.
+        "force": bool(row["pairing_force"]),
         "updated_at": row["updated_at"] or "",
     }
 
@@ -11158,6 +11217,7 @@ def clear_whatsapp_pairing(conn: sqlite3.Connection) -> bool:
            SET pairing_state = NULL, pairing_window_id = NULL,
                pairing_requested_by = NULL, pairing_requested_at = NULL,
                pairing_expires_at = NULL, pairing_message = NULL,
+               pairing_force = NULL,
                updated_at = ?
          WHERE singleton = 1 AND pairing_state IS NOT NULL
         """,

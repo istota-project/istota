@@ -2,7 +2,7 @@
 
 `whatsapp_runtime` already carries the live billing circuit breaker on a
 deployment where WhatsApp is in production, so every assertion here is about a
-migration that only ever *adds*. The six columns are nullable with no default,
+migration that only ever *adds*. The seven columns are nullable with no default,
 nothing is backfilled, and a build rolled back to before them selects none of
 them — which is what makes an upgrade harmless in both directions.
 
@@ -126,7 +126,7 @@ class TestTheMigration:
     def test_every_column_is_nullable_with_no_default(self, db_path):
         """What makes the migration additive in *both* directions: nothing is
         backfilled, so an un-paired deployment reads NULL everywhere and
-        behaves exactly as it did, and an older build ignores six columns it
+        behaves exactly as it did, and an older build ignores seven columns it
         never selects."""
         with db.get_db(db_path) as conn:
             present = columns_of(conn, "whatsapp_runtime")
@@ -150,7 +150,10 @@ class TestTheMigration:
         declared = {
             match.group(1)
             for match in re.finditer(
-                r"^\s{4}(pairing_\w+)\s+TEXT,?$", create.group(1), re.MULTILINE
+                # Any type, not `TEXT`: `pairing_force` is an INTEGER, and a
+                # regex naming one type reads a column of another as absent —
+                # which is a drift guard that goes quietly one-sided.
+                r"^\s{4}(pairing_\w+)\s+\w+,?$", create.group(1), re.MULTILINE
             )
         }
         assert declared == set(db.WHATSAPP_PAIRING_COLUMNS)

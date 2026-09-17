@@ -103,9 +103,18 @@ def start_baileys_bridge(config: "Config") -> bool:
     from ...async_runtime import get_async_runtime, run_coro  # noqa: PLC0415
 
     argv = baileys_bridge.resolve_sidecar_argv(config)
+    # The pairing keys are read here rather than inside the constructor so the
+    # bridge keeps taking them as parameters — which is what lets a test drive
+    # a five-second window without writing a config file. `pairing_relay_path`
+    # is the exception and is resolved by `default_pairing_relay_path`, because
+    # the poll's no-bridge relay clear has no bridge to ask.
     bridge = baileys_bridge.BaileysBridge(
         config,
         sidecar_argv=argv,
+        pairing_window_seconds=baileys_bridge.configured_pairing_window_seconds(
+            config
+        ),
+        restart_interval_seconds=config.whatsapp.baileys.restart_interval_seconds,
         on_fatal=lambda reason: _announce_unlink(config, reason),
     )
     try:
@@ -350,11 +359,19 @@ def _poll_pairing_request(config: "Config") -> None:
         config.db_path, busy_timeout_ms=_POLL_BUSY_TIMEOUT_MS
     ) as conn:
         row = db.read_whatsapp_pairing(conn)
+    # **An orphan is a window or a relay file the durable row no longer owns**,
+    # and clearing one is the only route a cancel has on the split shape: the
+    # web process holds no bridge on the Ansible deployment, so `DELETE` can
+    # only stamp the row and leave both to whoever does. Run *before* the
+    # terminal early return, because a fresh request written over a closed one
+    # is non-terminal and would otherwise skip it entirely — see
+    # `_pairing_row_owns_no_window`.
+    _close_orphaned_pairing(config, bridge, row)
     if row is None or row["state"] in db.WHATSAPP_PAIRING_TERMINAL_STATES:
         return
 
     closure: _PairingClosure | None = None
-    claim: tuple[str, str] | None = None
+    claim: tuple[str, str, bool] | None = None
     with db.get_db(
         config.db_path, busy_timeout_ms=_POLL_BUSY_TIMEOUT_MS
     ) as conn:
@@ -379,7 +396,11 @@ def _poll_pairing_request(config: "Config") -> None:
                     conn, row["window_id"], db.WHATSAPP_PAIRING_SERVICING,
                 )
             ):
-                claim = (row["window_id"], row["requested_by"])
+                # `force` rides the claim rather than being re-read later: the
+                # row is what carries the operator's confirmation, and by the
+                # time the coroutine runs the deadline arm could have replaced
+                # it with a fresh, unforced request.
+                claim = (row["window_id"], row["requested_by"], row["force"])
 
     if closure is not None:
         _clean_up_after_closure(config, bridge, closure)
@@ -393,7 +414,126 @@ def _poll_pairing_request(config: "Config") -> None:
         _spawn_pairing_announce(config, closure)
         return
     if claim is not None:
-        _spawn_pairing_service(config, bridge, claim[0], claim[1])
+        _spawn_pairing_service(
+            config, bridge, claim[0], claim[1], force=claim[2],
+        )
+
+
+def _pairing_row_owns_no_window(row: dict | None) -> bool:
+    """Whether a live pairing window would provably be an orphan of this row.
+
+    **Three states, and the third is the one that is easy to miss.** No row at
+    all and a terminal row are the obvious two. `requested` is the third: a
+    fresh request is only ever written over a terminal predecessor, so a window
+    alive while the row reads `requested` belongs to the request *before* this
+    one — and without that arm it survives, `repair_session` refuses the new
+    request `already_pairing` against it, and every retry fails for the rest of
+    its TTL with the row recording a failure the operator did not cause.
+    `_revert_pairing_claim` puts a row back to `requested` too, before the
+    coroutine has run, where the same reasoning holds.
+
+    **`servicing` is deliberately excluded, and an id comparison in place of a
+    state test would be a defect rather than a tightening.** Between
+    `open_pairing_window` and `_write_pairing_outcome`'s adopt write the row
+    carries the *request* id while the live window carries its own, so "the two
+    ids differ" is the ordinary state of a healthy re-pair — a tick landing in
+    that gap would cancel the very window it is servicing. The state is what
+    separates a leftover from work in flight; the id is not.
+    """
+    from ... import db  # noqa: PLC0415
+
+    if row is None:
+        return True
+    return (
+        row["state"] in db.WHATSAPP_PAIRING_TERMINAL_STATES
+        or row["state"] == db.WHATSAPP_PAIRING_REQUESTED
+    )
+
+
+def _close_orphaned_pairing(config: "Config", bridge, row: dict | None) -> None:
+    """Clear a window and a relay file the durable row no longer owns.
+
+    The row is the authority on whether a pairing is over — it is what the web
+    process can write and what survives a restart — so either leftover behind
+    a row that does not own it is a full-account credential with nothing
+    owning it.
+
+    **Two leftovers, two remedies, and the second is not reachable through the
+    first.** A live window is cancelled, which drops it, cancels its watchdog
+    and unlinks the relay under the bridge's own lock. But a scheduler restart
+    loses the window while the relay file survives — so after a `DELETE` there
+    is nothing left to cancel and the last code sits at 0600 for the life of
+    the deployment. `_clean_up_after_closure` is the sibling that would have
+    swept it, and it never runs again: its closure is computed past the
+    terminal early return, and the deadline arm only ever looks at non-terminal
+    rows.
+
+    **The existence test comes first, and that is about cost rather than
+    tidiness.** This runs on the dispatch thread on every tick, and
+    `clear_relay` globs the directory for staging files — so on a deployment
+    whose pairing row has been closed for months that would be a directory
+    listing per tick for ever. A `Path.exists()` on a file that is not there is
+    one `stat`.
+
+    Never raises: it is a poll tick.
+    """
+    if not _pairing_row_owns_no_window(row):
+        return
+    window = None if bridge is None else bridge.pairing_window
+    if window is not None:
+        _spawn_orphan_cancel(bridge, window)
+        return
+    try:
+        relay = (
+            baileys_bridge.default_pairing_relay_path(config)
+            if bridge is None
+            else bridge.pairing_relay_path
+        )
+        if not relay.exists():
+            return
+    except OSError:
+        return
+    logger.warning(
+        "whatsapp.pairing.orphan_relay_swept path=%s: a pairing code outlived "
+        "the request row that owned it", relay,
+    )
+    if bridge is not None:
+        # Through the bridge, so the unlink is serialized against a write it
+        # may still have in flight on a worker thread — the precondition
+        # `pairing_relay.clear_relay` states for itself.
+        bridge.clear_relay_file()
+        return
+    pairing_relay.clear_relay(relay)
+
+
+def _spawn_orphan_cancel(bridge, window) -> None:
+    """Cancel one orphaned window on the runtime loop. Never raises.
+
+    Scheduled rather than awaited, because the bridge's asyncio primitives are
+    bound to that loop and this runs on the scheduler's dispatch thread. Scoped
+    to the id read on this thread, since by the time it runs the window it
+    meant could have closed and a fresh one opened — and that scoping is also
+    what covers Stage 3's stated residual, a window whose adopt write was
+    refused and whose id therefore never reached the row at all.
+
+    A refusal to schedule is logged and nothing else: the window's own watchdog
+    still closes it at its TTL, and a runtime refusing a task means the process
+    is going away with it. It is re-attempted on the next tick, which is
+    harmless — `cancel_pairing` answers False once there is no window and
+    `_end_pairing_window` re-checks identity — and costs one scheduled task per
+    tick until one of them lands.
+    """
+    from ...async_runtime import spawn_task  # noqa: PLC0415
+
+    coro = bridge.cancel_pairing(window_id=window.window_id)
+    try:
+        spawn_task(coro, name="whatsapp-pairing-cancel")
+    except Exception as exc:  # noqa: BLE001 — a poll tick must not raise
+        coro.close()
+        logger.warning(
+            "whatsapp.pairing.orphan_cancel_unscheduled window=%s reason=%s",
+            window.window_id, exc,
+        )
 
 
 def _clean_up_after_closure(
@@ -630,6 +770,7 @@ def _mirror_pairing_window(conn, bridge, row: dict) -> None:
 
 def _spawn_pairing_service(
     config: "Config", bridge, request_id: str, requested_by: str,
+    *, force: bool = False,
 ) -> None:
     """Hand the claimed request to the bridge, on the runtime loop.
 
@@ -651,7 +792,9 @@ def _spawn_pairing_service(
     # it. `spawn` closes it itself on the `RuntimeError` it raises, but not on
     # anything else, and an un-awaited coroutine is a `RuntimeWarning` in a
     # place nobody is watching for one.
-    coro = _service_pairing_request(config, bridge, request_id, requested_by)
+    coro = _service_pairing_request(
+        config, bridge, request_id, requested_by, force=force,
+    )
     try:
         spawn_task(coro, name="whatsapp-pairing")
     except Exception as exc:  # noqa: BLE001 — the claim must not be stranded
@@ -685,6 +828,7 @@ def _revert_pairing_claim(config: "Config", request_id: str) -> None:
 
 async def _service_pairing_request(
     config: "Config", bridge, request_id: str, requested_by: str,
+    *, force: bool = False,
 ) -> None:
     """Run one re-pair and write its outcome onto the request row.
 
@@ -692,16 +836,19 @@ async def _service_pairing_request(
     runtime loop, where a `get_db` taking the write lock synchronously is the
     stall the rest of this surface already avoids at several seams.
 
-    `force` is deliberately not passed. The durable row has no column for it,
-    so the only way to derive one here would be to read the bridge's live
-    state — and a request written while a fatal was latched, serviced after the
-    session recovered, would then disconnect a working session. The unforced
-    default is the spec's safe one and the latched-permanent-fatal case is what
-    this flow is for; carrying an operator's confirmed `force` across the row
-    belongs with the routes that collect it.
+    **`force` comes off the row and from nowhere else.** It is the operator's
+    confirmation that disconnecting a working session is acceptable, collected
+    by the surface they spoke to and carried across processes in
+    `pairing_force`; this function is not that surface and must not manufacture
+    one. Deriving it from the bridge's live state was the obvious alternative
+    and is wrong in the one direction that matters: a request written while a
+    fatal was latched, serviced after the session recovered, would disconnect a
+    session nobody agreed to disconnect. The default is therefore the safe one,
+    so a caller that forgets the argument gets the refusal rather than the
+    destructive path.
     """
     try:
-        result = await bridge.repair_session(requested_by)
+        result = await bridge.repair_session(requested_by, force=force)
     except asyncio.CancelledError:
         # `repair_session` re-raises cancellation, and `AsyncRuntime._shutdown`
         # cancels pending tasks — so a daemon stopping mid-repair would leave

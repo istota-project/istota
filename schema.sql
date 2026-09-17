@@ -1062,7 +1062,7 @@ ON whatsapp_parked_status(parked_at);
 -- `allow_paid`. The message id is operational evidence and is masked outside
 -- private operator commands.
 --
--- The six `pairing_*` columns are the durable half of the re-pair flow: the web
+-- The seven `pairing_*` columns are the durable half of the re-pair flow: the web
 -- (or the CLI's attach mode) writes a request here and the process holding the
 -- Baileys bridge polls it. They are here *and* in `db._run_migrations` — this
 -- CREATE is what a fresh install gets, `_add_columns` is what an upgraded
@@ -1082,6 +1082,14 @@ ON whatsapp_parked_status(parked_at);
 -- time would be captured in a durable, replicated backup of a full-account
 -- credential. It travels in a 0600 relay file instead
 -- (`transport/whatsapp/pairing_relay.py`).
+--
+-- `pairing_force` is the seventh and is the record that an operator confirmed
+-- disconnecting a *working* session. The route collects that confirmation and
+-- the poll is what calls the bridge, so without a column on the row the poll
+-- can only ask unforced and a live-session re-pair is refused end to end. It
+-- is a record of a confirmation rather than a second place to grant one: the
+-- route writes 1 only where it saw both `force` and `confirm_disconnect`, and
+-- nothing defaults it server-side.
 CREATE TABLE IF NOT EXISTS whatsapp_runtime (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     billing_blocked_at TEXT,
@@ -1094,6 +1102,8 @@ CREATE TABLE IF NOT EXISTS whatsapp_runtime (
     pairing_requested_at TEXT,
     pairing_expires_at TEXT,
     pairing_message TEXT,
+    -- 1 where the operator confirmed disconnecting a working session.
+    pairing_force INTEGER,
     updated_at TEXT NOT NULL
 );
 

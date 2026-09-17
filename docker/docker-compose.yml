@@ -449,6 +449,15 @@ services:
       # meant to stay empty: the `whatsapp-baileys` service runs it, and a
       # second sidecar against one session directory corrupts the credential.
       ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND: ${ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND:-}
+      # Re-pairing the paired session from the admin web UI. `PAIRING_ENABLED`
+      # gates those routes and nothing else. `RESTART_INTERVAL_SECONDS` stays
+      # empty here (the generator renders 0): it declares a supervisor that
+      # restarts on a fixed interval, and Docker's backoff from 100ms is not
+      # one. It gates nothing either way.
+      ISTOTA_WHATSAPP_BAILEYS_PAIRING_ENABLED: ${ISTOTA_WHATSAPP_BAILEYS_PAIRING_ENABLED:-}
+      ISTOTA_WHATSAPP_BAILEYS_PAIRING_WINDOW_SECONDS: ${ISTOTA_WHATSAPP_BAILEYS_PAIRING_WINDOW_SECONDS:-}
+      ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH: ${ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH:-}
+      ISTOTA_WHATSAPP_BAILEYS_RESTART_INTERVAL_SECONDS: ${ISTOTA_WHATSAPP_BAILEYS_RESTART_INTERVAL_SECONDS:-}
       ISTOTA_WHATSAPP_WABA_ID: ${ISTOTA_WHATSAPP_WABA_ID:-}
       ISTOTA_WHATSAPP_PHONE_NUMBER_ID: ${ISTOTA_WHATSAPP_PHONE_NUMBER_ID:-}
       ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER: ${ISTOTA_WHATSAPP_BUSINESS_PHONE_NUMBER:-}
