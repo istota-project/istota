@@ -139,6 +139,14 @@ REASON_SESSION_FATAL = "the WhatsApp session needs re-pairing"
 REASON_SEND_TIMEOUT = "the sidecar did not answer the send"
 REASON_LINK_LOST = "the sidecar connection dropped during the send"
 REASON_ENCODE_FAILED = "the send could not be encoded"
+#: What a send inside an open pairing window is refused with. Its own string
+#: rather than `REASON_SESSION_FATAL`, because the two are different states an
+#: operator reads differently: that one means the session needs re-pairing,
+#: this one means somebody is re-pairing it right now. Both are `definite`,
+#: which is the point — `repair_session` clears the permanent-fatal latch so
+#: the supervisor can resume, and without a refusal of its own every send in
+#: the window would be written to an unpaired sidecar and settle `unknown`.
+REASON_PAIRING = "the WhatsApp session is being re-paired"
 #: The catch-all for a send that failed before its line entered the socket and
 #: for no reason above. It is its own string rather than `REASON_LINK_LOST`
 #: because the two settle the ledger differently — this one is `definite`, so
@@ -455,6 +463,7 @@ __all__ = [
     "REASON_LINK_LOST",
     "REASON_NOT_WRITTEN",
     "REASON_NO_SIDECAR",
+    "REASON_PAIRING",
     "REASON_SEND_TIMEOUT",
     "REASON_SESSION_FATAL",
     "UP_MESSAGES",
