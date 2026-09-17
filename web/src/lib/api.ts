@@ -494,6 +494,119 @@ export async function getAdminDoctor(deep = false): Promise<DoctorReport> {
   return apiFetch<DoctorReport>(`/admin/doctor${deep ? '?deep=1' : ''}`);
 }
 
+/**
+ * What the bridge says about the sidecar link, or `null`.
+ *
+ * `null` means **this process cannot see the bridge** — never that the bridge
+ * is down. On the canonical Ansible deployment the web unit and the scheduler
+ * are separate units and the bridge lives in the scheduler, so `null` is the
+ * only answer that surface ever gives.
+ */
+export interface AdminConnectionLink {
+  listening: boolean;
+  connected: boolean;
+  ready: boolean;
+  /** The sidecar's last fatal, already reduced to a bounded label server-side. */
+  fatal_reason: string | null;
+  /** The session is unlinked and will not come back without a re-pair. */
+  fatal_is_permanent: boolean;
+  restarts: number | null;
+}
+
+/** The durable pairing row, plus the live window's state where one is publishing. */
+export interface AdminPairingState {
+  window_id: string | null;
+  /** `requested` | `servicing` | `awaiting_sidecar` | `awaiting_scan` |
+   *  `sidecar_absent` | `paired` | `expired` | `failed`. */
+  state: string | null;
+  row_state: string | null;
+  terminal: boolean;
+  requested_by: string | null;
+  requested_at: string | null;
+  expires_at: string | null;
+  expires_at_epoch: number | null;
+  message: string | null;
+  force: boolean;
+  /** Bumped on every rotation. The only thing that says a new code exists. */
+  qr_seq: number;
+  /** Whether `qr.svg` would draw something now. Never the code itself. */
+  qr_available: boolean;
+}
+
+/** One deployment-level connection. WhatsApp is the only member today. */
+export interface AdminConnection {
+  id: string;
+  label: string;
+  enabled: boolean;
+  provider: string;
+  number: string;
+  /** The adapter has a QR at all — false for Meta's Cloud API. */
+  pairing_supported: boolean;
+  pairing_enabled: boolean;
+  restart_interval_seconds: number;
+  credential_errors: string[];
+  link: AdminConnectionLink | null;
+  pairing: AdminPairingState | null;
+  /** Why a start would be refused before it is attempted, or `null`. */
+  pairing_blocked_reason: string | null;
+}
+
+export async function getAdminConnections(): Promise<{ connections: AdminConnection[] }> {
+  return apiFetch<{ connections: AdminConnection[] }>('/admin/connections');
+}
+
+export async function getWhatsAppPairing(): Promise<{ pairing: AdminPairingState | null }> {
+  return apiFetch<{ pairing: AdminPairingState | null }>('/admin/connections/whatsapp/pairing');
+}
+
+/**
+ * Ask for a pairing window.
+ *
+ * **Both flags are always sent and neither is ever inferred.** `force` means
+ * "I accept disconnecting a session that is working" and the server refuses
+ * `force` without `confirm_disconnect` with a 400, so the destructive path
+ * cannot be reached by one flipped boolean. The unforced call is safe against a
+ * live session whatever this browser believes: the bridge refuses anything with
+ * no latched permanent fault and records that refusal on the row.
+ */
+export async function startWhatsAppPairing(
+  opts: { force?: boolean; confirmDisconnect?: boolean } = {},
+): Promise<{ window_id: string; state: string; force: boolean }> {
+  return apiFetch('/admin/connections/whatsapp/pairing', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      force: opts.force === true,
+      confirm_disconnect: opts.confirmDisconnect === true,
+    }),
+  });
+}
+
+export async function cancelWhatsAppPairing(): Promise<{
+  cancelled: boolean;
+  reason: string;
+  window_id?: string | null;
+}> {
+  return apiFetch('/admin/connections/whatsapp/pairing', { method: 'DELETE' });
+}
+
+/** URL for the pairing SSE stream. Built here for `adminLogStreamUrl`'s reason. */
+export function whatsAppPairingStreamUrl(): string {
+  return `${base}/api/admin/connections/whatsapp/pairing/stream`;
+}
+
+/**
+ * URL of the server-rendered pairing code.
+ *
+ * `seq` is a cache-buster rather than a selector — the server draws whichever
+ * code is live and names it in `X-Pairing-Qr-Seq` — so it is what makes the
+ * browser refetch on a rotation and hold the image still between them. The code
+ * reaches the page only as this response's bytes: nothing puts it in a string.
+ */
+export function whatsAppPairingQrUrl(seq: number): string {
+  return `${base}/api/admin/connections/whatsapp/pairing/qr.svg?seq=${encodeURIComponent(String(seq))}`;
+}
+
 export interface FeedCategory {
   id: number;
   title: string;

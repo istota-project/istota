@@ -2,7 +2,7 @@
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { AppShell, ShellHeader, Sidebar, SidebarToggle } from '$lib/components/ui';
-  import { Activity, ScrollText, SlidersHorizontal, Stethoscope } from 'lucide-svelte';
+  import { Activity, Plug, ScrollText, SlidersHorizontal, Stethoscope } from 'lucide-svelte';
 
   let { children } = $props();
 
@@ -15,6 +15,7 @@
     { href: '', label: 'Status', icon: Activity },
     { href: '/health', label: 'Health', icon: Stethoscope },
     { href: '/config', label: 'Configuration', icon: SlidersHorizontal },
+    { href: '/connections', label: 'Connections', icon: Plug },
     { href: '/logs', label: 'Logs', icon: ScrollText },
   ];
 
@@ -86,6 +87,7 @@
      and Svelte prunes a selector whose subject it cannot see in this file. */
   :global(.settings.admin-page),
   :global(.settings.config-page),
+  :global(.settings.connections-page),
   :global(.settings.health-page),
   :global(.settings.logs-page) {
     max-width: var(--content-max);
