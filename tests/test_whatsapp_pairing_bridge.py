@@ -49,11 +49,17 @@ from istota.transport.whatsapp import pairing_relay
 from istota.transport.whatsapp.baileys_bridge import (
     PAIRING_ALREADY,
     PAIRING_COOLDOWN,
+    PAIRING_FAILED,
+    PAIRING_FRAME_UNSENT,
+    PAIRING_NO_WINDOW,
     PAIRING_OK,
+    PAIRING_RESET_REFUSED,
     PAIRING_SESSION_DIR_UNUSABLE,
     PAIRING_SESSION_LIVE,
     PAIRING_SHAPE_UNSUPPORTED,
     PAIRING_SIDECAR_ABSENT,
+    PAIRING_SIDECAR_RETURNED,
+    PAIRING_STOPPING,
     PAIRING_STOP_TIMEOUT,
     BaileysBridge,
 )
@@ -644,7 +650,9 @@ class TestTheTwoShapes:
                 instance, sockets, closes_on_shutdown=False,
             ) as peer:
                 await latch_fatal(instance, peer)
-                await wait_for(lambda: instance._supervisor.done() is True, timeout=15.0)
+                await wait_for(
+                    lambda: instance._supervisor.done() is True, timeout=15.0,
+                )
                 before = peer.shutdowns
 
                 result = await instance.repair_session(USER)
@@ -694,7 +702,9 @@ class TestTheTwoShapes:
                 instance, sockets, closes_on_shutdown=False,
             ) as peer:
                 await latch_fatal(instance, peer)
-                await wait_for(lambda: instance._supervisor.done() is True, timeout=15.0)
+                await wait_for(
+                    lambda: instance._supervisor.done() is True, timeout=15.0,
+                )
                 assert instance._process is None
 
                 result = await instance.repair_session(USER)
@@ -788,6 +798,224 @@ class TestOneRenameImplementation:
             assert instance.pairing_window.destructive is False
 
 
+class TestTheBranchesNothingReachedBefore:
+    """Six `PairingResult` branches both reviewers found untested, including
+    the never-raises contract itself. Each is a state an operator is told
+    about, so each has to have been produced at least once."""
+
+    async def test_a_sidecar_reconnecting_before_the_move_is_refused(
+        self, config, sockets, monkeypatch,
+    ):
+        """`PAIRING_SIDECAR_RETURNED` is the last line of defence — with both
+        latch clears removed it is what still refuses — and it was reachable
+        only as the third step of a combined mutation.
+
+        Driven directly: the frame is answered as written while the peer stays
+        connected, and the drop latch is raised by hand. That is the shape a
+        respawn beating the rename produces, and the only thing between it and
+        a credential moved out from under a live writer is this check.
+        """
+        renames = record_renames(monkeypatch)
+        async with running(config, sockets) as instance:
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                await latch_fatal(instance, peer)
+
+                async def answered_but_still_connected(writer):
+                    instance._link_dropped.set()
+                    return True
+
+                monkeypatch.setattr(
+                    instance, "_write_shutdown_frame",
+                    answered_but_still_connected,
+                )
+                result = await instance.repair_session(USER)
+
+                assert result.reason == PAIRING_SIDECAR_RETURNED
+                assert result.restart_spent is True
+                assert peer.shutdowns == 0, peer.types
+
+            assert renames == []
+            assert archives(sockets) == []
+            assert (sockets.session / "creds.json").read_text() == CREDS
+
+    async def test_a_frame_that_cannot_be_written_costs_nothing(
+        self, config, sockets, monkeypatch,
+    ):
+        """`PAIRING_FRAME_UNSENT`, the other clean no-op: nothing left this
+        process, so no restart was spent and no cooldown is stamped — which is
+        what lets the operator retry at once."""
+        async with running(config, sockets) as instance:
+            async with sidecar(instance, sockets) as peer:
+                await latch_fatal(instance, peer)
+
+                async def refuse(writer):
+                    return False
+
+                monkeypatch.setattr(instance, "_write_shutdown_frame", refuse)
+                result = await instance.repair_session(USER)
+
+                assert result.reason == PAIRING_FRAME_UNSENT
+                assert result.restart_spent is False
+                assert result.moved_to is None
+            assert instance._cooldown_remaining() == 0
+            assert (sockets.session / "creds.json").read_text() == CREDS
+
+    async def test_a_stopping_bridge_refuses(self, config, sockets):
+        """`PAIRING_STOPPING`. `stop()` cancels the supervisor and reaps
+        concurrently, so a repair racing it would contend for the same child
+        and the same directory."""
+        async with running(config, sockets) as instance:
+            async with sidecar(instance, sockets) as peer:
+                await latch_fatal(instance, peer)
+                instance._stopping = True
+                try:
+                    result = await instance.repair_session(USER)
+                finally:
+                    instance._stopping = False
+
+                assert result.reason == PAIRING_STOPPING
+                assert result.restart_spent is False
+                assert peer.shutdowns == 0, peer.types
+
+    async def test_the_never_raises_contract_holds(
+        self, config, sockets, monkeypatch,
+    ):
+        """`PAIRING_FAILED`, and the contract the docstring states: this runs
+        from a scheduler tick and from a web route, neither of which can act
+        on an exception. The in-flight flag has to come back too, or one raise
+        wedges the surface for the life of the process."""
+        async with running(config, sockets) as instance:
+            async with sidecar(instance, sockets) as peer:
+                await latch_fatal(instance, peer)
+
+                def explode():
+                    raise RuntimeError("the disk went away")
+
+                monkeypatch.setattr(instance, "_move_session_aside", explode)
+                result = await instance.repair_session(USER)
+
+                assert result.ok is False
+                assert result.reason == PAIRING_FAILED
+                assert instance._repairing is False
+                assert peer.shutdowns == 1, peer.types
+
+    async def test_the_spawned_shape_reports_its_once_per_bridge_bound(
+        self, config, sockets, monkeypatch,
+    ):
+        """`PAIRING_RESET_REFUSED`, ahead of the cooldown rather than behind
+        it. Behind it the operator is told to wait a few minutes and then, a
+        few minutes later, refused for good — two messages pointing in
+        different directions, neither naming the state they are in."""
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        async with running(
+            config, sockets, sidecar_argv=IDLE_CHILD, reset_cooldown=0.0,
+        ) as instance:
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                await latch_fatal(instance, peer)
+                await wait_for(
+                    lambda: instance._supervisor.done() is True, timeout=15.0,
+                )
+                assert (await instance.repair_session(USER)).ok is True
+            assert await instance.cancel_pairing() is True
+
+            result = await instance.repair_session(USER)
+            assert result.reason == PAIRING_RESET_REFUSED
+            assert "istota whatsapp pair --reset" in result.message
+
+    async def test_a_failed_delegated_reset_spends_no_restart(
+        self, config, sockets, monkeypatch,
+    ):
+        """The delegated path's failure arm, and the decision behind it.
+
+        Both reviewers flagged that this arm marked `restart_spent=True` and
+        stamped no cooldown, which disagreed with two docstrings written in the
+        same change. Reading the code settles it toward no restart: the
+        supervisor's own permanent-fatal arm asks the child to stop and reaps
+        it *before* `repair_session` is called, so nothing is spent until
+        `resume()` spawns a fresh one — which only a returning reset reaches.
+        Stamping a cooldown here would block a legitimate retry for ten
+        minutes over a restart that never happened.
+
+        So the assertion is that the cooldown is *not* running and the result
+        does not claim a restart. Marking it spent turns the first two
+        assertions red; stamping the cooldown turns the third.
+        """
+        monkeypatch.setattr(bridge_module, "RESPAWN_BASE_SECONDS", 0.001)
+        async with running(
+            config, sockets, sidecar_argv=IDLE_CHILD,
+        ) as instance:
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                await latch_fatal(instance, peer)
+                await wait_for(
+                    lambda: instance._supervisor.done() is True, timeout=15.0,
+                )
+
+                def explode():
+                    raise OSError("the volume went read-only")
+
+                monkeypatch.setattr(instance, "_move_session_aside", explode)
+                result = await instance.repair_session(USER)
+
+            assert result.ok is False
+            assert result.reason == PAIRING_FAILED
+            assert result.restart_spent is False
+            assert instance._cooldown_remaining() == 0
+            assert (sockets.session / "creds.json").read_text() == CREDS
+
+    async def test_a_directory_holding_only_sidecar_files_is_not_archived(
+        self, config, sockets,
+    ):
+        """The empty arm as production actually reaches it.
+
+        The sidecar writes `sidecar.log` on every boot — before the daemon link
+        is even up — and `logout-backoff.json` beside it, both inside the
+        session directory. So an emptiness test answers True for a directory
+        holding nothing but logs, and the arm is unreachable in exactly the
+        case it exists for: a window a process restart orphaned, whose
+        credential is already at a `.old-` sibling. The case that stood here
+        arranged a bare directory, which a running sidecar never leaves.
+        """
+        async with running(config, sockets) as instance:
+            (sockets.session / "creds.json").unlink()
+            (sockets.session / "sidecar.log").write_text("info connecting\n")
+            (sockets.session / "logout-backoff.json").write_text('{"count":2}')
+            async with sidecar(instance, sockets) as peer:
+                await latch_fatal(instance, peer)
+                result = await instance.repair_session(USER)
+
+            assert result.ok is True, result.message
+            assert result.moved_to is None
+            assert archives(sockets) == []
+            assert instance.pairing_window.destructive is False
+            assert (sockets.session / "sidecar.log").exists()
+
+    async def test_a_directory_holding_a_signal_key_is_archived(
+        self, config, sockets,
+    ):
+        """The other side of that predicate, and why it is an allowlist of
+        files to *ignore* rather than a list to count.
+        `useMultiFileAuthState` writes a `.json` per Signal key under names
+        this module has no business enumerating, so anything unrecognised is
+        auth state."""
+        async with running(config, sockets) as instance:
+            (sockets.session / "creds.json").unlink()
+            (sockets.session / "sidecar.log").write_text("info connecting\n")
+            (sockets.session / "pre-key-7.json").write_text('{"private":"k"}')
+            async with sidecar(instance, sockets) as peer:
+                await latch_fatal(instance, peer)
+                result = await instance.repair_session(USER)
+
+            assert result.ok is True, result.message
+            assert result.moved_to is not None
+            assert (result.moved_to / "pre-key-7.json").exists()
+
+
 def wrap_move_aside(monkeypatch, instance) -> list[bool]:
     """Record that the shared core ran, and let it run."""
     reached: list[bool] = []
@@ -879,12 +1107,85 @@ class TestASendInsideAWindow:
             assert record.status == "failed"
             assert ledger_row(config, "task-result:2")["status"] == "failed"
 
-    async def test_a_send_outside_a_window_is_unaffected(
+    async def test_a_send_during_a_forced_repair_settles_failed(
         self, config, sockets, monkeypatch,
     ):
-        """The control for the arm's placement: with the window closed the
-        send reaches the socket exactly as it did before, so the arm cannot be
-        a blanket refusal wearing a window's name."""
+        """**The span ahead of the window**, and under `force` it is the only
+        thing standing in front of the ledger.
+
+        The unforced sequence is covered by the fatal latch it has not cleared
+        yet, which is why nothing showed this. Forced, the latch is absent by
+        construction — that is what `force` means — so between
+        `repair_session`'s first statement and the window there is no gate but
+        `_repairing`: up to `sidecar_return_timeout + sidecar_stop_timeout`,
+        75s at the shipped values, during which a send is written and then
+        settled `unknown` by the very link drop this sequence asked for.
+
+        **Driven with a sidecar connected and ignoring the frame**, which is
+        the discriminating point and took a control to find. The first draft
+        drove the widest part of the span — nothing connected — where `_send`
+        already refuses definitely on its own "no writer" gate, so removing
+        the `_repairing` arm left it green. Here the writer is live, so
+        without that arm the line reaches the socket and settles `unknown` at
+        `send_timeout`; the stop timeout is set above `send_timeout` so the
+        sequence is still waiting while that happens.
+        """
+        bind_user(config)
+        async with running(
+            config, sockets, sidecar_stop_timeout=3.0,
+        ) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                pending = asyncio.ensure_future(
+                    instance.repair_session(USER, force=True),
+                )
+                # The frame has been written, so the sequence is in its drop
+                # wait with the writer still live — no window, no latch.
+                await wait_for(lambda: peer.shutdowns == 1, timeout=5.0)
+                assert instance._repairing is True
+                assert instance.pairing_window is None
+                assert instance.status.fatal_is_permanent is False
+                assert instance.status.connected is True
+
+                record = await asyncio.wait_for(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:6", user_id=USER,
+                        text="the backup finished",
+                    ),
+                    timeout=5.0,
+                )
+
+                assert record.status == "failed"
+                assert ledger_row(config, "task-result:6")["status"] == "failed"
+                assert peer.types.count(proto.MSG_SEND) == 0, peer.types
+
+                outcome = await asyncio.wait_for(pending, timeout=10.0)
+                assert outcome.reason == PAIRING_STOP_TIMEOUT
+
+    async def test_a_send_after_a_window_closed_unscanned_still_settles_failed(
+        self, config, sockets, monkeypatch,
+    ):
+        """**The window is not the span the refusal needs to cover**, and this
+        is the half review found missing.
+
+        The window expires at its TTL; the latch stays clear for the life of
+        the process, on a session directory this sequence emptied. So every
+        later send goes to a sidecar restarting into an unpaired session and
+        settles `unknown` indefinitely — the same regression the window arm
+        exists to prevent, moved outside the window.
+
+        **The case that stood here could not see it**, and that is the lesson
+        rather than the bug: it had the fake answer `ok=True` and asserted
+        `accepted`, which models a *paired* sidecar. The real one in this state
+        has no credential, so the answer it gives is a failure or nothing at
+        all — the fake was more capable than the thing it stood in for, which
+        is `.claude/rules/testbed.md`'s recurring entry.
+
+        The control is removing `_unpaired_by_repair` from `_send`'s second
+        arm: the row settles `unknown` and this goes red there specifically.
+        """
         bind_user(config)
         async with running(config, sockets) as instance:
             use_bridge_as_adapter(monkeypatch, instance)
@@ -893,12 +1194,45 @@ class TestASendInsideAWindow:
                 assert (await instance.repair_session(USER)).ok is True
                 assert await instance.cancel_pairing() is True
 
+            assert instance.pairing_window is None
+            assert instance.status.fatal_is_permanent is False
+
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                record = await asyncio.wait_for(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:3", user_id=USER,
+                        text="the backup finished",
+                    ),
+                    timeout=5.0,
+                )
+
+                assert record.status == "failed"
+                assert ledger_row(config, "task-result:3")["status"] == "failed"
+                assert peer.types.count(proto.MSG_SEND) == 0, peer.types
+
+    async def test_a_send_on_a_bridge_that_never_repaired_is_unaffected(
+        self, config, sockets, monkeypatch,
+    ):
+        """The control for the arms' placement, and it has to be a bridge that
+        never repaired — which is what makes it a control rather than a second
+        statement of the case above.
+
+        A paired session reaches the socket and settles `accepted` exactly as
+        it did before this stage, so neither arm is a blanket refusal wearing a
+        pairing name. Here the fake answering `ok=True` is faithful: the
+        session it stands for is open.
+        """
+        bind_user(config)
+        async with running(config, sockets) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
             async with sidecar(
                 instance, sockets, closes_on_shutdown=False,
             ) as peer:
                 sending = asyncio.ensure_future(
                     outbound.deliver_whatsapp(
-                        config, logical_key="task-result:3", user_id=USER,
+                        config, logical_key="task-result:4", user_id=USER,
                         text="the backup finished",
                     ),
                 )
@@ -919,7 +1253,52 @@ class TestASendInsideAWindow:
                 record = await asyncio.wait_for(sending, timeout=5.0)
 
             assert record.status == "accepted"
-            assert ledger_row(config, "task-result:3")["status"] == "accepted"
+            assert ledger_row(config, "task-result:4")["status"] == "accepted"
+
+    async def test_a_ready_lifts_the_post_repair_refusal(
+        self, config, sockets, monkeypatch,
+    ):
+        """A scan is the only thing that says the session is open again, so it
+        is the only thing that lifts the refusal. Without this the flag would
+        be a one-way door and a paired deployment could never send again."""
+        bind_user(config)
+        async with running(config, sockets) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
+            async with sidecar(instance, sockets) as peer:
+                await latch_fatal(instance, peer)
+                assert (await instance.repair_session(USER)).ok is True
+
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                await peer.say(proto.MSG_QR, qr="2@PAIRINGcode/abc==")
+                await wait_for(lambda: instance.pairing_window.qr_seq == 1)
+                await peer.say(proto.MSG_READY)
+                await wait_for(lambda: instance.status.ready is True)
+
+                sending = asyncio.ensure_future(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:5", user_id=USER,
+                        text="the backup finished",
+                    ),
+                )
+                await wait_for(
+                    lambda: peer.types.count(proto.MSG_SEND) == 1, timeout=5.0,
+                )
+                request = next(
+                    payload
+                    for _, payload in peer.frames
+                    if payload["type"] == proto.MSG_SEND
+                )
+                await peer.say(
+                    proto.MSG_SEND_RESULT,
+                    request_id=request["request_id"],
+                    ok=True,
+                    message_id="BAE5CAFE",
+                )
+                record = await asyncio.wait_for(sending, timeout=5.0)
+
+            assert record.status == "accepted"
 
 
 # ---------------------------------------------------------------------------
@@ -967,6 +1346,7 @@ class TestWhatTheSequenceLeavesOpen:
                 result = await instance.repair_session(USER)
 
             assert result.ok is False
+            assert result.reason == PAIRING_NO_WINDOW
             assert result.moved_to is not None
             assert str(result.moved_to) in result.message
             assert (result.moved_to / "creds.json").read_text() == CREDS
