@@ -47,9 +47,11 @@ import pytest
 from istota import secret_schema, secrets_store
 from istota.secrets_vault import (
     DAEMON_WRITTEN_SERVICES,
+    SKIP_DELETE_HELD,
     SKIP_INELIGIBLE_SERVICE,
     SKIP_RESERVED_SERVICE,
     SKIP_UNKNOWN_KEY,
+    SKIP_UNREADABLE_ROW,
     VAULT_READ_CAP_BYTES,
     VaultCorrupt,
     VaultLibraryMissing,
@@ -1413,6 +1415,11 @@ class TestApply:
 
         assert secrets_store.get_secret(
             db_path, "alice", "karakeep", "api_key") == "ak-old"
+        # Without this, a reversed iteration passes the test vacuously: `ntfy`
+        # would raise first, `karakeep` would never be reached, and nothing
+        # written or deleted still satisfies the assertion above.
+        assert secrets_store.get_secret(
+            db_path, "alice", "karakeep", "base_url") == BASE_URL_VALUE
 
     def test_no_log_record_carries_a_value_on_the_apply_path(
         self, db_path, secret_key_env, caplog
@@ -1451,3 +1458,167 @@ class TestApply:
                 if r.name == "istota.secrets_vault"]
         assert any("karakeep" in m and "api-key" in m for m in said), said
         assert any("monarch" in m for m in said), said
+
+    def test_a_row_that_will_not_decrypt_is_never_deleted(self, db_path):
+        """The master-key guard tests presence and a length floor, which is all
+        `secret_key_available` can see — so a key that is *wrong* passes it, and
+        without this arm the pass writes fresh rows and deletes every one it
+        could not read.
+
+        That is the expensive direction: a half-loaded `secrets.env` or a
+        rotation applied to the wrong host is transient, and the credentials
+        come back when the right key does. They do not come back from a delete,
+        and the pass runs unattended every five minutes."""
+        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "a" * 64}):
+            secrets_store.set_secret(db_path, "alice", "ntfy", "token", "tk-ntfy")
+            secrets_store.set_secret(db_path, "alice", "ntfy", "username", "alice")
+        read = _vault_read({"ntfy": {"topic": TOPIC_VALUE}})
+
+        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "b" * 64}):
+            result = apply_vault(db_path, "alice", read, frozenset({"ntfy"}))
+
+        assert result.deleted == 0 and result.deleted_keys == []
+        assert sorted(result.skipped) == [
+            ("ntfy", "token", SKIP_UNREADABLE_ROW),
+            ("ntfy", "username", SKIP_UNREADABLE_ROW),
+        ]
+        assert secrets_store.secret_exists(db_path, "alice", "ntfy", "token")
+        assert secrets_store.secret_exists(db_path, "alice", "ntfy", "username")
+        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "a" * 64}):
+            assert secrets_store.get_secret(
+                db_path, "alice", "ntfy", "token") == "tk-ntfy"
+
+    def test_a_key_below_the_length_floor_is_refused_as_too_weak(self, db_path):
+        """`secret_key_available` collapses "absent" and "below the floor" into
+        one False, and the two have different remedies — the distinction
+        `doctor`'s `security.secret_key` check is built around. A 16-character
+        key told the operator the variable was not set, which is false and
+        points at the wrong fix."""
+        read = _vault_read({}, present=["karakeep"])
+
+        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "short"}):
+            with pytest.raises(secrets_store.SecretKeyTooWeakError) as caught:
+                apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
+
+        assert "not set" not in str(caught.value)
+        assert "Refusing to apply a vault" in str(caught.value)
+
+    def test_a_near_miss_entry_title_holds_the_deletion_it_would_have_caused(
+        self, tmp_path, db_path, secret_key_env
+    ):
+        """A title of `api_key ` is refused as a key this service does not
+        declare — §3 matches titles exactly — and the deletion rule would then
+        remove the very credential that entry was meant to set. Refuse the new
+        value and destroy the old one, from one trailing space on a phone
+        keyboard, with two branches that know nothing about each other.
+
+        The fuzzy match only ever holds a deletion back. Nothing is written on
+        it, so a title this cannot interpret still fails closed."""
+        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        karakeep = kp.add_group(root, "karakeep")
+        kp.add_entry(karakeep, "api_key ", "", API_KEY_VALUE)
+        kp.save()
+        read, _ = _read(path)
+
+        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
+
+        assert ("karakeep", "api_key ", SKIP_UNKNOWN_KEY) in result.skipped
+        assert ("karakeep", "api_key", SKIP_DELETE_HELD) in result.skipped
+        assert result.deleted == 0
+        assert secrets_store.get_secret(
+            db_path, "alice", "karakeep", "api_key") == "ak-old"
+
+    def test_a_case_variant_entry_title_holds_the_deletion_too(
+        self, db_path, secret_key_env
+    ):
+        """The other axis a phone keyboard moves. §3 folds the service segment
+        for exactly this reason and leaves titles exact; that is right for
+        deciding what to write and not for deciding what to destroy."""
+        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
+        read = _vault_read({"karakeep": {"API_KEY": API_KEY_VALUE}})
+
+        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
+
+        assert ("karakeep", "api_key", SKIP_DELETE_HELD) in result.skipped
+        assert secrets_store.get_secret(
+            db_path, "alice", "karakeep", "api_key") == "ak-old"
+
+    def test_a_read_missing_a_present_group_raises_rather_than_deleting(
+        self, db_path, secret_key_env
+    ):
+        """`entry_titles` is indexed rather than defaulted, here as well as on
+        the dataclass. An absent entry reads as "the group contains nothing",
+        which plans a deletion for every declared key — so the convenient
+        default is the destructive one, and a caller that built a `VaultRead`
+        wrong must hear about it rather than have its rows removed."""
+        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
+        read = VaultRead(
+            digest="0" * 64,
+            services={"karakeep": {}},
+            group_present={"karakeep": "karakeep"},
+            entry_titles={},
+        )
+
+        with pytest.raises(KeyError):
+            apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
+
+        assert secrets_store.secret_exists(db_path, "alice", "karakeep", "api_key")
+
+    def test_a_key_written_by_this_pass_is_never_deleted_by_it(
+        self, db_path, secret_key_env
+    ):
+        """`values <= entry_titles` holds on every path `_map_groups` can
+        produce, so this shape needs a hand-built read — which is the point:
+        the invariant belongs to `apply_vault` rather than being inherited from
+        a collaborator that a later stage's CLI verb is not bound by. Writing a
+        credential and deleting it in the same call is the worst outcome
+        available here, since the row is gone and the counts say it was set."""
+        read = VaultRead(
+            digest="0" * 64,
+            services={"karakeep": {"api_key": API_KEY_VALUE}},
+            group_present={"karakeep": "karakeep"},
+            entry_titles={"karakeep": frozenset()},
+        )
+
+        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
+
+        assert result.created == 1
+        assert result.deleted_keys == []
+        assert secrets_store.get_secret(
+            db_path, "alice", "karakeep", "api_key") == API_KEY_VALUE
+
+    def test_a_partial_delete_still_says_which_credentials_went(
+        self, db_path, secret_key_env, caplog
+    ):
+        """Each delete commits its own transaction, so a raise part-way through
+        the loop — a locked database on a background gate contending with the
+        scheduler's own writers — leaves rows gone with nothing on any surface
+        saying which, since the result object never returns. The plan is logged
+        before the loop for that reason: it over-reports on a partial failure,
+        which is the direction to be wrong in."""
+        for key in ("token", "username", "password"):
+            secrets_store.set_secret(db_path, "alice", "ntfy", key, f"v-{key}")
+        read = _vault_read({"ntfy": {"topic": TOPIC_VALUE}})
+        real_delete = secrets_store.delete_secret
+        calls = []
+
+        def _fail_on_the_second(db, user, service, key):
+            calls.append(key)
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("database is locked")
+            return real_delete(db, user, service, key)
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            with mock.patch.object(secrets_store, "delete_secret",
+                                   _fail_on_the_second):
+                with pytest.raises(sqlite3.OperationalError):
+                    apply_vault(db_path, "alice", read, frozenset({"ntfy"}))
+
+        said = [r.getMessage() for r in caplog.records
+                if r.name == "istota.secrets_vault"]
+        planned = [m for m in said if "deleting 3 credential(s)" in m]
+        assert planned, said
+        for key in ("token", "username", "password"):
+            assert f"ntfy/{key}" in planned[0]

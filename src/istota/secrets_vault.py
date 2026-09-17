@@ -91,6 +91,8 @@ _RESERVED_SERVICE_PREFIX = "connector:"
 SKIP_RESERVED_SERVICE = "reserved service namespace"
 SKIP_INELIGIBLE_SERVICE = "not a vault-eligible service"
 SKIP_UNKNOWN_KEY = "not a key this service declares"
+SKIP_UNREADABLE_ROW = "stored value will not decrypt, so it is not deleted"
+SKIP_DELETE_HELD = "a near-miss entry title held this deletion back"
 
 
 class VaultError(Exception):
@@ -414,6 +416,16 @@ def apply_vault(
        the values, so an entry whose password is empty or whose title is
        duplicated holds its row — see that field's own note.
 
+    **Two things hold a deletion back, and both are about a delete being the
+    one action that cannot be undone by fixing the cause.** A row that is
+    present and will not decrypt is never deleted: that is a stale master key
+    rather than a credential the user retired, and the credential comes back
+    when the right key does but not from a delete. And a deletion whose key
+    differs from a title refused in the same group only by case or surrounding
+    whitespace is held, because the alternative is refusing the new value and
+    destroying the old one over one trailing space — a combination §6 licenses
+    only by not having considered it. Both are reported in ``skipped``.
+
     **Every write happens before any delete**, across all services rather than
     within each, so a failure part-way through leaves credentials present rather
     than absent. That ordering is the reason the deletions are planned into a
@@ -423,18 +435,44 @@ def apply_vault(
     vocabulary. Every other path raises on its first ``set_secret`` anyway; the
     one that does not is a present group holding nothing, where the pass would
     delete every row of a service on a deployment that can neither read what it
-    is removing nor write a replacement.
+    is removing nor write a replacement. That guard tests presence and a length
+    floor, which is all ``secret_key_available`` can see, so a key that is
+    *wrong* passes it — the per-row readability test above is what covers that,
+    and neither substitutes for the other: an absent key makes every row
+    unreadable and is a deployment fault rather than a per-row one.
+
+    **It bumps ``last_accessed_at`` on every owned credential it reaches**, and
+    that is a cost to the column rather than to this pass: ``upsert_secret``
+    compares against ``get_secret``, the readability test above is another read,
+    and §7 parses on every *save* of the file rather than every change — so a
+    user who opens the vault and saves out of habit marks their whole owned set
+    as used. Nothing here can avoid it, since vault-wins needs the comparison
+    the existing importer avoids by never overwriting; what it means is that
+    ``last_accessed_at`` is not evidence a vault-owned credential is read by
+    anything.
 
     ``owned`` is matched exactly. §3 folds the *service segment of the file*
     and nothing else, and ``vault_services`` is operator config rather than
     something a phone keyboard touched — a name that does not match is refused
     here and warned about at config load.
     """
-    if not secrets_store.secret_key_available():
-        raise secrets_store.SecretKeyMissingError(
-            "ISTOTA_SECRET_KEY is not set; refusing to apply a vault, which "
-            "would delete credentials it cannot read or replace."
-        )
+    try:
+        # The store's own validator rather than `secret_key_available`, which
+        # collapses "absent" and "below the length floor" into one False — and
+        # the two have different remedies, which is the distinction `doctor`'s
+        # `security.secret_key` check is built around. Reaching for the private
+        # name follows that check's precedent (it reads `_MIN_KEY_LEN` from here
+        # for the same reason): a second copy of the rule is the drift the rule
+        # exists to catch. The key itself is not bound.
+        secrets_store._validated_key()
+    except (
+        secrets_store.SecretKeyMissingError,
+        secrets_store.SecretKeyTooWeakError,
+    ) as exc:
+        raise type(exc)(
+            f"{exc} Refusing to apply a vault: it would delete credentials it "
+            f"can neither read nor replace."
+        ) from exc
 
     result = VaultApplyResult()
     eligible = eligible_services()
@@ -456,6 +494,7 @@ def apply_vault(
 
         declared = schema[service]
         values = read.services.get(service, {})
+        written: set[str] = set()
         for key in sorted(values):
             if key not in declared:
                 result.skipped.append((service, key, SKIP_UNKNOWN_KEY))
@@ -468,33 +507,101 @@ def apply_vault(
             state = secrets_store.upsert_secret(
                 db_path, user_id, service, key, values[key]
             )
+            written.add(key)
             if state == "created":
                 result.created += 1
             elif state == "updated":
                 result.updated += 1
-            else:
+            elif state == "noop":
                 result.unchanged += 1
+            else:  # pragma: no cover - the store's contract is three literals
+                raise ValueError(f"unexpected upsert state {state!r}")
 
-        titles = read.entry_titles.get(service, frozenset())
-        for key in sorted(declared - titles):
-            if secrets_store.secret_exists(db_path, user_id, service, key):
-                pending_deletes.append((service, key))
+        # Indexed, not `.get(..., frozenset())`: an absent entry reads as "the
+        # group contains nothing" and plans a delete for every declared key, so
+        # the convenient default is the destructive one — the same reason the
+        # field itself carries no default. `_map_groups` fills it for every
+        # group it reports present, so a KeyError here is a caller that built a
+        # `VaultRead` by hand and got it wrong.
+        titles = read.entry_titles[service]
+        # `written` is subtracted so the pass can never write a key and delete
+        # it in the same call. It follows from `values <= titles` on every
+        # parser path, and this keeps it a property of `apply_vault` rather than
+        # one inherited from a collaborator.
+        for key in sorted(declared - titles - written):
+            if not secrets_store.secret_exists(db_path, user_id, service, key):
+                continue
+            if secrets_store.get_secret(db_path, user_id, service, key) is None:
+                # Present and undecryptable: a stale master key, a half-loaded
+                # `secrets.env`, a rotation applied to the wrong host. The
+                # process-level guard above cannot see this — `_MIN_KEY_LEN` and
+                # presence are all it tests — so without this arm a wrong key
+                # turns a transient misconfiguration into permanent loss: the
+                # credential comes back when the right key does, and does not
+                # come back from a delete. Never destroy what cannot be read.
+                result.skipped.append((service, key, SKIP_UNREADABLE_ROW))
+                logger.warning(
+                    "vault: %s/%s is stored but will not decrypt, so it is not "
+                    "deleted; check ISTOTA_SECRET_KEY",
+                    _label(service),
+                    _label(key),
+                )
+                continue
+            if _near_miss_title(key, service, result.skipped):
+                # An entry titled `api_key ` or `API_KEY` is refused above as a
+                # key this service does not declare, and would then be followed
+                # by a delete of the very credential it was meant to set —
+                # refuse the new value and destroy the old one, from one
+                # trailing space on a phone keyboard. Neither branch knows about
+                # the other, and §6 rule 3 licenses the delete in the abstract,
+                # but the combination is a state no rule intends. The fuzzy
+                # match only ever *holds* a deletion; nothing is written on it.
+                result.skipped.append((service, key, SKIP_DELETE_HELD))
+                logger.warning(
+                    "vault: %s/%s was not deleted: an entry title in that group "
+                    "differs from it only in case or surrounding whitespace, so "
+                    "the deletion is more likely a typo than an instruction",
+                    _label(service),
+                    _label(key),
+                )
+                continue
+            pending_deletes.append((service, key))
 
+    if pending_deletes:
+        # Named **before** the loop rather than after it. Each `delete_secret`
+        # commits its own transaction, so a raise part-way through — a locked
+        # database on a background gate contending with the scheduler's own
+        # writers — leaves earlier rows gone with nothing on any surface saying
+        # which. Logging the plan over-reports in that case, which is the
+        # direction to be wrong in: the operator gets a superset of what went.
+        logger.warning(
+            "vault: %s: deleting %d credential(s) absent from the vault: %s",
+            _label(user_id),
+            len(pending_deletes),
+            ", ".join(f"{_label(s)}/{_label(k)}" for s, k in pending_deletes),
+        )
     for service, key in pending_deletes:
         if secrets_store.delete_secret(db_path, user_id, service, key):
             result.deleted += 1
             result.deleted_keys.append((service, key))
-
-    if result.deleted_keys:
-        # Named rather than counted, at WARNING: on an adoption this is the
-        # first anybody hears that the vault owns more keys than it holds.
-        logger.warning(
-            "vault: %s: deleted %d credential(s) absent from the vault: %s",
-            user_id,
-            result.deleted,
-            ", ".join(f"{_label(s)}/{_label(k)}" for s, k in result.deleted_keys),
-        )
     return result
+
+
+def _near_miss_title(key: str, service: str,
+                     skipped: list[tuple[str, str, str]]) -> bool:
+    """Whether some title refused in this group was meant to be ``key``.
+
+    Compares on the two axes a phone keyboard moves: surrounding whitespace and
+    case. §3 matches entry titles exactly and reports a mismatch as a typo,
+    which is the right rule for deciding what to *write*; this is the narrower
+    question of whether a deletion licensed by that same mismatch should go
+    ahead, and there the answer that costs nothing is to hold.
+    """
+    return any(
+        s == service and reason == SKIP_UNKNOWN_KEY
+        and title.strip().casefold() == key.casefold()
+        for s, title, reason in skipped
+    )
 
 
 def _service_refusal(service: str, eligible: frozenset[str]) -> str | None:
