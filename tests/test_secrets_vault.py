@@ -1893,6 +1893,27 @@ class TestTheEligibilityFilterAtLoad:
         kept, _said = self._load_with(tmp_path, caplog, [7, ["karakeep"]])
         assert kept == []
 
+    def test_a_hand_built_config_carrying_junk_does_not_fail_the_load(self):
+        """Driven against the filter directly, because nothing can reach it.
+
+        `_vault_services_value` guarantees `list[str]` on the TOML path and
+        nothing else writes the field, so a `load_config` round trip cannot
+        exercise this — the shape guard upstream would have to be removed first,
+        and a test whose subject is reachable only through another bug is a test
+        that passes for the wrong reason. What it defends is worth a line
+        anyway: `_service_refusal` calls `.startswith`, and an `AttributeError`
+        escaping `load_config` stops the scheduler, the web app, the webhook
+        receiver and every host-side skill CLI the proxy spawns per call.
+        """
+        from istota.config import Config, _validate_vault_services
+
+        config = Config(users={"alice": UserConfig()})
+        config.users["alice"].vault_services = [7, None, ["karakeep"], "karakeep"]
+
+        _validate_vault_services(config)
+
+        assert config.users["alice"].vault_services == ["karakeep"]
+
     def test_the_filter_agrees_with_what_apply_vault_would_refuse(self):
         """One predicate, two callers. A second copy of the rule here is the
         drift the rule exists to catch — a name the loader keeps and the apply

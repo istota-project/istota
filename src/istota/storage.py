@@ -483,13 +483,18 @@ class VaultLocation:
     ``dir_fd`` is an open descriptor on the leaf's **parent**, and **the caller
     closes it**. It is ``None`` for exactly one case, the absolute form, and
     that is a property of the form rather than an omission: an absolute
-    ``vault_path`` is refused unless it resolves outside ``workspace_path``
-    entirely, so it has no sandbox-writable ancestor there would be any point
+    ``vault_path`` is refused if it resolves under any tree the sandbox binds
+    read-write, so there is no model-writable ancestor there would be any point
     holding open. ``open_user_skill_overlays`` bans its own ``(path, None)``
     answer because there the path *was* under a model-writable tree and a caller
     holding one had no choice but to walk it again; here the absence of a
     descriptor is the conclusion of the containment check rather than a failure
     to perform one.
+
+    **Read that claim as exactly as large as the check below.** It is the list
+    in :func:`_sandbox_writable_roots` and nothing wider — not "no writable
+    ancestor of any kind" — and a bind added to ``sandbox_plan`` without a row
+    there makes this sentence false without making anything fail.
     """
 
     path: Path
@@ -502,9 +507,11 @@ class VaultLocation:
 VAULT_PATH_NO_WORKSPACE = "no_workspace_for_a_relative_path"
 VAULT_PATH_BAD_USER = "user_id_does_not_name_a_child"
 VAULT_PATH_NOT_A_FILENAME = "path_names_no_plain_file"
-VAULT_PATH_INSIDE_WORKSPACE = "absolute_path_resolves_inside_the_workspace"
+VAULT_PATH_BAD_COMPONENT = "path_component_is_not_a_plain_name"
+VAULT_PATH_INSIDE_WORKSPACE = "absolute_path_resolves_inside_a_sandbox_writable_tree"
 VAULT_PATH_UNRESOLVABLE = "path_could_not_be_resolved"
 VAULT_PATH_OUTSIDE_USER_TREE = "directory_component_is_not_reachable_in_the_tree"
+VAULT_PATH_NO_SUCH_DIRECTORY = "no_directory_at_the_configured_path"
 
 
 def resolve_user_vault_path(
@@ -538,7 +545,7 @@ def resolve_user_vault_path(
 
     An **absolute** ``vault_path`` is taken as a host path — the form for an
     operator who wants the bytes out of the sandbox entirely — and is refused
-    unless it resolves **outside** ``workspace_path``. "Operator config, so
+    if it resolves under any tree a sandbox binds read-write. "Operator config, so
     trust it" is the rule this replaces and it is wrong: the sync reads the file
     *in the daemon*, with the daemon's whole filesystem view, so an
     unconstrained absolute path makes this feature read the first
@@ -553,11 +560,25 @@ def resolve_user_vault_path(
     is a file the sandbox cannot reach and everything under ``workspace_path``
     is reachable by construction.
 
+    **§1 scoped that refusal to ``workspace_path`` and the workspace is not the
+    only tree a sandbox binds read-write.** ``sandbox_plan`` binds
+    ``{temp_dir}/{user_id}`` into *every* task's namespace and
+    ``{developer.repos_dir}/{user_id}`` into an admin developer task's, and both
+    sit outside the workspace — so an operator moving the vault off the mount,
+    which is precisely what this form is for, could land it in a directory the
+    model writes. The absolute branch holds no descriptor, so the leaf-only
+    ``O_NOFOLLOW`` would be the whole of the containment. :func:`_sandbox_writable_roots`
+    is the list, and refusal is the only remedy available here: there is no
+    per-user root to walk for a path the operator wrote whole.
+
     ``workspace_path`` and not ``nextcloud_mount_path``: the sandbox binds and
     every workspace path this module builds are derived from the former, and on
     a deployment where the two differ a vault on the mount but outside the
     workspace is both phone-editable and sandbox-unreachable, which is the best
-    placement this form has rather than one to refuse.
+    placement this form has rather than one to refuse. ``db_path.parent`` is
+    likewise absent by decision — §10 makes an absolute ``vault_path`` there a
+    ``doctor`` warning, since the framework database is not a KDBX and comes
+    back ``VaultCorrupt``, and it is masked out of every sandbox besides.
 
     **The refusal is by resolved path on both branches**, so a symlink from
     outside the workspace *into* it is followed first and then refused. Both
@@ -582,7 +603,14 @@ def resolve_user_vault_path(
 
     user = config.users.get(user_id)
     raw = getattr(user, "vault_path", "") if user is not None else ""
-    if not isinstance(raw, str) or not raw.strip():
+    if not isinstance(raw, str) or not raw:
+        # The feature is off for this user, which is every user by default, so
+        # this one answer is the silent one.
+        return None
+    if not raw.strip():
+        # Blank but *present* is a configured value that resolves to nothing,
+        # which the contract above says must not be silence.
+        _refuse_vault_path(user_id, raw, VAULT_PATH_NOT_A_FILENAME)
         return None
 
     written = Path(raw)
@@ -618,11 +646,39 @@ def resolve_user_vault_path(
         _refuse_vault_path(user_id, raw, VAULT_PATH_NOT_A_FILENAME)
         return None
 
+    if not all(_is_plain_component(part) for part in parts[:-1]):
+        # `open_overlay_dir` applies this same rule in its own pre-loop check
+        # and answers None, which would arrive below as a containment refusal —
+        # so a NUL or an interior `..` would be reported as though the tree had
+        # refused it. Asked here so the reason names what is actually wrong.
+        _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_COMPONENT)
+        return None
+
     fd = open_overlay_dir(user_root, *parts[:-1])
     if fd is None:
-        _refuse_vault_path(user_id, raw, VAULT_PATH_OUTSIDE_USER_TREE)
+        # What is left after the component check above is still four causes at
+        # once — a missing directory, a symlinked component, a non-directory
+        # component, a permission failure — and the commonest by far is a typo'd
+        # directory that simply is not there. Reported as a containment refusal
+        # it sends an operator hunting a boundary that is working. This
+        # `lexists` is **diagnosis after the refusal**, never a second
+        # resolution the answer depends on: nothing is opened on it, the walk
+        # has already declined, and the worst a wrong answer can do is print the
+        # wrong reason id.
+        try:
+            absent = not os.path.lexists(user_root.joinpath(*parts[:-1]))
+        except (OSError, ValueError):  # pragma: no cover - the components are plain
+            absent = False
+        _refuse_vault_path(
+            user_id, raw,
+            VAULT_PATH_NO_SUCH_DIRECTORY if absent else VAULT_PATH_OUTSIDE_USER_TREE,
+        )
         return None
     try:
+        # Defence in depth rather than a case with a test behind it: `user_root`
+        # is composed by the daemon from `workspace_path` and a `user_id` that
+        # has already passed `is_scopable_user_id`, which refuses a NUL, so
+        # neither arm is reachable from a configured deployment today.
         root = Path(os.path.realpath(user_root))
     except (OSError, ValueError):
         os.close(fd)
@@ -639,22 +695,68 @@ def resolve_user_vault_path(
 def _absolute_vault_location(
     config: "Config", user_id: str, written: Path
 ) -> VaultLocation | None:
-    """The absolute branch: resolved, and refused if it lands in the workspace."""
+    """The absolute branch: resolved, and refused if it lands in a written tree."""
     try:
         resolved = Path(os.path.realpath(written))
     except (OSError, ValueError):
         _refuse_vault_path(user_id, str(written), VAULT_PATH_UNRESOLVABLE)
         return None
-    if config.has_workspace:
-        try:
-            workspace = Path(os.path.realpath(config.workspace_path))
-        except (OSError, ValueError):
-            _refuse_vault_path(user_id, str(written), VAULT_PATH_UNRESOLVABLE)
-            return None
-        if resolved == workspace or workspace in resolved.parents:
+    for root in _sandbox_writable_roots(config):
+        if resolved == root or root in resolved.parents:
             _refuse_vault_path(user_id, str(written), VAULT_PATH_INSIDE_WORKSPACE)
             return None
     return VaultLocation(path=resolved, dir_fd=None)
+
+
+def _sandbox_writable_roots(config: "Config") -> list[Path]:
+    """Resolved roots of every tree ``sandbox_plan`` binds read-write.
+
+    An absolute ``vault_path`` under any of these is refused, because the
+    absolute form holds no directory descriptor and its only containment would
+    then be the leaf's own ``O_NOFOLLOW`` — against a parent directory a
+    prompt-injected task can replace.
+
+    Three entries, each a per-user subtree of the root named here:
+    ``{workspace}/Users/{user_id}`` (§1's own rule), ``{temp_dir}/{user_id}``,
+    bound into **every** task's namespace, and
+    ``{developer.repos_dir}/{user_id}``, bound into an admin developer task's.
+    The roots rather than the subtrees, because the operator wrote one path and
+    this has no user to scope it by — refusing a sibling user's subtree too
+    costs nothing, since no vault belongs anywhere under any of them.
+
+    Deliberately **not** the whole of what the daemon can read: this is the
+    written set, and §1's argument is about a file a task can swap rather than
+    one it can see. ``db_path.parent`` is out by §10's decision. Both sides are
+    resolved, because the mount is reached through a symlink on some hosts and
+    comparing a resolved path against an unresolved root reads every path as
+    outside — which is the cross-user case admitted.
+
+    An unset root contributes nothing: ``developer.repos_dir`` is ``""`` on
+    every deployment without the developer skill, and an empty root must not
+    read as "every path is inside it".
+    """
+    candidates: list[Path | None] = [
+        config.workspace_path if config.has_workspace else None,
+        config.temp_dir,
+        Path(config.developer.repos_dir) if config.developer.repos_dir else None,
+    ]
+    roots: list[Path] = []
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            roots.append(Path(os.path.realpath(candidate)))
+        except (OSError, ValueError):
+            # A root this cannot resolve is one this cannot clear a path
+            # against, so it is dropped rather than skipped silently — the
+            # refusal below is by comparison, and a missing comparison is a
+            # permission rather than a refusal.
+            logger.warning(
+                "vault_path root %s could not be resolved; an absolute "
+                "vault_path is not checked against it",
+                _bounded_for_log(candidate),
+            )
+    return roots
 
 
 def _is_plain_component(name: str) -> bool:
@@ -690,10 +792,28 @@ def _refuse_vault_path(user_id: object, vault_path: str, reason: str) -> None:
 
 
 def _bounded_for_log(value: object) -> str:
-    text = "".join(ch if ch.isprintable() else " " for ch in str(value))
-    if len(text) <= _VAULT_PATH_LOG_MAX_CHARS:
-        return text
-    return text[:_VAULT_PATH_LOG_MAX_CHARS] + "…"
+    """Flatten and cap, slicing *first* so the work is bounded too.
+
+    A third copy of ``secrets_vault._label``'s rule, and the authoritative one
+    is that: ``_label`` bounds the names out of the vault file and this bounds
+    the path out of ``config.toml``. Not shared, because importing
+    ``secrets_vault`` here at module scope would pull ``secret_schema`` and
+    ``secrets_store`` into a module ``config`` imports — the same cost
+    ``_validate_vault_services`` function-scopes its own import to avoid. What
+    holds them in step is that neither has any reason to change: both are "make
+    it one line and bound it". ``transport``'s ``_slug`` is a *different* rule
+    (an alphabet for a dedup key) and is correctly not what either reuses.
+
+    The slice is before the join rather than after it because a TOML string has
+    no length limit, so flattening the whole value first makes a multi-megabyte
+    ``vault_path`` cost a per-character loop and a full copy once per user per
+    sync cycle, to print 200 characters.
+    """
+    raw = str(value)
+    head = "".join(
+        ch if ch.isprintable() else " " for ch in raw[:_VAULT_PATH_LOG_MAX_CHARS]
+    )
+    return head + ("…" if len(raw) > _VAULT_PATH_LOG_MAX_CHARS else "")
 
 
 #: Ceiling on any single file read out of a user's ``config/`` directory.

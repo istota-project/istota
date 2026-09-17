@@ -385,13 +385,15 @@ def eligible_services() -> frozenset[str]:
     )
 
 
-def service_refusal(service: str) -> str | None:
-    """Why this service may not be vault-owned, or None. One call, no set.
+def service_refusal(
+    service: str, eligible: frozenset[str] | None = None
+) -> str | None:
+    """Why this service may not be vault-owned, or None.
 
-    The same predicate ``apply_vault`` applies to every entry of ``owned``,
-    for the caller that has one name and no eligible set to hand it —
-    ``config``'s load-time filter, which drops an ineligible ``vault_services``
-    entry with a warning naming the service and the reason.
+    The same predicate ``apply_vault`` applies to every entry of ``owned``, for
+    the caller outside this module — ``config``'s load-time filter, which drops
+    an ineligible ``vault_services`` entry with a warning naming the service and
+    the reason.
 
     **Delegation rather than a second copy**, and the distinction matters: the
     load-time filter is what tells the operator a line is inert, and if the two
@@ -399,10 +401,16 @@ def service_refusal(service: str) -> str | None:
     refused hours later inside a background gate. Same reason constants, so
     ``vault-status`` and the boot log say one word about one condition.
 
-    ``apply_vault`` keeps the two-argument private form because it asks per
-    service inside a loop and the eligible set is a schema walk.
+    ``eligible`` is the set to test against, computed when it is not given. A
+    caller asking about several names in a loop passes it, because
+    ``eligible_services`` is a schema walk and building it per name is the cost
+    ``apply_vault`` hoists it out of a loop to avoid. Deliberately not memoized:
+    the schema is monkeypatched in tests, and a cache would make an exclusion
+    pinned there vacuously true on the second call.
     """
-    return _service_refusal(service, eligible_services())
+    return _service_refusal(
+        service, eligible_services() if eligible is None else eligible
+    )
 
 
 @dataclass

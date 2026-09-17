@@ -578,10 +578,10 @@ class TestTheReturnedPathIsDisplayOnly:
     #: `secrets_vault.py` was a third entry for one stage of the KDBX vault
     #: spec, written as provisional, and it is **settled by removal** rather
     #: than by a decision to keep it. `[users.<id>] vault_path` has two forms:
-    #: the absolute one is refused unless it resolves outside `workspace_path`
-    #: entirely, so it has no model-writable ancestor and passes `dir_fd=None`;
-    #: the relative one resolves under `{mount}/Users/{user_id}`, where every
-    #: component above the leaf *is* model-writable, and
+    #: the absolute one is refused if it resolves under any tree the sandbox
+    #: binds read-write, so it has no model-writable ancestor and passes
+    #: `dir_fd=None`; the relative one resolves under `{mount}/Users/{user_id}`,
+    #: where every component above the leaf *is* model-writable, and
     #: `storage.resolve_user_vault_path` walks it with `open_overlay_dir` and
     #: hands the descriptor to `read_vault_bytes`. So the call site names
     #: `dir_fd` and the rule below covers it positively, which is strictly
@@ -591,6 +591,21 @@ class TestTheReturnedPathIsDisplayOnly:
         "storage.py",                 # read_regular_file / read_user_config_file
         "skills/memory/__init__.py",  # the memory CLI's _read_text
     })
+
+    #: Wrappers whose own callers have to carry a descriptor through, checked by
+    #: the same rule as the primitives they wrap.
+    #:
+    #: `secrets_vault.read_vault_bytes` takes `dir_fd` and defaults it to
+    #: `None`, so its *internal* pass-through satisfies the rule for every value
+    #: including `None` — which leaves a caller writing
+    #: `read_vault_bytes(location.path)` walking every model-writable component
+    #: by name with nothing in the tree objecting. That is precisely the shape
+    #: `open_overlay_dir`'s docstring records as "exactly how four of five
+    #: callers came to be wrong", and documentation is what failed to stop it
+    #: last time. Naming the wrapper here costs nothing on the correct call
+    #: (`dir_fd=location.dir_fd`, or an explicit `dir_fd=None` for the absolute
+    #: form, which is a decision rather than an omission) and fails the bare one.
+    _WRAPPED_OVERLAY_READERS = ("read_vault_bytes",)
 
     def test_no_overlay_reader_opens_a_path_without_a_descriptor(self):
         """A grep-shaped guard, because the risk is a *new* caller.
@@ -609,11 +624,13 @@ class TestTheReturnedPathIsDisplayOnly:
         from pathlib import Path as P
 
         root = P(__file__).resolve().parent.parent / "src" / "istota"
+        names = ("read_overlay_bytes", "inspect_overlay") + self._WRAPPED_OVERLAY_READERS
+        pattern = r"\b(" + "|".join(names) + r")\s*\("
         offenders = []
         for path in sorted(root.rglob("*.py")):
             rel = str(path.relative_to(root))
             src = path.read_text()
-            for m in re.finditer(r"\b(read_overlay_bytes|inspect_overlay)\s*\(", src):
+            for m in re.finditer(pattern, src):
                 callee = m.group(1)
                 if callee == "read_overlay_bytes" and rel in self._NOT_OVERLAY_READERS:
                     continue
@@ -644,11 +661,24 @@ class TestTheReturnedPathIsDisplayOnly:
         silently stops matching. Feed it a known-bad module and require a hit."""
         import re
 
+        names = ("read_overlay_bytes", "inspect_overlay") + self._WRAPPED_OVERLAY_READERS
+        pattern = r"\b(" + "|".join(names) + r")\s*\("
+
         src = "found = inspect_overlay(path, known_skills=known)\n"
-        hits = [m.group(1) for m in
-                re.finditer(r"\b(read_overlay_bytes|inspect_overlay)\s*\(", src)]
+        hits = [m.group(1) for m in re.finditer(pattern, src)]
         assert hits == ["inspect_overlay"]
         assert "dir_fd" not in src
+
+        # And the wrapper, whose bare-path call is the shape Stage 4 of the
+        # vault spec could otherwise write: `location.path` without
+        # `location.dir_fd` re-walks every model-writable component by name.
+        wrapped = "data, digest = read_vault_bytes(location.path)\n"
+        assert [m.group(1) for m in re.finditer(pattern, wrapped)] == [
+            "read_vault_bytes"
+        ]
+        assert "dir_fd" not in wrapped
+        allowed = "data, digest = read_vault_bytes(loc.path, dir_fd=loc.dir_fd)\n"
+        assert "dir_fd" in allowed
 
 
 class TestTheExecutorPromptPath:

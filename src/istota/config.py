@@ -4349,7 +4349,14 @@ def _validate_vault_services(config: "Config") -> None:
     if not configured:
         return
     try:
-        from .secrets_vault import service_refusal  # noqa: PLC0415 - import cost
+        from .secrets_vault import (  # noqa: PLC0415 - import cost
+            eligible_services,
+            service_refusal,
+        )
+        # Hoisted out of the loop below: it is a walk over the whole secret
+        # schema, and `service_refusal`'s own docstring says a caller asking
+        # about several names should pass it rather than rebuild it per name.
+        eligible = eligible_services()
     except Exception:  # pragma: no cover - defensive; never fail config load
         logger.warning(
             "vault service eligibility could not be checked; the entries load "
@@ -4360,7 +4367,19 @@ def _validate_vault_services(config: "Config") -> None:
     for user_id, user in configured:
         kept: list[str] = []
         for service in user.vault_services:
-            reason = service_refusal(service) if service else "an empty name"
+            # `_vault_services_value` guarantees `list[str]` on the TOML path
+            # and nothing else writes this field, so the type test is defence
+            # behind that rather than a case with a producer. It earns its line
+            # anyway: `_service_refusal` calls `.startswith`, and an
+            # `AttributeError` escaping here fails `load_config` in the
+            # scheduler, the web app, the webhook receiver and every host-side
+            # skill CLI the proxy spawns — the blast radius this function drops
+            # rather than raises to avoid. Past it the call cannot raise: a
+            # prefix test and a set membership over in-tree constants.
+            if not isinstance(service, str) or not service:
+                reason = "not a service name"
+            else:
+                reason = service_refusal(service, eligible)
             if reason is None:
                 kept.append(service)
                 continue

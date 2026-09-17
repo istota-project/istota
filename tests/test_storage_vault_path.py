@@ -41,7 +41,13 @@ import pytest
 from istota.config import Config, UserConfig
 from istota.secrets_vault import VaultUnreadable, read_vault_bytes
 from istota.skills._loader import OVERLAY_IS_A_SYMLINK, OVERLAY_NOT_A_REGULAR_FILE
-from istota.storage import resolve_user_vault_path
+from istota.storage import (
+    VAULT_PATH_BAD_COMPONENT,
+    VAULT_PATH_NO_SUCH_DIRECTORY,
+    VAULT_PATH_NOT_A_FILENAME,
+    VAULT_PATH_OUTSIDE_USER_TREE,
+    resolve_user_vault_path,
+)
 
 
 VAULT_BYTES = b"not-a-real-kdbx-just-bytes-to-identify-the-file"
@@ -156,9 +162,13 @@ class TestTheRelativeForm:
 
         with caplog.at_level("WARNING", logger="istota.storage"):
             assert _resolve(config) is None
-        assert any(
-            "vault_path_refused" in r.getMessage() for r in caplog.records
-        ), "a configured path that is refused must say so somewhere"
+        said = [
+            r.getMessage() for r in caplog.records if r.name == "istota.storage"
+        ]
+        assert said, "a configured path that is refused must say so somewhere"
+        # The reason id, not just the line: a refused path that reported a
+        # missing directory would send the operator to create one.
+        assert VAULT_PATH_OUTSIDE_USER_TREE in said[0], said
 
     def test_a_symlinked_directory_component_inside_the_tree_is_refused_too(
         self, tmp_path
@@ -274,6 +284,46 @@ class TestTheAbsoluteForm:
             assert _resolve(config) is None
         assert any("vault_path_refused" in r.getMessage() for r in caplog.records)
 
+    def test_an_absolute_path_under_the_task_temp_dir_is_refused(self, tmp_path):
+        """`workspace_path` is not the only tree bound read-write into a sandbox.
+
+        `sandbox_plan` binds `{temp_dir}/{user_id}` read-write into **every**
+        task's namespace, and `{developer.repos_dir}/{user_id}` into an admin
+        developer task's. Both are outside `workspace_path`, so an operator
+        putting the vault there to "keep it off the mount" would land it in a
+        tree the model can write — and the absolute branch hands back no
+        descriptor, so the leaf-only `O_NOFOLLOW` is all that stands behind it.
+        §1 scoped the refusal to the workspace without weighing these two.
+        """
+        config = _config(tmp_path, alice=UserConfig())
+        vault = _seed(Path(config.temp_dir) / "alice" / "vault.kdbx")
+        config.users["alice"].vault_path = str(vault)
+
+        assert _resolve(config) is None
+
+    def test_an_absolute_path_under_the_developer_repos_root_is_refused(
+        self, tmp_path
+    ):
+        config = _config(tmp_path, alice=UserConfig())
+        repos = tmp_path / "repos"
+        config.developer.repos_dir = str(repos)
+        vault = _seed(repos / "alice" / "vault.kdbx")
+        config.users["alice"].vault_path = str(vault)
+
+        assert _resolve(config) is None
+
+    def test_an_unconfigured_repos_root_refuses_nothing(self, tmp_path):
+        """The control: `developer.repos_dir` is empty by default, and an empty
+        root must not read as "every path is inside it"."""
+        config = _config(tmp_path, alice=UserConfig())
+        assert config.developer.repos_dir == ""
+        vault = _seed(tmp_path / "etc" / "vault.kdbx")
+        config.users["alice"].vault_path = str(vault)
+
+        location = _resolve(config)
+        assert location is not None
+        assert location.path == vault.resolve()
+
     def test_a_symlink_from_outside_the_mount_into_it_is_refused(self, tmp_path):
         """The refusal is by *resolved* path, so the link is followed first."""
         config = _config(tmp_path, alice=UserConfig(), bob=UserConfig())
@@ -349,25 +399,67 @@ class TestWhatIsRefusedBeforeEitherBranch:
         config = _config(tmp_path, alice=UserConfig(vault_path="vault.kdbx"))
         assert _resolve(config, "nobody") is None
 
-    @pytest.mark.parametrize(
-        "vault_path",
-        [
-            ".",
-            "..",
-            "./",
-            "config/..",
-            "",
-            "   ",
-        ],
-    )
-    def test_a_path_naming_no_plain_file_is_refused(self, tmp_path, vault_path):
+    @pytest.mark.parametrize("vault_path", [".", "..", "./", "config/..", "   "])
+    def test_a_path_naming_no_plain_file_is_refused(
+        self, tmp_path, vault_path, caplog
+    ):
         """`Path(".").parts` is empty, so the leaf extraction has nothing to
         take — and `Path("a/..").name` is `..`, which climbs rather than
         descending. Refused here rather than left to fail three layers down,
-        where the reason would name the wrong thing."""
+        where the reason would name the wrong thing.
+
+        The reason id is asserted, not just the None. Every case in this class
+        returns None, so the value alone cannot say which branch produced it —
+        and `"   "` in particular used to reach None by the *unconfigured*
+        early return, which says nothing at all about a value the operator did
+        configure.
+        """
         config = _config(tmp_path, alice=UserConfig(vault_path=vault_path))
         _user_root(config, "alice")
-        assert _resolve(config) is None
+
+        with caplog.at_level("WARNING", logger="istota.storage"):
+            assert _resolve(config) is None
+        said = [
+            r.getMessage() for r in caplog.records if r.name == "istota.storage"
+        ]
+        assert said, "a configured path refused in silence is the thing to avoid"
+        assert VAULT_PATH_NOT_A_FILENAME in said[0], said
+
+    def test_an_empty_vault_path_is_off_rather_than_refused(self, tmp_path, caplog):
+        """The one silent answer, and the discriminating pair for the case above.
+
+        Empty means the feature is off for this user, which is every user by
+        default — so a WARNING here would be one line per sync cycle per user on
+        a deployment nobody has configured a vault on. A blank-but-present value
+        is the opposite: something was written and it resolves to nothing.
+        """
+        config = _config(tmp_path, alice=UserConfig(vault_path=""))
+        _user_root(config, "alice")
+
+        with caplog.at_level("WARNING", logger="istota.storage"):
+            assert _resolve(config) is None
+        assert not [r for r in caplog.records if r.name == "istota.storage"]
+
+    def test_a_missing_directory_says_so_rather_than_naming_containment(
+        self, tmp_path, caplog
+    ):
+        """A typo'd directory is the commonest refusal and the least alarming.
+
+        `open_overlay_dir` answers None for five causes at once, and reported as
+        a containment refusal the ordinary one sends an operator hunting a
+        boundary that is working.
+        """
+        config = _config(tmp_path, alice=UserConfig(vault_path="confg/vault.kdbx"))
+        _user_root(config, "alice")
+
+        with caplog.at_level("WARNING", logger="istota.storage"):
+            assert _resolve(config) is None
+        said = [
+            r.getMessage() for r in caplog.records if r.name == "istota.storage"
+        ]
+        assert said
+        assert VAULT_PATH_NO_SUCH_DIRECTORY in said[0], said
+        assert VAULT_PATH_OUTSIDE_USER_TREE not in said[0]
 
     @pytest.mark.parametrize("vault_path", ["config", "config/", "config/."])
     def test_a_trailing_slash_or_dot_is_not_distinguishable_from_a_filename(
@@ -395,13 +487,27 @@ class TestWhatIsRefusedBeforeEitherBranch:
         finally:
             os.close(location.dir_fd)
 
-    def test_a_null_byte_in_the_path_is_refused_rather_than_raising(self, tmp_path):
-        """`\\u0000` is expressible in a TOML string, and `os.open` answers a NUL
-        with `ValueError`, which is not an `OSError` and escapes every guard
-        written for one."""
+    def test_a_null_byte_in_the_path_is_refused_rather_than_raising(
+        self, tmp_path, caplog
+    ):
+        """`\\u0000` is expressible in a TOML string and must not raise.
+
+        On the relative branch the NUL is caught by the component check, which
+        mirrors `open_overlay_dir`'s own pre-loop rule — so this does *not*
+        exercise the resolver's `except ValueError`, and the reason id says so
+        rather than blaming the tree. The absolute sibling below is the one
+        where `os.path.realpath` genuinely raises `ValueError`.
+        """
         config = _config(tmp_path, alice=UserConfig(vault_path="con\0fig/vault.kdbx"))
         _user_root(config, "alice")
-        assert _resolve(config) is None
+
+        with caplog.at_level("WARNING", logger="istota.storage"):
+            assert _resolve(config) is None
+        said = [
+            r.getMessage() for r in caplog.records if r.name == "istota.storage"
+        ]
+        assert said
+        assert VAULT_PATH_BAD_COMPONENT in said[0], said
 
     def test_an_absolute_path_with_a_null_byte_is_refused(self, tmp_path):
         config = _config(tmp_path, alice=UserConfig(vault_path="/etc/va\0ult.kdbx"))

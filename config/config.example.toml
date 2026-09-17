@@ -1844,6 +1844,27 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
                                # plus a plain-text fallback part. Also settable per user via
                                # `istota user ensure --no-briefing-email-html` or the web UI
                                # (Briefings → settings → Email delivery).
+# vault_path = "istota/config/vault.kdbx"   # a KeePass (KDBX) file this user maintains,
+                               # read by the daemon and never written. A relative path
+                               # resolves under this user's own workspace directory, so
+                               # they can edit it from a phone; an absolute path is taken
+                               # as a host path and must resolve outside every tree a task
+                               # sandbox can write, which keeps the file out of reach of a
+                               # task at the cost of the phone. Empty (the default) means
+                               # the feature is off for this user. The passphrase is a
+                               # secret, provisioned with
+                               # `istota secret ensure -u alice --service vault --key passphrase`,
+                               # and must be a generated value rather than a chosen one.
+# vault_services = ["karakeep", "ntfy"]     # which services the file owns. The vault is the
+                               # authority for these, deletions included: a key the file's
+                               # group does not hold is removed from the secrets table, so
+                               # put every key you already hold into the file before adding
+                               # its service here. Empty (the default) reads the file and
+                               # applies nothing, which is a usable dry run. A name the
+                               # vault may not own — a service whose credentials the daemon
+                               # mints for itself — is dropped with a warning at load.
+                               # These two keys are TOML-only by design: they are not in
+                               # `user_profiles` and cannot be set from the web UI.
 
 # Alice's resources — only `folder` (an out-of-workspace sandbox mount)
 # is declarable after the Resources sunset. todo/reminders/notes are
