@@ -27,6 +27,7 @@ the file eventually appearing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -53,6 +54,13 @@ from .support.whatsapp_config import build_whatsapp_config
 
 USER = "alice"
 BAILEYS = "baileys"
+
+#: This checkout's root, for the leaf-boundary guard.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: A deadline comfortably ahead of any test run. `read_relay` checks it on
+#: every read, so a fixed past epoch would read as expired.
+FUTURE = time.time() + 3600.0
 
 #: Distinctive enough that a substring scan over captured log records cannot
 #: match it by accident, and shaped like the real thing (a `2@…` ref).
@@ -137,7 +145,7 @@ class TestTheRelayLeaf:
         payload = pairing_relay.build_payload(
             window_id="w1",
             state=pairing_relay.STATE_AWAITING_SCAN,
-            expires_at=1789000000.0,
+            expires_at=FUTURE,
             qr=QR,
             qr_seq=3,
         )
@@ -154,7 +162,7 @@ class TestTheRelayLeaf:
         payload = pairing_relay.build_payload(
             window_id="w1",
             state=pairing_relay.STATE_AWAITING_SIDECAR,
-            expires_at=1789000000.0,
+            expires_at=FUTURE,
             qr=QR,
         )
         assert "qr" not in payload
@@ -168,7 +176,7 @@ class TestTheRelayLeaf:
             pairing_relay.build_payload(
                 window_id="old",
                 state=pairing_relay.STATE_AWAITING_SCAN,
-                expires_at=1789000000.0,
+                expires_at=FUTURE,
                 qr=QR,
             ),
         )
@@ -189,6 +197,23 @@ class TestTheRelayLeaf:
         assert pairing_relay.read_relay(path, now=99.0) is not None
         assert pairing_relay.read_relay(path, now=101.0) is None
 
+    def test_the_deadline_is_checked_without_being_asked(self, tmp_path):
+        """The shortest call is the one a later reader copies, so it has to
+        fail closed — an expired relay is exactly what a skipped unlink
+        leaves behind."""
+        path = tmp_path / "relay.json"
+        pairing_relay.write_relay(
+            path,
+            pairing_relay.build_payload(
+                window_id="w1",
+                state=pairing_relay.STATE_AWAITING_SCAN,
+                expires_at=time.time() - 1.0,
+                qr=QR,
+            ),
+        )
+        assert pairing_relay.read_relay(path) is None
+        assert pairing_relay.read_relay(path, expected_window_id="w1") is None
+
     def test_a_torn_or_foreign_file_reads_as_nothing(self, tmp_path):
         path = tmp_path / "relay.json"
         path.write_text('{"window_id": "w1", "state": "awaiting_sc')
@@ -206,7 +231,7 @@ class TestTheRelayLeaf:
         payload = pairing_relay.build_payload(
             window_id="w1",
             state=pairing_relay.STATE_AWAITING_SCAN,
-            expires_at=1789000000.0,
+            expires_at=FUTURE,
             qr=QR,
         )
         with caplog.at_level(logging.DEBUG):
@@ -217,11 +242,15 @@ class TestTheRelayLeaf:
         assert "ENOENT" in joined or "errno=2" in joined
 
     def test_two_concurrent_writes_both_complete(self, tmp_path):
-        """A fixed staging name fails the second with `FileNotFoundError`.
+        """Two writers at once both publish, and the file is one of them.
 
-        The defect `atomic_write.py`'s docstring records, and the relay is a
-        re-entered writer with a watchdog task beside it — the exact shape that
-        bit `health/documents.py`.
+        Deliberately **not** claiming to catch a fixed staging name: that name
+        is `tempfile.mkstemp`'s, inside `atomic_write`, so the defect is
+        unreachable from here without editing that module — and two barrier
+        -synchronised threads would not reliably collide even then.
+        `tests/test_atomic_write.py` owns the staging-name property. What this
+        pins is that the relay is safe as a re-entered writer at all, which is
+        the shape `health/documents.py` was not.
         """
         path = tmp_path / "relay.json"
         start = threading.Barrier(2)
@@ -232,7 +261,7 @@ class TestTheRelayLeaf:
             payload = pairing_relay.build_payload(
                 window_id="w1",
                 state=pairing_relay.STATE_AWAITING_SCAN,
-                expires_at=1789000000.0,
+                expires_at=FUTURE,
                 qr=QR,
                 qr_seq=seq,
             )
@@ -257,7 +286,7 @@ class TestTheRelayLeaf:
             pairing_relay.build_payload(
                 window_id="w1",
                 state=pairing_relay.STATE_AWAITING_SCAN,
-                expires_at=1789000000.0,
+                expires_at=FUTURE,
                 qr=QR,
                 qr_seq=0,
             ),
@@ -280,7 +309,7 @@ class TestTheRelayLeaf:
                     pairing_relay.build_payload(
                         window_id="w1",
                         state=pairing_relay.STATE_AWAITING_SCAN,
-                        expires_at=1789000000.0,
+                        expires_at=FUTURE,
                         qr=QR * 40,
                         qr_seq=seq,
                     ),
@@ -290,6 +319,29 @@ class TestTheRelayLeaf:
             thread.join(timeout=5)
         assert torn == []
 
+    def test_clearing_sweeps_a_staging_file_left_by_a_killed_writer(
+        self, tmp_path, caplog,
+    ):
+        """An orphaned staging file holds the code and nothing else sweeps it.
+
+        `atomic_write` says so itself: a staging file outlives the call when
+        the process dies between the write and the rename, the names are
+        unique per call so no later run reclaims one, and nothing sweeps them.
+        For most callers that is inert. Here it is a pairing credential at
+        0600 for as long as the deployment lasts.
+        """
+        path = tmp_path / "relay.json"
+        orphan = tmp_path / f".{path.name}.abc123"
+        orphan.write_text(json.dumps({"qr": QR}))
+        os.chmod(orphan, 0o600)
+        unrelated = tmp_path / ".something-else.tmp"
+        unrelated.write_text("keep me")
+        with caplog.at_level(logging.DEBUG):
+            assert pairing_relay.clear_relay(path) is True
+        assert not orphan.exists()
+        assert unrelated.exists()
+        assert mentions_payload(caplog) == []
+
     def test_clearing_is_idempotent(self, tmp_path):
         path = tmp_path / "relay.json"
         pairing_relay.write_relay(
@@ -297,7 +349,7 @@ class TestTheRelayLeaf:
             pairing_relay.build_payload(
                 window_id="w1",
                 state=pairing_relay.STATE_AWAITING_SIDECAR,
-                expires_at=1789000000.0,
+                expires_at=FUTURE,
             ),
         )
         assert pairing_relay.clear_relay(path) is True
@@ -305,16 +357,32 @@ class TestTheRelayLeaf:
         assert pairing_relay.clear_relay(path) is True
 
     def test_the_leaf_reaches_only_the_neighbouring_atomic_write(self):
-        """The reader runs in the web process and must not pull in the bridge."""
-        source = Path(pairing_relay.__file__).read_text()
-        package_imports = [
-            line.strip()
-            for line in source.splitlines()
-            if line.startswith(("from .", "import istota", "from istota"))
-        ]
-        assert package_imports == [
-            "from ...atomic_write import write_bytes_atomic",
-        ]
+        """The reader runs in the web process and must not pull in the bridge.
+
+        Asserted **transitively** and over *stripped* lines, which is
+        `tests/native/test_session_log.py`'s shape and for its reason. Two
+        weaker forms miss the cases that matter: an unstripped scan cannot see
+        a function-scope `from ...db import get_db`, which is the leaf
+        convention's own failure mode, and a check on this module alone would
+        pass the day the one helper it permits grows a `config` import and
+        brings the whole graph in behind an already-approved name.
+        """
+        permitted = {
+            "src/istota/transport/whatsapp/pairing_relay.py": {
+                "from ...atomic_write import write_bytes_atomic",
+            },
+            "src/istota/atomic_write.py": set(),
+        }
+        for relative, allowed in permitted.items():
+            source = (REPO_ROOT / relative).read_text()
+            found = {
+                line.strip()
+                for line in source.splitlines()
+                if line.strip().startswith(
+                    ("from .", "import istota", "from istota"),
+                )
+            }
+            assert found == allowed, relative
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +469,12 @@ class TestTheQrHandlerWithNoWindow:
     ):
         window = await bridge.open_pairing_window(USER)
         assert window is not None
-        # The watchdog closes it on its own; drive the expiry by hand so the
-        # handler is reached with a window object that is past its deadline.
+        # **The watchdog is stopped first**, or this case can pass through the
+        # plain no-window path with identical assertions: it wakes within
+        # ~0.2s of the open, reads the hand-mutated deadline and closes the
+        # window, and `_handle_qr` then sees `None` rather than the
+        # expired-but-open branch under test.
+        bridge._pairing_watchdog.cancel()
         window.expires_at = asyncio.get_running_loop().time() - 1.0
         with caplog.at_level(logging.DEBUG):
             await sidecar.say(proto.MSG_QR, qr=QR)
@@ -413,6 +485,9 @@ class TestTheQrHandlerWithNoWindow:
                 ),
             )
         assert mentions_payload(caplog) == []
+        # Still installed, so the branch that was skipped was the window one
+        # rather than the window itself having gone.
+        assert bridge.pairing_window is window
         read = pairing_relay.read_relay(relay_path(bridge))
         assert read is None or "qr" not in read
 
@@ -442,6 +517,42 @@ class TestTheQrHandlerWithNoWindow:
 
 
 class TestTheQrHandlerInsideAWindow:
+    async def test_an_armed_window_suppresses_the_callback(self, config, sockets):
+        """One code, one channel.
+
+        A bridge carrying both an `on_qr` callback and an open window must
+        deliver through the relay alone. Double delivery is the "two channels"
+        the design rejects, and a suite that only covers the callback with no
+        window open would not see it.
+        """
+        seen: list[str] = []
+        instance = BaileysBridge(
+            config,
+            socket_path=sockets.socket,
+            session_dir=sockets.session,
+            pairing_relay_path=sockets.path / "relay.json",
+            pairing_window_seconds=5.0,
+            sidecar_return_timeout=5.0,
+            on_qr=seen.append,
+        )
+        await instance.start()
+        try:
+            fake = FakeSidecar(sockets.socket)
+            await fake.connect()
+            await wait_for(lambda: instance.status.connected is True)
+            await instance.open_pairing_window(USER)
+            await fake.say(proto.MSG_QR, qr=QR)
+            await wait_for(
+                lambda: (
+                    pairing_relay.read_relay(sockets.path / "relay.json") or {}
+                ).get("qr") == QR
+            )
+            await asyncio.sleep(0.05)
+            assert seen == []
+            await fake.close()
+        finally:
+            await instance.stop()
+
     async def test_it_publishes_0600_with_the_window_id(self, bridge, sidecar):
         window = await bridge.open_pairing_window(USER)
         assert window is not None
@@ -507,6 +618,47 @@ class TestOpeningAWindow:
         first = await bridge.open_pairing_window(USER)
         assert await bridge.open_pairing_window("bob") is None
         assert bridge.pairing_window is first
+
+    async def test_a_window_the_bridge_stopped_under_is_not_returned(
+        self, config, sockets, monkeypatch,
+    ):
+        """Both gates are re-read after the awaits.
+
+        `reset_session`'s own rule, for its reason: they were answered before
+        two awaits, and handing back a window `stop()` has since closed would
+        have the caller write a durable request row for a window that does not
+        exist — and then wait out its deadline for a code nothing will relay.
+        """
+        path = sockets.path / "relay.json"
+        instance = BaileysBridge(
+            config,
+            socket_path=sockets.socket,
+            session_dir=sockets.session,
+            pairing_relay_path=path,
+        )
+        await instance.start()
+        released = threading.Event()
+        entered = threading.Event()
+        real_write = pairing_relay.write_relay
+
+        def blocking_write(target, payload):
+            entered.set()
+            released.wait(timeout=8)
+            return real_write(target, payload)
+
+        monkeypatch.setattr(pairing_relay, "write_relay", blocking_write)
+        try:
+            opening = asyncio.ensure_future(instance.open_pairing_window(USER))
+            assert await asyncio.to_thread(entered.wait, 8) is True
+            stopping = asyncio.ensure_future(instance.stop())
+            await asyncio.sleep(0.05)
+            released.set()
+            assert await opening is None
+            await stopping
+        finally:
+            released.set()
+        assert instance.pairing_window is None
+        assert not path.exists()
 
     async def test_the_status_reports_the_open_window_and_not_the_payload(
         self, bridge, sidecar,
@@ -606,6 +758,65 @@ class TestClosingAWindow:
         await bridge._publish_relay_qr(window, 2, QR)
         assert pairing_relay.read_relay(relay_path(bridge))["qr"] == QR
 
+    async def test_a_cancelled_write_cannot_land_after_the_unlink(
+        self, bridge, monkeypatch,
+    ):
+        """Cancelling the *awaiter* must not let the write overtake the unlink.
+
+        This is the case an `asyncio.Lock` around the thread hop cannot hold,
+        and it is reached on an ordinary shutdown: `AsyncRuntime._shutdown`
+        cancels every pending task before it runs the cleanup hook that calls
+        `stop()`. Cancelling a task awaiting `asyncio.to_thread` does not stop
+        a thread that has already begun — only a future whose work has not
+        started can be cancelled — so the `async with` would unwind and
+        release the lock with the write still live, the unlink would take the
+        free lock, and the orphaned thread's `os.replace` would put a pairing
+        code back on disk after its window had closed. Held inside the thread,
+        the lock cannot be released early.
+        """
+        released = threading.Event()
+        entered = threading.Event()
+        finished = threading.Event()
+        real_write = pairing_relay.write_relay
+
+        def blocking_write(path, payload):
+            if not payload.get("qr"):
+                return real_write(path, payload)
+            entered.set()
+            released.wait(timeout=8)
+            try:
+                return real_write(path, payload)
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(pairing_relay, "write_relay", blocking_write)
+        try:
+            window = await bridge.open_pairing_window(USER)
+            window.state = pairing_relay.STATE_AWAITING_SCAN
+            window.qr_seq = 1
+            writing = asyncio.ensure_future(
+                bridge._publish_relay_qr(window, 1, QR),
+            )
+            assert await asyncio.to_thread(entered.wait, 8) is True
+            writing.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await writing
+            # The close, in the order `stop()` performs it.
+            assert bridge._end_pairing_window(
+                window, pairing_relay.STATE_FAILED, "the bridge stopped",
+            ) is True
+            clearing = asyncio.ensure_future(bridge._clear_relay())
+            await asyncio.sleep(0.05)
+            released.set()
+            await clearing
+        finally:
+            released.set()
+        # **Wait for the write thread before asserting**, or the assertion
+        # races it and passes by luck against exactly the shape it is here to
+        # refuse.
+        assert await asyncio.to_thread(finished.wait, 8) is True
+        assert not relay_path(bridge).exists()
+
     async def test_an_in_flight_write_still_lands_before_the_unlink(
         self, bridge, sidecar, monkeypatch,
     ):
@@ -637,6 +848,97 @@ class TestClosingAWindow:
         assert not relay_path(bridge).exists()
 
 
+class TestTheGuardsWithNoTestBehindThem:
+    """Four checks a mutation could delete with the rest of the suite green.
+
+    Each was named by review rather than found by a failure, which is the
+    reason they are grouped: the cases above exercise the paths these guards
+    sit on without ever putting them in the state they refuse.
+    """
+
+    def test_a_hand_written_payload_cannot_smuggle_a_code_past_the_state(
+        self, tmp_path,
+    ):
+        """`build_payload` strips a `qr` from a non-scan state, so no fixture
+        built through it can reach the reader's own arm."""
+        path = tmp_path / "relay.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "window_id": "w1",
+                    "state": pairing_relay.STATE_SIDECAR_ABSENT,
+                    "expires_at": FUTURE,
+                    "qr": QR,
+                    "qr_seq": 1,
+                    "message": "",
+                    "updated_at": time.time(),
+                }
+            )
+        )
+        read = pairing_relay.read_relay(path)
+        assert read is not None
+        assert "qr" not in read
+
+    async def test_a_stopping_bridge_opens_no_window(self, config, sockets):
+        path = sockets.path / "relay.json"
+        instance = BaileysBridge(
+            config,
+            socket_path=sockets.socket,
+            session_dir=sockets.session,
+            pairing_relay_path=path,
+        )
+        await instance.start()
+        await instance.stop()
+        assert await instance.open_pairing_window(USER) is None
+        assert instance.pairing_window is None
+        assert not path.exists()
+
+    async def test_the_first_closer_wins_the_recorded_outcome(self, bridge):
+        """A losing closer must not overwrite the outcome the durable row
+        reads."""
+        window = await bridge.open_pairing_window(USER)
+        assert bridge._end_pairing_window(
+            window, pairing_relay.STATE_PAIRED, "first",
+        ) is True
+        assert bridge._end_pairing_window(
+            window, pairing_relay.STATE_FAILED, "second",
+        ) is False
+        assert bridge.last_pairing_outcome.state == pairing_relay.STATE_PAIRED
+        assert bridge.last_pairing_outcome.message == "first"
+
+    async def test_settled_relay_jobs_do_not_accumulate(self, bridge, sidecar):
+        """Held so the loop cannot collect them mid-flight, discarded after."""
+        await bridge.open_pairing_window(USER)
+        for seq in range(1, 4):
+            await sidecar.say(proto.MSG_QR, qr=f"{QR}{seq}")
+            await wait_for(
+                lambda seq=seq: (
+                    pairing_relay.read_relay(relay_path(bridge)) or {}
+                ).get("qr_seq") == seq
+            )
+        await wait_for(lambda: bridge._relay_tasks == set())
+
+
+class TestReadyWithoutACode:
+    async def test_a_reconnect_inside_a_window_is_not_recorded_as_paired(
+        self, bridge, sidecar,
+    ):
+        """`ready` is re-announced on every daemon-link reconnect.
+
+        So a `ready` with no relayed code behind it is a working session
+        saying hello again, not somebody's re-pair completing — and the
+        durable row records this state as that request's outcome.
+        """
+        window = await bridge.open_pairing_window(USER)
+        await sidecar.say(proto.MSG_READY)
+        await wait_for(lambda: bridge.pairing_window is None)
+        await wait_for(lambda: not relay_path(bridge).exists())
+        outcome = bridge.last_pairing_outcome
+        assert outcome.window_id == window.window_id
+        assert outcome.state == pairing_relay.STATE_FAILED
+        assert "nothing was re-paired" in outcome.message
+
+
 class TestTheWatchdog:
     async def test_the_ttl_expires_the_window_and_unlinks(self, bridge, sidecar):
         window = await bridge.open_pairing_window(USER)
@@ -664,6 +966,85 @@ class TestTheWatchdog:
         assert "qr" not in read
         assert read["message"]
         assert bridge.status.pairing_state == pairing_relay.STATE_SIDECAR_ABSENT
+
+    async def test_a_connected_but_silent_sidecar_is_not_called_absent(
+        self, bridge, sidecar,
+    ):
+        """The message must not send an operator to a unit that is running.
+
+        `doctor` renders a `sidecar_absent` window as a WARN, so "check its
+        own unit and the update log" against a peer this same status object
+        reports as connected is a false alarm about a stopped service.
+        """
+        await bridge.open_pairing_window(USER)
+        # Waiting on the **file**, not on `status.pairing_state`: the state
+        # flips on the loop and the publish happens on a thread, so the status
+        # leads the relay and reading it here caught the previous payload.
+        await wait_for(
+            lambda: (pairing_relay.read_relay(relay_path(bridge)) or {}).get(
+                "state"
+            ) == pairing_relay.STATE_SIDECAR_ABSENT,
+            timeout=3.0,
+        )
+        assert bridge.status.connected is True
+        message = pairing_relay.read_relay(relay_path(bridge))["message"]
+        assert "is connected" in message
+        assert "update log" not in message
+        assert "sidecar.log" in message
+
+    async def test_nothing_connected_names_the_unit_and_the_update_log(
+        self, config, sockets,
+    ):
+        """The ISSUE-497 residual: a failed dependency install can leave the
+        unit stopped with the reason only in the update log."""
+        path = sockets.path / "relay.json"
+        instance = BaileysBridge(
+            config,
+            socket_path=sockets.socket,
+            session_dir=sockets.session,
+            pairing_relay_path=path,
+            pairing_window_seconds=3.0,
+            sidecar_return_timeout=0.2,
+        )
+        await instance.start()
+        try:
+            await instance.open_pairing_window(USER)
+            await wait_for(
+                lambda: (pairing_relay.read_relay(path) or {}).get("state")
+                == pairing_relay.STATE_SIDECAR_ABSENT,
+                timeout=3.0,
+            )
+            assert instance.status.connected is False
+            message = pairing_relay.read_relay(path)["message"]
+            assert "update log" in message
+            assert instance.pairing_window is not None
+        finally:
+            await instance.stop()
+
+    async def test_a_watchdog_that_cannot_run_closes_the_window(
+        self, bridge, sidecar, monkeypatch,
+    ):
+        """Fail closed, not open.
+
+        Logging and returning would leave the window armed with nothing left
+        to enforce its TTL and the code on disk until the process stops — the
+        opposite of "unlinked the moment the window closes by any route". The
+        realistic trigger is `to_thread` answering `RuntimeError` as the
+        default executor shuts down, which is the shutdown case.
+        """
+        await bridge.open_pairing_window(USER)
+        assert relay_path(bridge).exists()
+
+        async def boom(_window):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+        # Patched after the open, so the file is on disk when the watchdog
+        # fails — the demotion at `sidecar_return_timeout` is what reaches it.
+        monkeypatch.setattr(bridge, "_publish_relay", boom)
+        await wait_for(lambda: bridge.pairing_window is None, timeout=3.0)
+        await wait_for(lambda: not relay_path(bridge).exists())
+        assert bridge.last_pairing_outcome.state == pairing_relay.STATE_FAILED
+        assert "watchdog" in bridge.last_pairing_outcome.message
 
     async def test_a_late_sidecar_still_pairs(self, bridge, sidecar):
         await bridge.open_pairing_window(USER)
@@ -733,8 +1114,8 @@ class TestNothingTouchesTheDiskOnTheReadLoop:
         behind the write. Off the loop that is immediate; on the loop it cannot
         be anything less than the timer.
         """
-        block_for = 0.6
-        budget = 0.3
+        block_for = 3.0
+        budget = 1.0
         released = threading.Event()
         real_write = pairing_relay.write_relay
 
@@ -766,6 +1147,107 @@ class TestNothingTouchesTheDiskOnTheReadLoop:
             f"behind a relay write that blocked for {block_for}s"
         )
         assert bridge.pairing_window is not None
+
+    async def test_the_loop_keeps_servicing_frames_while_an_unlink_blocks(
+        self, bridge, sidecar, monkeypatch,
+    ):
+        """The unlink is the other half of the stated property.
+
+        It is reached from the `ready` arm, on the read loop, so a regression
+        to a direct `clear_relay` call there would be invisible to the write
+        case above — the relay's own docstring says both touches happen on a
+        thread, and only one of them was measured.
+        """
+        block_for = 3.0
+        budget = 1.0
+        released = threading.Event()
+        real_clear = pairing_relay.clear_relay
+
+        def blocking_clear(path):
+            released.wait(timeout=8)
+            return real_clear(path)
+
+        monkeypatch.setattr(pairing_relay, "clear_relay", blocking_clear)
+        timer = threading.Timer(block_for, released.set)
+        timer.start()
+        try:
+            await bridge.open_pairing_window(USER)
+            await sidecar.say(proto.MSG_QR, qr=QR)
+            await wait_for(lambda: bridge.status.pairing_state == (
+                pairing_relay.STATE_AWAITING_SCAN
+            ))
+            before = bridge.status.malformed_lines
+            started = time.monotonic()
+            await sidecar.say(proto.MSG_READY)
+            await sidecar.write_raw(b"{not json}\n")
+            await wait_for(
+                lambda: bridge.status.malformed_lines == before + 1,
+                timeout=8.0,
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            timer.cancel()
+            released.set()
+        assert elapsed < budget, (
+            f"the read loop took {elapsed:.2f}s to service a frame queued "
+            f"behind a relay unlink that blocked for {block_for}s"
+        )
+
+    async def test_the_loop_keeps_servicing_frames_while_the_parent_mkdir_blocks(
+        self, config, sockets, monkeypatch,
+    ):
+        """`_ensure_relay_parent` is a `mkdir`, and a hung filesystem is where
+        a `mkdir` costs what a write costs."""
+        block_for = 3.0
+        budget = 1.0
+        released = threading.Event()
+        real_mkdir = Path.mkdir
+
+        def blocking_mkdir(self, *args, **kwargs):
+            if self == sockets.path:
+                released.wait(timeout=8)
+            return real_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", blocking_mkdir)
+        instance = BaileysBridge(
+            config,
+            socket_path=sockets.socket,
+            session_dir=sockets.session,
+            pairing_relay_path=sockets.path / "relay.json",
+            pairing_window_seconds=8.0,
+            sidecar_return_timeout=8.0,
+        )
+        monkeypatch.undo()
+        await instance.start()
+        monkeypatch.setattr(Path, "mkdir", blocking_mkdir)
+        timer = threading.Timer(block_for, released.set)
+        timer.start()
+        try:
+            fake = FakeSidecar(sockets.socket)
+            await fake.connect()
+            await wait_for(lambda: instance.status.connected is True)
+            before = instance.status.malformed_lines
+            started = time.monotonic()
+            opening = asyncio.ensure_future(instance.open_pairing_window(USER))
+            await fake.write_raw(b"{not json}\n")
+            await wait_for(
+                lambda: instance.status.malformed_lines == before + 1,
+                timeout=8.0,
+            )
+            elapsed = time.monotonic() - started
+            timer.cancel()
+            released.set()
+            await opening
+            await fake.close()
+        finally:
+            timer.cancel()
+            released.set()
+            monkeypatch.undo()
+            await instance.stop()
+        assert elapsed < budget, (
+            f"the read loop took {elapsed:.2f}s to service a frame queued "
+            f"behind a relay mkdir that blocked for {block_for}s"
+        )
 
 
 # ---------------------------------------------------------------------------

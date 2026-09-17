@@ -152,13 +152,20 @@ def read_relay(
 ) -> dict | None:
     """The relay's current contents, or `None` for anything unusable.
 
-    Two optional filters, because the caller holding the durable request row is
-    the one that knows which window is current: a payload whose `window_id`
-    does not match `expected_window_id` is a leftover from an earlier window
-    and is ignored rather than rendered, and one whose absolute deadline has
-    passed is ignored the same way. A torn file cannot be observed — the
-    publish is an `os.replace` of a fully written file — but a file that fails
-    to parse anyway reads as nothing.
+    **The deadline is checked on every read and there is no way to skip it**,
+    which is the one place this reader is deliberately stricter than its
+    arguments suggest. `now` overrides the clock for a test or a caller that
+    has already read one; it does not turn the check off. An opt-in filter
+    would mean `read_relay(path)` — the shortest form, and so the one a later
+    reader copies — handing back a pairing code from a file whose window
+    expired hours ago, which is exactly the state a skipped unlink leaves
+    behind. `brain_availability.read_unavailable` defaults the same way.
+
+    `expected_window_id` is the caller's, because only the holder of the
+    durable request row knows which window is current: a payload from an
+    earlier one is ignored rather than rendered. A torn file cannot be
+    observed — the publish is an `os.replace` of a fully written file — but a
+    file that fails to parse anyway reads as nothing.
     """
     target = Path(path)
     try:
@@ -179,7 +186,7 @@ def read_relay(
         expires_at = float(payload["expires_at"])
     except (KeyError, TypeError, ValueError):
         return None
-    if now is not None and expires_at <= now:
+    if expires_at <= (time.time() if now is None else now):
         return None
     if state != STATE_AWAITING_SCAN:
         # Defence in depth on the way back as well as on the way out: a state
@@ -189,21 +196,67 @@ def read_relay(
 
 
 def clear_relay(path: Path | str) -> bool:
-    """Remove the relay. Never raises.
+    """Remove the relay, and any staging file left behind. Never raises.
 
     Returns whether nothing is at the path afterwards, so an absent file is
     success — the caller's question is "is the credential gone", and it is.
+
+    **The staging sweep is not tidiness.** `atomic_write` names its staging
+    file `.{target}.{random}` in the target's own directory, unique per call,
+    and its docstring says outright that one outlives the call when the
+    process dies between the write and the rename and that nothing sweeps it
+    afterwards — which for most callers is inert and here is a pairing code
+    sitting at 0600 for as long as the deployment lasts. So the close sweeps
+    the prefix as well as the name. It knows that prefix, which is a coupling
+    to the neighbouring leaf's naming rather than to its behaviour; the
+    alternative is a credential with no owner.
+
+    Safe to run beside a live writer only because the bridge serializes every
+    relay touch behind one lock, so there is no in-flight staging file of its
+    own to delete while this runs.
     """
     target = Path(path)
+    removed = True
     try:
         os.unlink(target)
     except FileNotFoundError:
-        return True
+        pass
     except OSError as exc:
         logger.warning(
             "whatsapp.pairing.relay_unremoved path=%s errno=%s (%s): a pairing "
             "code may still be readable on disk",
             target, exc.errno, errno.errorcode.get(exc.errno or 0, "unknown"),
         )
-        return False
-    return True
+        removed = False
+    for stray in _staging_files(target):
+        try:
+            os.unlink(stray)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning(
+                "whatsapp.pairing.relay_staging_unremoved path=%s errno=%s "
+                "(%s): a pairing code may still be readable on disk",
+                stray, exc.errno,
+                errno.errorcode.get(exc.errno or 0, "unknown"),
+            )
+            removed = False
+            continue
+        logger.warning(
+            "whatsapp.pairing.relay_staging_swept path=%s: a previous write "
+            "did not finish and left a pairing code behind",
+            stray,
+        )
+    return removed
+
+
+def _staging_files(target: Path) -> list[Path]:
+    """Every `atomic_write` staging file for `target`, newest last.
+
+    Its own function so the prefix is written once, and a glob rather than a
+    listing so a directory this cannot read yields nothing rather than raising.
+    """
+    try:
+        return sorted(target.parent.glob(f".{target.name}.*"))
+    except OSError:
+        return []

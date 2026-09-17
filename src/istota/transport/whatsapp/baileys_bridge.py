@@ -60,6 +60,7 @@ import math
 import os
 import secrets
 import stat
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -309,20 +310,28 @@ _return_timeout_for = sidecar_return_timeout
 def default_pairing_relay_path(config: Config) -> Path:
     """Where the QR relay file goes unless the operator named somewhere else.
 
-    `{db_path.parent}` on both server shapes, which already holds the session
-    directory itself at 0700 — so a 0600 file beside it is not a new exposure
-    class.
+    `{db_path.parent}` on both server shapes: the deployment's state root,
+    which the socket and — unless the operator pointed `session_dir`
+    elsewhere — the paired session itself already sit in, and which the
+    sandbox binds at no path.
 
-    **The standalone install is the exception and the path resolves away from
-    it.** `setup_wizard` puts `db_path` at `{workspace}/istota.db`, so there
+    **The standalone install is the exception and the path moves off the state
+    root there.** `setup_wizard` puts `db_path` at `{workspace}/istota.db`, so
     `db_path.parent`, `workspace_path` and the state root are one directory:
-    the shape where `_mask_dir` refuses outright and where a `folder` resource
-    naming the workspace is bound read-write into every sandbox. The credential
-    *class* is no different from `creds.json` already sitting in that unmasked
-    tree, but the friction is — a QR is a scan-and-done artifact with no
-    keystore to exfiltrate, live for 300s and rotating every 20 — so it goes to
-    the temp root instead, which is the parent of the per-user directories the
-    sandbox binds rather than one of them.
+    the shape where `_mask_dir` refuses outright, and where a `user_resources`
+    row is bounded by `workspace_path` alone. The credential *class* is no
+    different from `creds.json` already sitting in that unmasked tree, but a
+    QR is a scan-and-done artifact with no keystore to exfiltrate, live for
+    300s and rotating every 20, so it is worth keeping out of the way.
+
+    **What the move buys is narrower than it looks, and is stated rather than
+    implied**: `{workspace}/tmp` is still inside `workspace_path`, so a
+    resource naming the workspace *root* reaches it either way. What it does
+    buy is that the file is not in the directory such a row most plausibly
+    names, and is a sibling of the per-user temp directories the sandbox binds
+    rather than inside one. The refusal for a shape where the resolved relay
+    would still land inside a bound root belongs to the sequence that opens a
+    window, which is where the task's own bind list is known.
     """
     db_parent = Path(config.db_path).parent
     workspace = config.workspace_path
@@ -793,11 +802,25 @@ class BaileysBridge:
         self._pairing_watchdog: asyncio.Task | None = None
         self._last_pairing_outcome: PairingOutcome | None = None
         # Serializes every relay touch, and it is the ordering *and* the
-        # anti-resurrection guard: each queued job re-reads the live window
-        # under this lock, so a write already in flight when a window closes
-        # finds a stale window and skips rather than re-creating a credential
-        # file behind the unlink. Nothing in this stage sweeps that path.
-        self._relay_lock = asyncio.Lock()
+        # anti-resurrection guard: each job re-reads the live window while
+        # holding this lock, so a write scheduled before a window closed finds
+        # a stale window and skips rather than re-creating a credential file
+        # behind the unlink. Nothing in this stage sweeps that path.
+        #
+        # **A `threading.Lock`, taken inside the worker thread, rather than an
+        # `asyncio.Lock` taken around the thread hop.** The asyncio form looks
+        # equivalent and is not: cancelling the task that awaits
+        # `asyncio.to_thread` does not stop a thread that has already started
+        # — `run_in_executor` can only cancel a future whose work has not
+        # begun — so the `async with` unwinds and *releases the lock* with the
+        # write still live. The unlink then takes the free lock, removes the
+        # file, and the orphaned thread's `os.replace` puts a pairing code
+        # back on disk after its window has closed. That cancel is not
+        # hypothetical: `AsyncRuntime._shutdown` cancels every pending task
+        # before it runs the cleanup hook that calls `stop()`. Held inside the
+        # thread, a cancelled awaiter cannot release it early, and the guard
+        # below runs after any pending unlink rather than before it.
+        self._relay_lock = threading.Lock()
         self._relay_tasks: set[asyncio.Task] = set()
         # Called once per *transition into* a permanent fatal, with the
         # reason. The bridge itself never writes a notification row: this
@@ -869,11 +892,21 @@ class BaileysBridge:
     ) -> PairingWindow | None:
         """Arm the relay for `PAIRING_WINDOW_SECONDS`, or refuse.
 
-        `None` means a window is already open and nothing was touched — the
-        single-flight rule behind the route's 409. Awaits the initial relay
-        publish, so a caller returns with the state already readable by the web
-        process; the window is installed *before* that await, or a QR arriving
-        during it would be discarded by a handler that sees no window.
+        **`None` has three producers and a caller cannot tell them apart**:
+        a window is already open (the single-flight rule behind the route's
+        409), the bridge is stopping, or it began stopping during the two
+        awaits below. A discriminated refusal belongs with the `PairingResult`
+        the sequence around this returns, not here, so the note is that all
+        three mean "no window was opened and nothing was touched".
+
+        Awaits the initial relay publish, so a caller returns with the state
+        already readable by the web process; the window is installed *before*
+        that await, or a QR arriving during it would be discarded by a handler
+        that sees no window. Both gates are then re-read, which is
+        `reset_session`'s own rule for the same reason: they were answered
+        before two awaits, and returning a window `stop()` has since closed
+        would have the caller write a durable row for a window that does not
+        exist.
 
         Never raises. A relay that cannot be written still leaves a window
         open — the code is then invisible to the UI and the durable row says
@@ -911,6 +944,8 @@ class BaileysBridge:
             self._pairing_window_seconds,
         )
         await self._guarded_relay_job(self._publish_relay(window))
+        if self._pairing_window is not window or self._stopping:
+            return None
         return window
 
     async def cancel_pairing(self) -> bool:
@@ -968,28 +1003,27 @@ class BaileysBridge:
             await self._clear_relay()
 
     async def _publish_relay(self, window: PairingWindow) -> None:
-        """Write the window's state with no payload, unless it has closed.
+        """Write the window's state with no payload.
 
-        Under `_relay_lock`, which is what makes the liveness check
-        meaningful: every relay touch passes through it in order, so a write
-        scheduled before a close cannot land after the unlink and re-create a
-        credential file nothing in this stage would ever sweep.
+        The payload is snapshotted here, on the loop, so the worker thread
+        reads nothing mutable but the two guard values — and so a rotation
+        that changed the state between this call and the thread running is
+        what the guard refuses rather than something this payload silently
+        carries.
         """
-        async with self._relay_lock:
-            if self._pairing_window is not window:
-                return
-            payload = pairing_relay.build_payload(
+        await asyncio.to_thread(
+            self._write_relay_under_lock,
+            window,
+            pairing_relay.build_payload(
                 window_id=window.window_id,
                 state=window.state,
                 expires_at=window.expires_at_wall,
                 qr_seq=window.qr_seq,
                 message=window.message,
-            )
-            # Off the loop, because this coroutine is also reachable from the
-            # read loop's own `_handle_qr`.
-            await asyncio.to_thread(
-                pairing_relay.write_relay, self._pairing_relay_path, payload,
-            )
+            ),
+            window.state,
+            None,
+        )
 
     async def _publish_relay_qr(
         self, window: PairingWindow, qr_seq: int, value: str,
@@ -1001,35 +1035,62 @@ class BaileysBridge:
         keeping it would leave the credential in the daemon's memory long
         after it had stopped being scannable, and every later `_publish_relay`
         would have to decide whether to re-publish it.
-
-        A rotation whose successor already landed is dropped rather than
-        written, which is what stops two queued writes from publishing in the
-        wrong order — the sequence is stamped on the loop, in order, and this
-        runs under the lock.
         """
-        async with self._relay_lock:
-            if self._pairing_window is not window or window.qr_seq != qr_seq:
-                return
-            payload = pairing_relay.build_payload(
+        await asyncio.to_thread(
+            self._write_relay_under_lock,
+            window,
+            pairing_relay.build_payload(
                 window_id=window.window_id,
                 state=window.state,
                 expires_at=window.expires_at_wall,
                 qr=value,
                 qr_seq=qr_seq,
                 message=window.message,
-            )
-            await asyncio.to_thread(
-                pairing_relay.write_relay, self._pairing_relay_path, payload,
-            )
+            ),
+            window.state,
+            qr_seq,
+        )
+
+    def _write_relay_under_lock(
+        self,
+        window: PairingWindow,
+        payload: dict,
+        expected_state: str,
+        expected_seq: int | None,
+    ) -> None:
+        """Publish, in a worker thread, unless the window has moved on.
+
+        Three guards, and each refuses a write that would publish something
+        untrue by the time it reached the disk:
+
+        - the window is no longer the live one, so the file would be a
+          credential re-created behind its own unlink;
+        - its state has moved on, so a `sidecar_absent` notice queued a moment
+          before a code arrived would clobber that code with a payload-free
+          record of a wait that is over;
+        - a later rotation already landed, so this one is stale.
+
+        All three are read **here**, inside the lock and inside the thread,
+        rather than around the thread hop — see `_relay_lock`.
+        """
+        with self._relay_lock:
+            if self._pairing_window is not window:
+                return
+            if window.state != expected_state:
+                return
+            if expected_seq is not None and window.qr_seq != expected_seq:
+                return
+            pairing_relay.write_relay(self._pairing_relay_path, payload)
 
     def _ensure_relay_parent(self) -> None:
         self._pairing_relay_path.parent.mkdir(parents=True, exist_ok=True)
 
     async def _clear_relay(self) -> None:
-        async with self._relay_lock:
-            await asyncio.to_thread(
-                pairing_relay.clear_relay, self._pairing_relay_path,
-            )
+        await asyncio.to_thread(self._clear_relay_under_lock)
+
+    def _clear_relay_under_lock(self) -> None:
+        with self._relay_lock:
+            pairing_relay.clear_relay(self._pairing_relay_path)
 
     def _spawn_relay_job(self, coro) -> None:
         """Run a relay coroutine off the read loop's own call stack.
@@ -1089,17 +1150,38 @@ class BaileysBridge:
                     now >= absent_at
                     and window.state == pairing_relay.STATE_AWAITING_SIDECAR
                 ):
+                    # **Two faults reach this deadline and the message says
+                    # which.** The state is the same either way, because what
+                    # it is for is stopping the UI from implying a code is on
+                    # its way — but a sidecar that is *connected* and has not
+                    # offered one is not a stopped unit, and telling an
+                    # operator to go and look at the unit and the update log
+                    # is a false alarm that `doctor` will repeat as a WARN.
+                    # `connected` is the bridge's own answer and is right
+                    # here; it is not enough to *gate* the demotion on,
+                    # which would restore the empty wait to the full TTL.
                     window.state = pairing_relay.STATE_SIDECAR_ABSENT
-                    window.message = (
-                        "no WhatsApp sidecar has connected in "
-                        f"{self._sidecar_return_timeout:.0f}s. Check its own "
-                        "unit or compose service and the deploy update log — a "
-                        "failed dependency install can leave it stopped. A "
-                        "late sidecar still pairs."
-                    )
+                    if self._status.connected:
+                        window.message = (
+                            "a WhatsApp sidecar is connected and has not "
+                            f"offered a pairing code in "
+                            f"{self._sidecar_return_timeout:.0f}s, which is "
+                            "what a session starting from a credential that "
+                            "is still there looks like. Check `sidecar.log` "
+                            "inside the session directory. A code that "
+                            "arrives later still pairs."
+                        )
+                    else:
+                        window.message = (
+                            "no WhatsApp sidecar has connected in "
+                            f"{self._sidecar_return_timeout:.0f}s. Check its "
+                            "own unit or compose service and the deploy "
+                            "update log — a failed dependency install can "
+                            "leave it stopped. A late sidecar still pairs."
+                        )
                     logger.warning(
-                        "whatsapp.pairing.sidecar_absent window=%s",
-                        window.window_id,
+                        "whatsapp.pairing.sidecar_absent window=%s connected=%s",
+                        window.window_id, self._status.connected,
                     )
                     await self._publish_relay(window)
                     continue
@@ -1112,10 +1194,26 @@ class BaileysBridge:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — the contract is never-raises
+            # **Fail closed.** Logging and falling off the end of this
+            # coroutine leaves the window armed with nothing left to enforce
+            # its TTL and the credential on disk until the process stops —
+            # which is the opposite of what a relay whose whole contract is
+            # "unlinked the moment the window closes by any route" wants from
+            # its last line of defence. The realistic trigger is
+            # `asyncio.to_thread` answering `RuntimeError` as the default
+            # executor shuts down, i.e. exactly the shutdown case.
             logger.warning(
-                "whatsapp.pairing.watchdog_failed window=%s reason=%s",
+                "whatsapp.pairing.watchdog_failed window=%s reason=%s: "
+                "closing the window rather than leaving it armed",
                 window.window_id, type(exc).__name__,
             )
+            with contextlib.suppress(Exception):
+                await self._close_pairing_window(
+                    window,
+                    pairing_relay.STATE_FAILED,
+                    "the pairing window was closed because its watchdog "
+                    "could not run",
+                )
 
     async def start(self) -> None:
         """Make the session directory, open the socket, start the sidecar.
@@ -1151,14 +1249,35 @@ class BaileysBridge:
         # that would notice an orphaned window belongs to a later stage. This
         # runs on a task rather than the read loop, so it can await the unlink.
         window = self._pairing_window
-        if window is not None:
-            await self._guarded_relay_job(
-                self._close_pairing_window(
-                    window,
-                    pairing_relay.STATE_FAILED,
-                    "the bridge stopped before a code was scanned",
-                ),
-            )
+        if window is not None and self._end_pairing_window(
+            window,
+            pairing_relay.STATE_FAILED,
+            "the bridge stopped before a code was scanned",
+        ):
+            # **The drop is synchronous and only the unlink can be skipped.**
+            # Every other await in this method is already inside a
+            # `contextlib.suppress`, because the docstring's "never raises" is
+            # what keeps the socket inode from outliving the process — and
+            # `_guarded_relay_job` deliberately re-raises `CancelledError`, so
+            # an unguarded await here would abort `stop()` before the sidecar
+            # was even asked to leave. `AsyncRuntime._shutdown` cancels
+            # pending tasks before it runs the cleanup hook that calls this,
+            # so that cancel is the ordinary case rather than a corner. The
+            # cost of a skipped unlink is a relay file nothing sweeps, which
+            # is the accepted residual named in `pairing_relay`.
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await self._clear_relay()
+        # Cancelled rather than left pending, like the supervisor and the
+        # worker below: a relay job still holding an executor thread at loop
+        # close is a destroyed-pending-task warning on the `istota serve`
+        # shape. It cannot resurrect the file — `_write_relay_under_lock`
+        # refuses a window that is no longer live, and the window is already
+        # gone by here.
+        for task in list(self._relay_tasks):
+            task.cancel()
+        for task in list(self._relay_tasks):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         await self._request_shutdown()
         if self._supervisor is not None:
             self._supervisor.cancel()
@@ -1820,13 +1939,35 @@ class BaileysBridge:
             # no browser is watching still pairs. The window is dropped
             # synchronously and the credential unlinked on a task, because
             # `_dispatch` runs on the read loop and may not await.
+            #
+            # **A `ready` frame is not evidence that a code was scanned**, and
+            # the terminal state must not claim it was: the sidecar
+            # re-announces its verdict whenever the daemon link reconnects, so
+            # a link blip inside a window produces one with no pairing behind
+            # it. `qr_seq` is the evidence — it counts codes this window
+            # actually relayed — and the distinction matters because the
+            # durable row records this state as the outcome of somebody's
+            # re-pair request. The window closes either way; there is nothing
+            # left to relay to a session that is up.
             window = self._pairing_window
-            if window is not None and self._end_pairing_window(
-                window,
-                pairing_relay.STATE_PAIRED,
-                "the session was paired",
-            ):
-                self._spawn_relay_job(self._clear_relay())
+            if window is not None:
+                paired = window.qr_seq > 0
+                if self._end_pairing_window(
+                    window,
+                    (
+                        pairing_relay.STATE_PAIRED
+                        if paired
+                        else pairing_relay.STATE_FAILED
+                    ),
+                    (
+                        "the session was paired"
+                        if paired
+                        else "the session reported itself open without having "
+                        "offered a pairing code, which is what a reconnect of "
+                        "a working session looks like; nothing was re-paired"
+                    ),
+                ):
+                    self._spawn_relay_job(self._clear_relay())
             logger.info("whatsapp.baileys.ready")
         elif message_type == proto.MSG_QR:
             self._handle_qr(payload)
