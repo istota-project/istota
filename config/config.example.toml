@@ -977,6 +977,15 @@ avatar_import_interval = 21600
 # the sleep cycle was off or the primary brain's breaker was open.
 skill_overlay_reindex_interval = 21600
 
+# Seconds between KDBX credential-vault syncs (0 disables). Inert unless some
+# user has a `vault_path`. Startup alone is not enough — a user edits their
+# vault at 3pm and nothing happens until the next restart — and five minutes is
+# chosen against the rclone dir-cache lag, which adds its own delay on top; a
+# shorter interval mostly buys more `stat` calls. A cycle whose file digest is
+# unchanged stops at the hash, so the steady-state cost is one bounded read per
+# user rather than a key derivation.
+vault_sync_interval = 300
+
 # Defense-in-depth: alert an operator if the single-threaded main dispatch loop
 # stops ticking for this many seconds (a slow call that slipped onto the loop
 # thread, a wedged check). A separate watchdog thread logs an ERROR and fires

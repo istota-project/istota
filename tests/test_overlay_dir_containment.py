@@ -575,22 +575,21 @@ class TestTheReturnedPathIsDisplayOnly:
     #: those files get their containment from `storage.resolve_user_config_dir`
     #: instead. Reusing the reader is the point; the exemption is from *this*
     #: rule, not from containment.
-    #: `secrets_vault.py` is the third, and is the one entry here that is not
-    #: yet settled. `[users.<id>] vault_path` has two forms and they want
-    #: different answers. The **absolute** form is deliberately outside the mount
-    #: — it is what an operator picks to keep the file out of the sandbox
-    #: entirely — so there is no overlay directory to hold open and the
-    #: exemption is exactly right. The **relative** form resolves under
-    #: `{mount}/Users/{user_id}`, where every component above the leaf is
-    #: model-writable, and it is therefore a candidate for `open_overlay_dir` +
-    #: `dir_fd` rather than for this list. `resolve_user_vault_path` does not
-    #: exist yet — it is the stage of that spec after the reader — so revisit
-    #: this entry when it lands rather than reading it as a decision already
-    #: taken. Nothing is exposed meanwhile: `read_vault_bytes` has no caller.
+    #: `secrets_vault.py` was a third entry for one stage of the KDBX vault
+    #: spec, written as provisional, and it is **settled by removal** rather
+    #: than by a decision to keep it. `[users.<id>] vault_path` has two forms:
+    #: the absolute one is refused unless it resolves outside `workspace_path`
+    #: entirely, so it has no model-writable ancestor and passes `dir_fd=None`;
+    #: the relative one resolves under `{mount}/Users/{user_id}`, where every
+    #: component above the leaf *is* model-writable, and
+    #: `storage.resolve_user_vault_path` walks it with `open_overlay_dir` and
+    #: hands the descriptor to `read_vault_bytes`. So the call site names
+    #: `dir_fd` and the rule below covers it positively, which is strictly
+    #: better than an exemption — an exemption would have gone on passing if
+    #: the descriptor were dropped again.
     _NOT_OVERLAY_READERS = frozenset({
         "storage.py",                 # read_regular_file / read_user_config_file
         "skills/memory/__init__.py",  # the memory CLI's _read_text
-        "secrets_vault.py",           # read_vault_bytes
     })
 
     def test_no_overlay_reader_opens_a_path_without_a_descriptor(self):

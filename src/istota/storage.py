@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import stat
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +19,7 @@ from .rclone_client import (
     rclone_rcat,
     rclone_run,
 )
+from .user_scope import is_scopable_user_id
 
 if TYPE_CHECKING:
     from .config import Config
@@ -465,6 +467,233 @@ def resolve_user_config_dir(config: "Config", user_id: str) -> Path | None:
         user_id,
         _get_mount_path(config, get_user_config_path(user_id, config.bot_dir_name)),
     )
+
+
+@dataclass(frozen=True)
+class VaultLocation:
+    """Where a user's KDBX vault is, and the directory it was reached through.
+
+    ``path`` is for display, for log lines and for ``path.name`` — never for
+    opening. On the relative form its leading components are realpath'd and its
+    trailing ones are the operator's own spelling, so under a concurrent swap it
+    and ``dir_fd`` can name different inodes; the read goes through the
+    descriptor, which is what makes that harmless. The precedent is
+    ``open_user_skill_overlays``, whose returned path carries the same rule.
+
+    ``dir_fd`` is an open descriptor on the leaf's **parent**, and **the caller
+    closes it**. It is ``None`` for exactly one case, the absolute form, and
+    that is a property of the form rather than an omission: an absolute
+    ``vault_path`` is refused unless it resolves outside ``workspace_path``
+    entirely, so it has no sandbox-writable ancestor there would be any point
+    holding open. ``open_user_skill_overlays`` bans its own ``(path, None)``
+    answer because there the path *was* under a model-writable tree and a caller
+    holding one had no choice but to walk it again; here the absence of a
+    descriptor is the conclusion of the containment check rather than a failure
+    to perform one.
+    """
+
+    path: Path
+    dir_fd: int | None
+
+
+#: Why a configured ``vault_path`` was refused. Stable ids, in the log line the
+#: refusal writes: the condition persists across every sync cycle, so an
+#: operator grepping for one wants a word rather than a sentence.
+VAULT_PATH_NO_WORKSPACE = "no_workspace_for_a_relative_path"
+VAULT_PATH_BAD_USER = "user_id_does_not_name_a_child"
+VAULT_PATH_NOT_A_FILENAME = "path_names_no_plain_file"
+VAULT_PATH_INSIDE_WORKSPACE = "absolute_path_resolves_inside_the_workspace"
+VAULT_PATH_UNRESOLVABLE = "path_could_not_be_resolved"
+VAULT_PATH_OUTSIDE_USER_TREE = "directory_component_is_not_reachable_in_the_tree"
+
+
+def resolve_user_vault_path(
+    config: "Config", user_id: str
+) -> VaultLocation | None:
+    """Which KDBX file this user's vault sync may open, or None.
+
+    The daemon holds the passphrase and the model does not, so this decides
+    what gets decrypted and written into the secrets table. ``None`` means
+    there is nothing to open — the feature is off for this user, or the
+    configured path is one this may not reach — and every refusal is logged,
+    because a configured path that resolves to nothing must not be silence.
+
+    **Two forms, two mechanisms, because their exposure differs.**
+
+    A **relative** ``vault_path`` resolves under ``{workspace}/Users/{user_id}``,
+    which ``build_bwrap_cmd`` binds read-write into that user's own sandbox — so
+    every directory component above the leaf is model-writable and ``mv config
+    config.real && ln -s /anywhere config`` is two commands from inside it.
+    ``read_overlay_bytes``' ``O_NOFOLLOW`` covers the *last* component and
+    nothing above it, so containment here is ``open_overlay_dir``'s walk: each
+    component opened ``O_NOFOLLOW | O_DIRECTORY`` relative to the one above, and
+    the caller left holding a descriptor pinned to an inode rather than a name
+    to walk again. That is **stricter than §1's stated rule**, which named
+    ``_contained_under_user_root`` and would accept a symlink landing back
+    inside the user's own tree: refusing is the only answer that survives the
+    path being rewritten underneath it, which is the same reversal ISSUE-344
+    made for skill overlays. The cost is a user who deliberately linked a
+    directory inside their own workspace, and they get a refusal with a reason
+    rather than a vault that quietly reads something else.
+
+    An **absolute** ``vault_path`` is taken as a host path — the form for an
+    operator who wants the bytes out of the sandbox entirely — and is refused
+    unless it resolves **outside** ``workspace_path``. "Operator config, so
+    trust it" is the rule this replaces and it is wrong: the sync reads the file
+    *in the daemon*, with the daemon's whole filesystem view, so an
+    unconstrained absolute path makes this feature read the first
+    ``VAULT_READ_CAP_BYTES`` of any daemon-readable file the config names. The
+    case that matters is not a wild path but a plausible typo —
+    ``vault_path = "{mount}/Users/bob/config/vault.kdbx"`` under
+    ``[users.alice]`` reads **bob's** vault, and since an operator provisioning
+    two users is liable to generate one passphrase and paste it twice, it then
+    parses and writes bob's credentials onto alice's rows, with no error on any
+    surface. That is the only cross-user route in the design. Refusing anything
+    under the workspace costs nothing, because the stated purpose of this form
+    is a file the sandbox cannot reach and everything under ``workspace_path``
+    is reachable by construction.
+
+    ``workspace_path`` and not ``nextcloud_mount_path``: the sandbox binds and
+    every workspace path this module builds are derived from the former, and on
+    a deployment where the two differ a vault on the mount but outside the
+    workspace is both phone-editable and sandbox-unreachable, which is the best
+    placement this form has rather than one to refuse.
+
+    **The refusal is by resolved path on both branches**, so a symlink from
+    outside the workspace *into* it is followed first and then refused. Both
+    sides are resolved, because the mount is reached through a symlink on some
+    hosts and comparing a resolved path against an unresolved root reads every
+    path as outside — which here would admit the cross-user case above.
+
+    **A symlink at the leaf is not this function's refusal**, on either branch,
+    and that is deliberate rather than a gap. On the relative branch the walk
+    covers directories only, and the leaf is refused one layer down by
+    ``read_vault_bytes``' ``O_NOFOLLOW`` as ``VaultUnreadable``. On the absolute
+    branch ``realpath`` has already resolved it, so the containment test above
+    is applied to the file it really names.
+
+    Never raises: both branches touch the filesystem, and both callers — a
+    background sync gate and a ``doctor`` check — need a refusal rather than an
+    exception. ``ValueError`` is caught beside ``OSError`` at every touch, since
+    a NUL is expressible in a TOML string and ``os.open`` and ``realpath``
+    answer one with ``ValueError``.
+    """
+    from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+
+    user = config.users.get(user_id)
+    raw = getattr(user, "vault_path", "") if user is not None else ""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+
+    written = Path(raw)
+    if written.is_absolute():
+        return _absolute_vault_location(config, user_id, written)
+
+    if not config.has_workspace:
+        _refuse_vault_path(user_id, raw, VAULT_PATH_NO_WORKSPACE)
+        return None
+    # `{root}/{user_id}` is a join, and a join is not the check it reads as: an
+    # empty id collapses to `{workspace}/Users`, the parent of every user's
+    # directory. `is_scopable_user_id` is asked *first* rather than left to
+    # `workspace_root`, because that method reads a falsy `user_id` as "no user
+    # given" and returns the bare workspace root — correct for its other
+    # callers, and here it would resolve a relative `vault_path` against the
+    # whole shared tree.
+    if not is_scopable_user_id(user_id):
+        _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_USER)
+        return None
+    user_root = config.workspace_root(user_id)
+    if user_root is None:
+        _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_USER)
+        return None
+
+    parts = written.parts
+    if not parts or not _is_plain_component(parts[-1]):
+        # `Path(".").parts` is empty, so there is no leaf to take, and
+        # `Path("a/..").name` is `..`, which climbs rather than descending.
+        # A trailing separator and a `.` component are *not* in this set:
+        # pathlib erases both, so `"config/"` is `Path("config")` and refusing
+        # it would refuse an ordinary, if wrong, leaf name. That one is the
+        # read's to answer, as `not a regular file`.
+        _refuse_vault_path(user_id, raw, VAULT_PATH_NOT_A_FILENAME)
+        return None
+
+    fd = open_overlay_dir(user_root, *parts[:-1])
+    if fd is None:
+        _refuse_vault_path(user_id, raw, VAULT_PATH_OUTSIDE_USER_TREE)
+        return None
+    try:
+        root = Path(os.path.realpath(user_root))
+    except (OSError, ValueError):
+        os.close(fd)
+        _refuse_vault_path(user_id, raw, VAULT_PATH_UNRESOLVABLE)
+        return None
+    # The *root* is realpath'd and the components the operator wrote are not.
+    # `read_overlay_bytes` opens `path.name` relative to the descriptor, so
+    # resolving the whole join would hand it a symlinked leaf's **target** name
+    # and the read would open a different file from the one the walk contained
+    # — silently, and only when the leaf happens to be a link.
+    return VaultLocation(path=root.joinpath(*parts), dir_fd=fd)
+
+
+def _absolute_vault_location(
+    config: "Config", user_id: str, written: Path
+) -> VaultLocation | None:
+    """The absolute branch: resolved, and refused if it lands in the workspace."""
+    try:
+        resolved = Path(os.path.realpath(written))
+    except (OSError, ValueError):
+        _refuse_vault_path(user_id, str(written), VAULT_PATH_UNRESOLVABLE)
+        return None
+    if config.has_workspace:
+        try:
+            workspace = Path(os.path.realpath(config.workspace_path))
+        except (OSError, ValueError):
+            _refuse_vault_path(user_id, str(written), VAULT_PATH_UNRESOLVABLE)
+            return None
+        if resolved == workspace or workspace in resolved.parents:
+            _refuse_vault_path(user_id, str(written), VAULT_PATH_INSIDE_WORKSPACE)
+            return None
+    return VaultLocation(path=resolved, dir_fd=None)
+
+
+def _is_plain_component(name: str) -> bool:
+    """One ordinary filename, the same rule ``open_overlay_dir`` applies."""
+    if not name or name in (".", ".."):
+        return False
+    return "/" not in name and "\0" not in name
+
+
+#: How much of a refused ``vault_path`` a log line may carry (see below).
+_VAULT_PATH_LOG_MAX_CHARS = 200
+
+
+def _refuse_vault_path(user_id: object, vault_path: str, reason: str) -> None:
+    """One line per refused cycle, naming what an operator has to change.
+
+    Not deduplicated. The condition persists, so a misconfigured user costs one
+    line per sync interval — which is the cost of a *configured* path that is
+    actively refused, and is the direction to be wrong in for a value deciding
+    which file the daemon decrypts with a key it holds.
+
+    Both interpolated values are bounded and flattened. Self-inflicted rather
+    than attacker-reachable, since a ``config.toml`` is the operator's — but a
+    TOML string can carry a newline and has no length limit, and an unflattened
+    one forges a whole record in the daemon's own log. Same rule as
+    ``transport``'s ``_slug`` and ``secrets_vault``'s ``_label``: bound every
+    axis that came from outside.
+    """
+    logger.warning(
+        "vault_path_refused user=%s reason=%s path=%s",
+        _bounded_for_log(user_id), reason, _bounded_for_log(vault_path),
+    )
+
+
+def _bounded_for_log(value: object) -> str:
+    text = "".join(ch if ch.isprintable() else " " for ch in str(value))
+    if len(text) <= _VAULT_PATH_LOG_MAX_CHARS:
+        return text
+    return text[:_VAULT_PATH_LOG_MAX_CHARS] + "…"
 
 
 #: Ceiling on any single file read out of a user's ``config/`` directory.

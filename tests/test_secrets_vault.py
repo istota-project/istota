@@ -34,17 +34,22 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import hashlib
+import json
 import logging
 import os
 import sqlite3
 import sys
+import textwrap
 
+from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from istota import secret_schema, secrets_store
+from istota.config import UserConfig, load_config
 from istota.secrets_vault import (
     DAEMON_WRITTEN_SERVICES,
     SKIP_DELETE_HELD,
@@ -63,12 +68,15 @@ from istota.secrets_vault import (
     eligible_services,
     parse_vault,
     read_vault_bytes,
+    service_refusal,
 )
 from istota.skills._loader import (
     OVERLAY_IS_A_SYMLINK,
     OVERLAY_NOT_A_REGULAR_FILE,
     OVERLAY_UNREADABLY_LARGE,
 )
+
+REPO = Path(__file__).resolve().parent.parent
 
 PASSPHRASE = "fixture-passphrase-not-a-real-one"
 
@@ -111,6 +119,18 @@ def _standard_vault(tmp_path, *, password=PASSPHRASE):
 def _read(path, *, password=PASSPHRASE):
     data, digest = read_vault_bytes(path)
     return parse_vault(data, password), digest
+
+
+def _load_config_text(tmp_path, body: str):
+    """`load_config` over a config file written from `body`.
+
+    A real load rather than a hand-built `Config`, because what the config-side
+    tests below assert is that the loader *reads* these keys — a dataclass with
+    a default and no line in the loader is the defect class they exist for.
+    """
+    path = tmp_path / "config.toml"
+    path.write_text(textwrap.dedent(body))
+    return load_config(path)
 
 
 #: The names an "extra not installed" simulation has to make unimportable.
@@ -1654,3 +1674,286 @@ class TestApply:
         assert planned, said
         for key in ("token", "username", "password"):
             assert f"ntfy/{key}" in planned[0]
+
+
+class TestReadingThroughADescriptor:
+    """`read_vault_bytes(path, dir_fd=...)` — the relative form's containment.
+
+    The bytes are read through `read_overlay_bytes`, which given a descriptor
+    opens `path.name` relative to it and consults no component above the leaf.
+    That is what lets `storage.resolve_user_vault_path` hand the read a
+    directory it walked with `O_NOFOLLOW` rather than a name to walk again:
+    every component under `{mount}/Users/{user_id}` is model-writable, and the
+    leaf-only `O_NOFOLLOW` the reader already had does not see a swapped
+    `config/`.
+    """
+
+    def test_the_bytes_come_from_the_descriptor_not_the_path(self, tmp_path):
+        """The discriminating layout: two files of the same name, one directory
+        open. A read that walked the path would find the other one."""
+        held = tmp_path / "held"
+        held.mkdir()
+        (held / "vault.kdbx").write_bytes(b"from-the-descriptor")
+        decoy = tmp_path / "decoy"
+        decoy.mkdir()
+        (decoy / "vault.kdbx").write_bytes(b"from-the-path")
+
+        fd = os.open(held, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            data, digest = read_vault_bytes(decoy / "vault.kdbx", dir_fd=fd)
+        finally:
+            os.close(fd)
+        assert data == b"from-the-descriptor"
+        assert digest == hashlib.sha256(b"from-the-descriptor").hexdigest()
+
+    def test_a_symlink_at_the_leaf_is_still_refused_through_a_descriptor(
+        self, tmp_path
+    ):
+        held = tmp_path / "held"
+        held.mkdir()
+        (held / "real.kdbx").write_bytes(b"real")
+        (held / "vault.kdbx").symlink_to(held / "real.kdbx")
+
+        fd = os.open(held, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with pytest.raises(VaultUnreadable) as exc:
+                read_vault_bytes(held / "vault.kdbx", dir_fd=fd)
+        finally:
+            os.close(fd)
+        assert str(exc.value) == OVERLAY_IS_A_SYMLINK
+
+    def test_an_absent_file_is_still_missing_through_a_descriptor(self, tmp_path):
+        held = tmp_path / "held"
+        held.mkdir()
+        fd = os.open(held, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with pytest.raises(VaultMissing):
+                read_vault_bytes(held / "vault.kdbx", dir_fd=fd)
+        finally:
+            os.close(fd)
+
+    def test_no_descriptor_is_the_absolute_forms_behaviour_unchanged(self, tmp_path):
+        path = tmp_path / "vault.kdbx"
+        path.write_bytes(b"absolute")
+        data, _digest = read_vault_bytes(path)
+        assert data == b"absolute"
+
+
+class TestTheConfigFields:
+    """`vault_path`, `vault_services` and `scheduler.vault_sync_interval`.
+
+    Asserted as a round trip through `load_config` rather than against the
+    dataclass alone, because "declared, documented, and read by nothing" is a
+    defect class `config_mapper.py` records eleven instances of — and for these
+    three the symptom is a feature the operator configured and the daemon never
+    ran.
+    """
+
+    def test_the_defaults_leave_the_feature_off(self, tmp_path):
+        config = _load_config_text(tmp_path, 'bot_name = "Istota"\n')
+        assert config.scheduler.vault_sync_interval == 300
+        user = UserConfig()
+        assert user.vault_path == ""
+        assert user.vault_services == []
+
+    def test_both_user_fields_round_trip(self, tmp_path):
+        config = _load_config_text(tmp_path, """
+            [users.alice]
+            vault_path = "istota/config/vault.kdbx"
+            vault_services = ["karakeep", "ntfy"]
+        """)
+        assert config.users["alice"].vault_path == "istota/config/vault.kdbx"
+        assert config.users["alice"].vault_services == ["karakeep", "ntfy"]
+
+    def test_the_interval_round_trips(self, tmp_path):
+        config = _load_config_text(
+            tmp_path, "[scheduler]\nvault_sync_interval = 60\n"
+        )
+        assert config.scheduler.vault_sync_interval == 60
+
+    def test_a_non_list_vault_services_is_dropped_rather_than_iterated(
+        self, tmp_path, caplog
+    ):
+        """A bare string iterates as characters, so `"karakeep"` would become
+        eight one-letter services.
+
+        **The result is `[]` either way**, which is why this asserts on what was
+        said rather than only on what was kept: the eligibility filter refuses
+        every one of those eight on its own, so a version that iterated the
+        string would leave the list empty and be indistinguishable here — while
+        telling the operator eight times that a service they never wrote is not
+        vault-eligible. Measured: with the string guard removed, the kept list
+        is still `[]` and the warning count goes from one to eight.
+        """
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            config = _load_config_text(tmp_path, """
+                [users.alice]
+                vault_services = "karakeep"
+            """)
+        assert config.users["alice"].vault_services == []
+        said = [
+            m for m in (r.getMessage() for r in caplog.records)
+            if "vault_services" in m
+        ]
+        assert len(said) == 1, said
+        assert "not a list of service names" in said[0]
+
+    def test_a_non_string_vault_path_is_dropped(self, tmp_path):
+        config = _load_config_text(tmp_path, """
+            [users.alice]
+            vault_path = 7
+        """)
+        assert config.users["alice"].vault_path == ""
+
+    def test_the_interval_is_documented(self):
+        """`tests/test_config_field_coverage.py` holds every leaf field of the
+        tree to the example or the Ansible template, with an exemption list that
+        is deliberately empty. Named here so a reader of this file finds out
+        where the line has to live."""
+        text = (REPO / "config" / "config.example.toml").read_text()
+        assert "vault_sync_interval" in text
+
+
+class TestTheEligibilityFilterAtLoad:
+    """A `vault_services` name a vault may not own is dropped, with a warning.
+
+    Dropped rather than raised: §4's rule is that a config refusing to boot
+    because a module was disabled is worse than one telling the operator which
+    line is inert. The filter is not the boundary — `apply_vault` refuses the
+    same names again on its own terms — it is what makes the refusal visible at
+    the moment somebody could act on it.
+    """
+
+    def _load_with(self, tmp_path, caplog, services):
+        body = "[users.alice]\nvault_services = %s\n" % json.dumps(services)
+        with caplog.at_level(logging.WARNING, logger="istota.config"):
+            config = _load_config_text(tmp_path, body)
+        return config.users["alice"].vault_services, [
+            r.getMessage() for r in caplog.records if r.name == "istota.config"
+        ]
+
+    def test_an_eligible_service_survives(self, tmp_path, caplog):
+        kept, said = self._load_with(tmp_path, caplog, ["karakeep"])
+        assert kept == ["karakeep"]
+        assert not [m for m in said if "vault_service" in m]
+
+    def test_a_daemon_written_service_is_dropped_and_named(self, tmp_path, caplog):
+        kept, said = self._load_with(tmp_path, caplog, ["karakeep", "monarch"])
+        assert kept == ["karakeep"]
+        warned = [m for m in said if "monarch" in m]
+        assert warned, said
+        assert SKIP_INELIGIBLE_SERVICE in warned[0]
+        assert "alice" in warned[0]
+
+    def test_a_reserved_connector_service_is_dropped_under_its_own_reason(
+        self, tmp_path, caplog
+    ):
+        """The reserved namespace has exactly one writer, and it is not this.
+
+        Reported as the namespace rather than as an ordinary unknown service, so
+        the refusal survives a connector service one day appearing in the
+        schema — which is the arrangement `apply_vault` already has.
+        """
+        kept, said = self._load_with(tmp_path, caplog, ["connector:acme"])
+        assert kept == []
+        warned = [m for m in said if "connector:acme" in m]
+        assert warned, said
+        assert SKIP_RESERVED_SERVICE in warned[0]
+
+    def test_the_vaults_own_service_is_dropped(self, tmp_path, caplog):
+        """The passphrase cannot live in the file it unlocks."""
+        kept, _said = self._load_with(tmp_path, caplog, ["vault"])
+        assert kept == []
+
+    def test_a_case_variant_is_dropped_rather_than_folded(self, tmp_path, caplog):
+        """§3 folds the *file's* service group and nothing else.
+
+        The fold exists because a phone keyboard autocapitalizes a group name.
+        `vault_services` is operator config in a file nobody types on a phone,
+        so a name that does not match is a typo — and folding it here would put
+        the normalization on both sides of one comparison.
+        """
+        kept, said = self._load_with(tmp_path, caplog, ["Karakeep"])
+        assert kept == []
+        assert [m for m in said if "Karakeep" in m], said
+
+    def test_surrounding_whitespace_is_stripped_rather_than_refused(
+        self, tmp_path, caplog
+    ):
+        kept, _said = self._load_with(tmp_path, caplog, [" karakeep "])
+        assert kept == ["karakeep"]
+
+    def test_an_empty_entry_is_dropped(self, tmp_path, caplog):
+        kept, _said = self._load_with(tmp_path, caplog, ["", "   "])
+        assert kept == []
+
+    def test_a_non_string_entry_is_dropped_rather_than_raising(
+        self, tmp_path, caplog
+    ):
+        kept, _said = self._load_with(tmp_path, caplog, [7, ["karakeep"]])
+        assert kept == []
+
+    def test_the_filter_agrees_with_what_apply_vault_would_refuse(self):
+        """One predicate, two callers. A second copy of the rule here is the
+        drift the rule exists to catch — a name the loader keeps and the apply
+        refuses is a line the operator was told was live."""
+        for service in sorted(eligible_services()):
+            assert service_refusal(service) is None
+        for service in sorted(DAEMON_WRITTEN_SERVICES):
+            assert service_refusal(service) is not None
+        assert service_refusal("connector:acme") == SKIP_RESERVED_SERVICE
+
+
+class TestTheProfileTableGuard:
+    """Neither field may be settable by anything downstream of a task.
+
+    `user_profiles` is writable from the settings UI, and every other per-user
+    scalar is overlaid from it by `_apply_user_profiles`. These two are a
+    security control rather than a preference: `vault_path` selects which file
+    the daemon decrypts with a key it holds, and `vault_services` selects which
+    credentials that file may overwrite and delete.
+
+    Two halves, and neither covers the other. The column set is read off a real
+    initialised database rather than grepped out of `schema.sql`, because
+    `_run_migrations` adds columns with `ALTER TABLE` and a grep would not see
+    one. The behavioural half drives the overlay itself, because a column is not
+    the only way a value could arrive — `merge_into_user_config` sets attributes
+    by name and could set these from anywhere.
+    """
+
+    def test_the_table_carries_neither_column(self, db_path):
+        with sqlite3.connect(db_path) as conn:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(user_profiles)")
+            }
+        assert columns, "the table must exist for this assertion to mean anything"
+        assert "vault_path" not in columns
+        assert "vault_services" not in columns
+
+    def test_the_overlay_leaves_both_fields_alone(self, db_path):
+        from istota import user_profiles as up
+
+        up.ensure_profile(db_path, "alice", display_name="Alice")
+        rows = up.list_profiles(db_path)
+        assert "alice" in rows
+
+        user = UserConfig(
+            vault_path="istota/config/vault.kdbx",
+            vault_services=["karakeep"],
+            display_name="from-toml",
+        )
+        up.merge_into_user_config(rows["alice"], user)
+
+        # The control: the overlay demonstrably ran on this object, so the two
+        # assertions below are about what it declined to touch rather than
+        # about a call that did nothing.
+        assert user.display_name == "Alice"
+        assert user.vault_path == "istota/config/vault.kdbx"
+        assert user.vault_services == ["karakeep"]
+
+    def test_the_profile_dataclass_declares_neither_field(self):
+        from istota.user_profiles import UserProfile
+
+        names = {f.name for f in dataclasses.fields(UserProfile)}
+        assert "vault_path" not in names
+        assert "vault_services" not in names

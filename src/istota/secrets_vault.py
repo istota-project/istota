@@ -25,7 +25,9 @@ all; ``parse_vault`` is the half that runs when the digest moved.
 already resolved, and the containment rules — a relative path under
 ``{mount}/Users/{user_id}``, an absolute one refused if it lands anywhere under
 the workspace — belong to ``storage.resolve_user_vault_path``. What is covered
-here is the last component alone, by way of ``read_overlay_bytes``.
+here is the last component alone, by way of ``read_overlay_bytes``: its
+``O_NOFOLLOW``, and the ``dir_fd`` that resolver hands over for the relative
+form so the components *above* the leaf are not walked by name a second time.
 
 **And it never logs a value, at any level.** Counts, service names and key names
 are loggable and are what the warnings below carry. The rule is easy to defeat
@@ -208,7 +210,7 @@ class VaultRead:
         )
 
 
-def read_vault_bytes(path: Path) -> tuple[bytes, str]:
+def read_vault_bytes(path: Path, *, dir_fd: int | None = None) -> tuple[bytes, str]:
     """The file's bytes and their SHA-256, or a mapped ``VaultError``.
 
     Read through ``skills._loader.read_overlay_bytes`` rather than a fresh
@@ -226,6 +228,21 @@ def read_vault_bytes(path: Path) -> tuple[bytes, str]:
       gate with no timeout behind it;
     - the size checked on the fd *before* the read, since reading the file and
       refusing afterwards bounds nothing.
+
+    **``dir_fd`` changes what ``path`` means, and it is what covers the three
+    components above the leaf.** ``O_NOFOLLOW`` is the last component only, and
+    for the relative form of ``vault_path`` every component above it lives in
+    the tree bound read-write into that user's own sandbox — so ``mv config
+    config.real && ln -s /anywhere config`` between the containment check and
+    the ``open(2)`` hands the daemon another directory and nothing here sees it.
+    Given a descriptor only ``path.name`` is opened, resolved by the kernel
+    relative to that directory, so no component above the leaf is consulted a
+    second time. ``storage.resolve_user_vault_path`` is what produces the pair
+    and it produces them together: **pass the descriptor it gave you beside the
+    path it gave you**, never one without the other, and never an absolute path
+    from somewhere else — the two have to name the same file or the read is
+    about a different one. ``None`` is the absolute form, which resolves outside
+    the workspace by construction and so has no model-writable ancestor to hold.
 
     **Absence and emptiness are the same bytes and are told apart by the size
     element.** A missing file is ``(b"", None, None)`` and is ``VaultMissing``; a
@@ -253,7 +270,9 @@ def read_vault_bytes(path: Path) -> tuple[bytes, str]:
     from .skills._loader import OVERLAY_UNREADABLE, read_overlay_bytes
 
     try:
-        data, refusal, size = read_overlay_bytes(path, max_bytes=VAULT_READ_CAP_BYTES)
+        data, refusal, size = read_overlay_bytes(
+            path, max_bytes=VAULT_READ_CAP_BYTES, dir_fd=dir_fd
+        )
     except (ValueError, NotImplementedError) as exc:
         raise VaultUnreadable(OVERLAY_UNREADABLE) from exc
     if refusal is not None:
@@ -364,6 +383,26 @@ def eligible_services() -> frozenset[str]:
         and service != VAULT_PASSPHRASE_SERVICE
         and not service.startswith(_RESERVED_SERVICE_PREFIX)
     )
+
+
+def service_refusal(service: str) -> str | None:
+    """Why this service may not be vault-owned, or None. One call, no set.
+
+    The same predicate ``apply_vault`` applies to every entry of ``owned``,
+    for the caller that has one name and no eligible set to hand it —
+    ``config``'s load-time filter, which drops an ineligible ``vault_services``
+    entry with a warning naming the service and the reason.
+
+    **Delegation rather than a second copy**, and the distinction matters: the
+    load-time filter is what tells the operator a line is inert, and if the two
+    could disagree the operator would be told a line was live and then have it
+    refused hours later inside a background gate. Same reason constants, so
+    ``vault-status`` and the boot log say one word about one condition.
+
+    ``apply_vault`` keeps the two-argument private form because it asks per
+    service inside a loop and the eligible set is a schema walk.
+    """
+    return _service_refusal(service, eligible_services())
 
 
 @dataclass
