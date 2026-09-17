@@ -149,6 +149,7 @@ all = [
     "istota[signaling]",
     "istota[sms]",
     "istota[whatsapp]",
+    "istota[vault]",
 ]
 # What the test suite needs: `all` minus the two heavy ML extras. Not a
 # deployment shape — nobody should install `istota[test]` to run the bot; it
@@ -179,10 +180,22 @@ test = [
     "istota[signaling]",
     "istota[sms]",
     "istota[whatsapp]",
+    "istota[vault]",
 ]
 sms = [
     "telnyx[webhooks]>=4.178.0",
     "twilio>=9.11.1",
+]
+
+# Reading a user's KeePass credential vault (`[users.<id>] vault_path`).
+# pykeepass pulls `construct`, `argon2-cffi`, `pycryptodomex`, `lxml`, `pyotp`
+# and `importlib-metadata`; two of those carry compiled extensions. That cost is
+# why this is an extra rather than a core dependency, and why the import lives
+# inside `secrets_vault.parse_vault` — a deployment without the extra sees a
+# `VaultLibraryMissing` with a remedy rather than an ImportError at startup, and
+# a sync cycle that stops at the file digest loads none of it.
+vault = [
+    "pykeepass>=4.2",
 ]
 
 # Meta WhatsApp Cloud API client. `pywa`, not `pywa[server]`: istota already
