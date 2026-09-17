@@ -575,9 +575,17 @@ class TestTheReturnedPathIsDisplayOnly:
     #: those files get their containment from `storage.resolve_user_config_dir`
     #: instead. Reusing the reader is the point; the exemption is from *this*
     #: rule, not from containment.
+    #: `secrets_vault.py` is the third, and the one where a descriptor is not
+    #: merely unavailable but wrong: `[users.<id>] vault_path` may be an
+    #: **absolute** path deliberately outside the mount, which is the form an
+    #: operator picks to keep the file out of the sandbox entirely, so there is
+    #: no overlay directory to hold open. Its containment is
+    #: `storage.resolve_user_vault_path`, the same disposition as the two
+    #: entries above; what it takes from this reader is the leaf hardening.
     _NOT_OVERLAY_READERS = frozenset({
         "storage.py",                 # read_regular_file / read_user_config_file
         "skills/memory/__init__.py",  # the memory CLI's _read_text
+        "secrets_vault.py",           # read_vault_bytes
     })
 
     def test_no_overlay_reader_opens_a_path_without_a_descriptor(self):
