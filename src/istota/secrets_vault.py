@@ -1,9 +1,18 @@
-"""Reading a user's KeePass credential vault: the bytes, and what they mean.
+"""A user's KeePass credential vault: the bytes, what they mean, and what they own.
 
 A user who keeps their credentials in a password manager otherwise maintains two
 copies of every key, and the copy istota reads is the one they cannot see,
-search or back up. This module is the reading half of the answer: a KDBX file in
-the user's own workspace that istota decrypts and never writes.
+search or back up. This module is the answer's provisioning half: a KDBX file in
+the user's own workspace that istota decrypts and never writes, and the pass
+that copies what it holds into the encrypted ``secrets`` table.
+
+**It is provisioning input, not a storage backend.** ``resolve_secret``'s order
+is unchanged, the table stays the live store, and a vault that is missing,
+half-synced or locked leaves every credential working. What the pass adds is the
+one direction the table cannot express on its own: a service the vault owns is
+the file's to say, deletions included — which is why the applying half is where
+the destructive rules live and why each of them is stated below rather than
+inferred.
 
 **Two functions rather than one**, and that split is the design rather than
 tidiness. The sync cycle hashes the file bytes to decide whether to parse at
@@ -31,8 +40,10 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import secret_schema, secrets_store
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +58,39 @@ VAULT_ROOT_GROUP = "istota"
 
 #: How much of a group or key name a log line may carry (see ``_label``).
 _LABEL_MAX_CHARS = 64
+
+#: The service the vault's own passphrase is stored under. Subtracted from
+#: eligibility: the passphrase cannot live in the file it unlocks.
+VAULT_PASSPHRASE_SERVICE = "vault"
+
+#: Services with declared writable keys that the daemon rewrites on its own —
+#: Monarch's cookie pair from ``/api/money/monarch/login``, the Overland ingest
+#: token from its generate endpoint (which also reloads a cache an importer
+#: would have to reproduce), and the two machine-managed OAuth blobs. Vault
+#: ownership of any of them means a window in which a freshly minted credential
+#: is reverted, so they are subtracted whatever the schema says. Two of the four
+#: already fall out for having no writable keys; they are named anyway, because
+#: the reason they must never be vault-owned is this one and not that one.
+DAEMON_WRITTEN_SERVICES = frozenset(
+    {"monarch", "overland", "garmin", "google_workspace"}
+)
+
+#: Reserved service namespace: ``connector:<id>`` rows have exactly one writer,
+#: the connector route that validated the key against the resolved provider
+#: manifest. Nothing in the tree declares one yet — the prefix is checked here so
+#: the refusal is this module's own rather than a side effect of the schema walk
+#: finding nothing. ``Specs/Drafts/generic-connectors.md`` owns the namespace and
+#: will bring ``secret_schema.is_reserved_service()`` with it; read it from there
+#: when it lands rather than keeping this spelling.
+_RESERVED_SERVICE_PREFIX = "connector:"
+
+#: The fixed vocabulary ``VaultApplyResult.skipped`` reports with. The service
+#: and key ride in their own slots of the triple, so a reason never interpolates
+#: either: these reach ``vault-status`` output, where a caller wants to group by
+#: reason rather than parse a sentence.
+SKIP_RESERVED_SERVICE = "reserved service namespace"
+SKIP_INELIGIBLE_SERVICE = "not a vault-eligible service"
+SKIP_UNKNOWN_KEY = "not a key this service declares"
 
 
 class VaultError(Exception):
@@ -109,11 +153,25 @@ class VaultRead:
     "the vault has no opinion about a service it does not mention" rule reads,
     so a group holding no entries is present here with an empty bucket beside
     it rather than dropped.
+
+    ``entry_titles`` is every title found in a group **whether or not a value
+    was taken from it**, and it exists because the applying half's deletion rule
+    is about the group's contents rather than about the values the mapping
+    kept. §6 deletes a schema key "the group does not contain", and a group
+    contains an entry whose password field is empty or whose title is
+    duplicated — both of which are skips that leave nothing in ``services``.
+    Computing the deletion set from ``services`` would therefore make §3's "an
+    empty password is skipped, not treated as a deletion" false in exactly the
+    fat-finger case it names, and would turn the duplicate-title hard skip into
+    a credential deletion. Required rather than defaulted for the same reason:
+    a hand-built ``VaultRead`` that omitted it would get the destructive
+    reading silently.
     """
 
     digest: str
     services: dict[str, dict[str, str]]
     group_present: dict[str, str]
+    entry_titles: dict[str, frozenset[str]]
 
     def __repr__(self) -> str:
         """Everything but the values.
@@ -138,9 +196,13 @@ class VaultRead:
         debug line about the read as a whole.
         """
         keys = {service: sorted(values) for service, values in self.services.items()}
+        titles = {
+            service: sorted(names) for service, names in self.entry_titles.items()
+        }
         return (
             f"VaultRead(digest={self.digest!r}, "
-            f"group_present={self.group_present!r}, keys={keys!r})"
+            f"group_present={self.group_present!r}, keys={keys!r}, "
+            f"entry_titles={titles!r})"
         )
 
 
@@ -268,6 +330,188 @@ def parse_vault(data: bytes, passphrase: str) -> VaultRead:
         raise VaultCorrupt("the file is not a readable KeePass database") from None
 
 
+def eligible_services() -> frozenset[str]:
+    """Services a vault may own: declared writable keys, minus the exclusions.
+
+    Computed from ``secret_schema`` rather than hand-listed, so a service added
+    there is classified by these rules instead of by somebody remembering this
+    module exists. Three exclusions, each for its own reason:
+
+    - **No writable keys.** ``"fields": []`` means the credential is a
+      machine-managed blob (``google_workspace``, ``garmin``); there is nothing
+      a file could express.
+    - **``DAEMON_WRITTEN_SERVICES``.** The daemon rewrites these rows itself, so
+      vault ownership means a window in which a freshly minted credential is
+      reverted — the one class of writer §6's "no other writer is left" argument
+      could never close.
+    - **The reserved ``connector:`` namespace and ``vault`` itself.**
+
+    **Eligibility is not enablement, and this deliberately does not consult the
+    modules.** Two of the names it yields belong to modules (``feeds`` and
+    ``carto``), and a deployment with those modules off is still offered them.
+    Writing the row anyway is right: the secrets table is not module-scoped,
+    ``istota secret ensure`` does not consult enablement either, and a
+    credential that is present and unread costs nothing while one silently
+    refused because a module was off is a failure with no surface.
+    """
+    return frozenset(
+        service
+        for service, keys in secret_schema.known_service_keys().items()
+        if keys
+        and service not in DAEMON_WRITTEN_SERVICES
+        and service != VAULT_PASSPHRASE_SERVICE
+        and not service.startswith(_RESERVED_SERVICE_PREFIX)
+    )
+
+
+@dataclass
+class VaultApplyResult:
+    """What one apply did, in the vocabulary the CLI and the panel report.
+
+    ``deleted_keys`` names what went rather than counting it, because the
+    deletion rule's documented surprise (§6) is a first sync removing keys the
+    operator did not realise the vault would own — a bare count tells them four
+    credentials are gone and leaves them to work out which four.
+
+    ``skipped`` is ``(service, key, reason)``. A **service-level** refusal
+    carries an empty key: the whole service was refused and no key of it was
+    looked at. Reasons come from the fixed vocabulary above, never a sentence
+    built around a name.
+    """
+
+    created: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    deleted: int = 0
+    deleted_keys: list[tuple[str, str]] = field(default_factory=list)
+    skipped: list[tuple[str, str, str]] = field(default_factory=list)
+
+
+def apply_vault(
+    db_path: Path,
+    user_id: str,
+    read: VaultRead,
+    owned: frozenset[str],
+) -> VaultApplyResult:
+    """Write ``read``'s owned services into the secrets table, and delete out of it.
+
+    Precedence is **vault-wins** for a service the operator has named, which
+    inverts ``secrets_store.import_from_user_configs`` — that one never
+    overwrites, because TOML extras are a legacy source being drained, and this
+    one is the live authority for its declared services or editing the file
+    would change nothing.
+
+    Three rules, and the first is the guard against the catastrophic case:
+
+    1. A service **not** in ``read.group_present`` is left alone entirely. The
+       vault has no opinion about a service it does not mention, so a file that
+       parses and has lost its contents — an older copy put back by a resync, a
+       group deleted by mistake — is silence rather than a wipe.
+    2. Each key in the group that the schema declares is upserted, counted by
+       the state ``upsert_secret`` returns.
+    3. A schema key the group does not contain, and the table has, is deleted.
+       "Contain" is read against ``VaultRead.entry_titles`` rather than against
+       the values, so an entry whose password is empty or whose title is
+       duplicated holds its row — see that field's own note.
+
+    **Every write happens before any delete**, across all services rather than
+    within each, so a failure part-way through leaves credentials present rather
+    than absent. That ordering is the reason the deletions are planned into a
+    list and executed at the end instead of inline.
+
+    **A missing master key refuses the whole pass**, in the store's own
+    vocabulary. Every other path raises on its first ``set_secret`` anyway; the
+    one that does not is a present group holding nothing, where the pass would
+    delete every row of a service on a deployment that can neither read what it
+    is removing nor write a replacement.
+
+    ``owned`` is matched exactly. §3 folds the *service segment of the file*
+    and nothing else, and ``vault_services`` is operator config rather than
+    something a phone keyboard touched — a name that does not match is refused
+    here and warned about at config load.
+    """
+    if not secrets_store.secret_key_available():
+        raise secrets_store.SecretKeyMissingError(
+            "ISTOTA_SECRET_KEY is not set; refusing to apply a vault, which "
+            "would delete credentials it cannot read or replace."
+        )
+
+    result = VaultApplyResult()
+    eligible = eligible_services()
+    schema = secret_schema.known_service_keys()
+    pending_deletes: list[tuple[str, str]] = []
+
+    for service in sorted(owned):
+        reason = _service_refusal(service, eligible)
+        if reason is not None:
+            result.skipped.append((service, "", reason))
+            logger.warning(
+                "vault: %s is not a service a vault may own (%s), skipped",
+                _label(service),
+                reason,
+            )
+            continue
+        if service not in read.group_present:
+            continue
+
+        declared = schema[service]
+        values = read.services.get(service, {})
+        for key in sorted(values):
+            if key not in declared:
+                result.skipped.append((service, key, SKIP_UNKNOWN_KEY))
+                logger.warning(
+                    "vault: %s/%s is not a key this service declares, skipped",
+                    _label(service),
+                    _label(key),
+                )
+                continue
+            state = secrets_store.upsert_secret(
+                db_path, user_id, service, key, values[key]
+            )
+            if state == "created":
+                result.created += 1
+            elif state == "updated":
+                result.updated += 1
+            else:
+                result.unchanged += 1
+
+        titles = read.entry_titles.get(service, frozenset())
+        for key in sorted(declared - titles):
+            if secrets_store.secret_exists(db_path, user_id, service, key):
+                pending_deletes.append((service, key))
+
+    for service, key in pending_deletes:
+        if secrets_store.delete_secret(db_path, user_id, service, key):
+            result.deleted += 1
+            result.deleted_keys.append((service, key))
+
+    if result.deleted_keys:
+        # Named rather than counted, at WARNING: on an adoption this is the
+        # first anybody hears that the vault owns more keys than it holds.
+        logger.warning(
+            "vault: %s: deleted %d credential(s) absent from the vault: %s",
+            user_id,
+            result.deleted,
+            ", ".join(f"{_label(s)}/{_label(k)}" for s, k in result.deleted_keys),
+        )
+    return result
+
+
+def _service_refusal(service: str, eligible: frozenset[str]) -> str | None:
+    """Why this service may not be vault-owned, or None.
+
+    The reserved-namespace arm is checked before eligibility although the
+    eligible set already excludes it, so that the refusal names the namespace
+    rather than reading as an ordinary unknown service — and so that it survives
+    a connector service one day appearing in the schema.
+    """
+    if service.startswith(_RESERVED_SERVICE_PREFIX):
+        return SKIP_RESERVED_SERVICE
+    if service not in eligible:
+        return SKIP_INELIGIBLE_SERVICE
+    return None
+
+
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -373,7 +617,14 @@ def _map_groups(kp, digest: str) -> VaultRead:
                     "y" if untitled == 1 else "ies",
                 )
 
-    return VaultRead(digest=digest, services=services, group_present=group_present)
+    return VaultRead(
+        digest=digest,
+        services=services,
+        group_present=group_present,
+        # `seen` is already "every title in this group", skipped ones included,
+        # which is what the deletion rule needs and what `services` is not.
+        entry_titles={service: frozenset(titles) for service, titles in seen.items()},
+    )
 
 
 def _label(name: str) -> str:
