@@ -1061,10 +1061,39 @@ ON whatsapp_parked_status(parked_at);
 -- `istota whatsapp billing-unblock` is the only way back short of switching to
 -- `allow_paid`. The message id is operational evidence and is masked outside
 -- private operator commands.
+--
+-- The six `pairing_*` columns are the durable half of the re-pair flow: the web
+-- (or the CLI's attach mode) writes a request here and the process holding the
+-- Baileys bridge polls it. They are here *and* in `db._run_migrations` — this
+-- CREATE is what a fresh install gets, `_add_columns` is what an upgraded
+-- deployment gets, and `_add_columns` no-ops on a table that does not exist yet
+-- because the migrations run before this script.
+--
+-- `pairing_expires_at` is stored absolute rather than derived from
+-- `pairing_requested_at` plus the configured TTL at read time: derived, an
+-- operator editing the TTL would move the deadline of a window already in
+-- flight, and a shortened value would expire a window somebody is mid-scan on.
+-- It is stamped at *request* time, so the poll's deadline arm can close a row
+-- nobody ever picked up, and refreshed to the window's own deadline once a
+-- window is actually open.
+--
+-- The QR payload is deliberately *not* here, at any width. `db_backup`
+-- snapshots this database onto the Nextcloud mount, so a code live at snapshot
+-- time would be captured in a durable, replicated backup of a full-account
+-- credential. It travels in a 0600 relay file instead
+-- (`transport/whatsapp/pairing_relay.py`).
 CREATE TABLE IF NOT EXISTS whatsapp_runtime (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     billing_blocked_at TEXT,
     billing_message_id TEXT,
+    -- 'requested' | 'servicing' | 'awaiting_sidecar' | 'awaiting_scan'
+    -- | 'sidecar_absent' | 'paired' | 'expired' | 'failed'
+    pairing_state TEXT,
+    pairing_window_id TEXT,
+    pairing_requested_by TEXT,
+    pairing_requested_at TEXT,
+    pairing_expires_at TEXT,
+    pairing_message TEXT,
     updated_at TEXT NOT NULL
 );
 

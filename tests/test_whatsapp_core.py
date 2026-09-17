@@ -888,9 +888,15 @@ class TestWhatsAppSchemaMigration:
             "pricing_model", "pricing_category", "pricing_type",
             "claimed_at", "attempted_at",
         } <= sent
+        # Exact rather than a subset, so a column arriving here is a decision
+        # somebody made rather than one that rode in. The six `pairing_*` are
+        # the pairing request channel (`.claude/rules/whatsapp.md`), added to
+        # this same table because it is the deployment-wide singleton and a
+        # pairing request is deployment-wide state; `db.WHATSAPP_PAIRING_COLUMNS`
+        # is where they are declared for the migration.
         assert runtime == {
             "singleton", "billing_blocked_at", "billing_message_id", "updated_at",
-        }
+        } | set(db.WHATSAPP_PAIRING_COLUMNS)
 
     def test_the_ledger_keeps_no_body_or_destination(self, tmp_path):
         """The task, notification or command record already owns the content,

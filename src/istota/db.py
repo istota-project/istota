@@ -17,6 +17,65 @@ from .user_scope import is_scopable_user_id
 
 logger = logging.getLogger("istota.db")
 
+#: The `whatsapp_runtime.pairing_*` columns, in one statement, because they are
+#: declared twice — here for `_run_migrations` and again in `schema.sql`'s
+#: CREATE for a fresh install. `tests/test_whatsapp_pairing_db.py` holds the two
+#: lists equal; a column added to one and not the other is a deployment where
+#: half the flow writes to a column that is not there.
+WHATSAPP_PAIRING_COLUMNS: dict[str, str] = {
+    "pairing_state": "TEXT",
+    "pairing_window_id": "TEXT",
+    "pairing_requested_by": "TEXT",
+    "pairing_requested_at": "TEXT",
+    "pairing_expires_at": "TEXT",
+    "pairing_message": "TEXT",
+}
+
+#: The request row's state vocabulary. Six of these are
+#: `transport.whatsapp.pairing_relay.STATE_*` — the relay file and the row say
+#: the same thing about a live window — and `requested` / `servicing` are the
+#: row's own, for the span before a bridge has opened one. Restated here rather
+#: than imported because this module sits below `transport` and must not take
+#: its graph; `tests/test_whatsapp_pairing_db.py` holds the six equal to the
+#: relay's spellings.
+WHATSAPP_PAIRING_REQUESTED = "requested"
+WHATSAPP_PAIRING_SERVICING = "servicing"
+WHATSAPP_PAIRING_AWAITING_SIDECAR = "awaiting_sidecar"
+WHATSAPP_PAIRING_AWAITING_SCAN = "awaiting_scan"
+WHATSAPP_PAIRING_SIDECAR_ABSENT = "sidecar_absent"
+WHATSAPP_PAIRING_PAIRED = "paired"
+WHATSAPP_PAIRING_EXPIRED = "expired"
+WHATSAPP_PAIRING_FAILED = "failed"
+
+#: A row in one of these is closed: nothing reopens it, and a fresh request is
+#: allowed over it. Every guarded write carries this set as a `WHERE` clause,
+#: the discipline `_set_outcome` already applies to `sent_whatsapp` — without
+#: it a coroutine finishing after the poll's deadline arm expired its row
+#: resurrects a closed window, because the window-id guard alone passes.
+WHATSAPP_PAIRING_TERMINAL_STATES = frozenset({
+    WHATSAPP_PAIRING_PAIRED,
+    WHATSAPP_PAIRING_EXPIRED,
+    WHATSAPP_PAIRING_FAILED,
+})
+
+#: The states that imply a bridge opened a window, which is what the poll's
+#: orphan arm keys on: no in-memory window behind one of these means the
+#: process that owned it is gone. `requested` and `servicing` are deliberately
+#: absent — a fresh `requested` row has no window behind it *by construction*,
+#: and an arm that read them would expire the request it exists to service.
+WHATSAPP_PAIRING_WINDOW_STATES = frozenset({
+    WHATSAPP_PAIRING_AWAITING_SIDECAR,
+    WHATSAPP_PAIRING_AWAITING_SCAN,
+    WHATSAPP_PAIRING_SIDECAR_ABSENT,
+})
+
+#: The request-time TTL, restated from
+#: `transport.whatsapp.baileys_bridge.PAIRING_WINDOW_SECONDS` for the same
+#: import reason and held equal by test. It bounds the wait for a bridge to
+#: pick the row up; once one has, `record_whatsapp_pairing_state` refreshes the
+#: deadline to that window's own.
+WHATSAPP_PAIRING_WINDOW_SECONDS = 300.0
+
 
 @dataclass
 class Task:
@@ -436,6 +495,24 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "jid": "TEXT",
         "provider": "TEXT",
     })
+
+    # WhatsApp pairing: the durable request channel behind the re-pair flow.
+    # The web writes a row and the process holding the Baileys bridge polls it.
+    #
+    # Every column is nullable with no default, which is the whole of the
+    # migration's safety argument: nothing is backfilled, so a deployment that
+    # has never paired through this flow reads NULL everywhere and behaves
+    # exactly as it did — and a build rolled back to before this change ignores
+    # six columns it never selects. `whatsapp_runtime` carries the live billing
+    # circuit breaker, so this must add and never rewrite: `_add_columns` reads
+    # the schema rather than catching `OperationalError`, which is what closes
+    # the check-then-ALTER race two connections reach at a first post-upgrade
+    # boot and what keeps a re-run from touching `billing_blocked_at`.
+    #
+    # Ahead of `schema.sql` like every other migration here. No index names one
+    # of these columns — the table is a singleton read by primary key — so the
+    # ordering is convention rather than load-bearing in this one case.
+    _add_columns(conn, "whatsapp_runtime", WHATSAPP_PAIRING_COLUMNS)
 
     # Memory chunks metadata columns
     _add_columns(conn, "memory_chunks", {
@@ -10876,6 +10953,204 @@ def clear_whatsapp_billing_block(conn: sqlite3.Connection) -> bool:
         UPDATE whatsapp_runtime
            SET billing_blocked_at = NULL, billing_message_id = NULL, updated_at = ?
          WHERE singleton = 1 AND billing_blocked_at IS NOT NULL
+        """,
+        (sql_datetime_now(),),
+    )
+    return cur.rowcount > 0
+
+
+# --- WhatsApp pairing: the durable request channel -------------------------
+#
+# The web process (or the CLI's attach mode) writes a request row; the process
+# holding the Baileys bridge polls it, claims it, runs the re-pair and writes
+# the outcome back. The row is the trigger and the durable state; the pairing
+# code itself never comes near this table — see the `schema.sql` comment.
+#
+# It goes in `whatsapp_runtime` rather than a table of its own because it is
+# deployment-wide state with exactly one row, which is what that table is.
+
+
+def sql_datetime_from_epoch(when: float) -> str:
+    """An epoch instant in the `datetime('now')` format this file stores.
+
+    The pairing deadline crosses two clocks: the bridge's window is measured on
+    the event loop's monotonic clock and published to the relay file as epoch
+    seconds, while the row stores `sql_datetime_now`'s text so the deadline arm
+    can compare it in SQL. Without one converter the two are compared by
+    whichever caller got there first.
+    """
+    return datetime.fromtimestamp(float(when), timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def request_whatsapp_pairing(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    window_seconds: float = WHATSAPP_PAIRING_WINDOW_SECONDS,
+) -> str | None:
+    """Write a pending pairing request. The request id, or `None` if one is open.
+
+    `None` means a request is already pending or in progress, which is what the
+    route answers 409 on. The guard is in SQL rather than a read followed by a
+    write: two admins pressing the button at once must not both get an id, and
+    the caller's own transaction is not something this function can assume.
+    `block_whatsapp_billing` is the shape — one upsert whose `WHERE` carries
+    the precondition, `rowcount` as the answer — for the same reason.
+
+    The returned id is the row's own, minted here so a `requested` row has an
+    identity the route can return and `record_whatsapp_pairing_state` can guard
+    on. It is **not** the bridge's window id: the bridge mints that when it
+    actually opens a window, up to a sidecar-return plus a stop timeout later,
+    and the row adopts it then (`adopt_window_id`) because the relay file
+    carries that one and the reader validates the two against each other.
+
+    `pairing_expires_at` is stamped here, at request time, which is what lets
+    the poll's deadline arm close a row nobody ever picked up — a scheduler
+    that was down, or a bridge that failed to start. It is refreshed to the
+    window's own deadline once one is open, or the sequence's own wait would
+    eat into the time somebody has to scan.
+
+    The billing columns are preserved on the conflict branch. This table
+    carries the live circuit breaker and a pairing request must not clear it.
+    """
+    now = sql_datetime_now()
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=float(window_seconds))
+    ).strftime("%Y-%m-%d %H:%M:%S")
+    request_id = uuid.uuid4().hex
+    terminal = sorted(WHATSAPP_PAIRING_TERMINAL_STATES)
+    placeholders = ", ".join("?" * len(terminal))
+    cur = conn.execute(
+        """
+        INSERT INTO whatsapp_runtime (
+            singleton, pairing_state, pairing_window_id, pairing_requested_by,
+            pairing_requested_at, pairing_expires_at, pairing_message,
+            updated_at
+        ) VALUES (1, ?, ?, ?, ?, ?, NULL, ?)
+        ON CONFLICT(singleton) DO UPDATE SET
+            pairing_state = excluded.pairing_state,
+            pairing_window_id = excluded.pairing_window_id,
+            pairing_requested_by = excluded.pairing_requested_by,
+            pairing_requested_at = excluded.pairing_requested_at,
+            pairing_expires_at = excluded.pairing_expires_at,
+            pairing_message = NULL,
+            updated_at = excluded.updated_at
+         WHERE whatsapp_runtime.pairing_state IS NULL
+            OR whatsapp_runtime.pairing_state IN (PLACEHOLDERS)
+        """.replace("PLACEHOLDERS", placeholders),
+        (
+            WHATSAPP_PAIRING_REQUESTED,
+            request_id,
+            str(user_id),
+            now,
+            expires_at,
+            now,
+            *terminal,
+        ),
+    )
+    return request_id if cur.rowcount > 0 else None
+
+
+def read_whatsapp_pairing(conn: sqlite3.Connection) -> dict | None:
+    """The pairing request row, or `None` where none has ever been written.
+
+    A plain dict rather than a dataclass: its one producer is this table and
+    its consumers are a poll, a route and a test, none of which needs the
+    column set pinned by a type. `None` covers both a missing singleton row and
+    a row whose pairing columns were never written — an existing deployment
+    whose only use of this table was the billing circuit — because neither is
+    a pairing and no caller can act on the difference.
+    """
+    row = conn.execute(
+        "SELECT pairing_state, pairing_window_id, pairing_requested_by, "
+        "pairing_requested_at, pairing_expires_at, pairing_message, updated_at "
+        "FROM whatsapp_runtime WHERE singleton = 1"
+    ).fetchone()
+    if row is None or not row["pairing_state"]:
+        return None
+    return {
+        "state": row["pairing_state"],
+        "window_id": row["pairing_window_id"] or "",
+        "requested_by": row["pairing_requested_by"] or "",
+        "requested_at": row["pairing_requested_at"] or "",
+        "expires_at": row["pairing_expires_at"] or "",
+        "message": row["pairing_message"] or "",
+        "updated_at": row["updated_at"] or "",
+    }
+
+
+def record_whatsapp_pairing_state(
+    conn: sqlite3.Connection,
+    window_id: str,
+    state: str,
+    message: str | None = None,
+    *,
+    adopt_window_id: str | None = None,
+    expires_at: float | None = None,
+) -> bool:
+    """Move the request row to `state`. `False` where the write did not apply.
+
+    **Two guards, and neither covers the other's case.** `window_id` is what
+    stops a late writer overwriting a newer window: a coroutine servicing a
+    request the poll has since closed and replaced holds a stale id and must
+    not land. And the terminal set is what stops it resurrecting the *same*
+    row: the deadline arm can expire a row while its coroutine is still
+    running, and that coroutine's id matches — so without the state guard it
+    would reopen a window nothing owns. `sent_whatsapp`'s `_set_outcome`
+    carries the same clause for the same reason.
+
+    `adopt_window_id` rotates the row onto the bridge's window id, and
+    `expires_at` (epoch seconds) onto that window's own deadline. Both are for
+    the one transition that opens a real window; every other caller leaves the
+    request's id and request-time deadline alone.
+    """
+    sets = [
+        "pairing_state = ?",
+        "pairing_message = ?",
+        "updated_at = ?",
+    ]
+    params: list[Any] = [str(state), message or None, sql_datetime_now()]
+    if adopt_window_id:
+        sets.append("pairing_window_id = ?")
+        params.append(str(adopt_window_id))
+    if expires_at is not None:
+        sets.append("pairing_expires_at = ?")
+        params.append(sql_datetime_from_epoch(expires_at))
+    terminal = sorted(WHATSAPP_PAIRING_TERMINAL_STATES)
+    placeholders = ", ".join("?" * len(terminal))
+    params.extend([str(window_id), *terminal])
+    cur = conn.execute(
+        """
+        UPDATE whatsapp_runtime
+           SET ASSIGNMENTS
+         WHERE singleton = 1
+           AND pairing_window_id = ?
+           AND pairing_state IS NOT NULL
+           AND pairing_state NOT IN (PLACEHOLDERS)
+        """.replace("ASSIGNMENTS", ", ".join(sets)).replace(
+            "PLACEHOLDERS", placeholders
+        ),
+        tuple(params),
+    )
+    return cur.rowcount > 0
+
+
+def clear_whatsapp_pairing(conn: sqlite3.Connection) -> bool:
+    """Drop the pairing request entirely. `False` where there was none.
+
+    The billing columns are untouched — this table's other tenant is the live
+    circuit breaker, and a cleared pairing must not re-open sending.
+    """
+    cur = conn.execute(
+        """
+        UPDATE whatsapp_runtime
+           SET pairing_state = NULL, pairing_window_id = NULL,
+               pairing_requested_by = NULL, pairing_requested_at = NULL,
+               pairing_expires_at = NULL, pairing_message = NULL,
+               updated_at = ?
+         WHERE singleton = 1 AND pairing_state IS NOT NULL
         """,
         (sql_datetime_now(),),
     )
