@@ -45,6 +45,9 @@ VAULT_READ_CAP_BYTES = 8 * 1024 * 1024
 #: service segment below it folds (see ``_map_groups``).
 VAULT_ROOT_GROUP = "istota"
 
+#: How much of a group or key name a log line may carry (see ``_label``).
+_LABEL_MAX_CHARS = 64
+
 
 class VaultError(Exception):
     """Base for every way a vault read can fail.
@@ -126,6 +129,13 @@ class VaultRead:
 
         Key names are kept, because they are the thing a reader needs and are
         loggable by the same rule the warnings below follow.
+
+        **It closes the route through this object and not the field itself.**
+        ``services`` is public, so ``assert read.services == {...}`` compares two
+        plain dicts and prints both, and a caller is free to log the attribute
+        directly. What this covers is the case nobody writes on purpose: the
+        object reaching a repr by way of a container, a failing comparison or a
+        debug line about the read as a whole.
         """
         keys = {service: sorted(values) for service, values in self.services.items()}
         return (
@@ -163,10 +173,25 @@ def read_vault_bytes(path: Path) -> tuple[bytes, str]:
     The import is function-scoped like ``storage.read_regular_file``'s: reaching
     ``skills._loader`` executes ``istota.skills.__init__``, which star-imports
     every skill.
-    """
-    from .skills._loader import read_overlay_bytes
 
-    data, refusal, size = read_overlay_bytes(path, max_bytes=VAULT_READ_CAP_BYTES)
+    **Every failure leaves here as a ``VaultError``, which is a contract rather
+    than an observation**: §7 keys its retry rule and §8 its notification on the
+    class, so an unmapped exception out of a background gate is a different
+    failure class from a mapped one. ``read_overlay_bytes`` catches
+    ``FileNotFoundError`` and ``OSError``, which leaves two escapes — a NUL in
+    the path makes ``os.open`` raise ``ValueError``, and ``vault_path`` is a TOML
+    string, where ``\\u0000`` is expressible (``_loader`` names that exact escape
+    in ``open_overlay_dir``, which is a different function and screens a
+    different argument); and a platform with no ``dir_fd`` support raises
+    ``NotImplementedError``. Both are the caller naming a path this read cannot
+    make, so both are a refusal.
+    """
+    from .skills._loader import OVERLAY_UNREADABLE, read_overlay_bytes
+
+    try:
+        data, refusal, size = read_overlay_bytes(path, max_bytes=VAULT_READ_CAP_BYTES)
+    except (ValueError, NotImplementedError) as exc:
+        raise VaultUnreadable(OVERLAY_UNREADABLE) from exc
     if refusal is not None:
         raise VaultUnreadable(refusal)
     if size is None:
@@ -193,10 +218,27 @@ def parse_vault(data: bytes, passphrase: str) -> VaultRead:
     asked for ``exc_info``, and the no-value rule outranks it: KDBX3 carries no
     payload HMAC, so a body corrupted after decryption reaches lxml rather than
     failing a checksum, and an ``XMLSyntaxError`` quotes the document it choked
-    on — which at that point is decrypted credential text. The chain is
-    suppressed for the same reason, since any caller's ``logger.exception``
-    would render it. The type and its module are enough to tell a ``construct``
-    stream error from an XML one, and carry no payload.
+    on — which at that point is decrypted credential text. Measured against
+    pykeepass 4.2.0, a header intact over a garbled body also reaches here as a
+    bare ``KeyError`` whose argument is an XML key lifted out of the decrypted
+    document. The chain is suppressed for the same reason, since any caller's
+    ``logger.exception`` would render it. The type and its module are enough to
+    tell a ``construct`` stream error from an XML one, and carry no payload.
+
+    **The catch-all is the ordinary path for a half-synced file, not an
+    exceptional one**, so the log line does not call it unexpected. Only an HMAC
+    mismatch raises ``PayloadChecksumError``; a *truncated* file — §2's own named
+    mid-write case — dies inside ``construct`` with a ``StreamError`` that
+    pykeepass re-raises unmapped. Adding ``construct.core.StreamError`` to the
+    mapped arm was the alternative and is refused: it would name a transitive of
+    a transitive in an import this module otherwise keeps to pykeepass's own
+    surface, to change a log string. Which arm ran is pinned by that string.
+
+    **The mapping runs inside the guard too.** A file that decrypts and is then
+    structurally malformed — `/KeePassFile/Root/Group` absent, which needs the
+    passphrase and so cannot be arranged by a task — makes ``kp.root_group``
+    None, and an ``AttributeError`` out of the walk is not a class §7 and §8 can
+    act on.
     """
     try:
         from pykeepass import PyKeePass
@@ -212,19 +254,18 @@ def parse_vault(data: bytes, passphrase: str) -> VaultRead:
 
     try:
         kp = PyKeePass(io.BytesIO(data), password=passphrase)
+        return _map_groups(kp, _digest(data))
     except CredentialsError as exc:
         raise VaultLocked("the stored passphrase does not open this vault") from exc
     except (HeaderChecksumError, PayloadChecksumError) as exc:
         raise VaultCorrupt("the file is not a readable KeePass database") from exc
     except Exception as exc:
         logger.warning(
-            "vault: unexpected parse failure (%s.%s)",
+            "vault: parse failed (%s.%s)",
             type(exc).__module__,
             type(exc).__name__,
         )
         raise VaultCorrupt("the file is not a readable KeePass database") from None
-
-    return _map_groups(kp, _digest(data))
 
 
 def _digest(data: bytes) -> str:
@@ -280,6 +321,19 @@ def _map_groups(kp, digest: str) -> VaultRead:
 
     Neither skip rule is a deletion. A key skipped here is simply absent from
     the group, and what the apply step does about that is its own rule.
+
+    **Depth comes from ``Group.entries`` and ``Group.subgroups`` being direct
+    children**, which is a property of pykeepass rather than of anything written
+    here — so the two exclusions that follow from it are pinned by a fixture
+    rather than by a branch: an entry one subgroup deeper is not a key, and an
+    edited entry's ``History`` copies are not duplicates of it. The second is the
+    expensive one if it ever changes, since it would turn every credential the
+    user has ever edited into a duplicate hard-skip.
+
+    A group whose name is only whitespace is dropped rather than becoming a
+    service, because §6's deletion rule fires on presence in ``group_present``
+    and a junk row there is a row that can delete. It is *not* stripped for the
+    purpose of matching, since §3 strips values and normalizes nothing else.
     """
     services: dict[str, dict[str, str]] = {}
     group_present: dict[str, str] = {}
@@ -296,17 +350,43 @@ def _map_groups(kp, digest: str) -> VaultRead:
             if recyclebin is not None and group.uuid == recyclebin:
                 continue
             name = group.name or ""
-            if not name:
+            if not name.strip():
                 continue
             folded = name.casefold()
             group_present.setdefault(folded, name)
             values = services.setdefault(folded, {})
             titles = seen.setdefault(folded, set())
             dupes = duplicated.setdefault(folded, set())
+            untitled = 0
             for entry in group.entries:
+                if not entry.title:
+                    untitled += 1
+                    continue
                 _take_entry(folded, entry, values, titles, dupes)
+            if untitled:
+                # Counted rather than one line each: an entry with no title has
+                # no name to report, so N lines say exactly what one line says.
+                logger.warning(
+                    "vault: %s has %d entr%s with no title, skipped",
+                    _label(name),
+                    untitled,
+                    "y" if untitled == 1 else "ies",
+                )
 
     return VaultRead(digest=digest, services=services, group_present=group_present)
+
+
+def _label(name: str) -> str:
+    """A group or key name, bounded and flattened, for a log line.
+
+    Both are arbitrary strings out of the file: unbounded in length and free to
+    contain newlines, so an unflattened one can forge a log record in the
+    daemon's own log. Self-inflicted rather than attacker-reachable — the file is
+    the user's — which is why this flattens rather than refusing. The rule is
+    ``transport``'s ``_slug``: bound every axis that came from outside.
+    """
+    flat = "".join(ch if ch.isprintable() else " " for ch in name)
+    return flat[:_LABEL_MAX_CHARS] + ("…" if len(flat) > _LABEL_MAX_CHARS else "")
 
 
 def _take_entry(
@@ -325,11 +405,12 @@ def _take_entry(
     arrived at from the other direction. A duplicate also removes whatever was
     already accepted under that title, since the first copy is no more
     authoritative than the second.
+
+    The caller has already dropped an entry with no title, since that one has no
+    name to report and is counted per group instead. Every name that does reach a
+    log line goes through ``_label``.
     """
     title = entry.title
-    if not title:
-        logger.warning("vault: %s has an entry with no title, skipped", service)
-        return
     if title in titles:
         values.pop(title, None)
         if title not in duplicated:
@@ -337,8 +418,8 @@ def _take_entry(
             logger.warning(
                 "vault: %s/%s appears more than once, so neither copy is used; "
                 "delete one",
-                service,
-                title,
+                _label(service),
+                _label(title),
             )
         return
     titles.add(title)
@@ -348,8 +429,8 @@ def _take_entry(
         logger.warning(
             "vault: %s/%s has an empty password field, skipped; delete the entry "
             "to remove the credential",
-            service,
-            title,
+            _label(service),
+            _label(title),
         )
         return
     values[title] = value

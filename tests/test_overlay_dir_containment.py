@@ -575,13 +575,18 @@ class TestTheReturnedPathIsDisplayOnly:
     #: those files get their containment from `storage.resolve_user_config_dir`
     #: instead. Reusing the reader is the point; the exemption is from *this*
     #: rule, not from containment.
-    #: `secrets_vault.py` is the third, and the one where a descriptor is not
-    #: merely unavailable but wrong: `[users.<id>] vault_path` may be an
-    #: **absolute** path deliberately outside the mount, which is the form an
-    #: operator picks to keep the file out of the sandbox entirely, so there is
-    #: no overlay directory to hold open. Its containment is
-    #: `storage.resolve_user_vault_path`, the same disposition as the two
-    #: entries above; what it takes from this reader is the leaf hardening.
+    #: `secrets_vault.py` is the third, and is the one entry here that is not
+    #: yet settled. `[users.<id>] vault_path` has two forms and they want
+    #: different answers. The **absolute** form is deliberately outside the mount
+    #: — it is what an operator picks to keep the file out of the sandbox
+    #: entirely — so there is no overlay directory to hold open and the
+    #: exemption is exactly right. The **relative** form resolves under
+    #: `{mount}/Users/{user_id}`, where every component above the leaf is
+    #: model-writable, and it is therefore a candidate for `open_overlay_dir` +
+    #: `dir_fd` rather than for this list. `resolve_user_vault_path` does not
+    #: exist yet — it is the stage of that spec after the reader — so revisit
+    #: this entry when it lands rather than reading it as a decision already
+    #: taken. Nothing is exposed meanwhile: `read_vault_bytes` has no caller.
     _NOT_OVERLAY_READERS = frozenset({
         "storage.py",                 # read_regular_file / read_user_config_file
         "skills/memory/__init__.py",  # the memory CLI's _read_text

@@ -12,8 +12,10 @@ symlink, the FIFO and the size cap — and all three are inherited from
 That is exactly the shape `.claude/rules/testbed.md` warns about: they would
 pass just as happily against a `path.read_bytes()` that had none of the
 hardening, because the *happy* path is identical. They were driven with the
-reader swapped for a plain `open()` and each was confirmed red; see the stage
-log. Read them as pinning which reader is used, not as proof the reader works.
+reader swapped for `path.read_bytes()`: the symlink and cap cases went red, and
+the FIFO case did not fail at all — it hung, which is the production failure
+exactly. The commit adding this file records that in its body. Read the three as
+pinning which reader is used, not as proof the reader works.
 
 The values in the fixtures are strings invented here. Nothing in this file is a
 credential, and `test_no_log_record_carries_a_value` is what keeps it that way
@@ -24,10 +26,13 @@ them.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import logging
 import os
 import sys
+
+from unittest import mock
 
 import pytest
 
@@ -89,6 +94,45 @@ def _standard_vault(tmp_path, *, password=PASSPHRASE):
 def _read(path, *, password=PASSPHRASE):
     data, digest = read_vault_bytes(path)
     return parse_vault(data, password), digest
+
+
+#: The names an "extra not installed" simulation has to make unimportable.
+#: `pykeepass.pykeepass` is in the list because it is the module that actually
+#: *raises*, and leaving it cached is what makes the naive teardown poison the
+#: worker — see `_library_absent`.
+_LIBRARY_MODULES = ("pykeepass", "pykeepass.exceptions", "pykeepass.pykeepass")
+
+
+@contextlib.contextmanager
+def _library_absent():
+    """`import pykeepass` raises ImportError for the body, and only the body.
+
+    A `None` in `sys.modules` is what the import machinery reads as "this module
+    is known to be absent". **Saving and restoring is the whole of this helper**,
+    and the obvious `del sys.modules[name]` teardown is a live defect rather than
+    an untidiness: it drops the *class objects* along with the modules, so the
+    next `from pykeepass.exceptions import CredentialsError` binds a freshly
+    constructed class while whichever submodule stayed cached goes on raising the
+    original. `except CredentialsError` then misses, and a wrong passphrase
+    arrives as `VaultCorrupt` — the module's own catch-all silently reclassifying
+    it, with no import error anywhere to say why. Measured: the file stays green
+    only because collection order happens to put the locked tests first, and
+    reversing two node ids on one `-n0` run turns `test_a_wrong_passphrase_reads_as_locked`
+    red. That is the shape the project memory records as "a new file green in
+    isolation turns a *different* file red under xdist".
+    """
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in _LIBRARY_MODULES}
+    for name in _LIBRARY_MODULES:
+        sys.modules[name] = None  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        for name, module in saved.items():
+            if module is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 class TestRead:
@@ -322,6 +366,82 @@ class TestRead:
         assert read.services == {"ntfy": {"topic": TOPIC_VALUE}}
         assert read.group_present == {"ntfy": "ntfy"}
 
+    def test_the_istota_group_nominated_as_the_recycle_bin_is_excluded(
+        self, tmp_path
+    ):
+        """The sibling of the case above, and the one that keeps the outer check
+        from being free to delete.
+
+        The two checks are at different levels and neither covers the other:
+        deleting the outer one left the whole file green, because the three other
+        recycle-bin tests reach only the inner check or the walk's own starting
+        point."""
+        kp, path = _standard_vault(tmp_path)
+        root = next(g for g in kp.root_group.subgroups if g.name == "istota")
+        elem = kp._xpath("/KeePassFile/Meta/RecycleBinUUID", first=True)
+        elem.text = base64.b64encode(root.uuid.bytes).decode()
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {}
+        assert read.group_present == {}
+
+    # ---- what the walk's shape excludes --------------------------------
+
+    def test_an_entry_nested_deeper_than_one_subgroup_is_not_a_key(self, tmp_path):
+        """`istota/<service>/<key>` and no deeper.
+
+        Implemented by *not* recursing — `Group.entries` is direct children —
+        so nothing in the module states this and only a fixture holds it. A
+        pykeepass change to recursive `entries`, or a refactor to
+        `find_entries(..., recursive=True)`, would start importing credentials
+        from an arbitrary depth with the rest of this file green."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        karakeep = kp.add_group(root, "karakeep")
+        kp.add_entry(karakeep, "api_key", "", API_KEY_VALUE)
+        deeper = kp.add_group(karakeep, "deeper")
+        kp.add_entry(deeper, "base_url", "", BASE_URL_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"karakeep": {"api_key": API_KEY_VALUE}}
+
+    def test_an_edited_entrys_history_is_not_a_duplicate_of_it(self, tmp_path):
+        """The expensive one if `Group.entries` ever stops meaning current
+        entries: a KDBX keeps previous versions of an edited entry as `History`
+        children, so every credential the user has ever changed would become a
+        duplicate hard-skip — silently, and for the keys they touch most."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        karakeep = kp.add_group(root, "karakeep")
+        entry = kp.add_entry(karakeep, "api_key", "", "ak-the-old-value")
+        entry.save_history()
+        entry.password = API_KEY_VALUE
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"karakeep": {"api_key": API_KEY_VALUE}}
+
+    def test_a_whitespace_only_group_name_is_not_a_service(self, tmp_path):
+        """§6's deletion rule fires on presence in `group_present`, so a junk row
+        there is a row that can delete. The name is not stripped for *matching* —
+        §3 strips values and normalizes nothing else — only tested for being
+        entirely whitespace."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(kp.add_group(root, "   "), "api_key", "", API_KEY_VALUE)
+        kp.add_entry(kp.add_group(root, "karakeep"), "api_key", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.group_present == {"karakeep": "karakeep"}
+        assert read.services == {"karakeep": {"api_key": API_KEY_VALUE}}
+
     # ---- ownership and folding -----------------------------------------
 
     def test_an_unowned_group_is_parsed_and_reported(self, tmp_path):
@@ -518,23 +638,68 @@ class TestRead:
         with pytest.raises(VaultCorrupt):
             parse_vault(b"# just some text\n" * 20, PASSPHRASE)
 
+    def test_a_file_that_decrypts_but_has_no_root_group_reads_as_corrupt(
+        self, tmp_path
+    ):
+        """The mapping walk is inside the guard, so the closed set of error
+        classes is a contract rather than an observation.
+
+        `kp.root_group` is None for a database whose `/KeePassFile/Root/Group` is
+        gone, and an `AttributeError` out of the walk is not a class §7's retry
+        rule or §8's notification can act on — it would arrive at a background
+        gate as an unhandled exception instead. It needs the passphrase to
+        produce, so a task cannot arrange it; a client that wrote a malformed
+        file can."""
+        kp, path = _standard_vault(tmp_path)
+        root = kp._xpath("/KeePassFile/Root/Group", first=True)
+        root.getparent().remove(root)
+        kp.save()
+        data, _ = read_vault_bytes(path)
+
+        with pytest.raises(VaultCorrupt):
+            parse_vault(data, PASSPHRASE)
+
+    def test_a_path_with_a_nul_is_refused_rather_than_raising(self, tmp_path):
+        """`read_overlay_bytes` catches `FileNotFoundError` and `OSError`, and a
+        NUL makes `os.open` raise `ValueError`, which is neither — so it would
+        leave `read_vault_bytes` as something outside the closed set. `vault_path`
+        is a TOML string, where a NUL is expressible."""
+        with pytest.raises(VaultUnreadable):
+            read_vault_bytes(tmp_path / "vault\0.kdbx")
+
     def test_an_absent_library_reads_as_library_missing(self, tmp_path):
         """The extra is optional, so a deployment without it gets a mapped error
         with a remedy rather than an ImportError out of a background gate."""
         _, path = _standard_vault(tmp_path)
         data, _ = read_vault_bytes(path)
-        # A None in `sys.modules` is what the import machinery reads as "this
-        # module is known to be absent"; both names are set so the result does
-        # not depend on which import statement runs first.
-        for name in ("pykeepass", "pykeepass.exceptions"):
-            sys.modules.pop(name, None)
-            sys.modules[name] = None  # type: ignore[assignment]
-        try:
+
+        with _library_absent():
             with pytest.raises(VaultLibraryMissing):
                 parse_vault(data, PASSPHRASE)
-        finally:
-            for name in ("pykeepass", "pykeepass.exceptions"):
-                del sys.modules[name]
+
+    def test_simulating_an_absent_library_leaves_the_real_one_working(
+        self, tmp_path
+    ):
+        """The control on `_library_absent`'s teardown, and on nothing else.
+
+        It asserts the property the naive `del sys.modules[...]` version breaks:
+        after the simulation, a wrong passphrase is still `VaultLocked` rather
+        than the catch-all's `VaultCorrupt`. Without the save-and-restore this
+        fails here rather than in whichever unrelated test the worker reaches
+        next, which is the point of having it."""
+        _, path = _standard_vault(tmp_path)
+        data, _ = read_vault_bytes(path)
+
+        with _library_absent():
+            with pytest.raises(VaultLibraryMissing):
+                parse_vault(data, PASSPHRASE)
+
+        with pytest.raises(VaultLocked):
+            parse_vault(data, "the-wrong-passphrase")
+        assert parse_vault(data, PASSPHRASE).group_present == {
+            "karakeep": "karakeep",
+            "ntfy": "ntfy",
+        }
 
     # ---- the properties the rest of the design rests on ----------------
 
@@ -607,13 +772,154 @@ class TestRead:
             read, _ = _read(path)
 
         assert read.services == {"karakeep": {}, "ntfy": {"topic": TOPIC_VALUE}}
-        assert caplog.records, "nothing logged, so the sweep below proves nothing"
+        # Scoped to this module's own logger, and counted. `caplog.records`
+        # non-empty proves nothing on its own: pykeepass emits five DEBUG
+        # records during an ordinary parse, so the sweep was satisfied by a
+        # third party's output and stayed green with all three warnings deleted.
+        ours = [r for r in caplog.records if r.name == "istota.secrets_vault"]
+        assert len(ours) == 3, [r.getMessage() for r in ours]
         for record in caplog.records:
             rendered = f"{record.getMessage()} {record.args!r} {record.exc_text!r}"
             for value in secrets:
                 assert value not in rendered, (
                     f"{record.name} logged a fixture value: {record.getMessage()!r}"
                 )
+
+    def test_each_skip_says_which_key_it_skipped(self, tmp_path, caplog):
+        """§3 asks for a warning naming the service and the key, and the
+        behavioural assertions above cannot see whether one was emitted — they
+        prove the branch ran, not that it said anything."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        karakeep = kp.add_group(root, "karakeep")
+        kp.add_entry(karakeep, "api_key", "", API_KEY_VALUE)
+        kp.add_entry(karakeep, "api_key", "", "ak-the-duplicate", force_creation=True)
+        kp.add_entry(karakeep, "base_url", "", "")
+        kp.add_entry(karakeep, "", "", "untitled-value")
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            _read(path)
+
+        said = [r.getMessage() for r in caplog.records
+                if r.name == "istota.secrets_vault"]
+        assert any("karakeep" in m and "api_key" in m and "more than once" in m
+                   for m in said), said
+        assert any("karakeep" in m and "base_url" in m and "empty password" in m
+                   for m in said), said
+        assert any("karakeep" in m and "no title" in m for m in said), said
+
+    def test_untitled_entries_are_counted_rather_than_named_one_by_one(
+        self, tmp_path, caplog
+    ):
+        """An entry with no title has no name to report, so N lines say exactly
+        what one line says — and §7 parses on every save, so a vault carrying a
+        few of them would otherwise write N lines for the life of the
+        deployment."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        karakeep = kp.add_group(root, "karakeep")
+        for _ in range(4):
+            kp.add_entry(karakeep, "", "", API_KEY_VALUE, force_creation=True)
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            _read(path)
+
+        said = [r.getMessage() for r in caplog.records
+                if r.name == "istota.secrets_vault"]
+        assert said == ["vault: karakeep has 4 entries with no title, skipped"]
+
+    def test_a_name_cannot_forge_a_log_line(self, tmp_path, caplog):
+        """Group and entry names are arbitrary strings out of the file:
+        unbounded, and free to carry a newline. Unflattened, one of them can put
+        a whole fabricated record into the daemon's log. Self-inflicted rather
+        than attacker-reachable — the file is the user's — so this flattens and
+        bounds rather than refusing."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        karakeep = kp.add_group(root, "karakeep")
+        kp.add_entry(karakeep, "api\nkey ERROR forged line", "", "")
+        kp.add_entry(kp.add_group(root, "x" * 400), "api_key", "", "")
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            _read(path)
+
+        for record in caplog.records:
+            if record.name != "istota.secrets_vault":
+                continue
+            assert "\n" not in record.getMessage()
+            assert len(record.getMessage()) < 300
+
+    def test_the_catch_all_does_not_render_the_exception(self, tmp_path, caplog):
+        """The branch the `exc_info` departure was made for, driven.
+
+        Nothing else in the file reaches it with a value in play, so re-adding
+        `exc_info=True` — or dropping `raise ... from None` — passes every other
+        test here. A stand-in raiser rather than a crafted KDBX3, because what is
+        being asserted is what this module does with an exception whose text
+        carries credential material, not which library produces one."""
+        _, path = _standard_vault(tmp_path)
+        data, _ = read_vault_bytes(path)
+
+        class _Boom(Exception):
+            pass
+
+        def _explode(*args, **kwargs):
+            raise _Boom(f"choked on <Value>{API_KEY_VALUE}</Value>")
+
+        import pykeepass
+
+        with caplog.at_level(logging.DEBUG):
+            with mock.patch.object(pykeepass, "PyKeePass", _explode):
+                with pytest.raises(VaultCorrupt) as caught:
+                    parse_vault(data, PASSPHRASE)
+
+        assert API_KEY_VALUE not in str(caught.value)
+        # `raise ... from None`: a caller's own `logger.exception` renders the
+        # chain, so suppressing it is part of the same rule.
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None or caught.value.__suppress_context__
+        assert caplog.records
+        for record in caplog.records:
+            rendered = f"{record.getMessage()} {record.args!r} {record.exc_text!r}"
+            assert API_KEY_VALUE not in rendered
+        said = [r.getMessage() for r in caplog.records
+                if r.name == "istota.secrets_vault"]
+        assert said == ["vault: parse failed (tests.test_secrets_vault._Boom)"]
+
+    def test_a_truncated_file_takes_the_catch_all_and_says_so(
+        self, tmp_path, caplog
+    ):
+        """Which arm a corruption shape takes, pinned.
+
+        Every arm produces `VaultCorrupt`, so the class assertions above cannot
+        tell them apart. Measured against pykeepass 4.2.0: only an HMAC mismatch
+        raises `PayloadChecksumError`, and a truncated file — §2's own named
+        mid-write case — dies inside `construct` with a `StreamError` that
+        pykeepass re-raises unmapped. That is why the catch-all's line does not
+        call the failure unexpected."""
+        _, path = _standard_vault(tmp_path)
+        whole = path.read_bytes()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            with pytest.raises(VaultCorrupt):
+                parse_vault(whole[: len(whole) // 2], PASSPHRASE)
+
+        said = [r.getMessage() for r in caplog.records
+                if r.name == "istota.secrets_vault"]
+        assert said == ["vault: parse failed (construct.core.StreamError)"]
+
+    def test_bytes_that_are_not_a_kdbx_take_the_mapped_arm(self, tmp_path, caplog):
+        """The control for the one above: a bad *header* is mapped, so it logs
+        nothing. Without this the assertion there is about a string rather than
+        about which branch ran."""
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            with pytest.raises(VaultCorrupt):
+                parse_vault(b"# just some text\n" * 20, PASSPHRASE)
+
+        assert [r for r in caplog.records if r.name == "istota.secrets_vault"] == []
 
 
 class TestTheLibraryStaysOutOfTheImportGraph:
@@ -646,14 +952,9 @@ class TestTheLibraryStaysOutOfTheImportGraph:
         with the extra absent — which is what makes the digest short-circuit
         free."""
         _, path = _standard_vault(tmp_path)
-        for name in ("pykeepass", "pykeepass.exceptions"):
-            sys.modules.pop(name, None)
-            sys.modules[name] = None  # type: ignore[assignment]
-        try:
+
+        with _library_absent():
             data, digest = read_vault_bytes(path)
-        finally:
-            for name in ("pykeepass", "pykeepass.exceptions"):
-                del sys.modules[name]
 
         assert data == path.read_bytes()
         assert digest == hashlib.sha256(data).hexdigest()
