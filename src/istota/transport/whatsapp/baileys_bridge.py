@@ -68,6 +68,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ... import du
 from ...config import Config
 from . import baileys_protocol as proto, message_fingerprint, pairing_relay
 from ._types import WhatsAppSendOutcome, WhatsAppSendRequest
@@ -705,37 +706,30 @@ def session_archives(session_dir: Path) -> list[Path]:
     chronological because the stamp is fixed width, so the first entry is the
     oldest.
 
-    Directories only, judged by `lstat`: a symlink at such a name points the
-    survey somewhere this deployment did not put a credential, and following it
-    would report another tree's modes as this one's.
+    **The scan is `du.first_level_dirs`', not a fourth copy of it.** That
+    leaf exists because five callers had each written the same sorted,
+    symlink-skipping, non-directory-skipping walk, and it already carries the
+    `(OSError, ValueError)` handling a never-raises caller needs — a null byte
+    in a configured `session_dir` raises the second rather than the first. A
+    symlink is skipped there for this function's reason as well: one at an
+    archive's name points the survey somewhere this deployment did not put a
+    credential, and following it would report another tree's modes as these.
 
-    Never raises, for the reason every `doctor` helper does not. An unreadable
-    parent yields no archives, which is honest rather than optimistic — the
-    check's live arms are what report a directory nothing here can read.
+    Never raises. **An unreadable parent yields no archives and says so
+    nowhere**, which is the one place this is weaker than it looks: `x`
+    without `r` on the state root lets the live arms answer normally while
+    this walk returns nothing, so an archive that cannot be listed reads
+    exactly like a host that has never re-paired. Stated rather than fixed,
+    because distinguishing the two means a second return channel for a corner
+    where the directory is the daemon's own.
     """
     prefix = session_dir.name + "."
-    try:
-        entries = sorted(session_dir.parent.iterdir())
-    except (OSError, ValueError):
-        # `ValueError` beside `OSError` at every filesystem touch, which is
-        # `du.py`'s rule and is here for its reason: an embedded null byte in
-        # a configured `session_dir` raises that rather than an `OSError`, and
-        # this is called from a check with a never-raises contract.
-        return []
-    found: list[Path] = []
-    for entry in entries:
-        if not entry.name.startswith(prefix):
-            continue
-        if _ARCHIVE_SUFFIX_RE.search(entry.name) is None:
-            continue
-        try:
-            info = entry.lstat()
-        except OSError:
-            continue
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            continue
-        found.append(entry)
-    return found
+    return [
+        entry
+        for entry in du.first_level_dirs(session_dir.parent)
+        if entry.name.startswith(prefix)
+        and _ARCHIVE_SUFFIX_RE.search(entry.name) is not None
+    ]
 
 
 def session_archive_stamp(path: Path) -> datetime | None:

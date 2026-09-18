@@ -7482,32 +7482,56 @@ def _baileys_pairing_window(
     `pairing_relay`'s own module constants, written by the bridge, where a
     fatal reason is a string the sidecar chose.
     """
+    from .transport.whatsapp.pairing_relay import (
+        STATE_AWAITING_SCAN, STATE_SIDECAR_ABSENT,
+    )
+
     expires_at = status.get("pairing_expires_at")
     left = ""
     if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool):
         left = f", {_duration(expires_at - time.time())} left"
 
-    if state == "sidecar_absent":
+    # **The one arm this shadows that has a remedy of its own.** A refused
+    # connection means a second sidecar dialled, which is two Baileys clients
+    # against one session directory — and mid-window is exactly when that
+    # matters most, since the sequence renames the directory on the strength of
+    # a drop it caused on the peer it adopted. Its own arm sits below this one
+    # and is unreachable while a window is open, so the fact and its remedy
+    # come along rather than being left to the counters.
+    refused = _as_count(status.get("rejected_connections"))
+    second = ""
+    second_remedy = ""
+    if refused:
+        second = "; a second WhatsApp sidecar has tried to connect"
+        second_remedy = (
+            " Two sidecars against one session directory corrupt the paired "
+            "credential: check whether both [whatsapp.baileys] "
+            "sidecar_command and a separate unit or compose service are "
+            "running one, and leave exactly one."
+        )
+
+    if state == STATE_SIDECAR_ABSENT:
         return CheckResult(
             name, WARN,
             f"a WhatsApp pairing window is open and no sidecar has connected "
-            f"to receive it{left}; {counters}",
+            f"to receive it{left}{second}; {counters}",
             remedy=(
                 "Check the sidecar's own unit or compose service — a failing "
                 "`npm ci` in the update path stops it and records the reason "
                 "only in the update log. A late sidecar still pairs while the "
-                "window is open."
+                "window is open." + second_remedy
             ),
             scope=DEPLOYMENT,
         )
-    if state == "awaiting_scan":
+    if state == STATE_AWAITING_SCAN:
         return CheckResult(
             name, WARN,
-            f"a WhatsApp pairing code is waiting to be scanned{left}; every "
-            f"send is refused until the window closes; {counters}",
+            f"a WhatsApp pairing code is waiting to be scanned{left}{second}; "
+            f"every send is refused until the window closes; {counters}",
             remedy=(
                 "Scan it from WhatsApp's Linked Devices screen — the code is "
                 "in Admin, Connections, or in the terminal that asked for it."
+                + second_remedy
             ),
             scope=DEPLOYMENT,
         )
@@ -7517,11 +7541,11 @@ def _baileys_pairing_window(
     return CheckResult(
         name, WARN,
         f"a WhatsApp pairing window is open ({state}) and no code has arrived "
-        f"yet{left}; every send is refused until it closes; {counters}",
+        f"yet{left}{second}; every send is refused until it closes; {counters}",
         remedy=(
             "Wait for the sidecar to restart and offer a code — Admin, "
             "Connections shows the window. Cancel it there if it was asked "
-            "for by mistake."
+            "for by mistake." + second_remedy
         ),
         scope=DEPLOYMENT,
     )
@@ -7557,9 +7581,26 @@ def check_whatsapp_pairing_relay(config: "Config", probe: bool) -> CheckResult:
     if skipped is not None:
         return skipped
 
-    from .transport.whatsapp.baileys_bridge import default_pairing_relay_path
+    from .transport.whatsapp.baileys_bridge import (
+        configured_pairing_window_seconds, default_pairing_relay_path,
+    )
+    from .transport.whatsapp.pairing_relay import RELAY_MODE
 
-    path = default_pairing_relay_path(config)
+    try:
+        path = default_pairing_relay_path(config)
+    except (OSError, ValueError, RuntimeError) as exc:
+        # `expanduser` answers `RuntimeError` for a `~unknownuser` value and a
+        # null byte answers `ValueError`. Both come out of a config field.
+        return CheckResult(
+            name, WARN,
+            f"[whatsapp.baileys] pairing_relay_path could not be resolved "
+            f"({type(exc).__name__}), so the pairing relay was not examined",
+            remedy=(
+                "Correct [whatsapp.baileys] pairing_relay_path, or clear it to "
+                "derive the file beside the framework database."
+            ),
+            scope=DEPLOYMENT,
+        )
     remedy = (
         f"Remove {path}. It holds a pairing code, which is a full-account "
         "WhatsApp credential; the bridge rewrites it on the next window."
@@ -7606,19 +7647,26 @@ def check_whatsapp_pairing_relay(config: "Config", probe: bool) -> CheckResult:
             remedy=remedy, scope=DEPLOYMENT,
         )
     mode = stat.S_IMODE(info.st_mode)
-    if mode != 0o600:
+    if mode != RELAY_MODE:
         return CheckResult(
             name, FAIL,
-            f"{path} is {mode:04o}, not 0600; a WhatsApp pairing code is "
-            "readable by another account",
+            f"{path} is {mode:04o}, not {RELAY_MODE:04o}; a WhatsApp pairing "
+            "code is readable by another account",
             remedy=(
-                f"Run `chmod 0600 {path}`, or remove it — the bridge rewrites "
-                "it on the next window."
+                f"Run `chmod {RELAY_MODE:04o} {path}`, or remove it — the "
+                "bridge rewrites it on the next window."
             ),
             scope=DEPLOYMENT,
         )
 
-    window = _setting_float(config.whatsapp.baileys, "pairing_window_seconds", 300.0)
+    # **The bridge's own predicate, not `_setting_float`.** The two disagree on
+    # values the loader permits, because that field is clamped at read rather
+    # than validated at load: `pairing_window_seconds = 0` runs a 300s window
+    # and would give a 120s staleness bound here, so every real pairing past
+    # two minutes would be reported as a code nobody can scan — while
+    # somebody is mid-scan. `.claude/rules/doctor.md`'s rule, which the
+    # neighbouring arms already follow.
+    window = configured_pairing_window_seconds(config)
     age = time.time() - info.st_mtime
     if age > max(window, 60.0) + 60.0:
         return CheckResult(
@@ -7627,10 +7675,17 @@ def check_whatsapp_pairing_relay(config: "Config", probe: bool) -> CheckResult:
             "so it holds a code nothing can still scan",
             remedy=remedy, scope=DEPLOYMENT,
         )
+    # **"owned by uid N" rather than "private to this account" under root**,
+    # because that is the path where the ownership arm is skipped and a check
+    # may not assert what it did not compare.
+    owner = (
+        "private to this account" if os.geteuid() != 0
+        else f"owned by uid {info.st_uid}"
+    )
     return CheckResult(
         name, OK,
-        f"a WhatsApp pairing code is on disk at {path}, 0600 and private to "
-        f"this account, written {_duration(age)} ago",
+        f"a WhatsApp pairing code is on disk at {path}, {RELAY_MODE:04o} and "
+        f"{owner}, written {_duration(age)} ago",
         scope=DEPLOYMENT,
     )
 
@@ -7681,29 +7736,86 @@ def check_whatsapp_baileys_session(config: "Config", probe: bool) -> CheckResult
         return skipped
 
     from .transport.whatsapp.baileys_bridge import (
-        default_session_dir, session_archives, session_archive_stamp,
-        survey_session_files,
+        default_session_dir, session_archives,
     )
 
-    path = default_session_dir(config)
+    try:
+        path = default_session_dir(config)
+    except (OSError, ValueError, RuntimeError) as exc:
+        # `expanduser` answers `RuntimeError` for a `~unknownuser` value and a
+        # null byte answers `ValueError`, neither of which is an `OSError`.
+        # Both come out of a config field, so this is an operator's typo and
+        # not a fault of the deployment's session.
+        return CheckResult(
+            name, WARN,
+            f"[whatsapp.baileys] session_dir could not be resolved "
+            f"({type(exc).__name__}), so the paired session was not examined",
+            remedy=(
+                "Correct [whatsapp.baileys] session_dir, or clear it to derive "
+                "the directory beside the framework database."
+            ),
+            scope=DEPLOYMENT,
+        )
     live = _baileys_live_session(name, path)
 
     archives = session_archives(path)
     if not archives:
         return live
+    return _baileys_archive_survey(name, path, archives, live)
+
+
+def _baileys_archive_survey(
+    name: str, path: Path, archives: list[Path], live: CheckResult,
+) -> CheckResult:
+    """The read-only second pass over the sessions a re-pair moved aside.
+
+    Three questions per archive, which is the same three the live pass asks —
+    its own mode, its owner, and whether anything inside it is wider than
+    0600. Asking only the third would leave the remedy claiming more than the
+    check verified, which is the gap that made this pass necessary one level
+    up: `rename(2)` preserves a directory's mode, so a wide archive directory
+    means somebody has since changed it, and an archive is no less a
+    full-account credential for being the previous one.
+    """
+    from .transport.whatsapp.baileys_bridge import (
+        session_archive_stamp, survey_session_files,
+    )
 
     wide = sum(survey_session_files(archive) for archive in archives)
-    oldest = session_archive_stamp(archives[0])
+    loose = 0
+    for archive in archives:
+        try:
+            info = archive.lstat()
+        except (OSError, ValueError):
+            continue
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            loose += 1
+        elif os.geteuid() != 0 and info.st_uid != os.geteuid():
+            # Root is exempt for `_baileys_live_session`'s reason: `sudo istota
+            # doctor` is an ordinary invocation, and there the archive belongs
+            # to the daemon's account while `geteuid()` is 0.
+            loose += 1
+
+    # The oldest *parseable* stamp rather than `archives[0]`'s. The name filter
+    # accepts any `\d{8}T\d{6}Z`, which includes an impossible date and a
+    # non-ASCII digit run, and such a name sorts ahead of every real one — so
+    # reading the first entry's stamp would drop the age clause while still
+    # counting the archive.
+    stamps = [
+        stamp for stamp in (session_archive_stamp(a) for a in archives)
+        if stamp is not None
+    ]
     age = ""
-    if oldest is not None:
+    if stamps:
         # Through `_duration`, which clamps a negative to zero: the stamp is a
         # wall-clock reading from whichever host wrote it, so a clock that
         # moved would otherwise render a negative age into the boot log.
-        seconds = (datetime.now(timezone.utc) - oldest).total_seconds()
+        seconds = (datetime.now(timezone.utc) - min(stamps)).total_seconds()
         age = f", the oldest {_duration(seconds)} old"
     note = (
         f"{len(archives)} archived session(s) sit beside it, holding "
-        f"{wide} file(s) wider than 0600{age}"
+        f"{wide} file(s) wider than 0600 in {loose} directory/ies that are "
+        f"not 0700 or not this account's{age}"
     )
     archive_remedy = (
         "Each archive is a full-account WhatsApp credential a re-pair moved "
@@ -7720,13 +7832,19 @@ def check_whatsapp_baileys_session(config: "Config", probe: bool) -> CheckResult
             detail=f"{live.detail}; {note}",
             remedy=f"{live.remedy} {archive_remedy}",
         )
-    if wide:
+    if wide or loose:
         return CheckResult(
             name, FAIL,
-            f"{wide} file(s) in {len(archives)} archived WhatsApp session(s) "
-            f"beside {path} are wider than 0600; an archive is a full-account "
+            # **The live detail is carried even here**, because live is `WARN`
+            # on this branch rather than clean: an unpaired host, or one whose
+            # session directory could not be read. Reporting the archive alone
+            # would tell an operator holding an exposed archive *and* no live
+            # session only about the first of the two.
+            f"{live.detail}; {wide} file(s) and {loose} directory/ies in "
+            f"{len(archives)} archived WhatsApp session(s) beside {path} are "
+            f"not private to this account; an archive is a full-account "
             f"credential too{age}",
-            remedy=archive_remedy,
+            remedy=f"{archive_remedy} {live.remedy}".strip(),
             scope=DEPLOYMENT,
         )
     return replace(live, detail=f"{live.detail}; {note}")

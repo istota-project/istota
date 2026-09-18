@@ -24,8 +24,9 @@ import pytest
 
 from istota import doctor
 from istota.config import Config, UserConfig
-from istota.transport.whatsapp import baileys_bridge
+from istota.transport.whatsapp import baileys_bridge, pairing_relay
 
+from .support.drift import source_of
 from .support.whatsapp_config import build_whatsapp_config
 
 
@@ -527,6 +528,7 @@ class TestThePairingArm:
         result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
 
         assert result.status == doctor.WARN
+        assert "waiting to be scanned" in result.detail
         assert "left" not in result.detail
 
     def test_the_window_outranks_the_no_sidecar_warning_it_would_otherwise_hit(
@@ -566,9 +568,11 @@ class TestThePairingArm:
         assert "not listening" in result.detail
 
     def test_a_latched_fatal_still_outranks_a_window(self, tmp_path):
-        """A permanent fatal with a window open is the ordinary re-pair in
-        flight, and the unlink arm is the one carrying the reason and the
-        `--reset` remedy."""
+        """A *new* permanent fatal arriving inside an open window, which is
+        the only way the two states coexist: `repair_session` clears the latch
+        on both its arms before the window opens, so an ordinary re-pair in
+        flight carries no latched fault. The unlink arm holds the reason and
+        the `--reset` remedy, so it keeps precedence."""
         baileys_bridge.set_active_bridge(_Status(
             listening=True, connected=False, ready=False,
             fatal_reason="logged_out", fatal_is_permanent=True,
@@ -590,7 +594,10 @@ class TestThePairingArm:
 
         result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
 
+        # The OK arm's own words, so the case still discriminates if the
+        # pairing arm is deleted outright rather than merely not firing.
         assert result.status == doctor.OK
+        assert "the WhatsApp session is open" in result.detail
         assert "pairing" not in result.detail
 
 
@@ -651,6 +658,13 @@ class TestThePairingRelayCheck:
 
         assert first.status == doctor.FAIL
         assert second.status == doctor.FAIL
+        # **The mode, in both details.** `run_checks` reports a raising check
+        # as a `FAIL` carrying the exception text, and a check that crashed
+        # before touching the file would leave the mode alone too — so status
+        # plus an unchanged mode is satisfied by a `NameError` on the first
+        # line. The substring is what separates the two.
+        assert "0644" in first.detail
+        assert "0644" in second.detail
         assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
     def test_a_relay_owned_by_another_account_fails(self, tmp_path, monkeypatch):
@@ -740,6 +754,10 @@ class TestThePairingRelayCheck:
 
         result = _run(cfg, "whatsapp.pairing_relay")
 
+        # Positive first: two `not in` assertions alone are satisfied by a
+        # check that crashed, skipped, or never reached the arm.
+        assert result.status == doctor.FAIL
+        assert "0644" in result.detail
         assert "2@PAIRINGSECRET" not in result.detail
         assert "2@PAIRINGSECRET" not in result.remedy
 
@@ -922,18 +940,43 @@ class TestTheSessionArchives:
         assert "1 archived session(s)" in result.detail
 
     def test_two_archives_are_both_surveyed(self, tmp_path):
-        """One archive would pass against a predicate that stopped at the
-        first match, and the wide file is in the *second* one."""
+        """The wide file is in the archive that sorts **second**, so a
+        predicate stopping at the first match reports the tree clean.
+
+        The two stamps are built explicitly rather than by calling the writer
+        twice, and that is this case's own correction: `_reset_destination`
+        stamps to one-second resolution and appends `-1` on a collision, so
+        two calls inside one second give the *later* archive the bare name,
+        which sorts first — and the case would then pass against exactly the
+        predicate it is written to catch. `.claude/rules/whatsapp.md` records
+        the same trap on `TestTheSessionReset`. What keeps the hand-built name
+        honest is the writer's own format constant plus the agreement pin
+        above.
+        """
         cfg = _config(tmp_path)
-        first = self._archive(tmp_path, cfg)
-        second = first.with_name(f"{first.name}-1")
-        first.rename(second)
-        exposed_archive = self._archive(tmp_path, cfg, mode=0o644)
+        stamps = [
+            datetime(2026, 1, day, tzinfo=timezone.utc).strftime(
+                baileys_bridge.ARCHIVE_STAMP_FORMAT,
+            )
+            for day in (1, 2)
+        ]
+        earlier, later = (
+            tmp_path / f"whatsapp-baileys-session.{stamp}" for stamp in stamps
+        )
+        for archive in (earlier, later):
+            archive.mkdir(mode=0o700)
+            (archive / "creds.json").write_text("{}")
+            os.chmod(archive / "creds.json", 0o600)
+        exposed = later / "app-state-sync-key-1.json"
+        exposed.write_text("{}")
+        os.chmod(exposed, 0o644)
         self._paired(tmp_path)
 
         result = _run(cfg, "whatsapp.baileys_session")
 
-        assert second.is_dir() and exposed_archive.is_dir()
+        assert baileys_bridge.session_archives(
+            tmp_path / "whatsapp-baileys-session",
+        ) == [earlier, later]
         assert result.status == doctor.FAIL
         assert "2 archived" in result.detail
 
@@ -1005,3 +1048,227 @@ class TestTheNeverRaisesContract:
 
         assert result.status == doctor.OK
         assert "the oldest 0s old" in result.detail
+
+
+class TestWhatTheReviewFound:
+    """Cases for the review fixes, each with the control that made it a fix.
+
+    Grouped rather than filed beside their siblings, because what they have in
+    common is how they were found: every one is a case the suite could not
+    have failed on before, and each names the control that says so.
+    """
+
+    def _paired(self, tmp_path, mode=0o700):
+        path = tmp_path / "whatsapp-baileys-session"
+        path.mkdir(mode=mode)
+        (path / "creds.json").write_text("{}")
+        os.chmod(path / "creds.json", 0o600)
+        return path
+
+    def _archive(self, tmp_path, *, dir_mode=0o700, file_mode=0o600):
+        archive = tmp_path / (
+            "whatsapp-baileys-session."
+            + datetime(2026, 1, 1, tzinfo=timezone.utc).strftime(
+                baileys_bridge.ARCHIVE_STAMP_FORMAT,
+            )
+        )
+        archive.mkdir(mode=0o700)
+        (archive / "creds.json").write_text("{}")
+        os.chmod(archive / "creds.json", file_mode)
+        os.chmod(archive, dir_mode)
+        return archive
+
+    def test_an_undeclared_window_does_not_shorten_the_relay_deadline(
+        self, tmp_path,
+    ):
+        """**Both reviewers, independently.** The staleness bound read the
+        config field with `_setting_float` while the bridge reads it through
+        `configured_pairing_window_seconds`, which clamps a non-positive value
+        to the shipped 300s — so `pairing_window_seconds = 0` ran 300s windows
+        against a 120s bound, and every real pairing past two minutes was
+        reported as a code nobody can scan while somebody was mid-scan.
+
+        The two-value case above it stays green either way, which is why this
+        one exists: it exercises 300 and 7200, where the two readings agree.
+        """
+        cfg = _config(tmp_path, pairing_window_seconds=0)
+        path = baileys_bridge.default_pairing_relay_path(cfg)
+        path.write_text("{}")
+        os.chmod(path, 0o600)
+        recent = time.time() - 200
+        os.utime(path, (recent, recent))
+
+        result = _run(cfg, "whatsapp.pairing_relay")
+
+        assert result.status == doctor.OK
+
+    def test_an_archive_directory_wider_than_0700_fails(self, tmp_path):
+        """The archive pass asked one of the live pass's three questions while
+        its remedy told the operator to fix all three. `rename(2)` preserves a
+        mode, so a wide archive directory means somebody has since changed it
+        — and an archive is no less a full-account credential for being the
+        previous one."""
+        cfg = _config(tmp_path)
+        self._archive(tmp_path, dir_mode=0o755)
+        self._paired(tmp_path)
+
+        result = _run(cfg, "whatsapp.baileys_session")
+
+        assert result.status == doctor.FAIL
+        assert "1 directory/ies" in result.detail
+
+    def test_an_archive_owned_by_another_account_fails(self, tmp_path,
+                                                       monkeypatch):
+        cfg = _config(tmp_path)
+        self._archive(tmp_path)
+        self._paired(tmp_path)
+        monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1000)
+
+        result = _run(cfg, "whatsapp.baileys_session")
+
+        assert result.status == doctor.FAIL
+        assert "1 directory/ies" in result.detail
+
+    def test_a_private_archive_directory_is_not_counted_as_loose(self, tmp_path):
+        """The control for the two above: a 0700 archive owned by this account
+        must not fail, or the pass warns on every host that has re-paired."""
+        cfg = _config(tmp_path)
+        self._archive(tmp_path)
+        self._paired(tmp_path)
+
+        result = _run(cfg, "whatsapp.baileys_session")
+
+        assert result.status == doctor.OK
+        assert "0 directory/ies" in result.detail
+
+    def test_an_exposed_archive_still_reports_that_there_is_no_live_session(
+        self, tmp_path,
+    ):
+        """The docstring said an archive finding is never dropped, and the
+        `if wide` branch dropped the *live* one: a host that is both unpaired
+        and holding an exposed archive was told only about the archive."""
+        cfg = _config(tmp_path)
+        self._archive(tmp_path, file_mode=0o644)
+
+        result = _run(cfg, "whatsapp.baileys_session")
+
+        assert result.status == doctor.FAIL
+        assert "does not exist" in result.detail
+        assert "archived WhatsApp session" in result.detail
+
+    def test_a_second_sidecar_is_named_inside_an_open_window(self, tmp_path):
+        """The pairing arm returns ahead of the refused-connection arm, whose
+        remedy is the only surface for two Baileys clients against one session
+        directory — and mid-window is when that matters most, since the
+        sequence renames the directory on the strength of a drop it caused on
+        the peer it adopted. The fact and the remedy come along."""
+        baileys_bridge.set_active_bridge(_Status(
+            listening=True, connected=True, ready=False,
+            pairing_state="awaiting_scan", rejected_connections=1,
+        ))
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
+
+        assert result.status == doctor.WARN
+        assert "a second WhatsApp sidecar has tried to connect" in result.detail
+        assert "leave exactly one" in result.remedy
+
+    def test_no_second_sidecar_leaves_the_window_message_alone(self, tmp_path):
+        """The control. Naming it unconditionally would report the corruption
+        hazard on every pairing there is."""
+        baileys_bridge.set_active_bridge(_Status(
+            listening=True, connected=True, ready=False,
+            pairing_state="awaiting_scan",
+        ))
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
+
+        assert "second WhatsApp sidecar" not in result.detail
+        assert "leave exactly one" not in result.remedy
+
+    def test_the_pairing_states_are_the_relay_modules_own_constants(self):
+        """A drift guard rather than a driven case, because the driven ones
+        cannot see this: the doctor arm compared string literals and the tests
+        set the same literals, so a rename of either constant would break
+        production while every test stayed green — losing the `sidecar_absent`
+        remedy, which is the one arm the spec asks for by name."""
+        source = source_of(doctor._baileys_pairing_window)
+
+        assert "STATE_SIDECAR_ABSENT" in source
+        assert "STATE_AWAITING_SCAN" in source
+        assert '== "sidecar_absent"' not in source
+        assert '== "awaiting_scan"' not in source
+        assert pairing_relay.STATE_SIDECAR_ABSENT == "sidecar_absent"
+        assert pairing_relay.STATE_AWAITING_SCAN == "awaiting_scan"
+
+    def test_an_unresolvable_session_dir_is_reported_rather_than_raised(
+        self, tmp_path,
+    ):
+        """`expanduser` answers `RuntimeError` for a `~unknownuser` value,
+        which is neither an `OSError` nor a `ValueError`. It reached
+        `run_checks`' catch-all and was reported as a `FAIL` naming the
+        exception class."""
+        cfg = _config(tmp_path, session_dir="~nosuchuser12345/session")
+
+        result = _run(cfg, "whatsapp.baileys_session")
+
+        assert result.status == doctor.WARN
+        assert "could not be resolved" in result.detail
+        assert "session_dir" in result.remedy
+
+    def test_an_unresolvable_relay_path_is_reported_rather_than_raised(
+        self, tmp_path,
+    ):
+        cfg = _config(tmp_path, pairing_relay_path="~nosuchuser12345/pair.json")
+
+        result = _run(cfg, "whatsapp.pairing_relay")
+
+        assert result.status == doctor.WARN
+        assert "could not be resolved" in result.detail
+        assert "pairing_relay_path" in result.remedy
+
+    def test_the_age_comes_from_the_oldest_parseable_stamp(self, tmp_path):
+        """The name filter accepts any `\\d{8}T\\d{6}Z`, including an
+        impossible date, and such a name sorts ahead of every real one — so
+        reading `archives[0]`'s stamp dropped the age clause while still
+        counting the archive."""
+        cfg = _config(tmp_path)
+        self._paired(tmp_path)
+        (tmp_path / "whatsapp-baileys-session.00000000T000000Z").mkdir(mode=0o700)
+        real = datetime.now(timezone.utc) - timedelta(days=3)
+        (tmp_path / (
+            "whatsapp-baileys-session."
+            + real.strftime(baileys_bridge.ARCHIVE_STAMP_FORMAT)
+        )).mkdir(mode=0o700)
+
+        result = _run(cfg, "whatsapp.baileys_session")
+
+        assert result.status == doctor.OK
+        assert "2 archived session(s)" in result.detail
+        assert "the oldest 3d 0h old" in result.detail
+
+    def test_the_relay_mode_is_the_relay_modules_own(self):
+        """Same drift shape as the states above, one constant over."""
+        source = source_of(doctor.check_whatsapp_pairing_relay)
+
+        assert "RELAY_MODE" in source
+        assert "0o600" not in source
+        assert pairing_relay.RELAY_MODE == 0o600
+
+    def test_under_root_the_relay_detail_states_the_owner_it_read(
+        self, tmp_path, monkeypatch,
+    ):
+        """The ownership arm is skipped under root by design, so the OK detail
+        may not claim the file is private to this account — a check must not
+        assert what it did not compare."""
+        cfg = _config(tmp_path)
+        path = baileys_bridge.default_pairing_relay_path(cfg)
+        path.write_text("{}")
+        os.chmod(path, 0o600)
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+
+        result = _run(cfg, "whatsapp.pairing_relay")
+
+        assert result.status == doctor.OK
+        assert "private to this account" not in result.detail
+        assert f"owned by uid {path.stat().st_uid}" in result.detail
