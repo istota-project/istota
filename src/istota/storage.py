@@ -744,13 +744,30 @@ def _sandbox_writable_roots(config: "Config") -> list[Path]:
     then be the leaf's own ``O_NOFOLLOW`` — against a parent directory a
     prompt-injected task can replace.
 
-    Three entries, each a per-user subtree of the root named here:
+    Four entries, each a per-user subtree of the root named here:
     ``{workspace}/Users/{user_id}`` (§1's own rule), ``{temp_dir}/{user_id}``,
-    bound into **every** task's namespace, and
-    ``{developer.repos_dir}/{user_id}``, bound into an admin developer task's.
-    The roots rather than the subtrees, because the operator wrote one path and
-    this has no user to scope it by — refusing a sibling user's subtree too
-    costs nothing, since no vault belongs anywhere under any of them.
+    bound into **every** task's namespace, ``{developer.repos_dir}/{user_id}``,
+    bound into an admin developer task's, and
+    ``{security.sandbox_cache_dir}/{user_id}``, the package cache
+    ``sandbox_plan`` emits as ``_rw(cache_dir, "package_cache")``. The roots
+    rather than the subtrees, because the operator wrote one path and this has
+    no user to scope it by — refusing a sibling user's subtree too costs
+    nothing, since no vault belongs anywhere under any of them.
+
+    **The authoritative bind list is ``sandbox_plan``, and this is a deliberate
+    second copy with a narrower question.** ``sandbox_plan.config_sandbox_bound_roots``
+    answers "would a configured path land in *any* bind", read-only ones
+    included, and is held in step with the real planner by a coverage walk
+    (``tests/test_whatsapp_pairing_web.py``) that drives ``build_mount_plan``
+    and requires every mount it emits to be covered. This one answers the
+    narrower "would a task be able to *swap* the parent directory", so it takes
+    the read-write binds alone — and it cannot simply defer to that function,
+    which deliberately excludes ``workspace_path`` whole and admits a direct
+    child of ``temp_dir``, both of which this must refuse. Widening is the safe
+    direction here too: an entry wider than the real bind refuses a path that
+    would have been fine, a missing one admits a path that is bound. The
+    package-cache entry was missing until the two lists were read side by side;
+    if a further read-write bind appears in ``sandbox_plan``, it belongs here.
 
     Deliberately **not** the whole of what the daemon can read: this is the
     written set, and §1's argument is about a file a task can swap rather than
@@ -763,10 +780,12 @@ def _sandbox_writable_roots(config: "Config") -> list[Path]:
     every deployment without the developer skill, and an empty root must not
     read as "every path is inside it".
     """
+    cache_dir = (config.security.sandbox_cache_dir or "").strip()
     candidates: list[Path | None] = [
         config.workspace_path if config.has_workspace else None,
         config.temp_dir,
         Path(config.developer.repos_dir) if config.developer.repos_dir else None,
+        Path(cache_dir) if cache_dir else None,
     ]
     roots: list[Path] = []
     for candidate in candidates:

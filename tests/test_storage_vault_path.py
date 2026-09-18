@@ -312,6 +312,37 @@ class TestTheAbsoluteForm:
 
         assert _resolve(config) is None
 
+    def test_an_absolute_path_under_the_package_cache_is_refused(self, tmp_path):
+        """The fourth read-write bind, and the one this list was missing.
+
+        `sandbox_plan` emits `_rw(cache_dir, "package_cache")` for
+        `resolve_sandbox_cache_dir`, whose configured branch is
+        `{security.sandbox_cache_dir}/{user_id}` — the shape for every
+        non-admin and for any deployment without the developer skill, so the
+        common case rather than the exotic one. It was admitted here until
+        this function was read beside `sandbox_plan.config_sandbox_bound_roots`,
+        which lists it.
+        """
+        config = _config(tmp_path, alice=UserConfig())
+        cache = tmp_path / "caches"
+        config.security.sandbox_cache_dir = str(cache)
+        vault = _seed(cache / "alice" / "vault.kdbx")
+        config.users["alice"].vault_path = str(vault)
+
+        assert _resolve(config) is None
+
+    def test_an_unconfigured_package_cache_refuses_nothing(self, tmp_path):
+        """The control for the entry above, matching the repos-root pair: an
+        empty `sandbox_cache_dir` must not read as "every path is inside it"."""
+        config = _config(tmp_path, alice=UserConfig())
+        config.security.sandbox_cache_dir = ""
+        vault = _seed(tmp_path / "etc" / "vault.kdbx")
+        config.users["alice"].vault_path = str(vault)
+
+        location = _resolve(config)
+        assert location is not None
+        assert location.path == vault.resolve()
+
     def test_an_unconfigured_repos_root_refuses_nothing(self, tmp_path):
         """The control: `developer.repos_dir` is empty by default, and an empty
         root must not read as "every path is inside it"."""
