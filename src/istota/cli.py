@@ -3019,7 +3019,7 @@ def cmd_whatsapp_restore_session(args):
     # The row this recovers from is a non-terminal one whose deadline may not
     # have passed — the operator can be back inside the window — so the next
     # scheduler tick would adopt it, arm a window over the session just put
-    # back, and latch `_unpaired_by_repair`, refusing every send until a
+    # back, and latch `_session_unpaired`, refusing every send until a
     # `ready` arrives. Clearing it is safe here for the reason the whole
     # command is: a bridge answering the socket was already refused above, so
     # no live window can own this row. Best effort, after the credential has

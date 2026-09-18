@@ -106,6 +106,25 @@ def bind_user(config: Config) -> None:
 
 @pytest.fixture
 async def bridge(config, sockets):
+    """A started bridge over a session directory that holds a credential.
+
+    **Seeded before `start()`, because every send case below models a paired
+    sidecar.** `start()` reads the directory to decide whether this bridge is
+    attached to a session that can send at all (ISSUE-506), and a deployment
+    whose directory holds no auth state cannot — so an unseeded fixture here
+    would be a bridge in one state answering as though it were in another,
+    which is the fake-more-capable-than-the-thing failure
+    `.claude/rules/testbed.md` keeps recording. The unpaired shape is its own
+    subject in `tests/test_whatsapp_pairing_bridge.py`.
+
+    0600 explicitly, because that is the mode the sidecar's own umask leaves —
+    so `harden_session_files` finds nothing to narrow and the fixture is not
+    exercising the repair path incidentally on its way to a send assertion.
+    """
+    sockets.session.mkdir(parents=True, exist_ok=True)
+    creds = sockets.session / "creds.json"
+    creds.write_text('{"me":"the paired device"}')
+    creds.chmod(0o600)
     instance = BaileysBridge(
         config, socket_path=sockets.socket, session_dir=sockets.session,
         send_timeout=2.0,
