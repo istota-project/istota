@@ -840,10 +840,35 @@ language = "en_US"
 # is better there, since systemd restarts a unit a permanent fatal stopped.
 # `istota whatsapp pair` finds the program in a checkout on its own, so this
 # is only needed where the daemon itself has to run one.
+# The four pairing keys configure re-pairing the session from the admin web UI
+# (Admin, Connections) rather than over SSH. pairing_enabled is the off switch
+# and gates those routes and nothing else — `istota whatsapp pair` writes the
+# same request row and is unaffected, which is deliberate: the operator who
+# turns the web flow off is the one who will be on a terminal.
+#
+# pairing_window_seconds is how long a pairing window stays armed. For that
+# span a pairing code — a full-account WhatsApp credential — is relayable to
+# the admin UI, so this is the number to shorten to narrow the exposure.
+#
+# pairing_relay_path is where the code is relayed between the scheduler and the
+# web process. Empty resolves to a 0600 file beside db_path, which is where the
+# session directory already sits and which the task sandbox binds at no path; a
+# path inside a sandbox-bound root is refused at the route rather than used.
+#
+# restart_interval_seconds is this deployment's declaration that its supervisor
+# restarts the sidecar on a fixed interval of about this length. It gates
+# nothing — it only sizes how long a re-pair waits for the sidecar to come back
+# before reporting it missing. 0 means undeclared, which is right wherever the
+# supervisor backs off rather than waiting a fixed period (Docker). Under
+# systemd set it to the unit's own RestartSec.
 [whatsapp.baileys]
 session_dir = ""
 library_version = ""
 sidecar_command = ""
+pairing_enabled = true
+pairing_window_seconds = 300
+pairing_relay_path = ""
+restart_interval_seconds = 0
 
 [conversation]
 # Enable conversation context (uses Sonnet to select relevant previous messages)

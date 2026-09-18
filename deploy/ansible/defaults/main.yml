@@ -1031,6 +1031,31 @@ istota_whatsapp_baileys_node_bin: /usr/bin/node
 istota_whatsapp_baileys_sidecar_command: ""
 istota_whatsapp_baileys_log_level: "info"    # error|warn|info|debug, to sidecar.log
 istota_whatsapp_baileys_memory_high: "512M"  # empty omits the directive
+# How long systemd waits before restarting the sidecar, and the daemon's own
+# declaration of the same number. **One variable renders both**, which is the
+# only way they cannot drift: it fills `RestartSec=` in
+# istota-whatsapp-baileys.service.j2 and `restart_interval_seconds` under
+# `[whatsapp.baileys]` in config.toml.j2. The daemon uses it to size how long a
+# re-pair waits for the sidecar to come back before reporting it missing — it
+# gates nothing, so a wrong value costs an inaccurate deadline rather than
+# permission to act, and the unit's own comment holds the reason for 30 rather
+# than 5.
+istota_whatsapp_baileys_restart_sec: 30
+# Re-pairing the paired session from the admin web UI (Admin, Connections).
+# Setting this false keeps pairing a terminal-only operation: those routes 404
+# and `istota whatsapp pair` is unaffected, which is deliberate — the operator
+# who turned the web flow off is exactly the one who will be on a terminal.
+istota_whatsapp_baileys_pairing_enabled: true
+# How long a pairing window stays armed. For that span a pairing code — a
+# full-account WhatsApp credential — is relayable to the admin UI, so this is
+# the number to shorten to narrow the exposure. 300s is about fifteen QR
+# rotations.
+istota_whatsapp_baileys_pairing_window_seconds: 300
+# Where the code is relayed between the scheduler and the web process. Empty
+# resolves to a 0600 file beside the database, which is where the session
+# directory itself already sits and which the task sandbox binds at no path. A
+# path inside a sandbox-bound root is refused at the route rather than used.
+istota_whatsapp_baileys_pairing_relay_path: ""
 
 # --- Cloud adapter (provider = "whatsapp_cloud") ---
 #

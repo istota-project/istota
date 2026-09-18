@@ -49,9 +49,9 @@ from istota.scheduler import (
 # (gate name, config.scheduler field). ``None`` marks a gate whose interval is
 # not a config field: `travel-timezone` reads the module constant
 # TRAVEL_TZ_CHECK_INTERVAL, `status-write` a literal 60, and
-# `backup-stale-alert` is not an interval gate at all (it ran on every tick and
-# still does — it is in the table only so its position, immediately after the
-# snapshot gate, stays stated in one place).
+# `backup-stale-alert` and `whatsapp-pairing` are not interval gates at all
+# (both run on every tick — `backup-stale-alert` is in the table only so its
+# position, immediately after the snapshot gate, stays stated in one place).
 EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("briefings", "briefing_check_interval"),
     ("shared-blocks", "briefing_check_interval"),
@@ -69,6 +69,10 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     ("worktree-reap", "worktree_reap_interval"),
     ("sandbox-cache-sweep", "sandbox_cache_sweep_interval"),
     ("avatar-import", "avatar_import_interval"),
+    # Added after the baseline extraction: the WhatsApp pairing request poll,
+    # `fixed_interval=0` like `backup-stale-alert` and for the same
+    # clock-bypass reason. See `tests/test_whatsapp_pairing_poll.py`.
+    ("whatsapp-pairing", None),
     ("skill-overlay-reindex", "skill_overlay_reindex_interval"),
     ("db-backup", "db_backup_interval"),
     ("backup-stale-alert", None),

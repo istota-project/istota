@@ -152,6 +152,11 @@ Meta's Cloud API, used directly rather than through a Business Solution Provider
 |---|---|---|
 | `session_dir` | `""` | Where the paired session is stored. Empty derives it beside the database. The session is a full-account credential |
 | `library_version` | `""` | Pin the sidecar's Baileys version. Empty follows what the shipped sidecar pins |
+| `sidecar_command` | `""` | The command that runs the Node sidecar. Empty means the daemon listens and spawns nothing, which is what a deployment running the sidecar as its own unit or compose service wants |
+| `pairing_enabled` | `true` | Whether a session can be re-paired from Admin, Connections. `false` makes the pairing routes answer 404; `istota whatsapp pair` is unaffected |
+| `pairing_window_seconds` | `300` | How long a pairing window stays open for a code to be scanned |
+| `pairing_relay_path` | `""` | Where a pairing code is relayed between the process holding the sidecar and the web process. Empty derives it beside the database, 0600 |
+| `restart_interval_seconds` | `0` | Roughly how long this deployment's supervisor waits before restarting the sidecar. It gates nothing — it sizes how long a pairing window waits before reporting the sidecar missing. `0` means undeclared |
 
 ### `[whatsapp.cloud.proactive_template]`
 

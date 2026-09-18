@@ -196,6 +196,11 @@ case "${ISTOTA_WHATSAPP_PROVIDER}" in
         ;;
 esac
 ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND="$(toml_escape "${ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND:-}")"
+# Escaped and defaulted here for the reason its neighbour is: the heredoc below
+# runs under `set -u`, so an unset variable there aborts the whole render, and
+# a `"` in an operator's path would otherwise leave a config.toml that does not
+# parse — which on this shape is a container that will not boot.
+ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH="$(toml_escape "${ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH:-}")"
 
 render_config() {
     echo "[istota] Generating config.toml..."
@@ -533,8 +538,21 @@ language = "${ISTOTA_WHATSAPP_TEMPLATE_LANGUAGE}"
 # whatsapp-baileys compose service is given, derived from db_path above.
 # sidecar_command is empty by default and means the daemon listens and spawns
 # nothing, which is what a stack running the sidecar as its own service wants.
+# The four pairing keys configure re-pairing from the admin web UI.
+# pairing_enabled gates those routes and nothing else — the scheduler's pairing
+# poll stays on the Baileys predicate, because istota whatsapp pair writes the
+# same request row. restart_interval_seconds defaults to 0 on this shape
+# deliberately: it is a declaration that the supervisor restarts the sidecar on
+# a fixed interval, and Docker's backoff from 100ms is not one. It gates
+# nothing; a 0 only shortens the sidecar-absent deadline.
+# (No backticks in this heredoc: it is unquoted, so a pair is a command
+# substitution that deletes the text between them and writes to stderr.)
 [whatsapp.baileys]
 sidecar_command = "${ISTOTA_WHATSAPP_BAILEYS_SIDECAR_COMMAND}"
+pairing_enabled = ${ISTOTA_WHATSAPP_BAILEYS_PAIRING_ENABLED:-true}
+pairing_window_seconds = ${ISTOTA_WHATSAPP_BAILEYS_PAIRING_WINDOW_SECONDS:-300}
+pairing_relay_path = "${ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH}"
+restart_interval_seconds = ${ISTOTA_WHATSAPP_BAILEYS_RESTART_INTERVAL_SECONDS:-0}
 TOML
 
     cat >> "$CONFIG_FILE" <<TOML

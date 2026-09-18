@@ -10,6 +10,7 @@ has to name all three.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import tomllib
 from pathlib import Path
@@ -1379,6 +1380,291 @@ def _render_docker(directory: Path, provider: str):
         text=True,
         timeout=120,
     )
+
+
+class TestThePairingKeysReachBothGenerators:
+    """The four `[whatsapp.baileys]` pairing keys, through every place a
+    `[whatsapp.baileys]` key has to land.
+
+    Seven places, not two, and two of them fail in ways unrelated to this
+    surface: `config.toml.j2` references the Ansible variable unguarded, so a
+    missing `defaults/main.yml` entry fails the play at the template task
+    having already replaced the running deployment's config, and
+    `tests/test_config_field_coverage.py` compares the dataclass against
+    `config/config.example.toml`, so an undocumented key turns the **default
+    suite** red. Both are asserted here rather than left to be discovered.
+    """
+
+    PAIRING_KEYS = (
+        "pairing_enabled",
+        "pairing_window_seconds",
+        "pairing_relay_path",
+        "restart_interval_seconds",
+    )
+
+    PAIRING_ENV = {
+        "ISTOTA_WHATSAPP_BAILEYS_PAIRING_ENABLED",
+        "ISTOTA_WHATSAPP_BAILEYS_PAIRING_WINDOW_SECONDS",
+        "ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH",
+        "ISTOTA_WHATSAPP_BAILEYS_RESTART_INTERVAL_SECONDS",
+    }
+
+    def test_the_dataclass_declares_all_four(self):
+        from istota.config import WhatsAppBaileysConfig
+
+        declared = {f.name for f in dataclasses.fields(WhatsAppBaileysConfig)}
+        for name in self.PAIRING_KEYS:
+            assert name in declared, name
+
+    def test_the_example_config_documents_all_four(self):
+        """`tests/test_config_field_coverage.py` is the general guard; this is
+        the one that names the four and so says which key is missing."""
+        text = (REPO / "config" / "config.example.toml").read_text()
+        start = text.index("[whatsapp.baileys]")
+        block = text[start:]
+        end = block.find("\n[", 1)
+        block = block if end < 0 else block[:end]
+        for name in self.PAIRING_KEYS:
+            assert re.search(rf"^{name}\s*=", block, re.M), name
+
+    def test_the_docker_render_writes_all_four(self, tmp_path):
+        path = render_docker_config(
+            tmp_path, **REQUIRED, **WHATSAPP_VALUES, **WHATSAPP_ADAPTER_VALUES,
+        )
+        baileys = tomllib.loads(path.read_text())["whatsapp"]["baileys"]
+        for name in self.PAIRING_KEYS:
+            assert name in baileys, name
+        # The shape's own defaults: pairing on, the shipped window, the relay
+        # resolved rather than pointed somewhere, and no restart interval
+        # declared because Docker's backoff from 100ms is not one.
+        assert baileys["pairing_enabled"] is True
+        assert baileys["pairing_window_seconds"] == 300
+        assert baileys["pairing_relay_path"] == ""
+        assert baileys["restart_interval_seconds"] == 0
+
+    def test_the_docker_render_honours_each_value(self, tmp_path):
+        path = render_docker_config(
+            tmp_path,
+            **REQUIRED,
+            **WHATSAPP_VALUES,
+            **WHATSAPP_ADAPTER_VALUES,
+            ISTOTA_WHATSAPP_BAILEYS_PAIRING_ENABLED="false",
+            ISTOTA_WHATSAPP_BAILEYS_PAIRING_WINDOW_SECONDS="90",
+            ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH="/srv/relay/qr.json",
+            ISTOTA_WHATSAPP_BAILEYS_RESTART_INTERVAL_SECONDS="7",
+        )
+        baileys = _loaded(path).whatsapp.baileys
+
+        assert baileys.pairing_enabled is False
+        assert baileys.pairing_window_seconds == 90
+        assert baileys.pairing_relay_path == "/srv/relay/qr.json"
+        assert baileys.restart_interval_seconds == 7
+
+    def test_a_quote_in_the_relay_path_still_renders_loadable_toml(self, tmp_path):
+        """The heredoc runs under `set -u` and interpolates, so the path is
+        escaped where its neighbour is — an unescaped `"` leaves a config.toml
+        that does not parse, which on this shape is a container that will not
+        boot."""
+        path = render_docker_config(
+            tmp_path,
+            **REQUIRED,
+            **WHATSAPP_VALUES,
+            **WHATSAPP_ADAPTER_VALUES,
+            ISTOTA_WHATSAPP_BAILEYS_PAIRING_RELAY_PATH='/srv/a"b/qr.json',
+        )
+        loaded = _loaded(path)
+
+        assert loaded.whatsapp.baileys.pairing_relay_path == '/srv/a"b/qr.json'
+
+    def test_compose_passes_every_pairing_variable_the_render_reads(self):
+        """The testbed rules' two-file rule: a variable the generator reads
+        must also be passed through, and the two files are not automatically
+        in sync."""
+        compose = yaml.safe_load(COMPOSE.read_text())
+        environment = compose["services"]["istota"]["environment"]
+
+        for name in self.PAIRING_ENV:
+            assert name in environment, f"compose withholds {name}"
+
+    def test_the_env_example_documents_every_pairing_variable(self):
+        text = ENV_EXAMPLE.read_text()
+
+        for name in self.PAIRING_ENV:
+            assert re.search(rf"^{name}=", text, re.M), (
+                f".env.example does not document {name}"
+            )
+
+    def test_the_ansible_template_renders_all_four(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(render_ansible_config(
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_provider="baileys",
+        ))
+        baileys = _loaded(path).whatsapp.baileys
+
+        assert baileys.pairing_enabled is True
+        assert baileys.pairing_window_seconds == 300
+        assert baileys.pairing_relay_path == ""
+        # The role declares an interval because systemd genuinely has one.
+        assert baileys.restart_interval_seconds == 30
+
+    def test_the_ansible_template_honours_each_value(self, tmp_path):
+        path = tmp_path / "config.toml"
+        path.write_text(render_ansible_config(
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_provider="baileys",
+            istota_whatsapp_baileys_pairing_enabled=False,
+            istota_whatsapp_baileys_pairing_window_seconds=120,
+            istota_whatsapp_baileys_pairing_relay_path="/var/lib/istota/qr.json",
+            istota_whatsapp_baileys_restart_sec=45,
+        ))
+        baileys = _loaded(path).whatsapp.baileys
+
+        assert baileys.pairing_enabled is False
+        assert baileys.pairing_window_seconds == 120
+        assert baileys.pairing_relay_path == "/var/lib/istota/qr.json"
+        assert baileys.restart_interval_seconds == 45
+
+    def test_every_variable_the_template_names_has_a_default(self):
+        """`config.toml.j2` references these unguarded, and the play renders
+        under `StrictUndefined`, so a missing default is a failed converge
+        rather than a missing key — and it fails at the template task, having
+        already replaced the running deployment's config."""
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+
+        for name in (
+            "istota_whatsapp_baileys_pairing_enabled",
+            "istota_whatsapp_baileys_pairing_window_seconds",
+            "istota_whatsapp_baileys_pairing_relay_path",
+            "istota_whatsapp_baileys_restart_sec",
+        ):
+            assert name in defaults, f"defaults/main.yml has no {name}"
+
+
+class TestTheRestartIntervalCannotDrift:
+    """`RestartSec=` and `restart_interval_seconds` come from one variable.
+
+    That is the whole reason the config key is trustworthy: the daemon sizes
+    how long a re-pair waits for the sidecar to come back from a number it
+    cannot observe, and the only way the two cannot disagree is that one
+    Ansible variable renders both files.
+
+    **Asserted over a non-default value**, because a test that checks only the
+    default passes while the two are independent literals — which is exactly
+    the state this stage found them in.
+    """
+
+    UNIT = ANSIBLE / "templates" / "istota-whatsapp-baileys.service.j2"
+
+    def _unit(self, **overrides) -> str:
+        defaults = yaml.safe_load(DEFAULTS_FILE.read_text())
+        return _ansible_ish_environment().from_string(self.UNIT.read_text()).render(
+            **{
+                **defaults,
+                "istota_namespace": "istota",
+                "istota_user": "istota",
+                "istota_group": "istota",
+                "istota_home": "/srv/app/istota",
+                "istota_repo_dir": "/srv/app/istota/src",
+                **overrides,
+            }
+        )
+
+    @pytest.mark.parametrize("seconds", [30, 45, 5])
+    def test_both_artifacts_agree_for_any_value(self, tmp_path, seconds):
+        unit = self._unit(istota_whatsapp_baileys_restart_sec=seconds)
+        config_path = tmp_path / f"config-{seconds}.toml"
+        config_path.write_text(render_ansible_config(
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_provider="baileys",
+            istota_whatsapp_baileys_restart_sec=seconds,
+        ))
+
+        match = re.search(r"^RestartSec=(\d+)$", unit, re.M)
+        assert match, "the unit renders no RestartSec"
+        declared = _loaded(config_path).whatsapp.baileys.restart_interval_seconds
+
+        assert int(match.group(1)) == declared == seconds
+
+    @pytest.mark.parametrize("value", ["30s", "1min", "100ms"])
+    def test_a_systemd_time_span_does_not_render_unloadable_toml(
+        self, tmp_path, value
+    ):
+        """The cost of the two consumers sharing one variable.
+
+        `RestartSec=` accepts a systemd time span and `defaults/main.yml`
+        invites "set it to the unit's own RestartSec" — and the same value
+        written bare into `restart_interval_seconds` is TOML no istota process
+        can parse, so `load_config` would fail in the scheduler, the web app,
+        the webhook receiver and every host-side skill CLI spawn alike. The
+        template's `| int` renders 0 there, which is the "undeclared" value
+        that gates nothing; the role's own assert is what makes such an
+        inventory fail the converge rather than the daemon.
+
+        Negative control: dropping `| int` from the template turns this red on
+        `tomllib` refusing the render.
+        """
+        path = tmp_path / f"config-{value}.toml"
+        path.write_text(render_ansible_config(
+            istota_whatsapp_enabled=True,
+            istota_whatsapp_provider="baileys",
+            istota_whatsapp_baileys_restart_sec=value,
+        ))
+
+        baileys = _loaded(path).whatsapp.baileys
+
+        assert baileys.restart_interval_seconds == 0
+
+    def test_the_role_refuses_a_non_integer_interval(self):
+        """The half the filter cannot do: with `| int` the config still loads,
+        so the two artifacts silently disagree — the unit waits 1min and the
+        daemon believes it waits none. The assert is what makes that loud."""
+        tasks = yaml.safe_load(TASKS_FILE.read_text())
+        task = next(
+            t for t in tasks
+            if t.get("name") == "Assert WhatsApp settings the config loader accepts"
+        )
+        clauses = " ".join(str(c) for c in task["assert"]["that"])
+
+        assert "istota_whatsapp_baileys_restart_sec" in clauses
+        assert "istota_whatsapp_baileys_pairing_window_seconds" in clauses
+
+        env = _ansible_ish_environment()
+        for value, ok in (("30", True), ("30s", False), ("1min", False)):
+            rendered = env.from_string(
+                "{{ (v == (v | int)) | lower }}"
+            ).render(v=int(value) if value.isdigit() else value)
+            assert (rendered == "true") is ok, (value, rendered)
+
+    def test_the_unit_still_carries_the_reason_for_thirty(self):
+        """The comment explaining why thirty rather than five stays put as the
+        reason for the default, which is what a templated literal loses if
+        somebody moves the number without it."""
+        source = self.UNIT.read_text()
+
+        assert "{{ istota_whatsapp_baileys_restart_sec }}" in source
+        assert "RestartSec=30" not in source
+        assert "twelve entries a minute" in source
+
+    def test_the_daemons_timeout_scales_with_the_declared_value(self):
+        """What the number is actually for. It gates nothing — it supplies the
+        scaling term of the wait for a sidecar to reappear — so the assertion
+        is that the two are related, not that either is a threshold."""
+        from istota.transport.whatsapp.baileys_bridge import sidecar_return_timeout
+
+        assert sidecar_return_timeout(30) == sidecar_return_timeout(0) + 30
+        assert sidecar_return_timeout(0) == sidecar_return_timeout(-1)
+
+
+def _loaded(path: Path):
+    """`load_config` on a rendered file, with the import at function scope.
+
+    Every other caller in this file imports it inside its own test; one helper
+    says the same thing once.
+    """
+    from istota.config import load_config
+
+    return load_config(path)
 
 
 def _whatsapp_section(rendered: str) -> str:

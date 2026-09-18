@@ -229,6 +229,95 @@ class TestStartingTheBridge:
         assert baileys_bridge.active_bridge() is not None
         assert hooks, "no cleanup hook was registered"
 
+    def test_the_pairing_config_keys_reach_the_bridge(
+        self, tmp_path, monkeypatch,
+    ):
+        """Otherwise `pairing_window_seconds` and `restart_interval_seconds`
+        are operator keys that do nothing.
+
+        The bridge takes both as constructor parameters — which is what lets a
+        test drive a five-second window without writing a config file — so
+        this is the one place that reads them off the config, and nothing else
+        would go red if it stopped. `pairing_relay_path` is deliberately not
+        asserted here: `default_pairing_relay_path` resolves it, because the
+        poll's no-bridge relay clear has no bridge to ask.
+
+        Negative control: dropping either keyword from the construction turns
+        this red.
+        """
+        built: list[dict] = []
+
+        class _Bridge:
+            def __init__(self, config, **kwargs):
+                built.append(kwargs)
+
+            async def start(self):
+                return None
+
+            async def stop(self):
+                return None
+
+        monkeypatch.setattr(baileys_bridge, "BaileysBridge", _Bridge)
+        monkeypatch.setattr(
+            baileys_bridge, "resolve_sidecar_argv", lambda config: (),
+        )
+        monkeypatch.setattr(
+            "istota.async_runtime.run_coro", lambda coro, **kw: asyncio.run(coro),
+        )
+        monkeypatch.setattr(
+            "istota.async_runtime.get_async_runtime",
+            lambda: type(
+                "_RT", (), {"add_cleanup_hook": staticmethod(lambda hook: None)},
+            )(),
+        )
+
+        cfg = _config(
+            tmp_path, pairing_window_seconds=75, restart_interval_seconds=12,
+        )
+        assert baileys_runtime.start_baileys_bridge(cfg) is True
+
+        assert built and built[0]["pairing_window_seconds"] == 75.0
+        assert built[0]["restart_interval_seconds"] == 12
+
+    def test_a_nonsense_window_does_not_stop_the_bridge_starting(
+        self, tmp_path, monkeypatch,
+    ):
+        """The clamp is at the read rather than at the load, because
+        `load_config` runs in every istota process and a typo on this knob
+        must not stop any of them."""
+        built: list[dict] = []
+
+        class _Bridge:
+            def __init__(self, config, **kwargs):
+                built.append(kwargs)
+
+            async def start(self):
+                return None
+
+            async def stop(self):
+                return None
+
+        monkeypatch.setattr(baileys_bridge, "BaileysBridge", _Bridge)
+        monkeypatch.setattr(
+            baileys_bridge, "resolve_sidecar_argv", lambda config: (),
+        )
+        monkeypatch.setattr(
+            "istota.async_runtime.run_coro", lambda coro, **kw: asyncio.run(coro),
+        )
+        monkeypatch.setattr(
+            "istota.async_runtime.get_async_runtime",
+            lambda: type(
+                "_RT", (), {"add_cleanup_hook": staticmethod(lambda hook: None)},
+            )(),
+        )
+
+        cfg = _config(tmp_path, pairing_window_seconds=0)
+        assert baileys_runtime.start_baileys_bridge(cfg) is True
+
+        assert built[0]["pairing_window_seconds"] == (
+            baileys_bridge.PAIRING_WINDOW_SECONDS
+        )
+
     def test_a_start_that_fails_publishes_nothing_and_does_not_raise(
         self, tmp_path, monkeypatch,
     ):
