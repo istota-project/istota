@@ -63,6 +63,7 @@ from istota.transport.whatsapp.baileys_bridge import (
     PAIRING_STOPPING,
     PAIRING_STOP_TIMEOUT,
     BaileysBridge,
+    dir_holds_a_session,
 )
 from istota.transport.whatsapp.providers._types import (
     WhatsAppProviderAdapter,
@@ -135,10 +136,36 @@ def make_bridge(config, sockets, **kwargs) -> BaileysBridge:
 
 
 @contextlib.asynccontextmanager
-async def running(config, sockets, **kwargs):
+async def running(config, sockets, *, paired: bool = True, **kwargs):
+    """A started bridge, over a session directory that holds a credential.
+
+    **The credential is written before `start()`, not after, and that ordering
+    is the fixture's subject rather than its plumbing.** A paired deployment
+    has `creds.json` on disk before the daemon comes up — nothing writes one
+    into a running bridge's directory but the sidecar — and `start()` reads the
+    directory to decide whether this bridge is attached to a session that can
+    send at all. Seeding afterwards models a host that was unpaired at boot and
+    then acquired a credential with no `ready` behind it, which is a state no
+    deployment reaches; it also made every send case here a fake more capable
+    than the thing it stood in for, which is `.claude/rules/testbed.md`'s
+    recurring entry.
+
+    `paired=False` is the other real shape: a host that has never paired, or
+    one whose window expired unscanned before a restart. Both leave a directory
+    with no auth state in it, and the bridge is expected to refuse sends
+    definitely rather than write them at a sidecar that cannot carry them.
+
+    0600 explicitly, because that is the mode the sidecar's own umask leaves —
+    so `harden_session_files` finds nothing to narrow and the fixture is not
+    exercising the repair path incidentally on its way to a send assertion.
+    """
     instance = make_bridge(config, sockets, **kwargs)
+    if paired:
+        sockets.session.mkdir(parents=True, exist_ok=True)
+        creds = sockets.session / "creds.json"
+        creds.write_text(CREDS)
+        creds.chmod(0o600)
     await instance.start()
-    (sockets.session / "creds.json").write_text(CREDS)
     try:
         yield instance
     finally:
@@ -1184,7 +1211,7 @@ class TestASendInsideAWindow:
         all — the fake was more capable than the thing it stood in for, which
         is `.claude/rules/testbed.md`'s recurring entry.
 
-        The control is removing `_unpaired_by_repair` from `_send`'s second
+        The control is removing `_session_unpaired` from `_send`'s second
         arm: the row settles `unknown` and this goes red there specifically.
         """
         bind_user(config)
@@ -1300,6 +1327,240 @@ class TestASendInsideAWindow:
                 record = await asyncio.wait_for(sending, timeout=5.0)
 
             assert record.status == "accepted"
+
+
+# ---------------------------------------------------------------------------
+# A directory with no credential in it
+# ---------------------------------------------------------------------------
+
+
+class TestASendAgainstADirectoryHoldingNoSession:
+    """The two states `_send`'s post-repair latch could not reach, because the
+    latch lives in memory and both of them outlive the process that set it.
+
+    ISSUE-504 restored the refusal for the life of an *adopted* window. What it
+    left uncovered is every send after that window is gone: a window that
+    expired unscanned leaves the session directory emptied, a restart gives the
+    new bridge a clear latch, and from then on every send reaches
+    `writer.write`. The answer is a failure the sidecar cannot call definite,
+    or no answer at all — both settle `unknown`, and `sent_whatsapp.logical_key`
+    is UNIQUE with nothing deleting from that table, so each one is a task
+    result, a confirmation prompt or an admin alert that can never be sent.
+
+    A host that has never paired is the same shape with no re-pair behind it.
+    ISSUE-506 asked whether the sidecar's own `if (!this.sock)` guard already
+    answers that one definitely; it does not. `open_()` assigns `this.sock`
+    synchronously from `makeWASocket` and the connection opens later, so the
+    guard passes and every path past it is `definite: false` — a throw, a reply
+    with no message id, or a hang the daemon ends at `send_timeout` with the
+    write mark set. All three settle `unknown`, so the fix is one gate for both
+    states: the directory is the evidence, and the bridge can read it itself.
+
+    Each case asserts on the `sent_whatsapp` row rather than on a refusal, per
+    the rule this surface already states, and each has a control: remove the
+    `start()` latch and the row settles `unknown`.
+    """
+
+    async def test_a_send_after_a_restart_into_an_emptied_directory_fails(
+        self, config, sockets, monkeypatch,
+    ):
+        """ISSUE-506 §1, and the restart is modelled as a second bridge over
+        the same directory, which is what a scheduler restart is.
+
+        The first bridge re-pairs, emptying the directory, and its window is
+        cancelled unscanned — so the durable state a later adoption could read
+        is gone and the credential is not coming back on its own. The second
+        bridge starts over exactly that directory with everything in memory
+        reset: no fatal latch, no window, no repair flag.
+        """
+        bind_user(config)
+        async with running(config, sockets) as first:
+            async with sidecar(first, sockets) as peer:
+                await latch_fatal(first, peer)
+                assert (await first.repair_session(USER)).ok is True
+                assert await first.cancel_pairing() is True
+        assert not dir_holds_a_session(sockets.session)
+
+        async with running(config, sockets, paired=False) as second:
+            use_bridge_as_adapter(monkeypatch, second)
+            assert second.status.fatal_is_permanent is False
+            assert second.pairing_window is None
+            async with sidecar(
+                second, sockets, closes_on_shutdown=False,
+            ) as peer:
+                record = await asyncio.wait_for(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:10", user_id=USER,
+                        text="the backup finished",
+                    ),
+                    timeout=5.0,
+                )
+
+            assert record.status == "failed"
+            assert ledger_row(config, "task-result:10")["status"] == "failed"
+            assert peer.types.count(proto.MSG_SEND) == 0, peer.types
+
+    async def test_a_send_on_a_host_that_never_paired_fails(
+        self, config, sockets, monkeypatch,
+    ):
+        """ISSUE-506 §2. No re-pair anywhere behind this one — the directory
+        has simply never held a credential, which is every deployment that
+        enables the surface before anybody scans a code."""
+        bind_user(config)
+        async with running(config, sockets, paired=False) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                record = await asyncio.wait_for(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:11", user_id=USER,
+                        text="the backup finished",
+                    ),
+                    timeout=5.0,
+                )
+
+            assert record.status == "failed"
+            assert ledger_row(config, "task-result:11")["status"] == "failed"
+            assert peer.types.count(proto.MSG_SEND) == 0, peer.types
+
+    async def test_pre_pair_auth_state_still_reads_as_unpaired(
+        self, config, sockets, monkeypatch,
+    ):
+        """**The axis the fix actually turns on, and the one a file-presence
+        test gets wrong.**
+
+        In both states above the sidecar is a unit of its own and is *up*,
+        looping on a fresh code every twenty seconds against the directory this
+        bridge is about to read, with `saveCreds` bound to `creds.update`. So
+        the directory need not be empty: a Baileys release is free to persist
+        noise keys, prekeys or an unregistered `creds.json` at any point in that
+        loop, and every one of those is a file that is not a session anybody can
+        send from. A predicate that counts files answers "paired" there and the
+        latch is never set — in exactly the two scenarios it exists for, on the
+        shape both deployments run.
+
+        Nothing in any tier connects to WhatsApp, so which files Baileys leaves
+        mid-pairing cannot be asserted here. What can be, and is, is that the
+        gate reads the registration rather than the listing: an unregistered
+        `creds.json` and a Signal key file are both refused.
+        """
+        bind_user(config)
+        sockets.session.mkdir(parents=True, exist_ok=True)
+        (sockets.session / "creds.json").write_text(
+            '{"registered": false, "noiseKey": {"private": "x"}}',
+        )
+        (sockets.session / "pre-key-1.json").write_text('{"public": "y"}')
+        assert dir_holds_a_session(sockets.session) is True
+
+        async with running(config, sockets, paired=False) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
+            assert instance._session_unpaired is True
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                record = await asyncio.wait_for(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:14", user_id=USER,
+                        text="the backup finished",
+                    ),
+                    timeout=5.0,
+                )
+
+            assert record.status == "failed"
+            assert ledger_row(config, "task-result:14")["status"] == "failed"
+            assert peer.types.count(proto.MSG_SEND) == 0, peer.types
+
+    async def test_a_start_over_a_credential_does_not_latch(
+        self, config, sockets, monkeypatch,
+    ):
+        """The no-false-positive control, and the reason the fixture writes the
+        credential before `start()`.
+
+        A paired deployment must be unaffected: the directory holds auth state
+        at start, so nothing latches and the send crosses the socket exactly as
+        it did before. Without this the two cases above would pass equally well
+        against a bridge that had simply stopped sending.
+        """
+        bind_user(config)
+        async with running(config, sockets) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                sending = asyncio.ensure_future(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:12", user_id=USER,
+                        text="the backup finished",
+                    ),
+                )
+                await wait_for(
+                    lambda: peer.types.count(proto.MSG_SEND) == 1, timeout=5.0,
+                )
+                request = next(
+                    payload
+                    for _, payload in peer.frames
+                    if payload["type"] == proto.MSG_SEND
+                )
+                await peer.say(
+                    proto.MSG_SEND_RESULT,
+                    request_id=request["request_id"],
+                    ok=True,
+                    message_id="BAE5CAFE",
+                )
+                record = await asyncio.wait_for(sending, timeout=5.0)
+
+            assert record.status == "accepted"
+            assert ledger_row(config, "task-result:12")["status"] == "accepted"
+
+    async def test_a_ready_lifts_the_latch_a_start_over_an_empty_directory_set(
+        self, config, sockets, monkeypatch,
+    ):
+        """The third producer shares the one thing that clears the latch, so a
+        host pairing for the first time can send the moment it is paired.
+
+        Without this the refusal would be a one-way door for the life of the
+        process: a deployment that enabled the surface, scanned a code and came
+        up would keep answering `failed` until somebody restarted the daemon.
+        """
+        bind_user(config)
+        async with running(config, sockets, paired=False) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
+            # Asserted, not assumed: without it this passes identically against
+            # a `start()` that never latches, so it would be a live guard on the
+            # clear and say nothing about the producer its name is about.
+            assert instance._session_unpaired is True
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                await peer.say(proto.MSG_READY)
+                await wait_for(lambda: instance.status.ready is True)
+                assert instance._session_unpaired is False
+
+                sending = asyncio.ensure_future(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:13", user_id=USER,
+                        text="the backup finished",
+                    ),
+                )
+                await wait_for(
+                    lambda: peer.types.count(proto.MSG_SEND) == 1, timeout=5.0,
+                )
+                request = next(
+                    payload
+                    for _, payload in peer.frames
+                    if payload["type"] == proto.MSG_SEND
+                )
+                await peer.say(
+                    proto.MSG_SEND_RESULT,
+                    request_id=request["request_id"],
+                    ok=True,
+                    message_id="BAE5CAFE",
+                )
+                record = await asyncio.wait_for(sending, timeout=5.0)
+
+            assert record.status == "accepted"
+            assert ledger_row(config, "task-result:13")["status"] == "accepted"
 
 
 # ---------------------------------------------------------------------------
@@ -1481,7 +1742,7 @@ class TestAdoptingAWindowAfterARestart:
     ):
         """**A send-ledger guard, not tidiness.** A `ready` clears the latch and
         nothing re-sends one until the link reconnects — so arming a window over
-        an open session would set `_unpaired_by_repair` with nothing left to
+        an open session would set `_session_unpaired` with nothing left to
         lift it, and every later send would be refused for the life of the
         process. Control: drop the `self._status.ready` arm and this goes red.
         """
@@ -1494,7 +1755,7 @@ class TestAdoptingAWindowAfterARestart:
                     "win-orphan", USER, time.time() + 120,
                 ) is None
                 assert instance.pairing_window is None
-                assert instance._unpaired_by_repair is False
+                assert instance._session_unpaired is False
 
     async def test_a_send_during_an_adopted_window_settles_failed(
         self, config, sockets, monkeypatch,
@@ -1505,7 +1766,7 @@ class TestAdoptingAWindowAfterARestart:
         that stops a send reaching an emptied session — and `logical_key` is
         UNIQUE with nothing deleting from `sent_whatsapp`, so an `unknown` row
         is a task result that can never be sent. Control: drop
-        `_unpaired_by_repair = True` and the `_pairing_window` arm from
+        `_session_unpaired = True` and the `_pairing_window` arm from
         `adopt_pairing_window` and the row settles `unknown`.
         """
         bind_user(config)
