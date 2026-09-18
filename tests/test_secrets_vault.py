@@ -49,6 +49,7 @@ from unittest import mock
 import pytest
 
 from istota import secret_schema, secrets_store
+from istota import secrets_vault as secrets_vault_module
 from istota.config import UserConfig, load_config
 from istota.secrets_vault import (
     DAEMON_WRITTEN_SERVICES,
@@ -75,6 +76,7 @@ from istota.skills._loader import (
     OVERLAY_NOT_A_REGULAR_FILE,
     OVERLAY_UNREADABLY_LARGE,
 )
+from tests.support.drift import source_of
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -1072,12 +1074,78 @@ class TestEligibility:
         keys = secret_schema.known_service_keys()
         assert keys["monarch"] and keys["overland"]
 
+    def test_the_two_exclusion_rules_hold_over_the_whole_schema(self):
+        """The quantified form of the two tests above, and the one that survives
+        a new schema service.
+
+        Both of those name the services the schema holds today, so a sixth
+        machine-managed blob added tomorrow is covered by neither: the empty-key
+        rule would go on being asserted about `google_workspace` and `garmin`
+        while the new one walked straight into `eligible_services()`. This walks
+        the schema instead, so the assertion is about the rule.
+
+        `source_of` is what makes `scripts/qt` select it. The two subjects are
+        module-level literals — `DAEMON_WRITTEN_SERVICES` and the schema dicts —
+        which execute at *import* and are therefore attributed to whichever test
+        in the worker imported the module first, so editing either records no
+        dependency on this test. Reading both modules' text registers one.
+        """
+        source_of(secrets_vault_module)
+        source_of(secret_schema)
+
+        keys = secret_schema.known_service_keys()
+        eligible = eligible_services()
+
+        keyless = {service for service, declared in keys.items() if not declared}
+        assert keyless, "no service declares an empty key set; the rule is untested"
+        assert not (keyless & eligible), (
+            "a service with no operator-writable keys is vault-eligible: "
+            f"{sorted(keyless & eligible)}"
+        )
+
+        assert DAEMON_WRITTEN_SERVICES, "the daemon-written set is empty"
+        assert not (DAEMON_WRITTEN_SERVICES & eligible), (
+            "a service the daemon rewrites on its own is vault-eligible: "
+            f"{sorted(DAEMON_WRITTEN_SERVICES & eligible)}"
+        )
+
+    def test_the_empty_key_rule_refuses_a_service_nothing_else_would(
+        self, monkeypatch
+    ):
+        """The half above that cannot fail against today's schema, made to.
+
+        Found by control: deleting `if keys` from `eligible_services` leaves the
+        quantified test green, and Stage 2's named version green too. Both
+        keyless services — `google_workspace` and `garmin` — are also in
+        `DAEMON_WRITTEN_SERVICES`, so the subtraction refuses them a second time
+        and the empty-key rule is masked by a coincidence of today's schema
+        rather than exercised by it.
+
+        A keyless service outside that set is what separates the two rules, and
+        the schema has none to point at, so one is monkeypatched in — the
+        technique `test_a_reserved_connector_service_is_never_eligible` uses for
+        the same reason. The same mutation then turns this red and leaves its
+        neighbours alone.
+        """
+        schema = dict(secret_schema.CONNECTED_SERVICE_SCHEMA)
+        schema["blob_only"] = {"label": "Blob only", "used_by": (), "fields": []}
+        monkeypatch.setattr(secret_schema, "CONNECTED_SERVICE_SCHEMA", schema)
+
+        assert secret_schema.known_service_keys()["blob_only"] == frozenset()
+        assert "blob_only" not in DAEMON_WRITTEN_SERVICES
+        assert "blob_only" not in eligible_services()
+
     def test_the_vault_service_is_excluded_once_the_schema_declares_it(
         self, monkeypatch
     ):
         """§4 subtracts `vault` itself: the passphrase cannot live in the file it
-        unlocks. The schema entry is a later stage's, so without the monkeypatch
-        this exclusion is a no-op nothing can see."""
+        unlocks.
+
+        The schema entry is real now — Stage 4 added it — so the monkeypatch is
+        no longer what makes the exclusion visible. It stays because it is what
+        keeps the test honest if the entry is ever removed again: the exclusion
+        is vacuously true against a schema with no `vault` in it, which is the
+        state this was written in."""
         schema = dict(secret_schema.CONNECTED_SERVICE_SCHEMA)
         schema["vault"] = {
             "label": "Credential vault",
@@ -1978,3 +2046,87 @@ class TestTheProfileTableGuard:
         names = {f.name for f in dataclasses.fields(UserProfile)}
         assert "vault_path" not in names
         assert "vault_services" not in names
+
+
+class TestNoSkillManifestDeclaresThePassphrase:
+    """The drift guard on §5's single named route into a task.
+
+    Credential injection into a task is driven entirely by
+    `executor.derive_skill_credential_map` reading manifest `env:` blocks, and
+    the proxy serves its `credential` request type out of a dict built from
+    those same manifests. So a passphrase no manifest names can reach a task by
+    no route at all, and the whole of §5's claim rests on no manifest naming it.
+
+    **Matched on the parsed `(service, key)` pair, never on the variable's
+    name.** A manifest is free to call the variable anything it likes — the
+    resolver reads `service` and `key` off the spec and hands them to
+    `secrets_store.get_secret` — so a name-shaped grep for `VAULT_PASSPHRASE`
+    passes a manifest declaring `service: vault, key: passphrase` as `FOO`,
+    which is the live route wearing a name nobody would search for.
+
+    **Dated, because it covers manifests and not the appearance of a second
+    reader.** As of `76c12104` the manifest env spec resolved in
+    `skills/_env.py` is the only code path in the tree that reads the secrets
+    table on a task's behalf, there is no verb anywhere returning an arbitrary
+    `(service, key)` row, and `_PROXY_LOOKUP_BLOCKED` is checked against a
+    manifest-derived allowlist. One second reader is already scheduled:
+    `Specs/Drafts/generic-connectors.md`'s broker reads `connector:*` rows the
+    day it lands. This guard will still be green then and the claim above will
+    not be, so widen it rather than trusting it.
+    """
+
+    def _specs(self):
+        """Every `EnvSpec` of every manifest this deployment ships.
+
+        The operator directory is included beside the bundled one because an
+        override is a manifest too, and `build_skill_env` reads whichever wins.
+        """
+        from istota.skills._loader import load_skill_index
+
+        index = load_skill_index(REPO / "config" / "skills", bundled_dir=None)
+        assert index, "no skill manifests loaded — did the loader change shape?"
+        return [(name, spec) for name, meta in index.items() for spec in meta.env_specs]
+
+    def test_no_manifest_declares_the_vault_passphrase(self):
+        """Folded on both halves, which is wider than the route it guards.
+
+        `get_secret` matches the service and key as written, so a manifest
+        spelling `Vault` would resolve nothing today. The guard refuses it
+        anyway: the thing being protected is that nobody writes the pair down in
+        a manifest at all, and a comparison that let one spelling through would
+        be relitigated the first time the store's matching changed.
+        """
+        from istota.secrets_vault import VAULT_PASSPHRASE_KEY, VAULT_PASSPHRASE_SERVICE
+
+        declared = [
+            f"{skill}: {spec.var or '<unnamed>'}"
+            for skill, spec in self._specs()
+            if spec.source == "secret"
+            and spec.service.strip().casefold() == VAULT_PASSPHRASE_SERVICE
+            and spec.key.strip().casefold() == VAULT_PASSPHRASE_KEY
+        ]
+        assert not declared, (
+            "a skill manifest declares the vault passphrase as a task credential, "
+            "which is the one route §5 says does not exist: " + ", ".join(declared)
+        )
+
+    def test_the_guard_is_reading_real_secret_specs(self):
+        """Non-vacuity, and it is not optional here.
+
+        Every assertion above is a `not in`, so a loader change that left
+        `service` and `key` empty — or a parse that dropped `from: secret`
+        entirely — would make the guard pass about nothing. This requires the
+        shipped manifests to carry secret-sourced specs with both halves
+        populated, so the comparison is over real data.
+        """
+        secret_specs = [
+            (skill, spec) for skill, spec in self._specs() if spec.source == "secret"
+        ]
+        assert len(secret_specs) >= 5, (
+            f"only {len(secret_specs)} secret-sourced env specs parsed; the guard "
+            "above would be comparing against nothing"
+        )
+        assert all(spec.service and spec.key for _skill, spec in secret_specs), (
+            "a secret-sourced spec parsed with an empty service or key, so the "
+            "pair the guard matches on is not what the manifests carry"
+        )

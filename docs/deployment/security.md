@@ -53,6 +53,18 @@ Reads and writes reach the databases only through skill CLIs, which the credenti
 
 Linux-only and merged-usr compatible for Debian 13+. See [Supported deployment](#supported-deployment) above for the policy on non-Linux / no-bwrap configurations.
 
+### The credential vault is inside the sandbox, and the passphrase is not
+
+A user with a [credential vault](../configuration/credentials.md#credential-vault) configured has a KDBX file in their own workspace directory, which is bound **read-write** into that user's own task sandbox. State what that does and does not mean plainly, because the feature is safe for one reason and it is not the encryption.
+
+A task in that user's sandbox can read the file, copy it out, delete it and overwrite it. What it cannot do is open it: the passphrase is a row in the `secrets` table, the table is masked out of every sandbox, and the master Fernet key that would decrypt the row enters no subprocess environment — so a host-side skill CLI handed `ISTOTA_DB_PATH` sees ciphertext it cannot read either. No skill manifest declares the passphrase, and manifest `env:` blocks are the only thing that puts a per-user secret into a task; a test refuses one that ever does, matched on the service and key the manifest names rather than on the variable's name.
+
+So the exposure is real and is exactly one thing: **a prompt-injected task can carry out the ciphertext of every credential that user's vault holds.** That is why `istota secret ensure --service vault --key passphrase --generate` mints the passphrase rather than documenting how to choose one. Argon2id makes a stolen KDBX useless against 256 random bits and does not make it useless against a memorable phrase, and nothing else about this feature is standing in front of that. Read the generated-passphrase rule as the boundary rather than as hygiene.
+
+Two things follow that are worth knowing before turning it on. Deleting or corrupting the file is a denial of service that leaves every credential in the table working and raises a notification — the sync applies nothing it cannot parse, and a service the file no longer mentions is left alone. Replacing it with an older copy the user keeps in the same tree is a genuine rollback of whatever that copy holds, bounded by the `vault_services` list. Keep one copy of the vault inside the workspace.
+
+An absolute `vault_path` removes the exposure completely: the resolver refuses one that lands under the workspace, `temp_dir` or `developer.repos_dir`, so the accepted form is a host path no sandbox binds at all. It is not the default because editing the file from a phone is the feature.
+
 ### The `.developer` carve-out
 
 Each task's scratch space holds a `.developer` directory, written by the `developer` skill's `setup_env` hook. It holds two kinds of thing, and both need the same protection.

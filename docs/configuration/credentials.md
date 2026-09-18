@@ -63,6 +63,7 @@ Available to all users regardless of which modules are enabled.
 | Garmin Connect | (interactive email/password → MFA; the stored blob is machine-managed) | `health` and `location` modules |
 | ntfy | `topic`, `server_url`\*, `username`\*, `password`\*, `token`\* | push notifications |
 | Native brain provider | `api_key` | The native brain — a per-user key overlaying the instance one |
+| Credential vault | `passphrase` | The KDBX vault sync — see [below](#credential-vault) |
 
 \* = optional
 
@@ -88,6 +89,114 @@ CARTO is its own service rather than a second field on Overland: a different cre
 A special case: stored in their own `google_oauth_tokens` table (not in `secrets`) because the OAuth flow writes `access_token` and `refresh_token` as a pair with expiry metadata. Fernet-encrypted at rest using the same `ISTOTA_SECRET_KEY`. A migration function auto-upgrades any pre-existing plaintext rows on read.
 
 Users connect their Google account through the web dashboard at `/istota/` (the dashboard shows a Google Workspace card). See [Google Workspace](../features/google-workspace.md) for the full setup.
+
+## Credential vault
+
+A user who keeps their credentials in a password manager otherwise maintains two copies of every key, and the copy Istota reads is the one they cannot see, search or back up. The credential vault removes the second edit: a KeePass (KDBX) file the user maintains on their own devices, which Istota reads on a schedule and copies into the `secrets` table. Off for every user until an operator turns it on.
+
+It is **provisioning input, not a storage backend**. The table stays the live store, `resolve_secret`'s order is unchanged, and a vault that is missing, half-synced or locked leaves every credential working. Istota never writes the file.
+
+### Turning it on
+
+Two keys in the user's `[users.<id>]` block of `config.toml`, and nowhere else — they are deliberately not in `user_profiles` and cannot be set from the web UI, because one selects which file the daemon decrypts and the other selects which credentials that file may overwrite:
+
+```toml
+[users.alice]
+vault_path = "istota/config/vault.kdbx"
+vault_services = ["karakeep", "ntfy"]
+```
+
+A relative `vault_path` resolves under that user's own workspace directory, which is where a phone or a laptop can reach it. An absolute one is a host path and must resolve outside every tree a task sandbox can write; that form keeps the file away from a task entirely, at the cost of the user no longer being able to edit it from a phone. Empty — the default — means the feature is off for that user.
+
+`vault_services` is the list of services the file owns. Empty reads the file and applies nothing, which is a usable dry run. A service whose credentials the daemon mints for itself can never be vault-owned (Monarch, Overland, Garmin, Google Workspace), and a name like that is dropped with a warning when the config loads. Today's eligible set is `karakeep`, `ntfy`, `native_brain`, `feeds` and `carto`.
+
+Install the `vault` extra on the host. `pykeepass` and its five dependencies are optional because two of them carry compiled extensions, and a deployment with no vault should not pay for them.
+
+### The passphrase
+
+The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. Provision it once, from a host shell:
+
+```bash
+istota secret ensure -u alice --service vault --key passphrase --generate
+```
+
+**It must be generated rather than chosen, and that rule is the whole security argument for this feature.** The vault file sits in a tree bound read-write into that user's own task sandbox, so a prompt-injected task can read the ciphertext of every credential the vault holds and carry it out. Argon2id makes that useless against 256 random bits. It does not make it useless against a memorable phrase. Everything else here is a boundary against a mistake; this is the only one standing in front of an adversary.
+
+`--generate` mints the value, stores it and prints it once. Copy it into the password manager you keep everything else in, and use it as the master password when you create the KDBX file. A *supplied* `--value` shorter than 32 characters is refused rather than warned about, because a warning is read after provisioning and by then the file is already encrypted under it.
+
+`--generate` refuses to replace a passphrase that is already there unless you pass `--force`. Minting a second one destroys the only copy the server has of the value the file is encrypted under, and the command otherwise advertises itself as idempotent — so an Ansible play re-running the documented provisioning line is the ordinary case rather than a careless one.
+
+There is no web form for the passphrase, on purpose: a form field is an invitation to type a memorable one.
+
+### The file
+
+Group path `istota/<service>`, one subgroup per service. The **entry title** is the secret key and the **password field** is the value. Everything else is ignored — username, URL, notes, attachments, custom string fields, and anything in the recycle bin.
+
+```
+istota/
+  karakeep/
+    base_url     (password field: https://karakeep.example.com)
+    api_key      (password field: ak_…)
+  ntfy/
+    topic
+```
+
+Entry titles rather than custom attributes on one per-service entry, because custom attributes are second-class in most mobile clients and several cannot create them at all — and editing from a phone is the point.
+
+The `<service>` group name is matched case-insensitively, so `Karakeep` owns `karakeep`; a phone keyboard that autocapitalizes it costs nothing. Entry titles are matched exactly, because a key that does not match the schema is reported as a typo rather than silently discarded. Values are stripped of surrounding whitespace and nothing else is normalized. An entry with an empty password is skipped rather than treated as a deletion, and a title that appears twice in one group skips that key with a warning.
+
+### What a sync does
+
+The daemon reads the file at start-up and every `scheduler.vault_sync_interval` seconds (300 by default; 0 turns both off). Each cycle hashes the file bytes, and stops there when nothing has changed — no unlock, no database write, no log line. `istota secret vault-sync [-u alice]` runs one by hand and ignores the cached hash.
+
+For a service in `vault_services`, the vault is the authority:
+
+- A key the file's group holds is written over whatever the table had.
+- **A key the table has, the schema declares, and the group does not hold is deleted.** Deleting a credential through the vault means deleting the entry.
+- A service the file does not mention at all is left alone entirely. That rule is what makes a vault that parses but has lost its contents harmless: a resync that replaced it with an emptier copy removes nothing.
+
+**Adopting a service deletes the keys the vault does not mention, on the first sync.** The group is present the moment you add the service to `vault_services`, so a user with an ntfy topic, token and username in the settings UI, and a vault group holding only `topic`, loses the other two within five minutes. So put every key you already hold into the file *before* adding its service to the list. `istota secret vault-sync` prints the count and names each deleted key, which is where that gets noticed.
+
+`istota secret remove` is still the direct route for removing one credential, and `istota secret ensure` refuses to write a vault-owned key unless you pass `--force` — a CLI write there does not touch the file, so the digest never moves and the value would stand indefinitely against the file the user believes is authoritative.
+
+### What the settings UI does
+
+A vault-owned service's fields render disabled, with a sentence saying the vault owns them. `PUT` and `DELETE` on those keys answer 409. The "Connected services" heading carries a read-only status line: the resolved path, the owned services, when Istota last applied the file, and the error class when it is failing.
+
+**"Last applied" is not a health check, and a healthy vault shows an old stamp.** The record is written only by a cycle that did work, and a cycle over an unchanged file does none — so a vault nobody has edited for three weeks reports a three-week-old timestamp and is working perfectly.
+
+### When it fails
+
+Each of these leaves the credentials in the table alone and raises a notification on the user's connected-services panel, once per transition rather than once per cycle:
+
+| What happened | What to do |
+|---|---|
+| The stored passphrase does not open the file | Re-provision it, then run `istota secret vault-sync` |
+| The file is not a readable KeePass database | Also what a sync caught mid-write looks like — check the mount before suspecting the file |
+| Nothing at the configured path | Check `vault_path`, and that the file has synced to the server |
+| The `vault` extra is not installed | An operator remedy, not a user one |
+| No passphrase provisioned | `istota secret ensure … --generate` |
+| `ISTOTA_SECRET_KEY` cannot read the stored passphrase | A deployment problem; see `security.secret_key` in `istota doctor` |
+| `vault_path` is one the daemon may not open | An operator corrects the line in `config.toml` |
+
+`istota secret vault-status -u alice` prints the whole answer for one user: the resolved path, whether a passphrase is provisioned, the groups the file holds, which of them are owned, and which owned services the file does not mention. `istota doctor`'s `security.credential_vault` answers the same questions across every configured user, and reports counts rather than key names.
+
+**Rotate the vault's master password in the quiet order**: provision the new passphrase with `istota secret ensure` first, then change it in KeePassXC. The other order raises a notification in between, because the rewritten file no longer opens with the stored value.
+
+### Two things that are not evidence
+
+Both are honest and both mislead if read the other way:
+
+- **A sync bumps `last_accessed_at` on every credential it owns**, because writing over a value means comparing it first. `istota secret vault-status` bumps it on the `vault/passphrase` row for the same reason. So that column stops being evidence that a vault-owned credential is read by anything.
+- **A sync runs whenever the file's bytes change, not whenever a credential changes.** KDBX draws a fresh master seed on every save, so saving a database nobody edited produces different bytes and a full apply. That is harmless — every write is idempotent — and it is the one thing that eventually re-asserts the file's version of a value somebody changed in the table directly.
+
+### What it does not fix
+
+The secrets table still holds a copy of everything. What the vault removes is the second place a user has to *edit*.
+
+The security accounting is that the vault adds no confidentiality and one new exposure. Every credential in it is also a row in the table, and the passphrase that opens it is another row in that same table, so one secret — `ISTOTA_SECRET_KEY` — opens both. What changes is *where* credential ciphertext sits: none of it used to be reachable from inside a sandbox, and now a copy of every owned credential is, in a file a task can read, copy out, delete or overwrite. Deleting or corrupting it is a denial of service that leaves every credential working and raises a notification. Replacing it with an older copy the user keeps in the same tree is a real rollback vector, bounded by `vault_services`.
+
+The generated passphrase is the entire mitigation. The absolute `vault_path` form removes the exposure completely by putting the file outside every tree a sandbox can reach, at the cost of the phone; it is not the default because editing from a phone is the feature.
 
 ## How credentials flow at runtime
 
