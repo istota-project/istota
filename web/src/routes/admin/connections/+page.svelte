@@ -102,9 +102,20 @@
    * admin's window opening against a card whose last index read found none.
    */
   let inProgress = $derived.by(() => {
-    if (pairingRow !== null && pairingRow.state !== null) return !pairingRow.terminal;
-    if (frame?.state) return !WHATSAPP_PAIRING_TERMINAL_STATES.has(frame.state);
-    return false;
+    const rowOpen = pairingRow !== null && pairingRow.state !== null && !pairingRow.terminal;
+    const frameOpen = frame?.state != null && !WHATSAPP_PAIRING_TERMINAL_STATES.has(frame.state);
+    // **Either, and not the row first.** An early return on the row shadows a
+    // live frame behind a *closed* row — the resting state after any completed
+    // pairing — so another admin's window, or the CLI's attach mode writing the
+    // same row while this pane sits open, rendered a code mid-scan with no
+    // Cancel (that is behind `inProgress`) and Re-pair beside it. Nothing heals
+    // it either: only a terminal frame triggers a re-read. A non-terminal frame
+    // is itself proof the server's row is open, since the reader consults the
+    // relay only past its own terminal veto, so it is newer evidence than this
+    // copy of the row — while the row staying authoritative when *it* is the
+    // open one is what keeps the relay from reporting a close the row has not
+    // reached.
+    return rowOpen || frameOpen;
   });
 
   /** Whether a start would be accepted at all. `pairing_blocked_reason` is the

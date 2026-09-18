@@ -484,6 +484,28 @@ describe('the WhatsApp card — the row is what gates the controls', () => {
     expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
   });
 
+  it('treats a live frame as open even behind a closed row', async () => {
+    // A terminal row is the resting state after any completed pairing, and a
+    // window can open without this pane having asked for it: another admin, or
+    // the CLI's attach mode writing the same row. Only a *terminal* frame
+    // triggers a re-read, so a stale closed row is not self-healing — and with
+    // the row consulted first it shadowed the frame entirely, rendering a code
+    // mid-scan with no Cancel and both start controls beside it.
+    await mount({
+      link: linkState({ fatal_is_permanent: true }),
+      pairing: pairingState({ state: 'paired', row_state: 'paired', terminal: true }),
+    });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    expect(screen.getByRole('button', { name: REPAIR })).toBeInTheDocument();
+
+    streams[0].emit('pairing', frame('awaiting_scan', { qr_seq: 4, qr_available: true }));
+
+    await screen.findByTestId('pairing-qr');
+    expect(screen.getByRole('button', { name: 'Cancel pairing' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
+    expect(screen.queryByRole('button', { name: UNLINK })).toBeNull();
+  });
+
   it('renders the durable row when no stream frame has arrived', async () => {
     const message = 'no sidecar connected. Check the unit and the update log.';
     await mount({
