@@ -513,6 +513,24 @@ export interface AdminConnectionLink {
   restarts: number | null;
 }
 
+/**
+ * The pairing row's closed states, mirroring `db.WHATSAPP_PAIRING_TERMINAL_STATES`.
+ *
+ * Here rather than in the page because a set of state names written twice is a
+ * set that drifts, and this is the module that already mirrors the server's
+ * vocabulary. **It is a fallback, not the authority**: `AdminPairingState`
+ * carries `terminal`, computed server-side from `row_state` by the same rule
+ * the start route's own guard reads, and that field is what a caller should
+ * gate on. These names are for a live stream frame, which carries no
+ * `terminal` of its own. Pinned against the Python constant by
+ * `pairingTerminalStates.parity.test.ts`.
+ */
+export const WHATSAPP_PAIRING_TERMINAL_STATES: ReadonlySet<string> = new Set([
+  'paired',
+  'expired',
+  'failed',
+]);
+
 /** The durable pairing row, plus the live window's state where one is publishing. */
 export interface AdminPairingState {
   window_id: string | null;
@@ -562,16 +580,19 @@ export async function getWhatsAppPairing(): Promise<{ pairing: AdminPairingState
 /**
  * Ask for a pairing window.
  *
- * **Both flags are always sent and neither is ever inferred.** `force` means
- * "I accept disconnecting a session that is working" and the server refuses
- * `force` without `confirm_disconnect` with a 400, so the destructive path
- * cannot be reached by one flipped boolean. The unforced call is safe against a
- * live session whatever this browser believes: the bridge refuses anything with
- * no latched permanent fault and records that refusal on the row.
+ * **Both flags are always sent and neither is ever inferred**, which is why
+ * they are required rather than optional: the rule is enforced by the type
+ * instead of by each caller remembering it. `force` means "I accept
+ * disconnecting a session that is working", and the server answers `force`
+ * without `confirm_disconnect` with a 400, so the destructive path cannot be
+ * reached by one flipped boolean. The unforced call is safe against a live
+ * session whatever this browser believes: the bridge refuses anything with no
+ * latched permanent fault and records that refusal on the row.
  */
-export async function startWhatsAppPairing(
-  opts: { force?: boolean; confirmDisconnect?: boolean } = {},
-): Promise<{ window_id: string; state: string; force: boolean }> {
+export async function startWhatsAppPairing(opts: {
+  force: boolean;
+  confirmDisconnect: boolean;
+}): Promise<{ window_id: string; state: string; force: boolean }> {
   return apiFetch('/admin/connections/whatsapp/pairing', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

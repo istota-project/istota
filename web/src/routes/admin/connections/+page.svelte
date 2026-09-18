@@ -3,10 +3,13 @@
   import {
     cancelWhatsAppPairing,
     getAdminConnections,
+    getWhatsAppPairing,
     startWhatsAppPairing,
     whatsAppPairingQrUrl,
     whatsAppPairingStreamUrl,
+    WHATSAPP_PAIRING_TERMINAL_STATES,
     type AdminConnection,
+    type AdminPairingState,
   } from '$lib/api';
   import { Badge, Button, ConfirmDialog, NoticeBanner } from '$lib/components/ui';
 
@@ -19,14 +22,20 @@
     message: string;
   }
 
-  /** The row's own closed states. A window is in flight in every other one. */
-  const TERMINAL = new Set(['paired', 'expired', 'failed']);
-
   /** Typed into the destructive confirmation. Short, and not a word anyone
    *  types by reflex — the point is that the phrase cannot arrive by accident. */
   const UNLINK_CHALLENGE = 'unlink';
 
+  /** The log tail's own ladder, and its cap. A stream that cannot be reopened
+   *  says so rather than retrying for the life of the tab. */
+  const MAX_STREAM_RETRIES = 5;
+  const STREAM_RETRY_CEILING_MS = 15_000;
+
+  /** One retry per code, far enough out to clear a rotation mid-flight. */
+  const QR_RETRY_DELAY_MS = 500;
+
   let connections = $state<AdminConnection[] | null>(null);
+  let pairingRow = $state<AdminPairingState | null>(null);
   let loading = $state(true);
   let error = $state('');
   let notice = $state('');
@@ -38,7 +47,16 @@
   let confirmOpen = $state(false);
   let frame = $state<PairingFrame | null>(null);
   let now = $state(Date.now());
+  let qrFetchFailed = $state(false);
+  let qrNonce = $state(0);
   let stream: EventSource | null = null;
+  let streamRetries = 0;
+  let streamRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let qrRetried = false;
+  let qrRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The rendered pairing state the current `notice` was issued against. A
+   *  plain `let` so the effect that reads it is not re-run by writing it. */
+  let noticeState = '';
 
   let whatsapp = $derived(connections?.find((c) => c.id === 'whatsapp') ?? null);
   let link = $derived(whatsapp?.link ?? null);
@@ -51,14 +69,13 @@
       if (frame.state === null) return null;
       return {
         state: frame.state,
-        message: frame.message ?? '',
+        message: frame.message,
         qrSeq: frame.qr_seq,
         qrAvailable: frame.qr_available,
         expiresAt: frame.expires_at,
-        requestedBy: whatsapp?.pairing?.requested_by ?? null,
       };
     }
-    const row = whatsapp?.pairing ?? null;
+    const row = pairingRow;
     if (!row || row.state === null) return null;
     return {
       state: row.state,
@@ -66,11 +83,29 @@
       qrSeq: row.qr_seq,
       qrAvailable: row.qr_available,
       expiresAt: row.expires_at_epoch,
-      requestedBy: row.requested_by,
     };
   });
 
-  let inProgress = $derived(pairing !== null && !TERMINAL.has(pairing.state));
+  /**
+   * Whether a window is in flight — **the row's answer, never the rendered
+   * one**, and that distinction is the whole of this derived.
+   *
+   * `pairing.state` is the *relay's* state whenever a window is publishing,
+   * and the relay reaches `paired` / `expired` / `failed` a poll before the
+   * row mirrors it. The server's start guard reads the row, so gating on the
+   * rendered state renders both start controls — the destructive one included
+   * — beside "Paired. The session is linked again.", against a route that
+   * would answer 409. So `terminal` is read off the payload, computed from
+   * the same column the guard reads.
+   *
+   * The frame is the fallback only where no row has been read yet: another
+   * admin's window opening against a card whose last index read found none.
+   */
+  let inProgress = $derived.by(() => {
+    if (pairingRow !== null && pairingRow.state !== null) return !pairingRow.terminal;
+    if (frame?.state) return !WHATSAPP_PAIRING_TERMINAL_STATES.has(frame.state);
+    return false;
+  });
 
   /** Whether a start would be accepted at all. `pairing_blocked_reason` is the
    *  server's own pre-refusal — today, a relay path that would land inside a
@@ -186,18 +221,25 @@
     }
   });
 
+  /** A primitive `$derived`, so the effect below re-runs on a *rotation* and
+   *  not on every frame — `pairing` is a fresh object each time. */
+  let qrSeq = $derived(pairing?.qrSeq ?? 0);
+
   /** The code reaches the page only as this endpoint's bytes. `qr_seq` is what
    *  makes the browser refetch on a rotation and hold the image still between
-   *  them; nothing here holds the payload. */
-  let qrSrc = $derived(
-    pairing !== null && pairing.state === 'awaiting_scan' && pairing.qrAvailable
-      ? whatsAppPairingQrUrl(pairing.qrSeq)
-      : null,
-  );
+   *  them; nothing here holds the payload. `qrNonce` is the one retry below. */
+  let qrSrc = $derived.by(() => {
+    if (pairing === null || pairing.state !== 'awaiting_scan' || !pairing.qrAvailable) return null;
+    const url = whatsAppPairingQrUrl(pairing.qrSeq);
+    return qrNonce === 0 ? url : `${url}&retry=${qrNonce}`;
+  });
 
   let remaining = $derived.by(() => {
     if (!inProgress || !pairing?.expiresAt) return null;
-    return Math.max(0, Math.round(pairing.expiresAt * 1000 - now) / 1000);
+    // Seconds, not rounded milliseconds — the misplaced paren rounded the
+    // product and then divided, so the round did nothing and a 90s window
+    // read "1m 29s" the instant it opened. `countdown` floors.
+    return Math.max(0, (pairing.expiresAt * 1000 - now) / 1000);
   });
 
   function countdown(seconds: number): string {
@@ -207,11 +249,45 @@
   }
 
   // A clock only while something is counting down, and cleaned up by the effect
-  // itself — a leaked interval outlives the page and the test run alike.
+  // itself — a leaked interval outlives the page and the test run alike. `now`
+  // is re-seeded here rather than trusted from construction: seeded once at
+  // mount it is stale by however long the pane has been open, and the first
+  // interval tick is a second away, so a window opened on a page left sitting
+  // rendered its whole page-open age on top of the real remaining time.
   $effect(() => {
     if (!inProgress) return;
+    now = Date.now();
     const id = setInterval(() => (now = Date.now()), 1000);
     return () => clearInterval(id);
+  });
+
+  // A new code invalidates whatever the last one's fetch did.
+  $effect(() => {
+    void qrSeq;
+    qrFetchFailed = false;
+    qrNonce = 0;
+    qrRetried = false;
+    return clearQrRetry;
+  });
+
+  // A destructive dialog may not outlive the state that offered it. Without
+  // this, one left open stays confirmable through any later change — another
+  // admin's window opening, a link latching a permanent fault — and `onConfirm`
+  // sends `force` unconditionally. It is also what stops the dialog reappearing
+  // already open if the card unmounts and comes back with `confirmOpen` true.
+  $effect(() => {
+    if (!offersForced) confirmOpen = false;
+  });
+
+  // The notice is a receipt for an action, so it goes the moment the pairing
+  // state moves past the one it was issued against — otherwise "Pairing
+  // requested…" sits above a `failed` message contradicting it for minutes.
+  $effect(() => {
+    const state = pairing?.state ?? '';
+    if (state !== noticeState) {
+      noticeState = state;
+      notice = '';
+    }
   });
 
   $effect(() => {
@@ -219,45 +295,154 @@
     else stopStream();
   });
 
+  function setNotice(text: string) {
+    notice = text;
+    noticeState = pairing?.state ?? '';
+  }
+
+  function clearQrRetry() {
+    if (qrRetryTimer !== null) {
+      clearTimeout(qrRetryTimer);
+      qrRetryTimer = null;
+    }
+  }
+
+  /**
+   * The image could not be fetched. Retry once, then say so in words.
+   *
+   * The server documents 404 for a stale window, a terminal row, a missing
+   * relay file and a window not yet at `awaiting_scan`, and the gate here is
+   * `qr_available` off a relay read up to a poll old — so the window can
+   * rotate or close between the frame that announced a sequence and the
+   * browser's request for it. `src` is a pure function of that sequence, so
+   * nothing re-issues a failed fetch on its own; the nonce is what makes the
+   * second request a new URL rather than a cache read. This is the operator's
+   * only route to the code, so the fallback is a sentence rather than a broken
+   * image with no text.
+   */
+  function onQrError() {
+    if (!qrRetried) {
+      qrRetried = true;
+      clearQrRetry();
+      qrRetryTimer = setTimeout(() => {
+        qrRetryTimer = null;
+        qrNonce = Date.now();
+      }, QR_RETRY_DELAY_MS);
+      return;
+    }
+    qrFetchFailed = true;
+  }
+
   function startStream() {
     if (stream || typeof EventSource === 'undefined') return;
     const es = new EventSource(whatsAppPairingStreamUrl(), { withCredentials: true });
     stream = es;
     es.addEventListener('pairing', (ev) => {
-      let next: PairingFrame;
+      let raw: unknown;
       try {
-        next = JSON.parse((ev as MessageEvent).data);
+        raw = JSON.parse((ev as MessageEvent).data);
       } catch {
         return;
       }
+      // Projected to the five declared fields rather than stored whole, so
+      // nothing the server sends that this page did not ask for reaches
+      // component state. It is also the type guard the template needs: a
+      // `JSON.parse` of a scalar survives a `!== null` test and then throws in
+      // `pairing.state.replace(...)`.
+      const next = projectFrame(raw);
+      if (next === null) return;
       const was = frame?.state ?? null;
       frame = next;
       streamError = '';
+      streamRetries = 0;
       // A close changes what the *link* half of the card says — green and a
       // number after a scan — and that comes off the index, not the stream.
-      if (next.state !== null && next.state !== was && TERMINAL.has(next.state)) {
+      // Conditioned on our row copy still being open rather than on the state
+      // having changed: the relay reaches a terminal state a poll before the
+      // row does, and both of those arrive as frames with the same `state`.
+      if (
+        next.state !== null &&
+        WHATSAPP_PAIRING_TERMINAL_STATES.has(next.state) &&
+        !(pairingRow?.terminal ?? false)
+      ) {
         void load({ quiet: true });
       }
     });
     es.addEventListener('stream_error', () => {
+      // The server could not read the relay and has ended the stream itself.
+      // Not retried: nothing about a second connection reads a different file.
       stopStream();
-      streamError = 'The live pairing state stopped updating. Reload to resume it.';
+      streamError = 'The live pairing state could not be read. Reload to resume it.';
     });
-    // No `error` listener: unlike the log tail this URL carries no cursor, so
-    // the browser's own reconnect re-requests exactly the right thing and a
-    // hand-rolled retry would only duplicate it.
+    es.addEventListener('error', () => {
+      // A dropped transport is retried by the browser on its own. A non-200,
+      // a wrong content type or an expired session are not: EventSource goes
+      // to CLOSED and fires this without ever reconnecting — reachable here as
+      // a 404 the moment `pairing_enabled` flips or the provider changes, a
+      // 401 on session expiry, and any 5xx or proxy error. With no listener
+      // that is silent *and* unrecoverable, since `stream` stays non-null and
+      // `startStream` refuses to reopen. So reopen on the log tail's own
+      // capped ladder, and say which of the two states the pane is in.
+      es.close();
+      if (stream !== es) return;
+      stream = null;
+      frame = null;
+      streamRetries += 1;
+      if (streamRetries > MAX_STREAM_RETRIES) {
+        streamError =
+          'The live pairing state is not reachable. The record below is the durable one; ' +
+          'reload the page to try the live stream again.';
+        return;
+      }
+      streamError = 'Reconnecting to the live pairing state…';
+      streamRetryTimer = setTimeout(
+        () => {
+          streamRetryTimer = null;
+          startStream();
+        },
+        Math.min(1000 * 2 ** (streamRetries - 1), STREAM_RETRY_CEILING_MS),
+      );
+    });
   }
 
+  function projectFrame(raw: unknown): PairingFrame | null {
+    if (raw === null || typeof raw !== 'object') return null;
+    const f = raw as Record<string, unknown>;
+    return {
+      state: typeof f.state === 'string' ? f.state : null,
+      qr_seq: typeof f.qr_seq === 'number' && Number.isFinite(f.qr_seq) ? f.qr_seq : 0,
+      qr_available: f.qr_available === true,
+      expires_at:
+        typeof f.expires_at === 'number' && Number.isFinite(f.expires_at) ? f.expires_at : null,
+      message: typeof f.message === 'string' ? f.message : '',
+    };
+  }
+
+  /** Drop the live stream **and the frame it left behind**. A stale frame is
+   *  not merely out of date: `pairing` prefers it whenever it exists, so a
+   *  non-terminal one freezes the pane for the life of the page — both start
+   *  controls hidden, the countdown pinned at zero, `qrSrc` on a retired
+   *  sequence, and every later row read correct and ignored. */
   function stopStream() {
+    if (streamRetryTimer !== null) {
+      clearTimeout(streamRetryTimer);
+      streamRetryTimer = null;
+    }
+    streamRetries = 0;
     stream?.close();
     stream = null;
+    frame = null;
   }
 
   async function load(opts: { quiet?: boolean } = {}) {
     if (!opts.quiet) loading = true;
     try {
       const payload = await getAdminConnections();
+      // Read off the payload rather than through the derived, so the row and
+      // the link can never be one render apart.
+      const found = payload.connections.find((c) => c.id === 'whatsapp') ?? null;
       connections = payload.connections;
+      pairingRow = found?.pairing ?? null;
       error = '';
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Failed to load connections';
@@ -265,6 +450,24 @@
       else error = message;
     } finally {
       loading = false;
+    }
+  }
+
+  /**
+   * Re-read the pairing row alone.
+   *
+   * Writing or cancelling a request changes the row and nothing about the
+   * link, so this asks the endpoint that answers for the row rather than
+   * re-reading the whole index. It falls back to the index where that endpoint
+   * refuses — a 404 or a 409 there means this browser's copy of the
+   * deployment's configuration is stale, which is the one case in which the
+   * link may have moved too.
+   */
+  async function refreshPairing() {
+    try {
+      pairingRow = (await getWhatsAppPairing()).pairing;
+    } catch {
+      await load({ quiet: true });
     }
   }
 
@@ -290,33 +493,42 @@
   }
 
   async function start(force: boolean) {
+    // Re-entrancy is the function's own property rather than something each of
+    // its three call sites has to remember.
+    if (starting) return;
     starting = true;
     notice = '';
     actionError = '';
+    let receipt = '';
     try {
       // Both flags on every call, and neither inferred. `force` is the
       // operator's acceptance of a disconnect; the server refuses it without
       // its companion rather than filling one in.
       await startWhatsAppPairing({ force, confirmDisconnect: force });
-      notice = force
+      receipt = force
         ? 'Re-pair requested. The sidecar is being asked to stop; a code follows once it restarts.'
         : 'Pairing requested. The scheduler picks it up within one poll interval.';
     } catch (e) {
       actionError = startFailure(e);
     } finally {
       starting = false;
-      await load({ quiet: true });
+      await refreshPairing();
+      // After the read, so the receipt is tagged with the state it describes
+      // rather than with the one it superseded.
+      if (receipt) setNotice(receipt);
     }
   }
 
   async function cancel() {
+    if (cancelling) return;
     cancelling = true;
     notice = '';
     actionError = '';
+    let receipt = '';
     try {
       const outcome = await cancelWhatsAppPairing();
       if (outcome.cancelled) {
-        notice =
+        receipt =
           'Pairing cancelled. Any session directory already moved aside is left where it is — ' +
           'the message below names it.';
       } else if (outcome.reason === 'servicing') {
@@ -324,18 +536,22 @@
           'The re-pair is already running and cannot be stopped part-way. It will report its ' +
           'outcome here.';
       } else {
-        notice = 'There was no open pairing request to cancel.';
+        receipt = 'There was no open pairing request to cancel.';
       }
     } catch (e) {
       actionError = e instanceof Error ? e.message : 'Failed to cancel pairing';
     } finally {
       cancelling = false;
-      await load({ quiet: true });
+      await refreshPairing();
+      if (receipt) setNotice(receipt);
     }
   }
 
   onMount(() => load());
-  onDestroy(stopStream);
+  onDestroy(() => {
+    clearQrRetry();
+    stopStream();
+  });
 </script>
 
 <div class="settings connections-page">
@@ -436,8 +652,22 @@
           {#if pairing.message}
             <p class="caption pairing-message" data-testid="pairing-message">{pairing.message}</p>
           {/if}
-          {#if qrSrc}
-            <img class="qr" src={qrSrc} alt="WhatsApp pairing code" data-testid="pairing-qr" />
+          {#if qrSrc && !qrFetchFailed}
+            <img
+              class="qr"
+              src={qrSrc}
+              alt="WhatsApp pairing code"
+              data-testid="pairing-qr"
+              onerror={onQrError}
+            />
+          {:else if qrSrc}
+            <!-- The image is the operator's only route to the code, so a
+                 failed fetch says so in words rather than leaving a broken
+                 image with no text. One retry has already been spent. -->
+            <p class="caption" data-testid="pairing-qr-error">
+              The pairing code could not be fetched. It is redrawn about every twenty seconds, so
+              the next rotation should bring it back.
+            </p>
           {/if}
           {#if inProgress}
             <div class="form-actions">
@@ -476,23 +706,30 @@
         <Button variant="ghost" size="sm" onclick={() => (confirmOpen = true)} disabled={starting}
           >Unlink and re-pair</Button
         >
+        <!-- Inside the block, not beside it: mounted unconditionally it stayed
+             confirmable through any later state change, and `onConfirm` sends
+             `force` whatever the card is now showing. The `$effect` above
+             closes it as well, which is what covers the unmount-and-return
+             path this placement alone would leave open. -->
+        <ConfirmDialog
+          bind:open={confirmOpen}
+          title="Unlink and re-pair WhatsApp"
+          confirmLabel="Unlink and re-pair"
+          challenge={UNLINK_CHALLENGE}
+          message={'This disconnects the WhatsApp session, whether or not it is working, and ' +
+            'costs a real reconnect. The current credential is moved aside rather than deleted, ' +
+            'and a new code has to be scanned from the phone before messages can be sent again.'}
+          onConfirm={() => {
+            confirmOpen = false;
+            void start(true);
+          }}
+        />
       </section>
     {/if}
-
-    <ConfirmDialog
-      bind:open={confirmOpen}
-      title="Unlink and re-pair WhatsApp"
-      confirmLabel="Unlink and re-pair"
-      challenge={UNLINK_CHALLENGE}
-      message={'This disconnects the WhatsApp session, whether or not it is working, and costs a ' +
-        'real reconnect. The current credential is moved aside rather than deleted, and a new ' +
-        'code has to be scanned from the phone before messages can be sent again.'}
-      onConfirm={() => {
-        confirmOpen = false;
-        void start(true);
-      }}
-    />
   {:else}
+    <!-- Reached when the payload carries no `whatsapp` entry, which is not the
+         same as carrying no connections: the index returns exactly one member
+         today, so the card reads it by id rather than iterating. -->
     <div class="center-msg">No deployment-level connections are configured.</div>
   {/if}
 </div>

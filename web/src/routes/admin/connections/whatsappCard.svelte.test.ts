@@ -3,7 +3,7 @@ import { tick } from 'svelte';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen, waitFor, fireEvent, within } from '@testing-library/svelte';
 
-import type { AdminConnection, AdminConnectionLink } from '$lib/api';
+import type { AdminConnection, AdminConnectionLink, AdminPairingState } from '$lib/api';
 
 /**
  * The WhatsApp card on `/admin/connections`.
@@ -47,6 +47,7 @@ await fillApiDouble(api, {
 import {
   cancelWhatsAppPairing,
   getAdminConnections,
+  getWhatsAppPairing,
   startWhatsAppPairing,
   whatsAppPairingStreamUrl,
 } from '$lib/api';
@@ -62,6 +63,9 @@ interface FakeStream {
   url: string;
   closed: boolean;
   emit: (kind: string, payload: unknown) => void;
+  /** An `error` event — a non-200, a wrong content type or an expired session,
+   *  which EventSource reports here and never reconnects from. */
+  fail: () => void;
 }
 
 let streams: FakeStream[] = [];
@@ -87,6 +91,9 @@ function installFakeEventSource() {
     }
     emit(kind: string, payload: unknown) {
       for (const fn of this.listeners.get(kind) ?? []) fn({ data: JSON.stringify(payload) });
+    }
+    fail() {
+      for (const fn of this.listeners.get('error') ?? []) fn({});
     }
   }
   (globalThis as unknown as { EventSource: unknown }).EventSource = Fake;
@@ -122,6 +129,24 @@ function connection(over: Partial<AdminConnection> = {}): AdminConnection {
   };
 }
 
+function pairingState(over: Partial<AdminPairingState> = {}): AdminPairingState {
+  return {
+    window_id: 'w1',
+    state: 'requested',
+    row_state: 'requested',
+    terminal: false,
+    requested_by: 'alice',
+    requested_at: '2026-09-17 12:00:00',
+    expires_at: '2026-09-17 12:05:00',
+    expires_at_epoch: null,
+    message: '',
+    force: false,
+    qr_seq: 0,
+    qr_available: false,
+    ...over,
+  };
+}
+
 /** The five fields the stream sends. `extra` is how a control puts something on
  *  the frame the server never sends. */
 function frame(
@@ -147,6 +172,16 @@ async function mount(over: Partial<AdminConnection> = {}) {
   await screen.findByTestId('whatsapp-card');
 }
 
+/** The same mount under fake timers, where `findBy*` cannot be awaited: the
+ *  library's polling wait needs a clock this test is holding still. One zero
+ *  advance flushes the load's microtasks, and `tick()` flushes Svelte. */
+async function mountFake(over: Partial<AdminConnection> = {}) {
+  api.getAdminConnections.mockResolvedValue({ connections: [connection(over)] });
+  render(Page);
+  await vi.advanceTimersByTimeAsync(0);
+  await tick();
+}
+
 beforeEach(() => {
   installFakeEventSource();
   api.getAdminConnections.mockReset();
@@ -158,6 +193,8 @@ beforeEach(() => {
   });
   api.cancelWhatsAppPairing.mockReset();
   api.cancelWhatsAppPairing.mockResolvedValue({ cancelled: true, reason: '' });
+  api.getWhatsAppPairing.mockReset();
+  api.getWhatsAppPairing.mockResolvedValue({ pairing: null });
 });
 
 afterEach(cleanup);
@@ -216,6 +253,11 @@ describe('the WhatsApp card — which control each state offers', () => {
     expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
     expect(screen.queryByRole('button', { name: UNLINK })).toBeNull();
     expect(screen.getByText(/Cloud API adapter/)).toBeInTheDocument();
+    // Synchronous rather than awaited, and that is settled by measurement
+    // rather than by reading: `mount` awaits `findByTestId`, which is the same
+    // settle point the positive case reaches, so the effect has already run.
+    // Driven — `startStream()` made unconditional turns this and its sibling
+    // below red, and nothing else.
     expect(streams).toHaveLength(0);
   });
 
@@ -296,17 +338,59 @@ describe('the WhatsApp card — starting a pairing', () => {
     expect(startWhatsAppPairing).toHaveBeenCalledWith({ force: true, confirmDisconnect: true });
   });
 
-  it('re-reads the index after a refusal and names it', async () => {
+  it('closes the confirmation when the state stops offering it', async () => {
+    await mount({ link: linkState({ ready: true }) });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    await fireEvent.click(screen.getByRole('button', { name: UNLINK }));
+    await screen.findByRole('dialog');
+
+    // Another admin's window opening, or a link latching a fault, withdraws
+    // the control — and a dialog left mounted past that stays confirmable,
+    // with `onConfirm` sending `force` whatever the card is now showing.
+    streams[0].emit('pairing', frame('awaiting_sidecar'));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(screen.queryByRole('button', { name: UNLINK })).toBeNull();
+    expect(startWhatsAppPairing).not.toHaveBeenCalled();
+
+    // **And it does not come back open**, which is the half the `{#if}` alone
+    // does not give: `confirmOpen` is page state, so a dialog that unmounted
+    // while it was true reappears already confirmable the moment the control
+    // returns. Measured — with only the `{#if}`, the assertion above stays
+    // green and this one goes red.
+    streams[0].emit('pairing', frame('expired', { message: 'the window expired.' }));
+
+    expect(await screen.findByRole('button', { name: UNLINK })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('re-reads the pairing row after a refusal and names it', async () => {
     await mount({ link: linkState({ fatal_is_permanent: true }) });
     api.startWhatsAppPairing.mockRejectedValue(new Error('API error: 409'));
-    api.getAdminConnections.mockClear();
+    api.getWhatsAppPairing.mockClear();
 
     await fireEvent.click(screen.getByRole('button', { name: REPAIR }));
 
     await waitFor(() => expect(screen.getByText(/Refused:/)).toBeInTheDocument());
-    // The server's view is the authority on what happened, so the card asks
-    // again rather than reasoning from its own stale copy.
-    expect(getAdminConnections).toHaveBeenCalled();
+    // The row is the authority on what happened and the link cannot have moved
+    // as a result of writing a request, so the card re-reads the row alone
+    // rather than the whole index.
+    expect(getWhatsAppPairing).toHaveBeenCalled();
+  });
+
+  it('ignores a second click while the first start is in flight', async () => {
+    await mount({ link: linkState({ fatal_is_permanent: true }) });
+    let release = () => {};
+    api.startWhatsAppPairing.mockImplementation(
+      () => new Promise((resolve) => (release = () => resolve({ window_id: 'w1' }))),
+    );
+
+    const button = screen.getByRole('button', { name: REPAIR });
+    await fireEvent.click(button);
+    await fireEvent.click(button);
+    release();
+
+    await waitFor(() => expect(startWhatsAppPairing).toHaveBeenCalledTimes(1));
   });
 });
 
@@ -364,6 +448,167 @@ describe('the WhatsApp card — a window in flight', () => {
   });
 });
 
+describe('the WhatsApp card — the row is what gates the controls', () => {
+  it('withholds both starts while the row is open, though the relay says paired', async () => {
+    const open = pairingState({ state: 'awaiting_scan', row_state: 'awaiting_scan' });
+    await mount({ link: linkState({ fatal_is_permanent: true }), pairing: open });
+    await waitFor(() => expect(streams).toHaveLength(1));
+
+    // The happy path, one poll wide: the relay reaches `paired` before the row
+    // mirrors it, so the rendered state is terminal while the server's own
+    // start guard — which reads the row — would still answer 409. A card
+    // gating on the rendered state puts both controls, the destructive one
+    // included, directly beside "Paired".
+    api.getAdminConnections.mockResolvedValue({
+      connections: [connection({ link: linkState({ ready: true }), pairing: open })],
+    });
+    streams[0].emit('pairing', frame('paired'));
+
+    expect(await screen.findByText('Paired. The session is linked again.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
+    expect(screen.queryByRole('button', { name: UNLINK })).toBeNull();
+
+    // And they come back once the row itself is closed, which is the read the
+    // terminal frame triggered.
+    api.getAdminConnections.mockResolvedValue({
+      connections: [
+        connection({
+          link: linkState({ ready: true }),
+          pairing: pairingState({ state: 'paired', row_state: 'paired', terminal: true }),
+        }),
+      ],
+    });
+    streams[0].emit('pairing', frame('paired', { expires_at: 1 }));
+
+    expect(await screen.findByRole('button', { name: UNLINK })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
+  });
+
+  it('renders the durable row when no stream frame has arrived', async () => {
+    const message = 'no sidecar connected. Check the unit and the update log.';
+    await mount({
+      link: linkState({ fatal_is_permanent: true }),
+      pairing: pairingState({
+        state: 'sidecar_absent',
+        row_state: 'sidecar_absent',
+        message,
+        expires_at_epoch: Date.now() / 1000 + 120,
+      }),
+    });
+
+    // The row is what survives a browser reload, and on a `pairing_enabled`
+    // deployment it is also what a CLI-initiated pairing leaves behind.
+    expect(screen.getByTestId('pairing-state')).toHaveTextContent('sidecar absent');
+    expect(screen.getByTestId('pairing-message')).toHaveTextContent(message);
+    expect(screen.getByTestId('pairing-remaining')).toHaveTextContent(/expires in \dm/);
+    expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
+  });
+
+  it('drops a stale frame when the stream stops, rather than freezing the pane', async () => {
+    await mount({ link: linkState({ fatal_is_permanent: true }) });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].emit('pairing', frame('awaiting_scan', { qr_seq: 1, qr_available: true }));
+    await screen.findByTestId('pairing-qr');
+    expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
+
+    streams[0].emit('stream_error', { error: 'pairing read failed' });
+
+    // A non-terminal frame left in place outlives the stream that delivered
+    // it: `pairing` prefers a frame whenever one exists, so both controls stay
+    // hidden, the countdown pins at zero and every later row read is ignored.
+    expect(await screen.findByRole('button', { name: REPAIR })).toBeInTheDocument();
+    expect(screen.queryByTestId('pairing-qr')).toBeNull();
+    expect(screen.getByText(/could not be read/)).toBeInTheDocument();
+  });
+
+  it('reopens the stream on a close the browser will not retry, then gives up', async () => {
+    vi.useFakeTimers();
+    try {
+      await mountFake({ link: linkState({ fatal_is_permanent: true }) });
+      expect(streams).toHaveLength(1);
+
+      // Not a dropped transport, which the browser retries itself: a 404 the
+      // moment `pairing_enabled` flips, a 401 on session expiry, any 5xx.
+      // EventSource goes to CLOSED and fires this without reconnecting.
+      streams[0].fail();
+      await tick();
+      expect(screen.getByText(/Reconnecting/)).toBeInTheDocument();
+
+      let opened = 1;
+      for (let attempt = 1; attempt <= 5; attempt += 1) {
+        await vi.advanceTimersByTimeAsync(20_000);
+        opened += 1;
+        expect(streams).toHaveLength(opened);
+        streams[streams.length - 1].fail();
+        await tick();
+      }
+
+      // Past the cap it says so rather than retrying for the life of the tab.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(streams).toHaveLength(opened);
+      expect(screen.getByText(/not reachable/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('the WhatsApp card — the countdown', () => {
+  it('counts down from the deadline and leaves no timer behind', async () => {
+    vi.useFakeTimers();
+    try {
+      // **The pane is opened before the window is, and the clock is moved on
+      // in between.** That gap is the whole test: `now` seeded once at
+      // construction is stale by however long the page has been sitting, and
+      // the interval's first assignment is a second away — so the first render
+      // of a window added a minute of page-open age to the real remaining
+      // time. Mounted with the window already present, the construction
+      // instant and the effect's own reading are the same and the assertion
+      // cannot fail; measured, that version stayed green under the control.
+      await mountFake({ link: linkState({ fatal_is_permanent: true }) });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(streams).toHaveLength(1);
+
+      streams[0].emit('pairing', frame('awaiting_scan', { expires_at: Date.now() / 1000 + 95 }));
+      await tick();
+
+      expect(screen.getByTestId('pairing-remaining')).toHaveTextContent('expires in 1m 35s');
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await tick();
+      expect(screen.getByTestId('pairing-remaining')).toHaveTextContent('expires in 1m 33s');
+
+      cleanup();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('floors the remaining seconds rather than rounding the milliseconds', async () => {
+    vi.useFakeTimers();
+    try {
+      await mountFake({ link: linkState({ fatal_is_permanent: true }) });
+      expect(streams).toHaveLength(1);
+
+      // The misplaced paren rounded the *millisecond* difference and then
+      // divided, which is a no-op except in the sub-millisecond band below a
+      // whole second — where it rounds up and reports one second more than is
+      // left. 89999.6ms is inside that band: floored it is 89s, rounded first
+      // it is 90s.
+      streams[0].emit(
+        'pairing',
+        frame('awaiting_scan', { expires_at: (Date.now() + 89_999.6) / 1000 }),
+      );
+      await tick();
+
+      expect(screen.getByTestId('pairing-remaining')).toHaveTextContent('expires in 1m 29s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('the WhatsApp card — the code', () => {
   it('refetches the SVG when qr_seq moves and holds it still when it does not', async () => {
     await mount({ link: linkState({ fatal_is_permanent: true }) });
@@ -406,6 +651,84 @@ describe('the WhatsApp card — the code', () => {
     expect(screen.queryByTestId('pairing-qr')).toBeNull();
   });
 
+  it('retries a failed fetch once, then says the code could not be fetched', async () => {
+    await mount({ link: linkState({ fatal_is_permanent: true }) });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].emit('pairing', frame('awaiting_scan', { qr_seq: 7, qr_available: true }));
+    const img = await screen.findByTestId('pairing-qr');
+    const first = img.getAttribute('src');
+
+    // The server 404s a stale window, a terminal row, a missing relay file and
+    // a window not yet at `awaiting_scan`, and `qr_available` comes off a relay
+    // read up to a poll old — so the window can close between the frame and the
+    // browser's request. `src` is a pure function of the sequence, so nothing
+    // re-issues a failed fetch on its own.
+    await fireEvent.error(img);
+    await waitFor(() =>
+      expect(screen.getByTestId('pairing-qr').getAttribute('src')).not.toBe(first),
+    );
+    expect(screen.getByTestId('pairing-qr').getAttribute('src')).toContain('seq=7');
+
+    await fireEvent.error(screen.getByTestId('pairing-qr'));
+
+    // One retry, then words: this is the operator's only route to the code, so
+    // the failure must not be a broken image with no text.
+    expect(await screen.findByTestId('pairing-qr-error')).toBeInTheDocument();
+    expect(screen.queryByTestId('pairing-qr')).toBeNull();
+  });
+
+  it('refetches after a rotation even once a fetch has failed', async () => {
+    await mount({ link: linkState({ fatal_is_permanent: true }) });
+    await waitFor(() => expect(streams).toHaveLength(1));
+    streams[0].emit('pairing', frame('awaiting_scan', { qr_seq: 7, qr_available: true }));
+    const img = await screen.findByTestId('pairing-qr');
+    await fireEvent.error(img);
+    await fireEvent.error(screen.getByTestId('pairing-qr'));
+    await screen.findByTestId('pairing-qr-error');
+
+    streams[0].emit('pairing', frame('awaiting_scan', { qr_seq: 8, qr_available: true }));
+
+    // A new code is a new fetch, so the fallback is not a one-way door for the
+    // rest of the window.
+    const next = await screen.findByTestId('pairing-qr');
+    expect(next.getAttribute('src')).toContain('seq=8');
+    expect(screen.queryByTestId('pairing-qr-error')).toBeNull();
+  });
+
+  it('ignores a frame that is not an object rather than crashing on it', async () => {
+    // **The throw is recorded, not merely absent from the DOM**, and that is
+    // the whole shape of this test. `JSON.parse('7')` survives a `!== null`
+    // check and then throws in the template at `pairing.state.replace(...)` —
+    // during Svelte's flush, in a microtask nothing here awaits, so it arrives
+    // as an unhandled error attributed to whichever file was running while the
+    // suite still reports every test green. Measured: with the projection
+    // replaced by a bare cast, the DOM assertions below all pass and only the
+    // recorder goes red.
+    const unhandled: unknown[] = [];
+    const record = (e: unknown) => unhandled.push(e);
+    process.on('unhandledRejection', record);
+    process.on('uncaughtException', record);
+    try {
+      await mount({ link: linkState({ fatal_is_permanent: true }) });
+      await waitFor(() => expect(streams).toHaveLength(1));
+
+      streams[0].emit('pairing', 7);
+      streams[0].emit('pairing', 'paired');
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandled).toEqual([]);
+      expect(screen.queryByTestId('pairing-state')).toBeNull();
+
+      // And the pane is still live afterwards.
+      streams[0].emit('pairing', frame('awaiting_sidecar'));
+      expect(await screen.findByTestId('pairing-state')).toHaveTextContent('awaiting sidecar');
+    } finally {
+      process.off('unhandledRejection', record);
+      process.off('uncaughtException', record);
+    }
+  });
+
   it('puts no payload in the document even if a frame carries one', async () => {
     await mount({ link: linkState({ fatal_is_permanent: true }) });
     await waitFor(() => expect(streams).toHaveLength(1));
@@ -419,6 +742,10 @@ describe('the WhatsApp card — the code', () => {
     );
 
     await screen.findByTestId('pairing-qr');
+    // The DOM, which is what a reader of the page sees. It says nothing about
+    // the heap — that property is structural instead: `projectFrame` copies the
+    // five declared fields and the parsed object is not retained, so an
+    // undeclared field never reaches component state at all.
     expect(document.body.innerHTML).not.toContain('PAYLOAD-2');
   });
 });
