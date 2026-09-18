@@ -68,6 +68,20 @@
              and istota_whatsapp_provider == "baileys"
              and (istota_whatsapp_baileys_sidecar_unit | bool)
              and (istota_whatsapp_baileys_sidecar_command | length > 0))
+      # The two numeric pairing keys, and the first of them is the one that
+      # needs saying. istota_whatsapp_baileys_restart_sec renders `RestartSec=`
+      # in the sidecar unit *and* `restart_interval_seconds` in config.toml,
+      # and systemd accepts a time span there — `30s`, `1min`, `100ms`. Any of
+      # those writes `restart_interval_seconds = 1min`, which is not valid
+      # TOML, so `load_config` then fails in the scheduler, the web app, the
+      # webhook receiver and every host-side skill CLI spawn alike. The
+      # template renders `| int`, which turns such a value into 0 rather than
+      # into broken TOML; this is what stops the two artifacts silently
+      # disagreeing instead, which is the whole reason they share a variable.
+      - istota_whatsapp_baileys_restart_sec == (
+          istota_whatsapp_baileys_restart_sec | int)
+      - istota_whatsapp_baileys_pairing_window_seconds == (
+          istota_whatsapp_baileys_pairing_window_seconds | int)
     fail_msg: |
       The [whatsapp] settings would produce a config.toml the daemon refuses
       to load. istota_whatsapp_provider must be "baileys", "whatsapp_cloud" or
@@ -82,6 +96,12 @@
       istota_whatsapp_baileys_sidecar_unit=true the unit runs one, so
       istota_whatsapp_baileys_sidecar_command must stay empty. Two Baileys
       clients sharing one session directory corrupt the paired credential.
+
+      istota_whatsapp_baileys_restart_sec and
+      istota_whatsapp_baileys_pairing_window_seconds must be plain integer
+      seconds. The first also fills RestartSec= in the sidecar unit, where
+      systemd would accept "30s" or "1min" — write 30, not 30s, or the unit
+      and the daemon's own idea of the interval stop agreeing.
 
 - name: Resolve webhook receiver need
   set_fact:

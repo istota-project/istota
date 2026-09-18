@@ -23,15 +23,22 @@ other side.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import os
+import re
 import socket
+import sqlite3
 import stat
 import sys
+import threading
+import time
+from pathlib import Path
 
 import pytest
 
-from istota import cli
-from istota.transport.whatsapp import baileys_bridge
+from istota import cli, db
+from istota.transport.whatsapp import baileys_bridge, pairing_relay
 
 from .support.baileys_sidecar import SocketDir
 
@@ -103,7 +110,9 @@ def _write_sidecar(sockets, *, qr=None, fatal=False, fatal_marker=None):
     return (sys.executable, str(path))
 
 
-def _config_file(tmp_path, sockets, *, provider="baileys", sidecar_command=""):
+def _config_file(
+    tmp_path, sockets, *, provider="baileys", sidecar_command="", baileys=(),
+):
     path = tmp_path / "config.toml"
     body = [
         f'db_path = "{sockets.path / "istota.db"}"',
@@ -127,8 +136,17 @@ def _config_file(tmp_path, sockets, *, provider="baileys", sidecar_command=""):
             'app_secret = "wa-app-secret"',
             'verify_token = "wa-verify-token"',
         ]
+    body += ["", "[whatsapp.baileys]"]
+    # Attach mode's patience is the *request row's* own deadline, which comes
+    # from this key rather than from `WHATSAPP_PAIR_TIMEOUT_SECONDS` — so
+    # without it here a case that reaches the follow loop and never gets a
+    # terminal row waits the shipped five minutes. Found by a negative control
+    # rather than by a test: collapsing the mode selector to attach sent the
+    # own-sidecar cases into the loop and the run stopped being bounded.
+    body.append("pairing_window_seconds = 8")
     if sidecar_command:
-        body += ["", "[whatsapp.baileys]", f'sidecar_command = "{sidecar_command}"']
+        body.append(f'sidecar_command = "{sidecar_command}"')
+    body += list(baileys)
     path.write_text("\n".join(body) + "\n")
     return path
 
@@ -155,6 +173,74 @@ def _use_sidecar(monkeypatch, argv):
     monkeypatch.setattr(baileys_bridge, "in_tree_sidecar_argv", lambda: ())
 
 
+class _Tty(io.StringIO):
+    """A stdin that claims to be a terminal.
+
+    The unlink confirmation refuses a non-terminal stdin, so a test driving it
+    has to supply one — and it reads through `sys.stdin.readline` rather than
+    `input()` for exactly this reason: `input()` reaches for the process's real
+    stdin when `sys.stdin` has been replaced, which under pytest is closed.
+    """
+
+    def isatty(self) -> bool:
+        return True
+
+
+@contextlib.contextmanager
+def _live_bridge_socket(sockets):
+    """A listener on the bridge socket: what "a daemon is running" looks like.
+
+    Bound and listening rather than merely present, because the selector is a
+    connect — an inode outliving its process is exactly what the bridge's own
+    `_unlink_stale` cleans up.
+    """
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(sockets.path / "whatsapp-baileys.sock"))
+    listener.listen(1)
+    try:
+        yield listener
+    finally:
+        listener.close()
+
+
+def _init_pairing_db(sockets):
+    """The framework database attach mode writes its request row into."""
+    path = sockets.path / "istota.db"
+    db.init_db(path)
+    return path
+
+
+def _pairing_row(sockets):
+    with db.get_db(sockets.path / "istota.db") as conn:
+        return db.read_whatsapp_pairing(conn)
+
+
+def _relay_path(sockets):
+    """Where the bridge would publish, given these tests' `db_path`.
+
+    Derived rather than spelled: the config files here put `db_path` in the
+    socket directory and nothing sets a workspace, so the relay resolves to
+    `{db_path.parent}/whatsapp-pairing.json`. Asking the product means a change
+    to that rule shows up as a failure rather than as a test quietly reading a
+    file nothing writes.
+    """
+    return sockets.path / baileys_bridge.PAIRING_RELAY_NAME
+
+
+def _publish(sockets, window_id, state, *, qr=None, qr_seq=0, message=""):
+    pairing_relay.write_relay(
+        _relay_path(sockets),
+        pairing_relay.build_payload(
+            window_id=window_id,
+            state=state,
+            expires_at=time.time() + 300.0,
+            qr=qr,
+            qr_seq=qr_seq,
+            message=message,
+        ),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _fast_pair(monkeypatch):
     """Six seconds rather than five minutes. The shipped value is fifteen QR
@@ -171,24 +257,6 @@ class TestTheRefusals:
 
         assert cli.cmd_whatsapp_pair(_args(path)) == 1
         assert "business setup" in capsys.readouterr().err
-
-    def test_a_live_socket_refuses_rather_than_pairing_beside_it(
-        self, tmp_path, sockets, capsys,
-    ):
-        """Two Baileys clients on one auth state corrupt it — each rotates
-        keys the other then fails to decrypt with — so the session directory
-        is a single-writer resource and a running daemon's bridge is already
-        its writer."""
-        path = _config_file(tmp_path, sockets, sidecar_command="/bin/true")
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(sockets.path / "whatsapp-baileys.sock"))
-        listener.listen(1)
-        try:
-            assert cli.cmd_whatsapp_pair(_args(path)) == 1
-        finally:
-            listener.close()
-
-        assert "Stop the istota scheduler" in capsys.readouterr().err
 
     def test_a_stale_socket_file_does_not_refuse(
         self, tmp_path, sockets, capsys, monkeypatch,
@@ -489,38 +557,1077 @@ class TestTheResetFlag:
         assert str(moved[0]) in out
         assert "Paired" in out
 
-    def test_the_live_socket_refusal_runs_before_the_reset(
+    def test_a_live_socket_moves_nothing_from_this_process(
         self, tmp_path, sockets, capsys, monkeypatch,
     ):
-        """The issue's first property, and the one that matters most.
+        """The issue's first property, in the form it survives in.
 
-        Moving a session directory a second Baileys client is holding is the
-        auth-state corruption the refusal exists to prevent, so `--reset` has
-        to sit behind it rather than beside it — and the credential has to
-        still be there afterwards, which is what separates a refusal from a
-        reset that happened and then reported a problem.
+        This case used to assert that `--reset` was *refused* while a bridge
+        held the socket. The refusal became the mode selector, so what has to
+        hold now is the property the refusal existed for rather than the
+        refusal itself: with a bridge live, **this process renames nothing**.
+        The daemon performs the move, on evidence only it has — a `shutdown`
+        frame and the link drop that frame caused — and moving a session
+        directory a second Baileys client is holding is the auth-state
+        corruption that ordering exists to prevent.
 
-        **A sidecar is configured deliberately, though none is ever spawned.**
-        Without one the argv resolution refuses a line later, so removing the
-        live-socket check still leaves the directory untouched and this case
-        goes red on the message alone — measured. With one, the only thing
-        between `--reset` and the rename is the refusal under test.
+        **A sidecar is configured deliberately, though none may be spawned.**
+        Without one the argv resolution refuses a line later, so a selector
+        that fell through to own-sidecar mode would leave the directory
+        untouched for an unrelated reason and this case would pass on it. With
+        one configured, the only thing between `--reset` and a rename in *this*
+        process is the selector under test.
         """
         self._seed_dead_session(sockets)
         _use_sidecar(monkeypatch, _write_sidecar(sockets, fatal_marker="creds.json"))
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(sockets.path / "whatsapp-baileys.sock"))
-        listener.listen(1)
+        _init_pairing_db(sockets)
         path = _config_file(tmp_path, sockets)
-        try:
-            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 1
-        finally:
-            listener.close()
+        monkeypatch.setattr(cli.sys, "stdin", _Tty("unlink\n"))
+        monkeypatch.setattr(cli, "_whatsapp_follow_pairing", lambda config, **kw: 0)
 
-        assert "already listening" in capsys.readouterr().err
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 0
+
+        assert "listening" in capsys.readouterr().out
         session = self._session(sockets)
         assert (session / "creds.json").read_text() == '{"me":"unlinked"}'
         assert not [
             entry for entry in sockets.path.iterdir()
             if entry.name.startswith(session.name + ".")
         ]
+        # The request is what it did instead, and it carries the confirmation.
+        row = _pairing_row(sockets)
+        assert row["state"] == "requested"
+        assert row["force"] is True
+
+
+class TestTheModeSelector:
+    """`_whatsapp_socket_is_live` decides which pairing this is.
+
+    It used to decide whether pairing happened at all: a live socket was a
+    refusal, and an operator's remedy was to stop the scheduler and the sidecar
+    unit, pair from a terminal, and start them again. It is now the selector
+    between two modes that both pair, and the property that has to hold on each
+    side is different.
+
+    **Attach mode spawns nothing**, because the bridge on the other end of that
+    socket already holds the session directory and two Baileys clients on one
+    auth state corrupt it. **Own-sidecar mode writes no request row**, because
+    there is no daemon to service one — which is also the case a developer
+    checkout and a first-ever compose pair are.
+
+    Both halves are asserted, so the selector cannot be removed in either
+    direction without something going red: collapsed to own-sidecar mode the
+    attach cases fail, and collapsed to attach mode the own-sidecar one does.
+    """
+
+    @staticmethod
+    def _refuse_every_bridge(monkeypatch):
+        """Make constructing a bridge a test failure.
+
+        The strongest available statement of "spawns nothing": a mode that
+        reached for a sidecar would have to build a `BaileysBridge` to do it,
+        and every construction site in this command goes through this name.
+        """
+        class _Refused:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError(
+                    "attach mode constructed a bridge, so it may have spawned "
+                    "a second Baileys client against the session directory"
+                )
+
+        monkeypatch.setattr(baileys_bridge, "BaileysBridge", _Refused)
+
+    def test_a_live_socket_writes_a_request_instead_of_refusing(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        _init_pairing_db(sockets)
+        self._refuse_every_bridge(monkeypatch)
+        _use_sidecar(monkeypatch, ("/bin/true",))
+        path = _config_file(tmp_path, sockets)
+        monkeypatch.setattr(cli, "_whatsapp_follow_pairing", lambda config, **kw: 0)
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path)) == 0
+
+        row = _pairing_row(sockets)
+        assert row["state"] == "requested"
+        # Unforced, which is the whole of the difference `--reset` makes: the
+        # daemon refuses to disconnect a session that has not reported itself
+        # unlinked unless this column says an operator confirmed it.
+        assert row["force"] is False
+        assert row["requested_by"].startswith("cli:")
+        out = capsys.readouterr().out
+        assert "listening" in out
+        assert "Requested" in out
+        # Nothing in this process touched the credential's directory.
+        assert not (sockets.path / baileys_bridge.SESSION_DIR_NAME).exists()
+
+    def test_a_dead_socket_pairs_itself_and_writes_no_request(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """The other half, and the one that keeps the developer checkout
+        working. There is no daemon to service a request here, so a row written
+        instead of a sidecar spawned would be a pairing that waits out its
+        deadline for a code nobody is generating."""
+        _init_pairing_db(sockets)
+        _use_sidecar(monkeypatch, _write_sidecar(sockets, qr="2@OWNSIDECAR=="))
+        path = _config_file(tmp_path, sockets)
+
+        assert cli.cmd_whatsapp_pair(_args(path)) == 0, _sidecar_error(sockets)
+
+        assert _pairing_row(sockets) is None
+        assert "Paired" in capsys.readouterr().out
+
+
+class TestAttachModeRefusals:
+    """What attach mode declines to write a request for.
+
+    Both path arms are about where the QR lands rather than about pairing, and
+    the bridge applies neither — it deliberately does not check its own relay
+    path, so `web_app.admin_whatsapp_pairing_start` and this are the only two
+    gates in front of a window. A CLI with no gate of its own would be a second
+    door onto the window the route refuses.
+    """
+
+    def test_a_relative_relay_path_is_refused_rather_than_resolved(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """This process reads the relay and the daemon writes it, each against
+        its own working directory — so a relative path means watching a file
+        nothing writes while a live credential is published somewhere else."""
+        _init_pairing_db(sockets)
+        path = _config_file(
+            tmp_path, sockets, baileys=['pairing_relay_path = "relay.json"'],
+        )
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path)) == 1
+
+        err = capsys.readouterr().err
+        assert "pairing_relay_path" in err
+        assert "relative" in err
+        assert _pairing_row(sockets) is None
+
+    def test_a_relative_relay_nobody_configured_names_db_path_instead(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """`default_pairing_relay_path` falls back to `{db_path.parent}`, so a
+        relative `db_path` makes the relay relative through no act of the
+        operator — and naming `pairing_relay_path` there sends them to a key
+        they never set. Same refusal, different culprit."""
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+        config = cli.load_config(path)
+        object.__setattr__(config, "db_path", Path("data/istota.db"))
+
+        refusal = cli._whatsapp_attach_refusal(config)
+
+        assert refusal is not None
+        assert "db_path" in refusal
+        assert "pairing_relay_path" not in refusal
+
+    def test_a_relay_inside_a_sandbox_bind_is_refused(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """A path inside a root some task's bubblewrap namespace binds would
+        hand the pairing code to the model, which links itself as a device.
+        `{temp_dir}/{user}` is bound read-write into that user's namespace, so
+        anything below the temp root is inside one."""
+        _init_pairing_db(sockets)
+        relay = tmp_path / "tmp" / "alice" / "whatsapp-pairing.json"
+        path = _config_file(
+            tmp_path, sockets, baileys=[f'pairing_relay_path = "{relay}"'],
+        )
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path)) == 1
+
+        err = capsys.readouterr().err
+        # A substring **unique to this arm**. Asserting "sandbox" alone passed
+        # against the sibling arm's "could not be settled" text too, so the
+        # check degrading to unanswerable — a signature change or a cycle in
+        # `sandbox_plan` — would have left this green with bind detection dead.
+        # The commit's control removes the arm, which catches a deletion and
+        # not that.
+        assert "which the task sandbox binds (" in err
+        assert "pairing_relay_path outside it" in err
+        assert _pairing_row(sockets) is None
+
+    def test_a_request_already_in_progress_is_not_written_over(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """`request_whatsapp_pairing`'s guard is in SQL and answers `None`;
+        the route turns that into a 409 and this into a sentence. Joining the
+        open window instead is deliberately not a mode — it would mean two
+        watchers and one of them drawing a code it did not ask for."""
+        _init_pairing_db(sockets)
+        with db.get_db(sockets.path / "istota.db") as conn:
+            assert db.request_whatsapp_pairing(conn, "admin") is not None
+        path = _config_file(tmp_path, sockets)
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path)) == 1
+
+        assert "already in progress" in capsys.readouterr().err
+        assert _pairing_row(sockets)["requested_by"] == "admin"
+
+    def test_an_open_request_is_refused_before_the_phrase_is_asked_for(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """Asking somebody to type `unlink` and *then* telling them nothing was
+        written inverts the same ordering rule the path refusals follow. The
+        pre-read is best-effort — the SQL guard inside
+        `request_whatsapp_pairing` still decides the race — so the assertion is
+        that the phrase was never read."""
+        _init_pairing_db(sockets)
+        with db.get_db(sockets.path / "istota.db") as conn:
+            assert db.request_whatsapp_pairing(conn, "admin") is not None
+        stdin = _Tty("unlink\n")
+        monkeypatch.setattr(cli.sys, "stdin", stdin)
+        path = _config_file(tmp_path, sockets)
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 1
+
+        assert stdin.tell() == 0, "the confirmation was read before the refusal"
+        assert "already in progress" in capsys.readouterr().err
+        assert _pairing_row(sockets)["requested_by"] == "admin"
+
+    def test_an_unanswerable_pre_read_does_not_refuse_on_its_own(
+        self, tmp_path, sockets, monkeypatch,
+    ):
+        """The pre-read only moves a refusal ahead of a prompt, so a database
+        blip must not refuse a pairing the authoritative guard would allow.
+
+        Failing **only the first** read, which is the pre-read: the read-back
+        after the write is a different call with a different consequence, and
+        its own case is below.
+        """
+        _init_pairing_db(sockets)
+        real = db.read_whatsapp_pairing
+        calls = []
+
+        def _explode_once(conn):
+            calls.append(1)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return real(conn)
+
+        monkeypatch.setattr(db, "read_whatsapp_pairing", _explode_once)
+        path = _config_file(tmp_path, sockets)
+        monkeypatch.setattr(cli, "_whatsapp_follow_pairing", lambda config, **kw: 0)
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path)) == 0
+
+        assert _pairing_row(sockets)["state"] == "requested"
+
+    def test_a_replacement_landing_before_the_first_tick_is_not_adopted(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """The identity pin is seeded from the **write**, not from the
+        follower's first read.
+
+        Seeded in the loop there is a tick in which a replacement request is
+        adopted *as* this operator's — which is the failure the pin exists for,
+        moved rather than closed. Driven by replacing the row from inside the
+        first view call, which is exactly that window: the follower then reports
+        a request that is not the one this command wrote.
+
+        The control is dropping the read-back and letting the loop seed itself,
+        which turns this red — it was the only thing that did, and the change
+        was untested until this case existed.
+        """
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+        real_view = cli._whatsapp_pairing_view
+        swapped = []
+
+        def _replace_then_view(config):
+            if not swapped:
+                swapped.append(1)
+                with db.get_db(sockets.path / "istota.db") as conn:
+                    mine = db.read_whatsapp_pairing(conn)
+                    assert db.record_whatsapp_pairing_state(
+                        conn, mine["window_id"], "failed", "ours closed",
+                    )
+                    assert db.request_whatsapp_pairing(conn, "admin") is not None
+            return real_view(config)
+
+        monkeypatch.setattr(cli, "_whatsapp_pairing_view", _replace_then_view)
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_POLL_SECONDS", 0.0)
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path)) == 1
+
+        assert swapped == [1]
+        assert "replaced this one" in capsys.readouterr().err
+        assert _pairing_row(sockets)["requested_by"] == "admin"
+
+    def test_a_failed_read_back_does_not_report_a_failed_write(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """By the read-back the request **has been written**, so letting it
+        escape to the write handler reports a failure over a request that
+        landed — and the operator then re-runs and meets "already in progress"
+        about their own row. The follower seeds its pin from the first tick
+        when handed nothing, so the cost of losing this read is the narrowing
+        rather than the pairing.
+
+        Found by the sibling case above patching the name globally: the control
+        is dropping this guard, which turns this red on the exit code.
+        """
+        _init_pairing_db(sockets)
+
+        def _explode(conn):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(db, "read_whatsapp_pairing", _explode)
+        path = _config_file(tmp_path, sockets)
+        seen = []
+        monkeypatch.setattr(
+            cli, "_whatsapp_follow_pairing",
+            lambda config, **kw: seen.append(kw.get("following")) or 0,
+        )
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path)) == 0
+
+        assert seen == [None]
+        assert "could not be written" not in capsys.readouterr().err
+        # Undo first: `_pairing_row` goes through the very name this case has
+        # patched to raise, so asserting through it would fail on the reader
+        # rather than on the row.
+        monkeypatch.undo()
+        assert _pairing_row(sockets)["state"] == "requested"
+
+    def test_a_database_that_cannot_be_written_is_a_sentence(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """Attach mode is reachable from any host whose socket path happens to
+        be live, so "this is not the host the daemon runs on" is an ordinary
+        mistake rather than a fault."""
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+
+        def _explode(*args, **kwargs):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+
+        monkeypatch.setattr(db, "request_whatsapp_pairing", _explode)
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path)) == 1
+
+        assert "could not be written" in capsys.readouterr().err
+
+
+class TestTheUnlinkConfirmation:
+    """`--reset` in attach mode, which is the destructive half.
+
+    Own-sidecar mode's `--reset` acts only on a session that has already
+    reported a permanent fault — `reset_session` refuses anything else — so
+    there is nothing working to disconnect and the flag is the whole
+    confirmation. Attach mode's writes `pairing_force`, which is what lets the
+    daemon disconnect a session that *is* working, and the web's control
+    collects a typed phrase for exactly that. Same phrase here, and no flag to
+    skip it.
+    """
+
+    def test_a_non_terminal_stdin_is_refused_with_no_flag_to_skip_it(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """There is no `--yes`, and the reason is not strictness: the command
+        draws a QR and waits for a human to scan it off a phone, so it can do
+        nothing useful unattended anyway — a flag would exist only to let the
+        destructive half run without one."""
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+        monkeypatch.setattr(cli.sys, "stdin", io.StringIO("unlink\n"))
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 1
+
+        assert "typed confirmation" in capsys.readouterr().err
+        assert _pairing_row(sockets) is None
+
+    def test_the_wrong_phrase_writes_nothing(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+        monkeypatch.setattr(cli.sys, "stdin", _Tty("yes\n"))
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 1
+
+        assert "Not confirmed" in capsys.readouterr().err
+        assert _pairing_row(sockets) is None
+
+    def test_ctrl_c_at_the_prompt_reads_as_no(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """Nothing has been written at that point, so there is nothing for a
+        traceback to explain — and a `KeyboardInterrupt` escaping here would be
+        one, since no caller of this command catches it."""
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+
+        class _Interrupted(_Tty):
+            def readline(self, *args):
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli.sys, "stdin", _Interrupted())
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 1
+
+        assert "Not confirmed" in capsys.readouterr().err
+        assert _pairing_row(sockets) is None
+
+    def test_the_phrase_matches_the_panes_own(self):
+        """One spelling on both surfaces, so an operator who has used the
+        destructive control in Admin, Connections recognises this prompt.
+
+        Read out of the Svelte source rather than restated, since a constant
+        copied into a test is a constant that agrees with itself.
+        """
+        pane = (
+            Path(__file__).resolve().parents[1]
+            / "web/src/routes/admin/connections/+page.svelte"
+        ).read_text()
+        match = re.search(r"UNLINK_CHALLENGE\s*=\s*'([^']+)'", pane)
+        assert match is not None, "the pane's challenge constant moved"
+        assert match.group(1) == cli.WHATSAPP_UNLINK_CHALLENGE
+
+    def test_the_prompt_names_the_shorter_route(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """Every remedy in the tree — doctor's FAIL arm, the unlink alert, the
+        sidecar's own log lines — names `--reset` about a session that is
+        already unlinked, where a bare `pair` needs no confirmation at all. An
+        operator arriving from one of those should be told so rather than
+        typing a phrase they did not need."""
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+        monkeypatch.setattr(cli.sys, "stdin", _Tty("no\n"))
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 1
+
+        out = capsys.readouterr().out
+        assert "istota whatsapp pair" in out
+        assert "without the confirmation" in out
+
+    def test_the_confirmed_request_carries_the_force_column(
+        self, tmp_path, sockets, monkeypatch,
+    ):
+        """`pairing_force` is the whole carrier of the confirmation across the
+        two processes: the poll passes `repair_session(force=True)` only where
+        this column reads 1, so a request written without it is refused
+        `session_live` against a working session."""
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+        monkeypatch.setattr(cli.sys, "stdin", _Tty("unlink\n"))
+        monkeypatch.setattr(cli, "_whatsapp_follow_pairing", lambda config, **kw: 0)
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 0
+
+        assert _pairing_row(sockets)["force"] is True
+
+    def test_the_path_refusals_run_before_the_prompt(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """Asking somebody to type a phrase and then refusing on a
+        configuration key is the wrong order. Driven by supplying a stdin that
+        would answer correctly: if the prompt ran, the refusal would be the
+        path one either way, so the assertion is that nothing was *read*."""
+        _init_pairing_db(sockets)
+        stdin = _Tty("unlink\n")
+        path = _config_file(
+            tmp_path, sockets, baileys=['pairing_relay_path = "relay.json"'],
+        )
+        monkeypatch.setattr(cli.sys, "stdin", stdin)
+
+        with _live_bridge_socket(sockets):
+            assert cli.cmd_whatsapp_pair(_args(path, reset=True)) == 1
+
+        assert stdin.tell() == 0, "the confirmation was read before the refusal"
+        assert "relative" in capsys.readouterr().err
+
+    def test_a_user_with_no_passwd_entry_still_gets_a_name(self, monkeypatch):
+        """`getpass.getuser` raises where no environment variable names a user
+        and the uid has no passwd entry — a container, most often. The row's
+        `requested_by` is prose, so the fallback is a name rather than a
+        refusal."""
+        import getpass
+
+        def _explode():
+            raise OSError("no such user")
+
+        monkeypatch.setattr(getpass, "getuser", _explode)
+        assert cli._whatsapp_cli_actor() == "cli"
+
+
+class TestTheViewTheAttachLoopReads:
+    """`_whatsapp_pairing_view`: the request row joined to the relay file.
+
+    The sibling of `web_app._pairing_state_payload`, and the rule they share is
+    what these cases are about: the row first with its terminal state as a
+    veto, then the relay matched on the row's **current** window id.
+    """
+
+    @staticmethod
+    def _config(tmp_path, sockets):
+        _init_pairing_db(sockets)
+        return cli.load_config(_config_file(tmp_path, sockets))
+
+    def test_a_relay_from_another_window_is_ignored(self, tmp_path, sockets):
+        """A window's own file is unlinked when it closes, so a file carrying
+        another id is a skipped unlink or a previous attempt — and rendering
+        its code would be drawing a credential nothing can scan into."""
+        config = self._config(tmp_path, sockets)
+        with db.get_db(sockets.path / "istota.db") as conn:
+            request_id = db.request_whatsapp_pairing(conn, "admin")
+        _publish(
+            sockets, "a-window-nobody-owns", "awaiting_scan",
+            qr="2@STALEPAYLOAD==", qr_seq=4,
+        )
+
+        view = cli._whatsapp_pairing_view(config)
+
+        assert view["window_id"] == request_id
+        assert view["qr"] == ""
+        assert view["qr_seq"] == 0
+
+    def test_the_relay_is_read_against_the_adopted_window_id(
+        self, tmp_path, sockets,
+    ):
+        """The id the request returned is *not* the id the relay carries: the
+        row adopts the bridge's own window id when a window opens. A reader
+        pinned to the request id stops seeing the relay at that transition,
+        which is the first thing that happens on every real pairing."""
+        config = self._config(tmp_path, sockets)
+        with db.get_db(sockets.path / "istota.db") as conn:
+            request_id = db.request_whatsapp_pairing(conn, "admin")
+            assert db.record_whatsapp_pairing_state(
+                conn, request_id, "awaiting_sidecar",
+                adopt_window_id="bridge-window", expires_at=time.time() + 300,
+            )
+        _publish(
+            sockets, "bridge-window", "awaiting_scan",
+            qr="2@LIVEPAYLOAD==", qr_seq=2, message="scan it",
+        )
+
+        view = cli._whatsapp_pairing_view(config)
+
+        assert view["window_id"] == "bridge-window"
+        assert view["state"] == "awaiting_scan"
+        assert view["qr"] == "2@LIVEPAYLOAD=="
+        assert view["qr_seq"] == 2
+        # The live prose while a window is publishing.
+        assert view["message"] == "scan it"
+
+    def test_a_terminal_row_vetoes_a_relay_that_is_still_publishing(
+        self, tmp_path, sockets,
+    ):
+        """The relay carries the window's own deadline, which is later than the
+        request row's — so a window republishing after its row was closed
+        passes `read_relay`'s own deadline check. The row has to be asked."""
+        config = self._config(tmp_path, sockets)
+        with db.get_db(sockets.path / "istota.db") as conn:
+            request_id = db.request_whatsapp_pairing(conn, "admin")
+            assert db.record_whatsapp_pairing_state(
+                conn, request_id, "failed", "the sidecar never came back",
+            )
+        _publish(
+            sockets, request_id, "awaiting_scan",
+            qr="2@ORPHANPAYLOAD==", qr_seq=7,
+        )
+
+        view = cli._whatsapp_pairing_view(config)
+
+        assert view["terminal"] is True
+        assert view["state"] == "failed"
+        assert view["qr"] == ""
+        # The row's message, which is where the archived path lives.
+        assert view["message"] == "the sidecar never came back"
+
+    def test_no_row_at_all_reads_as_nothing(self, tmp_path, sockets):
+        assert cli._whatsapp_pairing_view(self._config(tmp_path, sockets)) is None
+
+    def test_the_request_stamp_is_carried_for_the_follower_to_pin_on(
+        self, tmp_path, sockets,
+    ):
+        """The follower cannot pin on the window id, since the row rotates onto
+        the bridge's own at the first transition — so these two are what tell
+        one request from the next on a singleton row."""
+        config = self._config(tmp_path, sockets)
+        with db.get_db(sockets.path / "istota.db") as conn:
+            assert db.request_whatsapp_pairing(conn, "cli:operator") is not None
+
+        view = cli._whatsapp_pairing_view(config)
+
+        assert view["requested_by"] == "cli:operator"
+        assert view["requested_at"]
+
+    def test_an_unresolvable_sandbox_answer_says_which_question_failed(
+        self, tmp_path, sockets, monkeypatch,
+    ):
+        """A refusal saying "the sandbox binds (unresolvable)" names a
+        collision nobody observed, which an operator cannot act on."""
+        config = self._config(tmp_path, sockets)
+        from istota import sandbox_plan
+
+        def _explode(cfg, path):
+            raise RuntimeError("no")
+
+        monkeypatch.setattr(sandbox_plan, "sandbox_bound_reason", _explode)
+
+        refusal = cli._whatsapp_attach_refusal(config)
+
+        assert refusal is not None
+        assert "could not be settled" in refusal
+        assert "unresolvable" not in refusal
+
+
+class TestFollowingTheWindow:
+    """The attach loop, driven over scripted views.
+
+    Scripted rather than driven through a daemon: what is under test here is
+    what the loop does with each state it can be handed, and a real bridge
+    would make the *sequence* of states a race rather than an assertion. The
+    join those views come from has its own cases above, and one end-to-end run
+    through both is at the bottom of this file.
+    """
+
+    @staticmethod
+    def _view(state, **over):
+        row_state = over.pop("row_state", state)
+        view = {
+            "state": state,
+            "row_state": row_state,
+            "terminal": row_state in db.WHATSAPP_PAIRING_TERMINAL_STATES,
+            "window_id": "w",
+            "message": "",
+            "expires_at": time.time() + 300.0,
+            "qr": "",
+            "qr_seq": 0,
+            "requested_at": "2026-09-17 10:00:00",
+            "requested_by": "cli:operator",
+        }
+        view.update(over)
+        return view
+
+    @staticmethod
+    def _drive(monkeypatch, views):
+        """Hand the loop one view per tick, repeating the last for ever.
+
+        Repeating rather than exhausting: several cases are about what the loop
+        does *while* a state persists, and a `StopIteration` would end them at
+        the tick the property starts holding.
+        """
+        remaining = list(views)
+        drawn = []
+
+        def _next(config):
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+        monkeypatch.setattr(cli, "_whatsapp_pairing_view", _next)
+        monkeypatch.setattr(cli, "_render_qr", drawn.append)
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_POLL_SECONDS", 0.0)
+        return drawn
+
+    def test_a_code_is_drawn_once_per_rotation_not_once_per_tick(
+        self, monkeypatch,
+    ):
+        """WhatsApp rotates the payload about every twenty seconds and this
+        reads every second, so a redraw per read would scroll the operator's
+        terminal past the code they were about to scan.
+
+        The control is dropping the `!= drawn` guard so every tick draws: that
+        turns this red on the count while leaving every other case here green,
+        since none of the others asserts one. (It is *not* "drop the `qr_seq`
+        comparison" — the loop does not make one, and a reader applying that
+        control would change nothing.)
+        """
+        scan = self._view("awaiting_scan", qr="2@FIRST==", qr_seq=1)
+        drawn = self._drive(monkeypatch, [
+            self._view("servicing"),
+            scan, scan, scan, scan, scan,
+            self._view("awaiting_scan", qr="2@SECOND==", qr_seq=2),
+            self._view("paired"),
+        ])
+
+        assert cli._whatsapp_follow_pairing(None) == 0
+        assert drawn == ["2@FIRST==", "2@SECOND=="]
+
+    def test_a_code_whose_counter_is_unusable_is_still_drawn(self, monkeypatch):
+        """A rotation is compared on the payload rather than on `qr_seq`.
+
+        `read_relay` hands that counter back exactly as the file held it —
+        `web_app` coerces it with `_as_int` for the same reason — so a relay
+        whose counter is missing or unparseable reads as 0, which is what the
+        loop starts at. Compared on the counter, the code would never be drawn
+        at all: an operator watching a window that has a live code and shows
+        none. The control is comparing counters, which turns this red while
+        leaving the once-per-rotation case above green.
+        """
+        drawn = self._drive(monkeypatch, [
+            self._view("awaiting_scan", qr="2@ONLYCODE==", qr_seq=0),
+            self._view("awaiting_scan", qr="2@ONLYCODE==", qr_seq=0),
+            self._view("paired"),
+        ])
+
+        assert cli._whatsapp_follow_pairing(None) == 0
+        assert drawn == ["2@ONLYCODE=="]
+
+    def test_a_paired_row_is_the_only_zero(self, monkeypatch):
+        for state in sorted(db.WHATSAPP_PAIRING_TERMINAL_STATES):
+            self._drive(monkeypatch, [self._view(state)])
+            expected = 0 if state == "paired" else 1
+            assert cli._whatsapp_follow_pairing(None) == expected, state
+
+    def test_a_closed_window_prints_the_daemons_own_prose(
+        self, monkeypatch, capsys,
+    ):
+        """The archived path is in that message and nowhere else this process
+        can reach — it is the only durable record of where an operator's
+        credential went."""
+        self._drive(monkeypatch, [self._view(
+            "failed", message="the old session is at /srv/.baileys.old-2026",
+        )])
+
+        assert cli._whatsapp_follow_pairing(None) == 1
+        assert ".baileys.old-2026" in capsys.readouterr().out
+
+    def test_a_request_cleared_from_under_it_says_so(self, monkeypatch, capsys):
+        """A web admin's cancel landing between two reads, or the poll's own
+        row-without-id escape. Neither is this process's to recover."""
+        self._drive(monkeypatch, [None])
+
+        assert cli._whatsapp_follow_pairing(None) == 1
+        assert "gone" in capsys.readouterr().err
+
+    def test_a_read_that_raises_is_a_sentence_rather_than_a_traceback(
+        self, monkeypatch, capsys,
+    ):
+        def _explode(config):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(cli, "_whatsapp_pairing_view", _explode)
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_POLL_SECONDS", 0.0)
+
+        assert cli._whatsapp_follow_pairing(None) == 1
+        err = capsys.readouterr().err
+        assert "could not be read" in err
+        # It says what Ctrl-C says: the window is in the daemon either way, and
+        # a give-up that does not say so leaves a live full-account credential
+        # publishing with nobody looking at it and no remedy named.
+        assert "still open in the daemon" in err
+
+    def test_a_single_locked_read_is_a_skipped_tick_not_the_end_of_the_watch(
+        self, monkeypatch, capsys,
+    ):
+        """A contended write lock is the *ordinary* failure on a connection
+        opened per tick, and the daemon's own poll treats exactly that as a
+        lost tick costing nothing. Ending the watch on one abandons a live
+        window — so only `WHATSAPP_PAIR_READ_FAILURES` running do.
+
+        The control is returning 1 on the first failure, which turns this red
+        while leaving the give-up case above green.
+        """
+        views = [None, None, self._view("paired")]
+
+        def _flaky(config):
+            head = views.pop(0)
+            if head is None:
+                raise sqlite3.OperationalError("database is locked")
+            return head
+
+        monkeypatch.setattr(cli, "_whatsapp_pairing_view", _flaky)
+        monkeypatch.setattr(cli, "_render_qr", lambda payload: None)
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_POLL_SECONDS", 0.0)
+
+        assert cli._whatsapp_follow_pairing(None) == 0
+        assert "could not be read" not in capsys.readouterr().err
+
+    def test_a_row_with_no_readable_deadline_is_still_bounded(
+        self, monkeypatch, capsys,
+    ):
+        """The sibling above pins that `None` is not read as "expired". This
+        pins the other half: without a second ceiling that branch is the
+        unbounded loop the docstring says the first one exists to prevent.
+
+        Latent rather than live — no writer produces a NULL `pairing_expires_at`
+        today — and bounded by `WHATSAPP_PAIR_TIMEOUT_SECONDS`, which the
+        autouse fixture here shortens. The control is dropping the elapsed arm,
+        which makes this hang rather than fail, since a hang is the defect.
+        """
+        self._drive(monkeypatch, [self._view("awaiting_scan", expires_at=None)])
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_TIMEOUT_SECONDS", 0.0)
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_GRACE_SECONDS", 0.0)
+
+        assert cli._whatsapp_follow_pairing(None) == 1
+        assert "Nothing has closed this pairing request" in capsys.readouterr().err
+
+    def test_the_grace_carries_the_deployments_own_poll_interval(
+        self, monkeypatch, capsys,
+    ):
+        """The deadline arm that closes a wedged row runs in the daemon's poll,
+        so it stamps `expired` up to one tick late. `poll_interval` is
+        operator-settable, so a fixed grace makes a perfectly healthy window on
+        a slow-polling deployment report that the poll is not running.
+
+        Driven as a pair over two configs rather than one: a single value
+        passes against a fixed grace and a derived one alike, which is the
+        shape `.claude/rules/whatsapp.md` records going unexamined on
+        `SIDECAR_RETURN_TIMEOUT`.
+        """
+        import types
+
+        def _config(poll_interval):
+            return types.SimpleNamespace(
+                scheduler=types.SimpleNamespace(poll_interval=poll_interval)
+            )
+
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_GRACE_SECONDS", 0.0)
+        # Ten seconds past its deadline. Under a 5s poll that is outside the
+        # grace; under a 30s one it is inside, and the window is still live.
+        stale = self._view("awaiting_scan", expires_at=time.time() - 10.0)
+
+        self._drive(monkeypatch, [stale])
+        assert cli._whatsapp_follow_pairing(_config(5)) == 1
+        assert "Nothing has closed" in capsys.readouterr().err
+
+        self._drive(monkeypatch, [stale, self._view("paired")])
+        assert cli._whatsapp_follow_pairing(_config(30)) == 0
+        assert "Nothing has closed" not in capsys.readouterr().err
+
+    def test_an_unreadable_poll_interval_does_not_raise_mid_pairing(
+        self, monkeypatch,
+    ):
+        """Its one caller is inside the never-raise loop and the value only
+        widens a grace, so a config it cannot reach costs an earlier give-up
+        and never a traceback. `None` is what every other case here passes."""
+        assert cli._scheduler_poll_interval(None) == 0.0
+        assert cli._scheduler_poll_interval(object()) == 0.0
+
+    def test_a_row_nothing_picks_up_names_the_scheduler(
+        self, monkeypatch, capsys,
+    ):
+        """A live socket is not proof a scheduler is running: `istota whatsapp
+        pair` in own-sidecar mode on another terminal holds one too. So the
+        wait says which unit to look at — and it keeps waiting, because a late
+        scheduler still services the row."""
+        self._drive(monkeypatch, [
+            self._view("requested"), self._view("requested"),
+            self._view("paired"),
+        ])
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_PICKUP_SECONDS", 0.0)
+
+        assert cli._whatsapp_follow_pairing(None) == 0
+        err = capsys.readouterr().err
+        assert "No bridge has picked this request up" in err
+        assert err.count("No bridge has picked") == 1
+
+    def test_the_pickup_warning_is_not_printed_for_a_serviced_row(
+        self, monkeypatch, capsys,
+    ):
+        self._drive(monkeypatch, [
+            self._view("servicing"), self._view("servicing"),
+            self._view("paired"),
+        ])
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_PICKUP_SECONDS", 0.0)
+
+        assert cli._whatsapp_follow_pairing(None) == 0
+        assert "No bridge has picked" not in capsys.readouterr().err
+
+    def test_a_deadline_the_daemon_never_closes_is_not_waited_out_for_ever(
+        self, monkeypatch, capsys,
+    ):
+        """The arm that closes a wedged row runs in the daemon's own poll, so a
+        scheduler that died mid-window leaves nothing to stamp the row
+        terminal. Without a ceiling of its own this loop waits for a code that
+        cannot come, for ever."""
+        self._drive(monkeypatch, [
+            self._view("awaiting_scan", expires_at=time.time() - 60.0)
+        ])
+
+        assert cli._whatsapp_follow_pairing(None) == 1
+        assert "poll is not running" in capsys.readouterr().err
+
+    def test_a_row_with_no_readable_deadline_is_not_abandoned(
+        self, monkeypatch, capsys,
+    ):
+        """`sql_epoch_from_datetime` answers `None` for a column it cannot
+        parse, and reading that as "the deadline has passed" would abandon a
+        live window over an unparseable timestamp."""
+        self._drive(monkeypatch, [
+            self._view("awaiting_sidecar", expires_at=None),
+            self._view("paired"),
+        ])
+
+        assert cli._whatsapp_follow_pairing(None) == 0
+        assert "poll is not running" not in capsys.readouterr().err
+
+    def test_another_operators_request_is_not_reported_as_this_one(
+        self, monkeypatch, capsys,
+    ):
+        """`whatsapp_runtime` is a singleton, so the row can become somebody
+        else's: a web admin may write a fresh request in the second between
+        this one going terminal and the next read.
+
+        The wrong answer that follows is not cosmetic — a `paired` row from
+        their attempt would be reported as this operator's, exit 0, over a
+        re-pair that had just failed. Pinned on the request stamp rather than
+        the window id, which the row rotates onto the bridge's own at the first
+        transition; the control is dropping the pin, which turns this red with
+        an exit 0 and "Paired" on stdout.
+        """
+        self._drive(monkeypatch, [
+            self._view("servicing"),
+            self._view(
+                "paired", requested_at="2026-09-17 11:00:00",
+                requested_by="admin",
+            ),
+        ])
+
+        assert cli._whatsapp_follow_pairing(None) == 1
+        assert "replaced this one" in capsys.readouterr().err
+
+    def test_every_state_the_row_can_hold_has_something_to_say(self):
+        """The note table is keyed by literals, so a renamed state would
+        silently print nothing — `.get` answers `None` and the loop carries on.
+        Built from the product's own constants, so a rename is a failure here
+        rather than a state an operator watches in silence.
+
+        `awaiting_scan` is the deliberate absence: the code is what that state
+        has to say, and a sentence over it would push it up the terminal.
+        """
+        expected = {
+            db.WHATSAPP_PAIRING_REQUESTED,
+            db.WHATSAPP_PAIRING_SERVICING,
+            *db.WHATSAPP_PAIRING_WINDOW_STATES,
+            *db.WHATSAPP_PAIRING_TERMINAL_STATES,
+        } - {db.WHATSAPP_PAIRING_AWAITING_SCAN}
+
+        assert set(cli._WHATSAPP_PAIRING_NOTES) == expected
+
+    def test_ctrl_c_leaves_the_window_open(self, monkeypatch, capsys):
+        """The window lives in the daemon and its session directory has already
+        moved aside, so a scan that lands with nobody watching still pairs.
+        Closing it from here would abandon that."""
+        def _interrupt(config):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli, "_whatsapp_pairing_view", _interrupt)
+
+        assert cli._whatsapp_follow_pairing(None) == 1
+        err = capsys.readouterr().err
+        assert "still open" in err
+        assert "cancel it" in err
+
+    def test_the_payload_reaches_no_log_record(self, monkeypatch, caplog):
+        """The rule the whole relay design rests on: a QR is the full-account
+        credential, so it never reaches `logging` on any path at any level —
+        `db_backup` would carry a log file onto the Nextcloud mount, and a
+        traceback frame holding one is why `_call_back` logs without
+        `exc_info`.
+
+        Scanned rather than trusted: the control is a `logger.debug` of the
+        payload anywhere in this loop, which turns this red and nothing else.
+        """
+        payload = "2@NEVERLOGTHIS=="
+        self._drive(monkeypatch, [
+            self._view("awaiting_scan", qr=payload, qr_seq=1),
+            self._view("paired"),
+        ])
+
+        with caplog.at_level(0):
+            assert cli._whatsapp_follow_pairing(None) == 0
+
+        assert payload not in caplog.text
+        assert not [r for r in caplog.records if payload in str(r.args or "")]
+
+
+class TestAttachModeEndToEnd:
+    """One run through the real join, the real row and the real relay file.
+
+    Every other case here drives one seam. This one is the integration: the
+    command writes a request, a stand-in for the daemon services it exactly as
+    the poll would — adopting a window id, publishing a code, reporting paired
+    — and the operator's terminal shows the code and exits 0.
+    """
+
+    def test_a_request_is_serviced_and_the_code_reaches_the_terminal(
+        self, tmp_path, sockets, capsys, monkeypatch, caplog,
+    ):
+        _init_pairing_db(sockets)
+        path = _config_file(tmp_path, sockets)
+        payload = "2@ATTACHEDPAYLOAD=="
+        monkeypatch.setattr(cli, "WHATSAPP_PAIR_POLL_SECONDS", 0.01)
+        failure: list[BaseException] = []
+
+        def _daemon():
+            """What `poll_pairing_request` and the bridge do, in order."""
+            try:
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    row = _pairing_row(sockets)
+                    if row is not None and row["state"] == "requested":
+                        break
+                    time.sleep(0.005)
+                else:
+                    raise AssertionError("no pairing request was ever written")
+                request_id = row["window_id"]
+                with db.get_db(sockets.path / "istota.db") as conn:
+                    assert db.record_whatsapp_pairing_state(
+                        conn, request_id, "awaiting_sidecar",
+                        adopt_window_id="bridge-window",
+                        expires_at=time.time() + 300.0,
+                    )
+                _publish(
+                    sockets, "bridge-window", "awaiting_scan",
+                    qr=payload, qr_seq=1,
+                )
+                # Long enough for several of the loop's ticks to pass over one
+                # unchanged code, which is what makes the single draw below an
+                # assertion rather than a coincidence of timing.
+                time.sleep(0.2)
+                with db.get_db(sockets.path / "istota.db") as conn:
+                    assert db.record_whatsapp_pairing_state(
+                        conn, "bridge-window", "paired", "linked",
+                    )
+                pairing_relay.clear_relay(_relay_path(sockets))
+            except BaseException as exc:  # noqa: BLE001 — reported, not raised
+                failure.append(exc)
+
+        driver = threading.Thread(target=_daemon, daemon=True)
+        driver.start()
+        try:
+            with _live_bridge_socket(sockets), caplog.at_level(0):
+                code = cli.cmd_whatsapp_pair(_args(path))
+        finally:
+            driver.join(timeout=10.0)
+
+        assert not failure, failure
+        assert code == 0
+
+        out = capsys.readouterr().out
+        assert "Paired" in out
+        # Drawn, and the payload itself never printed — the same property
+        # `TestTheCodeIsNeverWrittenDown` asserts of `_render_qr` directly.
+        assert "█" in out or "▀" in out
+        assert payload not in out
+        assert _pairing_row(sockets)["state"] == "paired"
+        # **The never-logged rule, over the two functions that actually hold
+        # the payload.** `TestFollowingTheWindow`'s log scan patches both
+        # `_whatsapp_pairing_view` and `_render_qr` out, so it covers a loop
+        # body containing no `logging` call at all — a leak added in the view,
+        # which reads the relay and carries the code into the dict, or in
+        # `_render_qr`'s fallback would not turn it red. Here both run for
+        # real.
+        assert payload not in caplog.text
+        assert not [r for r in caplog.records if payload in str(r.args or "")]

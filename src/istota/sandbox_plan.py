@@ -38,7 +38,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from .user_scope import scoped_user_dir
+from .user_scope import is_within, scoped_user_dir
 
 if TYPE_CHECKING:
     from . import db
@@ -53,6 +53,17 @@ Mode = Literal["ro", "rw", "tmpfs", "symlink", "flag"]
 #: boundary and its two callers lose different things by it — see the comment
 #: at the emission site in :func:`build_mount_plan`.
 EXTRA_RO_BIND = "extra_ro_bind"
+
+#: The `/etc` entries every profile binds read-only. Module scope because
+#: `config_sandbox_bound_roots` has to name the same set from outside
+#: `build_mount_plan`, and a second copy of it there is a refusal that silently
+#: stops covering a path the sandbox still binds.
+_ETC_BINDS: tuple[str, ...] = (
+    "/etc/ssl", "/etc/ca-certificates", "/etc/resolv.conf",
+    "/etc/hosts", "/etc/nsswitch.conf", "/etc/ld.so.cache",
+    "/etc/localtime", "/etc/passwd", "/etc/group",
+    "/etc/alternatives",
+)
 
 
 @dataclass(frozen=True)
@@ -443,13 +454,7 @@ def build_mount_plan(
     # dangling. The command then fails with "No such file or directory" for a
     # binary ls shows sitting right there, inside the sandbox only. It holds
     # nothing but symlinks back into /usr, which is already bound.
-    etc_files = [
-        "/etc/ssl", "/etc/ca-certificates", "/etc/resolv.conf",
-        "/etc/hosts", "/etc/nsswitch.conf", "/etc/ld.so.cache",
-        "/etc/localtime", "/etc/passwd", "/etc/group",
-        "/etc/alternatives",
-    ]
-    for ef in etc_files:
+    for ef in _ETC_BINDS:
         _ro(Path(ef), "etc")
 
     # --- Namespaces ---
@@ -1139,3 +1144,214 @@ def project_fs_roots(
 
     read_roots = list(dict.fromkeys(write + read_only))
     return read_roots, write, write_denied
+
+
+# ---------------------------------------------------------------------------
+# Config-derived bind roots, for a caller deciding where a file may sit
+# ---------------------------------------------------------------------------
+
+
+def config_sandbox_bound_roots(config: "Config") -> list[tuple[Path, str]]:
+    """The deployment-owned directories some task's sandbox binds, per config.
+
+    `(root, reason)` pairs, where `reason` is the `Mount.reason` the bind would
+    carry, so a refusal can name what it collided with. It lives here because
+    this module owns the bind list: a copy of it beside a consumer is how the
+    two come to disagree about what is in a namespace, which for a credential
+    relay means a file believed to be outside one and bound read-write into
+    every task's.
+
+    **It answers a different question from `build_mount_plan`, which is why it
+    is a separate function rather than a projection of one.** That one needs a
+    task, a user id and an admin flag, and it has side effects its own docstring
+    warns about (it creates a cache directory and logs a refused mask). The
+    caller here has no task: it is asking, before any task exists, whether a
+    configured path would land inside *any* user's sandbox. So each root is
+    widened to the level the config names — `{workspace}/Users` rather than one
+    user's directory, `{repos_dir}` rather than one admin's subtree — and a
+    direct child of `temp_dir` is admitted while anything under a per-user
+    subdirectory of it is not, since `user_temp_dir` is `{temp_dir}/{user_id}`
+    and the relay's own standalone fallback is a sibling of those.
+
+    **Widening is the safe direction and narrowing is not**, which is the rule
+    for anyone extending this: an entry wider than the real bind refuses a path
+    that would have been fine, and an entry narrower than it admits one that is
+    bound. `tests/test_whatsapp_pairing_web.py` drives `build_mount_plan` for a
+    synthetic task and requires **every** `ro`/`rw` mount it emits to be
+    covered here — not only the deployment-owned ones, which is where an
+    earlier version of that walk let the system binds through — so a new bind
+    fails the walk rather than silently escaping this list.
+
+    **Three things it cannot answer, stated rather than implied.** A
+    `user_resources` row names an arbitrary path under `workspace_path` and is
+    bound read-write or read-only per row, and those rows are in the database
+    rather than in the config — so a path under the workspace that is not
+    under `Users`, `Talk` or `Channels` is admitted here and could still be
+    reached by a resource somebody adds later. `repl_workspace` is a
+    caller-supplied directory bound read-write, bounded by
+    `executor._validate_workspace_dir`'s blocklist rather than by anything
+    knowable from the config. And a `docker`-shape deployment binds neither,
+    because no sandbox is built there at all — `effective_sandboxing` is False,
+    so every answer here is conservative rather than wrong.
+
+    `workspace_path` whole is deliberately *not* an entry: on the standalone
+    install `db_path.parent`, the workspace and `temp_dir` are one directory,
+    so that entry would refuse the very shape the relay path's own fallback
+    resolves for.
+
+    Never raises: it runs on a route's refusal path, and a config carrying a
+    path it cannot resolve must produce a refusal rather than a traceback.
+    """
+    roots: list[tuple[Path, str]] = []
+
+    def _add(value, reason: str) -> None:
+        try:
+            path = Path(value)
+        except (TypeError, ValueError):
+            return
+        if not str(path).strip():
+            return
+        roots.append((path, reason))
+
+    for ro_path in getattr(config.security, "sandbox_ro_paths", None) or []:
+        _add(ro_path, "sandbox_ro_paths")
+
+    workspace = config.workspace_path
+    if workspace is not None:
+        for name, reason in (
+            ("Users", "nextcloud_user_dir"),
+            ("Talk", "nextcloud_talk_dir"),
+            ("Channels", "nextcloud_channel_dir"),
+        ):
+            _add(Path(workspace) / name, reason)
+
+    repos_dir = (config.developer.repos_dir or "").strip()
+    if repos_dir:
+        _add(repos_dir, "developer_repos")
+
+    # The package cache, and it is the one entry here bound **read-write**.
+    # `resolve_sandbox_cache_dir` has two branches: the derived one lands
+    # inside `{repos_dir}/{user_id}`, already covered above, and the configured
+    # one is `{security.sandbox_cache_dir}/{user_id}` — which is the shape for
+    # every non-admin and for any deployment without the developer skill, so it
+    # is the common case rather than the exotic one. Widened to the root the
+    # operator named, since the per-user component is not knowable here.
+    cache_dir = (config.security.sandbox_cache_dir or "").strip()
+    if cache_dir:
+        _add(cache_dir, "package_cache")
+
+    # The system read-only binds every profile carries. Restated from the
+    # emission sites above rather than projected, because those are `_ro(...)`
+    # calls inside a function that needs a task — and the cost of drift is a
+    # refusal that should have happened, which the coverage walk in
+    # `tests/test_whatsapp_pairing_web.py` catches by driving the real planner.
+    #
+    # An operator is unlikely to point a relay at `/usr`, and on most shapes
+    # the daemon could not write there if they did. Listed anyway: the consumer
+    # reads `None` as permission to write a full-account credential, so
+    # "unlikely" and "the write would probably fail" are not the standard this
+    # answer is held to — and a root-run deployment with a writable
+    # `/usr/local` reaches it.
+    _add(Path("/usr"), "usr")
+    for compat in ("/bin", "/lib", "/lib64", "/sbin"):
+        _add(Path(compat), "merged_usr_compat")
+    for etc_path in _ETC_BINDS:
+        _add(Path(etc_path), "etc")
+
+    # The daemon user's own model cache, bound read-only wherever it exists.
+    # From `$HOME` rather than `Path.home()`, matching the emission site: the
+    # two differ for a process whose passwd entry is not what its environment
+    # says, and the bind follows the environment. Found by the coverage walk
+    # rather than by reading — it is the one bind here derived from neither the
+    # config nor a fixed path.
+    _add(
+        Path(os.environ.get("HOME", "/tmp")) / ".cache" / "huggingface",
+        "huggingface_cache",
+    )
+
+    try:
+        from . import executor  # noqa: PLC0415
+
+        istota_src, venv_path = executor._source_and_venv_paths()
+        base_pythons = executor.python_base_prefix_binds()
+    except Exception:  # noqa: BLE001 — never raises, per the contract
+        istota_src = venv_path = None
+        base_pythons = []
+    if istota_src is not None:
+        _add(istota_src, "istota_src")
+    if venv_path is not None:
+        _add(venv_path, "venv")
+    for base_python in base_pythons:
+        _add(base_python, "python_base")
+
+    return roots
+
+
+def sandbox_bound_reason(config: "Config", path) -> str | None:
+    """The bind `path` sits inside, or `None` where no sandbox reaches it.
+
+    The `reason` string rather than a bool, so a refusal can say which bind it
+    collided with — an operator who pointed a path at `{workspace}/Users` needs
+    to be told that and not merely that the path was refused.
+
+    Comparison is on **resolved** paths, because the question is about the
+    directory rather than about how it was spelled: a symlinked workspace root
+    and a path written through it are the same place, and `_bind` resolves at
+    `execve` anyway. A path that cannot be resolved falls back to a lexical
+    comparison rather than raising, the way `_same_directory` does.
+
+    The per-user temp root is the one root compared by *depth*: `temp_dir`
+    itself is bound at no path, `{temp_dir}/{user_id}` is bound read-write into
+    that user's namespace, so a direct child file of `temp_dir` is outside
+    every sandbox and anything deeper is inside one.
+    """
+    try:
+        target = Path(path)
+    except (TypeError, ValueError):
+        return None
+    resolved = _resolved_or_self(target)
+
+    # The temp root is the one compared by **depth** rather than containment,
+    # so `is_within` answers only half of it: what matters is how many
+    # components lie between the two, and `relative_to` is what supplies them.
+    # (The loop below is the containment question and uses `is_within`, which
+    # is the tree's one spelling of it.)
+    temp_dir = _resolved_or_self(Path(config.temp_dir))
+    if is_within(resolved, temp_dir):
+        # One component is `{temp_dir}/<name>`, the relay's own fallback and a
+        # sibling of the per-user directories. Two or more is inside one, and
+        # nought is the root itself, which is bound at no path.
+        if len(resolved.relative_to(temp_dir).parts) > 1:
+            return "user_temp_dir"
+
+    for root, reason in config_sandbox_bound_roots(config):
+        # `user_scope.is_within`, not an inline `== or is_relative_to` pair:
+        # the equality term is redundant and the tree keeps one spelling of
+        # this test (`tests/test_containment_idiom_guard.py`). It is lexical,
+        # so both sides are resolved above and here.
+        if is_within(resolved, _resolved_or_self(root)):
+            return reason
+    return None
+
+
+def _resolved_or_self(path: Path) -> Path:
+    """`path.resolve()`, or the path as written where that cannot be done.
+
+    `Path.resolve` raises `ValueError` on an embedded NUL, `RuntimeError` on a
+    symlink cycle before 3.13, and `OSError` on a dead or hung filesystem
+    underneath — and this runs on a route's refusal path, so it must answer
+    rather than propagate.
+
+    **Falling back to the unresolved path rather than to `None`**, which is
+    where this differs from `db_backup._resolve_or_none` and why that one is
+    not reused: there `None` means "can't tell" and the caller skips the run,
+    while here there is no skipping — the caller has to say whether a
+    credential may be written to this path, and a lexical comparison is a
+    weaker answer than a resolved one but a much better one than none.
+    `baileys_bridge._same_directory` degrades the same way for the same
+    reason.
+    """
+    try:
+        return path.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return path

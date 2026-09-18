@@ -3956,6 +3956,659 @@ async def admin_doctor(deep: int = 0, _: dict = Depends(_require_admin)):
     }
 
 
+# ---- Connections: deployment-level external links ----
+#
+# Distinct from the per-user connected services on `/settings`: a connection
+# here is a deployment-wide link one operator owns, and WhatsApp's paired
+# Baileys session is its only member for now.
+#
+# **The pairing QR never appears in a JSON body, on any of these routes.** It
+# is a full-account WhatsApp credential — anything that scans it is linked as a
+# device — so the state, the stream and the index carry a `qr_seq` counter and
+# nothing else, and the code itself reaches the browser only as a server-
+# rendered SVG from `qr.svg`, with `Cache-Control: no-store`. That keeps the
+# payload out of the JSON API, out of the browser's JS heap as a string, and
+# out of anything that logs a response body. It is the property the whole
+# design rests on, and `tests/test_whatsapp_pairing_web.py` asserts it over all
+# three JSON endpoints together rather than one at a time.
+
+#: How often the pairing stream re-reads the relay. Well inside WhatsApp's ~20s
+#: QR rotation, and the state it polls is four small fields.
+_PAIRING_STREAM_POLL_SECONDS = 1.0
+
+#: Ticks of silence before the pairing stream sends a comment frame, so a proxy
+#: idle timeout does not close a window nobody is scanning yet.
+_PAIRING_STREAM_KEEPALIVE_TICKS = 20
+
+
+def _whatsapp_pairing_refusal() -> tuple[int, str] | None:
+    """The config-level refusal shared by the five pairing routes, or `None`.
+
+    One function rather than a decorator, because the GET routes need the same
+    answer and a decorator would have to know which of them may mutate.
+
+    Order is by whose decision each refusal is. A config that did not load is
+    the deployment's (503); a WhatsApp surface switched off is the operator's
+    and is not a pairing question at all (503); `pairing_enabled = false` is the
+    operator saying this surface does not exist here, so it **404s** rather than
+    explaining itself — a deployment that wants pairing to stay a terminal-only
+    operation should not advertise a route; and a Cloud deployment is a 409,
+    because the adapter has no QR to show and that is a fact about the state
+    rather than about the URL.
+
+    There is deliberately **no shape-based refusal**: the `shutdown` frame is
+    what makes the move safe, so the flow runs on systemd, on compose and in
+    `istota serve` alike, and `restart_interval_seconds = 0` — what compose
+    renders — refuses nothing.
+    """
+    if _config is None:
+        return 503, "config not loaded"
+    if not _config.whatsapp.enabled:
+        return 503, "the WhatsApp surface is disabled on this deployment"
+    if not _config.whatsapp.baileys.pairing_enabled:
+        return 404, "not found"
+    if _config.whatsapp.provider != "baileys":
+        return (
+            409,
+            "the WhatsApp surface runs on the Cloud API adapter, which is "
+            "configured through Meta's business setup and has no pairing code",
+        )
+    return None
+
+
+def _require_whatsapp_pairing() -> None:
+    refusal = _whatsapp_pairing_refusal()
+    if refusal is not None:
+        raise HTTPException(status_code=refusal[0], detail=refusal[1])
+
+
+def _pairing_relay_path() -> Path:
+    from .transport.whatsapp import baileys_bridge
+
+    return baileys_bridge.default_pairing_relay_path(_config)
+
+
+def _pairing_relay_sandbox_reason() -> str | None:
+    """Which sandbox bind the resolved relay path sits inside, or `None`.
+
+    A pairing window is refused where it is not `None`. The relay holds a
+    full-account credential for the length of the window, so a path inside a
+    root some task's bubblewrap namespace binds would hand that code to the
+    model — and `pairing_relay_path` is an operator-settable key, so the answer
+    cannot be decided once at design time.
+
+    **The bind list is `sandbox_plan`'s, asked rather than copied.** The check
+    belongs on this side because the answer needs that module, and a
+    `transport/whatsapp` module cannot import it without taking the executor's
+    whole graph and a cycle. Never raises: a config it cannot resolve produces a
+    refusal, not a traceback.
+    """
+    from . import sandbox_plan
+
+    try:
+        relay = _pairing_relay_path()
+        if not relay.is_absolute():
+            # A relative path is resolved against each process's own cwd, so
+            # the verdict reached here would be about the *web* process while
+            # the write happens in the scheduler. The two share
+            # `WorkingDirectory` under Ansible today and nothing enforces it —
+            # and the CLI's own mode will not. An answer about a different
+            # directory from the one the credential lands in is worse than no
+            # answer, so this is a refusal rather than a guess.
+            return "relative_path"
+        return sandbox_plan.sandbox_bound_reason(_config, relay)
+    except Exception:  # noqa: BLE001 — a refusal path must not 500
+        logger.warning("whatsapp pairing relay path check failed", exc_info=True)
+        return "unresolvable"
+
+
+def _as_float(value, default: float | None = None) -> float | None:
+    """A relay number as a float, or `default`. Never raises.
+
+    **The relay's numbers are not validated on the way back.**
+    `pairing_relay.read_relay` type-checks `window_id`, `state` and
+    `expires_at` — it coerces that last one for its own deadline test and does
+    not write the coerced value back — and passes `qr_seq` through exactly as
+    the file held it. Every reader here is a route with no exception wrapper,
+    so an unparseable value would be a 500 on the state, index and SVG
+    endpoints rather than the "a read that fails to parse returns nothing" the
+    design asks for.
+    """
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed):
+        return default
+    return parsed
+
+
+def _as_int(value, default: int = 0) -> int:
+    """A relay counter as an int, or `default`. Never raises. See `_as_float`."""
+    parsed = _as_float(value, None)
+    return default if parsed is None else int(parsed)
+
+
+def _read_pairing_row() -> dict | None:
+    from . import db
+
+    with db.get_db(_config.db_path) as conn:
+        return db.read_whatsapp_pairing(conn)
+
+
+def _pairing_state_payload() -> dict | None:
+    """The pairing state both JSON routes and the stream render. No payload.
+
+    **Row first, relay second, and the row's terminal state is a veto.** The
+    relay file carries the window's own deadline, which is later than the
+    request row's, so a window republishing after its row was closed passes
+    `read_relay`'s own deadline check — the reader has to ask the row. That is
+    the defence-in-depth half of Stage 3's cancel: the poll drops such a window
+    within a tick, and this makes the surface stop rendering it at once.
+
+    `window_id` is what the two are matched on, so a stale file from an earlier
+    window is ignored rather than drawn. Every field here is small and
+    absolute; `qr_seq` is the only thing that says a new code exists.
+    """
+    from . import db
+    from .transport.whatsapp import pairing_relay
+
+    row = _read_pairing_row()
+    if row is None:
+        return None
+    terminal = row["state"] in db.WHATSAPP_PAIRING_TERMINAL_STATES
+    live = None
+    if not terminal and row["window_id"]:
+        live = pairing_relay.read_relay(
+            _pairing_relay_path(), expected_window_id=row["window_id"],
+        )
+    expires_epoch = db.sql_epoch_from_datetime(row["expires_at"])
+    if live is not None:
+        expires_epoch = _as_float(live.get("expires_at"), expires_epoch)
+    return {
+        "window_id": row["window_id"],
+        # The live window's state when one is publishing, because the row is
+        # only mirrored once per poll; the row's own state otherwise, which is
+        # the authority for every terminal answer.
+        "state": live["state"] if live is not None else row["state"],
+        "row_state": row["state"],
+        "terminal": terminal,
+        "requested_by": row["requested_by"],
+        "requested_at": row["requested_at"],
+        "expires_at": row["expires_at"],
+        "expires_at_epoch": expires_epoch,
+        "message": (live or {}).get("message") or row["message"],
+        "force": row["force"],
+        "qr_seq": _as_int((live or {}).get("qr_seq")),
+        # Whether `qr.svg` would draw something right now. Never the payload.
+        "qr_available": bool(live is not None and live.get("qr")),
+    }
+
+
+def _pairing_stream_frame(payload: dict | None) -> dict:
+    """The five small fields the stream carries, and deliberately not the rest.
+
+    A frame is what a browser needs to decide whether to refetch the SVG and
+    what to say while it waits. `qr_available` rides along so the client knows a
+    `qr_seq` of 0 means "no code yet" rather than "a code the fetch will miss".
+
+    **Both branches emit the same five keys.** The no-pairing branch used to
+    omit `qr_available`, which is the one frame where the reason it exists
+    applies — a client keyed on it read `undefined` on the first frame of every
+    idle stream.
+    """
+    if payload is None:
+        return {
+            "state": None,
+            "qr_seq": 0,
+            "qr_available": False,
+            "expires_at": None,
+            "message": "",
+        }
+    return {
+        "state": payload["state"],
+        "qr_seq": payload["qr_seq"],
+        "qr_available": payload["qr_available"],
+        "expires_at": payload["expires_at_epoch"],
+        "message": payload["message"],
+    }
+
+
+def _whatsapp_connection_payload() -> dict:
+    """One card's worth of facts about the deployment's WhatsApp link.
+
+    Reads `read_status()`, which answers `None` in a process holding no bridge
+    — the web unit on the canonical Ansible deployment — so `link` being `None`
+    means "this process cannot see the bridge", never "the bridge is down". The
+    card renders the durable pairing row either way, which is the state that
+    crosses processes.
+    """
+    from . import config as istota_config
+    from .transport.whatsapp import baileys_bridge
+
+    baileys = _config.whatsapp.baileys
+    provider = _config.whatsapp.provider
+    pairing_supported = provider == "baileys"
+    status = baileys_bridge.read_status() if pairing_supported else None
+    payload = {
+        "id": "whatsapp",
+        "label": "WhatsApp",
+        "enabled": bool(_config.whatsapp.enabled),
+        "provider": provider,
+        "number": _config.whatsapp.business_phone_number,
+        "pairing_supported": pairing_supported,
+        "pairing_enabled": bool(pairing_supported and baileys.pairing_enabled),
+        "restart_interval_seconds": baileys.restart_interval_seconds,
+        "credential_errors": istota_config.whatsapp_credential_errors(_config),
+        "link": None,
+        "pairing": None,
+        "pairing_blocked_reason": None,
+    }
+    if status is not None:
+        # Named fields rather than the whole status dict: that one is doctor's,
+        # it grows, and a card is not the place to discover a field that turns
+        # out to carry something an operator would not put in a browser.
+        payload["link"] = {
+            "listening": bool(status.get("listening")),
+            "connected": bool(status.get("connected")),
+            "ready": bool(status.get("ready")),
+            "fatal_reason": status.get("fatal_reason"),
+            "fatal_is_permanent": bool(status.get("fatal_is_permanent")),
+            "restarts": status.get("restarts"),
+        }
+    if payload["pairing_enabled"]:
+        payload["pairing_blocked_reason"] = _pairing_relay_sandbox_reason()
+    return payload
+
+
+@api_router.get("/admin/connections")
+async def admin_connections(_: dict = Depends(_require_admin)):
+    """Which deployment-level connections exist, and where each one stands.
+
+    A dedicated endpoint rather than a read of `/admin/doctor`: that payload is
+    a diagnostic and bending it into a UI data source couples two things that
+    change for different reasons.
+
+    **It stays reachable when `pairing_enabled` is false**, unlike the five
+    pairing routes, and that is the one place this reads differently from the
+    spec's "the routes 404". The card has to be able to say the session is
+    working and that re-pairing is switched off here; a 404 on the index would
+    leave the Connections pane blank on exactly the deployment whose operator
+    made a deliberate choice.
+    """
+    if _config is None:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    payload = await asyncio.to_thread(_whatsapp_connection_payload)
+    if payload["pairing_supported"] and payload["enabled"]:
+        payload["pairing"] = await asyncio.to_thread(_pairing_state_payload)
+    return {"connections": [payload]}
+
+
+@api_router.get("/admin/connections/whatsapp/pairing")
+async def admin_whatsapp_pairing_state(_: dict = Depends(_require_admin)):
+    """The current pairing state, one shot. Carries no payload."""
+    _require_whatsapp_pairing()
+    return {"pairing": await asyncio.to_thread(_pairing_state_payload)}
+
+
+@api_router.post("/admin/connections/whatsapp/pairing")
+async def admin_whatsapp_pairing_start(
+    request: Request,
+    admin: dict = Depends(_require_admin),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Start a pairing window by writing the durable request row.
+
+    **Neither `force` nor `confirm_disconnect` is ever defaulted server-side.**
+    A start against a session with no latched permanent fatal is refused 409
+    saying the session is working — the route does not quietly set `force`
+    itself, because a server-side fallback is how a confirmed action becomes an
+    unconfirmed one. `force: true` additionally requires
+    `confirm_disconnect: true`, so the destructive path cannot be reached by a
+    single flipped boolean in a script or a replayed request; that second one is
+    a 400, since it is a malformed request rather than a state conflict.
+
+    **The session-live refusal is best-effort here and authoritative in the
+    bridge.** `read_status()` answers `None` in a process with no bridge, which
+    is the web unit on the canonical Ansible deployment, so this route can only
+    apply the gate where it can see the link — `istota serve`, and a test that
+    published one. `repair_session` applies it again with the live link in front
+    of it and records `session_live` on the row, which is what the card reads.
+    Refusing outright when the link is unreadable is not available: it would
+    404 the split shape this whole flow exists for.
+
+    The confirmation is carried across processes by `pairing_force`, because the
+    poll is what calls the bridge and it is not the surface the operator spoke
+    to.
+    """
+    _require_whatsapp_pairing()
+    blocked = await asyncio.to_thread(_pairing_relay_sandbox_reason)
+    if blocked is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the pairing relay would be written inside a directory the "
+                f"task sandbox binds ({blocked}); set [whatsapp.baileys] "
+                "pairing_relay_path to a directory outside it, or pair from a "
+                "terminal with `istota whatsapp pair`"
+            ),
+        )
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — a body-less POST is the unforced case
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    force = body.get("force") is True
+    confirmed = body.get("confirm_disconnect") is True
+    if force and not confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "force requires confirm_disconnect: re-pairing a working "
+                "session disconnects it and costs a reconnect"
+            ),
+        )
+    if not force:
+        from .transport.whatsapp import baileys_bridge
+
+        status = await asyncio.to_thread(baileys_bridge.read_status)
+        if status is not None and not status.get("fatal_is_permanent"):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the WhatsApp session has not reported itself unlinked, so "
+                    "re-pairing it would disconnect a link that may be working. "
+                    "Confirm with force and confirm_disconnect to proceed."
+                ),
+            )
+    window_id = await asyncio.to_thread(
+        _start_pairing_request, admin["username"], force,
+    )
+    if window_id is None:
+        raise HTTPException(
+            status_code=409, detail="a pairing request is already in progress",
+        )
+    logger.info(
+        "whatsapp pairing requested by %s force=%s", admin["username"], force,
+    )
+    return {"window_id": window_id, "state": "requested", "force": force}
+
+
+def _start_pairing_request(user_id: str, force: bool) -> str | None:
+    from . import db
+    from .transport.whatsapp import baileys_bridge
+
+    with db.get_db(_config.db_path) as conn:
+        return db.request_whatsapp_pairing(
+            conn,
+            user_id,
+            window_seconds=baileys_bridge.configured_pairing_window_seconds(
+                _config
+            ),
+            force=force,
+        )
+
+
+@api_router.delete("/admin/connections/whatsapp/pairing")
+async def admin_whatsapp_pairing_cancel(
+    admin: dict = Depends(_require_admin),
+    _csrf: None = Depends(_verify_origin),
+):
+    """Cancel an open pairing request.
+
+    **It stamps the row and touches neither the relay nor the window**, which
+    is not laziness: the web process holds no bridge on the split deployment,
+    and `pairing_relay.clear_relay` states its own precondition — the bridge
+    serializes every relay touch behind one lock, and nothing in this process
+    can take it. So the row is the instruction, the poll's cancel arm drops the
+    window and unlinks the file within a tick, and `_pairing_state_payload`'s
+    terminal veto stops this surface rendering the window in the meantime.
+
+    A session directory an earlier step moved aside is **not** restored: the
+    sidecar may already have written a partial new session into the recreated
+    one, and choosing between the two is an operator's call rather than a
+    heuristic's. The archived path is on the row's message and is preserved.
+    """
+    _require_whatsapp_pairing()
+    outcome = await asyncio.to_thread(_cancel_pairing_request)
+    if outcome["cancelled"]:
+        logger.info(
+            "whatsapp pairing cancelled by %s window=%s",
+            admin["username"], outcome.get("window_id") or "",
+        )
+    return outcome
+
+
+def _cancel_pairing_request() -> dict:
+    """Stamp the request row terminal. Never restores a moved-aside session.
+
+    **`BEGIN IMMEDIATE`, matching the poll's own claim**, and that pair is the
+    whole of why this is one transaction rather than a read followed by a
+    write: under a deferred `BEGIN` the poll could commit `servicing` in
+    between, and since both sides hold the same `window_id` and the row was
+    still non-terminal, the cancel's write applied and this route answered
+    `cancelled: true` about a re-pair that was already running.
+
+    **A `servicing` row is refused rather than stamped**, which is the other
+    half. `repair_session` takes no instruction from the row once it has
+    started — its refusals are its own single-flight flag, an open window, a
+    stopping bridge and the directory check — so stamping the row could not
+    have stopped it, and the write did active harm: the guarded outcome write
+    that follows was then refused by the terminal clause, so the timestamped
+    archive path never reached the row and an operator was left with two
+    session directories and nothing saying which held theirs. Refusing keeps
+    the row writable for that outcome, which is the record that matters.
+
+    A window mid-scan is `awaiting_sidecar` or `awaiting_scan`, not
+    `servicing`, so the spec's cancel-mid-window case is unaffected.
+    """
+    from . import db
+
+    with db.get_db(_config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = db.read_whatsapp_pairing(conn)
+        if row is None:
+            return {"cancelled": False, "reason": "no_pairing"}
+        if row["state"] in db.WHATSAPP_PAIRING_TERMINAL_STATES:
+            return {
+                "cancelled": False,
+                "reason": "already_closed",
+                "window_id": row["window_id"],
+            }
+        if row["state"] == db.WHATSAPP_PAIRING_SERVICING:
+            return {
+                "cancelled": False,
+                "reason": "servicing",
+                "window_id": row["window_id"],
+            }
+        message = (
+            "the pairing window was cancelled from the admin UI before a code "
+            "was scanned."
+        )
+        # The row's own message is the archive clause a later process needs to
+        # tell an operator which of two session directories holds theirs, so it
+        # is appended rather than replaced.
+        existing = (row["message"] or "").strip()
+        if existing:
+            message = f"{message} {existing}"
+        if row["window_id"]:
+            applied = db.record_whatsapp_pairing_state(
+                conn, row["window_id"], db.WHATSAPP_PAIRING_FAILED, message,
+            )
+        else:
+            # No id to guard on, so every guarded write here refuses it. The
+            # unguarded clear is the escape, which is what stops such a row
+            # blocking every later request for the life of the deployment.
+            applied = db.clear_whatsapp_pairing(conn)
+        return {
+            "cancelled": bool(applied),
+            "reason": "" if applied else "not_applied",
+            "window_id": row["window_id"],
+        }
+
+
+@api_router.get("/admin/connections/whatsapp/pairing/stream")
+async def admin_whatsapp_pairing_stream(
+    request: Request,
+    _: dict = Depends(_require_admin),
+):
+    """Live pairing state over SSE. State, `qr_seq`, deadline and message only.
+
+    Polls the store the other process writes, for the reason the admin log tail
+    does: on the split deployment the bridge is in the scheduler unit, so there
+    is no in-process bus to subscribe to. Cadence is 1s, well inside the ~20s
+    QR rotation.
+
+    **The sleep goes through `web_shutdown.sleep_unless_shutdown`**, like the
+    three generators already here. Nothing server-side ever ends a polling
+    stream, so on a bare `asyncio.sleep` uvicorn runs out its whole graceful
+    window and then cancels the ASGI task — which `run_asgi` logs as
+    `ERROR: Exception in ASGI application` with a full traceback, on every
+    ordinary Ctrl-C and every deploy restart.
+    """
+    _require_whatsapp_pairing()
+
+    async def _generate():
+        last: dict | None = None
+        idle = 0
+        while True:
+            if await request.is_disconnected() or web_shutdown.is_shutting_down():
+                return
+            try:
+                frame = _pairing_stream_frame(
+                    await asyncio.to_thread(_pairing_state_payload)
+                )
+            except Exception as exc:  # noqa: BLE001 — must not 500 mid-stream
+                # `stream_error`, not `error`: EventSource has a built-in
+                # `error` event for connection failures, so a frame by that
+                # name lands on the same listener and is never seen.
+                #
+                # And the type alone, never `exc_info`: the frames on this path
+                # hold the dict `read_relay` returned, which carries the
+                # pairing code. Standard `logging` does not render locals, so
+                # nothing leaks today — the rule is that no reader of this
+                # payload is the one that finds out when that changes, and
+                # `_render_pairing_qr` below already follows it.
+                logger.warning(
+                    "whatsapp pairing stream read failed: %s",
+                    type(exc).__name__,
+                )
+                yield (
+                    "event: stream_error\n"
+                    f"data: {json.dumps({'error': 'pairing read failed'})}\n\n"
+                )
+                return
+            if frame != last:
+                last = frame
+                idle = 0
+                yield f"event: pairing\ndata: {json.dumps(frame)}\n\n"
+            else:
+                idle += 1
+                if idle >= _PAIRING_STREAM_KEEPALIVE_TICKS:
+                    idle = 0
+                    yield ": ping\n\n"
+            if not await web_shutdown.sleep_unless_shutdown(
+                _PAIRING_STREAM_POLL_SECONDS
+            ):
+                return
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@api_router.get("/admin/connections/whatsapp/pairing/qr.svg")
+async def admin_whatsapp_pairing_qr(
+    seq: str | None = None, _: dict = Depends(_require_admin),
+):
+    """The pairing code, rendered server-side as an SVG.
+
+    `segno` is already a top-level dependency and already renders this exact
+    payload for `cli._render_qr`, so the alternative — a JS QR library in
+    `web/` — would buy nothing and would put the credential in the browser as a
+    string. A scannable image is still a credential, which is what
+    `Cache-Control: no-store` and the admin gate are for; what this buys is
+    that the payload stays out of the JSON API and out of anything that logs a
+    response body.
+
+    `seq` is a cache-buster the client passes back from the stream frame, and a
+    mismatch is **not** a refusal: the client can legitimately be one rotation
+    behind, and a 409 there would blank the code for a person mid-scan. The
+    code actually drawn is named in `X-Pairing-Qr-Seq`.
+
+    It is typed `str | None` rather than `int` for that same reason. FastAPI
+    validates the annotation, so `?seq=` or `?seq=abc` on an `int` is a 422 —
+    the refusal the paragraph above says must not happen, reached by a
+    different status code. The value is read by nothing.
+
+    404 covers every way there is nothing to draw — no request row, a terminal
+    one, no relay file, a stale window, or a window not yet at `awaiting_scan`.
+    """
+    _require_whatsapp_pairing()
+    drawn = await asyncio.to_thread(_render_pairing_qr)
+    if drawn is None:
+        raise HTTPException(status_code=404, detail="no pairing code available")
+    svg, qr_seq = drawn
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Pairing-Qr-Seq": str(qr_seq),
+            # The image is drawn from the deployment's own bytes, so nothing
+            # here needs to be fetched, framed or scripted.
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _render_pairing_qr() -> tuple[bytes, int] | None:
+    """The live pairing code as SVG bytes, or `None`. Never logs the payload.
+
+    Same row-first rule as `_pairing_state_payload`: a terminal row vetoes the
+    relay, and the window id is matched before anything is read out of the
+    file. Only `awaiting_scan` carries a code, which `read_relay` enforces on
+    the way back as well as `build_payload` on the way out.
+    """
+    import io
+
+    from . import db
+    from .transport.whatsapp import pairing_relay
+
+    row = _read_pairing_row()
+    if row is None or not row["window_id"]:
+        return None
+    if row["state"] in db.WHATSAPP_PAIRING_TERMINAL_STATES:
+        return None
+    live = pairing_relay.read_relay(
+        _pairing_relay_path(), expected_window_id=row["window_id"],
+    )
+    if live is None or live.get("state") != pairing_relay.STATE_AWAITING_SCAN:
+        return None
+    payload = live.get("qr")
+    if not isinstance(payload, str) or not payload:
+        return None
+    try:
+        import segno
+
+        buf = io.BytesIO()
+        segno.make(payload, error="l").save(
+            buf, kind="svg", scale=6, border=2, xmldecl=False, svgns=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — never with the payload attached
+        # No `exc_info` and no payload: a traceback frame here holds the
+        # credential, which is the rule every relay touch follows.
+        logger.warning(
+            "whatsapp pairing QR could not be drawn: %s", type(exc).__name__,
+        )
+        return None
+    return buf.getvalue(), _as_int(live.get("qr_seq"))
+
+
 # ---- Web chat surface ----
 #
 # Always-on in-app companion to Talk. Rooms are per-user channel tokens (each

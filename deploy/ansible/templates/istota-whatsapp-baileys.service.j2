@@ -43,7 +43,7 @@ ExecStart={{ istota_whatsapp_baileys_node_bin }} {{ istota_repo_dir }}/docker/wh
 # lengthening RestartSec is not the same fix and would slow the second case
 # down for nothing.
 Restart=always
-RestartSec=30
+RestartSec={{ istota_whatsapp_baileys_restart_sec }}
 
 # Both are required and the program exits 2 without either — the session
 # directory is where its own log lives, so there is no channel left to complain

@@ -33,6 +33,16 @@ stdio is discarded so it cannot print into the daemon's log; the directory is
 bound into no sandbox at any path; and neither its contents nor a `qr` payload
 is ever logged, a QR being the pairing credential itself.
 
+**A pairing code is relayed only inside an armed window, and never through
+this module's log.** `_handle_qr` discards the payload with a note unless an
+admin-initiated `PairingWindow` is open, which is what every deployment has
+always done — relaying every QR the bridge sees would publish a full-account
+credential to anyone who can reach `/admin` on each unpaired boot. Inside a
+window it goes to a 0600 file (`pairing_relay`), which is unlinked the moment
+the window closes by any route, and every touch of that file happens on a
+thread: the read loop dispatches and never works, and `_call_back` is not a
+thread hop however its name reads.
+
 `sidecar_argv=()` is a first-class mode rather than a test affordance: the
 Ansible shape runs the sidecar as its own systemd unit, so the bridge listens
 and supervises nothing. Passing an argv is the `istota serve` shape, where the
@@ -46,15 +56,21 @@ import contextlib
 import dataclasses
 import inspect
 import logging
+import math
 import os
+import re
 import secrets
 import stat
+import threading
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ... import du
 from ...config import Config
-from . import baileys_protocol as proto, message_fingerprint
+from . import baileys_protocol as proto, message_fingerprint, pairing_relay
 from ._types import WhatsAppSendOutcome, WhatsAppSendRequest
 
 logger = logging.getLogger(__name__)
@@ -115,11 +131,85 @@ TERMINATE_GRACE_SECONDS = 5.0
 #: bounds `_reap_process`'s own two grace periods and nothing else.
 RESET_SETTLE_SECONDS = SHUTDOWN_GRACE_SECONDS + TERMINATE_GRACE_SECONDS + 2.0
 
+#: How long an admin-initiated pairing window stays armed. Matching
+#: `cli.WHATSAPP_PAIR_TIMEOUT_SECONDS`, which is about fifteen QR rotations —
+#: long enough to find a phone, short enough that a credential is not
+#: relayable for an afternoon.
+PAIRING_WINDOW_SECONDS = 300.0
+
+#: How long the pairing sequence waits for the link to drop after it has sent
+#: `shutdown`. A **constant**, because the sidecar's own path from that frame to
+#: `exit(0)` is a socket teardown and a process exit with no dependence on any
+#: supervisor.
+SIDECAR_STOP_TIMEOUT = 15.0
+
+#: How long after a re-pair another one is refused. It stands in for
+#: `reset_session`'s once-per-bridge `_reset_used` on a bridge that lives as
+#: long as the daemon, where that flag would allow one re-pair per daemon
+#: restart on a surface whose whole purpose is recovery. Longer than
+#: `PAIRING_WINDOW_SECONDS`, which is the property that matters: it makes a
+#: retry loop against a link WhatsApp watches for churn pointless without
+#: obstructing somebody who mis-scanned.
+#:
+#: **Stamped where the restart is actually spent, which is a different
+#: statement on each shape.** What is being rationed is the induced restart —
+#: ISSUE-497's churn against a link WhatsApp watches — so on the external-unit
+#: shape it is stamped at the `shutdown` write, because a sequence that then
+#: aborted at `SIDECAR_STOP_TIMEOUT` spent one just as surely as one that
+#: paired. On the spawned shape it is stamped on a returning `reset_session`,
+#: and that is not the same rule read differently: the supervisor's own
+#: permanent-fatal arm has already asked the child to stop and reaped it
+#: before `repair_session` is called, so nothing is spent until `resume()`
+#: spawns a fresh one — which only a successful reset reaches. Stamping that
+#: path's failures would block a legitimate retry for ten minutes over a
+#: restart that never happened.
+RESET_COOLDOWN = 600.0
+
+#: How often the pairing sequence re-reads `connected` while it waits for a
+#: sidecar to appear. Only the *appear* wait polls; the wait for the link to
+#: drop is event-driven, because that one is where the rename's safety margin
+#: is measured in Docker's 100ms restart backoff rather than in systemd's 30s.
+_SIDECAR_POLL_INTERVAL = 0.05
+
+#: The fixed half of `sidecar_return_timeout` — node boot, the Baileys load, a
+#: TLS and Noise handshake, and the 500ms the sidecar waits for its own frame
+#: to leave the socket. ISSUE-496 measured 42 restarts in about 25 minutes at
+#: `RestartSec=30`, i.e. a ~35.7s cycle: roughly 30s down and about 5.7s up.
+SIDECAR_RETURN_FIXED_SECONDS = 30.0
+
+#: How long the watchdog will sleep in one go. The deadlines drive the sleeps,
+#: so this is only the ceiling that keeps a window whose clock was read wrongly
+#: from parking for its whole TTL.
+PAIRING_WATCHDOG_MAX_SLEEP = 1.0
+
+#: The relay file's name beside the state directory. See `pairing_relay`.
+PAIRING_RELAY_NAME = "whatsapp-pairing.json"
+
+#: What the sidecar writes into the session directory that is **not** auth
+#: state: its own log, appended on every boot before the daemon link is up,
+#: and the logged-out backoff's run record. Neither is a credential and
+#: neither says a session is there, so `_session_dir_holds_a_session` ignores
+#: both. Restated from `docker/whatsapp-baileys/index.js` rather than shared,
+#: since nothing crosses between a Node program and this module; the cost of
+#: drift is a needless archive, which is the safe direction.
+_SIDECAR_OWN_FILES = frozenset({"sidecar.log", "logout-backoff.json"})
+
 #: How many names `_reset_destination` will probe before giving up. The stamp
 #: is one second wide, so a collision means two resets inside one second and a
 #: handful of suffixes covers it; the ceiling is there because an unbounded
 #: walk is a hang wherever a stat is answering wrongly.
 _RESET_NAME_ATTEMPTS = 1000
+
+#: How `_reset_destination` stamps an archived session directory. One spelling,
+#: read by the writer and by `session_archives`, because the two disagreeing
+#: means a diagnostic reporting one credential on a host holding several.
+ARCHIVE_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+
+#: The stamp as it appears at the end of an archive's name, plus the `-N`
+#: collision suffix `_reset_destination` appends when two resets land inside
+#: one second. Anchored at the end, so a name that merely contains a stamp is
+#: not an archive.
+_ARCHIVE_SUFFIX_RE = re.compile(r"\.(\d{8}T\d{6}Z)(?:-\d+)?\Z")
 
 #: A `fatal` naming one of these is not retried by respawning. The session is
 #: gone and only `istota whatsapp pair --reset` brings it back, so a respawn
@@ -218,6 +308,130 @@ def default_session_dir(config: Config) -> Path:
 
 def default_socket_path(config: Config) -> Path:
     return Path(config.db_path).parent / SOCKET_NAME
+
+
+def sidecar_return_timeout(restart_interval_seconds) -> float:
+    """How long to wait for a sidecar to *appear*, from a declared interval.
+
+    It bounds **both** waits for one: the one before the `shutdown` frame,
+    where the pairing sequence needs a connected peer to send it to, and the
+    one after the rename, where a window is waiting for a code. Those are the
+    same quantity measured at two points, so they share one answer rather than
+    acquiring two names.
+
+    **Additive rather than a multiple, because only one of its terms scales.**
+    A whole restart interval can elapse before the boot begins, but the boot
+    itself is the same ~6s whatever the interval. At `RestartSec=5` a `3x`
+    multiple gives 15s against that fixed cost and would report a healthy
+    restart as a missing sidecar on a slow host; additive gives 35s, correctly
+    dominated by the fixed allowance.
+
+    The declaration **gates nothing** — it lives in a unit file the daemon
+    never reads, so a wrong value costs only an inaccurate `sidecar_absent`
+    deadline rather than permission to act. Which is why anything unusable
+    (undeclared, negative, not a number at all) falls back to the fixed
+    allowance instead of raising: 0 is what compose renders, since Docker's
+    sub-second backoff is not an interval.
+    """
+    try:
+        declared = float(restart_interval_seconds)
+    except (TypeError, ValueError):
+        declared = 0.0
+    if not math.isfinite(declared) or declared <= 0:
+        declared = 0.0
+    return declared + SIDECAR_RETURN_FIXED_SECONDS
+
+
+#: The same function under a name the constructor's own keyword argument does
+#: not shadow. The keyword keeps the public spelling because that is what a
+#: caller overriding the wait is naming.
+_return_timeout_for = sidecar_return_timeout
+
+
+def configured_pairing_window_seconds(config: Config) -> float:
+    """The window TTL the operator declared, or the shipped default.
+
+    Clamped rather than validated at load, which is this block's posture for
+    every numeric key it has: `load_config` runs in the scheduler, the web
+    app, the webhook receiver and every host-side skill CLI spawn, so a typo
+    on a knob that bounds one admin operation must not stop any of them from
+    starting. A non-positive or non-finite value is the shipped 300s, and so
+    is anything that is not a number at all — `sidecar_return_timeout` falls
+    back the same way and for the same reason.
+
+    There is deliberately no ceiling. The window is the span in which a
+    full-account credential is relayable, so a long one is a decision an
+    operator is entitled to make and to see in their own config file; what
+    would be wrong is silently shortening it, since a window cut under
+    somebody mid-scan reads as a pairing that simply did not work.
+    """
+    try:
+        declared = float(config.whatsapp.baileys.pairing_window_seconds)
+    except (TypeError, ValueError):
+        return PAIRING_WINDOW_SECONDS
+    if not math.isfinite(declared) or declared <= 0:
+        return PAIRING_WINDOW_SECONDS
+    return declared
+
+
+def default_pairing_relay_path(config: Config) -> Path:
+    """Where the QR relay file goes unless the operator named somewhere else.
+
+    **`[whatsapp.baileys] pairing_relay_path` wins when it is set**, read here
+    rather than at each caller — `default_session_dir`'s arrangement, and the
+    reason is the same: the bridge's constructor, the poll's no-bridge relay
+    clear and the web routes all have to agree on one answer, and a key read
+    at only some of them is a deployment whose orphan sweep misses the file it
+    is meant to remove. A set value is taken as written, with `~` expanded and
+    nothing resolved, so a relative one follows each process's own cwd and an
+    absolute path is what to write.
+
+    `{db_path.parent}` on both server shapes: the deployment's state root,
+    which the socket and — unless the operator pointed `session_dir`
+    elsewhere — the paired session itself already sit in, and which the
+    sandbox binds at no path.
+
+    **The standalone install is the exception and the path moves off the state
+    root there.** `setup_wizard` puts `db_path` at `{workspace}/istota.db`, so
+    `db_path.parent`, `workspace_path` and the state root are one directory:
+    the shape where `_mask_dir` refuses outright, and where a `user_resources`
+    row is bounded by `workspace_path` alone. The credential *class* is no
+    different from `creds.json` already sitting in that unmasked tree, but a
+    QR is a scan-and-done artifact with no keystore to exfiltrate, live for
+    300s and rotating every 20, so it is worth keeping out of the way.
+
+    **What the move buys is narrower than it looks, and is stated rather than
+    implied**: `{workspace}/tmp` is still inside `workspace_path`, so a
+    resource naming the workspace *root* reaches it either way. What it does
+    buy is that the file is not in the directory such a row most plausibly
+    names, and is a sibling of the per-user temp directories the sandbox binds
+    rather than inside one. The refusal for a shape where the resolved relay
+    would still land inside a bound root belongs to the sequence that opens a
+    window, which is where the task's own bind list is known.
+    """
+    configured = (config.whatsapp.baileys.pairing_relay_path or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    db_parent = Path(config.db_path).parent
+    workspace = config.workspace_path
+    if workspace is not None and _same_directory(workspace, db_parent):
+        return Path(config.temp_dir) / PAIRING_RELAY_NAME
+    return db_parent / PAIRING_RELAY_NAME
+
+
+def _same_directory(left, right) -> bool:
+    """Whether two paths name one directory, comparing resolved where it can.
+
+    Resolved, because the collapse this decides is a fact about the directory
+    rather than about how it was spelled — a symlinked workspace root and a
+    `db_path` written through it are the same place. Falls back to a lexical
+    comparison rather than raising: `resolve()` answers `ValueError` for an
+    embedded null byte, and the caller is a constructor on a boot path.
+    """
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return Path(left) == Path(right)
 
 
 #: The Node program's entry point inside its own directory.
@@ -471,6 +685,74 @@ def harden_session_files(path: Path) -> tuple[int, int]:
     return narrowed, failed
 
 
+def session_archives(session_dir: Path) -> list[Path]:
+    """Every archived session `_reset_destination` has left beside this one.
+
+    **A re-pair moves the old credential aside rather than deleting it**, and
+    nothing sweeps the result — each archive is a full WhatsApp account and a
+    timer that deletes one is a credential-destroying automatic path with no
+    operator present. So a host that has re-paired N times holds N+1 copies,
+    and `survey_session_files` walks one directory. Before the pairing flow
+    there was exactly one credential on disk and `whatsapp.baileys_session`
+    covered it; this is what keeps that true, by giving the check the same
+    question about each archive.
+
+    **The name is the whole predicate, and it is the writer's own**:
+    `ARCHIVE_STAMP_FORMAT` plus the collision suffix, anchored at the end of
+    the name. A prefix test alone would claim `whatsapp-baileys-session.json`
+    beside the directory, and a second spelling here would be the copy
+    `.claude/rules/doctor.md` refuses — a diagnostic asks the owning module's
+    predicate rather than keeping its own. Sorted by name, which is
+    chronological because the stamp is fixed width, so the first entry is the
+    oldest.
+
+    **The scan is `du.first_level_dirs`', not a fourth copy of it.** That
+    leaf exists because five callers had each written the same sorted,
+    symlink-skipping, non-directory-skipping walk, and it already carries the
+    `(OSError, ValueError)` handling a never-raises caller needs — a null byte
+    in a configured `session_dir` raises the second rather than the first. A
+    symlink is skipped there for this function's reason as well: one at an
+    archive's name points the survey somewhere this deployment did not put a
+    credential, and following it would report another tree's modes as these.
+
+    Never raises. **An unreadable parent yields no archives and says so
+    nowhere**, which is the one place this is weaker than it looks: `x`
+    without `r` on the state root lets the live arms answer normally while
+    this walk returns nothing, so an archive that cannot be listed reads
+    exactly like a host that has never re-paired. Stated rather than fixed,
+    because distinguishing the two means a second return channel for a corner
+    where the directory is the daemon's own.
+    """
+    prefix = session_dir.name + "."
+    return [
+        entry
+        for entry in du.first_level_dirs(session_dir.parent)
+        if entry.name.startswith(prefix)
+        and _ARCHIVE_SUFFIX_RE.search(entry.name) is not None
+    ]
+
+
+def session_archive_stamp(path: Path) -> datetime | None:
+    """When `_reset_destination` named this archive, off the name.
+
+    The name rather than `mtime`, because the name is the record the writer
+    made: a directory's mtime moves whenever an entry is added or removed, so
+    an operator who opened an archive to copy a key out of it would have moved
+    it. `None` for a name this cannot read, which `session_archives` filters
+    out already — the guard is here because a reader may hand over any path.
+
+    Never raises.
+    """
+    match = _ARCHIVE_SUFFIX_RE.search(path.name)
+    if match is None:
+        return None
+    try:
+        parsed = datetime.strptime(match.group(1), ARCHIVE_STAMP_FORMAT)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
@@ -516,6 +798,108 @@ class SessionResetIncomplete(Exception):
 
 
 @dataclass
+class PairingWindow:
+    """One admin-initiated, TTL-bounded permission to relay a pairing code.
+
+    **The relay is never ambient.** Without a window, `_handle_qr` keeps its
+    original behaviour and discards the payload — which is what every Baileys
+    deployment has always done. Relaying every QR the bridge sees would publish
+    a full-account credential to anyone who can reach `/admin` on every
+    unpaired boot, and that is not a trade worth making.
+
+    Two clocks, deliberately. `opened_at` and `expires_at` are the event loop's
+    monotonic clock, because they drive the watchdog and a backwards NTP step
+    must not extend or cut a window somebody is mid-scan on.
+    `expires_at_wall` is the same instant in epoch seconds, because it is what
+    crosses to another process — the relay file and the durable request row —
+    where a monotonic reading means nothing.
+    """
+
+    window_id: str
+    opened_at: float
+    expires_at: float
+    expires_at_wall: float
+    requested_by: str
+    destructive: bool
+    #: The last state published to the relay. `awaiting_sidecar` at open.
+    state: str = pairing_relay.STATE_AWAITING_SIDECAR
+    #: Incremented per QR rotation, so a reader can tell a new code from a
+    #: re-read of the same one without holding the payload to compare.
+    qr_seq: int = 0
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class PairingOutcome:
+    """How the last window ended, for whoever owns the durable request row.
+
+    The bridge writes no database row — this module never raises and never
+    opens a connection, and the owner that started it does that work. But a
+    closed window is indistinguishable from a process that died holding one
+    unless the terminal state is readable from here, so this is what lets a
+    successful pairing be recorded as `paired` rather than swept up as an
+    orphan.
+    """
+
+    window_id: str
+    state: str
+    message: str
+
+
+#: `PairingResult.reason` codes. Machine-readable, because the web route maps
+#: them onto status codes and the durable row records them; the prose an
+#: operator reads is `message`, which is built per case.
+PAIRING_OK = "pairing"
+PAIRING_ALREADY = "already_pairing"
+PAIRING_COOLDOWN = "cooldown"
+PAIRING_SESSION_LIVE = "session_live"
+PAIRING_SIDECAR_ABSENT = "sidecar_absent"
+PAIRING_STOP_TIMEOUT = "stop_timeout"
+PAIRING_FRAME_UNSENT = "frame_unsent"
+PAIRING_SIDECAR_RETURNED = "sidecar_returned"
+PAIRING_SESSION_DIR_UNUSABLE = "session_dir_unusable"
+PAIRING_STOPPING = "stopping"
+PAIRING_SHAPE_UNSUPPORTED = "shape_unsupported"
+PAIRING_RESET_REFUSED = "reset_refused"
+PAIRING_RESET_INCOMPLETE = "reset_incomplete"
+PAIRING_NO_WINDOW = "no_window"
+PAIRING_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class PairingResult:
+    """What one `repair_session` did, as a value rather than an exception.
+
+    `repair_session` never raises — it runs from a scheduler tick and from a
+    web route, and every one of its refusals is a state an operator has to be
+    told about rather than a fault. `reason` is one of the codes above and
+    `message` is the prose that names the unit, the remedy or the path.
+
+    **`moved_to` is on the result even when `ok` is False**, and that is the
+    field to be careful with: the sequence can move a full-account credential
+    aside and then fail to open a window, and a result that dropped the path
+    would leave an operator with two directories and no way to tell which
+    holds their session. Stage 3's admin notification reads it for the same
+    reason.
+    """
+
+    ok: bool
+    reason: str
+    window_id: str | None = None
+    message: str = ""
+    moved_to: Path | None = None
+    #: Whether this attempt cost a sidecar restart, so an abort can say
+    #: whether it was a clean no-op. True from the moment the `shutdown` frame
+    #: reaches `writer.write` on the external-unit shape, and from a
+    #: *returning* `reset_session` on the spawned one — never from one that
+    #: raised, because on that shape the child is already down before the
+    #: sequence starts and the restart is `resume()`'s fresh spawn, which a
+    #: failed reset does not reach. It is not "a frame was written", since the
+    #: delegated path spends its restart without writing one.
+    restart_spent: bool = False
+
+
+@dataclass
 class BridgeStatus:
     """What the bridge will tell `doctor` and `istota whatsapp pair`.
 
@@ -552,6 +936,15 @@ class BridgeStatus:
     session_dir: str = ""
     protocol_version: int | None = None
     pending_sends: int = 0
+    #: The open pairing window's state, or `None` when none is open — derived
+    #: in the `status` property from the live window rather than stamped at
+    #: each transition, so the two cannot drift and a closed window reads as
+    #: closed. **Neither of these may ever become the payload**: `read_status`
+    #: returns this dataclass to `doctor`, which renders it into the boot log
+    #: and the admin dashboard.
+    pairing_state: str | None = None
+    #: Wall clock, so it means something to a reader in another process.
+    pairing_expires_at: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +972,12 @@ class BaileysBridge:
         socket_path: Path | None = None,
         session_dir: Path | None = None,
         send_timeout: float = SEND_TIMEOUT_SECONDS,
+        pairing_relay_path: Path | None = None,
+        pairing_window_seconds: float = PAIRING_WINDOW_SECONDS,
+        restart_interval_seconds: float = 0.0,
+        sidecar_return_timeout: float | None = None,
+        sidecar_stop_timeout: float = SIDECAR_STOP_TIMEOUT,
+        reset_cooldown: float = RESET_COOLDOWN,
         on_qr=None,
         on_fatal=None,
     ) -> None:
@@ -588,6 +987,64 @@ class BaileysBridge:
         self._session_dir = Path(session_dir or default_session_dir(config))
         self._send_timeout = send_timeout
         self._on_qr = on_qr
+        # The pairing window and its relay. Every one of these is a
+        # constructor parameter rather than a config read, because the four
+        # `[whatsapp.baileys]` keys behind them land with the web API; this is
+        # the seam they fill.
+        self._pairing_relay_path = Path(
+            pairing_relay_path or default_pairing_relay_path(config)
+        )
+        self._pairing_window_seconds = float(pairing_window_seconds)
+        self._sidecar_return_timeout = (
+            float(sidecar_return_timeout)
+            if sidecar_return_timeout is not None
+            else _return_timeout_for(restart_interval_seconds)
+        )
+        self._sidecar_stop_timeout = float(sidecar_stop_timeout)
+        self._reset_cooldown = float(reset_cooldown)
+        self._pairing_window: PairingWindow | None = None
+        self._pairing_watchdog: asyncio.Task | None = None
+        self._last_pairing_outcome: PairingOutcome | None = None
+        # Single-flight for `repair_session`, which is not the same thing as
+        # "a window is open": the window is not opened until the last step,
+        # after up to `sidecar_return_timeout + sidecar_stop_timeout` of
+        # waiting, so the window alone leaves the whole destructive half
+        # re-entrant. Set synchronously before the first await and cleared in a
+        # `finally`.
+        self._repairing = False
+        # Whether a repair has emptied the session directory and no `ready`
+        # has arrived since. **Not the same question as the fatal latch**,
+        # which the repair had to clear so a supervisor could be resumed, and
+        # not the same as the window, which expires long before anybody
+        # scans. It is what keeps `_send` answering `failed` rather than
+        # `unknown` for a session this process knowingly left unpaired; a
+        # `ready` clears it, which is the only evidence that the session is
+        # open again.
+        self._unpaired_by_repair = False
+        # Loop-monotonic, and `None` until a restart has been spent on this
+        # bridge. See `RESET_COOLDOWN`.
+        self._last_reset_at: float | None = None
+        # Serializes every relay touch, and it is the ordering *and* the
+        # anti-resurrection guard: each job re-reads the live window while
+        # holding this lock, so a write scheduled before a window closed finds
+        # a stale window and skips rather than re-creating a credential file
+        # behind the unlink. Nothing in this stage sweeps that path.
+        #
+        # **A `threading.Lock`, taken inside the worker thread, rather than an
+        # `asyncio.Lock` taken around the thread hop.** The asyncio form looks
+        # equivalent and is not: cancelling the task that awaits
+        # `asyncio.to_thread` does not stop a thread that has already started
+        # — `run_in_executor` can only cancel a future whose work has not
+        # begun — so the `async with` unwinds and *releases the lock* with the
+        # write still live. The unlink then takes the free lock, removes the
+        # file, and the orphaned thread's `os.replace` puts a pairing code
+        # back on disk after its window has closed. That cancel is not
+        # hypothetical: `AsyncRuntime._shutdown` cancels every pending task
+        # before it runs the cleanup hook that calls `stop()`. Held inside the
+        # thread, a cancelled awaiter cannot release it early, and the guard
+        # below runs after any pending unlink rather than before it.
+        self._relay_lock = threading.Lock()
+        self._relay_tasks: set[asyncio.Task] = set()
         # Called once per *transition into* a permanent fatal, with the
         # reason. The bridge itself never writes a notification row: this
         # module's contracts are that it never raises and never logs a payload,
@@ -621,6 +1078,28 @@ class BaileysBridge:
         # logged-out sidecar running until it exited on its own, which for a
         # long-lived process is never.
         self._permanent_fatal = asyncio.Event()
+        # Set by `_close_link`, cleared when `_on_connect` adopts a writer and
+        # again by `repair_session` immediately before it writes its
+        # `shutdown` frame. **Those two clears are how the sequence tells a
+        # drop its own frame caused from any other drop it happens to
+        # observe**, and without them the latch is "has any disconnect ever
+        # happened", which is the passive draft this design replaced: a
+        # disconnect from minutes earlier would satisfy the wait and move the
+        # session directory with no frame behind it.
+        #
+        # **Measured, either clear carries the property alone** — removing one
+        # turns no test red and removing both turns three red — so the pair is
+        # defence in depth rather than two halves of one mechanism. Both stay:
+        # `_on_connect`'s maintains the invariant that an adopted writer
+        # implies a clear latch, and `repair_session`'s re-asserts it at the
+        # point of use, which is `reset_session`'s own rule for a gate that
+        # everything after depends on.
+        #
+        # Event-driven rather than polled because the margin it is measured
+        # against is Docker's 100ms restart backoff: the wait has to wake on
+        # the callback that closed the link, with nothing between it and the
+        # rename.
+        self._link_dropped = asyncio.Event()
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -628,7 +1107,399 @@ class BaileysBridge:
     def status(self) -> BridgeStatus:
         self._status.queue_depth = self._queue.qsize()
         self._status.pending_sends = len(self._pending)
+        # Derived here rather than stamped at each transition, like
+        # `queue_depth` above: one source, no drift, and `None` the moment the
+        # window closes so `doctor`'s "an open window is reported" stays true.
+        window = self._pairing_window
+        self._status.pairing_state = None if window is None else window.state
+        self._status.pairing_expires_at = (
+            None if window is None else window.expires_at_wall
+        )
         return self._status
+
+    # -- pairing window -----------------------------------------------------
+
+    @property
+    def pairing_relay_path(self) -> Path:
+        return self._pairing_relay_path
+
+    @property
+    def pairing_window(self) -> PairingWindow | None:
+        return self._pairing_window
+
+    @property
+    def last_pairing_outcome(self) -> PairingOutcome | None:
+        """How the last window ended, for the owner of the durable row."""
+        return self._last_pairing_outcome
+
+    async def open_pairing_window(
+        self, requested_by: str, *, destructive: bool = False,
+    ) -> PairingWindow | None:
+        """Arm the relay for `PAIRING_WINDOW_SECONDS`, or refuse.
+
+        **`None` has three producers and a caller cannot tell them apart**:
+        a window is already open (the single-flight rule behind the route's
+        409), the bridge is stopping, or it began stopping during the two
+        awaits below. A discriminated refusal belongs with the `PairingResult`
+        the sequence around this returns, not here, so the note is that all
+        three mean "no window was opened and nothing was touched".
+
+        Awaits the initial relay publish, so a caller returns with the state
+        already readable by the web process; the window is installed *before*
+        that await, or a QR arriving during it would be discarded by a handler
+        that sees no window. Both gates are then re-read, which is
+        `reset_session`'s own rule for the same reason: they were answered
+        before two awaits, and returning a window `stop()` has since closed
+        would have the caller write a durable row for a window that does not
+        exist.
+
+        Never raises. A relay that cannot be written still leaves a window
+        open — the code is then invisible to the UI and the durable row says
+        so, which is a worse pairing rather than a failed daemon.
+        """
+        if self._pairing_window is not None:
+            return None
+        if self._stopping:
+            return None
+        loop = asyncio.get_running_loop()
+        opened_at = loop.time()
+        window = PairingWindow(
+            window_id=uuid.uuid4().hex,
+            opened_at=opened_at,
+            expires_at=opened_at + self._pairing_window_seconds,
+            expires_at_wall=time.time() + self._pairing_window_seconds,
+            requested_by=str(requested_by),
+            destructive=bool(destructive),
+        )
+        self._pairing_window = window
+        self._pairing_watchdog = asyncio.create_task(self._watch_pairing(window))
+        # `mkstemp` needs the directory to exist, and on the shape where the
+        # relay resolves to the temp root that directory is the daemon's own to
+        # make. Off the loop like every other relay touch. The mode is left to
+        # the umask deliberately: what carries the credential is the 0600 file,
+        # and narrowing a directory the rest of the deployment shares would be
+        # this module writing somebody else's permissions.
+        await self._guarded_relay_job(
+            asyncio.to_thread(self._ensure_relay_parent),
+        )
+        logger.info(
+            "whatsapp.pairing.window_opened window=%s by=%s destructive=%s "
+            "ttl=%.0fs",
+            window.window_id, window.requested_by, window.destructive,
+            self._pairing_window_seconds,
+        )
+        await self._guarded_relay_job(self._publish_relay(window))
+        if self._pairing_window is not window or self._stopping:
+            return None
+        return window
+
+    def clear_relay_file(self) -> bool:
+        """Unlink the relay under `_relay_lock`, synchronously. Never raises.
+
+        For a caller on another thread that has to remove a relay this bridge
+        is not going to remove itself — `baileys_runtime.poll_pairing_request`
+        closing a durable row whose window belonged to a process that is gone.
+        `pairing_relay.clear_relay`'s own docstring names serialization behind
+        this lock as the precondition that makes it safe beside a live writer,
+        so a caller reaching for that function directly would be removing a
+        staging file another thread is mid-rename on.
+
+        A `threading.Lock`, so this is callable from any thread and blocks only
+        for the length of one file operation. Not for the loop: everything in
+        here already goes through `_clear_relay`'s thread hop.
+        """
+        self._clear_relay_under_lock()
+        return not self._pairing_relay_path.exists()
+
+    async def cancel_pairing(self, *, window_id: str | None = None) -> bool:
+        """Close an open window and unlink the relay. `False` if none was open.
+
+        Does **not** restore a session directory an earlier step moved aside:
+        the sidecar may already have written a partial new session into the
+        recreated one, and choosing between the two is an operator's call
+        rather than a heuristic's.
+
+        `window_id` scopes the close to one window and is what a caller from
+        another thread must pass. `poll_pairing_request` decides to cancel from
+        a read of `pairing_window` taken on the dispatch thread and then
+        schedules this on the runtime loop, so by the time it runs the window it
+        meant could have closed and a fresh one opened — an unscoped close
+        would then cancel a pairing somebody is mid-scan on. `None` keeps the
+        unscoped behaviour for a caller holding the loop.
+        """
+        window = self._pairing_window
+        if window is None:
+            return False
+        if window_id is not None and window.window_id != window_id:
+            return False
+        await self._close_pairing_window(
+            window,
+            pairing_relay.STATE_FAILED,
+            "the pairing window was cancelled before a code was scanned",
+        )
+        return True
+
+    def _end_pairing_window(
+        self, window: PairingWindow, state: str, message: str,
+    ) -> bool:
+        """Drop the window and record how it ended, synchronously.
+
+        The synchronous half of a close, because one of the three things that
+        race to close a window is a `ready` frame arriving on the read loop,
+        where `_dispatch` cannot await — and a window that is dropped a tick
+        later is a window that relays one more QR after the session came up.
+        The unlink is the asynchronous half; `_relay_lock` is what keeps it
+        ordered against any write already queued.
+
+        `False` where this is no longer the live window, so a close is
+        idempotent however many of the three reach it.
+        """
+        if self._pairing_window is not window:
+            return False
+        # **The outcome is published before the window is dropped**, and the
+        # order is load-bearing rather than cosmetic. `poll_pairing_request`
+        # reads these two from the scheduler's dispatch thread, in the
+        # opposite order — `pairing_window` first, then
+        # `last_pairing_outcome` — to tell a close this process performed from
+        # a window a dead process left behind. These are two separate stores
+        # with a dataclass construction between them, which the GIL does not
+        # fuse, so with the old order a read landing in the gap saw no window
+        # and no matching outcome and recorded a *successful* pairing as
+        # `failed`, durably and with an admin alert behind it. Published this
+        # way round the gap shows a live window instead, which that reader
+        # leaves alone until the next tick. The idempotency guard above is
+        # unaffected: it tests the window's identity, not these two writes.
+        self._last_pairing_outcome = PairingOutcome(
+            window_id=window.window_id, state=state, message=message,
+        )
+        self._pairing_window = None
+        watchdog, self._pairing_watchdog = self._pairing_watchdog, None
+        if watchdog is not None and watchdog is not asyncio.current_task():
+            watchdog.cancel()
+        logger.info(
+            "whatsapp.pairing.window_closed window=%s state=%s",
+            window.window_id, state,
+        )
+        return True
+
+    async def _close_pairing_window(
+        self, window: PairingWindow, state: str, message: str,
+    ) -> None:
+        if self._end_pairing_window(window, state, message):
+            await self._clear_relay()
+
+    async def _publish_relay(self, window: PairingWindow) -> None:
+        """Write the window's state with no payload.
+
+        The payload is snapshotted here, on the loop, so the worker thread
+        reads nothing mutable but the two guard values — and so a rotation
+        that changed the state between this call and the thread running is
+        what the guard refuses rather than something this payload silently
+        carries.
+        """
+        await asyncio.to_thread(
+            self._write_relay_under_lock,
+            window,
+            pairing_relay.build_payload(
+                window_id=window.window_id,
+                state=window.state,
+                expires_at=window.expires_at_wall,
+                qr_seq=window.qr_seq,
+                message=window.message,
+            ),
+            window.state,
+            None,
+        )
+
+    async def _publish_relay_qr(
+        self, window: PairingWindow, qr_seq: int, value: str,
+    ) -> None:
+        """Publish one rotation's payload.
+
+        The payload is an **argument** rather than a field on the window: the
+        window lives for five minutes and a code lives for twenty seconds, so
+        keeping it would leave the credential in the daemon's memory long
+        after it had stopped being scannable, and every later `_publish_relay`
+        would have to decide whether to re-publish it.
+        """
+        await asyncio.to_thread(
+            self._write_relay_under_lock,
+            window,
+            pairing_relay.build_payload(
+                window_id=window.window_id,
+                state=window.state,
+                expires_at=window.expires_at_wall,
+                qr=value,
+                qr_seq=qr_seq,
+                message=window.message,
+            ),
+            window.state,
+            qr_seq,
+        )
+
+    def _write_relay_under_lock(
+        self,
+        window: PairingWindow,
+        payload: dict,
+        expected_state: str,
+        expected_seq: int | None,
+    ) -> None:
+        """Publish, in a worker thread, unless the window has moved on.
+
+        Three guards, and each refuses a write that would publish something
+        untrue by the time it reached the disk:
+
+        - the window is no longer the live one, so the file would be a
+          credential re-created behind its own unlink;
+        - its state has moved on, so a `sidecar_absent` notice queued a moment
+          before a code arrived would clobber that code with a payload-free
+          record of a wait that is over;
+        - a later rotation already landed, so this one is stale.
+
+        All three are read **here**, inside the lock and inside the thread,
+        rather than around the thread hop — see `_relay_lock`.
+        """
+        with self._relay_lock:
+            if self._pairing_window is not window:
+                return
+            if window.state != expected_state:
+                return
+            if expected_seq is not None and window.qr_seq != expected_seq:
+                return
+            pairing_relay.write_relay(self._pairing_relay_path, payload)
+
+    def _ensure_relay_parent(self) -> None:
+        self._pairing_relay_path.parent.mkdir(parents=True, exist_ok=True)
+
+    async def _clear_relay(self) -> None:
+        await asyncio.to_thread(self._clear_relay_under_lock)
+
+    def _clear_relay_under_lock(self) -> None:
+        with self._relay_lock:
+            pairing_relay.clear_relay(self._pairing_relay_path)
+
+    def _spawn_relay_job(self, coro) -> None:
+        """Run a relay coroutine off the read loop's own call stack.
+
+        **`_call_back` is not what does this**, and its name invites the
+        mistake: it runs its callback inline and hands only an awaitable
+        *result* to `asyncio.ensure_future`, which schedules it on this same
+        loop thread. What transfers from it is the part that is a rule rather
+        than a mechanism — hold the task so the loop cannot collect it
+        mid-flight, and log without `exc_info`, because a traceback frame here
+        holds the pairing credential.
+        """
+        task = asyncio.ensure_future(self._guarded_relay_job(coro))
+        self._relay_tasks.add(task)
+        task.add_done_callback(self._relay_tasks.discard)
+
+    async def _guarded_relay_job(self, coro) -> None:
+        try:
+            await coro
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the contract is never-raises
+            logger.warning(
+                "whatsapp.pairing.relay_job_failed reason=%s",
+                type(exc).__name__,
+            )
+
+    async def _watch_pairing(self, window: PairingWindow) -> None:
+        """Close the window at its TTL, and name a sidecar that never came.
+
+        Two deadlines on one task. The **shorter** one is ISSUE-497's residual
+        made visible: a failing `npm ci` in the update cron stops the sidecar's
+        unit and aborts before either restart arm, so it can be left down
+        indefinitely with the reason only in the update log. Past
+        `sidecar_return_timeout` the window says `sidecar_absent` and names
+        where to look, rather than sitting on an empty wait until the TTL —
+        and it **stays open**, because a late sidecar still pairs.
+
+        The demotion applies only to a window still `awaiting_sidecar`. A
+        window that already has a code in hand must not be clobbered back.
+        """
+        absent_at = window.opened_at + self._sidecar_return_timeout
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                now = loop.time()
+                if self._pairing_window is not window:
+                    return
+                if now >= window.expires_at:
+                    await self._close_pairing_window(
+                        window,
+                        pairing_relay.STATE_EXPIRED,
+                        "the pairing window expired with no code scanned",
+                    )
+                    return
+                if (
+                    now >= absent_at
+                    and window.state == pairing_relay.STATE_AWAITING_SIDECAR
+                ):
+                    # **Two faults reach this deadline and the message says
+                    # which.** The state is the same either way, because what
+                    # it is for is stopping the UI from implying a code is on
+                    # its way — but a sidecar that is *connected* and has not
+                    # offered one is not a stopped unit, and telling an
+                    # operator to go and look at the unit and the update log
+                    # is a false alarm that `doctor` will repeat as a WARN.
+                    # `connected` is the bridge's own answer and is right
+                    # here; it is not enough to *gate* the demotion on,
+                    # which would restore the empty wait to the full TTL.
+                    window.state = pairing_relay.STATE_SIDECAR_ABSENT
+                    if self._status.connected:
+                        window.message = (
+                            "a WhatsApp sidecar is connected and has not "
+                            f"offered a pairing code in "
+                            f"{self._sidecar_return_timeout:.0f}s, which is "
+                            "what a session starting from a credential that "
+                            "is still there looks like. Check `sidecar.log` "
+                            "inside the session directory. A code that "
+                            "arrives later still pairs."
+                        )
+                    else:
+                        window.message = (
+                            "no WhatsApp sidecar has connected in "
+                            f"{self._sidecar_return_timeout:.0f}s. Check its "
+                            "own unit or compose service and the deploy "
+                            "update log — a failed dependency install can "
+                            "leave it stopped. A late sidecar still pairs."
+                        )
+                    logger.warning(
+                        "whatsapp.pairing.sidecar_absent window=%s connected=%s",
+                        window.window_id, self._status.connected,
+                    )
+                    await self._publish_relay(window)
+                    continue
+                deadline = window.expires_at
+                if window.state == pairing_relay.STATE_AWAITING_SIDECAR:
+                    deadline = min(deadline, absent_at)
+                await asyncio.sleep(
+                    max(0.0, min(deadline - now, PAIRING_WATCHDOG_MAX_SLEEP)),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the contract is never-raises
+            # **Fail closed.** Logging and falling off the end of this
+            # coroutine leaves the window armed with nothing left to enforce
+            # its TTL and the credential on disk until the process stops —
+            # which is the opposite of what a relay whose whole contract is
+            # "unlinked the moment the window closes by any route" wants from
+            # its last line of defence. The realistic trigger is
+            # `asyncio.to_thread` answering `RuntimeError` as the default
+            # executor shuts down, i.e. exactly the shutdown case.
+            logger.warning(
+                "whatsapp.pairing.watchdog_failed window=%s reason=%s: "
+                "closing the window rather than leaving it armed",
+                window.window_id, type(exc).__name__,
+            )
+            with contextlib.suppress(Exception):
+                await self._close_pairing_window(
+                    window,
+                    pairing_relay.STATE_FAILED,
+                    "the pairing window was closed because its watchdog "
+                    "could not run",
+                )
 
     async def start(self) -> None:
         """Make the session directory, open the socket, start the sidecar.
@@ -658,6 +1529,41 @@ class BaileysBridge:
         """
         self._stopping = True
         listened = self._status.listening
+        # **Before anything else**, because a graceful shutdown mid-window
+        # would otherwise leave a live pairing code on disk indefinitely:
+        # nothing in this process sweeps that path, and the durable request row
+        # that would notice an orphaned window belongs to a later stage. This
+        # runs on a task rather than the read loop, so it can await the unlink.
+        window = self._pairing_window
+        if window is not None and self._end_pairing_window(
+            window,
+            pairing_relay.STATE_FAILED,
+            "the bridge stopped before a code was scanned",
+        ):
+            # **The drop is synchronous and only the unlink can be skipped.**
+            # Every other await in this method is already inside a
+            # `contextlib.suppress`, because the docstring's "never raises" is
+            # what keeps the socket inode from outliving the process — and
+            # `_guarded_relay_job` deliberately re-raises `CancelledError`, so
+            # an unguarded await here would abort `stop()` before the sidecar
+            # was even asked to leave. `AsyncRuntime._shutdown` cancels
+            # pending tasks before it runs the cleanup hook that calls this,
+            # so that cancel is the ordinary case rather than a corner. The
+            # cost of a skipped unlink is a relay file nothing sweeps, which
+            # is the accepted residual named in `pairing_relay`.
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await self._clear_relay()
+        # Cancelled rather than left pending, like the supervisor and the
+        # worker below: a relay job still holding an executor thread at loop
+        # close is a destroyed-pending-task warning on the `istota serve`
+        # shape. It cannot resurrect the file — `_write_relay_under_lock`
+        # refuses a window that is no longer live, and the window is already
+        # gone by here.
+        for task in list(self._relay_tasks):
+            task.cancel()
+        for task in list(self._relay_tasks):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
         await self._request_shutdown()
         if self._supervisor is not None:
             self._supervisor.cancel()
@@ -702,7 +1608,10 @@ class BaileysBridge:
         exists twice and a crash where it exists nowhere, and a destination on
         another filesystem turns the rename into exactly that. Timestamped
         rather than a fixed `.old`, so the second logout of a deployment's
-        life does not overwrite the record of the first.
+        life does not overwrite the record of the first. The stamp is
+        `ARCHIVE_STAMP_FORMAT`, which `session_archives` reads back — nothing
+        sweeps an archive, so a diagnostic has to be able to find every one of
+        them by name.
 
         The stamp is one second wide, so the name is settled by probing rather
         than by trusting the clock to be distinct: what stands at the
@@ -718,7 +1627,7 @@ class BaileysBridge:
         to the identical problem: a walk with no ceiling is a hang where a
         stat is answering wrongly, and both callers would rather fail.
         """
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(timezone.utc).strftime(ARCHIVE_STAMP_FORMAT)
         base = self._session_dir.parent / f"{self._session_dir.name}.{stamp}"
         candidate = base
         suffix = 1
@@ -865,6 +1774,37 @@ class BaileysBridge:
         # and the reset would wedge with nothing saying why.
         self._close_link(proto.REASON_LINK_LOST)
 
+        destination = self._move_session_aside()
+        self._reset_used = True
+        self.resume()
+        return destination
+
+    def _move_session_aside(self) -> Path | None:
+        """Archive the session directory, recreate it, and clear the latch.
+
+        **The valuable half of `reset_session`, shared rather than copied.**
+        Two callers reach it with two different kinds of evidence that nothing
+        holds the directory, and that axis is the only one they differ on:
+        `reset_session` supervised the child itself and awaited its reap, while
+        `repair_session` sent a `shutdown` frame to a named peer and observed
+        the drop that frame caused. Every guard producing that evidence stays
+        with its own caller. What is here is the part that moves a full-account
+        credential, which went through two reviewers and ten negative controls
+        under ISSUE-496 and must not acquire a second implementation: a copy is
+        cheap to write, passes its own tests, and drifts the first time either
+        one is fixed.
+
+        **Synchronous, and deliberately so.** There is no await in it, which is
+        what lets `repair_session` run it in the same loop iteration as the
+        drop it observed — on the compose shape the supervisor's restart
+        backoff starts at 100ms, and a suspension point in here is a window for
+        a respawned sidecar to be adopted mid-rename.
+
+        Returns where the old directory went, or `None` where there was nothing
+        at the name to move. Raises `SessionResetIncomplete` when the archive
+        could be neither replaced nor restored, and re-raises anything
+        `ensure_session_dir` refused after putting the archive back.
+        """
         destination: Path | None = self._reset_destination()
         try:
             os.rename(self._session_dir, destination)
@@ -898,21 +1838,603 @@ class BaileysBridge:
                     ) from restore_error
             raise
 
-        # The latch goes before the supervisor is recreated, or the new loop
-        # reads it at its own first statement and returns without spawning.
-        self._status.ready = False
-        self._status.fatal_reason = None
-        self._status.fatal_is_permanent = False
-        self._status.fatal_run_unrecorded = False
-        self._permanent_fatal.clear()
-        self._reset_used = True
-        self._supervisor = asyncio.create_task(self._supervise())
+        self._clear_fatal_latch()
         logger.warning(
             "whatsapp.baileys.session_reset moved_to=%s: the sidecar will "
             "offer a new pairing code",
             destination if destination is not None else "nothing to move",
         )
         return destination
+
+    def _clear_fatal_latch(self) -> None:
+        """Forget a permanent fault, so a supervisor can be started again.
+
+        **Before any supervisor is recreated**, or the new loop reads the latch
+        at its own first statement and returns without spawning. Its own method
+        because `repair_session` reaches it on a path that moves nothing: a
+        window orphaned by a scheduler restart has already emptied the session
+        directory, and archiving an empty one a second time would accumulate
+        directories nothing sweeps while telling the operator two of them
+        matter.
+        """
+        self._status.ready = False
+        self._status.fatal_reason = None
+        self._status.fatal_is_permanent = False
+        self._status.fatal_run_unrecorded = False
+        self._permanent_fatal.clear()
+
+    def _session_dir_holds_a_session(self) -> bool:
+        """Whether the session directory holds auth state worth archiving.
+
+        **Auth state, not emptiness, and the difference is the whole of
+        whether this is reachable.** The sidecar writes two files of its own
+        into this directory — `sidecar.log`, appended on every boot before the
+        daemon link is even up, and `logout-backoff.json` — so on the external
+        unit shape, which is the only shape that reaches here, an emptiness
+        test answers True for a directory holding nothing but logs. That makes
+        the arm this feeds unreachable in exactly the case it was written for:
+        a window a process restart orphaned, whose credential is already at a
+        timestamped sibling and whose recovery is another window rather than an
+        archive of a log file.
+
+        **An allowlist of files to ignore, not one of files to count.**
+        `useMultiFileAuthState` writes `creds.json` plus a `.json` per Signal
+        key, with names this module has no business enumerating, so anything
+        unrecognised counts as auth state.
+
+        **Fails toward archiving** for the same reason: a directory this cannot
+        read answers True, because the cost of a needless archive is a
+        directory an operator deletes and the cost of a wrong `False` is a
+        credential overwritten in place.
+        """
+        try:
+            with os.scandir(self._session_dir) as entries:
+                for entry in entries:
+                    if entry.name not in _SIDECAR_OWN_FILES:
+                        return True
+            return False
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+
+    def resume(self) -> bool:
+        """Start a supervisor a permanent fatal ended. `False` where there is
+        none to start.
+
+        Both permanent-fatal arms in `_supervise` `return`, and clearing the
+        latch does not resurrect a coroutine that has already ended — so on the
+        spawned shape a cleared latch with no fresh supervisor is a bridge that
+        reports itself healthy and will never run a sidecar again. That
+        distinction is the difference between a working re-pair and a green
+        test over a dead deployment, which is why the test for this asserts a
+        spawn rather than a flag.
+
+        Answers `False` on the `sidecar_argv=()` shape, where there is no
+        supervisor to resume because the sidecar is its own unit and its
+        `Restart=always` has already scheduled the start — which is the shape
+        the web flow runs on, and the reason this method matters to the CLI
+        rather than to that surface.
+        """
+        if not self._sidecar_argv:
+            return False
+        if self._stopping:
+            return False
+        supervisor = self._supervisor
+        if supervisor is not None and not supervisor.done():
+            return False
+        self._supervisor = asyncio.create_task(self._supervise())
+        return True
+
+    # -- the pairing sequence -----------------------------------------------
+
+    async def repair_session(
+        self, requested_by: str, *, force: bool = False,
+    ) -> PairingResult:
+        """Re-pair from a running bridge, and open a window for the code.
+
+        **The frame is the evidence.** There is no way to ask whether anything
+        holds the session directory — that is what an advisory lock would buy
+        and this deployment has none — so the sequence *causes* the answer
+        instead of observing it: it waits for a connected sidecar, writes
+        `shutdown` to that peer, and moves the directory only after the link
+        drop its own frame produced. A drop it merely observed is not evidence,
+        because `index.js` starts the Baileys session without waiting for the
+        daemon link and retries the link on its own timer — so a live sidecar
+        holds the directory for a window at every boot while `connected` reads
+        false. Renaming there leaves the survivor writing the old dead
+        credential into the freshly created directory: no code, an orphaned
+        archive, and a window that waits out its TTL for a QR that cannot come.
+
+        **`force` selects no mechanism.** The frame is sent either way; it means
+        "I accept disconnecting a session that is working", and without it a
+        bridge with no latched permanent fault is refused. The default is the
+        safe one, so a caller who forgets the argument cannot disconnect a live
+        link.
+
+        **On the spawned shape it delegates to `reset_session` outright**, and
+        that is the one place the shape matters. `_supervise` returns its
+        respawn delay to `RESPAWN_BASE_SECONDS` for any child that ran a
+        while, so the sidecar this sequence asks to exit is back about a second
+        later — into the directory the rename is about to move, with the drop to
+        observe, schedule and act on inside that second. `reset_session`
+        already settles with a supervisor rather than with a frame, by awaiting
+        the task and refusing if it outlived the wait, and reproducing that
+        reasoning here would be the second copy `_move_session_aside` exists to
+        avoid. The cost is that the forced case is unavailable there, which is
+        the developer checkout `istota whatsapp pair` already owns, and it is
+        said in the message rather than left as a silent refusal.
+
+        Never raises: every refusal is a `PairingResult` carrying a code and
+        the prose for it, because its callers are a scheduler tick and a web
+        route and neither can act on an exception.
+
+        **It must be awaited on the loop the bridge was started on**, which is
+        the runtime loop `baileys_runtime` starts it beside the Talk signaling
+        supervisor. `_link_dropped` and `_write_lock` are asyncio primitives
+        and `_close_link` sets the first from that loop with no
+        `call_soon_threadsafe`, so a waiter created on another loop is not
+        reliably woken: the wait would run to `sidecar_stop_timeout` and report
+        a stop timeout with a restart spent, on a sidecar that did exit. A
+        caller in another thread reaches it through `run_coro`, which is the
+        same rule every send on this surface already follows.
+
+        **Two residuals, stated rather than implied.** The frame is evidence
+        about the *adopted* peer and not about the directory: a second sidecar
+        whose connection `_on_connect` rejected is a live Baileys client this
+        process can see only as a counter, and the rename would proceed under
+        it. That is the advisory lock `.claude/rules/whatsapp.md` records as
+        absent and the spec's non-goals decline to add; gating on
+        `rejected_connections` was considered and refused, since a stray
+        connect attempt would then refuse a legitimate re-pair. And a QR
+        offered between the rename and the window's arming is discarded by
+        `_handle_qr`'s no-window arm — sub-millisecond against a restart
+        backoff of 100ms at its shortest, and self-healing, since the code
+        rotates about every twenty seconds inside a 300s window.
+        """
+        # Single-flight, and it is not the same question as "is a window open":
+        # the window opens at the last step, so between here and there the
+        # whole destructive half would otherwise be re-entrant. Both checks are
+        # synchronous and both are before the first await.
+        if self._repairing:
+            return PairingResult(
+                False,
+                PAIRING_ALREADY,
+                message="a WhatsApp re-pair is already in progress",
+            )
+        window = self._pairing_window
+        if window is not None:
+            return PairingResult(
+                False,
+                PAIRING_ALREADY,
+                window_id=window.window_id,
+                message=(
+                    "a WhatsApp pairing window is already open. Cancel it or "
+                    "wait for it to expire."
+                ),
+            )
+        self._repairing = True
+        try:
+            return await self._repair(str(requested_by), force=force)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the contract is never-raises
+            # No `exc_info`: this path can be reached with a pairing code live
+            # in a frame, and the module's rule is that no traceback carrying
+            # one is printed.
+            logger.warning(
+                "whatsapp.pairing.repair_failed reason=%s", type(exc).__name__,
+            )
+            return PairingResult(
+                False,
+                PAIRING_FAILED,
+                message=(
+                    "the WhatsApp re-pair could not be completed "
+                    f"({type(exc).__name__}). Check `doctor`'s "
+                    "`whatsapp.baileys_session` for where the session "
+                    "directory stands."
+                ),
+            )
+        finally:
+            self._repairing = False
+
+    async def _repair(self, requested_by: str, *, force: bool) -> PairingResult:
+        """The sequence, with the cheap refusals first.
+
+        The order is the design: nothing that can refuse on what it already
+        knows may run after the step that spends a sidecar restart.
+        """
+        if self._stopping:
+            return PairingResult(
+                False, PAIRING_STOPPING, message="the bridge is stopping",
+            )
+
+        # 1. Validate before anything is destroyed. `ensure_session_dir`
+        #    refuses a directory owned by another uid and a non-directory at
+        #    the name, and this is the moment to hear that — after the sidecar
+        #    is down it is a restart spent on a sequence that was never going
+        #    to finish.
+        try:
+            ensure_session_dir(self._session_dir)
+        except Exception as exc:  # noqa: BLE001 — reported, never raised on
+            logger.warning(
+                "whatsapp.pairing.session_dir_unusable reason=%s",
+                type(exc).__name__,
+            )
+            return PairingResult(
+                False,
+                PAIRING_SESSION_DIR_UNUSABLE,
+                message=(
+                    "the WhatsApp session directory could not be opened as "
+                    "this process's own private directory "
+                    f"({type(exc).__name__}). Nothing was stopped and nothing "
+                    "was moved."
+                ),
+            )
+
+        # 2. The spawned shape's own permanent bound, **ahead of the cooldown
+        #    rather than behind it**. That shape delegates to `reset_session`,
+        #    which is once per bridge — so a second re-pair there answers the
+        #    cooldown's "wait about N minutes" and then, N minutes later,
+        #    refuses for good. Two refusals pointing in different directions,
+        #    neither naming the state the operator is actually in.
+        if self._sidecar_argv and self._reset_used:
+            return PairingResult(
+                False,
+                PAIRING_RESET_REFUSED,
+                message=(
+                    "this process has already moved its WhatsApp session "
+                    "aside once, and on the shape where it runs the sidecar "
+                    "itself that is the bound — asking again is a retry loop "
+                    "against a link WhatsApp watches for churn. Restart this "
+                    "process, or run `istota whatsapp pair --reset` afresh."
+                ),
+            )
+
+        # 3. The cooldown, which stands in for `reset_session`'s
+        #    once-per-bridge flag on a bridge that lives as long as the daemon.
+        remaining = self._cooldown_remaining()
+        if remaining > 0:
+            minutes = max(1, int(remaining // 60) + (1 if remaining % 60 else 0))
+            return PairingResult(
+                False,
+                PAIRING_COOLDOWN,
+                message=(
+                    "a WhatsApp re-pair has already spent a sidecar restart "
+                    f"recently. Wait about {minutes} minute"
+                    f"{'' if minutes == 1 else 's'} before asking again — "
+                    "repeating it is churn against a link WhatsApp watches."
+                ),
+            )
+
+        # 4. The confirmation gate. Not a mechanism switch: the frame is sent
+        #    either way, and this asks whether the caller accepts that it
+        #    disconnects something that works.
+        if not self._status.fatal_is_permanent and not force:
+            return PairingResult(
+                False,
+                PAIRING_SESSION_LIVE,
+                message=(
+                    "the WhatsApp session has reported no permanent fault, so "
+                    "re-pairing it would disconnect a link that may be "
+                    "working or about to come back on its own. Confirm the "
+                    "disconnect to proceed."
+                ),
+            )
+
+        if self._sidecar_argv:
+            return await self._repair_by_reset(requested_by)
+        return await self._repair_by_frame(requested_by)
+
+    async def _repair_by_reset(self, requested_by: str) -> PairingResult:
+        """The spawned shape: settle with the supervisor, not with the frame.
+
+        Reached only with `sidecar_argv` non-empty. `force` is not a parameter
+        because the gate above has already answered it: a session with no
+        permanent fault only arrives here when the caller forced it, and
+        `reset_session` requires that fault, so this is where that combination
+        is named.
+        """
+        if not self._status.fatal_is_permanent:
+            return PairingResult(
+                False,
+                PAIRING_SHAPE_UNSUPPORTED,
+                message=(
+                    "this process runs the WhatsApp sidecar itself, and on "
+                    "that shape a re-pair settles with the supervisor rather "
+                    "than with a shutdown frame — which only moves a session "
+                    "that has reported a permanent fault. To re-pair a "
+                    "working session here, stop this process and run `istota "
+                    "whatsapp pair --reset`."
+                ),
+            )
+        try:
+            moved = await self.reset_session()
+        except SessionResetIncomplete as exc:
+            # **`restart_spent` is False and no cooldown is stamped**, and the
+            # two are the same fact: `resume()` is never reached on this path,
+            # and the supervisor's own permanent-fatal arm stopped and reaped
+            # the child before this sequence began, so no sidecar was started.
+            # `moved_to` is what carries the cost here — a credential has
+            # moved and neither a replacement nor a restore could be made —
+            # and it is deliberately a separate question from the restart.
+            logger.error("whatsapp.pairing.reset_incomplete moved_to=%s", exc.moved_to)
+            return PairingResult(
+                False,
+                PAIRING_RESET_INCOMPLETE,
+                message=str(exc),
+                moved_to=exc.moved_to,
+            )
+        except SessionResetRefused as exc:
+            return PairingResult(
+                False, PAIRING_RESET_REFUSED, message=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 — reported, never raised on
+            # Caught here rather than left to `repair_session`'s backstop, so
+            # the reason names the move rather than the sequence. Past
+            # `reset_session`'s own guards, which raise `SessionResetRefused`,
+            # this is a failing rename or harden — and its rollback has
+            # already run, so the directory is where it was.
+            logger.warning(
+                "whatsapp.pairing.reset_failed reason=%s", type(exc).__name__,
+            )
+            return PairingResult(
+                False,
+                PAIRING_FAILED,
+                message=(
+                    "the WhatsApp session directory could not be moved aside "
+                    f"({type(exc).__name__}); nothing was restarted."
+                ),
+            )
+        # A reset that got as far as returning has respawned the child through
+        # `resume()`, which is where this shape's restart is spent. See
+        # `RESET_COOLDOWN`.
+        self._last_reset_at = asyncio.get_running_loop().time()
+        # The session is knowingly unpaired from here until somebody scans.
+        # See `_unpaired_by_repair` and `_send`'s two arms.
+        self._unpaired_by_repair = True
+        return await self._open_window_after(
+            requested_by, moved, restart_spent=True,
+        )
+
+    async def _repair_by_frame(self, requested_by: str) -> PairingResult:
+        """The external-unit shape: cause the drop, then move.
+
+        Two waits, each with its own bound and its own meaning. The first is
+        for a sidecar to *appear*, because the evidence needs a peer to be
+        caused on; timing out there is the ISSUE-497 residual — a failing `npm
+        ci` in the update cron leaves the unit stopped with the reason only in
+        the update log — and it is the one abort in this flow that really costs
+        nothing. The second is for the link to drop after the frame, and past
+        its bound the directory is left alone: moving it out from under a live
+        writer is the corruption every guard in this module exists to prevent.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._sidecar_return_timeout
+        while True:
+            if self._stopping:
+                return PairingResult(
+                    False, PAIRING_STOPPING, message="the bridge is stopping",
+                )
+            writer = self._writer
+            if (
+                writer is not None
+                and self._status.connected
+                and not writer.is_closing()
+            ):
+                # **Clear the latch, then re-read the writer, with nothing
+                # awaited in between.** The clear is what makes the wait below
+                # mean "gone *since* the frame" rather than "gone at some
+                # point"; the re-read is what catches a link that dropped on
+                # its own during the clear, which must send this back to
+                # waiting rather than into a rename. From the re-read to
+                # `writer.write` there is no suspension point, so the loop
+                # cannot run `_close_link` in between.
+                self._link_dropped.clear()
+                if self._writer is writer and not writer.is_closing():
+                    if await self._write_shutdown_frame(writer):
+                        # **The restart is spent at the write, not at
+                        # success.** A sidecar slow past the bound below still
+                        # exits, so an abort there has cost a reconnect on a
+                        # re-pair that did not happen — which is what the
+                        # cooldown rations and what the confirmation copy
+                        # promises either way. Stamped before the `break`
+                        # rather than after the loop so a cancellation between
+                        # the two cannot lose it; a cancel inside the frame's
+                        # own drain still can, which is a shutting-down daemon
+                        # and leaves only an unrationed retry behind.
+                        self._last_reset_at = loop.time()
+                        break
+                    # The write itself failed, so nothing left this process and
+                    # no restart was spent. A clean abort, and the only one
+                    # here that is.
+                    logger.warning("whatsapp.pairing.frame_unsent")
+                    return PairingResult(
+                        False,
+                        PAIRING_FRAME_UNSENT,
+                        message=(
+                            "the shutdown frame could not be written to the "
+                            "WhatsApp sidecar, so nothing was stopped and "
+                            "nothing was moved. Try again."
+                        ),
+                    )
+            if loop.time() >= deadline:
+                logger.warning("whatsapp.pairing.sidecar_absent_at_start")
+                return PairingResult(
+                    False,
+                    PAIRING_SIDECAR_ABSENT,
+                    message=(
+                        "no WhatsApp sidecar connected in "
+                        f"{self._sidecar_return_timeout:.0f}s, so there was "
+                        "nothing to ask to stop. Check its own unit or compose "
+                        "service and the deploy update log — a failed "
+                        "dependency install can leave it stopped. Nothing was "
+                        "moved and no restart was spent."
+                    ),
+                )
+            await asyncio.sleep(_SIDECAR_POLL_INTERVAL)
+
+        try:
+            await asyncio.wait_for(
+                self._link_dropped.wait(), timeout=self._sidecar_stop_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("whatsapp.pairing.stop_timeout")
+            return PairingResult(
+                False,
+                PAIRING_STOP_TIMEOUT,
+                message=(
+                    "the WhatsApp sidecar's link did not drop within "
+                    f"{self._sidecar_stop_timeout:.0f}s of being asked to "
+                    "stop, so the session directory was left alone — moving "
+                    "it out from under a live writer is what corrupts an auth "
+                    "state. The shutdown frame has already gone, so the "
+                    "sidecar may still be stopping and its restart is spent."
+                ),
+                restart_spent=True,
+            )
+
+        # **Nothing awaits from here to the end of the move.** On the compose
+        # shape the supervisor's restart backoff starts at 100ms, and the two
+        # syscalls below are four orders of magnitude inside that — but only if
+        # the loop is not given a chance to adopt a respawned sidecar in
+        # between. `_move_session_aside` is synchronous for this reason.
+        if self._stopping:
+            return PairingResult(
+                False,
+                PAIRING_STOPPING,
+                message=(
+                    "the bridge began stopping while the WhatsApp sidecar was "
+                    "shutting down, so the session directory was left alone. "
+                    "Its restart is spent."
+                ),
+                restart_spent=True,
+            )
+        # **The second line of defence, and it is the one that keeps the
+        # corruption out of reach.** Measured: with both latch clears removed
+        # the wait is satisfied by a stale drop, and it is this check that
+        # still refuses rather than renaming out from under the sidecar that
+        # is connected right now. Removing it as well is what finally lets the
+        # directory move with a live writer holding it.
+        if self._writer is not None:
+            logger.warning("whatsapp.pairing.sidecar_returned_before_move")
+            return PairingResult(
+                False,
+                PAIRING_SIDECAR_RETURNED,
+                message=(
+                    "a WhatsApp sidecar reconnected before the session "
+                    "directory could be moved, so it was left alone rather "
+                    "than moved out from under a live writer. Its restart is "
+                    "spent, so another re-pair is refused until the cooldown "
+                    "runs out."
+                ),
+                restart_spent=True,
+            )
+
+        moved: Path | None = None
+        if self._session_dir_holds_a_session():
+            try:
+                moved = self._move_session_aside()
+            except SessionResetIncomplete as exc:
+                logger.error(
+                    "whatsapp.pairing.reset_incomplete moved_to=%s", exc.moved_to,
+                )
+                return PairingResult(
+                    False,
+                    PAIRING_RESET_INCOMPLETE,
+                    message=str(exc),
+                    moved_to=exc.moved_to,
+                    restart_spent=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — reported, never raised on
+                logger.warning(
+                    "whatsapp.pairing.move_aside_failed reason=%s",
+                    type(exc).__name__,
+                )
+                return PairingResult(
+                    False,
+                    PAIRING_FAILED,
+                    message=(
+                        "the WhatsApp session directory could not be moved "
+                        f"aside ({type(exc).__name__}); it is untouched and "
+                        "the sidecar's restart is spent."
+                    ),
+                    restart_spent=True,
+                )
+        else:
+            # **An empty directory is not archived a second time.** The routine
+            # case is a window a process restart orphaned: the credential is
+            # already at a timestamped sibling, so the recovery is another
+            # window against the directory that move emptied, not another
+            # archive of nothing. The reference deployment restarts its units on every
+            # commit, so this arm is ordinary rather than exceptional.
+            self._clear_fatal_latch()
+            logger.info(
+                "whatsapp.pairing.nothing_to_move: the session directory is "
+                "already empty, so only the fault latch was cleared",
+            )
+        # Set on both arms above — the move and the bare latch clear — since
+        # either leaves a session directory with no auth state in it. See
+        # `_unpaired_by_repair` and `_send`'s two arms.
+        self._unpaired_by_repair = True
+        # A no-op on this shape by construction — there is no supervisor to
+        # resume when `sidecar_argv` is empty — and called anyway, so the two
+        # entry points end the same way rather than one of them relying on a
+        # property of its caller.
+        self.resume()
+        return await self._open_window_after(
+            requested_by, moved, restart_spent=True,
+        )
+
+    async def _open_window_after(
+        self, requested_by: str, moved: Path | None, *, restart_spent: bool,
+    ) -> PairingResult:
+        """Arm the relay, and say where the old session went either way.
+
+        `open_pairing_window` can answer `None` — the bridge began stopping
+        during its own two awaits — and by here a full-account credential has
+        already moved. A result that dropped `moved_to` on that path would
+        leave an operator with two directories and nothing saying which holds
+        their session.
+        """
+        window = await self.open_pairing_window(
+            requested_by, destructive=moved is not None,
+        )
+        if window is None:
+            return PairingResult(
+                False,
+                PAIRING_NO_WINDOW,
+                message=(
+                    "the WhatsApp session was reset but no pairing window "
+                    "could be opened, so no code will be relayed"
+                    + (
+                        f". The old session is at {moved}"
+                        if moved is not None
+                        else ""
+                    )
+                ),
+                moved_to=moved,
+                restart_spent=restart_spent,
+            )
+        return PairingResult(
+            True,
+            PAIRING_OK,
+            window_id=window.window_id,
+            message=(
+                "waiting for the WhatsApp sidecar to restart and offer a "
+                "pairing code"
+                + (f". The old session is at {moved}" if moved is not None else "")
+            ),
+            moved_to=moved,
+            restart_spent=restart_spent,
+        )
+
+    def _cooldown_remaining(self) -> float:
+        last = self._last_reset_at
+        if last is None:
+            return 0.0
+        elapsed = asyncio.get_running_loop().time() - last
+        return max(0.0, self._reset_cooldown - elapsed)
 
     async def _listen(self) -> None:
         path = self._socket_path
@@ -993,16 +2515,17 @@ class BaileysBridge:
         cost a process every few seconds and change nothing; the status carries
         the reason for `doctor` to report and for the operator to act on.
 
-        **On this shape the way out is `reset_session`.** With an argv, ending
-        the loop means no child, so nothing can send the `ready` that
-        `_dispatch` clears the latch on — the clearing arm is unreachable from
-        in here. `reset_session` is the resume this used to record as owed: it
-        waits for *this task* to finish, moves the dead session aside, clears
-        the latch and creates a fresh supervisor. `istota whatsapp pair
-        --reset` is its one caller. On the `sidecar_argv=()` shape there is no
-        gap and no reset: systemd restarts the unit, it reconnects, and its
-        `ready` clears the latch — but its session directory is the unit's to
-        hold, not this process's to move.
+        **On this shape the way out is `resume()`.** With an argv, ending the
+        loop means no child, so nothing can send the `ready` that `_dispatch`
+        clears the latch on — the clearing arm is unreachable from in here. The
+        way back is to clear the latch and start this loop again, and both
+        callers do exactly that after the dead session has been moved aside:
+        `reset_session` (behind `istota whatsapp pair --reset`) and
+        `repair_session`, which delegates to it on this shape. On the
+        `sidecar_argv=()` shape there is no gap and nothing to resume: systemd
+        restarts the unit, it reconnects, and its `ready` clears the latch —
+        but its session directory is the unit's to hold, not this process's to
+        move.
         """
         delay = RESPAWN_BASE_SECONDS
         while not self._stopping:
@@ -1110,12 +2633,34 @@ class BaileysBridge:
         return None
 
     async def _request_shutdown(self) -> None:
-        writer = self._writer
+        """Ask whichever sidecar is connected to stop. Never raises."""
+        await self._write_shutdown_frame(self._writer)
+
+    async def _write_shutdown_frame(self, writer) -> bool:
+        """Ask **this** peer to stop, and say whether the frame was written.
+
+        Split out of `_request_shutdown` because `repair_session` needs both
+        halves that method does not give it. It has to write to the writer it
+        already established was live rather than to whatever `self._writer`
+        holds a statement later — the drop it then observes has to belong to a
+        process it named — and it has to know whether the frame reached
+        `writer.write`, because that is what decides whether a restart was
+        spent and therefore whether an abort is a clean no-op.
+
+        Never raises, and the mark is set between the write and the drain for
+        `_send`'s reason: past `write` the bytes may be in the kernel buffer
+        whatever `drain` then says. `_request_shutdown`'s own behaviour is
+        unchanged — it still suppresses everything and returns `None`, which
+        `stop()` and the supervisor's permanent-fatal arm both depend on.
+        """
         if writer is None:
-            return
+            return False
+        written = False
         with contextlib.suppress(Exception):
             writer.write(proto.encode(proto.MSG_SHUTDOWN))
+            written = True
             await asyncio.wait_for(writer.drain(), timeout=1.0)
+        return written
 
     async def _reap_process(self) -> None:
         process = self._process
@@ -1170,6 +2715,10 @@ class BaileysBridge:
                 return
             self._writer = writer
             self._status.connected = True
+            # Cleared where the writer is adopted rather than where the
+            # connection is accepted, so the latch tracks exactly the link
+            # `_close_link` will set it for.
+            self._link_dropped.clear()
             await self._read_loop(reader)
         except asyncio.CancelledError:
             raise
@@ -1224,6 +2773,10 @@ class BaileysBridge:
         self._status.connected = False
         self._status.ready = False
         self._status.protocol_version = None
+        # Set unconditionally, including where there was no writer: the
+        # question `repair_session` asks of this latch is "has the link gone
+        # since I cleared it", and it clears it while holding a live writer.
+        self._link_dropped.set()
         if writer is not None:
             with contextlib.suppress(Exception):
                 writer.close()
@@ -1314,6 +2867,46 @@ class BaileysBridge:
             self._status.fatal_is_permanent = False
             self._status.fatal_run_unrecorded = False
             self._permanent_fatal.clear()
+            # The session is open, so it is paired — the one thing that can
+            # say so, and therefore the only thing that lifts `_send`'s
+            # post-repair refusal. Cleared here whether or not a window is
+            # still open, since the arm below closes the window on either
+            # branch and a session that is up needs no further protection.
+            self._unpaired_by_repair = False
+            # A scan is what closes a pairing window, and it closes it from
+            # this side rather than from a reader's — so a code scanned while
+            # no browser is watching still pairs. The window is dropped
+            # synchronously and the credential unlinked on a task, because
+            # `_dispatch` runs on the read loop and may not await.
+            #
+            # **A `ready` frame is not evidence that a code was scanned**, and
+            # the terminal state must not claim it was: the sidecar
+            # re-announces its verdict whenever the daemon link reconnects, so
+            # a link blip inside a window produces one with no pairing behind
+            # it. `qr_seq` is the evidence — it counts codes this window
+            # actually relayed — and the distinction matters because the
+            # durable row records this state as the outcome of somebody's
+            # re-pair request. The window closes either way; there is nothing
+            # left to relay to a session that is up.
+            window = self._pairing_window
+            if window is not None:
+                paired = window.qr_seq > 0
+                if self._end_pairing_window(
+                    window,
+                    (
+                        pairing_relay.STATE_PAIRED
+                        if paired
+                        else pairing_relay.STATE_FAILED
+                    ),
+                    (
+                        "the session was paired"
+                        if paired
+                        else "the session reported itself open without having "
+                        "offered a pairing code, which is what a reconnect of "
+                        "a working session looks like; nothing was re-paired"
+                    ),
+                ):
+                    self._spawn_relay_job(self._clear_relay())
             logger.info("whatsapp.baileys.ready")
         elif message_type == proto.MSG_QR:
             self._handle_qr(payload)
@@ -1333,13 +2926,33 @@ class BaileysBridge:
 
         **The payload is never logged, at any level.** It is the pairing
         credential for the whole WhatsApp account: anything that scans it is
-        linked as a device. The callback is `istota whatsapp pair`'s at Stage
-        6; with none set the daemon is not pairing and the frame is noted
-        without its contents.
+        linked as a device. The callback is `istota whatsapp pair`'s
+        own-sidecar mode; with neither an armed window nor a callback the
+        daemon is not pairing and the frame is noted without its contents.
+
+        **The window branch is an addition at the top, not a rewrite.** With no
+        open window — including one already past its deadline that the watchdog
+        has not yet closed — this behaves exactly as it did before there was a
+        window at all, which is what every Baileys deployment in existence
+        runs. An armed window relays and returns rather than also calling the
+        callback: one code, one channel.
         """
         value = payload.get("qr")
         if not isinstance(value, str) or not value:
             self._status.malformed_lines += 1
+            return
+        window = self._pairing_window
+        if window is not None and asyncio.get_running_loop().time() < window.expires_at:
+            # Stamped on the loop, in order, so the sequence a queued write
+            # checks against is the one this rotation was given. A late
+            # sidecar's first code also lifts `sidecar_absent` — the window
+            # stayed open precisely so it could.
+            window.qr_seq += 1
+            window.state = pairing_relay.STATE_AWAITING_SCAN
+            window.message = ""
+            self._spawn_relay_job(
+                self._publish_relay_qr(window, window.qr_seq, value),
+            )
             return
         if self._on_qr is None:
             logger.info(
@@ -1580,11 +3193,11 @@ class BaileysBridge:
         `definite` is the single bit that decides `failed` against `unknown`.
 
         **The definite line is `writer.write`, exactly.** Everything above it —
-        no sidecar connected, a session in a fatal state, a request that would
-        not encode — is provably a message that never entered the socket, and
-        settles `failed`. From `write` onwards the bytes may be in the kernel
-        buffer whatever `drain` then says, so every outcome is ambiguous and
-        settles `unknown`.
+        an open pairing window, no sidecar connected, a session in a fatal
+        state, a request that would not encode — is provably a message that
+        never entered the socket, and settles `failed`. From `write` onwards
+        the bytes may be in the kernel buffer whatever `drain` then says, so
+        every outcome is ambiguous and settles `unknown`.
 
         `CancelledError` is deliberately not caught: `deliver_whatsapp`'s
         `BaseException` backstop settles the row and re-raises, and swallowing
@@ -1616,7 +3229,51 @@ class BaileysBridge:
     async def _send(
         self, request: WhatsAppSendRequest, mark: "_WriteMark"
     ) -> WhatsAppSendOutcome:
-        if self._status.fatal_is_permanent:
+        # **Ahead of the fatal latch, and not optional.** `repair_session`
+        # clears that latch — it has to, or `resume()`'s fresh supervisor reads
+        # it at its first statement and returns without spawning — so from
+        # that moment this bridge is attached to a sidecar restarting into an
+        # unpaired session. With only the latch below, `writer.write` succeeds,
+        # the mark is set, and the answer either never comes (`send_timeout`)
+        # or comes back as a link failure: both settle **`unknown`**, the one
+        # state `.claude/rules/whatsapp.md` says an operator can never
+        # resolve. `logical_key` is UNIQUE and nothing deletes from
+        # `sent_whatsapp`, so a task result, a confirmation prompt or an admin
+        # alert caught there would be unsendable for good. Before the latch
+        # clear that same send settled `failed`, honestly, and these two arms
+        # are what keep it doing so.
+        #
+        # **The window is not the span to gate on, and review found two ways
+        # it is too narrow.** It opens at the *last* step, and it closes long
+        # before the session is paired:
+        #
+        # - Ahead of it sits the whole destructive half. Under `force` the
+        #   latch is absent by construction, so between `repair_session`'s
+        #   first statement and the window there is no gate at all — up to
+        #   `sidecar_return_timeout + sidecar_stop_timeout`, 75s at the
+        #   shipped values, during which a send is written and then settled
+        #   `unknown` by the very link drop this sequence asked for.
+        #   `_repairing` covers that span: it is set synchronously before the
+        #   first await and cleared in a `finally`.
+        # - Behind it sits a session nobody scanned. The window expires at its
+        #   TTL and the latch stays clear for the life of the process, on a
+        #   session directory this sequence emptied — so every later send goes
+        #   to an unpaired sidecar and settles `unknown` indefinitely, which is
+        #   the same regression the window arm exists to prevent, just outside
+        #   the window. `_unpaired_by_repair` carries it until a `ready` says
+        #   the session is open.
+        #
+        # Gating on `self._status.ready` instead would cover both and is
+        # deliberately not done: `_handle_fatal` states that a transient fatal
+        # clears `ready` and sends carry on, so reading it here would refuse
+        # sends on a working session and contradict a decision already shipped
+        # on the live path.
+        if self._repairing or self._pairing_window is not None:
+            return proto.local_failure(proto.REASON_PAIRING, definite=True)
+        # `REASON_SESSION_FATAL` reads "needs re-pairing", which is exactly
+        # what an emptied directory nobody has scanned into is — so the two
+        # states share one answer rather than acquiring a third string.
+        if self._status.fatal_is_permanent or self._unpaired_by_repair:
             return proto.local_failure(proto.REASON_SESSION_FATAL, definite=True)
         request_id = secrets.token_hex(8)
         try:
@@ -1695,8 +3352,29 @@ __all__ = [
     "ENV_SOCKET",
     "INBOUND_ATTEMPTS",
     "INBOUND_QUEUE_MAX",
+    "PAIRING_ALREADY",
+    "PAIRING_COOLDOWN",
+    "PAIRING_FAILED",
+    "PAIRING_FRAME_UNSENT",
+    "PAIRING_NO_WINDOW",
+    "PAIRING_OK",
+    "PAIRING_RESET_INCOMPLETE",
+    "PAIRING_RESET_REFUSED",
+    "PAIRING_SESSION_DIR_UNUSABLE",
+    "PAIRING_SESSION_LIVE",
+    "PAIRING_SHAPE_UNSUPPORTED",
+    "PAIRING_SIDECAR_ABSENT",
+    "PAIRING_SIDECAR_RETURNED",
+    "PAIRING_STOPPING",
+    "PAIRING_STOP_TIMEOUT",
+    "PAIRING_WINDOW_SECONDS",
+    "PairingOutcome",
+    "PairingResult",
+    "PairingWindow",
+    "RESET_COOLDOWN",
     "SEND_TIMEOUT_SECONDS",
     "SESSION_DIR_NAME",
+    "SIDECAR_STOP_TIMEOUT",
     "SOCKET_NAME",
     "SessionResetIncomplete",
     "SessionResetRefused",

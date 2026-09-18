@@ -8269,6 +8269,13 @@ def build_interval_gates(
     )
     backup: dict = backup_state if backup_state is not None else {"alerted": False}
 
+    # At function scope rather than module scope: `scheduler` is imported by
+    # `cli` and by every test that builds a config, and the WhatsApp bridge
+    # pulls in the sidecar supervisor and the adapter. The `whatsapp-pairing`
+    # gate's `enabled` closure reads it on every tick, so it cannot be a
+    # deferred import inside a lambda.
+    from .transport.whatsapp.baileys_runtime import baileys_bridge_wanted
+
     def _briefings(now: float) -> None:
         # Manages its own DB connections so no lock is held during the slow
         # network pre-fetching.
@@ -8366,6 +8373,17 @@ def build_interval_gates(
         backup["alerted"] = _maybe_alert_backup_stale(
             config, now, persisted, backup["alerted"]
         )
+
+    def _whatsapp_pairing(now: float) -> None:
+        # Inline on the dispatch thread, deliberately: the poll's own cheap
+        # read is what makes an every-tick gate affordable, and
+        # `_spawn_background_check` would create a `threading.Thread` per tick
+        # — about 17,000 a day at the default `poll_interval` — to perform one
+        # indexed read of a singleton row that almost always finds nothing.
+        # It hands off with `spawn_task` when there is something to hand off.
+        from .transport.whatsapp.baileys_runtime import poll_pairing_request
+
+        poll_pairing_request(config)
 
     def _scheduler_stats(now: float) -> None:
         _emit_scheduler_stats(config, pool)
@@ -8580,6 +8598,38 @@ def build_interval_gates(
                 and c.scheduler.avatar_import_interval
             ),
             background=True,
+        ),
+        # The durable pairing request channel. Every tick, and `fixed_interval=0`
+        # is what says so — `_tick_interval_gates` bypasses the clock on a
+        # non-positive interval rather than comparing against it, which
+        # `backup-stale-alert` is the existing example of and which matters
+        # here for the same reason: `now` is wall-clock, so a backwards NTP
+        # step leaves the stored clock ahead of it and `now - clock >= 0` would
+        # skip the gate for the length of the step. A recovery surface must not
+        # be switchable off by a clock adjustment. Anything non-zero would also
+        # be a fiction: `_dispatch_sleep` consumes a whole `poll_interval`
+        # between gate passes, so the real pickup latency is one poll interval
+        # whatever this said.
+        #
+        # Not `background` — see `_whatsapp_pairing`. Not `overlap_expected`,
+        # which demotes `_spawn_background_check`'s in-flight log and has
+        # nothing to demote once the SQL claim replaces that registry. And not
+        # `one_shot`: that means `run_scheduler` — the single-pass `istota run`
+        # path — executes the gate, and since the predicate below is pure
+        # config it would have every Baileys deployment poll from a process
+        # that holds no bridge, which is exactly where the orphan arm's "in a
+        # process that holds the bridge" qualifier stops being true.
+        #
+        # `enabled` is `baileys_bridge_wanted` alone and must stay so. Gating it
+        # on `[whatsapp.baileys] pairing_enabled` would silently disable the
+        # CLI's attach mode, which writes the same request row and depends on
+        # this poll — an operator who turned the web flow off is exactly the one
+        # who will be on a terminal. That key gates the routes.
+        IntervalGate(
+            name="whatsapp-pairing",
+            run=_whatsapp_pairing,
+            fixed_interval=0,
+            enabled=lambda c: baileys_bridge_wanted(c),
         ),
         # ISSUE-343. An overlay is a user-written file with no CLI write path,
         # so a periodic full directory pass is the only seam that sees an edit.

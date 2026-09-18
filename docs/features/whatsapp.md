@@ -36,7 +36,7 @@ Baileys speaks WhatsApp's Web protocol as a linked device. That is not a support
 
 **The device unlinks.** WhatsApp drops a linked device after a long stretch with the phone offline, and the session can also end if you unlink it from the phone. Istota notices: sends refuse rather than silently dropping, `istota doctor --only whatsapp.baileys_bridge` fails, and an alert goes to the admins off the WhatsApp surface.
 
-Recovery is `istota whatsapp pair --reset`. The plain `pair` cannot do it, and that is worth understanding rather than remembering: the credential left on disk names a device WhatsApp has unlinked, and the library reads it as a registered account and tries to log in with it rather than offering a code. So every restart is refused and no QR is ever drawn — under systemd that is a restart every thirty seconds, for as long as it takes somebody to notice. `--reset` moves the directory to a timestamped sibling and pairs into a fresh one. It deletes nothing, so a session that turned out to be merely unreachable has lost no keys, and it still refuses to run while a bridge is listening on the socket. Stop the scheduler and any sidecar running as a unit of its own first, as you would for a first pairing; remove the old directory yourself once the new session works.
+Recovery is a re-pair, and it needs the old credential moved out of the way first. The file left on disk names a device WhatsApp has unlinked, and the library reads it as a registered account and tries to log in with it rather than offering a code — so every restart is refused and no QR is ever drawn. Under systemd that is a restart every thirty seconds, for as long as it takes somebody to notice. See "Re-pairing" below: from Admin, Connections it is one click, and from a terminal it is `istota whatsapp pair --reset`.
 
 Until somebody does that, the sidecar keeps starting, is refused, and exits. It spaces those attempts out rather than making one every thirty seconds: no wait on the first, then 30 seconds, 5 minutes, 15, 30, an hour, counted in `logout-backoff.json` inside the session directory. Each attempt is a login against a number WhatsApp has already unlinked, which is exactly the kind of client behaviour the paragraphs above are about, so leaving an unlinked session running for a week is no longer expensive. Re-pairing is not slowed by it — the wait ends as soon as the credential is replaced.
 
@@ -44,12 +44,41 @@ If that counter cannot be written, or cannot be read back on the next attempt, i
 
 None of that applies to the Cloud adapter, which is why it stays available. If you cannot afford to lose the number or the surface, use Cloud.
 
+## Re-pairing
+
+A paired session can be replaced from the running deployment. No SSH, no `systemctl`, and nothing to stop.
+
+Open Admin, Connections. The WhatsApp card says where the link stands and carries one control:
+
+- **The session is unlinked.** One click, no typed confirmation. There is nothing working to lose, and this is the case the flow exists for.
+- **The session is working, unsettled, or not readable from the web process.** No re-pair button on the card. A separate control below it asks you to type a phrase first, because the same sequence disconnects a link that may be fine. On the deployment shape where the web app and the scheduler are separate units the web process cannot read the live link at all, so this is the control you get there — including for a first-ever pairing, which from outside is indistinguishable from a working session.
+
+What happens next takes a minute or so. The request is written to the database, and the scheduler picks it up on its next poll. It waits for a connected sidecar, asks that sidecar to stop, and moves the session directory aside only after the link drop its own request caused — which is the evidence that nothing else is writing the directory. The sidecar restarts, finds no credential, and WhatsApp offers a code. The card draws it, redrawing about every twenty seconds as WhatsApp rotates it. Scan it from the phone's Linked Devices screen and the card goes green. An admin notification records who re-paired and when.
+
+Three things to know before pressing it:
+
+**It spends one sidecar restart, and spends it at the request rather than at the result.** On an unlinked session that costs nothing — the sidecar was already restarting on a loop, and this ends one cycle a few seconds early. On a working session it is a real reconnect, which is what the typed confirmation is about. If the sequence then aborts (the sidecar ignores the request, say), the restart has already been spent and the message says so.
+
+**The window lasts five minutes and closes for good.** Nothing scanned, and the session stays unpaired with the old credential already moved aside. Ask again rather than expecting the old session back. A second re-pair inside ten minutes is refused, naming the minutes left: repeating it is churn against a link WhatsApp watches.
+
+**The old session is kept, not deleted.** It moves to a timestamped sibling of the session directory — `whatsapp-baileys-session.20260101T120000Z` beside `whatsapp-baileys-session` — so a session that turned out to be merely unreachable has lost no keys. Nothing sweeps those, deliberately: each is a full-account credential and a timer that deletes one is a credential-destroying automatic path with no operator present. Remove them by hand once the new session works. `istota doctor --only whatsapp.baileys_session` counts them and reports their permissions, so the accumulation is visible rather than quiet.
+
+From a terminal the same flow is `istota whatsapp pair`. With a bridge already running it writes the same request the web card writes and then draws each code in the terminal; with no daemon running it starts a sidecar of its own, which is the first-ever pair on a checkout. `--reset` is what reaches the destructive half in either mode, and in attach mode it asks for the same typed phrase the web control does.
+
+### A code in a browser is a credential in a browser
+
+A WhatsApp pairing code is a full-account credential: whoever scans it becomes a linked device on the number, with no second factor and nothing the account holder is shown. Rendering it into the admin UI puts that credential in a browser, so a cross-site scripting hole in the admin UI during an open pairing window is account takeover rather than a defacement.
+
+Four things bound it and none of them removes it. The window is admin-initiated and never ambient, so an unpaired deployment publishes nothing. It expires after five minutes. The code is rendered server-side as an image and never reaches the browser as text, so it is in no JSON response and no JS string. And it lives on disk in a 0600 file rather than in the database, so a nightly backup of the framework database never captures one.
+
+An operator who judges that trade differently sets `pairing_enabled = false` under `[whatsapp.baileys]`. The pairing routes then answer 404, the Connections card says pairing is switched off here, and re-pairing goes back to being a terminal operation — `istota whatsapp pair` still works, since that switch governs the web routes alone.
+
 ## Setting up Baileys
 
 You need a phone with WhatsApp on the number Istota will use, a host with Node, and the sidecar's dependencies installed.
 
 1. Set `provider = "baileys"` and `enabled = true` in `[whatsapp]`, and `business_phone_number` to the number in E.164 form. Nothing else is required; `[whatsapp.baileys]` defaults are fine.
-2. Stop the Istota scheduler, **and any sidecar running as a unit or compose service of its own**. Two Baileys clients against one session directory corrupt it, and Istota can only detect one of the two.
+2. Stop the Istota scheduler, **and any sidecar running as a unit or compose service of its own**. Two Baileys clients against one session directory corrupt it, and Istota can only detect one of the two. This is the first-pair procedure on a host with nothing running yet; on a host where the deployment is already up, pair from Admin, Connections or with `istota whatsapp pair --reset` instead and stop nothing.
 3. Install the sidecar's dependencies: `npm ci` in `docker/whatsapp-baileys/`.
 4. Run `istota whatsapp pair`. It draws a QR code in the terminal — nothing to install, and the code is redrawn each time WhatsApp rotates it, which is every twenty seconds or so. On the phone, open WhatsApp, go to Linked Devices, and scan.
 5. When pairing reports the session is ready, start the scheduler and whatever runs the sidecar. **The daemon spawns no sidecar by default**: with `[whatsapp.baileys] sidecar_command` empty it only listens, which is what a deployment running the sidecar as its own unit or compose service wants. Set `sidecar_command` if you want the daemon to spawn it instead.
@@ -112,7 +141,15 @@ business_phone_number = "+15551234567"
 session_dir = ""                # defaults beside the database
 library_version = ""            # checked against the sidecar's pinned version
 sidecar_command = ""            # empty: the daemon listens and spawns nothing
+pairing_enabled = true          # false: the pairing routes 404, terminal only
+pairing_window_seconds = 300    # how long a pairing window stays open
+pairing_relay_path = ""         # defaults beside the database
+restart_interval_seconds = 0    # how long your supervisor takes to restart the sidecar
 ```
+
+The last four are the re-pairing flow's. `pairing_relay_path` is where a code crosses from the process holding the sidecar to the process serving `/admin`; the default sits beside the framework database at 0600, and on the standalone install it resolves off the workspace root instead, since there the two are one directory and the workspace is readable from inside a task's sandbox. A window is refused outright where the resolved path would still land inside a sandbox-bound directory, and the card says which setting to change.
+
+`restart_interval_seconds` is a declaration rather than a control: it tells Istota roughly how long your supervisor waits before restarting the sidecar, and the only thing it changes is how long the card waits before saying the sidecar has not come back. The Ansible role renders it from the same variable that fills `RestartSec=` in the unit, so the two cannot disagree. Compose leaves it `0`, because Docker's backoff is not an interval; `0` means undeclared and a fixed 30-second allowance is used.
 
 The Cloud adapter's own settings sit in their own block, and are read only under `provider = "whatsapp_cloud"`:
 
@@ -211,7 +248,7 @@ istota whatsapp billing-status          # Cloud: read the circuit breaker withou
 istota whatsapp billing-unblock         # Cloud: clear it, after checking Meta billing
 ```
 
-`whatsapp.common` reports which fields are missing or invalid for the active adapter, never their values. `whatsapp.billing` reports the Cloud circuit breaker, the service attempts used against the cap, and the template attempts, which nothing local bounds; it skips itself under Baileys. `whatsapp.baileys_session` reports the paired session's permissions and ownership, and does not repair them — if it says a file is readable by other accounts, fix it and run it again. `whatsapp.baileys_bridge` reports the link to the sidecar and only answers inside the process holding it, so read it from the admin Health pane, `!check`, or the boot log rather than from a shell.
+`whatsapp.common` reports which fields are missing or invalid for the active adapter, never their values. `whatsapp.billing` reports the Cloud circuit breaker, the service attempts used against the cap, and the template attempts, which nothing local bounds; it skips itself under Baileys. `whatsapp.baileys_session` reports the paired session's permissions and ownership — and those of every session a re-pair has moved aside, since each archive is a full-account credential too and nothing deletes one. It does not repair any of them: if it says a file is readable by other accounts, fix it and run it again. `whatsapp.pairing_relay` asks the same question about the file a pairing code crosses processes in; on a deployment that is not pairing there is no such file, and that is what it says. `whatsapp.baileys_bridge` reports the link to the sidecar, names an open pairing window and says when no sidecar has come back to receive one; it only answers inside the process holding the bridge, so read it from the admin Health pane, `!check`, or the boot log rather than from a shell.
 
 The Cloud circuit breaker is persistent and deployment-wide. In `free_guard`, the first authenticated delivery status carrying `billable = true` trips it and every later send is refused. The message that revealed the charge may already have been billed; what the breaker buys is that the next one is not. Check Meta billing first, then `billing-unblock`. Switching to `allow_paid` also clears it.
 
@@ -242,7 +279,7 @@ ISTOTA_WHATSAPP_VERIFY_TOKEN=...
 
 The `webhooks` service belongs to the `location`, `sms` and `whatsapp` profiles, so enabling several still starts one receiver. Nginx exposes `/webhooks/`; the receiver port stays inside the Compose network. Restart `istota`, `webhooks` and `nginx` after changing these. The main service renders `config.toml`; the webhook service waits for that render before it accepts a request.
 
-**Pairing a Baileys session is not reachable from inside this stack.** `istota whatsapp pair` starts a sidecar of its own, and the istota image ships neither the sidecar program nor its dependencies. Pair on a host with a checkout and Node, then move the session directory into the `istota_data` volume at `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers run as.
+**A first-ever pairing is not reachable from inside this stack.** `istota whatsapp pair` starts a sidecar of its own when no bridge is running, and the istota image ships neither the sidecar program nor its dependencies. Pair on a host with a checkout and Node, then move the session directory into the `istota_data` volume at `/data/db/whatsapp-baileys-session`, 0700 and owned by the uid the containers run as. **Re-pairing that session afterwards works from the stack**, through Admin, Connections: the flow asks the running sidecar to stop rather than starting one of its own, so it needs nothing the containers do not already have.
 
 ## Ansible
 
@@ -305,4 +342,4 @@ Going **away from Cloud**, Meta's callback stops being served the moment the new
 
 ## Switching off
 
-Set `enabled = false`. The routes refuse every request and the sidecar is not provisioned. Outstanding rows keep their last state. User bindings, opt-outs, ledger rows and conversation history all survive, so turning it back on resumes where it stopped. A paired Baileys session is left on disk: the Ansible teardown names the directory rather than deleting it, since a switch back re-uses it, and a credential deleted on your behalf during a routine converge is the wrong default. Remove it by hand if you are done with the number, and unlink the device from the phone.
+Set `enabled = false`. The routes refuse every request and the sidecar is not provisioned. Outstanding rows keep their last state. User bindings, opt-outs, ledger rows and conversation history all survive, so turning it back on resumes where it stopped. A paired Baileys session is left on disk: the Ansible teardown names the directory rather than deleting it, since a switch back re-uses it, and a credential deleted on your behalf during a routine converge is the wrong default. Remove it by hand if you are done with the number, and unlink the device from the phone. Two things sit beside it and are part of the same clean-up: every `whatsapp-baileys-session.<timestamp>` archive a re-pair left, each a full-account credential of its own, and `whatsapp-pairing.json` if a pairing window was open when the surface was switched off.
