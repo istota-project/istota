@@ -155,6 +155,12 @@ def _args(config_path, *, reset=False):
     return argparse.Namespace(config=str(config_path), reset=reset)
 
 
+def _restore_args(config_path, *, date=None, list_archives=False):
+    return argparse.Namespace(
+        config=str(config_path), date=date, list_archives=list_archives,
+    )
+
+
 def _sidecar_error(sockets) -> str:
     log = sockets.path / "sidecar-errors.log"
     return log.read_text() if log.exists() else "the fake sidecar left no traceback"
@@ -1631,3 +1637,299 @@ class TestAttachModeEndToEnd:
         # real.
         assert payload not in caplog.text
         assert not [r for r in caplog.records if payload in str(r.args or "")]
+
+
+class TestRestoreSession:
+    """`istota whatsapp restore-session`: getting a credential back by hand.
+
+    The companion ISSUE-504 asks for. Adoption stops a scheduler restart
+    stranding a credential at a timestamped sibling; this is what an operator
+    already in that state runs, in place of composing `mv` against a
+    full-account credential as root on a host where WhatsApp is down.
+
+    Every assertion here is about the **credential**, not the exit code: a
+    command that reported success while leaving the session somewhere the
+    operator was not told about is the one outcome they cannot undo from a
+    status line.
+    """
+
+    CREDS = '{"me": {"id": "1@s.whatsapp.net"}}'
+
+    def _session_dir(self, sockets) -> Path:
+        return sockets.path / baileys_bridge.SESSION_DIR_NAME
+
+    def _archive(self, sockets, stamp, *, creds=True) -> Path:
+        path = self._session_dir(sockets).with_name(
+            f"{baileys_bridge.SESSION_DIR_NAME}.{stamp}"
+        )
+        path.mkdir(parents=True)
+        if creds:
+            (path / "creds.json").write_text(f"{self.CREDS} {stamp}")
+        else:
+            # What the sidecar leaves behind on a boot that never paired, and
+            # what `dir_holds_a_session` has to keep telling apart from a
+            # credential — otherwise "newest" restores an empty directory.
+            (path / "sidecar.log").write_text("started\n")
+        return path
+
+    def test_it_restores_the_newest_archive_holding_a_session(
+        self, tmp_path, sockets, capsys,
+    ):
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        newest = self._archive(sockets, "20260102T000000Z")
+        self._session_dir(sockets).mkdir(parents=True)
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+
+        live = self._session_dir(sockets) / "creds.json"
+        assert live.read_text() == f"{self.CREDS} 20260102T000000Z"
+        assert not newest.exists()
+        assert str(newest) in capsys.readouterr().out
+
+    def test_an_archive_holding_only_logs_is_skipped(
+        self, tmp_path, sockets,
+    ):
+        """Newest *good*, `db_restore`'s rule. Control: take the newest archive
+        by name and the operator is handed an empty directory, on the run that
+        matters most — a failed re-pair is exactly when both are lying around.
+        """
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        self._archive(sockets, "20260103T000000Z", creds=False)
+        self._session_dir(sockets).mkdir(parents=True)
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+
+        live = self._session_dir(sockets) / "creds.json"
+        assert live.read_text() == f"{self.CREDS} 20260101T000000Z"
+
+    def test_a_named_stamp_is_restored(self, tmp_path, sockets):
+        path = _config_file(tmp_path, sockets)
+        wanted = self._archive(sockets, "20260101T000000Z")
+        self._archive(sockets, "20260102T000000Z")
+        self._session_dir(sockets).mkdir(parents=True)
+
+        code = cli.cmd_whatsapp_restore_session(
+            _restore_args(path, date="20260101T000000Z"),
+        )
+
+        assert code == 0
+        assert not wanted.exists()
+        live = self._session_dir(sockets) / "creds.json"
+        assert live.read_text() == f"{self.CREDS} 20260101T000000Z"
+
+    def test_an_unknown_stamp_changes_nothing(self, tmp_path, sockets, capsys):
+        path = _config_file(tmp_path, sockets)
+        kept = self._archive(sockets, "20260101T000000Z")
+        self._session_dir(sockets).mkdir(parents=True)
+
+        code = cli.cmd_whatsapp_restore_session(
+            _restore_args(path, date="20991231T235959Z"),
+        )
+
+        assert code == 1
+        assert kept.exists()
+        assert "--list" in capsys.readouterr().err
+
+    def test_a_live_session_is_parked_rather_than_overwritten(
+        self, tmp_path, sockets, capsys, monkeypatch,
+    ):
+        """The reversibility the command rests on. A restore aimed at the
+        wrong stamp is undone by running it again against the parked one, so
+        nothing here may delete.
+        """
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        live = self._session_dir(sockets)
+        live.mkdir(parents=True)
+        (live / "creds.json").write_text("the session that was running")
+        monkeypatch.setattr(sys, "stdin", _Tty("unlink\n"))
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+
+        out = capsys.readouterr().out
+        parked = [
+            entry for entry in baileys_bridge.session_archives(live)
+            if (entry / "creds.json").read_text()
+            == "the session that was running"
+        ]
+        assert len(parked) == 1
+        assert str(parked[0]) in out
+
+    def test_displacing_a_live_session_needs_the_typed_phrase(
+        self, tmp_path, sockets, monkeypatch,
+    ):
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        live = self._session_dir(sockets)
+        live.mkdir(parents=True)
+        (live / "creds.json").write_text("the session that was running")
+        monkeypatch.setattr(sys, "stdin", _Tty("no\n"))
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 1
+        assert (
+            live / "creds.json"
+        ).read_text() == "the session that was running"
+
+    def test_an_empty_live_directory_asks_for_nothing(
+        self, tmp_path, sockets, monkeypatch,
+    ):
+        """The ordinary recovery. The directory a failed re-pair left holds
+        only the sidecar's log, so there is nothing to displace and a prompt
+        would be ceremony on a host that is already down. Control: drop the
+        `dir_holds_a_session` gate and this refuses on an unanswered stdin.
+        """
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        live = self._session_dir(sockets)
+        live.mkdir(parents=True)
+        (live / "sidecar.log").write_text("started\n")
+        monkeypatch.setattr(sys, "stdin", _Tty(""))
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+        assert (live / "creds.json").exists()
+
+    def test_a_live_bridge_refuses_and_names_both_processes(
+        self, tmp_path, sockets, capsys,
+    ):
+        """`reset_session`'s own refusal, one command over: a bridge answering
+        the socket is a live writer, and this process can establish nothing
+        about a sidecar run as its own unit.
+        """
+        path = _config_file(tmp_path, sockets)
+        kept = self._archive(sockets, "20260101T000000Z")
+
+        with _live_bridge_socket(sockets):
+            code = cli.cmd_whatsapp_restore_session(_restore_args(path))
+
+        assert code == 1
+        assert (kept / "creds.json").exists()
+        err = capsys.readouterr().err
+        assert "daemon" in err and "sidecar" in err
+
+    def test_list_changes_nothing_and_says_which_hold_a_session(
+        self, tmp_path, sockets, capsys,
+    ):
+        path = _config_file(tmp_path, sockets)
+        good = self._archive(sockets, "20260101T000000Z")
+        empty = self._archive(sockets, "20260102T000000Z", creds=False)
+
+        assert cli.cmd_whatsapp_restore_session(
+            _restore_args(path, list_archives=True),
+        ) == 0
+
+        out = capsys.readouterr().out
+        assert f"{good.name}  (session)" in out
+        assert f"{empty.name}  (logs only)" in out
+        assert (good / "creds.json").exists()
+        assert not self._session_dir(sockets).exists()
+
+    def test_no_archive_is_a_refusal_naming_pair(
+        self, tmp_path, sockets, capsys,
+    ):
+        path = _config_file(tmp_path, sockets)
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 1
+        assert "istota whatsapp pair" in capsys.readouterr().err
+
+    def test_it_warns_about_a_separately_run_sidecar_on_every_path(
+        self, tmp_path, sockets, capsys,
+    ):
+        """The socket probe sees the daemon and only the daemon, and the daemon
+        is stopped by the time anybody runs this — so a sidecar run as its own
+        unit is exactly the writer nothing here can detect. `pair` prints this
+        before it spawns; the ordinary recovery path prompts for nothing, so
+        without it that path warns about nothing at all.
+        """
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        live = self._session_dir(sockets)
+        live.mkdir(parents=True)
+        (live / "sidecar.log").write_text("started\n")
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+
+        out = capsys.readouterr().out
+        assert "unit of its own" in out
+        assert "two Baileys clients" in out
+
+    def test_a_logs_only_live_directory_is_not_filed_as_an_archive(
+        self, tmp_path, sockets,
+    ):
+        """The ordinary recovery runs against the directory a failed re-pair
+        left. Parking it would file a permanent stamped archive that
+        `session_archives` lists and `doctor` reports for ever, beside the real
+        credentials and indistinguishable from them.
+        """
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        live = self._session_dir(sockets)
+        live.mkdir(parents=True)
+        (live / "sidecar.log").write_text("started\n")
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+
+        # The one archive left is the one that was restored *from*, consumed by
+        # the rename — so none at all.
+        assert baileys_bridge.session_archives(live) == []
+        assert (live / "creds.json").exists()
+
+    def test_an_archive_owned_by_another_mode_is_tightened_before_it_moves(
+        self, tmp_path, sockets,
+    ):
+        """`--date` takes any stamped sibling and the docs tell operators these
+        exist, so a hand-copied 0755 one would otherwise become the live
+        session directory at 0755. Validated before anything moves, so a
+        refusal leaves both directories where they were.
+        """
+        path = _config_file(tmp_path, sockets)
+        archive = self._archive(sockets, "20260101T000000Z")
+        archive.chmod(0o755)
+        self._session_dir(sockets).mkdir(parents=True)
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+
+        live = self._session_dir(sockets)
+        assert stat.S_IMODE(live.stat().st_mode) == 0o700
+
+    def test_it_clears_the_pending_pairing_request(
+        self, tmp_path, sockets, capsys,
+    ):
+        """Leaving the row open undoes the restore. Its deadline may not have
+        passed — the operator can be back inside the window — so the next
+        scheduler tick would adopt it, arm a window over the session just put
+        back and latch the send gate against a working session.
+        """
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        self._session_dir(sockets).mkdir(parents=True)
+        _init_pairing_db(sockets)
+        with db.get_db(sockets.path / "istota.db") as conn:
+            assert db.request_whatsapp_pairing(conn, "alice") is not None
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+
+        with db.get_db(sockets.path / "istota.db") as conn:
+            assert db.read_whatsapp_pairing(conn) is None
+        assert "pairing request was cleared" in capsys.readouterr().out
+
+    def test_no_pairing_request_is_not_reported_as_cleared(
+        self, tmp_path, sockets, capsys,
+    ):
+        path = _config_file(tmp_path, sockets)
+        self._archive(sockets, "20260101T000000Z")
+        self._session_dir(sockets).mkdir(parents=True)
+        _init_pairing_db(sockets)
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 0
+
+        assert "pairing request was cleared" not in capsys.readouterr().out
+
+    def test_the_cloud_provider_has_no_session_to_restore(
+        self, tmp_path, sockets, capsys,
+    ):
+        path = _config_file(tmp_path, sockets, provider="whatsapp_cloud")
+
+        assert cli.cmd_whatsapp_restore_session(_restore_args(path)) == 1
+        assert "whatsapp_cloud" in capsys.readouterr().err

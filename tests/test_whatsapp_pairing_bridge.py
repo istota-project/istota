@@ -37,6 +37,7 @@ import asyncio
 import contextlib
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -1350,3 +1351,212 @@ class TestWhatTheSequenceLeavesOpen:
             assert result.moved_to is not None
             assert str(result.moved_to) in result.message
             assert (result.moved_to / "creds.json").read_text() == CREDS
+
+
+class TestAdoptingAWindowAfterARestart:
+    """`adopt_pairing_window`: the window rebuilt from the durable row.
+
+    The process that archived the credential is gone; this one has the row and
+    a sidecar that never stopped offering codes. Everything asserted here is
+    about the *reconstruction* being the row's rather than a fresh window's —
+    a minted deadline outlives the bound the durable row carries, and a minted
+    id relays into a window no reader is watching.
+    """
+
+    async def test_it_arms_a_window_with_the_rows_id_and_deadline(
+        self, config, sockets,
+    ):
+        async with running(config, sockets) as instance:
+            window = await instance.adopt_pairing_window(
+                "win-orphan", USER, time.time() + 120, destructive=True,
+            )
+
+            assert window is not None
+            assert window.window_id == "win-orphan"
+            assert window.requested_by == USER
+            assert window.destructive is True
+            assert 0 < window.expires_at_wall - time.time() <= 121
+            assert instance.pairing_window is window
+
+    async def test_the_next_qr_relays_into_the_adopted_window(
+        self, config, sockets,
+    ):
+        """The point of adopting at all. Control: drop the arm and the code is
+        discarded exactly as it was before anyone asked for one.
+        """
+        async with running(config, sockets) as instance:
+            async with sidecar(instance, sockets) as peer:
+                assert await instance.adopt_pairing_window(
+                    "win-orphan", USER, time.time() + 120,
+                ) is not None
+                def relayed_code():
+                    read = pairing_relay.read_relay(
+                        instance.pairing_relay_path,
+                        expected_window_id="win-orphan",
+                    )
+                    # The adopt publish lands first with no payload, so the
+                    # wait is on the code rather than on the file existing.
+                    return read if read and read.get("qr") else None
+
+                await peer.say(proto.MSG_QR, qr="2@code-after-restart")
+                published = await wait_for(relayed_code)
+
+            assert published["state"] == pairing_relay.STATE_AWAITING_SCAN
+            assert published["qr"] == "2@code-after-restart"
+
+    async def test_a_scan_the_previous_process_relayed_still_reads_as_paired(
+        self, config, sockets,
+    ):
+        """**A code relayed before the restart is durable evidence and has to
+        survive the hop.** `_dispatch`'s `ready` branch reads `window.qr_seq`
+        to tell a real pairing from a link blip re-announcing a working
+        session, and an adopted window starts that counter at zero — so the
+        exact sequence adoption exists for (a code relayed, the user scans, the
+        scheduler dies before the `ready`) would close `paired` as `failed`,
+        write that to the durable row and alert every admin to re-pair. An
+        operator following that remedy archives the credential they had just
+        paired. The row's own `awaiting_scan` is what says a code went out.
+
+        Control: drop `codes_relayed` from `adopt_pairing_window` and this goes
+        red on the outcome state.
+        """
+        async with running(config, sockets) as instance:
+            async with sidecar(instance, sockets) as peer:
+                assert await instance.adopt_pairing_window(
+                    "win-orphan", USER, time.time() + 120, codes_relayed=True,
+                ) is not None
+
+                await peer.say(proto.MSG_READY)
+                outcome = await wait_for(
+                    lambda: instance.last_pairing_outcome,
+                )
+
+            assert outcome.window_id == "win-orphan"
+            assert outcome.state == pairing_relay.STATE_PAIRED
+            assert "paired" in outcome.message
+
+    async def test_an_adopted_window_nobody_scanned_still_reads_as_failed(
+        self, config, sockets,
+    ):
+        """The control for the case above, and the reason it is a flag rather
+        than an unconditional seed: a window adopted while the row still said
+        `awaiting_sidecar` has relayed nothing, so a `ready` there really is a
+        reconnect of a working session and must not claim a pairing.
+        """
+        async with running(config, sockets) as instance:
+            async with sidecar(instance, sockets) as peer:
+                assert await instance.adopt_pairing_window(
+                    "win-orphan", USER, time.time() + 120,
+                ) is not None
+
+                await peer.say(proto.MSG_READY)
+                outcome = await wait_for(
+                    lambda: instance.last_pairing_outcome,
+                )
+
+            assert outcome.state == pairing_relay.STATE_FAILED
+
+    async def test_a_deadline_already_past_is_refused(self, config, sockets):
+        """Adoption keeps the bound rather than extending it, so a row the
+        deadline arm is about to close is never re-armed.
+        """
+        async with running(config, sockets) as instance:
+            assert await instance.adopt_pairing_window(
+                "win-old", USER, time.time() - 1,
+            ) is None
+            assert instance.pairing_window is None
+
+    async def test_a_window_already_open_is_refused(self, config, sockets):
+        async with running(config, sockets) as instance:
+            live = await instance.open_pairing_window(USER)
+            assert live is not None
+
+            assert await instance.adopt_pairing_window(
+                "win-orphan", "bob", time.time() + 120,
+            ) is None
+            assert instance.pairing_window is live
+
+    async def test_a_session_that_is_already_up_is_refused(
+        self, config, sockets,
+    ):
+        """**A send-ledger guard, not tidiness.** A `ready` clears the latch and
+        nothing re-sends one until the link reconnects — so arming a window over
+        an open session would set `_unpaired_by_repair` with nothing left to
+        lift it, and every later send would be refused for the life of the
+        process. Control: drop the `self._status.ready` arm and this goes red.
+        """
+        async with running(config, sockets) as instance:
+            async with sidecar(instance, sockets) as peer:
+                await peer.say(proto.MSG_READY)
+                await wait_for(lambda: instance.status.ready is True)
+
+                assert await instance.adopt_pairing_window(
+                    "win-orphan", USER, time.time() + 120,
+                ) is None
+                assert instance.pairing_window is None
+                assert instance._unpaired_by_repair is False
+
+    async def test_a_send_during_an_adopted_window_settles_failed(
+        self, config, sockets, monkeypatch,
+    ):
+        """The ledger property, asserted on the row rather than on a refusal.
+
+        This process did not perform the repair, so it holds none of the state
+        that stops a send reaching an emptied session — and `logical_key` is
+        UNIQUE with nothing deleting from `sent_whatsapp`, so an `unknown` row
+        is a task result that can never be sent. Control: drop
+        `_unpaired_by_repair = True` and the `_pairing_window` arm from
+        `adopt_pairing_window` and the row settles `unknown`.
+        """
+        bind_user(config)
+        async with running(config, sockets) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                assert await instance.adopt_pairing_window(
+                    "win-orphan", USER, time.time() + 120,
+                ) is not None
+
+                record = await asyncio.wait_for(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:504", user_id=USER,
+                        text="the backup finished",
+                    ),
+                    timeout=5.0,
+                )
+
+                assert record.status == "failed"
+                assert ledger_row(config, "task-result:504")["status"] == "failed"
+                assert peer.types.count(proto.MSG_SEND) == 0, peer.types
+
+    async def test_the_latch_survives_the_window_expiring(
+        self, config, sockets, monkeypatch,
+    ):
+        """The tail the window arm does not cover: a code nobody scanned. The
+        window closes at its TTL and every later send still has to settle
+        `failed` rather than `unknown`.
+        """
+        bind_user(config)
+        async with running(config, sockets) as instance:
+            use_bridge_as_adapter(monkeypatch, instance)
+            async with sidecar(
+                instance, sockets, closes_on_shutdown=False,
+            ) as peer:
+                assert await instance.adopt_pairing_window(
+                    "win-orphan", USER, time.time() + 120,
+                ) is not None
+                assert await instance.cancel_pairing() is True
+                assert instance.pairing_window is None
+
+                record = await asyncio.wait_for(
+                    outbound.deliver_whatsapp(
+                        config, logical_key="task-result:505", user_id=USER,
+                        text="the backup finished",
+                    ),
+                    timeout=5.0,
+                )
+
+                assert record.status == "failed"
+                assert ledger_row(config, "task-result:505")["status"] == "failed"
+                assert peer.types.count(proto.MSG_SEND) == 0, peer.types

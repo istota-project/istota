@@ -303,6 +303,36 @@ class _PairingClosure:
     unlink_relay: bool
 
 
+@dataclass(frozen=True)
+class _PairingAdoption:
+    """A window this process should re-arm from the row (ISSUE-504).
+
+    The third outcome of `_expire_stale_pairing`, beside a closure and nothing.
+    Decided inside the `BEGIN IMMEDIATE` and acted on after it, the way the
+    claim already is, because `adopt_pairing_window` is a coroutine on the
+    runtime loop and the transaction runs on the dispatch thread.
+
+    **Nothing here is written back.** Every field is copied off the row, which
+    is what makes adoption a read: the row is already the durable record of the
+    window, so there is nothing to clobber and no column to add.
+    """
+
+    window_id: str
+    requested_by: str
+    #: Epoch seconds. The row stores `sql_datetime_now`'s text so the deadline
+    #: arm can compare it in SQL; the bridge needs the absolute instant.
+    expires_at_wall: float
+    #: Off the row's message, which `_window_open_message` writes as the
+    #: archive path and nothing else — so a non-empty one is exactly the
+    #: durable record that this re-pair moved a credential aside.
+    destructive: bool
+    #: Whether a code had already reached the relay, which the row records by
+    #: being in `awaiting_scan`. The bridge reads it as the evidence that a
+    #: `ready` frame is a real pairing rather than a reconnect, so without it a
+    #: scan the previous process relayed closes the re-adopted window `failed`.
+    codes_relayed: bool
+
+
 def poll_pairing_request(config: "Config") -> None:
     """Service the durable pairing request row. Never raises.
 
@@ -371,6 +401,7 @@ def _poll_pairing_request(config: "Config") -> None:
         return
 
     closure: _PairingClosure | None = None
+    adoption: _PairingAdoption | None = None
     claim: tuple[str, str, bool] | None = None
     with db.get_db(
         config.db_path, busy_timeout_ms=_POLL_BUSY_TIMEOUT_MS
@@ -386,8 +417,12 @@ def _poll_pairing_request(config: "Config") -> None:
         row = db.read_whatsapp_pairing(conn)
         if row is None or row["state"] in db.WHATSAPP_PAIRING_TERMINAL_STATES:
             return
-        closure = _expire_stale_pairing(conn, bridge, row)
-        if closure is None:
+        decision = _expire_stale_pairing(conn, bridge, row)
+        if isinstance(decision, _PairingAdoption):
+            adoption = decision
+        elif decision is not None:
+            closure = decision
+        else:
             _mirror_pairing_window(conn, bridge, row)
             if (
                 row["state"] == db.WHATSAPP_PAIRING_REQUESTED
@@ -401,6 +436,17 @@ def _poll_pairing_request(config: "Config") -> None:
                 # time the coroutine runs the deadline arm could have replaced
                 # it with a fresh, unforced request.
                 claim = (row["window_id"], row["requested_by"], row["force"])
+
+    if adoption is not None:
+        if _spawn_pairing_adopt(bridge, adoption):
+            return
+        # Nothing will re-arm it, so the row falls to the close adoption
+        # replaced. Its own transaction rather than the one above: that one has
+        # committed, and holding a write lock across a `spawn_task` is the
+        # stall `_POLL_BUSY_TIMEOUT_MS` exists to keep off this thread.
+        closure = _close_after_refused_adoption(config, row)
+        if closure is None:
+            return
 
     if closure is not None:
         _clean_up_after_closure(config, bridge, closure)
@@ -611,8 +657,14 @@ def _spawn_pairing_announce(config: "Config", closure: "_PairingClosure") -> Non
         )
 
 
-def _expire_stale_pairing(conn, bridge, row: dict) -> "_PairingClosure | None":
-    """Close a stale request row, by whichever of **two** arms applies.
+def _expire_stale_pairing(
+    conn, bridge, row: dict,
+) -> "_PairingClosure | _PairingAdoption | None":
+    """Close a stale request row, or say it should be adopted instead.
+
+    Three outcomes. A `_PairingClosure` is a row this moved to a terminal state;
+    a `_PairingAdoption` is a window the caller should re-arm on the runtime
+    loop, written back nowhere; `None` is a row to leave alone.
 
     **The two arms must not be collapsed into one**, and the obvious single
     sentence — "any non-terminal row with no in-memory window behind it" —
@@ -631,15 +683,18 @@ def _expire_stale_pairing(conn, bridge, row: dict) -> "_PairingClosure | None":
 
     The **orphan** arm applies only to the states that imply a window was
     opened, and only in a process that holds the bridge. No live window behind
-    such a row means the process that owned it is gone.
+    such a row means the process that owned it is gone — which since ISSUE-504
+    is an **adoption** rather than a close: the sidecar is its own unit and
+    survives a scheduler restart, so it is still offering codes against the
+    directory the sequence emptied, and the only thing lost was this daemon's
+    record that somebody was waiting. The close survives it for the one row
+    adoption cannot bound, a deadline this cannot read.
 
     **The two closures are not the same outcome and do not share a message.**
     A row that reached its deadline is `expired`: nobody scanned, and the
     destructive confirmation covered that. An orphaned row is `failed`, because
     the old credential is already moved aside and an operator has to be told
-    which of two directories to trust. On a deployment whose update cron
-    restarts the units on every commit, the orphan arm is routine rather than
-    exceptional.
+    which of two directories to trust.
     """
     from ... import db  # noqa: PLC0415
 
@@ -698,35 +753,98 @@ def _expire_stale_pairing(conn, bridge, row: dict) -> "_PairingClosure | None":
     # `pairing_window is None`, so without it a successful pairing would be
     # recorded `failed`.
     outcome = bridge.last_pairing_outcome
-    if outcome is not None and outcome.window_id == window_id:
-        state_out, message = outcome.state, outcome.message
-        # The bridge's five close sites all pass a terminal state today, so
-        # this coercion is latent — and it is the difference between a latent
-        # defect and a live one. A non-terminal value would land the row
-        # non-terminal with no window behind it, and since every write also
-        # stamps `updated_at` the `rowcount` is 1 every time: this arm would
-        # then return a fresh closure on every tick, one relay clear, one log
-        # line and one alert per poll interval until the deadline.
-        if state_out not in db.WHATSAPP_PAIRING_TERMINAL_STATES:
-            logger.warning(
-                "whatsapp.pairing.outcome_not_terminal window=%s state=%s — "
-                "recorded as failed",
-                window_id, state_out,
-            )
-            state_out = db.WHATSAPP_PAIRING_FAILED
-    else:
-        state_out, message = db.WHATSAPP_PAIRING_FAILED, _orphan_message(row)
-    if not db.record_whatsapp_pairing_state(
-        conn, window_id, state_out, message,
-    ):
+    if outcome is None or outcome.window_id != window_id:
+        # **Nothing closed this window here: a process holding it went away.**
+        # Before ISSUE-504 that was the orphan close below, which is wrong in
+        # the case it is most often reached in — the credential has already
+        # been archived and the sidecar is still offering codes, so the row is
+        # the only thing that was lost. Re-arm from it instead. The deadline
+        # arm above is what still bounds the result, which is why this sits
+        # behind it; the outcome branch below is what still records a pairing
+        # this process completed, which is why this sits behind that too.
+        adoption = _pairing_adoption(row)
+        if adoption is not None:
+            return adoption
+        # A deadline this cannot read is a window that could not be bounded, so
+        # the old close is the right answer rather than an armed relay nothing
+        # would expire.
+        return _record_pairing_closure(
+            conn, row, db.WHATSAPP_PAIRING_FAILED, _orphan_message(row),
+        )
+
+    state_out, message = outcome.state, outcome.message
+    # The bridge's five close sites all pass a terminal state today, so this
+    # coercion is latent — and it is the difference between a latent defect and
+    # a live one. A non-terminal value would land the row non-terminal with no
+    # window behind it, and since every write also stamps `updated_at` the
+    # `rowcount` is 1 every time: this arm would then return a fresh closure on
+    # every tick, one relay clear, one log line and one alert per poll interval
+    # until the deadline.
+    if state_out not in db.WHATSAPP_PAIRING_TERMINAL_STATES:
+        logger.warning(
+            "whatsapp.pairing.outcome_not_terminal window=%s state=%s — "
+            "recorded as failed",
+            window_id, state_out,
+        )
+        state_out = db.WHATSAPP_PAIRING_FAILED
+    return _record_pairing_closure(conn, row, state_out, message)
+
+
+def _pairing_adoption(row: dict) -> "_PairingAdoption | None":
+    """The row read back as a window to re-arm, or `None` where it cannot be.
+
+    `None` on a deadline this cannot parse, which is the one thing adoption
+    genuinely needs: the bridge's watchdog fires on that instant, so a window
+    armed without it would hold a published credential until the process
+    stopped. The caller closes such a row instead.
+
+    `sql_epoch_from_datetime` rather than a fourth parser — `db` already names
+    it the authoritative epoch-direction reader of this column's format, and a
+    copy here would be a fifth.
+    """
+    from ... import db  # noqa: PLC0415
+
+    expires_at_wall = db.sql_epoch_from_datetime(row["expires_at"])
+    if expires_at_wall is None:
+        return None
+    return _PairingAdoption(
+        window_id=row["window_id"],
+        requested_by=row["requested_by"],
+        expires_at_wall=expires_at_wall,
+        destructive=bool(row["message"]),
+        # **`awaiting_scan` and not "anything but `awaiting_sidecar`"**:
+        # `sidecar_absent` is a demotion the watchdog applies only to a window
+        # still waiting for its first code, so it means nothing was ever
+        # relayed either. Reading it as evidence would have a `ready` on a
+        # window nobody scanned recorded as a successful pairing.
+        codes_relayed=row["state"] == db.WHATSAPP_PAIRING_AWAITING_SCAN,
+    )
+
+
+def _record_pairing_closure(
+    conn, row: dict, state: str, message: str,
+) -> "_PairingClosure | None":
+    """Move a window-state row to `state` and describe it for the announcement.
+
+    One spelling of the write and the closure construction, because three
+    callers reach it now: the outcome branch, the unbounded-deadline arm, and
+    `_close_after_refused_adoption`, which runs in its own transaction after
+    the poll's has committed. `None` where the write did not apply — the row
+    went terminal underneath, which `record_whatsapp_pairing_state`'s own
+    guards answer.
+    """
+    from ... import db  # noqa: PLC0415
+
+    window_id = row["window_id"]
+    if not db.record_whatsapp_pairing_state(conn, window_id, state, message):
         return None
     logger.info(
         "whatsapp.pairing.row_reconciled window=%s from=%s to=%s",
-        window_id, state, state_out,
+        window_id, row["state"], state,
     )
     return _PairingClosure(
         window_id=window_id,
-        state=state_out,
+        state=state,
         message=message,
         requested_by=row["requested_by"],
         unlink_relay=True,
@@ -810,6 +928,73 @@ def _spawn_pairing_service(
             request_id, exc,
         )
         _revert_pairing_claim(config, request_id)
+
+
+def _spawn_pairing_adopt(bridge, adoption: "_PairingAdoption") -> bool:
+    """Re-arm an orphaned window on the runtime loop. `False` if it could not.
+
+    `spawn_task` rather than a worker thread, for `_spawn_pairing_service`'s
+    reason: the bridge's asyncio primitives are bound to that loop, and a
+    `run_coro` here would block the dispatch thread for the length of a relay
+    publish.
+
+    **A refusal is reported rather than swallowed**, because it is the one path
+    that still reaches the close adoption replaced — and the caller has to know
+    which of the two happened. `adopt_pairing_window` answering `None` is a
+    different thing and is deliberately not reported, so nothing here needs
+    retry bookkeeping — but the four refusals do not all converge the same way.
+    Three reach an arm that already exists within a tick or two: a matching
+    live window is arm 4, a passed deadline is arm 2, and a bridge that is
+    stopping takes the process with it. The fourth, a session already `ready`,
+    converges through **nothing** until the deadline arm fires, so until then
+    each tick spawns a coroutine that refuses on sight. That is bounded by the
+    row's own TTL and costs one scheduled no-op per poll; it is written down
+    rather than fixed because the alternative is a close, and a row whose
+    session came up on its own is not a failure to record.
+    """
+    from ...async_runtime import spawn_task  # noqa: PLC0415
+
+    coro = bridge.adopt_pairing_window(
+        adoption.window_id,
+        adoption.requested_by,
+        adoption.expires_at_wall,
+        destructive=adoption.destructive,
+        codes_relayed=adoption.codes_relayed,
+    )
+    try:
+        spawn_task(coro, name="whatsapp-pairing-adopt")
+        return True
+    except Exception as exc:  # noqa: BLE001 — a poll tick must not raise
+        coro.close()
+        logger.warning(
+            "whatsapp.pairing.adopt_unscheduled window=%s reason=%s",
+            adoption.window_id, exc,
+        )
+        return False
+
+
+def _close_after_refused_adoption(
+    config: "Config", row: dict,
+) -> "_PairingClosure | None":
+    """Close a row nothing could re-arm. `None` where the write did not apply.
+
+    The pre-ISSUE-504 orphan close, now reached only when the runtime refused
+    the adoption — which means it is stopping, so this is a row the next
+    process would adopt anyway. It is still written, because the archive path
+    has to reach an operator somehow and the row is the only thing carrying it.
+    """
+    from ... import db  # noqa: PLC0415
+
+    try:
+        with db.get_db(
+            config.db_path, busy_timeout_ms=_POLL_BUSY_TIMEOUT_MS
+        ) as conn:
+            return _record_pairing_closure(
+                conn, row, db.WHATSAPP_PAIRING_FAILED, _orphan_message(row),
+            )
+    except Exception:
+        logger.warning("whatsapp.pairing.orphan_close_failed", exc_info=True)
+        return None
 
 
 def _revert_pairing_claim(config: "Config", request_id: str) -> None:
@@ -1022,20 +1207,30 @@ def _deadline_message(row: dict) -> str:
 def _orphan_message(row: dict) -> str:
     """Why an orphaned row closed, and a remedy that actually works.
 
-    **Not "request a re-pair again".** After the restart this arm exists for,
-    the session directory is the empty one the previous attempt created: the
-    respawned sidecar sits in it in pairing mode, so nothing re-latches a
-    permanent fatal, and `repair_session`'s confirmation gate then refuses the
-    next request as `session_live` — the durable channel carries no `force`, so
-    the unforced default is all the poll can ask for. The remedy has to be one
-    of the two surfaces that *can* confirm.
+    **Not "request a re-pair again".** The session directory here is the empty
+    one the re-pair created: a sidecar sits in it in pairing mode, so nothing
+    re-latches a permanent fatal, and `repair_session`'s confirmation gate then
+    refuses the next request as `session_live` — the durable channel carries no
+    `force`, so the unforced default is all the poll can ask for. The remedy has
+    to be one of the two surfaces that *can* confirm.
+
+    **Since ISSUE-504 this has two producers and neither is the restart it used
+    to be about**: a row whose deadline `_pairing_adoption` could not parse,
+    where the daemon is perfectly healthy and the window simply could not be
+    bounded, and a `spawn_task` the runtime refused, which means the daemon is
+    stopping. The prose fits both, because what it says is that nothing took
+    the window over rather than why. Either way the credential is at the archive the row is
+    carrying, so the remedy names `restore-session` beside the two re-pair
+    routes: an operator whose session was working before the re-pair usually
+    wants it back rather than a new one.
     """
     base = (
-        "the process that was pairing WhatsApp restarted before a code was "
-        "scanned, so the window is gone and the session directory is empty. "
-        "Re-pair from the admin Connections pane, confirming the unlink, or "
-        "stop the istota daemon and any sidecar unit and run `istota whatsapp "
-        "pair`."
+        "nothing could take over the WhatsApp pairing window this deployment "
+        "had open, so it closed with no code scanned and the session directory "
+        "is empty. Re-pair from the admin Connections pane, confirming the "
+        "unlink, or stop the istota daemon and any sidecar unit and run "
+        "`istota whatsapp pair`. To put the previous session back instead, "
+        "stop both and run `istota whatsapp restore-session`."
     )
     return _with_archive(base, row)
 

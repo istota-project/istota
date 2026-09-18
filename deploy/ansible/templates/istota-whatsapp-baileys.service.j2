@@ -7,6 +7,13 @@ After=network.target
 # need the scheduler to be up, and a scheduler restart must not take the paired
 # WhatsApp session down with it. Ordering it after merely saves a burst of
 # reconnects on a cold boot.
+#
+# Since ISSUE-504 that survival is load-bearing rather than a courtesy. The
+# update cron restarts the scheduler on any commit, and a restart during an
+# open pairing window used to leave the deployment unpaired with its credential
+# already archived. The fix is that the next scheduler re-adopts the window from
+# the durable row — which works only because this sidecar stayed up and kept
+# offering a code. `PartOf=` or `BindsTo=` here would destroy exactly that.
 After={{ istota_namespace }}-scheduler.service
 Wants={{ istota_namespace }}-scheduler.service
 

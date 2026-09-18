@@ -44,6 +44,20 @@ USER = "alice"
 GATE = "whatsapp-pairing"
 ANNOUNCE = "whatsapp-pairing-announce"
 CANCEL = "whatsapp-pairing-cancel"
+ADOPT = "whatsapp-pairing-adopt"
+
+
+def _refuse_adopt(coro, *, name: str):
+    """A `spawn_task` double whose runtime is stopping, for adoption alone.
+
+    The orphan close is reachable by exactly one route since ISSUE-504 — a
+    refused adopt spawn — so a test about the *message* that close writes has
+    to drive it rather than assume the arm still fires on its own.
+    """
+    coro.close()
+    if name == ADOPT:
+        raise RuntimeError("runtime is stopping")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -85,11 +99,34 @@ class FakeBridge:
         self.result = result or PairingResult(True, PAIRING_OK, window_id="win-1")
         self.repairs: list[str] = []
         self.cancelled: list[str | None] = []
+        self.adoptions: list[tuple] = []
         self.relay_clears = 0
 
     async def repair_session(self, requested_by: str, *, force: bool = False):
         self.repairs.append(requested_by)
         return self.result
+
+    def adopt_pairing_window(
+        self, window_id: str, requested_by: str, expires_at_wall: float,
+        *, destructive: bool = False, codes_relayed: bool = False,
+    ):
+        """Records at **call** time and hands back a coroutine to schedule.
+
+        A plain method rather than an `async def`, deliberately: the `spawns`
+        fixture closes every coroutine unrun, so an `async def` would record
+        nothing and the arguments — the row's own id and deadline, which are
+        the whole property — would be untestable without running a loop. The
+        call site does not know the difference: it passes the result to
+        `spawn_task` either way.
+        """
+        self.adoptions.append(
+            (window_id, requested_by, expires_at_wall, destructive,
+             codes_relayed)
+        )
+        return self._adopted()
+
+    async def _adopted(self):
+        return None
 
     async def cancel_pairing(self, *, window_id: str | None = None):
         # Records rather than accepting anything: the scoping is the property
@@ -570,7 +607,7 @@ class TestTheWindowMirror:
         assert spawns == []
 
     def test_the_mirror_does_not_destroy_the_archive_path(
-        self, config, bridge, spawns
+        self, config, bridge, spawns, monkeypatch
     ):
         """The reachable, ordinary sequence: a window opens and records where
         the old session went, the sidecar does not come back so the bridge
@@ -609,15 +646,22 @@ class TestTheWindowMirror:
         assert mirrored["state"] == db.WHATSAPP_PAIRING_SIDECAR_ABSENT
         assert mirrored["message"] == archive
 
-        # Now the restart the orphan arm exists for.
+        # Now the restart. Since ISSUE-504 that is adopted rather than closed,
+        # so the archive path has to survive one more hop: it is what
+        # `_PairingAdoption` reads `destructive` off, and it is still what the
+        # close carries when nothing can adopt. Driven through the one route
+        # that still reaches that close — a runtime refusing the spawn.
         bridge.pairing_window = None
+        monkeypatch.setattr(async_runtime, "spawn_task", _refuse_adopt)
         runtime.poll_pairing_request(config)
 
         closed = row(config.db_path)
         assert closed["state"] == db.WHATSAPP_PAIRING_FAILED
         assert "/srv/session.old-1" in closed["message"]
 
-    def test_a_closed_row_names_a_remedy_that_works(self, config, bridge):
+    def test_a_closed_row_names_a_remedy_that_works(
+        self, config, bridge, monkeypatch
+    ):
         """Not "request a re-pair again".
 
         After the restart, the session directory is the empty one the previous
@@ -635,6 +679,9 @@ class TestTheWindowMirror:
                 db.WHATSAPP_PAIRING_AWAITING_SCAN,
                 adopt_window_id="win-gone",
             )
+        # Since ISSUE-504 this row is adopted, so the close is driven through
+        # the one route that still reaches it.
+        monkeypatch.setattr(async_runtime, "spawn_task", _refuse_adopt)
 
         runtime.poll_pairing_request(config)
 
@@ -1589,3 +1636,219 @@ class TestTheOrphanedRelaySweep:
             "the sweep went to the default path, so the configured key is not "
             "being read"
         )
+
+
+# ---------------------------------------------------------------------------
+# Adoption after a restart (ISSUE-504)
+# ---------------------------------------------------------------------------
+
+
+class TestTheAdoptionArm:
+    """A window a restart orphaned is re-armed, not closed.
+
+    The credential is spent *before* the part that can be interrupted, and on
+    the reference deployment the interruption is routine: the update cron
+    restarts the scheduler on any commit, so a 300s window overlaps one
+    whenever anything lands. The sidecar is a unit of its own and survives, so
+    it is still offering a code every twenty seconds — the only thing the
+    restart lost is the daemon's record that somebody was waiting for one.
+
+    Each test names the control that makes it able to fail.
+    """
+
+    ARCHIVE = "/srv/session.20260101T000000Z"
+
+    def _orphaned(self, config, *, state=None, window_seconds=3600):
+        """A row in a window state with no live window behind it."""
+        state = state or db.WHATSAPP_PAIRING_AWAITING_SCAN
+        request_id = request(config.db_path, window_seconds=window_seconds)
+        with db.get_db(config.db_path) as conn:
+            assert db.record_whatsapp_pairing_state(
+                conn, request_id, state, self.ARCHIVE,
+                adopt_window_id="win-orphan",
+                expires_at=time.time() + window_seconds,
+            )
+        return request_id
+
+    def test_a_restart_adopts_the_window_rather_than_closing_it(
+        self, config, bridge, spawns
+    ):
+        """The regression. Control: drop the adopt arm from
+        `_expire_stale_pairing` and the row closes `failed` with the credential
+        already archived, which is the reported defect.
+        """
+        self._orphaned(config)
+
+        runtime.poll_pairing_request(config)
+
+        assert spawns == [ADOPT]
+        after = row(config.db_path)
+        assert after["state"] == db.WHATSAPP_PAIRING_AWAITING_SCAN
+        assert after["window_id"] == "win-orphan"
+
+    def test_the_adoption_carries_the_rows_own_id_and_deadline(
+        self, config, bridge, spawns
+    ):
+        """A window minted fresh would outlive the durable deadline, which is
+        the bound the issue requires adoption to keep. `destructive` comes off
+        the row's message, which is the archive path and nothing else.
+        """
+        self._orphaned(config, window_seconds=120)
+
+        runtime.poll_pairing_request(config)
+
+        assert bridge.adoptions
+        window_id, requested_by, expires_at_wall, destructive, _ = (
+            bridge.adoptions[0]
+        )
+        assert window_id == "win-orphan"
+        assert requested_by == USER
+        assert destructive is True
+        assert 0 < expires_at_wall - time.time() <= 121
+
+    def test_a_row_that_relayed_a_code_says_so_in_the_adoption(
+        self, config, bridge, spawns
+    ):
+        """`awaiting_scan` is the durable record that a code went out, and the
+        bridge needs it: without it a scan the previous process relayed closes
+        the re-adopted window `failed` and alerts every admin to re-pair.
+        """
+        self._orphaned(config, state=db.WHATSAPP_PAIRING_AWAITING_SCAN)
+
+        runtime.poll_pairing_request(config)
+
+        assert bridge.adoptions[0][4] is True
+
+    def test_a_row_that_relayed_nothing_says_that_instead(
+        self, config, bridge, spawns
+    ):
+        """The other half, and why it is read off the row rather than assumed.
+        `sidecar_absent` is a demotion of `awaiting_sidecar`, so it too means no
+        code was ever offered — a `ready` on such a window is a reconnect of a
+        working session and must not be recorded as a pairing.
+        """
+        self._orphaned(config, state=db.WHATSAPP_PAIRING_SIDECAR_ABSENT)
+
+        runtime.poll_pairing_request(config)
+
+        assert bridge.adoptions[0][4] is False
+
+    def test_a_row_past_its_deadline_is_still_expired(
+        self, config, bridge, spawns
+    ):
+        """Control: move the adopt arm ahead of the deadline arm and this goes
+        red. Adoption changes *which* arm closes a row, never whether one does.
+        """
+        request_id = request(config.db_path, window_seconds=0)
+        with db.get_db(config.db_path) as conn:
+            assert db.record_whatsapp_pairing_state(
+                conn, request_id, db.WHATSAPP_PAIRING_AWAITING_SCAN,
+                adopt_window_id="win-old", expires_at=time.time() - 1,
+            )
+
+        runtime.poll_pairing_request(config)
+
+        assert row(config.db_path)["state"] == db.WHATSAPP_PAIRING_EXPIRED
+        assert ADOPT not in spawns
+
+    def test_a_close_this_process_performed_is_still_recorded(
+        self, config, bridge, spawns
+    ):
+        """Control: move the adopt arm ahead of the outcome branch and a
+        successful pairing is re-armed over a session that had just come up.
+        """
+        self._orphaned(config)
+        bridge.last_pairing_outcome = type(
+            "Outcome", (), {
+                "window_id": "win-orphan",
+                "state": db.WHATSAPP_PAIRING_PAIRED,
+                "message": "paired",
+            },
+        )()
+
+        runtime.poll_pairing_request(config)
+
+        assert row(config.db_path)["state"] == db.WHATSAPP_PAIRING_PAIRED
+        assert ADOPT not in spawns
+
+    def test_a_fresh_request_is_never_adopted(self, config, bridge, spawns):
+        """`requested` is not a window state, so there is no window to adopt —
+        it is serviced. Control: widen the arm past
+        `WHATSAPP_PAIRING_WINDOW_STATES` and the re-pair never runs.
+        """
+        request(config.db_path)
+
+        runtime.poll_pairing_request(config)
+
+        assert spawns == ["whatsapp-pairing"]
+
+    def test_a_process_with_no_bridge_adopts_nothing(
+        self, config, spawns, monkeypatch
+    ):
+        """The web process holds no bridge on the split Ansible shape."""
+        monkeypatch.setattr(baileys_bridge, "active_bridge", lambda: None)
+        self._orphaned(config)
+
+        runtime.poll_pairing_request(config)
+
+        assert spawns == []
+        assert row(config.db_path)["state"] == db.WHATSAPP_PAIRING_AWAITING_SCAN
+
+    def test_a_refused_spawn_falls_through_to_the_orphan_close(
+        self, config, bridge, monkeypatch
+    ):
+        """The runtime is stopping, so nothing will adopt. This is the one path
+        the orphan close is still reached by, and it must still close the row
+        and carry the archive path forward.
+        """
+        monkeypatch.setattr(async_runtime, "spawn_task", _refuse_adopt)
+        self._orphaned(config)
+
+        runtime.poll_pairing_request(config)
+
+        closed = row(config.db_path)
+        assert closed["state"] == db.WHATSAPP_PAIRING_FAILED
+        assert self.ARCHIVE in closed["message"]
+
+    def test_a_row_with_an_unreadable_deadline_is_closed_not_adopted(
+        self, config, bridge, spawns
+    ):
+        """A window this cannot bound is not a window worth arming: the
+        watchdog would have no deadline to enforce and the credential would sit
+        published for the life of the process.
+        """
+        request_id = request(config.db_path, window_seconds=3600)
+        with db.get_db(config.db_path) as conn:
+            assert db.record_whatsapp_pairing_state(
+                conn, request_id, db.WHATSAPP_PAIRING_AWAITING_SCAN,
+                adopt_window_id="win-noddl",
+            )
+            conn.execute(
+                "UPDATE whatsapp_runtime SET pairing_expires_at = NULL "
+                "WHERE singleton = 1"
+            )
+
+        runtime.poll_pairing_request(config)
+
+        assert row(config.db_path)["state"] == db.WHATSAPP_PAIRING_FAILED
+        assert ADOPT not in spawns
+
+    def test_adoption_is_single_flight_across_two_ticks(
+        self, config, bridge, spawns
+    ):
+        """The second tick finds the window this process now holds and leaves
+        it alone — arm 4, unchanged.
+        """
+        self._orphaned(config)
+
+        runtime.poll_pairing_request(config)
+        bridge.pairing_window = type(
+            "Window", (), {
+                "window_id": "win-orphan",
+                "state": db.WHATSAPP_PAIRING_AWAITING_SCAN,
+                "message": "",
+            },
+        )()
+        runtime.poll_pairing_request(config)
+
+        assert spawns == [ADOPT]
