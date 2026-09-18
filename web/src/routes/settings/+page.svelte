@@ -1,6 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
+  // The tree's own date rendering. A local `toLocaleString` here was a second
+  // copy of it, and `dateFormat.test.ts`'s drift guard is what said so — by
+  // name, in the default suite. `formatRelative` rather than `formatDateTime`:
+  // this stamp answers "is it keeping up", which a relative reading says
+  // directly, and it falls back to an absolute date past its own threshold for
+  // the vault nobody has edited in a month.
+  import { formatRelative } from '$lib/dateFormat';
   import {
     getSettingsServices,
     getModules,
@@ -246,20 +253,16 @@
     await refreshVault();
   }
 
-  // The failing sentence, or empty when the vault is working. Two sources and
-  // the live one wins: `outcome` is what the request itself found, which today
-  // is only ever a refused `vault_path`, and `last_outcome` is what the syncing
-  // process last settled — a fact from another process and possibly another
-  // machine. A refused path is true *now* and outranks a cycle that ran before
-  // the operator introduced it.
-  let vaultProblem = $derived.by(() => {
-    if (!vault) return '';
-    if (vault.outcome) return vault.reason || vault.outcome;
-    if (vault.last_outcome && vault.last_outcome !== 'ok') {
-      return vault.last_reason || vault.last_outcome;
-    }
-    return '';
-  });
+  // The failing sentence, or empty when the vault is working. Computed by the
+  // server: the precedence between a live finding and a recorded one is a rule,
+  // and restating it here was a second copy of it — one that compared against
+  // the literal `'ok'`, hardcoding a Python constant in TypeScript with nothing
+  // holding the two in step.
+  // `.by` rather than the expression form: a bare `$derived(vault?.problem)` is
+  // narrowed by control-flow analysis to the `null` the state was initialised
+  // with, since every assignment to `vault` is further down the file. The
+  // closure defers the read and keeps the declared type.
+  let vaultProblem = $derived.by(() => vault?.problem ?? '');
 
   async function refreshVault() {
     try {
@@ -965,9 +968,17 @@
             {#if vaultProblem}
               <span class="vault-problem">Not working: {vaultProblem}</span>
             {:else if vault.last_success_at}
-              Last synced {vault.last_success_at}.
+              <!--
+                "applied", not "synced". Istota re-reads the file only when its
+                bytes change, so a vault nobody has edited for three weeks
+                reports a three-week-old timestamp and is working perfectly —
+                calling that "last synced" reads as staleness and sends a user
+                looking for a fault that is not there.
+              -->
+              Istota last applied it {formatRelative(vault.last_success_at)}, and re-reads it
+              whenever the file changes.
             {:else}
-              It has not synced yet.
+              Nothing has been applied from it yet.
             {/if}
           </p>
         {/if}

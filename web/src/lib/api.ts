@@ -979,12 +979,20 @@ export interface VaultStatus {
   outcome?: string;
   reason?: string;
   refusal?: string;
-  /** The last *successful* sync. `last_sync_at` moves on a failed cycle too, so
-   *  this is the one to render as "last synced". */
+  /** When the vault was last successfully applied. `last_sync_at` moves on a
+   *  failed cycle too, so this is the one to render. ISO-8601 UTC off the wire:
+   *  render it through a local-time conversion, not raw. */
   last_success_at?: string;
   last_sync_at?: string;
   last_outcome?: string;
   last_reason?: string;
+  /** False here always — the endpoint does not unlock the file, so the group
+   *  listing a parse would produce is absent because nothing looked. */
+  parsed?: boolean;
+  /** The rendered verdict, empty when the vault is working. Computed by the
+   *  server so the precedence between a live finding and a recorded one is
+   *  stated once, in the language that owns the outcome constants. */
+  problem?: string;
 }
 
 export async function getVaultStatus(): Promise<VaultStatus> {

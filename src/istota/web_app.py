@@ -9285,8 +9285,8 @@ def _service_status(schema: dict, configured_keys: set[str]) -> str:
     return "missing"
 
 
-def _vault_owned_services(username: str) -> frozenset[str]:
-    """Which services this user's credential vault owns, or nothing.
+def _vault_owned_services(username: str) -> frozenset[str] | None:
+    """Which services this user's credential vault owns, or `None` if unknown.
 
     Blocking, and called from `asyncio.to_thread` at every site: resolving a
     `vault_path` walks directories under the workspace, which is a
@@ -9297,10 +9297,19 @@ def _vault_owned_services(username: str) -> frozenset[str]:
     itself, so a user who declares no `vault_services` — which is every user by
     default — costs a dict lookup and touches no filesystem at all.
 
-    Never raises. A settings page must render for a user whose vault line is
-    broken, and the consequence of answering "nothing" is that a write is
-    allowed where it might have been refused — which is the state every
-    deployment was in before this stage, rather than a new exposure.
+    **`None` and `frozenset()` are different answers and the callers must not
+    collapse them.** An empty set is a real answer: this user's vault owns
+    nothing. `None` means the question could not be settled, and the two callers
+    want opposite things from that. The card builder wants a page that renders,
+    so it reads `None` as "no flag" — the state every deployment was in before
+    this stage. The 409 gate is the last writer §6's "no other writer is left"
+    argument depends on closing, so it must **not** fail open: an unresolvable
+    answer there is a 503, not permission.
+
+    `resolve_user_vault_path` handles its own `OSError` and `ValueError` and
+    answers a refusal rather than raising, so the `except` below is a
+    defect-only path — which is exactly the kind that must not quietly become
+    permission to write a credential.
     """
     if not _config:
         return frozenset()
@@ -9313,7 +9322,7 @@ def _vault_owned_services(username: str) -> frozenset[str]:
             "could not resolve the vault-owned services for %r", username,
             exc_info=True,
         )
-        return frozenset()
+        return None
 
 
 def _refuse_if_vault_managed(service: str, username: str, schema: dict) -> None:
@@ -9343,7 +9352,20 @@ def _refuse_if_vault_managed(service: str, username: str, schema: dict) -> None:
     """
     from fastapi import HTTPException
 
-    if service not in _vault_owned_services(username):
+    owned = _vault_owned_services(username)
+    if owned is None:
+        # Fails closed. Whether this service is vault-owned is exactly the
+        # question that decides whether the write is allowed, so an
+        # unresolvable answer is a refusal to act rather than permission —
+        # and a 503 says "ask again" where a 409 would say "never".
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Could not determine whether your credential vault manages "
+                "this service, so the change was not saved. Try again."
+            ),
+        )
+    if service not in owned:
         return
     label = schema.get("label") or service
     raise HTTPException(
@@ -9407,7 +9429,9 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
 
     username = user["username"]
     stored = secrets_store.list_user_services(_config.db_path, username)
-    vault_owned = await asyncio.to_thread(_vault_owned_services, username)
+    # `or frozenset()`: a page that cannot resolve the vault still renders its
+    # cards. The gate is where an unresolvable answer has to bite.
+    vault_owned = await asyncio.to_thread(_vault_owned_services, username) or frozenset()
 
     cards: list[dict] = []
     for service, schema in _CONNECTED_SERVICE_SCHEMA.items():
@@ -9449,9 +9473,21 @@ def _vault_settings_payload(username: str) -> dict:
     Values never appear, and neither does the passphrase: `passphrase_present`
     is a boolean, and `reason` is the `NOTIFICATION_REASONS` sentence rather
     than an exception's text, so nothing interpolated into an error message can
-    reach a browser through here.
+    reach a browser through here. **`refusal` is the one exception to that** and
+    is safe for a different reason: it is one of `storage`'s own `VAULT_PATH_*`
+    constants, a fixed word with nothing interpolated into it, chosen from a
+    code-owned table. It is in the payload because it names *which* refusal,
+    which is what an operator reading a browser console needs and what the
+    prose sentence beside it deliberately does not carry.
 
-    `last_success_at` is the field to render as "last synced". `last_sync_at`
+    `problem` is computed here rather than in the browser, and that is the point
+    of it: the precedence between a live finding and a recorded one is a rule,
+    and a rule stated in TypeScript is a second copy — the first version
+    compared `last_outcome !== 'ok'` in the template, which hardcodes
+    `OUTCOME_OK`'s value in another language with nothing holding the two in
+    step. Empty means working.
+
+    `last_success_at` is the field to render as a sync time. `last_sync_at`
     moves on a failed cycle too.
     """
     from . import secrets_vault
@@ -9478,17 +9514,56 @@ def _vault_settings_payload(username: str) -> dict:
         "last_sync_at": report.last_sync_at,
         "last_outcome": report.recorded_outcome,
         "last_reason": report.recorded_reason,
+        # False here always, and it is not decoration: it is what tells a
+        # renderer that the four parse-only fields are empty because nothing
+        # looked, rather than because the file holds nothing. A future surface
+        # wanting the group listing asks the CLI; this one says it did not ask.
+        "parsed": report.parsed,
+        # The rendered verdict, empty when the vault is working. A live finding
+        # outranks a recorded one: `outcome` is what this request established
+        # and today is only ever a refused path, which is true *now* and about
+        # the configuration, while `last_outcome` is what some earlier cycle in
+        # another process settled and may predate the operator introducing it.
+        "problem": (
+            (report.reason or report.outcome)
+            if report.outcome
+            else (
+                (report.recorded_reason or report.recorded_outcome)
+                if report.recorded_outcome
+                and report.recorded_outcome != secrets_vault.OUTCOME_OK
+                else ""
+            )
+        ),
     }
 
 
 @api_router.get("/settings/vault")
 async def settings_vault(user: dict = Depends(_require_api_auth)) -> dict:
-    """The current user's credential vault status. Read-only; see the builder."""
+    """The current user's credential vault status. Read-only; see the builder.
+
+    Degrades to the unconfigured answer rather than raising, matching the
+    sibling helpers: this is a status line on a settings page whose actual
+    content is the cards below it, and an optional feature almost nobody has
+    must not be able to 500 the page that governs them. The frontend catches
+    too, so this only keeps the log honest — but a guard on one side only is
+    the kind that gets removed because it looks redundant.
+
+    The reverse direction is deliberately *not* symmetric: `settings_vault` may
+    degrade because nothing turns on its answer, while `_refuse_if_vault_managed`
+    may not, because its answer is the authorization.
+    """
     if not _config:
         return {"configured": False}
-    # Off the event loop: the builder resolves a path under the workspace, which
-    # is a FUSE mount on the deployment shape this runs on.
-    return await asyncio.to_thread(_vault_settings_payload, user["username"])
+    try:
+        # Off the event loop: the builder resolves a path under the workspace,
+        # which is a FUSE mount on the deployment shape this runs on.
+        return await asyncio.to_thread(_vault_settings_payload, user["username"])
+    except Exception:
+        logger.warning(
+            "could not build the vault status for %r", user["username"],
+            exc_info=True,
+        )
+        return {"configured": False}
 
 
 @api_router.get("/settings/modules")
@@ -9570,7 +9645,7 @@ async def settings_module_services(
     # Two of the five vault-eligible services (`feeds`, `carto`) live on module
     # pages, so a flag computed only in `/settings/services` would leave them
     # with an editable form the 409 then refuses.
-    vault_owned = await asyncio.to_thread(_vault_owned_services, username)
+    vault_owned = await asyncio.to_thread(_vault_owned_services, username) or frozenset()
     cards = [
         _build_service_card(service, schema, stored, vault_owned=vault_owned)
         for service, schema in schemas.items()

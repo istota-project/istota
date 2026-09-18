@@ -8211,7 +8211,12 @@ def vault_sync_enabled(config: Config) -> bool:
     branch exists for `backup-stale-alert`'s deliberate every-tick shape, so a
     negative value here would spawn a background sync roughly twice a second.
     """
-    return config.scheduler.vault_sync_interval > 0 and any(
+    from . import secrets_vault  # noqa: PLC0415 - keeps `config` load-time light
+
+    # The interval half is `secrets_vault.sync_is_scheduled`, not a second copy:
+    # the notification resolver needs the same rule and cannot import this
+    # module, so the predicate lives beside the thing it governs.
+    return secrets_vault.sync_is_scheduled(config) and any(
         getattr(user, "vault_path", "") for user in config.users.values()
     )
 
@@ -9260,6 +9265,15 @@ def run_daemon(
     # `sync_all` contains one user's failure rather than costing the rest.
     # Gated on the same predicate as the interval gate: the pass deletes rows,
     # so `vault_sync_interval = 0` has to mean off here too.
+    #
+    # It delivers, and on a fresh failure that means boot blocks on a Talk and
+    # ntfy fan-out. `deliver=False` was considered and is wrong: the dedup bump
+    # does not redeliver, so a row this pass wrote without delivering would be
+    # bumped in silence by every later cycle and the push would never happen at
+    # all — the notification would be lost rather than deferred. The cost is
+    # bounded in a way that is easy to misread as unbounded: only a *transition*
+    # raises, and a restart over an already-open row bumps, so this is one
+    # delivery at the first failure rather than one per boot.
     try:
         from . import secrets_vault  # noqa: PLC0415
 

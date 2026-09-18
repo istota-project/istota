@@ -447,13 +447,16 @@ def _vault_is_working(
 
     Two ways it has, and they are different facts.
 
-    **The vault is gone.** An operator who removes `vault_path` from
-    `config.toml` leaves nothing that would ever settle another outcome for this
-    user, so an open row would stand for the life of the deployment with no
-    surface able to close it. A resolver answering None is what `list_open`
-    reads as "the object is gone", and that backstop is the whole reason it
-    exists — this is the one source where the object is a config line rather
-    than a database row, so its disappearance is invisible to everything else.
+    **The vault is gone**, by either of the two ways an operator switches it
+    off. Removing `vault_path` from `config.toml` is one; setting
+    `scheduler.vault_sync_interval = 0` is the other, and it is the one that is
+    easy to miss because the config line stays where it was. Both leave nothing
+    that would ever settle another outcome for this user, so an open row would
+    stand for the life of the deployment with no surface able to close it. A
+    resolver answering None is what `list_open` reads as "the object is gone",
+    and that backstop is the whole reason it exists — this is the one source
+    where the object is a config line rather than a database row, so its
+    disappearance is invisible to everything else.
 
     **The last settled cycle succeeded.** `close_for_service` is the primary
     path and this is behind it, for the case where the close was lost: a busy
@@ -468,6 +471,8 @@ def _vault_is_working(
 
     user = getattr(config, "users", {}).get(user_id)
     if not (getattr(user, "vault_path", "") or "").strip():
+        return True
+    if not secrets_vault.sync_is_scheduled(config):
         return True
     record = secrets_vault.read_sync_state(conn, user_id)
     if not record:

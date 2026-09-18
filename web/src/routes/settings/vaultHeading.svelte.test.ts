@@ -26,6 +26,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fillApiDouble, type ApiDouble } from '$lib/test/apiDouble';
 import { render, cleanup, screen, waitFor } from '@testing-library/svelte';
 import type { ServiceCard as ServiceCardData, VaultStatus } from '$lib/api';
+import { formatRelative } from '$lib/dateFormat';
 
 const api = vi.hoisted(() => ({}) as ApiDouble);
 vi.mock('$lib/api', () => api);
@@ -107,13 +108,30 @@ function configured(over: Partial<VaultStatus> = {}): VaultStatus {
     outcome: '',
     reason: '',
     refusal: '',
-    last_success_at: '2026-09-17T10:00:00Z',
-    last_sync_at: '2026-09-17T10:00:00Z',
+    last_success_at: SYNC_AT,
+    last_sync_at: SYNC_AT,
     last_outcome: 'ok',
     last_reason: '',
+    parsed: false,
+    problem: '',
     ...over,
   };
 }
+
+// The heading renders through `$lib/dateFormat`, so the assertion is on that
+// module's own answer rather than on a string this file formats a second way —
+// which is what `dateFormat.test.ts`'s drift guard exists to stop, and it binds
+// a test as much as a component.
+//
+// **Deliberately older than `formatRelative`'s 30-day threshold**, so it renders
+// through the absolute fallback and the expected string does not depend on the
+// clock. A recent stamp would be read relatively by both sides and agree — until
+// a run straddled a rung boundary between the component's call and this one, and
+// then it would fail once a month for no reason. Passing a frozen `now` here
+// does not fix that either: the component uses the real clock, so the two would
+// simply disagree always.
+const SYNC_AT = '2025-01-15T10:00:00Z';
+const RENDERED_SYNC = formatRelative(SYNC_AT);
 
 async function mount() {
   render(Harness, { component: Page, user: person });
@@ -181,7 +199,13 @@ describe('a user whose vault owns a service', () => {
     const line = await findHeading();
     expect(line.textContent).toContain('karakeep');
     expect(line.textContent).toContain('/mnt/shared/Users/alice/config/vault.kdbx');
-    expect(line.textContent).toContain('2026-09-17T10:00:00Z');
+    // A relative reading, which is what the question "is it keeping up" wants.
+    // The exact words are `formatRelative`'s; what this pins is that the value
+    // went through it.
+    expect(line.textContent).toContain(RENDERED_SYNC);
+    // Not the raw wire value: it is UTC to millisecond precision and belongs to
+    // nobody reading this page.
+    expect(line.textContent).not.toContain(SYNC_AT);
     // It says it is read and never written, which is the property a user has to
     // know before they go looking for a Save button that does not exist.
     expect(line.textContent).toContain('never written');
@@ -202,6 +226,7 @@ describe('a user whose vault owns a service', () => {
       configured({
         last_outcome: 'VaultLocked',
         last_reason: 'the stored passphrase does not match the file',
+        problem: 'the stored passphrase does not match the file',
       }),
     );
     await mount();
@@ -209,9 +234,8 @@ describe('a user whose vault owns a service', () => {
     const line = await findHeading();
     expect(line.textContent).toContain('Not working');
     expect(line.textContent).toContain('does not match the file');
-    // The last successful sync is still shown as history rather than replaced,
-    // but the failing sentence is what takes the slot.
-    expect(line.textContent).not.toContain('Last synced');
+    // The failing sentence takes the slot the sync time would have had.
+    expect(line.textContent).not.toContain('last applied');
   });
 
   it('prefers a live path refusal over an older recorded failure', async () => {
@@ -219,12 +243,16 @@ describe('a user whose vault owns a service', () => {
     // `last_outcome` is what some earlier cycle in another process settled. A
     // refused path is true now and outranks a cycle that ran before the
     // operator introduced it.
+    // The precedence itself is the server's — `problem` arrives already
+    // resolved — so what this pins is that the renderer uses that field and
+    // does not re-derive a verdict from the two it sits beside.
     api.getVaultStatus.mockResolvedValue(
       configured({
         outcome: 'VaultPathRefused',
         reason: 'the configured vault_path is not one the daemon may open',
         last_outcome: 'VaultLocked',
         last_reason: 'the stored passphrase does not match the file',
+        problem: 'the configured vault_path is not one the daemon may open',
       }),
     );
     await mount();
@@ -246,7 +274,7 @@ describe('a user whose vault owns a service', () => {
     await mount();
 
     const line = await findHeading();
-    expect(line.textContent).toContain('not synced yet');
+    expect(line.textContent).toContain('Nothing has been applied');
     expect(line.textContent).not.toContain('Not working');
   });
 

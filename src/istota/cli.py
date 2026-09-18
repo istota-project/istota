@@ -969,6 +969,18 @@ def _refuse_if_vault_owned(config, args) -> None:
     named in the design as the direct route for removing a credential, which is
     the one thing the vault's absent-group rule will not do.
 
+    **That leaves `secret remove` and the web tier's DELETE taking opposite
+    positions on the same operation, which is deliberate and is about who is
+    asking rather than about what is done.** Both produce the same durable
+    divergence — a row gone from the table that the vault file still holds, and
+    nothing to put it back until the file next moves. The web route is the
+    *user's* hand on their own credential and §9 refuses it, because a user who
+    deletes there has no way to know the file is the authority. This is a host
+    shell: the operator has the file in front of them, and §6 names this command
+    as the escape hatch precisely because the vault cannot express a deletion
+    without one. Removing it would leave the absent-group rule with no
+    counterpart at all.
+
     It costs nothing on the provisioning path, since the vault's own service is
     subtracted from eligibility and the passphrase is therefore never
     vault-owned.
@@ -1225,6 +1237,11 @@ def _print_vault_status(report) -> None:
     print(f"  last sync:  {report.last_success_at or 'never (no record)'}")
     if report.recorded_outcome and report.recorded_outcome != secrets_vault.OUTCOME_OK:
         print(f"  last cycle: {report.recorded_outcome}")
+        # The class names the condition and the sentence names the remedy, so
+        # printing the first without the second reports a failure and withholds
+        # the actionable half of it.
+        if report.recorded_reason:
+            print(f"  last error: {report.recorded_reason}")
     if report.outcome and report.outcome != secrets_vault.OUTCOME_OK:
         print(f"  status:     {report.outcome}")
         if report.reason:

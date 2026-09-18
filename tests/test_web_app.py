@@ -2751,6 +2751,87 @@ class TestVaultOwnedServices:
             self._db_path, "alice", "karakeep", "api_key",
         ) == "still-writable"
 
+    async def test_an_unknown_key_on_an_owned_service_is_the_409(
+        self, tmp_path, client, app,
+    ):
+        """The ordering the gate's docstring states and nothing was driving.
+
+        409 sits between the unknown-service 404 and the unknown-key 400: the
+        whole service is refused, so which key was named does not matter. Moving
+        the call three lines down would leave every other test in this class
+        green while turning the stated contract false — on the class the change
+        itself calls the boundary.
+        """
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+
+        put = await client.put(
+            "/istota/api/settings/secrets/karakeep/not_a_declared_key",
+            json={"value": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert put.status_code == 409
+
+        delete = await client.delete(
+            "/istota/api/settings/secrets/karakeep/not_a_declared_key",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert delete.status_code == 409
+
+    async def test_an_unresolvable_answer_refuses_the_write(
+        self, tmp_path, client, app, monkeypatch,
+    ):
+        """The gate fails closed, which is the opposite of the card's rule.
+
+        `_vault_owned_services` answers `None` when it could not settle the
+        question at all. Whether a service is vault-owned is exactly what
+        decides this write, so an unresolvable answer must not become
+        permission — this is the last writer §6's "no other writer is left"
+        argument depends on closing, and a defect-only exception path that
+        quietly opens it is the worst kind.
+        """
+        import istota.web_app as mod
+        from istota import secrets_store
+
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+        monkeypatch.setattr(mod, "_vault_owned_services", lambda username: None)
+
+        resp = await client.put(
+            "/istota/api/settings/secrets/karakeep/api_key",
+            json={"value": "should-not-land"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        assert resp.status_code == 503
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "karakeep", "api_key",
+        ) is None
+
+    async def test_an_unresolvable_answer_still_renders_the_cards(
+        self, tmp_path, client, app, monkeypatch,
+    ):
+        """And the card path takes the opposite branch, deliberately.
+
+        A settings page must render for a user whose vault line is broken. The
+        cost of answering "no flag" there is an editable form the 409 then
+        refuses, which is an irritation; the cost of the gate guessing is a
+        credential written against a file that owns it.
+        """
+        import istota.web_app as mod
+
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+        monkeypatch.setattr(mod, "_vault_owned_services", lambda username: None)
+
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        assert resp.status_code == 200
+        cards = {c["service"]: c for c in resp.json()["services"]}
+        assert cards["karakeep"]["vault_managed"] is False
+
     async def test_an_unknown_service_is_still_a_404(self, tmp_path, client, app):
         """Ordering: the service lookup answers before the vault gate.
 
@@ -2936,6 +3017,9 @@ class TestTheVaultSettingsEndpoint:
 
         assert body["last_success_at"] == "2026-09-17T10:00:00Z"
         assert body["last_outcome"] == OUTCOME_OK
+        # A working vault has no verdict to render, which is what makes the
+        # heading say nothing alarming rather than saying "ok".
+        assert body["problem"] == ""
 
     async def test_a_failing_cycle_is_reported_with_its_class_and_sentence(
         self, tmp_path, client, app,
@@ -2974,6 +3058,10 @@ class TestTheVaultSettingsEndpoint:
         assert "passphrase does not match" in body["last_reason"]
         assert body["last_success_at"] == "2026-09-17T10:00:00Z"
         assert body["last_sync_at"] == "2026-09-17T11:00:00Z"
+        # The rendered verdict, resolved here rather than in the browser: the
+        # precedence between a live finding and a recorded one is a rule, and a
+        # rule restated in TypeScript is a second copy of it.
+        assert "passphrase does not match" in body["problem"]
 
     async def test_a_refused_path_is_reported_live_rather_than_from_the_record(
         self, tmp_path, client, app,
@@ -2991,11 +3079,16 @@ class TestTheVaultSettingsEndpoint:
         )).json()
 
         assert body["outcome"] == "VaultPathRefused"
+        # One of `storage`'s own VAULT_PATH_* constants: a fixed word from a
+        # code-owned table, which is what makes it the one field here that is
+        # not a NOTIFICATION_REASONS sentence and still safe to publish.
         assert body["refusal"]
         assert "config.toml" in body["reason"]
         # No cycle has run, so the record half is empty — and that is a
         # different emptiness from the live answer above.
         assert body["last_outcome"] == ""
+        # The live finding is what the verdict carries.
+        assert "config.toml" in body["problem"]
 
     async def test_it_does_not_open_the_vault(self, tmp_path, client, app, monkeypatch):
         """The discriminating assertion, and without it the property is invisible.
@@ -3030,6 +3123,9 @@ class TestTheVaultSettingsEndpoint:
 
         assert resp.status_code == 200
         assert calls == []
+        # The payload says so too, which is what lets a renderer tell "the group
+        # list is empty because nothing looked" from "because the file is empty".
+        assert resp.json()["parsed"] is False
 
     async def test_no_response_carries_a_passphrase_or_a_value(
         self, tmp_path, client, app,

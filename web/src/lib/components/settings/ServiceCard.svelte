@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import { ConfirmDialog } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -152,13 +153,23 @@
       <!--
         Above the fields rather than below them: it is the reason they are
         disabled, and a reader who meets a greyed-out input first has to hunt
-        for the explanation. The referent — which file, where — is on the
-        "Connected services" heading above every card, which is why this
-        sentence can be short and why the vault is not a card of its own.
+        for the explanation.
+
+        Self-contained, and that is a correction rather than the original
+        design. The first version leaned on the "Connected services" heading
+        for its referent — which file, and where — on the ground that the
+        heading sits above every card showing this. It does not: this component
+        also renders on the feeds, location and money settings pages, which have
+        no such heading, and `feeds` and `carto` are two of the five services a
+        vault may own. So the two services most likely to show this sentence
+        were exactly the two with nothing to read it against. The link carries
+        the referent everywhere; on /settings it points at the page already
+        open, where the heading answers it in place.
       -->
       <p class="hint vault-managed">
-        These credentials come from your credential vault. Edit them in the vault file — a change
-        here would be refused.
+        These credentials come from your credential vault, so they are not edited here — change them
+        in the vault file. Its path and sync status are under Connected services in
+        <a href="{base}/settings">Settings</a>.
       </p>
     {/if}
     {#each service.fields as f (f.key)}

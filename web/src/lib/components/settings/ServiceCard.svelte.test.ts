@@ -58,6 +58,21 @@ describe('a vault-managed service card', () => {
     }
   });
 
+  it('carries its own referent, because it renders where the heading does not', () => {
+    // The sharpest thing about this card: it is not only used on /settings. The
+    // feeds, location and money settings pages mount it too, and `feeds` and
+    // `carto` are two of the five services a vault may own — so the two
+    // services most likely to show this sentence are exactly the two with no
+    // "Connected services" heading above them to explain it. The sentence has
+    // to name where the vault's path and status can be found, and link there.
+    render(ServiceCard, { service: card({ vault_managed: true }) });
+
+    const hint = screen.getByText(EXPLANATION);
+    expect(hint.textContent).toMatch(/vault file/i);
+    const link = screen.getByRole('link', { name: /settings/i });
+    expect(link.getAttribute('href')).toMatch(/\/settings$/);
+  });
+
   it('offers no way to clear a stored value', () => {
     // Clearing is a DELETE, which the same 409 refuses. Leaving the button
     // would offer the one action on this card that is guaranteed to fail — and

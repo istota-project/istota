@@ -792,20 +792,34 @@ class TestTheDescriptorLifetime:
     path forgets, which is a slow failure that eventually costs the daemon every
     socket it opens. Both arms are here because the failure path is the one a
     `try/finally` is easy to write around and easy to leave out.
+
+    **It records the close rather than probing the number**, and the difference
+    is not academic. The original form asked `os.fstat(seen[0])` after the cycle
+    and read `OSError` as proof of closure — which holds only while nothing
+    reopens in between, because the kernel hands out the lowest free descriptor
+    and a number is reused the moment it is free. Stage 5 put a database write
+    and a notification fan-out after the close, one of which takes the number
+    straight back, and the test failed against a cycle that had closed the
+    descriptor correctly. An assertion that a *number* is unused answers a
+    different question from "was this descriptor closed", and only the second one
+    is the property.
     """
 
-    def _fd_is_open(self, fd: int) -> bool:
-        try:
-            os.fstat(fd)
-        except OSError:
-            return False
-        return True
-
     def _capture(self, monkeypatch, config):
+        """Record the descriptors handed out, and the ones handed back.
+
+        `os.close` is patched process-wide for the duration of the test, so
+        `closed` may carry descriptors belonging to anything else running in
+        this worker. That is why the assertions test *membership* rather than
+        the list's contents: a foreign close is noise, and a missing one is the
+        leak.
+        """
         from istota import storage
 
         seen: list[int] = []
+        closed: list[int] = []
         real = storage.resolve_user_vault_path
+        real_close = os.close
 
         def capturing(cfg, user_id):
             resolution = real(cfg, user_id)
@@ -813,8 +827,13 @@ class TestTheDescriptorLifetime:
                 seen.append(resolution.location.dir_fd)
             return resolution
 
+        def recording_close(fd):
+            closed.append(fd)
+            return real_close(fd)
+
         monkeypatch.setattr(storage, "resolve_user_vault_path", capturing)
-        return seen
+        monkeypatch.setattr(os, "close", recording_close)
+        return seen, closed
 
     def test_the_descriptor_is_closed_on_the_success_path(
         self, ready, monkeypatch
@@ -822,11 +841,11 @@ class TestTheDescriptorLifetime:
         from istota.secrets_vault import OUTCOME_OK, sync_user
 
         config, _path = ready
-        seen = self._capture(monkeypatch, config)
+        seen, closed = self._capture(monkeypatch, config)
 
         assert sync_user(config, "alice").outcome == OUTCOME_OK
         assert len(seen) == 1
-        assert not self._fd_is_open(seen[0])
+        assert seen[0] in closed
 
     def test_the_descriptor_is_closed_on_a_failure_path(
         self, tmp_path, secret_key, monkeypatch
@@ -838,11 +857,11 @@ class TestTheDescriptorLifetime:
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
         _provision_passphrase(config, "the-wrong-passphrase-entirely")
-        seen = self._capture(monkeypatch, config)
+        seen, closed = self._capture(monkeypatch, config)
 
         assert sync_user(config, "alice").outcome == VaultLocked.__name__
         assert len(seen) == 1
-        assert not self._fd_is_open(seen[0])
+        assert seen[0] in closed
 
     def test_the_descriptor_is_closed_when_the_skip_short_circuits(
         self, ready, monkeypatch
@@ -851,11 +870,11 @@ class TestTheDescriptorLifetime:
 
         config, _path = ready
         sync_user(config, "alice")
-        seen = self._capture(monkeypatch, config)
+        seen, closed = self._capture(monkeypatch, config)
 
         assert sync_user(config, "alice").outcome == OUTCOME_UNCHANGED
         assert len(seen) == 1
-        assert not self._fd_is_open(seen[0])
+        assert seen[0] in closed
 
 
 # ---------------------------------------------------------------------------

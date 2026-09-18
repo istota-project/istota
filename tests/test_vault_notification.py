@@ -582,8 +582,80 @@ class TestTheDurableRecord:
         record = self._record(config)
         assert record["outcome"] == VaultLocked.__name__
         assert record["ok_at"] == succeeded_at
-        # And `at` moved, which is what makes the two fields two facts.
-        assert record["at"] != succeeded_at or record["outcome"] != OUTCOME_OK
+        # `at` is the other half of the pair and moves on a failure, which is
+        # why it is the wrong field to render as "last synced" — a vault broken
+        # for a week would read as having synced a moment ago. It is stamped on
+        # every settled cycle, so it is present rather than carried.
+        assert record["at"]
+        assert record["outcome"] != OUTCOME_OK
+
+    def test_the_read_and_the_write_are_one_write_transaction(self, broken, sends):
+        """`ok_at` is carried forward across a read-modify-write, so it needs a lock.
+
+        `db.get_db` opens in autocommit: the `SELECT` in `kv_get` takes no lock
+        and only the upsert opens a deferred write one, which leaves a window
+        between them. Two settlers can interleave there — `istota secret
+        vault-sync` against a running daemon is the reachable pair — and the
+        loser writes a record carrying the `ok_at` it read before the winner's.
+        `last_success_at` then goes *backwards* on the settings heading, which is
+        the one field on it a user would act on.
+
+        **Asserted structurally rather than by racing two threads**, and that is
+        a deliberate limit rather than laziness. Forcing the interleave
+        deterministically deadlocks: hold thread A between its read and its
+        write and thread B's `BEGIN IMMEDIATE` blocks behind A's lock until the
+        busy timeout, so the correct implementation *loses* B's record and the
+        test fails against the fix. Two unsynchronised threads is the other
+        shape, and it passes or fails on timing. What is deterministic, and what
+        the fix actually is, is the *order*: the lock is taken before the read.
+        A test that reads the statement order goes red when the line is removed,
+        which is the property worth holding.
+        """
+        from contextlib import contextmanager
+
+        from istota import db, secrets_vault
+
+        config, _path = broken
+        statements: list[str] = []
+        real_get_db = db.get_db
+
+        class _Recording:
+            """Passes everything through and writes down the SQL it saw."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *args, **kwargs):
+                statements.append(" ".join(str(sql).split())[:40].upper())
+                return self._conn.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        @contextmanager
+        def recording(*args, **kwargs):
+            with real_get_db(*args, **kwargs) as conn:
+                yield _Recording(conn)
+
+        # Only the record's own connection is wrapped — patched around the one
+        # call, so the notification's connections are untouched.
+        original = db.get_db
+        db.get_db = recording
+        try:
+            secrets_vault._record_sync_state(
+                config.db_path, "alice", secrets_vault.OUTCOME_OK, ""
+            )
+        finally:
+            db.get_db = original
+
+        assert any(s.startswith("BEGIN IMMEDIATE") for s in statements), statements
+        begins = next(
+            i for i, s in enumerate(statements) if s.startswith("BEGIN IMMEDIATE")
+        )
+        selects = next(
+            i for i, s in enumerate(statements) if s.startswith("SELECT")
+        )
+        assert begins < selects, statements
 
     def test_it_carries_the_published_sentence_and_not_the_exception(
         self, broken, sends
@@ -729,6 +801,43 @@ class TestTheResolver:
             view = connected_service.RESOLVER.resolve(config, conn, row)
         assert view is not None
         assert [a.label for a in view.actions] == ["Open settings"]
+
+    def test_a_vault_whose_sync_the_operator_switched_off_is_gone(
+        self, broken, sends
+    ):
+        """The second off-switch, and the one that leaves the config line intact.
+
+        `scheduler.vault_sync_interval = 0` stops both triggers — the startup
+        pass and the interval gate — so nothing will settle another outcome for
+        this user ever again. `vault_path` is still set, so the first arm does
+        not fire, and without this one the row would stand for the life of the
+        deployment: the operator turned the feature off and kept its warning.
+        """
+        config, _path = broken
+        from istota.secrets_vault import sync_user
+
+        sync_user(config, "alice")
+        row = self._row(config)
+
+        config.scheduler.vault_sync_interval = 0
+        with db.get_db(config.db_path) as conn:
+            view = connected_service.RESOLVER.resolve(config, conn, row)
+        assert view is None
+
+    def test_a_vault_whose_sync_is_still_scheduled_is_not_gone(
+        self, broken, sends
+    ):
+        """The control. Without it the arm above could be answering True always."""
+        config, _path = broken
+        from istota.secrets_vault import sync_user
+
+        sync_user(config, "alice")
+        row = self._row(config)
+
+        assert config.scheduler.vault_sync_interval > 0
+        with db.get_db(config.db_path) as conn:
+            view = connected_service.RESOLVER.resolve(config, conn, row)
+        assert view is not None
 
     def test_a_recovered_vault_reads_as_connected(self, broken, sends):
         """The durable record is what makes this answerable outside the syncer.

@@ -1211,6 +1211,15 @@ def read_sync_state(conn, user_id: str) -> dict | None:
         return None
 
 
+#: A short lock budget for the record, rather than ``get_db``'s 30-second
+#: default. The precedent is ``scheduler._record_session_log_sweep`` and
+#: ``connected_service.close_for_service``, and the argument is theirs: losing a
+#: record of the work is strictly cheaper than holding a writer for half a
+#: minute. It matters here because the startup ``sync_all`` runs on the daemon's
+#: boot path, once per configured user.
+_RECORD_BUSY_TIMEOUT_MS = 2000
+
+
 def _record_sync_state(db_path, user_id: str, outcome: str, reason: str) -> None:
     """Write down what this cycle settled, for the processes that never see it.
 
@@ -1220,13 +1229,23 @@ def _record_sync_state(db_path, user_id: str, outcome: str, reason: str) -> None
     question: what a process that never runs a sync can say about one. The web
     tier renders the settings heading and the notification panel, and under the
     Ansible shape it is a different unit from the scheduler entirely.
+
+    **The read and the write are one transaction, and they have to be.**
+    ``db.get_db`` opens in autocommit, so the ``SELECT`` in ``kv_get`` takes no
+    lock and only ``kv_set``'s upsert opens a deferred write one — which leaves
+    a window between them. Two settlers can interleave there (``istota secret
+    vault-sync`` against a running daemon is the reachable pair, and two daemons
+    the pathological one): A reads ``ok_at``, B records a success, A writes its
+    failure record carrying the ``ok_at`` it read before B's. ``last_success_at``
+    then goes *backwards* on the settings heading, which is the one field on it
+    a user would act on. ``BEGIN IMMEDIATE`` takes the write lock before the
+    read, which is what ``handle_whatsapp_batch`` does for the same shape.
     """
     from . import db  # noqa: PLC0415
 
     try:
-        with db.get_db(db_path) as conn:
-            # Read-modify-write on one connection inside one transaction, which
-            # is what lets `ok_at` carry forward without a second round trip.
+        with db.get_db(db_path, busy_timeout_ms=_RECORD_BUSY_TIMEOUT_MS) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             previous = decode_sync_state(
                 db.kv_get(
                     conn, user_id, VAULT_SYNC_STATE_NAMESPACE, VAULT_SYNC_STATE_KEY
@@ -1405,6 +1424,25 @@ def label_for_display(name: str) -> str:
     return _label(name)
 
 
+def sync_is_scheduled(config) -> bool:
+    """Whether anything in this deployment will run a vault cycle again.
+
+    The interval half of ``scheduler.vault_sync_enabled``, lifted here so there
+    is one spelling of the rule and one place its reasoning lives. It is here
+    rather than there because the second reader is the notification resolver,
+    which runs in the **web** process and may not pull ``scheduler`` in at module
+    scope — while it already imports this module.
+
+    ``> 0`` rather than truthiness: a negative interval is truthy, and
+    ``_tick_interval_gates`` bypasses the clock for any non-positive one.
+
+    What it is *for* on the resolver's side: ``vault_sync_interval = 0`` is a
+    documented off-switch for the feature, and switching a feature off must not
+    leave one of its warnings standing for ever with nothing able to close it.
+    """
+    return getattr(config.scheduler, "vault_sync_interval", 0) > 0
+
+
 def vault_owned_services(config, user_id: str) -> frozenset[str]:
     """Which of this user's services the vault owns, right now.
 
@@ -1487,12 +1525,14 @@ def sync_user(
             # The feature is off for this user. Not a state worth remembering,
             # and not one to report a transition out of.
             return VaultSyncResult(user_id=user_id, outcome=OUTCOME_NOT_CONFIGURED)
-        return _settle(
+        return _publish(
             config,
-            user_id,
-            VaultPathRefused(resolution.refusal),
-            digest=None,
-            path="",
+            _settle(
+                user_id,
+                VaultPathRefused(resolution.refusal),
+                digest=None,
+                path="",
+            ),
             deliver=deliver,
         )
 
@@ -1500,17 +1540,16 @@ def sync_user(
     path = str(location.path)
     owned = frozenset(getattr(config.users.get(user_id), "vault_services", None) or ())
     try:
-        return _sync_resolved(
-            config, user_id, location, path, owned, deliver=deliver
-        )
+        result = _sync_resolved(config, user_id, location, path, owned)
     finally:
         if location.dir_fd is not None:
             os.close(location.dir_fd)
+    # Outside the `finally`, deliberately: `_publish` takes a write lock and may
+    # push over the network, and the descriptor pins a directory on a FUSE mount.
+    return _publish(config, result, deliver=deliver)
 
 
-def _sync_resolved(
-    config, user_id, location, path, owned, *, deliver: bool = True
-) -> VaultSyncResult:
+def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
     """Everything after the path resolved, with the descriptor still open."""
     try:
         # `dir_fd` beside `path`, never one without the other: the descriptor is
@@ -1519,7 +1558,7 @@ def _sync_resolved(
         # `tests/test_overlay_dir_containment.py` fails a call that drops it.
         data, digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
     except VaultError as exc:
-        return _settle(config, user_id, exc, digest=None, path=path, deliver=deliver)
+        return _settle(user_id, exc, digest=None, path=path)
 
     cached_digest, settled = _SYNC_STATE.get(user_id, (None, ""))
     if cached_digest is not None and cached_digest == digest:
@@ -1543,20 +1582,11 @@ def _sync_resolved(
         passphrase = _resolve_passphrase(config.db_path, user_id)
         read = parse_vault(data, passphrase)
     except VaultError as exc:
-        return _settle(
-            config, user_id, exc, digest=digest, path=path, deliver=deliver
-        )
+        return _settle(user_id, exc, digest=digest, path=path)
 
     applied = apply_vault(config.db_path, user_id, read, owned)
     return _settle(
-        config,
-        user_id,
-        None,
-        digest=digest,
-        path=path,
-        owned=owned,
-        applied=applied,
-        deliver=deliver,
+        user_id, None, digest=digest, path=path, owned=owned, applied=applied
     )
 
 
@@ -1683,8 +1713,44 @@ def _report(
         )
 
 
+def _publish(config, result: VaultSyncResult, *, deliver: bool) -> VaultSyncResult:
+    """The two surfaces outside this process, written once the file is let go.
+
+    Split from :func:`_settle` so it runs **after** ``sync_user``'s ``finally``
+    has closed ``VaultLocation.dir_fd``. Both legs can be slow — the record
+    takes a write lock, and the notification fans out to Talk and ntfy over
+    ``run_coro`` — and holding a descriptor pinned to a directory on a
+    ``fuse.rclone`` mount across an outbound HTTP call is a hold measured in
+    seconds where it used to be microseconds.
+
+    Each leg is guarded on its own, so losing either costs that surface and not
+    the cycle: by the time this runs the outcome is settled and the result is
+    already built.
+
+    Returns ``result`` so a caller can tail-call it.
+    """
+    if result.outcome in (OUTCOME_NOT_CONFIGURED, OUTCOME_UNCHANGED):
+        # A skip settles nothing and says nothing — §7's cycle costs no database
+        # touch, and the feature being off is not a state to record.
+        return result
+    # The published sentence, never `result.reason` — see `NOTIFICATION_REASONS`.
+    _record_sync_state(
+        config.db_path,
+        result.user_id,
+        result.outcome,
+        "" if result.outcome == OUTCOME_OK else notification_reason(result.outcome),
+    )
+    _report(
+        config,
+        result.user_id,
+        result.outcome,
+        transition=result.transition,
+        deliver=deliver,
+    )
+    return result
+
+
 def _settle(
-    config,
     user_id: str,
     exc: VaultError | None,
     *,
@@ -1692,7 +1758,6 @@ def _settle(
     path: str,
     owned: frozenset[str] = frozenset(),
     applied: VaultApplyResult | None = None,
-    deliver: bool = True,
 ) -> VaultSyncResult:
     """Record the outcome, decide whether it is a transition, and say so once.
 
@@ -1700,12 +1765,11 @@ def _settle(
     call up is a plain equality rather than a second condition that has to agree
     with ``_CACHEABLE_OUTCOMES``.
 
-    Three surfaces are written from here and the order is the cheap-to-recover
-    one: the in-memory state first (free, and the transition rule depends on
-    it), then the log, then the durable record, then the notification. Each of
-    the last two is guarded on its own, so losing either costs that surface and
-    not the cycle — the outcome this function returns is already settled by the
-    time either runs.
+    **It settles and says; it does not publish.** The durable record and the
+    notification are :func:`_publish`'s, and they are deliberately not here: both
+    are called with the vault's directory descriptor still open if they are, and
+    one of them can spend as long as a Talk post takes. What stays is the
+    in-memory state (free, and the transition rule depends on it) and the log.
     """
     outcome = OUTCOME_OK if exc is None else type(exc).__name__
     reason = "" if exc is None else str(exc)
@@ -1739,15 +1803,6 @@ def _settle(
             applied.unchanged,
             applied.deleted,
         )
-
-    # The published sentence, never `reason` — see `NOTIFICATION_REASONS`.
-    _record_sync_state(
-        config.db_path,
-        user_id,
-        outcome,
-        "" if exc is None else notification_reason(outcome),
-    )
-    _report(config, user_id, outcome, transition=transition, deliver=deliver)
 
     return VaultSyncResult(
         user_id=user_id,

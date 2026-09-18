@@ -704,6 +704,73 @@ class TestVaultStatus:
         assert BASE_URL_VALUE not in out
         assert PASSPHRASE not in out
 
+    def test_it_reports_the_last_cycle_the_daemon_settled(self, env, capsys):
+        """The record, which is the only thing here that crosses a process.
+
+        This command runs in a shell, so its own `_SYNC_STATE` is empty and
+        always has been — the last cycle it can report on is one the scheduler
+        ran, in another process and under Ansible in another systemd unit. Both
+        halves are printed: the class names the condition and the sentence names
+        the remedy, so printing the first alone reports a failure and withholds
+        the actionable half of it.
+        """
+        from istota import db, secrets_vault
+        from istota.cli import cmd_secret
+
+        cfg, db_path, mount = _with_vault(env)
+        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
+        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
+        with db.get_db(db_path) as conn:
+            db.kv_set(
+                conn, "alice",
+                secrets_vault.VAULT_SYNC_STATE_NAMESPACE,
+                secrets_vault.VAULT_SYNC_STATE_KEY,
+                secrets_vault.encode_sync_state(
+                    secrets_vault.VaultLocked.__name__,
+                    secrets_vault.notification_reason(
+                        secrets_vault.VaultLocked.__name__
+                    ),
+                    now="2026-09-17T10:00:00Z",
+                    previous=None,
+                ),
+            )
+
+        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
+        out = capsys.readouterr().out
+
+        assert "VaultLocked" in out
+        assert "does not match the file" in out
+
+    def test_a_healthy_record_reports_a_sync_time_and_no_error(self, env, capsys):
+        """The control, and the reason `last error` is conditional.
+
+        A working vault must not print an error line, and `last sync` must carry
+        the success stamp rather than the empty string a never-synced vault has.
+        """
+        from istota import db, secrets_vault
+        from istota.cli import cmd_secret
+
+        cfg, db_path, mount = _with_vault(env)
+        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
+        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
+        with db.get_db(db_path) as conn:
+            db.kv_set(
+                conn, "alice",
+                secrets_vault.VAULT_SYNC_STATE_NAMESPACE,
+                secrets_vault.VAULT_SYNC_STATE_KEY,
+                secrets_vault.encode_sync_state(
+                    secrets_vault.OUTCOME_OK, "",
+                    now="2026-09-17T10:00:00Z", previous=None,
+                ),
+            )
+
+        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
+        out = capsys.readouterr().out
+
+        assert "2026-09-17T10:00:00Z" in out
+        assert "last error" not in out
+        assert "last cycle" not in out
+
     def test_a_group_name_cannot_forge_a_line_of_the_report(self, env, capsys):
         """Every name in this report came out of the vault file, and a task in
         the user's own sandbox can overwrite that file. The consumer is an
