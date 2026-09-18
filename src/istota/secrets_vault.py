@@ -746,6 +746,29 @@ def _stored_entry_names(db_path: Path, user_id: str) -> set[str]:
     }
 
 
+def has_shared_credentials(db_path, user_id: str) -> bool:
+    """Whether this user has anything in the shared-credential namespace.
+
+    Presence, never a value: ``_stored_entry_names`` goes through
+    ``list_user_services``, which returns key names and timestamps, opens no
+    Fernet, needs no master key and bumps no ``last_accessed_at``. That matters
+    because the one caller is the prompt gate, which runs on every task
+    assembly including the dry run the goldens take.
+
+    Never raises and never reports a vault that is not there: a falsy
+    ``db_path`` and an unreadable database are both False, which is the
+    direction that withholds a prompt line rather than promising a namespace
+    nothing can serve.
+    """
+    if not db_path:
+        return False
+    try:
+        return bool(_stored_entry_names(Path(db_path), user_id))
+    except Exception as exc:  # pragma: no cover - a database that will not open
+        logger.debug("vault: could not count shared credentials: %s", exc)
+        return False
+
+
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 

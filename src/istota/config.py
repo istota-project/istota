@@ -1424,6 +1424,18 @@ class SecurityConfig:
     # derives its ceiling from this field directly, never from that export,
     # which the model can rewrite.
     skill_client_wait_seconds: int = 600
+    # How many shared-credential fetches (`vault_entries`, the user's own KDBX
+    # namespace) one task *attempt* may make over the proxy socket. `0` is
+    # unlimited and is the only spelling of unlimited — an absent key is this
+    # default, never "off", because a key missing from a rendered config.toml
+    # must not silently remove the bound.
+    #
+    # Read by `SkillProxy` alone, and enforced there rather than in the shim
+    # the model calls: that program sits in a directory the model can
+    # overwrite, and the socket answers a hand-rolled client just as readily.
+    # Counted per request whether or not the name resolves, so probing for
+    # absent names is not free; `vault_list` is not counted.
+    vault_fetch_limit_per_task: int = 10
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])
@@ -4043,6 +4055,10 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.
     "health.max_document_bytes": _non_negative_int,
+    # Same rule, and here the wrong direction is a security one: 0 is unlimited,
+    # so clamping a negative value to it would remove the cap on shared-credential
+    # fetches rather than tighten it. `_non_negative_int` keeps the shipped 10.
+    "security.vault_fetch_limit_per_task": _non_negative_int,
     # A brain name is compared literally downstream, so surrounding whitespace
     # in a rendered config is a name that matches nothing.
     "brain.fallback": lambda raw, key: (

@@ -383,6 +383,17 @@ class Case:
     #: `[brain] room_selectable`, without which `resolve_brain_kind` refuses the
     #: pin and the case silently reproduces its sibling.
     #:
+    #: Seeds one `vault_entries` row for the user, which is what the prompt's
+    #: shared-credential lines are gated on. A raw INSERT rather than
+    #: `upsert_secret`, deliberately: the gate is
+    #: `secrets_vault.has_shared_credentials`, which goes through
+    #: `list_user_services` and never decrypts, so the case needs no master key
+    #: and the ciphertext column can hold anything. Seeding through the real
+    #: store would make every golden run depend on `ISTOTA_SECRET_KEY`.
+    #:
+    #: `base_nextcloud` is the empty-namespace half of the pair, so the diff
+    #: between the two goldens is exactly the two lines this buys.
+    shared_credentials: bool = False
     #: Pairing this with `history=True` would construct a real provider before
     #: assembly reaches the `use_selection` short-circuit — `execute_task`
     #: evaluates `_build_triage_completer` as a call argument, so it runs
@@ -461,6 +472,12 @@ CASES: tuple[Case, ...] = (
         conversation_token="room-token",
         brain="native",
     ),
+    # A user with something in the shared-credential namespace. Against
+    # `base_nextcloud`, which it differs from in nothing else, so the diff
+    # between the two goldens is exactly the two lines the namespace buys —
+    # that it exists, and the quoting the injection form needs. Names and
+    # values are in neither golden, because they are in neither prompt.
+    Case("shared_credentials", shared_credentials=True),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -658,6 +675,27 @@ def _seed_history(config: Config, case: Case) -> None:
         conn.commit()
 
 
+def _seed_shared_credentials(config: Config, case: Case) -> None:
+    """One `vault_entries` row, written past the encryption layer.
+
+    The prompt gate reads `list_user_services`, which returns key names and
+    never opens a Fernet — so the ciphertext column can hold anything and this
+    fixture needs no `ISTOTA_SECRET_KEY`. Writing through `upsert_secret`
+    instead would make every case in this module depend on that variable being
+    set, which `tests/support/env_isolation.py` goes to some trouble to keep
+    out of the suite.
+    """
+    if not case.shared_credentials:
+        return
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "INSERT INTO secrets (user_id, service, key, encrypted_value) "
+            "VALUES (?, ?, ?, ?)",
+            (USER, "vault_entries", "home_assistant_token", b"ciphertext"),
+        )
+        conn.commit()
+
+
 def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     """Run one case to the normalized, two-part dry-run rendering.
 
@@ -681,6 +719,7 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_memory(config, case)
     _seed_overlay(config, case)
     _seed_history(config, case)
+    _seed_shared_credentials(config, case)
     task = _build_task(case)
 
     success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)

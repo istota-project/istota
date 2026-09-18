@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 from . import db
 from . import email_support
+from . import secrets_vault
 from . import task_cgroup
 from . import task_env
 from .claude_runtime_env import (
@@ -5795,6 +5796,7 @@ def build_prompt(
     conn: "db.sqlite3.Connection | None" = None,
     effective_prompt: str | None = None,
     attachment_status: "dict[str, str] | None" = None,
+    shared_credentials: bool = False,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
 
@@ -6218,6 +6220,29 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     display_output_target = _one_line(output_target or "text")
     display_token = _one_line(task.conversation_token or "none")
 
+    # The shared-credential namespace, named but never enumerated. The names are
+    # the user's own labels, they change with no task running, and putting them
+    # in the system half would put them in every transcript — so the prompt says
+    # the namespace exists and names the verb that lists it. Values are never
+    # here and never in any environment.
+    #
+    # The quoting sentence is not padding: the model's own shell expands
+    # `$TOKEN` before the shim runs, so the tempting one-line form sends an
+    # empty header and a model debugging that reaches for a verb that hands it
+    # the value — which is the one outcome `run` exists to avoid. One line here
+    # costs less than that.
+    shared_credentials_line = ""
+    if shared_credentials:
+        shared_credentials_line = (
+            "\n- Shared credentials: this user has stored credentials for you to "
+            "use. `istota-credential list` names them; you are not told the "
+            "values and do not need them. Hand one to the command that needs it: "
+            "`istota-credential run TOKEN=<name> -- sh -c 'curl -H \"Authorization: "
+            "Bearer $TOKEN\" <url>'`. The `sh -c` and the single quotes are "
+            "load-bearing — the variable is set in the child process, so your own "
+            "shell must not expand it first."
+        )
+
     group_chat_line = ""
     if task.is_group_chat:
         # No "below": the conversation context this names is in the user half,
@@ -6255,7 +6280,7 @@ Output target: {display_output_target}{per_user_email_line}
 You have access to:
 {file_tools}{browser_tool}{web_tools}{bash_tool}
 {cli_skills_section}{db_tool_line}
-- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
+- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.{shared_credentials_line}
 
 {rules_section}
 {channel_section}"""
@@ -7013,6 +7038,15 @@ def execute_task(
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),
+        # Presence, not the names and certainly not the values: one
+        # `list_user_services` read, no Fernet, no master key. Gated on the
+        # skill proxy too, because with it off there is no socket for the verb
+        # the line names to reach — a prompt line pointing at a program that
+        # cannot answer is worse than no line.
+        shared_credentials=(
+            config.security.skill_proxy_enabled
+            and secrets_vault.has_shared_credentials(config.db_path, task.user_id)
+        ),
     )
 
     # The two halves travel apart from here. `req.prompt` is the user half; the

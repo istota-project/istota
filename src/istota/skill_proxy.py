@@ -10,12 +10,25 @@ import logging
 import socket
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from istota import skill_client
+from istota.secrets_vault import label_for_display
 from istota.unix_server import UnixSocketServer
 
 logger = logging.getLogger("istota.skill_proxy")
+
+#: The three paths that may ask for a shared credential, as the request
+#: declares itself: a skill CLI resolving a stamped argument, the shim
+#: injecting into a child process, or a value handed back to the caller.
+#:
+#: It is a **claim by whoever holds the socket and is never verified** — the
+#: proxy sees a socket, not a process — so it decides a log level and nothing
+#: else. Anything absent or unrecognised is recorded as ``read``, which is the
+#: direction that does not under-report.
+VAULT_MODES = frozenset({"skill", "inject", "read"})
+VAULT_MODE_DEFAULT = "read"
 
 # Owner-only, so no other local user can ask this proxy for a credential. This
 # proxy's own decision, stated here rather than inherited from the server
@@ -255,6 +268,8 @@ class SkillProxy:
         allowed_skills: frozenset[str] | None = None,
         authorized_skills: frozenset[str] | None = None,
         task_id: int | None = None,
+        vault_credentials: dict[str, str] | None = None,
+        vault_fetch_limit: int = 0,
     ):
         self.credential_env = credential_env
         self.base_env = base_env
@@ -282,6 +297,29 @@ class SkillProxy:
         # informative-rejection list returned to the client.
         self.authorized_skills = authorized_skills
         self.task_id = task_id
+        # The user's shared-credential namespace (`vault_entries`), resolved
+        # once at task build. A **separate dict from `credential_env`**, and
+        # that separation is structural rather than tidiness: the skill
+        # dispatch below merges `credential_env` wholesale into a skill
+        # subprocess's environment when no per-skill map is given, so a vault
+        # value living in that dict would be handed to skill CLIs that never
+        # asked for it. The two name spaces also answer different questions —
+        # one is a union over skill manifests, the other is whatever the user
+        # put in their KDBX file — and only the vault branches read this one.
+        self.vault_credentials = vault_credentials or {}
+        # `security.vault_fetch_limit_per_task`; 0 is unlimited. Counted here
+        # rather than in the shim, because the shim is a program in a directory
+        # the model can overwrite and a hand-rolled five-line client speaks the
+        # same protocol — the proxy is the only thing that sees every request.
+        self.vault_fetch_limit = vault_fetch_limit
+        # Per task attempt, and that is the whole lifetime: `build_task_runtime`
+        # constructs one proxy per attempt, so the counter starts at zero with
+        # the attempt and is gone with it. A retry gets a fresh budget, which is
+        # correct — it re-executes the prompt from a fresh message list.
+        #
+        # Locked because `unix_server` runs one thread per connection.
+        self._vault_fetches = 0
+        self._vault_fetch_lock = threading.Lock()
         self._server = UnixSocketServer(
             socket_path,
             # Resolved per connection, not captured here: the accept loop
@@ -372,6 +410,22 @@ class SkillProxy:
                 self._send_response(conn, {"value": self.credential_env[name]})
                 return
 
+            if req_type == "vault_list":
+                # Not counted against the fetch limit: it returns names and no
+                # values, it is the discovery step the prompt tells the model to
+                # take, and one call answers what a hundred `vault_credential`
+                # probes would.
+                names = sorted(self.vault_credentials)
+                logger.info(
+                    "vault_list task_id=%s count=%d", self.task_id, len(names),
+                )
+                self._send_response(conn, {"names": names})
+                return
+
+            if req_type == "vault_credential":
+                self._serve_vault_credential(conn, request)
+                return
+
             skill = request.get("skill", "")
             args = request.get("args", [])
 
@@ -460,6 +514,79 @@ class SkillProxy:
                 conn.close()
             except OSError:
                 pass
+
+    def _spend_vault_fetch(self) -> tuple[int, bool]:
+        """Charge one fetch to this attempt's budget. ``(count, within)``.
+
+        **Counted per request, not per distinct name, and counted whether or
+        not the name resolves.** Counting only successful lookups makes probing
+        for absent names free, which is the enumeration the cap exists to
+        bound; counting distinct names lets a loop over one name run for ever,
+        which is the case it does not need to bound and cannot distinguish.
+        """
+        with self._vault_fetch_lock:
+            self._vault_fetches += 1
+            count = self._vault_fetches
+        limit = self.vault_fetch_limit
+        return count, not limit or count <= limit
+
+    def _serve_vault_credential(self, conn: socket.socket, request: dict) -> None:
+        """One shared credential, by name, under the per-attempt cap.
+
+        Order is load-bearing: charge, then the limit, then presence. A refusal
+        past the cap must be identical for a present and an absent name, or the
+        cap itself becomes the enumeration oracle it exists to close — which is
+        also why it names no credential at all.
+        """
+        name = str(request.get("name", ""))
+        raw_mode = request.get("mode")
+        mode = raw_mode if raw_mode in VAULT_MODES else VAULT_MODE_DEFAULT
+        # Bounded and flattened before it reaches a log line. The name came off
+        # a socket any process in the sandbox can speak to, so it is
+        # attacker-chosen outright rather than merely KDBX-sourced, and an
+        # unflattened one can forge a record in the daemon's own log.
+        label = label_for_display(name)
+
+        count, within = self._spend_vault_fetch()
+        if not within:
+            logger.warning(
+                "proxy_rejected task_id=%s type=vault_credential "
+                "count=%d limit=%d reason=vault_credential_limit",
+                self.task_id, count, self.vault_fetch_limit,
+            )
+            self._send_response(conn, {
+                "error": (
+                    f"Shared credential fetch limit reached for this task "
+                    f"({self.vault_fetch_limit})"
+                ),
+                "reason": "vault_credential_limit",
+            })
+            return
+
+        if name not in self.vault_credentials:
+            logger.warning(
+                "proxy_rejected task_id=%s type=vault_credential name=%s "
+                "mode=%s reason=vault_credential_not_present",
+                self.task_id, label, mode,
+            )
+            self._send_response(conn, {
+                "error": f"No shared credential named {label!r}",
+                "reason": "vault_credential_not_present",
+                "name": label,
+            })
+            return
+
+        # The audit trail, and the only new observability this adds. INFO where
+        # the value is being handed to something other than the model —
+        # a skill CLI resolving a stamped argument, or the shim injecting into a
+        # child — and WARNING where the caller asked for it back, because that
+        # is the one shape that puts a credential into the task's own context.
+        logger.log(
+            logging.INFO if mode in ("skill", "inject") else logging.WARNING,
+            "vault_credential task_id=%s name=%s mode=%s count=%d",
+            self.task_id, label, mode, count,
+        )
+        self._send_response(conn, {"value": self.vault_credentials[name]})
 
     @staticmethod
     def _recv_all(conn: socket.socket) -> str:

@@ -44,6 +44,9 @@ from urllib.parse import urlsplit
 
 from istota import config as istota_config
 from istota.atomic_write import write_text_atomic
+# Where the framework credential shim lands, from the module that defines the
+# rule. A stdlib-only leaf, so this costs the skill subprocess nothing.
+from istota.credential_shim import shim_path as credential_shim_path
 
 # The forge-binary resolution rule lives in a stdlib-only leaf so `doctor` can
 # reach it without importing `istota.skills` (whose __init__ star-imports every
@@ -472,34 +475,25 @@ def setup_env(ctx) -> dict[str, str]:
     dev_bin.mkdir(parents=True, exist_ok=True)
 
     use_proxy = config.security.skill_proxy_enabled
-    cred_fetch_cmd = ""
-    if use_proxy:
-        cred_fetch = dev_bin / "credential-fetch"
-        cred_fetch.write_text(
-            "#!/usr/bin/env python3\n"
-            "import json, socket, sys\n"
-            "import os\n"
-            "sock_path = os.environ.get('ISTOTA_SKILL_PROXY_SOCK', '')\n"
-            "if not sock_path:\n"
-            "    print('ISTOTA_SKILL_PROXY_SOCK not set', file=sys.stderr)\n"
-            "    sys.exit(1)\n"
-            "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
-            "s.connect(sock_path)\n"
-            "s.sendall(json.dumps({'type': 'credential', 'name': sys.argv[1]}).encode() + b'\\n')\n"
-            "d = b''\n"
-            "while b'\\n' not in d:\n"
-            "    c = s.recv(4096)\n"
-            "    if not c: break\n"
-            "    d += c\n"
-            "s.close()\n"
-            "r = json.loads(d)\n"
-            "if 'error' in r:\n"
-            "    print(r['error'], file=sys.stderr)\n"
-            "    sys.exit(1)\n"
-            "print(r.get('value', ''), end='')\n"
-        )
-        cred_fetch.chmod(0o700)
-        cred_fetch_cmd = str(cred_fetch)
+    # The five-line socket client this function used to generate as a string
+    # literal is now `istota.credential_shim`, written by `task_env` as a
+    # framework program with four verbs — of which `env` is this one's
+    # behaviour byte for byte. Two socket clients for one protocol is the
+    # duplication `AGENTS.md` opens with.
+    #
+    # The path is built rather than observed, because the order is fixed: this
+    # hook runs inside `build_task_runtime` *before* the proxy branch writes the
+    # shim, so the file does not exist yet. `credential_shim_path` is the one
+    # spelling both sides read.
+    cred_fetch_cmd = str(credential_shim_path(user_temp_dir))
+    # A program not wanted must not be reachable — `_remove_shims`' own rule,
+    # here for a file outside the directory it sweeps. `user_temp_dir` persists
+    # across tasks, so a copy written by a task that ran before this change
+    # would otherwise sit on disk for the life of the deployment.
+    try:
+        (dev_bin / "credential-fetch").unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("developer: could not remove the stale credential-fetch: %s", exc)
 
     def _token_expr(var_name: str) -> str:
         # Quoted: git's credential protocol wants the value verbatim, and an
@@ -507,7 +501,7 @@ def setup_env(ctx) -> dict[str, str]:
         # single spaces. No PAT format has whitespace today; this costs two
         # characters and removes a way for a future one to fail unreadably.
         if use_proxy:
-            return f'"$({cred_fetch_cmd} {var_name})"'
+            return f'"$({cred_fetch_cmd} env {var_name})"'
         return f'"${var_name}"'
 
     git_config_index = 0

@@ -465,6 +465,15 @@ features = []
 #                                  # too. Exported to the client as
 #                                  # ISTOTA_SKILL_CLIENT_WAIT; the proxy reads this
 #                                  # field, never the export.
+# vault_fetch_limit_per_task = 10  # how many shared credentials one task attempt may
+#                                  # fetch from the vault namespace over the proxy
+#                                  # socket. 0 is unlimited, and is the only spelling
+#                                  # of it — leaving the key out gives you the 10, not
+#                                  # "off". Counted per request whether or not the name
+#                                  # exists, so probing for absent names is not free;
+#                                  # listing the names costs nothing. A legitimate loop
+#                                  # over several credentials is the first thing to
+#                                  # trip it, which is why it is a setting at all.
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 # sandbox_ro_paths = []            # extra RO bind-mounts in sandbox, for co-located services the
 #                                  # agent needs to read. Keep entries narrow — a broad path sweeps
