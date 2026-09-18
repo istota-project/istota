@@ -2960,121 +2960,109 @@ class TestTheVaultWriteEndpoints:
 
     # -- the ordinary case ------------------------------------------------
 
-    async def test_a_relative_path_is_stored_and_wins_over_toml(
-        self, tmp_path, client, app,
-    ):
-        from istota import user_vault_config
+    def _folder(self, tmp_path, *names):
+        folder = (
+            tmp_path / "vaultmount" / "Users" / "alice" / "istota" / "vault"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (folder / name).write_bytes(b"not a real kdbx, just bytes")
+        return folder
+
+    async def test_a_listed_filename_is_stored(self, tmp_path, client, app):
+        import os
+
+        from istota import storage
 
         cookies = await self._setup(tmp_path, client, app)
+        self._folder(tmp_path, "personal.kdbx", "work.kdbx")
         resp = await client.put(
             "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-            json={"vault_path": "config/vault.kdbx", "vault_services": ["karakeep"]},
+            json={"vault_file": "work.kdbx"},
         )
         assert resp.status_code == 200, resp.text
-        row = user_vault_config.get_vault_config(self._db_path, "alice")
-        assert row is not None
-        assert row.vault_path == "config/vault.kdbx"
-        assert row.vault_services == ["karakeep"]
-        # And it is what the daemon will read, which is the half a stored row
-        # alone does not establish.
-        import istota.web_app as mod
-        assert mod._config.vault_path_for("alice") == "config/vault.kdbx"
 
-    async def test_the_get_reports_it_as_the_users_own(self, tmp_path, client, app):
+        import istota.web_app as mod
+        assert storage.stored_vault_file(mod._config, "alice") == "work.kdbx"
+        # And it is what the daemon will read, which is the half a stored value
+        # alone does not establish.
+        resolution = storage.vault_location_for(mod._config, "alice")
+        assert resolution.location is not None
+        os.close(resolution.location.dir_fd)
+        assert resolution.location.path.name == "work.kdbx"
+
+    async def test_the_get_reports_the_choice_back(self, tmp_path, client, app):
         cookies = await self._setup(tmp_path, client, app)
+        self._folder(tmp_path, "personal.kdbx", "work.kdbx")
         await client.put(
             "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-            json={"vault_path": "config/vault.kdbx", "vault_services": []},
+            json={"vault_file": "work.kdbx"},
         )
         body = (await client.get(
             "/istota/api/settings/vault", cookies=cookies,
         )).json()
-        assert body["source"] == "db"
+        assert body["files"] == ["personal.kdbx", "work.kdbx"]
+        assert body["vault_file"] == "work.kdbx"
         assert body["editable"] is True
-        assert body["vault_path"] == "config/vault.kdbx"
 
-    async def test_clearing_removes_the_row_and_reveals_the_toml_value(
+    async def test_clearing_returns_the_user_to_the_question(
         self, tmp_path, client, app,
     ):
-        # The state this is about: an operator has a `[users.alice] vault_path`
-        # *and* the user has a row. Clearing must give the operator's line back
-        # rather than shadowing it with an empty value for ever.
-        import istota.web_app as mod
-        from istota import user_vault_config
+        from istota import storage
 
         cookies = await self._setup(tmp_path, client, app)
-        user_vault_config.set_vault_config(
-            self._db_path, "alice",
-            vault_path="config/mine.kdbx", vault_services=[],
-        )
-        mod._config.users["alice"].vault_path = "config/operator.kdbx"
-        assert mod._config.vault_path_for("alice") == "config/mine.kdbx"
-
-        resp = await client.delete(
+        self._folder(tmp_path, "personal.kdbx", "work.kdbx")
+        await client.put(
             "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+            json={"vault_file": "work.kdbx"},
+        )
+        resp = await client.put(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+            json={"vault_file": ""},
         )
         assert resp.status_code == 200
-        assert resp.json()["cleared"] is True
-        assert mod._config.vault_path_for("alice") == "config/operator.kdbx"
+
+        import istota.web_app as mod
+        assert storage.stored_vault_file(mod._config, "alice") == ""
+        assert storage.vault_location_for(
+            mod._config, "alice"
+        ).refusal == storage.VAULT_DIR_UNCHOSEN
 
     # -- the boundary ------------------------------------------------------
 
-    async def test_an_absolute_path_is_refused(self, tmp_path, client, app):
-        from istota import user_vault_config
+    @pytest.mark.parametrize(
+        "name",
+        ["missing.kdbx", "../../etc/passwd", "/etc/passwd", "old/personal.kdbx"],
+    )
+    async def test_a_name_the_folder_does_not_hold_is_refused(
+        self, tmp_path, client, app, name,
+    ):
+        """Membership in a listing taken now, which is the whole of the path
+        handling: there is nothing to traverse and nothing to make absolute."""
+        from istota import storage
 
         cookies = await self._setup(tmp_path, client, app)
+        self._folder(tmp_path, "personal.kdbx", "work.kdbx")
         resp = await client.put(
             "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-            json={"vault_path": "/etc/istota/secrets.env", "vault_services": []},
+            json={"vault_file": name},
         )
         assert resp.status_code == 400
-        assert "relative" in resp.json()["detail"]
-        assert user_vault_config.get_vault_config(self._db_path, "alice") is None
 
-    async def test_a_traversing_path_is_refused_by_the_resolver(
+        import istota.web_app as mod
+        assert storage.stored_vault_file(mod._config, "alice") == ""
+
+    async def test_a_configured_vault_is_not_writable_from_here(
         self, tmp_path, client, app,
     ):
-        # Not by a second rule here. `..` is a child by name and the parent on
-        # disk, so the refusal has to come from the thing that resolves —
-        # `resolve_user_vault_path`, asked about a candidate rather than about a
-        # stored value. A check written here would be a second copy of a
-        # containment rule, which is the failure mode this whole area is
-        # arranged against.
-        from istota import user_vault_config
-
-        cookies = await self._setup(tmp_path, client, app)
-        resp = await client.put(
-            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-            json={"vault_path": "../bob/config/vault.kdbx", "vault_services": []},
-        )
-        assert resp.status_code == 400
-        assert user_vault_config.get_vault_config(self._db_path, "alice") is None
-
-    async def test_a_service_the_vault_may_not_own_is_refused(
-        self, tmp_path, client, app,
-    ):
-        from istota import user_vault_config
-
-        cookies = await self._setup(tmp_path, client, app)
-        for name in ("vault", "garmin", "nonesuch"):
-            resp = await client.put(
-                "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-                json={"vault_path": "config/vault.kdbx", "vault_services": [name]},
-            )
-            assert resp.status_code == 400, name
-        assert user_vault_config.get_vault_config(self._db_path, "alice") is None
-
-    async def test_a_toml_configured_vault_is_not_writable_from_here(
-        self, tmp_path, client, app,
-    ):
-        # Precedence rather than permission: a row would outrank the operator's
-        # line, so accepting the write would make their `config.toml` silently
-        # inert. The page says so instead.
-        from istota import user_vault_config
+        # Precedence rather than permission: a stored filename a configured
+        # path outranks is a control that does nothing. The page says so.
+        from istota import storage
 
         cookies = await self._setup(
             tmp_path, client, app, vault_path="config/operator.kdbx",
         )
+        self._folder(tmp_path, "personal.kdbx")
         body = (await client.get(
             "/istota/api/settings/vault", cookies=cookies,
         )).json()
@@ -3083,13 +3071,12 @@ class TestTheVaultWriteEndpoints:
 
         resp = await client.put(
             "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-            json={"vault_path": "config/mine.kdbx", "vault_services": []},
+            json={"vault_file": "personal.kdbx"},
         )
         assert resp.status_code == 409
-        assert (await client.delete(
-            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-        )).status_code == 409
-        assert user_vault_config.get_vault_config(self._db_path, "alice") is None
+
+        import istota.web_app as mod
+        assert storage.stored_vault_file(mod._config, "alice") == ""
 
     async def test_every_mutating_route_needs_a_session(
         self, tmp_path, client, app,
@@ -3097,14 +3084,24 @@ class TestTheVaultWriteEndpoints:
         _patch_app(self._config(tmp_path))
         assert (await client.put(
             "/istota/api/settings/vault",
-            json={"vault_path": "config/v.kdbx", "vault_services": []},
+            json={"vault_file": "v.kdbx"},
         )).status_code in (401, 403)
-        assert (await client.delete("/istota/api/settings/vault")).status_code in (
-            401, 403,
-        )
         assert (await client.put(
             "/istota/api/settings/vault/passphrase", json={"generate": True},
         )).status_code in (401, 403)
+
+    async def test_the_clear_route_is_gone(self):
+        """It went with the stored path it used to clear.
+
+        Switching the vault off is removing the file or the passphrase, both of
+        which are the user's own and neither of which a settings toggle should
+        do for them.
+        """
+        import istota.web_app as mod
+
+        for route in mod.api_router.routes:
+            if route.path == "/istota/api/settings/vault":
+                assert "DELETE" not in getattr(route, "methods", ())
 
     async def test_every_mutating_route_carries_the_origin_check(self):
         # The `web_router_stubs` pattern: the dependency is what the host app
@@ -3116,7 +3113,6 @@ class TestTheVaultWriteEndpoints:
         # `route.path` carries `api_router`'s own `/istota/api` prefix.
         wanted = {
             ("PUT", "/istota/api/settings/vault"),
-            ("DELETE", "/istota/api/settings/vault"),
             ("PUT", "/istota/api/settings/vault/passphrase"),
         }
         seen = set()
@@ -3254,100 +3250,21 @@ class TestTheVaultWriteEndpoints:
             self._db_path, "alice", "vault", "passphrase",
         ) == typed
 
-    async def test_a_cli_only_service_is_not_offered_by_the_form(
-        self, tmp_path, client, app,
-    ):
-        """`native_brain` is vault-*eligible* and is not web-settable.
-
-        Its schema comment says a web knob setting only the key would be a
-        per-user billing override dressed up as bring-your-own-brain, and a
-        vault the user configures is that knob one step removed. So the form
-        neither offers it nor accepts it, while `vault_services` in
-        `config.toml` still does — the operator route is unchanged and only the
-        web-settable set is narrower.
-
-        Filtered on the schema's `cli_only` flag rather than by name, so the
-        assertion is over every flagged service rather than over the one that
-        prompted it.
-        """
-        from istota.secret_schema import all_known_services
-        from istota.secrets_vault import eligible_services
-
-        schema = all_known_services()
-        flagged = {
-            name for name in eligible_services()
-            if schema.get(name, {}).get("cli_only")
-        }
-        assert flagged, "the assertion below is vacuous without one"
-
-        cookies = await self._setup(tmp_path, client, app)
-        body = (await client.get(
-            "/istota/api/settings/vault", cookies=cookies,
-        )).json()
-        offered = {s["service"] for s in body["eligible_services"]}
-        assert not (offered & flagged)
-        # And the eligible set it was filtered from is unchanged, so the control
-        # says the filter narrowed something rather than that the names were
-        # never there.
-        assert flagged <= eligible_services()
-
-        for name in sorted(flagged):
-            resp = await client.put(
-                "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-                json={"vault_path": "config/vault.kdbx", "vault_services": [name]},
-            )
-            assert resp.status_code == 400, name
-
-    async def test_each_offered_service_names_the_fields_it_hands_over(
-        self, tmp_path, client, app,
-    ):
-        """A service name is not what the user is agreeing to.
-
-        Ticking `ntfy` hands the file five fields and `karakeep` two, and
-        ownership includes deletion — a field the file's group does not hold is
-        removed from the secrets table. A payload carrying only the service name
-        leaves the form naming the wrong thing, and the field labels are in the
-        schema already, so there is nothing for the client to restate.
-
-        Asserted against the schema rather than against a written-out list, so
-        a field added to a service is covered without this test being edited —
-        and the `karakeep` clause afterwards is the control, since a payload
-        whose `keys` were all empty would satisfy the loop vacuously.
-        """
-        from istota.secret_schema import all_known_services
-
-        cookies = await self._setup(tmp_path, client, app)
-        body = (await client.get(
-            "/istota/api/settings/vault", cookies=cookies,
-        )).json()
-        schema = all_known_services()
-
-        for offered in body["eligible_services"]:
-            expected = [
-                f.get("label") or f.get("key", "")
-                for f in schema[offered["service"]].get("fields", [])
-            ]
-            assert offered["keys"] == expected, offered["service"]
-
-        karakeep = next(
-            s for s in body["eligible_services"] if s["service"] == "karakeep"
-        )
-        assert karakeep["keys"] == ["Base URL", "API key"]
-
     async def test_an_unanswerable_source_is_not_writable(
         self, tmp_path, client, app,
     ):
         """`_vault_is_web_editable` fails closed, and that is a real branch.
 
         An unknown source might be an operator's line, so writing over it is the
-        one thing that cannot be taken back. Written as a test for the two
-        values that permit a write rather than as `!= 'toml'`, which reads the
+        one thing that cannot be taken back. Written as a test for the one
+        value that permits a write rather than as `!= 'toml'`, which reads the
         same and admits every value added later — including the one meaning
         "I could not look".
         """
         import istota.web_app as mod
 
         cookies = await self._setup(tmp_path, client, app)
+        self._folder(tmp_path, "personal.kdbx")
         with patch.object(
             mod._config, "vault_config_source", side_effect=RuntimeError("boom"),
         ):
@@ -3355,7 +3272,7 @@ class TestTheVaultWriteEndpoints:
             assert mod._vault_is_web_editable("alice") is False
             resp = await client.put(
                 "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
-                json={"vault_path": "config/vault.kdbx", "vault_services": []},
+                json={"vault_file": "personal.kdbx"},
             )
         assert resp.status_code == 409
 
@@ -3464,13 +3381,14 @@ class TestTheVaultSettingsEndpoint:
         # Still the bare no for the *heading*, which is what renders nothing.
         assert body["configured"] is False
         # And the form's own fields, which have to be here precisely because
-        # this user has no vault: a payload carrying the checkbox list only once
-        # a vault existed would make the feature unreachable from the surface
-        # that configures it.
+        # this user has no vault: a payload carrying the folder only once a
+        # vault existed would make the feature unreachable from the surface
+        # that sets it up.
         assert body["editable"] is True
         assert body["source"] == ""
-        assert body["vault_path"] == ""
-        assert any(s["service"] == "karakeep" for s in body["eligible_services"])
+        assert body["vault_file"] == ""
+        assert body["files"] == []
+        assert body["vault_dir"].endswith("/istota/vault")
         # `passphrase_present` is a boolean and is meant to be here; what must
         # never be is a value, so the sweep is for the thing itself rather than
         # for the word.
@@ -3651,6 +3569,69 @@ class TestTheVaultSettingsEndpoint:
         assert passphrase not in raw
         assert "ak-endpoint-fixture" not in raw
         assert "test-key" not in raw
+
+    async def test_a_folder_vault_is_configured_without_a_path(
+        self, tmp_path, client, app,
+    ):
+        """The shape every new user gets: a file in the folder and a
+        passphrase, with nothing typed and nothing stored to select it."""
+        from istota import secrets_store
+
+        cfg = self._config(tmp_path, vault_path="", services=())
+        folder = (
+            Path(cfg.workspace_path) / "Users" / "alice" / "istota" / "vault"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "personal.kdbx").write_bytes(b"not a real kdbx, just bytes")
+        secrets_store.set_secret(
+            self._db_path, "alice", "vault", "passphrase", "x" * 40,
+        )
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+
+        assert body["configured"] is True
+        assert body["files"] == ["personal.kdbx"]
+        assert body["vault_file"] == "personal.kdbx"
+        assert body["passphrase_present"] is True
+        assert body["problem"] == ""
+
+    async def test_an_unchosen_folder_is_a_problem_with_no_outcome(
+        self, tmp_path, client, app,
+    ):
+        """Several files and none chosen is a question rather than a failure —
+        nothing failed, so there is no outcome, and the card still has to say
+        what the dropdown is for. `problem` gated on `outcome` renders this as
+        a working vault, which is the one thing it must not do.
+        """
+        from istota import secrets_store, storage
+
+        cfg = self._config(tmp_path, vault_path="", services=())
+        folder = (
+            Path(cfg.workspace_path) / "Users" / "alice" / "istota" / "vault"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in ("personal.kdbx", "work.kdbx"):
+            (folder / name).write_bytes(b"not a real kdbx, just bytes")
+        secrets_store.set_secret(
+            self._db_path, "alice", "vault", "passphrase", "x" * 40,
+        )
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+
+        assert body["configured"] is True
+        assert body["vault_file"] == ""
+        assert body["files"] == ["personal.kdbx", "work.kdbx"]
+        assert body["refusal"] == storage.VAULT_DIR_UNCHOSEN
+        assert body["outcome"] == ""
+        assert "choose which one" in body["problem"]
 
     async def test_it_needs_a_session(self, client, app):
         resp = await client.get("/istota/api/settings/vault")

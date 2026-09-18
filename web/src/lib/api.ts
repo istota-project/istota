@@ -1095,24 +1095,22 @@ export async function getSettingsServices(): Promise<ServicesResponse> {
 
 // --- Credential vault ---
 //
-// A user can now select their own vault file and the services it owns, and set
-// its passphrase. What has not changed is why those two config fields used to be
-// TOML-only: they decide which file the daemon decrypts and which credentials
-// that file may overwrite, so they are not on `user_profiles` with every other
-// per-user setting — they are in a table of their own that nothing downstream of
-// a task writes.
+// There is one place a vault file goes — a `vault/` folder inside the user's
+// own bot directory — and the only thing this surface writes is **a filename
+// out of that folder**. No path is typed and none is stored: the card offers
+// the `.kdbx` files the server found, one of them is selected on sight, and
+// what a user with several picks is a name.
 //
 // Two rules the client has to respect rather than re-derive:
 //
-// **Relative paths only.** The absolute form is the escape hatch that puts the
-// file outside every tree a sandbox binds, checked against a list of those trees
-// rather than against one user's own directory. It stays an operator setting in
-// `config.toml`; the server refuses one from here, and the form should not offer
-// it.
+// **A filename is not a path.** It is validated by being one of the entries
+// `files` just carried, which is set membership rather than a parse — so there
+// is nothing to traverse, nothing to make absolute and nowhere else to point.
+// A name the server does not list is a 400.
 //
-// **`editable: false` is about precedence, not permission.** A vault an operator
-// set in `config.toml` is not writable from here, because a stored row would
-// outrank that line and make their file silently inert.
+// **`editable: false` is about precedence, not permission.** A vault whose file
+// is set in the deployment's configuration is not selectable from here, because
+// a stored choice that line outranks is a control that does nothing.
 //
 // The passphrase is write-only. `passphrase_present` is a boolean and there is
 // no route that reads the value back, so a generated one is shown exactly once,
@@ -1150,32 +1148,24 @@ export interface VaultStatus {
   // Present even for a user with no vault, because that user is the one the
   // form exists for.
 
-  /** Whether this surface may write the selection. False for a vault set in
-   *  `config.toml` — see the note above: precedence, not permission. */
+  /** Whether this surface may store the choice. False when a configured
+   *  `vault_path` outranks it — see the note above: precedence, not
+   *  permission. */
   editable?: boolean;
-  /** `'db'` (the user's own), `'toml'` (an operator's), or `''` (nothing set). */
+  /** `'db'` (a stored path from the form this replaced), `'toml'` (an
+   *  operator's line), or `''` (nothing configured, which is the case the
+   *  folder serves). */
   source?: '' | 'db' | 'toml';
-  /** The path as written, for the form field. `path` above is the *resolved*
-   *  one and is only present once a vault is configured. */
-  vault_path?: string;
-  /** What a relative `vault_path` is relative to — the user's own workspace
-   *  directory. On the payload so the form can show where the file will land
-   *  rather than leaving it to be inferred: the same directory holds the
-   *  inbox, memories and shared folders, so an example alone is ambiguous. */
-  vault_root?: string;
-  /** Every service a vault may own, server-rendered so the form cannot offer a
-   *  name the write would refuse. */
-  eligible_services?: VaultEligibleService[];
-}
-
-export interface VaultEligibleService {
-  service: string;
-  label: string;
-  /** The writable fields the vault takes over for this service, in schema
-   *  order. On the payload because the service name is not what the user is
-   *  agreeing to: ticking `ntfy` hands the file five fields, not one, and a
-   *  field the file does not hold is *deleted* from the secrets table. */
-  keys: string[];
+  /** The vault folder, for the card's instruction. Where the user puts the
+   *  file, in the words of their own file tree. */
+  vault_dir?: string;
+  /** The `.kdbx` files in that folder, sorted. The dropdown's options, and the
+   *  whole of what a save may name. */
+  files?: string[];
+  /** Which of them resolution settled on — the stored choice, or the only file
+   *  there. Empty when the folder is empty, or holds several and none is
+   *  chosen. */
+  vault_file?: string;
 }
 
 export interface VaultPassphraseResponse {
@@ -1189,16 +1179,20 @@ export async function getVaultStatus(): Promise<VaultStatus> {
   return apiFetch<VaultStatus>('/settings/vault');
 }
 
-export async function updateVaultConfig(vaultPath: string, vaultServices: string[]): Promise<void> {
+/**
+ * Choose which file in the vault folder this user's vault is.
+ *
+ * `name` must be one of the entries `VaultStatus.files` carried, or the server
+ * answers 400 — the listing is taken again at request time, so a file deleted
+ * between the page load and the save is refused rather than stored. `''`
+ * clears the choice and returns the user to "the only file, or a question".
+ */
+export async function selectVaultFile(name: string): Promise<void> {
   await apiFetch('/settings/vault', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ vault_path: vaultPath, vault_services: vaultServices }),
+    body: JSON.stringify({ vault_file: name }),
   });
-}
-
-export async function clearVaultConfig(): Promise<void> {
-  await apiFetch('/settings/vault', { method: 'DELETE' });
 }
 
 /**

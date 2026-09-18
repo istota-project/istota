@@ -10106,16 +10106,18 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
 
 
 def _vault_settings_payload(username: str) -> dict:
-    """The credential vault's read-only status, for the settings heading.
+    """The credential vault's status and the folder's listing, for the card.
 
-    **Read-only in the strong sense: this endpoint has no writing sibling.** The
-    two fields that select the file (`vault_path`, `vault_services`) are
-    TOML-only because they are a security control rather than a preference — one
-    picks which file the daemon decrypts with a key it holds, the other which
-    credentials that file may overwrite — and the passphrase is `cli_only`
-    because it has to be *generated* rather than chosen. A form field is an
-    invitation to type a memorable passphrase, which is the one thing that makes
-    the file's presence inside the sandbox matter.
+    **The only thing this surface writes is a filename**, and that is what the
+    `files` / `vault_file` pair is for: the card offers the `.kdbx` files in
+    the user's vault folder and the user picks one of them. A filename is not a
+    path — it is validated by being one of the entries this listing returned,
+    which is set membership rather than a parse — so nothing here has a
+    traversal, an absolute form or a resolved-path preview to answer.
+
+    The listing rides on the status payload rather than getting an endpoint of
+    its own: there is one card, it already fetches its status on render, and a
+    second round trip would buy nothing.
 
     **It does not open the vault.** `vault_status(parse=False)` is why: an
     Argon2id unlock is tuned to about a second, and none of what §9's heading
@@ -10143,42 +10145,35 @@ def _vault_settings_payload(username: str) -> dict:
     `last_success_at` is the field to render as a sync time. `last_sync_at`
     moves on a failed cycle too.
     """
-    from . import secrets_vault
+    from . import secrets_vault, storage
 
     report = secrets_vault.vault_status(_config, username, parse=False)
+    files = storage.list_vault_files(_config, username) if _config else []
     # The form's own fields, present whatever the status. They have to be: the
     # user this page most needs to serve is the one with no vault yet, and a
-    # payload that carried the checkbox list only once a vault existed would
-    # make the feature unreachable from the surface that configures it.
+    # payload that carried the listing only once a vault existed would make the
+    # feature unreachable from the surface that sets it up.
     #
-    # `editable` is the half worth reading twice. It is False for a vault
-    # `config.toml` set, and it is not a permission — it is a statement about
-    # which of two places the live value comes from. Letting the form overwrite
-    # an operator's TOML line with a DB row that outranks it would make the
-    # operator's file silently inert; and the absolute form, which is the one an
-    # operator has a reason to use, is refused from here anyway, so the form
-    # could not express what it would be replacing.
+    # `editable` is the half worth reading twice. It is False when a configured
+    # `vault_path` outranks the filename this surface writes, and it is not a
+    # permission — it is a statement about which of two places the live value
+    # comes from. Letting the form store a choice an operator's line makes
+    # inert would be a control that does nothing.
     form = {
         "editable": _vault_is_web_editable(username),
         "source": _vault_config_source(username),
-        "vault_path": _config.vault_path_for(username) if _config else "",
-        # What a relative path is relative to, so the form can show where the
-        # file will actually be rather than leaving the user to infer it from an
-        # example. `config/vault.kdbx` as a placeholder is genuinely ambiguous:
-        # the same directory holds the user's inbox, memories and shared
-        # folders, so a path could reasonably be read against any of them. The
-        # resolver's own root is the only thing that settles it.
-        #
-        # Not a disclosure: it is this user's own directory, and `path` below
-        # already carries the resolved leaf once a vault is configured.
-        "vault_root": _vault_display_root(username),
-        "eligible_services": _vault_eligible_services(),
-        # A fact about the user rather than about the path, which is why it is
+        # Where the file goes, so the card can name the folder in its
+        # instruction. Not a disclosure: it is this user's own directory.
+        "vault_dir": storage.vault_dir_display(_config, username) if _config else "",
+        # The dropdown's options, and the whole of what a save may name.
+        "files": files,
+        # What resolution settled on, empty when nothing did — the folder is
+        # empty, or it holds several and none is chosen.
+        "vault_file": Path(report.path).name if report.path else "",
+        # A fact about the user rather than about the file, which is why it is
         # on this half and why it is asked directly rather than read off the
-        # report: `vault_status` returns early with `configured=False` for a
-        # user with no `vault_path`, so its `passphrase_present` is False for
-        # everyone who has not set a path yet — including somebody who
-        # generated a passphrase a minute ago and is now filling in the form.
+        # report: somebody who generated a passphrase a minute ago and has not
+        # yet put a file in the folder has to be told the half they have.
         # There is no other route that would tell them, because the value is
         # readable by nothing.
         "passphrase_present": _vault_passphrase_present(username),
@@ -10210,14 +10205,19 @@ def _vault_settings_payload(username: str) -> dict:
         # wanting the group listing asks the CLI; this one says it did not ask.
         "parsed": report.parsed,
         # The rendered verdict, empty when the vault is working. A live finding
-        # outranks a recorded one: `outcome` is what this request established
-        # and today is only ever a refused path, which is true *now* and about
+        # outranks a recorded one: `reason` and `outcome` are what this request
+        # established — a refused path, a folder with no file in it, or a
+        # folder with several and none chosen — which is true *now* and about
         # the configuration, while `last_outcome` is what some earlier cycle in
         # another process settled and may predate the operator introducing it.
+        #
+        # `reason` is read ahead of `outcome` and **not gated on it**: the
+        # unchosen folder has a sentence and no outcome at all, because nothing
+        # about it has failed. Gating on the outcome the way this did would
+        # render that case as working.
         "problem": (
             (report.reason or report.outcome)
-            if report.outcome
-            else (
+            or (
                 (report.recorded_reason or report.recorded_outcome)
                 if report.recorded_outcome
                 and report.recorded_outcome != secrets_vault.OUTCOME_OK
@@ -10225,106 +10225,6 @@ def _vault_settings_payload(username: str) -> dict:
             )
         ),
     }
-
-
-#: What a `vault_path` written through this surface may not be. The absolute
-#: form is refused here and nowhere else in the stack, because it is the one
-#: whose containment is checked against `storage._sandbox_writable_roots` — the
-#: trees a sandbox binds read-write — rather than against one user's own
-#: directory. That check is right for a path an operator wrote into
-#: `config.toml`, and it is not a boundary a user may place themselves on the
-#: other side of: an absolute path here would read any daemon-readable file
-#: named by it, as the daemon user, with the result decrypted into that user's
-#: own credential rows. The relative form is the feature — a file in the
-#: workspace, editable from a phone — and it is all this surface offers.
-VAULT_PATH_ABSOLUTE_REFUSAL = (
-    "a vault path set here must be relative to your own workspace; an absolute "
-    "path is an operator setting in config.toml"
-)
-
-
-def _vault_eligible_services() -> list[dict]:
-    """The checkbox list: every service a vault may own, with its keys.
-
-    Rendered server-side and validated server-side against the same set, so the
-    form cannot offer a name the write would refuse and cannot accept one it did
-    not offer. `secrets_vault.eligible_services` is the one predicate;
-    `secret_schema` supplies the labels the cards below already use.
-
-    **`keys` is on the payload because a service name is not what the user is
-    agreeing to.** Ticking `karakeep` does not hand the vault that service's
-    "API key" — it hands it `base_url` *and* `api_key`, and ntfy's three are
-    `server_url`, `topic` and `token`. Worse, ownership includes deletion: a key
-    the file's group does not hold is removed from the secrets table, so a user
-    who ticks a box thinking of one field can silently lose two. The field names
-    are in the schema already, and the form has no business restating them, so
-    they travel.
-    """
-    try:
-        from . import secrets_vault
-        from .secret_schema import all_known_services
-    except Exception:  # pragma: no cover - defensive
-        logger.warning("could not build the vault service list", exc_info=True)
-        return []
-    # `all_known_services` is the connected-service table and the module ones
-    # folded together, which is the same walk `eligible_services` filters — so
-    # every eligible name has a row here and the `.get` fallback is defence
-    # rather than a case with a producer.
-    schema = all_known_services()
-    eligible = secrets_vault.eligible_services()
-    out = []
-    for name in sorted(eligible):
-        entry = schema.get(name, {})
-        if entry.get("cli_only"):
-            continue
-        out.append({
-            "service": name,
-            "label": entry.get("label", name),
-            # The writable fields, in the order the schema declares them, which
-            # is the order the service card below renders them in. A service
-            # with none is not vault-eligible at all (`eligible_services`
-            # drops it), so an empty list here has no producer.
-            "keys": [
-                f.get("label") or f.get("key", "")
-                for f in entry.get("fields", [])
-                if isinstance(f, dict)
-            ],
-        })
-    return out
-
-
-#: Why a `cli_only` service is not on the form. Read the filter above as a
-#: policy rather than a tidy-up: `cli_only` marks a service the settings page
-#: deliberately does not offer, and `native_brain` is the one that makes the
-#: difference concrete. Its schema comment says a web knob setting only the key
-#: would be a per-user *billing* override dressed up as bring-your-own-brain,
-#: and a vault the user configures is exactly such a knob one step removed —
-#: tick the box, put `api_key` in your own KDBX, and the override is yours.
-#: Before this form that took an operator writing `vault_services` in TOML, and
-#: it still does: `eligible_services` is unchanged, `apply_vault` still applies
-#: such a name, and only the *web-settable* set is narrower. Filtered on the
-#: schema flag rather than by name so a later `cli_only` service is covered
-#: without anybody remembering this line exists.
-VAULT_WEB_EXCLUDES_CLI_ONLY = True
-
-
-def _vault_display_root(username: str) -> str:
-    """Where a relative `vault_path` lands, as a string for the form.
-
-    `workspace_root` is the resolver's own root rather than a second
-    derivation of it, so what the form shows is where the file will be. It
-    scopes the user id through `user_scope` and answers `None` for one that does
-    not name a plain child — which reads here as "cannot say", and the form
-    falls back to naming the directory in words.
-    """
-    if _config is None:
-        return ""
-    try:
-        root = _config.workspace_root(username)
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("vault display root lookup failed for %r", username)
-        return ""
-    return str(root) if root is not None else ""
 
 
 def _vault_passphrase_present(username: str) -> bool:
@@ -10375,90 +10275,63 @@ def _vault_config_source(username: str) -> str:
 
 
 def _vault_is_web_editable(username: str) -> bool:
-    """Whether this surface may write this user's vault selection.
+    """Whether this surface may store this user's choice of file.
 
-    False for a TOML-configured vault, and that is the substance of the rule —
-    see `_vault_settings_payload` for why it is about precedence rather than
-    about permission.
+    False whenever a configured `vault_path` outranks the filename, and that is
+    the substance of the rule — see `_vault_settings_payload` for why it is
+    about precedence rather than about permission. Both non-empty sources mean
+    that now: `toml` is an operator's line, and `db` is a path stored by the
+    form this one replaced, which nothing writes any more and which still wins
+    until it is dropped.
 
     It fails **closed**, and that is a property of this function rather than of
     the one above: an unanswerable source is not one to write over, since the
-    thing it might be is an operator's line. Written as a test for the two
-    values that permit a write, never as `!= TOML` — that spelling reads the
+    thing it might be is an operator's line. Written as a test for the one
+    value that permits a write, never as `!= TOML` — that spelling reads the
     same and admits every future value, including the one meaning "I could not
     look".
     """
-    from .config import Config
-
-    return _vault_config_source(username) in ("", Config.VAULT_SOURCE_DB)
+    return _vault_config_source(username) == ""
 
 
-def _write_vault_config(username: str, vault_path: str, services: list) -> dict:
-    """Validate and store one user's vault selection. Raises HTTPException.
+def _select_vault_file(username: str, name: str) -> dict:
+    """Store which file in the vault folder this user's vault is.
 
-    Off the event loop by its caller: the resolve walks directories under the
+    Off the event loop by its caller: the listing reads a directory under the
     workspace, which is a FUSE mount on the deployment shape this runs on.
 
-    **The path is resolved before it is stored, and that is the point of doing
-    it here.** `resolve_user_vault_path(candidate=...)` is the resolver itself
-    asked about a value nobody has written yet — one implementation, so a path
-    this accepts is one the sync can open, and a refusal is a 400 naming the
-    reason rather than a `vault_path_refused` line in the daemon log five
-    minutes later that nobody is looking at.
+    **A filename, validated by membership in a listing taken now.** That is the
+    whole of the path handling, and it is why there is no traversal check, no
+    absolute-path refusal and no containment resolver here: the value is one of
+    the names `list_vault_files` just produced, so it cannot be a path, cannot
+    climb and cannot point anywhere else. A file deleted between the page load
+    and the save is refused rather than stored.
+
+    `""` clears the selection and returns the user to the resolver's rules 3
+    and 4 — the only file if there is one, a question if there are several.
     """
     from fastapi import HTTPException
 
-    from . import storage, user_vault_config
+    from . import storage
 
     if not _vault_is_web_editable(username):
         raise HTTPException(
             status_code=409,
             detail=(
-                "this vault is configured in config.toml; an operator has to "
-                "change it there"
+                "this vault's file is set in this deployment's configuration; "
+                "an operator has to change it there"
             ),
         )
-    candidate = (vault_path or "").strip()
-    if not candidate:
-        raise HTTPException(status_code=400, detail="vault path is required")
-    # Both spellings, because the daemon's answer is the one that matters and a
-    # Windows-style root is not absolute to `PurePosixPath`. Neither is the
-    # containment check — that is the resolver's, below.
-    if Path(candidate).is_absolute() or candidate.startswith("/"):
-        raise HTTPException(status_code=400, detail=VAULT_PATH_ABSOLUTE_REFUSAL)
-
-    eligible = {row["service"] for row in _vault_eligible_services()}
-    chosen = []
-    for name in services:
-        if not isinstance(name, str) or name not in eligible:
-            raise HTTPException(
-                status_code=400, detail=f"not a service a vault may own: {name!r}"
-            )
-        chosen.append(name)
-
-    resolution = storage.resolve_user_vault_path(
-        _config, username, candidate=candidate
-    )
-    if resolution.location is None:
-        # `refusal` is one of `storage`'s own `VAULT_PATH_*` words, a fixed
-        # string from a code-owned table with nothing interpolated into it, so
-        # it is safe to return — and it is the only thing that says *which*
-        # refusal this is.
+    chosen = (name or "").strip()
+    if chosen and chosen not in storage.list_vault_files(_config, username):
+        # Named rather than described: the user picked from a dropdown, so a
+        # name that is not in the folder means the folder moved under them.
         raise HTTPException(
             status_code=400,
-            detail=f"that vault path cannot be used: {resolution.refusal}",
+            detail="that file is not in your vault folder any more",
         )
-    if resolution.location.dir_fd is not None:
-        # The resolver hands over a descriptor pinned to the leaf's parent and
-        # the caller closes it. This one asks a question and opens nothing.
-        os.close(resolution.location.dir_fd)
-
-    user_vault_config.set_vault_config(
-        _config.db_path, username,
-        vault_path=candidate, vault_services=sorted(set(chosen)),
-        source=user_vault_config.SOURCE_WEB,
-    )
-    return {"ok": True, "vault_path": candidate, "vault_services": sorted(set(chosen))}
+    storage.store_vault_file(_config, username, chosen)
+    return {"ok": True, "vault_file": chosen}
 
 
 @api_router.put("/settings/vault")
@@ -10467,10 +10340,12 @@ async def settings_vault_update(
     user: dict = Depends(_require_api_auth),
     _csrf: None = Depends(_verify_origin),
 ) -> dict:
-    """Set this user's vault file and the services it owns.
+    """Choose which file in this user's vault folder their vault is.
 
-    Body: ``{"vault_path": "config/vault.kdbx", "vault_services": ["karakeep"]}``.
-    Relative paths only; see `VAULT_PATH_ABSOLUTE_REFUSAL`.
+    Body: ``{"vault_file": "personal.kdbx"}`` and nothing else. The name must be
+    one the folder holds, or 400; ``""`` clears the choice. A user whose vault
+    file is set in configuration gets 409, because a stored choice that a
+    configured path outranks is a control that does nothing.
 
     Unlike its GET sibling this may **not** degrade — a settings read that fails
     costs a status line, and a settings write that fails quietly leaves the user
@@ -10482,46 +10357,10 @@ async def settings_vault_update(
         raise HTTPException(status_code=400, detail="payload must be an object")
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
-    services = payload.get("vault_services", [])
-    if not isinstance(services, list):
-        raise HTTPException(status_code=400, detail="vault_services must be a list")
-    path = payload.get("vault_path", "")
-    if not isinstance(path, str):
-        raise HTTPException(status_code=400, detail="vault_path must be a string")
-    return await asyncio.to_thread(
-        _write_vault_config, user["username"], path, services
-    )
-
-
-@api_router.delete("/settings/vault")
-async def settings_vault_clear(
-    user: dict = Depends(_require_api_auth),
-    _csrf: None = Depends(_verify_origin),
-) -> dict:
-    """Switch this user's vault off by removing the row.
-
-    Removes rather than blanks, so a `[users.<id>] vault_path` underneath it
-    becomes live again rather than being permanently shadowed by an empty value
-    — see `user_vault_config`'s module docstring. It does **not** touch the KDBX
-    file, and it does not touch the passphrase: both are the user's, and a
-    settings toggle that deleted a credential store would be the wrong shape of
-    surprise.
-    """
-    from fastapi import HTTPException
-
-    from . import user_vault_config
-
-    if _config is None or not _config.db_path:
-        raise HTTPException(status_code=503, detail="config not loaded")
-    if not _vault_is_web_editable(user["username"]):
-        raise HTTPException(
-            status_code=409,
-            detail="this vault is configured in config.toml",
-        )
-    removed = await asyncio.to_thread(
-        user_vault_config.clear_vault_config, _config.db_path, user["username"]
-    )
-    return {"ok": True, "cleared": removed}
+    name = payload.get("vault_file", "")
+    if not isinstance(name, str):
+        raise HTTPException(status_code=400, detail="vault_file must be a string")
+    return await asyncio.to_thread(_select_vault_file, user["username"], name)
 
 
 @api_router.put("/settings/vault/passphrase")

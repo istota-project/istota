@@ -42,11 +42,19 @@ from istota.config import Config, UserConfig
 from istota.secrets_vault import VaultUnreadable, read_vault_bytes
 from istota.skills._loader import OVERLAY_IS_A_SYMLINK, OVERLAY_NOT_A_REGULAR_FILE
 from istota.storage import (
+    VAULT_DIR_EMPTY,
+    VAULT_DIR_MAX_FILES,
+    VAULT_DIR_UNCHOSEN,
     VAULT_PATH_BAD_COMPONENT,
     VAULT_PATH_NO_SUCH_DIRECTORY,
     VAULT_PATH_NOT_A_FILENAME,
     VAULT_PATH_OUTSIDE_USER_TREE,
+    list_vault_files,
     resolve_user_vault_path,
+    store_vault_file,
+    stored_vault_file,
+    vault_dir_display,
+    vault_location_for,
 )
 
 
@@ -579,3 +587,286 @@ class TestWhatIsRefusedBeforeEitherBranch:
         config = _config(tmp_path, workspace=True)
         config.users[user_id] = UserConfig(vault_path="vault.kdbx")
         assert _resolve(config, user_id) is None
+
+
+# ---------------------------------------------------------------------------
+# The folder convention
+# ---------------------------------------------------------------------------
+
+
+def _vault_dir(config: Config, user_id: str = "alice") -> Path:
+    """`{bot_dir}/vault/` under the user's own root, created."""
+    folder = _user_root(config, user_id) / config.bot_dir_name / "vault"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _located(config: Config, user_id: str = "alice"):
+    """Resolve by the folder convention, closing the descriptor for the caller."""
+    resolution = vault_location_for(config, user_id)
+    if resolution.location is not None and resolution.location.dir_fd is not None:
+        os.close(resolution.location.dir_fd)
+    return resolution
+
+
+def _with_db(config: Config) -> Config:
+    from istota import db
+
+    db.init_db(config.db_path)
+    return config
+
+
+class TestTheFolderListing:
+    """What `list_vault_files` counts as a candidate, and what it refuses.
+
+    The folder is inside the tree bound read-write into that user's own
+    sandbox, so every name in it is model-writable. The listing's job is to
+    answer "what did the user put here", which is why a symlink is skipped
+    rather than resolved: a link names a file the folder's own containment says
+    nothing about.
+    """
+
+    def test_a_kdbx_file_is_listed(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        _seed(_vault_dir(config) / "personal.kdbx")
+        assert list_vault_files(config, "alice") == ["personal.kdbx"]
+
+    def test_the_suffix_is_matched_case_insensitively(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        _seed(_vault_dir(config) / "Personal.KDBX")
+        assert list_vault_files(config, "alice") == ["Personal.KDBX"]
+
+    def test_names_come_back_sorted(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        for name in ("zulu.kdbx", "alpha.kdbx", "mike.kdbx"):
+            _seed(folder / name)
+        assert list_vault_files(config, "alice") == [
+            "alpha.kdbx", "mike.kdbx", "zulu.kdbx",
+        ]
+
+    def test_another_suffix_is_not_a_candidate(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        _seed(folder / "notes.txt")
+        _seed(folder / "kdbx")
+        assert list_vault_files(config, "alice") == []
+
+    def test_a_file_one_level_down_is_not_a_candidate(self, tmp_path):
+        """No recursion. A subfolder is somewhere the card cannot offer."""
+        config = _config(tmp_path, alice=UserConfig())
+        _seed(_vault_dir(config) / "old" / "personal.kdbx")
+        assert list_vault_files(config, "alice") == []
+
+    def test_a_directory_named_like_a_vault_is_not_a_candidate(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        (_vault_dir(config) / "personal.kdbx").mkdir()
+        assert list_vault_files(config, "alice") == []
+
+    def test_a_fifo_is_not_a_candidate(self, tmp_path):
+        """`open(2)` on a FIFO blocks until somebody writes, and the sync runs
+        on a background gate with no timeout behind it."""
+        config = _config(tmp_path, alice=UserConfig())
+        os.mkfifo(_vault_dir(config) / "personal.kdbx")
+        assert list_vault_files(config, "alice") == []
+
+    def test_a_symlink_to_a_real_file_in_the_same_folder_is_not_a_candidate(
+        self, tmp_path,
+    ):
+        """The negative control for this stage.
+
+        `follow_symlinks=True` on either test makes this pass as an ordinary
+        file, which is the whole of the skip: a link is a name the user's own
+        sandbox can plant, pointing at a file the folder's containment says
+        nothing about.
+        """
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        _seed(folder / "real.kdbx")
+        os.symlink(folder / "real.kdbx", folder / "link.kdbx")
+        assert list_vault_files(config, "alice") == ["real.kdbx"]
+
+    def test_a_symlink_out_of_the_tree_is_not_a_candidate(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        outside = _seed(tmp_path / "outside" / "secret.kdbx", DECOY_BYTES)
+        os.symlink(outside, _vault_dir(config) / "personal.kdbx")
+        assert list_vault_files(config, "alice") == []
+
+    def test_a_symlinked_component_above_the_folder_is_refused(self, tmp_path):
+        """`open_overlay_dir`'s walk, exactly as the path resolver applies it."""
+        config = _config(tmp_path, alice=UserConfig())
+        real = tmp_path / "elsewhere" / "vault"
+        _seed(real / "personal.kdbx")
+        bot_dir = _user_root(config, "alice") / config.bot_dir_name
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        os.symlink(real, bot_dir / "vault")
+        assert list_vault_files(config, "alice") == []
+
+    def test_a_missing_folder_is_an_empty_list(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        _user_root(config, "alice")
+        assert list_vault_files(config, "alice") == []
+
+    def test_an_unreadable_folder_is_an_empty_list(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        _seed(folder / "personal.kdbx")
+        folder.chmod(0o000)
+        try:
+            assert list_vault_files(config, "alice") == []
+        finally:
+            folder.chmod(0o700)
+
+    def test_no_workspace_lists_nothing_and_touches_no_filesystem(
+        self, tmp_path, monkeypatch,
+    ):
+        config = _config(tmp_path, workspace=False, alice=UserConfig())
+
+        def _refuse(*args, **kwargs):  # pragma: no cover - the point is no call
+            raise AssertionError("the filesystem was touched")
+
+        monkeypatch.setattr(os, "scandir", _refuse)
+        assert list_vault_files(config, "alice") == []
+
+    @pytest.mark.parametrize("user_id", ["", ".", "..", "a/b"])
+    def test_a_user_id_that_names_no_child_lists_nothing(self, tmp_path, user_id):
+        config = _config(tmp_path, workspace=True)
+        config.users[user_id] = UserConfig()
+        assert list_vault_files(config, user_id) == []
+
+    def test_the_listing_is_capped(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        for i in range(VAULT_DIR_MAX_FILES + 5):
+            _seed(folder / f"v{i:03d}.kdbx")
+        assert len(list_vault_files(config, "alice")) == VAULT_DIR_MAX_FILES
+
+
+class TestWhichFileTheFolderSettlesOn:
+    """`vault_location_for`'s four rules, and what each refusal means.
+
+    Neither refusal is a failure: they are the two things the settings card
+    asks the user to fix, and the second is a dropdown away.
+    """
+
+    def test_the_only_file_resolves_with_nothing_stored(self, tmp_path):
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        _seed(_vault_dir(config) / "personal.kdbx")
+        resolution = _located(config)
+        assert resolution.refusal is None
+        assert resolution.location is not None
+        assert resolution.location.path.name == "personal.kdbx"
+
+    def test_the_descriptor_opens_the_file_that_was_chosen(self, tmp_path):
+        """The pair, not the path: the read goes through the descriptor."""
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        _seed(_vault_dir(config) / "personal.kdbx")
+        location = vault_location_for(config, "alice").location
+        assert location is not None
+        try:
+            data, _digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
+        finally:
+            os.close(location.dir_fd)
+        assert data == VAULT_BYTES
+
+    def test_an_empty_folder_is_the_empty_refusal(self, tmp_path):
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        _vault_dir(config)
+        assert _located(config).refusal == VAULT_DIR_EMPTY
+
+    def test_a_missing_folder_is_the_empty_refusal(self, tmp_path):
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        _user_root(config, "alice")
+        assert _located(config).refusal == VAULT_DIR_EMPTY
+
+    def test_several_files_and_nothing_stored_is_a_question(self, tmp_path):
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        folder = _vault_dir(config)
+        _seed(folder / "personal.kdbx")
+        _seed(folder / "work.kdbx")
+        assert _located(config).refusal == VAULT_DIR_UNCHOSEN
+
+    def test_the_stored_name_settles_it(self, tmp_path):
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        folder = _vault_dir(config)
+        _seed(folder / "personal.kdbx")
+        _seed(folder / "work.kdbx")
+        store_vault_file(config, "alice", "work.kdbx")
+        assert stored_vault_file(config, "alice") == "work.kdbx"
+        location = _located(config).location
+        assert location is not None and location.path.name == "work.kdbx"
+
+    def test_a_stored_name_that_is_gone_is_a_question_again(self, tmp_path):
+        """Consulted, never trusted: the listing is taken now."""
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        folder = _vault_dir(config)
+        _seed(folder / "personal.kdbx")
+        _seed(folder / "work.kdbx")
+        store_vault_file(config, "alice", "work.kdbx")
+        (folder / "work.kdbx").unlink()
+        _seed(folder / "archive.kdbx")
+        assert _located(config).refusal == VAULT_DIR_UNCHOSEN
+
+    def test_a_stored_name_is_ignored_when_one_file_is_left(self, tmp_path):
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        folder = _vault_dir(config)
+        _seed(folder / "personal.kdbx")
+        store_vault_file(config, "alice", "work.kdbx")
+        location = _located(config).location
+        assert location is not None and location.path.name == "personal.kdbx"
+
+    @pytest.mark.parametrize(
+        "stored", ["../../etc/passwd", "/etc/passwd", "old/personal.kdbx", "."],
+    )
+    def test_a_stored_name_is_never_used_as_a_path(self, tmp_path, stored):
+        """Membership in a listing, not a parse. There is nothing to traverse."""
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        folder = _vault_dir(config)
+        _seed(folder / "personal.kdbx")
+        _seed(folder / "work.kdbx")
+        store_vault_file(config, "alice", stored)
+        assert _located(config).refusal == VAULT_DIR_UNCHOSEN
+
+    def test_clearing_the_stored_name_returns_the_question(self, tmp_path):
+        config = _with_db(_config(tmp_path, alice=UserConfig()))
+        folder = _vault_dir(config)
+        _seed(folder / "personal.kdbx")
+        _seed(folder / "work.kdbx")
+        store_vault_file(config, "alice", "work.kdbx")
+        store_vault_file(config, "alice", "")
+        assert stored_vault_file(config, "alice") == ""
+        assert _located(config).refusal == VAULT_DIR_UNCHOSEN
+
+    def test_a_configured_path_wins_over_the_folder(self, tmp_path):
+        """Rule 1. The operator's line is what keeps a vault out of the sandbox."""
+        config = _with_db(
+            _config(tmp_path, alice=UserConfig(vault_path="config/operator.kdbx"))
+        )
+        _seed(_user_root(config, "alice") / "config" / "operator.kdbx")
+        _seed(_vault_dir(config) / "personal.kdbx")
+        location = _located(config).location
+        assert location is not None and location.path.name == "operator.kdbx"
+
+    def test_a_refused_configured_path_is_not_rescued_by_the_folder(self, tmp_path):
+        """A configured path that cannot be opened is an operator's to fix.
+
+        Falling through to the folder would apply a file the operator did not
+        choose, under a line they believe is in force.
+        """
+        config = _with_db(
+            _config(tmp_path, alice=UserConfig(vault_path="no-such-dir/v.kdbx"))
+        )
+        _seed(_vault_dir(config) / "personal.kdbx")
+        assert _located(config).refusal == VAULT_PATH_NO_SUCH_DIRECTORY
+
+    def test_no_workspace_settles_on_nothing(self, tmp_path):
+        config = _with_db(_config(tmp_path, workspace=False, alice=UserConfig()))
+        resolution = _located(config)
+        assert resolution.location is None
+        assert resolution.refusal == VAULT_DIR_EMPTY
+
+    def test_the_folder_display_path_names_the_folder(self, tmp_path):
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        assert Path(vault_dir_display(config, "alice")).name == "vault"
+        assert Path(vault_dir_display(config, "alice")).resolve() == folder.resolve()

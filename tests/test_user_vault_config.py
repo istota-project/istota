@@ -170,35 +170,47 @@ class TestTheDeploymentWideGate:
         # keeps an operator-configured deployment off the listing entirely.
         assert config.any_vault_configured() is True
 
-    def test_a_stored_row_turns_it_on(self, tmp_path, db_path):
+    def test_a_stored_passphrase_turns_it_on(self, tmp_path, db_path, monkeypatch):
+        """The database half asks for a passphrase now, not for a stored path.
+
+        A vault is a file *and* a passphrase, and the passphrase is the half
+        that cannot become true by accident — it is also what a user
+        configuring a vault from the folder has, where they store no path at
+        all. A stored row is not consulted: nothing writes one any more, and a
+        row that predates that still reaches `vault_path_for`, so a *working*
+        legacy vault has a passphrase behind it and is seen through that.
+        """
+        from istota import secrets_store
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
         config = _config(tmp_path, db_path)
         assert config.any_vault_configured() is False
-        uvc.set_vault_config(db_path, "alice", vault_path="v.kdbx", vault_services=[])
+        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", "x" * 40)
         assert config.any_vault_configured() is True
 
-    def test_it_costs_one_listing_rather_than_one_lookup_per_user(
+    def test_it_costs_one_lookup_rather_than_one_per_user(
         self, tmp_path, db_path
     ):
         # The property the shape exists for, measured rather than asserted about
         # in a comment: with nobody configured — the case that cannot
         # short-circuit — the count must not scale with the user list.
-        from istota import user_vault_config as mod
+        from istota import secrets_store as mod
 
         config = _config(tmp_path, db_path)
         config.users = {f"u{i}": UserConfig() for i in range(8)}
 
         calls = {"n": 0}
-        real = mod.list_vault_configs
+        real = mod.any_user_has_secret
 
         def counted(*a, **kw):
             calls["n"] += 1
             return real(*a, **kw)
 
-        mod.list_vault_configs = counted
+        mod.any_user_has_secret = counted
         try:
             assert config.any_vault_configured() is False
         finally:
-            mod.list_vault_configs = real
+            mod.any_user_has_secret = real
         assert calls["n"] == 1
 
     def test_an_unreadable_store_reads_as_the_toml_answer(self, tmp_path):
@@ -260,13 +272,17 @@ class TestNothingDownstreamOfATaskWritesIt:
             "daemon; it may not reach this table"
         )
 
-    def test_the_importers_are_the_three_this_table_admits(self):
-        # `config.py` reads; `web_app.py` and `cli.py` write. A fourth name here
-        # is a claim that something else may select which file the daemon
-        # decrypts, and wants saying out loud rather than passing.
-        assert self._importers() == ["cli.py", "config.py", "web_app.py"], (
-            self._importers()
-        )
+    def test_the_importers_are_the_two_this_table_admits(self):
+        # `config.py` reads; `cli.py` clears. A further name here is a claim
+        # that something else may select which file the daemon decrypts, and
+        # wants saying out loud rather than passing.
+        #
+        # `web_app.py` was the third and is gone: the settings form writes a
+        # *filename* into the reserved `_vault_file` KV namespace now, so this
+        # table has no writer left at all. The table itself goes in the stage
+        # that retires `vault_services`, which is what the remaining readers
+        # are still for.
+        assert self._importers() == ["cli.py", "config.py"], self._importers()
 
     def test_nothing_outside_the_module_names_the_table_in_sql(self):
         # The import guard above is defeated by a raw `conn.execute` against the

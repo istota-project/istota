@@ -1092,7 +1092,10 @@ NOTIFICATION_REASONS: dict[str, str] = {
         "caught mid-write looks like, so check the mount before suspecting the "
         "file"
     ),
-    VaultMissing.__name__: "there is nothing at the configured path",
+    VaultMissing.__name__: (
+        "there is no vault file to read — put one in your vault folder, or "
+        "check the path an operator configured"
+    ),
     VaultUnreadable.__name__: (
         "the file at the configured path was refused unread — it is not a "
         "regular file, or it is over the size cap"
@@ -1125,6 +1128,29 @@ _DEFAULT_NOTIFICATION_REASON = "the vault could not be read; see the daemon log"
 def notification_reason(outcome: str) -> str:
     """The sentence a given outcome class publishes, for every read surface."""
     return NOTIFICATION_REASONS.get(outcome, _DEFAULT_NOTIFICATION_REASON)
+
+
+def resolution_reason(refusal: str | None) -> str:
+    """The sentence a surface renders for a resolution that found no file.
+
+    Beside :func:`_resolution_outcome` rather than inside it, because the two
+    answer different questions and only one of them is about a failure: an
+    unchosen folder is *not* an outcome — nothing failed and nothing is
+    notified — and it still has something to say on the settings card, which is
+    the surface whose dropdown answers it.
+    """
+    exc = _resolution_outcome(refusal)
+    if exc is not None:
+        return notification_reason(type(exc).__name__)
+
+    from . import storage  # noqa: PLC0415 - see `sync_user`
+
+    if refusal == storage.VAULT_DIR_UNCHOSEN:
+        return (
+            "there are several vault files in your vault folder — choose which "
+            "one Istota should read"
+        )
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1452,11 +1478,19 @@ def vault_owned_services(config, user_id: str) -> frozenset[str]:
     refusing an operator's write on the strength of a line that does not work is
     a refusal with no remedy behind it.
 
-    **The cheap half is asked first**, deliberately. Resolving walks directories
-    and opens a descriptor, and it logs a refusal — so testing the service set
-    afterwards would make every ``istota secret ensure`` for every user pay a
-    directory walk, and would emit ``vault_path_refused`` as a side effect of
-    commands that have nothing to do with the vault.
+    **The cheap half is asked first**, deliberately. Resolving walks
+    directories, lists the vault folder and opens a descriptor, and it logs a
+    refusal — so testing the service set afterwards would make every ``istota
+    secret ensure`` for every user pay that, and would emit
+    ``vault_path_refused`` as a side effect of commands that have nothing to do
+    with the vault.
+
+    It resolves through :func:`storage.vault_location_for` rather than the path
+    resolver alone, so a vault reached by the folder convention owns its
+    declared services exactly as a configured path does. Both halves of that
+    leave in stage 3; until they do, the predicate has to see both shapes or
+    the 409 it drives would be right about one of them and silent about the
+    other.
 
     Closes the descriptor it opens: this asks a question and opens nothing.
     """
@@ -1466,12 +1500,85 @@ def vault_owned_services(config, user_id: str) -> frozenset[str]:
 
     from . import storage  # noqa: PLC0415 - see `sync_user` for why
 
-    location = storage.resolve_user_vault_path(config, user_id).location
+    location = storage.vault_location_for(config, user_id).location
     if location is None:
         return frozenset()
     if location.dir_fd is not None:
         os.close(location.dir_fd)
     return declared
+
+
+def _vault_is_enabled(config, user_id: str) -> bool:
+    """Has this user turned a vault on at all — the cycle's first question.
+
+    A vault is a file **and** a passphrase, and the passphrase is the half that
+    cannot become true by accident: nothing can be read without it, so a
+    ``.kdbx`` sitting in the folder of a user who has not provisioned one is
+    not a configured vault and must not be reported as a broken one.
+
+    **A configured ``vault_path`` counts too, and that is not the same
+    question.** It is an operator's line rather than the user's own act, so a
+    path with no passphrase behind it is a misconfiguration somebody has to be
+    told about — ``VaultPassphraseMissing`` names the command that fixes it.
+    Gating on the passphrase alone would make that state silent on every
+    surface a user sees. It costs no directory read either: a configured path
+    resolves without the folder being listed.
+
+    Never raises. A database that cannot be opened answers False on the
+    passphrase half, which is the safe direction for a background gate: the
+    next cycle asks again, where the other way round is a resolve and a read on
+    every user of a deployment whose database is gone.
+    """
+    raw = config.vault_path_for(user_id)
+    if isinstance(raw, str) and raw.strip():
+        return True
+    return _passphrase_present(config, user_id)
+
+
+def _passphrase_present(config, user_id: str) -> bool:
+    """Does this user have a vault passphrase row. Presence, never a value.
+
+    Presence rather than a successful decrypt: a row that will not decrypt is
+    still a vault somebody configured, and the class that says so is
+    ``VaultKeyUnusable`` from further down the cycle rather than silence here.
+    """
+    if config.db_path is None:
+        return False
+    try:
+        return secrets_store.secret_exists(
+            config.db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+        )
+    except Exception:  # noqa: BLE001 - a gate, never the work
+        logger.warning(
+            "vault: %s: could not check for a stored passphrase", _label(user_id)
+        )
+        return False
+
+
+def _resolution_outcome(refusal: str | None) -> VaultError | None:
+    """Which failure, if any, a resolution with no location is.
+
+    Three answers from two new refusal ids, and collapsing any pair of them
+    loses something:
+
+    - ``VAULT_DIR_EMPTY`` is :class:`VaultMissing`. This user has a passphrase,
+      so they have configured a vault and the file is not there — the existing
+      class, its existing retry rule and its existing notification, because
+      "the file went away" is worth saying.
+    - ``VAULT_DIR_UNCHOSEN`` is **nothing at all**. Several files and none
+      chosen is a question for the settings card, not a fault: reporting it as
+      a failure would push a notification at a user whose answer is one
+      dropdown away, every cycle until they answer it.
+    - Any ``VAULT_PATH_*`` id is :class:`VaultPathRefused`, unchanged — a
+      configured path the daemon may not open is an operator's to fix.
+    """
+    from . import storage  # noqa: PLC0415 - see `sync_user`
+
+    if refusal is None or refusal == storage.VAULT_DIR_UNCHOSEN:
+        return None
+    if refusal == storage.VAULT_DIR_EMPTY:
+        return VaultMissing("no vault file in the vault folder")
+    return VaultPathRefused(refusal)
 
 
 def sync_user(
@@ -1481,8 +1588,12 @@ def sync_user(
 
     The order is the design and each step earns its place ahead of the next:
 
-    1. **Resolve.** No ``vault_path`` is not a failure and is reported as
-       ``OUTCOME_NOT_CONFIGURED``; a *refused* path is ``VaultPathRefused``.
+    0. **Is a vault switched on at all?** :func:`_vault_is_enabled`, and it is
+       ahead of the resolve because the resolve now lists a directory, which on
+       the deployment shape this runs on is a FUSE mount. A user with neither a
+       passphrase nor a configured path is skipped before any file is touched.
+    1. **Resolve.** No file is not a failure; which of its two shapes *is* one
+       is :func:`_resolution_outcome`.
     2. **Read the bytes and hash them.** Bounded and cheap, and it needs no
        library at all — ``pykeepass`` is not imported on a cycle that stops here.
     3. **Compare the digest.** An unchanged file stops the cycle: no key
@@ -1518,20 +1629,20 @@ def sync_user(
     if force:
         reset_sync_state(user_id)
 
-    resolution = storage.resolve_user_vault_path(config, user_id)
+    if not _vault_is_enabled(config, user_id):
+        # The feature is off for this user, which is every user by default.
+        # Not a state worth remembering, and not one to report a transition
+        # out of.
+        return VaultSyncResult(user_id=user_id, outcome=OUTCOME_NOT_CONFIGURED)
+
+    resolution = storage.vault_location_for(config, user_id)
     if resolution.location is None:
-        if resolution.refusal is None:
-            # The feature is off for this user. Not a state worth remembering,
-            # and not one to report a transition out of.
+        exc = _resolution_outcome(resolution.refusal)
+        if exc is None:
             return VaultSyncResult(user_id=user_id, outcome=OUTCOME_NOT_CONFIGURED)
         return _publish(
             config,
-            _settle(
-                user_id,
-                VaultPathRefused(resolution.refusal),
-                digest=None,
-                path="",
-            ),
+            _settle(user_id, exc, digest=None, path=""),
             deliver=deliver,
         )
 
@@ -1911,7 +2022,16 @@ def vault_status(
     raw = config.vault_path_for(user_id)
     owned = tuple(sorted(config.vault_services_for(user_id)))
     last = _SYNC_STATE.get(user_id, (None, ""))[1]
-    if not raw:
+    # `configured` is the pair §7 makes the enable — a passphrase, or an
+    # operator's path — plus the folder having settled on a file, which covers
+    # the user who has dropped one in and not yet generated a passphrase. Read
+    # off `vault_path_for` alone it would answer False for every folder user,
+    # and the card would have no sync record to render.
+    present = _passphrase_present(config, user_id)
+    resolution = storage.vault_location_for(config, user_id)
+    if not (raw or present or resolution.location is not None):
+        # Nothing to close: this arm is reached only where the resolution found
+        # no file, which is where it holds no descriptor.
         return VaultStatusReport(user_id=user_id, configured=False, owned=owned)
 
     recorded: dict | None = None
@@ -1931,30 +2051,26 @@ def vault_status(
             recorded_reason=str(recorded.get("reason") or ""),
         )
 
-    resolution = storage.resolve_user_vault_path(config, user_id)
     if resolution.location is None:
+        # The two folder ids reach here beside the `VAULT_PATH_*` ones, and
+        # they do not all name a failure: an unchosen folder has a sentence for
+        # the card and no outcome at all, because nothing about it is broken.
+        exc = _resolution_outcome(resolution.refusal)
         return _with_record(
             VaultStatusReport(
                 user_id=user_id,
                 configured=True,
                 refusal=resolution.refusal or "",
                 owned=owned,
-                outcome=VaultPathRefused.__name__,
-                reason=notification_reason(VaultPathRefused.__name__),
+                passphrase_present=present,
+                outcome=type(exc).__name__ if exc is not None else "",
+                reason=resolution_reason(resolution.refusal),
                 last_outcome=last,
             )
         )
 
     location = resolution.location
-    # Everything from here to the close is inside the guard, including the
-    # presence lookup. That opens a SQLite connection and can raise on a locked
-    # or missing database, and it used to sit above the `try` — which leaks the
-    # descriptor. Harmless from a one-shot CLI process and not harmless from
-    # §9's long-lived web endpoint, which is one leaked fd per failed request.
     try:
-        present = secrets_store.secret_exists(
-            config.db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
-        )
         report = _with_record(
             VaultStatusReport(
                 user_id=user_id,

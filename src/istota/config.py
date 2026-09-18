@@ -2577,13 +2577,20 @@ class Config:
         `any(self.vault_path_for(u) for u in self.users)` is the wrong shape for
         that: `any` short-circuits on the first truthy value, so it is cheap
         exactly when somebody has a vault and costs one database open *per user*
-        when nobody does — which is every deployment by default, for ever. The
-        TOML half needs no database at all and is asked first; the row half is
-        one listing rather than one lookup per user.
+        when nobody does — which is every deployment by default, for ever.
 
-        `list_vault_configs` never raises and answers `{}` for a missing table,
-        so this degrades to the TOML answer rather than switching a configured
-        vault off — the safe direction, since the other one is a deployment that
+        **The question it asks is now "is there a stored vault passphrase"**,
+        and that is the enable rather than a proxy for it: a vault is a file in
+        the folder *and* a passphrase, the passphrase is the half that cannot
+        become true by accident, and a file with no passphrase can be read by
+        nothing. It is also one indexed lookup where the path half is a
+        directory listing per user. An operator's `[users.<id>] vault_path` is
+        still asked first, because it needs no database at all — but it is the
+        same pair in the end: without a passphrase, that user's cycle reports
+        `VaultNoPassphrase` and applies nothing.
+
+        Degrades to the TOML answer rather than switching a configured vault
+        off — the safe direction, since the other one is a deployment that
         silently stops applying a file the user is still editing.
         """
         for user in self.users.values():
@@ -2593,12 +2600,17 @@ class Config:
         if self.db_path is None or not Path(self.db_path).exists():
             return False
         try:
-            from . import user_vault_config as _uvc  # noqa: PLC0415 - import cost
-            rows = _uvc.list_vault_configs(Path(self.db_path))
+            from . import secrets_store  # noqa: PLC0415 - import cost
+            from .secrets_vault import (  # noqa: PLC0415 - import cost
+                VAULT_PASSPHRASE_KEY,
+                VAULT_PASSPHRASE_SERVICE,
+            )
+            return secrets_store.any_user_has_secret(
+                Path(self.db_path), VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+            )
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("vault config listing failed: %s", e)
+            logger.debug("vault passphrase lookup failed: %s", e)
             return False
-        return any(row.vault_path for row in rows.values())
 
     def vault_services_for(
         self, user_id: str, conn: "sqlite3.Connection | None" = None

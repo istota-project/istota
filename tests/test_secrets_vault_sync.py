@@ -938,6 +938,124 @@ class TestSyncAll:
 # ---------------------------------------------------------------------------
 
 
+class TestTheEnableGate:
+    """What switches a cycle on now, and what each empty answer costs.
+
+    The gate used to be a configured `vault_path`. It is now that **or** a
+    stored passphrase, which is what lets a user turn a vault on by dropping a
+    file in the folder and generating a passphrase, with nothing typed
+    anywhere. Its shape is what keeps the folder listing off every user's tick:
+    a user with neither is skipped before any file is touched.
+    """
+
+    def _folder(self, config: Config) -> Path:
+        folder = _user_root(config) / config.bot_dir_name / "vault"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def test_a_file_in_the_folder_with_no_passphrase_is_not_configured(
+        self, tmp_path, secret_key,
+    ):
+        """Half the pair is not a vault, and reporting it as a broken one
+        would notify a user who has not finished switching it on."""
+        from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
+
+        config = _vault_config(tmp_path, vault_path="", services=[])
+        _write_vault(self._folder(config) / "personal.kdbx")
+
+        result = sync_user(config, "alice")
+        assert result.outcome == OUTCOME_NOT_CONFIGURED
+        assert result.transition is False
+
+    def test_neither_half_touches_the_filesystem(
+        self, tmp_path, secret_key, monkeypatch,
+    ):
+        """Every user by default, on every tick."""
+        from istota import secrets_vault
+
+        config = _vault_config(tmp_path, vault_path="", services=[])
+
+        def _refuse(*args, **kwargs):  # pragma: no cover - the point is no call
+            raise AssertionError("the vault folder was listed")
+
+        monkeypatch.setattr(storage, "list_vault_files", _refuse)
+        result = secrets_vault.sync_user(config, "alice")
+        assert result.outcome == secrets_vault.OUTCOME_NOT_CONFIGURED
+
+    def test_a_passphrase_and_one_file_in_the_folder_applies_it(
+        self, tmp_path, secret_key,
+    ):
+        """The whole of the happy path: drop the file in, generate a
+        passphrase, and nothing is stored to select anything."""
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config = _vault_config(tmp_path, vault_path="", services=["karakeep"])
+        _write_vault(self._folder(config) / "personal.kdbx")
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == OUTCOME_OK
+        assert result.apply is not None and result.apply.created == 2
+
+    def test_a_passphrase_and_an_empty_folder_is_a_missing_file(
+        self, tmp_path, secret_key,
+    ):
+        """The user had a vault and the file went away, which is worth saying."""
+        from istota.secrets_vault import VaultMissing, sync_user
+
+        config = _vault_config(tmp_path, vault_path="", services=[])
+        self._folder(config)
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == VaultMissing.__name__
+        assert result.transition is True
+
+    def test_several_files_and_no_choice_is_quiet(self, tmp_path, secret_key):
+        """A question for the settings card, not a failure.
+
+        Reporting it as one would push a notification at a user whose answer is
+        one dropdown away, every cycle until they answer it.
+        """
+        from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
+
+        config = _vault_config(tmp_path, vault_path="", services=[])
+        folder = self._folder(config)
+        _write_vault(folder / "personal.kdbx")
+        _write_vault(folder / "work.kdbx")
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == OUTCOME_NOT_CONFIGURED
+        assert result.transition is False
+
+    def test_the_stored_choice_decides_which_one_is_read(
+        self, tmp_path, secret_key,
+    ):
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config = _vault_config(tmp_path, vault_path="", services=["karakeep"])
+        folder = self._folder(config)
+        _write_vault(folder / "personal.kdbx", karakeep=False, ntfy=True)
+        _write_vault(folder / "work.kdbx")
+        storage.store_vault_file(config, "alice", "work.kdbx")
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == OUTCOME_OK
+        assert str(result.path).endswith("work.kdbx")
+
+    def test_the_deployment_gate_sees_a_passphrase_alone(
+        self, tmp_path, secret_key,
+    ):
+        """`any_vault_configured` is what the scheduler's interval gate reads,
+        so a folder-configured user has to turn it on without a TOML line."""
+        config = _vault_config(tmp_path, vault_path="", services=[])
+        assert config.any_vault_configured() is False
+        _provision_passphrase(config)
+        assert config.any_vault_configured() is True
+
+
 class TestNoValueIsLogged:
     def test_no_sync_log_record_carries_a_value(self, ready, caplog):
         from istota.secrets_vault import sync_user
