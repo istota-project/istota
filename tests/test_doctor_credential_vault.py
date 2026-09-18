@@ -36,7 +36,12 @@ import pytest
 
 from istota import db, doctor, secrets_store
 from istota.config import UserConfig
-from istota.doctor import FAIL, OK, SKIP, WARN
+from istota.doctor import DEPLOYMENT, FAIL, OK, SKIP, WARN
+from istota.skills._loader import (
+    OVERLAY_IS_A_SYMLINK,
+    OVERLAY_NOT_A_REGULAR_FILE,
+    OVERLAY_UNREADABLY_LARGE,
+)
 
 PASSPHRASE = "doctor-vault-fixture-passphrase-not-a-real-one"
 
@@ -116,8 +121,55 @@ def _provision(config, user_id="alice", value=PASSPHRASE):
     secrets_store.upsert_secret(config.db_path, user_id, "vault", "passphrase", value)
 
 
+def _add_mixed_users(config):
+    """Three more users, one per failure class, beside `vault_config`'s working one.
+
+    Every fixture in this file was single-user until a review found that the
+    path arm returned on whichever of its three finding lists filled first — so
+    one refused path dropped every other user's finding, including the
+    misaimed-at-the-database warning that arm exists for, and reported a user
+    whose *file* was merely missing under a FAIL whose remedy told them to edit
+    a config line that was correct. Neither half is visible with one user.
+    """
+    ws = Path(config.workspace_path)
+    (ws / "Users" / "dave" / "config").mkdir(parents=True, exist_ok=True)
+    _write_vault(ws / "Users" / "dave" / "config" / "vault.kdbx")
+    # Carol's directory has to exist and be empty: the resolver refuses a path
+    # whose *directory* is missing (`no_directory_at_the_configured_path`, its
+    # own reason id), so without this she is a refusal rather than the
+    # resolves-but-the-file-is-absent case these tests are about.
+    (ws / "Users" / "carol" / "config").mkdir(parents=True, exist_ok=True)
+    config.users["bob"] = UserConfig(
+        display_name="B", vault_path=str(ws / "Users" / "carol" / "v.kdbx")
+    )
+    config.users["carol"] = UserConfig(
+        display_name="C", vault_path="config/missing.kdbx"
+    )
+    config.users["dave"] = UserConfig(
+        display_name="D", vault_path="config/vault.kdbx", vault_services=["ntfy"]
+    )
+    return config
+
+
 def _run(config, probe=True):
     return _by_name(doctor.check_credential_vault(config, probe))
+
+
+def _contents(config, probe=True):
+    """The parse arm, which is a registry entry of its own.
+
+    Split out because opening a vault costs a mount read, a Fernet decrypt that
+    writes `last_accessed_at`, and an Argon2id derivation *per configured user*
+    — and `run_checks`' `skip` matches by prefix, so a dotted child of
+    `security.credential_vault` could not be excluded from the heartbeat and the
+    hourly sweep without taking the four cheap arms with it.
+    """
+    return doctor.check_vault_contents(config, probe)
+
+
+def _all(config, probe=True):
+    """Every result about the vault, across both registry entries."""
+    return [*doctor.check_credential_vault(config, probe), _contents(config, probe)]
 
 
 class TestWhenNoVaultIsConfigured:
@@ -214,12 +266,12 @@ class TestTheLibraryArm:
         monkeypatch.setattr(importlib.util, "find_spec", _boom)
         assert doctor._vault_library_available() is False
 
-    def test_the_contents_arm_skips_without_the_library(
+    def test_the_contents_check_skips_without_the_library(
         self, vault_config, secret_key_env, monkeypatch
     ):
         _provision(vault_config)
         monkeypatch.setattr(doctor, "_vault_library_available", lambda: False)
-        result = _run(vault_config)["security.credential_vault.contents"]
+        result = _contents(vault_config)
         assert result.status == SKIP
         assert "library" in result.detail
 
@@ -304,26 +356,33 @@ class TestThePathArm:
         assert result.status == WARN
         assert "nothing at the path" in result.detail
 
-    def test_a_zero_byte_file_is_named_as_a_mid_write(self, vault_config):
+    def test_an_empty_file_is_named_as_a_mid_write(self, vault_config):
         path = Path(vault_config.workspace_path) / "Users" / "alice" / "config"
         (path / "empty.kdbx").write_bytes(b"")
         vault_config.users["alice"].vault_path = "config/empty.kdbx"
         result = _run(vault_config)["security.credential_vault.path"]
         assert result.status == WARN
-        assert "zero bytes" in result.detail
+        assert "empty" in result.detail
+        assert "mid-write" in result.remedy
 
     def test_a_fifo_is_reported_without_blocking(self, vault_config):
-        """`stat` rather than the read `read_vault_bytes` performs, and this is
-        the case that decides it: `open(2)` on a FIFO blocks until somebody
-        writes, on an arm that runs unattended with no timeout behind it. A
-        `stat` answers immediately. The test hangs rather than failing if that
-        ever stops being true, which is the production failure exactly."""
+        """The reader refuses a FIFO immediately rather than blocking on it.
+
+        This is the case worth pinning and the reason is **not** the one an
+        earlier version of this file gave. `open(2)` on a FIFO would block until
+        somebody writes, which on an unattended arm with no timeout behind it is
+        a hung boot path — and `read_overlay_bytes` opens
+        `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and checks `S_ISREG` on the fd
+        precisely so it does not. The property belongs to that primitive, which
+        is why this arm reuses it rather than keeping a fourth copy of the same
+        three answers. The test hangs rather than failing if it is ever lost.
+        """
         path = Path(vault_config.workspace_path) / "Users" / "alice" / "config"
         os.mkfifo(path / "pipe.kdbx")
         vault_config.users["alice"].vault_path = "config/pipe.kdbx"
         result = _run(vault_config)["security.credential_vault.path"]
         assert result.status == WARN
-        assert "not a regular file" in result.detail
+        assert OVERLAY_NOT_A_REGULAR_FILE in result.detail
 
     def test_an_oversize_file_is_reported_against_the_cap(self, vault_config):
         from istota.secrets_vault import VAULT_READ_CAP_BYTES
@@ -337,7 +396,7 @@ class TestThePathArm:
         vault_config.users["alice"].vault_path = "config/big.kdbx"
         result = _run(vault_config)["security.credential_vault.path"]
         assert result.status == WARN
-        assert "read cap" in result.detail
+        assert OVERLAY_UNREADABLY_LARGE in result.detail
 
     def test_a_symlinked_leaf_is_reported_rather_than_followed(self, vault_config):
         """The reader refuses a symlinked leaf with `O_NOFOLLOW`, so following
@@ -347,32 +406,51 @@ class TestThePathArm:
         vault_config.users["alice"].vault_path = "config/link.kdbx"
         result = _run(vault_config)["security.credential_vault.path"]
         assert result.status == WARN
-        assert "symlink" in result.detail
+        assert OVERLAY_IS_A_SYMLINK in result.detail
 
-    def test_the_descriptor_is_closed_on_every_path(self, vault_config, monkeypatch):
-        """A gate running per user per sweep leaks one descriptor a cycle
+    def test_the_refusal_ids_are_the_readers_own_words(self, vault_config):
+        """Not decoration: the id in this report is the id in the daemon's log.
+
+        `read_overlay_bytes` is the one reader for all of these, so reusing it
+        here means an operator greps one word rather than translating between a
+        doctor sentence and a sync warning. The three above are asserted against
+        the imported constants for the same reason the resolver's `VAULT_PATH_*`
+        words are.
+        """
+        assert OVERLAY_IS_A_SYMLINK == "overlay_is_a_symlink"
+        assert OVERLAY_NOT_A_REGULAR_FILE == "overlay_not_a_regular_file"
+        assert OVERLAY_UNREADABLY_LARGE == "overlay_unreadably_large"
+
+    @pytest.mark.parametrize("probe", [False, True])
+    def test_no_descriptor_is_left_open(self, vault_config, secret_key_env, probe):
+        """Counted rather than recorded, because recording could not settle it.
+
+        A gate running per user per sweep leaks one descriptor a cycle
         otherwise, which ends as a daemon that cannot open a socket days later
-        with nothing pointing back here. Recorded rather than probed: an fd
-        number is recyclable, so checking one is closed by trying to use it
-        tests whichever fd the allocator handed out next."""
-        closed = []
-        real_close = os.close
-        monkeypatch.setattr(
-            os, "close", lambda fd: (closed.append(fd), real_close(fd))[1]
-        )
-        opened = []
-        real_stat = os.stat
+        with nothing pointing back here. The first version of this test recorded
+        `os.close` calls and asserted the opened set was a subset of the closed
+        one — which an fd number satisfies whenever *anything* closed that
+        number at any point in the run, and `open_overlay_dir` closes its
+        intermediate component descriptors during the walk, so the closed set
+        arrives already populated with recyclable numbers. Counting the
+        process's open descriptors before and after is the measurement that
+        discriminates.
 
-        def _record(path, *args, dir_fd=None, **kwargs):
-            if dir_fd is not None:
-                opened.append(dir_fd)
-            return real_stat(path, *args, dir_fd=dir_fd, **kwargs)
+        Driven over a four-user mix, so the refusal and missing-file paths are
+        exercised rather than the happy one alone, and over both probe modes,
+        since the parse takes a second resolve of its own.
+        """
+        _provision(vault_config)
+        _add_mixed_users(vault_config)
 
-        monkeypatch.setattr(os, "stat", _record)
-        _run(vault_config, probe=False)
+        def _open_fds():
+            return len(os.listdir("/dev/fd"))
 
-        assert opened, "the relative form handed over no descriptor to close"
-        assert set(opened) <= set(closed)
+        _all(vault_config, probe)  # warm any lazy import before measuring
+        before = _open_fds()
+        for _ in range(5):
+            _all(vault_config, probe)
+        assert _open_fds() == before
 
     def test_an_absolute_path_under_the_database_directory_warns(
         self, vault_config, tmp_path
@@ -391,6 +469,65 @@ class TestThePathArm:
         assert result.status == WARN
         assert "database" in result.detail
         assert "alice" in result.detail
+
+    def test_one_refusal_does_not_swallow_every_other_users_finding(
+        self, vault_config
+    ):
+        """The defect a single-user fixture cannot see.
+
+        The arm accumulated three independent lists and returned on the first
+        non-empty one, so `notes` — the misaimed-at-the-database warning, which
+        is the whole reason that branch exists — was reachable only on a
+        deployment where nobody had a refusal and nobody's file was missing.
+        One refused path dropped it, and dropped every other user's finding with
+        it.
+        """
+        _add_mixed_users(vault_config)
+        aimed = vault_config.db_path.parent / "istota.db"
+        aimed.write_bytes(b"not a kdbx")
+        vault_config.users["dave"].vault_path = str(aimed)
+
+        result = _run(vault_config, probe=False)["security.credential_vault.path"]
+        assert result.status == FAIL  # bob is refused
+        for user_id in ("bob", "carol", "dave"):
+            assert user_id in result.detail, f"{user_id} was dropped from the report"
+        assert "alice" not in result.detail  # hers is fine, and counted instead
+        assert "1 other(s) are fine" in result.detail
+
+    def test_a_missing_file_is_not_reported_under_the_refusal_remedy(
+        self, vault_config
+    ):
+        """The second half of the same defect. `refused + problems` were joined
+        into one string under the FAIL wording and the FAIL remedy, so a user
+        whose path resolves and whose *file* is missing was told the daemon may
+        not open their path and sent to correct a config line that was right.
+
+        The status is still FAIL, because somebody genuinely is refused — what
+        must hold is that the remedy carries both sentences, so each user's
+        condition has an action behind it.
+        """
+        _add_mixed_users(vault_config)
+        result = _run(vault_config, probe=False)["security.credential_vault.path"]
+        assert result.status == FAIL
+        assert "carol: nothing at the path" in result.detail
+        assert "vault_path in config.toml" in result.remedy  # for bob
+        assert "the user's own device" in result.remedy  # for carol
+
+    def test_a_raise_inside_the_per_user_body_is_contained(
+        self, vault_config, monkeypatch
+    ):
+        """The one block in this arm holding a descriptor has a `finally` and no
+        `except` of its own, so an escape would be caught by `run_checks` and
+        collapsed into a single synthetic FAIL that replaced all four of this
+        check's findings."""
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(doctor, "_vault_file_note", _boom)
+        result = _run(vault_config, probe=False)["security.credential_vault.path"]
+        assert result.status == WARN
+        assert "RuntimeError" in result.detail
 
     def test_a_relative_path_under_the_database_directory_does_not_warn(
         self, make_config, tmp_path
@@ -463,12 +600,10 @@ class TestThePassphraseArm:
         assert "alice" in result.detail
 
 
-class TestTheContentsArm:
+class TestTheContentsCheck:
     def test_probe_false_opens_nothing(self, vault_config, secret_key_env):
         _provision(vault_config)
-        result = _run(vault_config, probe=False)[
-            "security.credential_vault.contents"
-        ]
+        result = _contents(vault_config, probe=False)
         assert result.status == SKIP
         assert "probing is disabled" in result.detail
 
@@ -476,7 +611,7 @@ class TestTheContentsArm:
         self, vault_config, secret_key_env
     ):
         _provision(vault_config)
-        result = _run(vault_config)["security.credential_vault.contents"]
+        result = _contents(vault_config)
         assert result.status == OK
         assert "2 of 2 owned group(s) present" in result.detail
         assert "2 key(s)" in result.detail
@@ -487,7 +622,7 @@ class TestTheContentsArm:
         """The class is a stable word the operator can grep; its human sentence
         is the notification's job and carries a remedy aimed at the user."""
         _provision(vault_config, value="the-wrong-passphrase-entirely-and-then-some")
-        result = _run(vault_config)["security.credential_vault.contents"]
+        result = _contents(vault_config)
         assert result.status == WARN
         assert "VaultLocked" in result.detail
         assert "vault-status" in result.remedy
@@ -502,7 +637,7 @@ class TestTheContentsArm:
 
         _provision(vault_config)
         monkeypatch.setattr(secrets_vault, "vault_status", _boom)
-        result = _run(vault_config)["security.credential_vault.contents"]
+        result = _contents(vault_config)
         assert result.status == WARN
         assert "RuntimeError" in result.detail
 
@@ -533,7 +668,7 @@ class TestTheContentsArm:
         _provision(vault_config)
         rendered = " ".join(
             f"{r.name} {r.status} {r.detail} {r.remedy}"
-            for r in doctor.check_credential_vault(vault_config, True)
+            for r in _all(vault_config, True)
         )
         for leaked in (
             UNOWNED_GROUP,
@@ -579,8 +714,160 @@ class TestTheRegistryContract:
             "security.credential_vault.schedule",
             "security.credential_vault.path",
             "security.credential_vault.passphrase",
-            "security.credential_vault.contents",
         }
+
+    def test_the_contents_check_is_a_sibling_rather_than_a_child(
+        self, vault_config, secret_key_env
+    ):
+        """The naming is load-bearing and reads like a style choice.
+
+        `only` and `skip` both match by **prefix**, so a
+        `security.credential_vault.contents` would be pulled in by every caller
+        naming the parent and — worse — re-included by any skip list that named
+        the parent to exclude the expensive arm. A sibling name is what lets the
+        two be selected apart, which is the entire mechanism the split exists to
+        use.
+        """
+        _provision(vault_config)
+        assert doctor.CHECK_SCOPES["security.vault_contents"] == DEPLOYMENT
+        cheap = doctor.run_checks(
+            vault_config, only=("security.credential_vault",), probe=True
+        )
+        assert not any(r.name == "security.vault_contents" for r in cheap)
+
+        both = doctor.run_checks(
+            vault_config,
+            only=("security.credential_vault", "security.vault_contents"),
+            probe=True,
+        )
+        assert sum(r.name == "security.vault_contents" for r in both) == 1
+
+    def test_the_expensive_check_is_skipped_by_the_sweep_and_the_heartbeat(self):
+        """Both lists exclude by registry name, and both are the tree's own
+        mechanism for a cost paid per user. The sweep and the heartbeat are the
+        two unattended callers whose cadence makes the Argon2id derivation per
+        configured vault multiply; the boot run and `istota doctor` still answer
+        it."""
+        from istota.heartbeat import _SELF_CHECK_SKIPPED
+        from istota.scheduler import SWEEP_SKIPPED_CHECKS
+
+        assert "security.vault_contents" in SWEEP_SKIPPED_CHECKS
+        assert "security.vault_contents" in _SELF_CHECK_SKIPPED
+        # And neither names the parent, which would take the four cheap arms
+        # with it by prefix.
+        assert "security.credential_vault" not in SWEEP_SKIPPED_CHECKS
+        assert "security.credential_vault" not in _SELF_CHECK_SKIPPED
+
+    def test_the_sweep_still_answers_the_cheap_arms(self, vault_config):
+        """The point of the split: a vault that stops resolving is still
+        reported hourly, and only the parse waits for a boot or an operator."""
+        from istota.scheduler import SWEEP_SKIPPED_CHECKS
+
+        names = {
+            r.name
+            for r in doctor.run_checks(
+                vault_config,
+                only=("security.credential_vault", "security.vault_contents"),
+                skip=SWEEP_SKIPPED_CHECKS,
+                probe=True,
+            )
+        }
+        assert "security.credential_vault.path" in names
+        assert "security.vault_contents" not in names
+
+
+class TestTheDatabaseDirectoryComparison:
+    """`_vault_db_dir` answers None rather than guessing, and both other answers
+    used to be wrong rather than merely unhelpful."""
+
+    def test_an_absolute_db_path_gives_its_resolved_parent(self, tmp_path, make_config):
+        config = make_config(db_path=tmp_path / "data" / "istota.db")
+        assert doctor._vault_db_dir(config) == Path(
+            os.path.realpath(tmp_path / "data")
+        )
+
+    @pytest.mark.parametrize("raw", ["", None, "data/istota.db", "istota.db"])
+    def test_anything_but_an_absolute_path_answers_none(
+        self, raw, make_config, monkeypatch
+    ):
+        """`Config.db_path` *defaults* to the relative `data/istota.db` and can
+        be unset, and `Path("").parent` is `Path(".")` — which `realpath`
+        resolves to the process's current directory. So the earlier version was
+        wrong in both directions: unset compared every absolute `vault_path`
+        under the daemon's cwd against a directory holding no database (noisy,
+        and plausible on the standalone shape, where the daemon may be started
+        from the operator's home), and relative compared against a `data/` with
+        nothing to do with the database (permissive — a genuinely misaimed path
+        went unreported).
+
+        Refusing to answer is the right failure for a WARN about a mistake, and
+        every shipped deployment renders an absolute `db_path`, so nothing real
+        is lost. The cwd is moved under the test's own tmp dir so a stray answer
+        would be visible rather than accidentally matching.
+        """
+        monkeypatch.chdir(make_config().temp_dir.parent)
+        config = make_config()
+        config.db_path = raw
+        assert doctor._vault_db_dir(config) is None
+
+    def test_an_unset_db_path_does_not_warn_about_a_vault_under_the_cwd(
+        self, vault_config, tmp_path, monkeypatch
+    ):
+        """The noisy direction, driven rather than asserted on the helper.
+
+        With `db_path` unset, `realpath(Path("").parent)` is the cwd, so an
+        absolute `vault_path` sitting under it was reported as "inside the
+        framework database's own directory" with a remedy telling the operator
+        to move a file that was where it belonged.
+        """
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (outside / "vault.kdbx").write_bytes(b"not a kdbx, but it is a file")
+        monkeypatch.chdir(outside)
+        vault_config.db_path = None
+        vault_config.users["alice"].vault_path = str(outside / "vault.kdbx")
+
+        result = _run(vault_config, probe=False)["security.credential_vault.path"]
+        assert "database" not in result.detail
+
+
+class TestAMalformedFieldDoesNotCostEveryFinding:
+    def test_a_non_iterable_vault_services_is_dropped_rather_than_raising(
+        self, vault_config
+    ):
+        """`list(x or ())` raises `TypeError` on an int, and `run_checks`
+        contains that into one synthetic FAIL replacing all four findings — so a
+        single malformed field costs the operator every answer the check had
+        already computed. Unreachable through `load_config`, which coerces the
+        field before the loader's own filter sees it, and guarded for the same
+        reason `_vault_users` guards the type of `vault_path`."""
+        vault_config.users["alice"].vault_services = 5
+        results = _run(vault_config, probe=False)
+        assert len(results) == 4
+        assert results["security.credential_vault.schedule"].detail.endswith(
+            "(alice owns nothing)"
+        )
+
+    def test_a_non_string_entry_is_dropped_rather_than_rendered(self, vault_config):
+        vault_config.users["alice"].vault_services = ["karakeep", 7, None]
+        result = _run(vault_config, probe=False)[
+            "security.credential_vault.schedule"
+        ]
+        assert "karakeep" in result.detail
+        assert "7" not in result.detail
+        assert "None" not in result.detail
+
+    def test_through_the_registry_a_malformed_field_still_yields_four_findings(
+        self, vault_config
+    ):
+        """The blast radius, asserted where it actually bites: `run_checks` is
+        what turns a raise into the synthetic FAIL."""
+        vault_config.users["alice"].vault_services = 5
+        results = doctor.run_checks(
+            vault_config, only=("security.credential_vault",), probe=False
+        )
+        assert len(results) == 4
+        assert not any("the check itself raised" in r.detail for r in results)
 
 
 class TestTheUserLabel:

@@ -2907,9 +2907,12 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     notification is what reaches *them*; this is the operator's half, and it is
     the only surface that answers for every configured user at once.
 
-    Five findings, because they fail independently and are fixed in five
+    Four findings, because they fail independently and are fixed in four
     different places. A deployment where no user has a ``vault_path`` — which is
-    every deployment by default — gets one ``SKIP`` instead.
+    every deployment by default — gets one ``SKIP`` instead. The fifth question
+    §10 asks — what each file turns out to hold — is :func:`check_vault_contents`
+    under a registry name of its own, and that split is a cost decision stated
+    there rather than a tidiness one.
 
     ``…library`` — is ``pykeepass`` installed. Tested with
     ``importlib.util.find_spec`` and **never with an import**: this check runs on
@@ -2942,38 +2945,16 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     only**: ``secret_exists``, never a decrypt, so this arm costs one indexed
     query per user and reveals nothing.
 
-    ``…contents`` — under ``probe``, open each vault and report **counts**.
-    §3 makes service and key names loggable in the sync log and a ``CheckResult``
-    is a different surface: it is rendered into the daemon's boot log *and* into
-    the admin Health pane, so a detail line enumerating one user's credential
-    keys is read by every admin. Counts are what goes in.
-
-    **The spec's parenthetical about when that arm runs is wrong about this
-    tree, and the correction matters more than the claim.** §10 says the arm is
-    "behind ``probe`` rather than running on the boot sweep". ``run_checks``
-    defaults ``probe=True``, and the two unattended callers — the scheduler's
-    startup run and its hourly sweep — take the default, as does the
-    ``self-check`` heartbeat. So this *does* run unattended, and the cost is a
-    bounded read plus one Argon2id derivation per configured vault per sweep,
-    plus a ``last_accessed_at`` stamp on that user's passphrase row. §10's
-    *conclusion* survives the correction and is why the arm stays: the sync
-    already does all three in this same process every time the file changes, and
-    a locked vault already spends one derivation every 300 seconds by design, so
-    nothing here widens the trust domain. What it adds is about a second of CPU
-    per vault user per sweep, and the same on the boot path.
+    Every arm here is cheap: a ``find_spec``, a config read, one bounded file
+    read per user, and one indexed query per user. That is what lets all four
+    run on every surface the registry reaches, and it is the whole reason the
+    parse lives elsewhere.
 
     Never raises, spawns nothing under any value of ``probe``, and closes the
     directory descriptor ``resolve_user_vault_path`` hands over on every path —
     a leak here is one descriptor per vault user per hourly sweep, which ends as
     a daemon that cannot open a socket with nothing pointing back at this
     function.
-
-    One cost stated rather than left for a reader to find: the path is resolved
-    twice per user per sweep, once here and once inside ``vault_status``. That
-    is two directory walks on a FUSE mount, and a *refused* path writes its
-    ``WARNING`` twice. Resolving once and threading the descriptor through would
-    mean this function owning a lifetime across the parse, which is what
-    ``vault_status``'s own ``finally`` exists to avoid.
     """
     prefix = "security.credential_vault"
     users = _vault_users(config)
@@ -2993,8 +2974,74 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
         _vault_schedule_result(config, secrets_vault, prefix, users),
         _vault_path_result(config, secrets_vault, storage, prefix, users),
         _vault_passphrase_result(config, secrets_store, secrets_vault, prefix, users),
-        _vault_contents_result(config, secrets_vault, prefix, users, probe),
     ]
+
+
+def check_vault_contents(config: "Config", probe: bool) -> CheckResult:
+    """Under ``probe``: open each configured vault and report what it holds, as counts.
+
+    **Its own registry entry rather than a fifth arm of
+    :func:`check_credential_vault`, and the reason is cost rather than shape.**
+    This is the only question about a vault that cannot be answered without
+    opening it, and opening one costs a read off the workspace mount, a Fernet
+    decrypt that *writes* ``last_accessed_at`` on that user's passphrase row, and
+    an Argon2id derivation — tuned to about a second, and paid **per configured
+    vault**. ``heartbeat._SELF_CHECK_SKIPPED``'s own docstring names exactly that
+    shape as what belongs on it ("a check whose cost is paid per *user* when the
+    answer is deployment-wide"), and ``scheduler.SWEEP_SKIPPED_CHECKS`` is the
+    same idea for the hourly sweep — but both exclude by registry *name*, so a
+    fifth arm could not be reached by either without taking the four cheap ones
+    with it. Both lists now name this check, on the ``runtime.framework_db``
+    precedent: answered at boot and on demand, not on every heartbeat and not
+    every hour.
+
+    **The name is a sibling rather than a child, deliberately.** ``only`` and
+    ``skip`` match by *prefix*, so a ``security.credential_vault.contents`` would
+    be selected by every caller naming the parent and silently re-included in any
+    list that skipped it — which is the mechanism this split exists to use.
+
+    **§10's parenthetical about when this runs is wrong about this tree, and the
+    correction is why the split happened at all.** It says the arm is "behind
+    ``probe`` rather than running on the boot sweep"; ``run_checks`` defaults
+    ``probe=True``, and the scheduler's startup run, its hourly sweep and the
+    ``self-check`` heartbeat all took the default. §10's *conclusion* survives —
+    the sync already performs the same read, unlock and stamp in this same
+    process whenever the file changes, so nothing here widens the trust domain —
+    and what the split fixes is the cost, not the boundary.
+
+    **Counts, never key names.** §3 makes service and key names loggable in the
+    sync log and a ``CheckResult`` is a different surface: it is rendered into
+    the daemon's boot log *and* into the admin Health pane, so a detail line
+    enumerating one user's credential keys is read by every admin.
+
+    Two costs left standing rather than hidden. The path is resolved a second
+    time here, inside ``vault_status``, so a *refused* path writes its
+    ``WARNING`` twice on a run that reaches both checks; threading one
+    descriptor through would mean owning a lifetime across the parse, which is
+    what ``vault_status``'s own ``finally`` exists to avoid. And nothing bounds
+    the read against a wedged ``fuse.rclone`` mount — ``O_NONBLOCK`` does not
+    apply to a regular file — which is a property this shares with
+    ``config.skill_overlays``, already walking the same mount on the same sweep.
+    """
+    name = "security.vault_contents"
+    users = _vault_users(config)
+    if not users:
+        return CheckResult(
+            name, SKIP, "no user has a vault_path configured, which is the default"
+        )
+    if not probe:
+        return CheckResult(name, SKIP, "probing is disabled; no vault file was opened")
+    if not _vault_library_available():
+        return CheckResult(
+            name,
+            SKIP,
+            "pykeepass is not installed, so no vault could be opened "
+            "(see security.credential_vault.library)",
+        )
+
+    from . import secrets_vault  # noqa: PLC0415
+
+    return _vault_contents_result(config, secrets_vault, name, users)
 
 
 def _vault_library_available() -> bool:
@@ -3030,6 +3077,25 @@ def _vault_library_result(prefix: str) -> CheckResult:
     )
 
 
+def _vault_declared_services(user) -> list[str]:
+    """One user's ``vault_services``, as a list of strings whatever it holds.
+
+    ``list(x or ())`` is the obvious spelling and raises ``TypeError`` on a
+    non-iterable — and a raise anywhere in this check is contained by
+    ``run_checks`` into one synthetic ``FAIL`` that replaces all five findings,
+    so a single malformed field costs the operator every answer this check had
+    already computed. Unreachable through ``load_config``, which coerces the
+    field to ``list[str]`` before the loader's own eligibility filter sees it,
+    and guarded anyway for the same reason ``_vault_users`` guards the type of
+    ``vault_path`` two functions up: the cost of being wrong is out of all
+    proportion to the cost of asking.
+    """
+    raw = getattr(user, "vault_services", None)
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
+        return []
+    return [service for service in raw if isinstance(service, str)]
+
+
 def _vault_schedule_result(config, secrets_vault, prefix: str, users) -> CheckResult:
     """Whether a cycle will run, and what each configured vault is set to own."""
     name = f"{prefix}.schedule"
@@ -3038,10 +3104,10 @@ def _vault_schedule_result(config, secrets_vault, prefix: str, users) -> CheckRe
     ineligible: list[str] = []
     for user_id in users:
         user = config.users.get(user_id)
-        services = list(getattr(user, "vault_services", None) or ())
+        services = _vault_declared_services(user)
         owned.append(
             f"{_vault_label(user_id)} owns "
-            + (", ".join(sorted(map(str, services))) if services else "nothing")
+            + (", ".join(sorted(_vault_label(s) for s in services)) if services else "nothing")
         )
         for service in services:
             # Defence in depth rather than a case with a remedy behind it.
@@ -3051,7 +3117,7 @@ def _vault_schedule_result(config, secrets_vault, prefix: str, users) -> CheckRe
             # unreachable `realpath` guard. It is here because the filter is
             # what the operator is being told, and a filter that stopped
             # running would otherwise show up as a deletion nobody explained.
-            if isinstance(service, str) and secrets_vault.service_refusal(service):
+            if secrets_vault.service_refusal(service):
                 ineligible.append(f"{_vault_label(user_id)}: {_vault_label(service)}")
 
     summary = "; ".join(owned)
@@ -3084,12 +3150,59 @@ def _vault_schedule_result(config, secrets_vault, prefix: str, users) -> CheckRe
     )
 
 
+#: The three things that can be wrong with one user's ``vault_path``, and the
+#: sentence that says what to do about each. A result names only the classes it
+#: found: the remedy for a refusal is a config edit and the remedy for a missing
+#: file is not, so a result carrying both has to carry both sentences.
+_VAULT_PATH_REMEDIES = {
+    "refused": (
+        "Correct [users.<id>] vault_path in config.toml. A relative path "
+        "resolves under that user's own workspace directory and may not leave "
+        "it; an absolute one is a host path and must resolve outside every "
+        "tree a task sandbox can write, which includes another user's "
+        "workspace."
+    ),
+    "file": (
+        "Check the file on the user's own device and the state of the "
+        "workspace mount — an empty file is what a sync caught mid-write "
+        "looks like."
+    ),
+    "aimed": (
+        "Point that vault_path at the KDBX file rather than into the framework "
+        "database's own directory. Nothing is exposed — the reader gets bytes "
+        "that are not a KeePass database and reports a corrupt vault — but the "
+        "notification will describe the wrong problem."
+    ),
+}
+
+
 def _vault_path_result(config, secrets_vault, storage, prefix: str, users) -> CheckResult:
-    """Per-user: does the configured path resolve, and is a usable file behind it."""
+    """Per-user: does the configured path resolve, and is a usable file behind it.
+
+    **One finding per user, never a first-non-empty-list return**, and that is a
+    correction rather than a style. The three conditions here are independent,
+    and the earlier shape returned on whichever list filled first — so a
+    deployment with one refused path dropped every other user's finding
+    entirely, including the misaimed-at-the-database warning this arm exists
+    for, and reported a user whose *file* was merely missing under a FAIL whose
+    text said the daemon may not open their path and whose remedy told them to
+    edit a config line that was correct. Both halves were invisible to a
+    single-user test, which is what every fixture here was.
+
+    So each user contributes its own clause, the status is the worst class
+    present, and the remedy is the union of the sentences for the classes that
+    actually occurred.
+
+    A refusal is the one FAIL: that set includes the cross-user typo — an
+    absolute ``vault_path`` under another user's workspace — which is the single
+    case in this design about an attack rather than a mistake, and the reason id
+    is carried verbatim so an operator can grep the daemon log for the same
+    word. Everything else the file can be is the user's own file being wrong,
+    which their notification already reaches them about.
+    """
     name = f"{prefix}.path"
-    refused: list[str] = []
-    problems: list[str] = []
-    notes: list[str] = []
+    findings: list[str] = []
+    classes: set[str] = set()
     ok = 0
 
     db_dir = _vault_db_dir(config)
@@ -3098,32 +3211,26 @@ def _vault_path_result(config, secrets_vault, storage, prefix: str, users) -> Ch
         try:
             resolution = storage.resolve_user_vault_path(config, user_id)
         except Exception as exc:  # noqa: BLE001 - the resolver never raises
-            refused.append(f"{label}: the resolver raised ({type(exc).__name__})")
+            findings.append(f"{label}: the resolver raised ({type(exc).__name__})")
+            classes.add("refused")
             continue
         location = resolution.location
         if location is None:
-            # `refusal` is a stable `VAULT_PATH_*` word rather than a sentence,
-            # which is the whole reason the resolver carries it: the same word
-            # is in the daemon log for every cycle that refused.
-            refused.append(f"{label}: {resolution.refusal or 'refused'}")
+            findings.append(f"{label}: refused, {resolution.refusal or 'no reason'}")
+            classes.add("refused")
             continue
+
+        clauses: list[str] = []
         try:
-            note = _vault_file_note(location, secrets_vault.VAULT_READ_CAP_BYTES)
-            # Only the absolute form, and the discriminator is the descriptor
-            # the resolver did not hand over. On the standalone shape the
-            # workspace, the temp dir and `db_path` all live under one
-            # directory, so an unconditional containment test would WARN about
-            # every ordinary *relative* vault there — and §1 refuses the
-            # absolute form under the workspace already, so a relative path
-            # landing under `db_path.parent` is that shape's normal state
-            # rather than a misaimed reader.
-            if location.dir_fd is None and db_dir is not None:
-                try:
-                    resolved = Path(os.path.realpath(location.path))
-                except (OSError, ValueError):
-                    resolved = location.path
-                if is_within(resolved, db_dir):
-                    notes.append(label)
+            try:
+                note = _vault_file_note(location, secrets_vault)
+                aimed = _vault_aims_at_the_database(location, db_dir)
+            except Exception as exc:  # noqa: BLE001 - a check never raises
+                # The whole per-user body, not just the resolve. This is the one
+                # block in the function holding a descriptor, so an escape here
+                # would be contained by `run_checks` into a single synthetic
+                # FAIL that replaced all five of this check's findings.
+                note, aimed = f"could not be examined ({type(exc).__name__})", False
         finally:
             if location.dir_fd is not None:
                 try:
@@ -3131,99 +3238,132 @@ def _vault_path_result(config, secrets_vault, storage, prefix: str, users) -> Ch
                 except OSError:  # pragma: no cover - already closed
                     pass
         if note:
-            problems.append(f"{label}: {note}")
+            clauses.append(note)
+            classes.add("file")
+        if aimed:
+            clauses.append("and it resolves inside the framework database's own directory")
+            classes.add("aimed")
+        if clauses:
+            findings.append(f"{label}: {' '.join(clauses)}")
         else:
             ok += 1
 
-    if refused:
+    if not findings:
         return CheckResult(
-            name,
-            FAIL,
-            "a configured vault_path is one the daemon may not open, so nothing "
-            "is read for that user: " + "; ".join(refused + problems),
-            remedy=(
-                "Correct [users.<id>] vault_path in config.toml. A relative "
-                "path resolves under that user's own workspace directory and "
-                "may not leave it; an absolute one is a host path and must "
-                "resolve outside every tree a task sandbox can write, which "
-                "includes another user's workspace."
-            ),
+            name, OK, f"{ok} configured vault path(s) resolve to a readable file"
         )
-    if problems:
-        return CheckResult(
-            name,
-            WARN,
-            "a configured vault_path resolves but has no usable file behind "
-            "it: " + "; ".join(problems),
-            remedy=(
-                "Check the file on the user's own device and the state of the "
-                "workspace mount — a zero-byte file is what a sync caught "
-                "mid-write looks like."
-            ),
-        )
-    detail = f"{ok} configured vault path(s) resolve to a readable file"
-    if notes:
-        return CheckResult(
-            name,
-            WARN,
-            f"{detail}, but an absolute vault_path resolves inside the "
-            f"framework database's own directory: " + ", ".join(notes),
-            remedy=(
-                "Point vault_path at the KDBX file rather than at the "
-                "database directory. Nothing is exposed — the reader gets "
-                "bytes that are not a KeePass database and reports a corrupt "
-                "vault — but the notification will describe the wrong problem."
-            ),
-        )
-    return CheckResult(name, OK, detail)
+    status = FAIL if "refused" in classes else WARN
+    lead = (
+        "a configured vault_path is one the daemon may not open"
+        if status == FAIL
+        else "a configured vault_path resolves but is not usable as written"
+    )
+    counted = f" ({ok} other(s) are fine)" if ok else ""
+    return CheckResult(
+        name,
+        status,
+        f"{lead}{counted}: " + "; ".join(findings),
+        remedy=" ".join(
+            _VAULT_PATH_REMEDIES[cls]
+            for cls in ("refused", "file", "aimed")
+            if cls in classes
+        ),
+    )
+
+
+def _vault_aims_at_the_database(location, db_dir: Path | None) -> bool:
+    """Has an **absolute** ``vault_path`` been pointed into ``db_path``'s directory.
+
+    §1 refuses an absolute path under every tree the sandbox binds read-write
+    and deliberately leaves ``db_path.parent`` out of that list, because the
+    framework database is not a KDBX and comes back as a corrupt vault — so this
+    is pointless rather than dangerous, and a warning rather than a refusal.
+
+    **The discriminator is the descriptor the resolver did not hand over**, not
+    the containment test alone. On the standalone shape ``setup_wizard`` puts
+    ``db_path``, the workspace and the temp dir all under one directory, so an
+    unconditional test warns about every ordinary *relative* vault there — and
+    §1 already refuses the absolute form under the workspace, so a relative path
+    landing under ``db_path.parent`` is that shape's normal state rather than a
+    misaimed reader.
+    """
+    if location.dir_fd is not None or db_dir is None:
+        return False
+    try:
+        resolved = Path(os.path.realpath(location.path))
+    except (OSError, ValueError):
+        resolved = location.path
+    return is_within(resolved, db_dir)
 
 
 def _vault_db_dir(config: "Config") -> Path | None:
-    """``db_path``'s resolved parent, or None when there is nothing to compare."""
+    """``db_path``'s resolved parent, or None when there is nothing to compare.
+
+    **``None`` for anything but an absolute ``db_path``**, and both of the other
+    answers used to be wrong rather than merely unhelpful. ``Config.db_path``
+    defaults to the *relative* ``data/istota.db`` and can be unset, and
+    ``Path("").parent`` is ``Path(".")`` — which ``realpath`` resolves to the
+    process's current directory. So an unset value compared every absolute
+    ``vault_path`` under the daemon's cwd against a directory holding no
+    database (noisy, and plausible on the standalone shape, where the daemon may
+    be started from the operator's home and the vault sits in it), while a
+    relative one compared against a ``data/`` that has nothing to do with the
+    database (permissive, and a genuinely misaimed path then goes unreported).
+
+    Refusing to answer is the right failure here: this feeds a WARN about a
+    mistake, so no answer costs one warning nobody needed and a wrong answer
+    costs either a false one or a missed real one. Every shipped deployment
+    renders an absolute ``db_path`` — the Ansible role, the Docker generator and
+    ``istota setup`` all do — so nothing real is lost.
+    """
     raw = getattr(config, "db_path", "") or ""
+    if not raw:
+        return None
     try:
-        parent = Path(raw).expanduser().parent
-        return Path(os.path.realpath(parent))
+        written = Path(raw).expanduser()
+        if not written.is_absolute():
+            return None
+        return Path(os.path.realpath(written.parent))
     except (OSError, ValueError):
         return None
 
 
-def _vault_file_note(location, cap: int) -> str:
+def _vault_file_note(location, secrets_vault) -> str:
     """What is wrong with the file at ``location``, or ``""``.
 
-    ``lstat`` through the descriptor the resolver opened, never a fresh walk of
-    the path: for the relative form every component above the leaf lives in the
-    tree bound read-write into that user's sandbox, so the descriptor is what
-    makes the answer about the file the read will open. ``follow_symlinks=False``
-    because the read refuses a symlinked leaf, so following one here would report
-    a file the sync will not open.
+    **``read_vault_bytes``, not a private stat of its own**, and the first
+    version of this was the second one. ``read_overlay_bytes``' docstring names
+    the hazard exactly — "one reader for three callers … the three answers above
+    are the whole of the hardening, and a fourth copy of them is a fourth chance
+    for one to be left out" — and a hand-rolled ``lstat`` here was that fourth
+    copy of the symlink, not-a-regular-file and size-cap answers. Reusing the
+    reader also hands back its **stable refusal ids** (``overlay_is_a_symlink``,
+    ``overlay_not_a_regular_file``, ``overlay_unreadably_large``), which is the
+    same thing this arm already prizes about the resolver's ``VAULT_PATH_*``
+    words: the id in the report is the id in the daemon's log.
 
-    A ``stat`` rather than the read ``read_vault_bytes`` performs, deliberately:
-    that one opens the file and pulls up to 8 MiB off a FUSE mount, and this arm
-    runs unattended. It never blocks — ``stat`` does not wait on a FIFO the way
-    ``open(2)`` would — which is the property that makes it safe here at all.
-    The authoritative answer is still the read's; this is the cheap diagnostic
-    in front of it.
+    The reasoning the stat was written on was also false, and is recorded here
+    so nobody reinstates it: it said ``open(2)`` on a FIFO would block. It does
+    not. ``read_overlay_bytes`` opens ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK`` and
+    checks ``S_ISREG`` on the fd precisely so that it refuses one immediately,
+    which is why that primitive was chosen for this read in the first place.
+
+    What the reuse costs is a read rather than a stat, bounded at
+    ``VAULT_READ_CAP_BYTES`` and checked on the fd *before* the read — and a real
+    vault is a few kilobytes. Neither form is bounded against a wedged
+    ``fuse.rclone`` mount, which hangs a ``stat`` as readily as a read, so that
+    hazard is unchanged by the choice.
     """
     try:
-        if location.dir_fd is not None:
-            info = os.stat(
-                location.path.name, dir_fd=location.dir_fd, follow_symlinks=False
-            )
-        else:
-            info = os.lstat(location.path)
-    except FileNotFoundError:
+        secrets_vault.read_vault_bytes(location.path, dir_fd=location.dir_fd)
+    except secrets_vault.VaultMissing:
         return "nothing at the path"
-    except (OSError, ValueError) as exc:
-        return f"could not be examined ({type(exc).__name__})"
-    if stat.S_ISLNK(info.st_mode):
-        return "a symlink, which the reader refuses"
-    if not stat.S_ISREG(info.st_mode):
-        return "not a regular file, which the reader refuses"
-    if info.st_size == 0:
-        return "zero bytes, which is what a sync caught mid-write looks like"
-    if info.st_size > cap:
-        return f"{info.st_size} bytes, over the {cap}-byte read cap"
+    except secrets_vault.VaultUnreadable as exc:
+        return f"refused unread ({exc})"
+    except secrets_vault.VaultCorrupt as exc:
+        return str(exc)
+    except secrets_vault.VaultError as exc:  # pragma: no cover - the set is closed
+        return f"could not be read ({type(exc).__name__})"
     return ""
 
 
@@ -3281,23 +3421,8 @@ def _vault_passphrase_result(
     )
 
 
-def _vault_contents_result(
-    config, secrets_vault, prefix: str, users, probe: bool
-) -> CheckResult:
-    """Under ``probe``: open each vault and report counts, never key names."""
-    name = f"{prefix}.contents"
-    if not probe:
-        return CheckResult(
-            name, SKIP, "probing is disabled; no vault file was opened"
-        )
-    if not _vault_library_available():
-        return CheckResult(
-            name,
-            SKIP,
-            "pykeepass is not installed, so no vault could be opened "
-            "(see security.credential_vault.library)",
-        )
-
+def _vault_contents_result(config, secrets_vault, name: str, users) -> CheckResult:
+    """Open each vault and report counts, never key names. Gating is the caller's."""
     counts: list[str] = []
     failures: list[str] = []
     for user_id in users:
@@ -3317,7 +3442,8 @@ def _vault_contents_result(
         # Counts, never names: this line reaches the boot log and the admin
         # Health pane, where one user's credential key names are read by every
         # admin. Which services a vault owns is operator config and is reported
-        # by `…schedule`; what the file turned out to hold is not.
+        # by `security.credential_vault.schedule`; what the file turned out to
+        # hold is not.
         #
         # Half of that is structural rather than a rule kept here, which is
         # worth knowing before somebody widens it: `VaultStatusReport` carries
@@ -8076,6 +8202,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
     ("security.credential_vault", check_credential_vault),
+    ("security.vault_contents", check_vault_contents),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
@@ -8179,6 +8306,10 @@ CHECK_SCOPES: dict[str, str] = {
     # users a rendered config declares, a file on that install's workspace, and
     # a row in its own secrets table. A bare `docker run` has none of the three.
     "security.credential_vault": DEPLOYMENT,
+    # Deployment, and a sibling name rather than a child of the one above:
+    # `only` and `skip` match by prefix, so a dotted child could not be skipped
+    # without taking the four cheap arms with it. See `check_vault_contents`.
+    "security.vault_contents": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,

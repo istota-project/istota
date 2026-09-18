@@ -110,7 +110,7 @@ A relative `vault_path` resolves under that user's own workspace directory, whic
 
 `vault_services` is the list of services the file owns. Empty reads the file and applies nothing, which is a usable dry run. A service whose credentials the daemon mints for itself can never be vault-owned (Monarch, Overland, Garmin, Google Workspace), and a name like that is dropped with a warning when the config loads. Today's eligible set is `karakeep`, `ntfy`, `native_brain`, `feeds` and `carto`.
 
-Install the `vault` extra on the host. `pykeepass` and its five dependencies are optional because two of them carry compiled extensions, and a deployment with no vault should not pay for them.
+Install the `vault` extra on the host. `pykeepass` and its six dependencies are optional because two of them carry compiled extensions, and a deployment with no vault should not pay for them.
 
 ### The passphrase
 
@@ -177,9 +177,12 @@ Each of these leaves the credentials in the table alone and raises a notificatio
 | The `vault` extra is not installed | An operator remedy, not a user one |
 | No passphrase provisioned | `istota secret ensure … --generate` |
 | `ISTOTA_SECRET_KEY` cannot read the stored passphrase | A deployment problem; see `security.secret_key` in `istota doctor` |
+| The file was refused unread — not a regular file, or over the 8 MiB cap | Check what is actually at the path; a symlink and a FIFO are both refused |
 | `vault_path` is one the daemon may not open | An operator corrects the line in `config.toml` |
 
-`istota secret vault-status -u alice` prints the whole answer for one user: the resolved path, whether a passphrase is provisioned, the groups the file holds, which of them are owned, and which owned services the file does not mention. `istota doctor`'s `security.credential_vault` answers the same questions across every configured user, and reports counts rather than key names.
+`istota secret vault-status -u alice` prints the whole answer for one user: the resolved path, whether a passphrase is provisioned, the groups the file holds, which of them are owned, and which owned services the file does not mention.
+
+`istota doctor` answers across every configured user instead, in two checks. `security.credential_vault` covers the cheap questions — the extra, the schedule, each path, each passphrase — and runs wherever doctor runs. `security.vault_contents` is the one that opens each file and reports counts rather than key names; opening a vault costs about a second per user, so it is excluded from the hourly sweep and from the `self-check` heartbeat, and answers at boot, from `istota doctor`, from `!check`, and on the admin Health pane.
 
 **Rotate the vault's master password in the quiet order**: provision the new passphrase with `istota secret ensure` first, then change it in KeePassXC. The other order raises a notification in between, because the rewritten file no longer opens with the stored value.
 
@@ -187,7 +190,7 @@ Each of these leaves the credentials in the table alone and raises a notificatio
 
 Both are honest and both mislead if read the other way:
 
-- **A sync bumps `last_accessed_at` on every credential it owns**, because writing over a value means comparing it first. `istota secret vault-status` bumps it on the `vault/passphrase` row for the same reason. So that column stops being evidence that a vault-owned credential is read by anything.
+- **A sync bumps `last_accessed_at` on every credential it owns**, because writing over a value means comparing it first. Three other things bump it on the `vault/passphrase` row alone, since each has to resolve the passphrase to open the file: `istota secret vault-status`, `istota doctor`'s `security.vault_contents`, and the same check reached through `!check` or the admin Health pane. So that column stops being evidence that a vault-owned credential is read by anything, and on the passphrase row it records a diagnostic as readily as a sync.
 - **A sync runs whenever the file's bytes change, not whenever a credential changes.** KDBX draws a fresh master seed on every save, so saving a database nobody edited produces different bytes and a full apply. That is harmless — every write is idempotent — and it is the one thing that eventually re-asserts the file's version of a value somebody changed in the table directly.
 
 ### What it does not fix

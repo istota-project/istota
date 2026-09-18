@@ -5108,7 +5108,14 @@ def run_startup_checks(config: Config) -> list:
 # that job and does it once a day. Running it hourly here would be the same
 # full-DB scan 24 times over, for a second opinion nobody asked for. It still
 # runs at boot and whenever an operator types `istota doctor`.
-SWEEP_SKIPPED_CHECKS = ("runtime.framework_db",)
+#
+# `security.vault_contents` opens every configured KDBX credential vault: a
+# workspace read, a Fernet decrypt that writes `last_accessed_at` on that user's
+# passphrase row, and an Argon2id derivation, all of it per user. Same shape as
+# the entry above — answered at boot and on demand rather than every hour — and
+# the four cheap `security.credential_vault` arms still sweep, so a vault that
+# stops resolving is still reported hourly.
+SWEEP_SKIPPED_CHECKS = ("runtime.framework_db", "security.vault_contents")
 
 
 def check_doctor(config: Config, state: dict) -> list:
