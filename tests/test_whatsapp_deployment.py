@@ -850,17 +850,39 @@ class TestTheAnsibleSidecarUnit:
         assert re.search(r"^RestartSec=\d+$", rendered, re.M)
 
     def test_a_scheduler_restart_does_not_take_the_session_down(self):
-        """Wants, never Requires.
+        """Wants, and none of the three directives that propagate one.
 
         `Requires=` propagates a stop, so a scheduler restart would drop the
         WhatsApp link on every deploy. The sidecar retries a missing socket
         every two seconds, so the ordering is a courtesy and the dependency is
         not one.
+
+        **`PartOf=` and `BindsTo=` are the two spellings this used to miss, and
+        since ISSUE-504 they matter more than `Requires=` does.** `PartOf=`
+        propagates a stop *and a restart*, which is precisely what the
+        two-minute update cron does to the scheduler on any commit — so a later
+        `PartOf=istota-scheduler.service` would take the sidecar down on every
+        commit while leaving the old two assertions green. What these two lines
+        mean is no longer only "the paired session survives a scheduler
+        restart": it is that plus "the next scheduler re-adopts the window this
+        sidecar is still offering codes into", a stronger claim resting on the
+        same two lines.
         """
         rendered = self._unit()
+        # Directives, not mentions: a `#` comment in the template names the two
+        # spellings in order to say why they must not be there, and a substring
+        # test cannot tell that apart from the directive itself.
+        directives = [
+            line.strip() for line in rendered.splitlines()
+            if not line.lstrip().startswith("#")
+        ]
 
-        assert "Wants=istota-scheduler.service" in rendered
-        assert "Requires=" not in rendered
+        assert "Wants=istota-scheduler.service" in directives
+        for propagates_a_stop in ("Requires=", "PartOf=", "BindsTo="):
+            assert not [
+                line for line in directives
+                if line.startswith(propagates_a_stop)
+            ]
 
     def test_it_discards_the_programs_own_output(self):
         """stdout is the channel Baileys would be chatty on.

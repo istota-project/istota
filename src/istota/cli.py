@@ -2185,7 +2185,9 @@ def _whatsapp_attach_refusal(config) -> str | None:
     return None
 
 
-def _whatsapp_confirm_unlink() -> bool:
+def _whatsapp_confirm_unlink(
+    *, non_interactive: str, lead_in: tuple[str, ...],
+) -> bool:
     """Ask for the unlink phrase. `False` for anything but an exact match.
 
     **The same confirmation discipline as the web's destructive control, not a
@@ -2196,13 +2198,19 @@ def _whatsapp_confirm_unlink() -> bool:
     shell line or a script could carry.
 
     **A terminal is required and there is no flag to skip it.** That is not
-    strictness for its own sake: this command draws a QR and waits for a human
+    strictness for its own sake: `pair --reset` draws a QR and waits for a human
     to scan it off a phone, so it can do nothing useful without one anyway, and
     a `--yes` would exist only to let the destructive half run unattended.
+    `restore-session` inherits the rule rather than earning it separately — it
+    displaces a live credential, which is not a thing to do from a script.
 
-    Read from `sys.stdin` directly rather than through `input()`, which reaches
-    for the process's real stdin when `sys.stdin` has been replaced — so the
-    prompt would be unanswerable in a test and this gate untestable.
+    **The prose is the caller's and the phrase is not.** Two verbs displace a
+    working session and each has to say what it is about to do in its own
+    words, while the challenge itself stays one string: an operator who has
+    typed it once should not have to learn a second. Read from `sys.stdin`
+    directly rather than through `input()`, which reaches for the process's real
+    stdin when `sys.stdin` has been replaced — so the prompt would be
+    unanswerable in a test and this gate untestable.
     """
     stream = sys.stdin
     try:
@@ -2210,23 +2218,10 @@ def _whatsapp_confirm_unlink() -> bool:
     except (AttributeError, ValueError):
         interactive = False
     if not interactive:
-        print(
-            "--reset disconnects the current WhatsApp session, so it asks for "
-            "a typed confirmation and there is no flag to skip it. Run it from "
-            "a terminal — pairing needs somebody to scan the code off a phone "
-            "in any case.",
-            file=sys.stderr,
-        )
+        print(non_interactive, file=sys.stderr)
         return False
-    print(
-        "Re-pairing moves the current WhatsApp session aside and disconnects "
-        "it. Nothing is deleted: the old credential is kept in a timestamped "
-        "sibling directory.",
-    )
-    print(
-        "If the session has already reported itself unlinked, a plain "
-        "`istota whatsapp pair` does this without the confirmation.",
-    )
+    for line in lead_in:
+        print(line)
     sys.stdout.write(f"Type {WHATSAPP_UNLINK_CHALLENGE} to confirm: ")
     sys.stdout.flush()
     try:
@@ -2393,7 +2388,21 @@ def _whatsapp_pair_attached(config, socket_path, *, reset: bool) -> int:
     if _whatsapp_pairing_is_open(config):
         print(_WHATSAPP_PAIRING_IN_PROGRESS, file=sys.stderr)
         return 1
-    if reset and not _whatsapp_confirm_unlink():
+    if reset and not _whatsapp_confirm_unlink(
+        non_interactive=(
+            "--reset disconnects the current WhatsApp session, so it asks for "
+            "a typed confirmation and there is no flag to skip it. Run it from "
+            "a terminal — pairing needs somebody to scan the code off a phone "
+            "in any case."
+        ),
+        lead_in=(
+            "Re-pairing moves the current WhatsApp session aside and "
+            "disconnects it. Nothing is deleted: the old credential is kept "
+            "in a timestamped sibling directory.",
+            "If the session has already reported itself unlinked, a plain "
+            "`istota whatsapp pair` does this without the confirmation.",
+        ),
+    ):
         return 1
 
     try:
@@ -2851,6 +2860,178 @@ def cmd_whatsapp_pair(args):
     import asyncio
 
     return asyncio.run(_whatsapp_pair(config, argv, reset=args.reset))
+
+
+def cmd_whatsapp_restore_session(args):
+    """Put an archived WhatsApp session back, parking the live one beside it.
+
+    **The recovery for a host already in ISSUE-504's state.** A scheduler
+    restart during an open pairing window used to leave a deployment unpaired
+    with its credential at a timestamped sibling, and getting it back meant
+    composing `mv` against a full-account credential, as root, on a host where
+    WhatsApp was already down — ISSUE-496's own argument, one state over.
+    Adoption stops that state being reached; this is what gets a host out of it,
+    and it is equally the undo for a `pair --reset` aimed at the wrong session.
+
+    **Own-sidecar mode only, and the refusal is the same one `reset_session`
+    carries.** A bridge answering on the socket is a live writer of the session
+    directory, and this process cannot establish anything about a sidecar run
+    as its own unit — so a live socket is a refusal naming both, rather than a
+    guess. Writing a credential into a directory a second Baileys client is
+    using is the auth-state corruption every guard on this path exists to
+    prevent.
+
+    **It deletes nothing.** Whatever stands at the live name is parked at a
+    timestamped sibling of its own, so running the command again against that
+    stamp undoes it. `--list` changes nothing at all.
+    """
+    config = load_config(Path(args.config) if args.config else None)
+    if config.whatsapp.provider != "baileys":
+        print(
+            f'[whatsapp] provider = "{config.whatsapp.provider}", which keeps '
+            "no session directory of its own.",
+            file=sys.stderr,
+        )
+        return 1
+
+    from .transport.whatsapp.baileys_bridge import (
+        ARCHIVE_STAMP_FORMAT,
+        SessionResetIncomplete,
+        default_session_dir,
+        default_socket_path,
+        dir_holds_a_session,
+        newest_restorable_archive,
+        restore_session_archive,
+        session_archives,
+    )
+
+    session_dir = default_session_dir(config)
+    archives = session_archives(session_dir)
+
+    if args.list_archives:
+        if not archives:
+            print(f"No archived WhatsApp sessions beside {session_dir}.")
+            return 0
+        print(f"Archived WhatsApp sessions beside {session_dir}:")
+        for archive in archives:
+            # The same predicate the restore uses, so a listing cannot promise
+            # a stamp the restore would then refuse.
+            held = "session" if dir_holds_a_session(archive) else "logs only"
+            print(f"  {archive.name}  ({held})")
+        return 0
+
+    if _whatsapp_socket_is_live(default_socket_path(config)):
+        print(
+            "A WhatsApp bridge is running, so it is holding the session "
+            "directory. Stop the istota daemon and any sidecar unit or "
+            "compose service, then run this again.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.date:
+        wanted = f"{session_dir.name}.{args.date}"
+        archive = next(
+            (entry for entry in archives if entry.name == wanted), None,
+        )
+        if archive is None:
+            print(
+                f"No archived WhatsApp session with stamp {args.date}. Run "
+                "`istota whatsapp restore-session --list` to see what is "
+                f"there; the stamp format is {ARCHIVE_STAMP_FORMAT}.",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        archive = newest_restorable_archive(session_dir)
+        if archive is None:
+            print(
+                f"No archived WhatsApp session beside {session_dir} holds "
+                "credentials to restore. Pair from scratch with `istota "
+                "whatsapp pair`.",
+                file=sys.stderr,
+            )
+            return 1
+
+    # **Said on every path, including the one that asks for nothing.** The
+    # socket probe above sees the daemon and only the daemon, and the daemon is
+    # stopped by the time anybody runs this — so a sidecar run as its own unit
+    # or compose service is exactly the writer nothing here can detect, and
+    # renaming the directory out from under it is the auth-state corruption
+    # every other guard on this path exists to prevent. `cmd_whatsapp_pair`
+    # prints the same warning before it spawns, for the same reason.
+    print(
+        "If a sidecar runs as a unit of its own on this host, stop it before "
+        "continuing: two Baileys clients sharing one session directory "
+        "corrupt it, and only a bridge listening on the socket is detected "
+        "here.",
+    )
+
+    # Only when there is something to displace. The ordinary recovery runs
+    # against the empty directory a failed re-pair left, where nothing is at
+    # risk and a prompt would be ceremony on a host that is already down.
+    if dir_holds_a_session(session_dir) and not _whatsapp_confirm_unlink(
+        non_interactive=(
+            "Restoring over a live WhatsApp session displaces it, so it asks "
+            "for a typed confirmation and there is no flag to skip it. Run it "
+            "from a terminal."
+        ),
+        lead_in=(
+            f"{session_dir} already holds a session. Restoring moves it aside "
+            "to a timestamped sibling and puts the archive in its place. "
+            "Nothing is deleted.",
+            "Run `istota whatsapp restore-session --list` first if you are "
+            "not sure which archive you want.",
+        ),
+    ):
+        return 1
+
+    try:
+        restored, parked = restore_session_archive(session_dir, archive)
+    except SessionResetIncomplete as exc:
+        # The one failure an operator has to act on by hand, so it names the
+        # path the only copy of their live session is now at.
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(
+            f"The WhatsApp session could not be restored: "
+            f"{type(exc).__name__}. Nothing was changed.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # **The pairing request is over, and leaving it open undoes the restore.**
+    # The row this recovers from is a non-terminal one whose deadline may not
+    # have passed — the operator can be back inside the window — so the next
+    # scheduler tick would adopt it, arm a window over the session just put
+    # back, and latch `_unpaired_by_repair`, refusing every send until a
+    # `ready` arrives. Clearing it is safe here for the reason the whole
+    # command is: a bridge answering the socket was already refused above, so
+    # no live window can own this row. Best effort, after the credential has
+    # moved: a database this cannot reach is worth a warning and not a failed
+    # restore, since the files are already where they belong.
+    try:
+        with db.get_db(config.db_path) as conn:
+            if db.clear_whatsapp_pairing(conn):
+                print("The pending pairing request was cleared.")
+    except Exception as exc:  # noqa: BLE001 — the restore already succeeded
+        print(
+            f"The session was restored, but the pending pairing request could "
+            f"not be cleared ({type(exc).__name__}). Cancel it from Admin, "
+            "Connections once the daemon is up, or the next poll will re-arm "
+            "a pairing window over the session just restored.",
+            file=sys.stderr,
+        )
+
+    print(f"Restored {restored} to {session_dir}.")
+    if parked is not None:
+        print(f"The session that was there is at {parked}.")
+    print(
+        "Start the istota daemon and the sidecar unit. If WhatsApp has "
+        "unlinked this device, `istota whatsapp pair --reset` pairs a new one.",
+    )
+    return 0
 
 
 def cmd_calendar_discover(args):
@@ -4846,6 +5027,27 @@ def main():
             "only if the sidecar reports it cannot be used"
         ),
     )
+    whatsapp_restore_parser = whatsapp_subparsers.add_parser(
+        "restore-session",
+        help=(
+            "Put an archived WhatsApp session back, parking the live one "
+            "beside it"
+        ),
+    )
+    whatsapp_restore_parser.add_argument(
+        "--date",
+        metavar="STAMP",
+        help=(
+            "Restore the archive with this timestamp (as `--list` prints it) "
+            "rather than the newest one holding a session"
+        ),
+    )
+    whatsapp_restore_parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_archives",
+        help="List the archives and change nothing",
+    )
     whatsapp_subparsers.add_parser(
         "billing-status",
         help="Report the billable circuit breaker without changing it",
@@ -4970,13 +5172,14 @@ def main():
     elif args.command == "whatsapp":
         whatsapp_commands = {
             "pair": cmd_whatsapp_pair,
+            "restore-session": cmd_whatsapp_restore_session,
             "billing-status": cmd_whatsapp_billing_status,
             "billing-unblock": cmd_whatsapp_billing_unblock,
         }
-        # `pair` is the one WhatsApp verb with a failure an operator's script
-        # has to be able to see, so its status is returned rather than
-        # discarded. The two billing verbs report through their own output and
-        # answer `None`, which reads as success exactly as it did before.
+        # `pair` and `restore-session` are the WhatsApp verbs with a failure an
+        # operator's script has to be able to see, so their status is returned
+        # rather than discarded. The two billing verbs report through their own
+        # output and answer `None`, which reads as success exactly as before.
         result = whatsapp_commands[args.whatsapp_action](args)
         if result:
             sys.exit(result)

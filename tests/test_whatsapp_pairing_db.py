@@ -602,61 +602,116 @@ def arrange_orphaned_window(db_path: Path, relay: Path) -> str:
 class TestTheSchedulerRestart:
     """The stuck-row class, on the surface whose whole purpose is recovery.
 
-    Two negative controls, and **they must fail on different tests**:
+    **Since ISSUE-504 a restart mid-window is adopted rather than closed**, and
+    these run against a real bridge and a real runtime rather than a double, so
+    they are what says the reconstruction works end to end. The credential is
+    already archived by the time the restart lands, and the sidecar — its own
+    unit, with no `PartOf=` on the scheduler — is still offering codes against
+    the directory the sequence emptied, so closing the row threw away a pairing
+    that was still live.
 
-    - Removing the orphan arm from `_expire_stale_pairing` turns *this* test
-      red. The row's deadline is an hour out, so the deadline arm cannot reach
-      it and the orphan arm is the only thing that can close it.
-    - Collapsing the two arms into the single "any non-terminal row with no
-      in-memory window behind it" form leaves this test **green** — the row it
-      closes is one it would have closed anyway — and turns
+    The negative controls, and **they must fail on different tests**:
+
+    - Removing the adopt arm from `_expire_stale_pairing` turns the first test
+      red: the row closes `failed` with the credential orphaned, which is the
+      reported defect.
+    - Removing the *deadline* arm turns the second red. That is the arm that
+      still bounds everything, and adoption sits behind it precisely so a row
+      nobody scans is still closed.
+    - Collapsing the arms into the single "any non-terminal row with no
+      in-memory window behind it" form leaves both **green** and turns
       `tests/test_whatsapp_pairing_poll.py::TestTheClaim::
       test_a_fresh_request_is_serviced` red instead, because that predicate
       expires a fresh `requested` row before anything can service it. That
-      mistake does not break this test; it breaks the feature.
+      mistake does not break these tests; it breaks the feature.
     """
 
-    async def test_the_poll_closes_the_row_and_unbricks_pairing(
+    async def test_the_poll_adopts_the_window_rather_than_closing_it(
         self, config, fresh_bridge, relay_file
     ):
         window_id = arrange_orphaned_window(config.db_path, relay_file)
-        assert relay_file.exists()
         assert fresh_bridge.pairing_window is None
         assert fresh_bridge.last_pairing_outcome is None
 
         await asyncio.to_thread(poll_pairing_request, config)
+        adopted = await wait_for(lambda: fresh_bridge.pairing_window)
 
+        # 1. The window this process now holds is the row's, not a fresh one:
+        #    a minted id relays into a window no reader is watching, and a
+        #    minted deadline outlives the bound the durable row carries.
+        assert adopted.window_id == window_id
+        assert adopted.requested_by == USER
+        assert 0 < adopted.expires_at_wall - time.time() <= 3601
+        # 2. `destructive` is recovered from the row's message, which
+        #    `_window_open_message` keeps down to the archive path alone.
+        assert adopted.destructive is True
+        # 3. The row is untouched — adoption writes nothing — so the code the
+        #    operator is looking at stays the one the request is about.
         with db.get_db(config.db_path) as conn:
             row = db.read_whatsapp_pairing(conn)
-        # 1. The row is closed, and closed as `failed` rather than `expired`:
-        #    the credential is already moved aside and an operator has to be
-        #    told which of two directories to trust.
-        assert row["state"] == db.WHATSAPP_PAIRING_FAILED
+        assert row["state"] == db.WHATSAPP_PAIRING_AWAITING_SCAN
         assert row["window_id"] == window_id
-        # 2. The relay is unlinked, so nothing keeps rendering a frozen code
-        #    for a window that no longer exists.
-        assert not relay_file.exists()
-        # 3. And this is the assertion the durable expiry exists for: without
-        #    it every later pairing request is refused for the life of the
-        #    deployment.
-        with db.get_db(config.db_path) as conn:
-            assert db.request_whatsapp_pairing(conn, USER) is not None
+        # 4. And the relay stays: it is the file the admin pane reads, and the
+        #    re-adopted window owns it by id.
+        assert relay_file.exists()
 
-    async def test_the_orphan_message_names_the_restart_and_the_archive(
+    async def test_the_deadline_is_what_still_unbricks_pairing(
         self, config, fresh_bridge, relay_file
     ):
-        """The two closures are not the same outcome and do not share a
-        message. The archived path is carried forward from the row the dead
-        process wrote, because a later process has no `PairingResult` and no way
-        to know which `.old-<timestamp>` sibling this attempt made."""
-        arrange_orphaned_window(config.db_path, relay_file)
+        """Adoption changes *which* arm closes a row, never whether one does.
+
+        Without a close every later pairing request is refused for the life of
+        the deployment, which is the stuck-row class this whole channel exists
+        to avoid. Past its deadline the row closes `expired` — nobody scanned,
+        and the destructive confirmation covered that.
+        """
+        window_id = "window-from-the-dead-process"
+        with db.get_db(config.db_path) as conn:
+            request_id = db.request_whatsapp_pairing(conn, USER, window_seconds=1)
+            assert db.record_whatsapp_pairing_state(
+                conn, request_id,
+                db.WHATSAPP_PAIRING_AWAITING_SCAN,
+                "The previous session was moved aside to /srv/session.old-20260101.",
+                adopt_window_id=window_id,
+                expires_at=time.time() - 1.0,
+            )
 
         await asyncio.to_thread(poll_pairing_request, config)
 
         with db.get_db(config.db_path) as conn:
             row = db.read_whatsapp_pairing(conn)
-        assert "restarted" in row["message"]
+        assert row["state"] == db.WHATSAPP_PAIRING_EXPIRED
+        assert fresh_bridge.pairing_window is None
+        with db.get_db(config.db_path) as conn:
+            assert db.request_whatsapp_pairing(conn, USER) is not None
+
+    async def test_the_orphan_message_names_the_archive(
+        self, config, fresh_bridge, relay_file, monkeypatch
+    ):
+        """The close adoption replaced, reached the one way it still can.
+
+        A runtime refusing the spawn means the daemon is stopping, so nothing
+        will re-arm the window — and the archived path still has to reach an
+        operator, carried forward from the row the dead process wrote because a
+        later process has no `PairingResult` and no way to know which
+        `.old-<timestamp>` sibling this attempt made.
+        """
+        from istota import async_runtime
+
+        def refuse(coro, *, name: str):
+            coro.close()
+            raise RuntimeError("runtime is stopping")
+
+        arrange_orphaned_window(config.db_path, relay_file)
+        monkeypatch.setattr(async_runtime, "spawn_task", refuse)
+
+        await asyncio.to_thread(poll_pairing_request, config)
+
+        with db.get_db(config.db_path) as conn:
+            row = db.read_whatsapp_pairing(conn)
+        assert row["state"] == db.WHATSAPP_PAIRING_FAILED
         assert "/srv/session.old-20260101" in row["message"]
+        assert "restore-session" in row["message"]
 
     async def test_a_window_this_process_still_holds_is_left_alone(
         self, config, fresh_bridge, relay_file

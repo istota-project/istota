@@ -60,6 +60,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import stat
 import threading
 import time
@@ -732,6 +733,187 @@ def session_archives(session_dir: Path) -> list[Path]:
     ]
 
 
+def dir_holds_a_session(path: Path) -> bool:
+    """Whether a session directory holds auth state, rather than only logs.
+
+    **Auth state, not emptiness, and the difference is the whole of whether
+    either caller is reachable.** The sidecar writes two files of its own into
+    this directory — `sidecar.log`, appended on every boot before the daemon
+    link is even up, and `logout-backoff.json` — so an emptiness test answers
+    True for a directory holding nothing but logs. For `_move_session_aside`
+    that would archive a log file and tell the operator two directories matter;
+    for `restore_session_archive` it would park an empty live directory beside
+    the credential it just restored, and refuse an archive that is only logs.
+
+    **An allowlist of files to ignore, not one of files to count.**
+    `useMultiFileAuthState` writes `creds.json` plus a `.json` per Signal key,
+    with names this module has no business enumerating, so anything
+    unrecognised counts as auth state.
+
+    **Fails toward "there is a session"** for the same reason at both callers:
+    a directory this cannot read answers True, because the cost of a needless
+    archive is a directory an operator deletes and the cost of a wrong `False`
+    is a credential overwritten in place.
+
+    Never raises. Module level rather than a method, because the restore path
+    asks it of an *archive* while the reset path asks it of the live directory,
+    and a second copy of a predicate that decides whether a credential is
+    overwritten is the duplication this module's other guards exist to prevent.
+    """
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.name not in _SIDECAR_OWN_FILES:
+                    return True
+        return False
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def archive_destination(session_dir: Path) -> Path:
+    """Where a session directory goes when it is moved aside: a timestamped
+    sibling that nothing stands at yet.
+
+    A **sibling**, because the move has to be one `rename(2)` inside one
+    directory — a copy-then-delete has a window where the credential exists
+    twice and a crash where it exists nowhere, and a destination on another
+    filesystem turns the rename into exactly that. Timestamped rather than a
+    fixed `.old`, so the second reset of a deployment's life does not overwrite
+    the record of the first. The stamp is `ARCHIVE_STAMP_FORMAT`, which
+    `session_archives` reads back — nothing sweeps an archive, so a diagnostic
+    has to be able to find every one of them by name.
+
+    The stamp is one second wide, so the name is settled by probing rather than
+    by trusting the clock to be distinct: what stands at the destination is the
+    only copy of what was in the session directory, and `rename(2)` onto an
+    empty one would take it silently. **The probe is the whole of that
+    guarantee** — there is no `RENAME_NOREPLACE` behind it, so a directory
+    created at the chosen name between the `lexists` and the rename is still
+    taken. Not a live hazard on either shipped shape, where the parent is the
+    operator's own state directory, but it is the probe rather than the syscall
+    that holds.
+
+    Bounded at `_RESET_NAME_ATTEMPTS`, matching `session_log`'s solution to the
+    identical problem: a walk with no ceiling is a hang where a stat is
+    answering wrongly, and every caller would rather fail.
+
+    Module level for `dir_holds_a_session`'s reason: the restore path parks a
+    live directory with it, and two spellings of where a credential is filed
+    is two sets of names a diagnostic would have to know about.
+    """
+    stamp = datetime.now(timezone.utc).strftime(ARCHIVE_STAMP_FORMAT)
+    base = session_dir.parent / f"{session_dir.name}.{stamp}"
+    candidate = base
+    suffix = 1
+    # `lexists`, not `exists`: a broken symlink standing at the name is
+    # something, and `rename(2)` would replace it.
+    while os.path.lexists(candidate) and suffix < _RESET_NAME_ATTEMPTS:
+        candidate = base.with_name(f"{base.name}-{suffix}")
+        suffix += 1
+    return candidate
+
+
+def newest_restorable_archive(session_dir: Path) -> Path | None:
+    """The newest archive that holds a session, or `None`.
+
+    **Newest *good*, not newest**, which is `db_restore`'s rule applied
+    literally: an archive of a directory that held only logs is a directory an
+    operator would restore and find empty, and the failed re-pair that produced
+    it is exactly when several archives are lying around. `session_archives` is
+    sorted by name and the stamp is fixed width, so the last entry is the most
+    recent.
+
+    Never raises.
+    """
+    for archive in reversed(session_archives(session_dir)):
+        if dir_holds_a_session(archive):
+            return archive
+    return None
+
+
+def restore_session_archive(
+    session_dir: Path, archive: Path,
+) -> tuple[Path, Path | None]:
+    """Put an archived session back, parking whatever stands at the live name.
+
+    `_move_session_aside`'s inverse, and the recovery ISSUE-504's own victims
+    need: a scheduler restart during a pairing window used to leave a
+    deployment unpaired with its credential at a timestamped sibling, and
+    getting it back meant composing `mv` against a full-account credential, as
+    root, on a host where WhatsApp was already down. Adoption stops that state
+    being reached; this is what gets a host already in it out.
+
+    Returns `(restored_from, parked_to)`, `parked_to` being `None` where the
+    live name held nothing. **Parks rather than overwrites**, and the park uses
+    `archive_destination` — so the operation is reversible by running it again
+    against the parked directory, and an operator who restores the wrong stamp
+    has lost nothing.
+
+    **The archive is validated before anything moves, not after.**
+    `ensure_session_dir` is what asserts 0700 on an `O_NOFOLLOW` fd and refuses
+    a directory belonging to another uid, and an archive is not always one this
+    module wrote — `--date` takes any stamped sibling, and the operator docs
+    say these siblings exist, so a hand-copied 0755 one would otherwise become
+    the live session directory at 0755. Running it on the *archive* first gives
+    the same guarantee as running it on the live name afterwards, because
+    `rename(2)` carries the inode and therefore the mode and the owner, and it
+    costs no second unwind: a refusal here leaves both directories exactly
+    where they were.
+
+    **Two renames, and a failure between them puts the first one back.** Where
+    even that fails, `SessionResetIncomplete` carries `moved_to`, which is the
+    one thing that has to reach a human: the path the only copy is now at.
+
+    **A live directory holding no session is removed rather than parked.**
+    Every ordinary recovery runs against the directory a failed re-pair left,
+    which holds `sidecar.log` and nothing else — parking it would file a
+    permanent stamped archive that `session_archives` lists and `doctor`
+    reports for ever, beside the real credentials, with nothing to tell them
+    apart. `dir_holds_a_session` fails toward True, so the removal runs only on
+    a directory this positively read and found to hold none of the auth state
+    the predicate counts.
+
+    **Nothing here establishes that no sidecar holds the directory.** That is
+    the caller's, for `reset_session`'s reason — this module cannot observe an
+    external unit, and writing a credential into a directory a live Baileys
+    client is using is the auth-state corruption every other guard here exists
+    to prevent.
+    """
+    # Before anything moves, so a refusal leaves both directories alone.
+    ensure_session_dir(archive)
+
+    parked: Path | None = None
+    if os.path.lexists(session_dir):
+        if dir_holds_a_session(session_dir):
+            parked = archive_destination(session_dir)
+            os.rename(session_dir, parked)
+        else:
+            shutil.rmtree(session_dir)
+    try:
+        os.rename(archive, session_dir)
+    except OSError as restore_error:
+        if parked is None:
+            raise
+        try:
+            os.rename(parked, session_dir)
+        except OSError as unwind_error:
+            raise SessionResetIncomplete(
+                f"the live WhatsApp session directory was moved to {parked} "
+                f"and {archive} could not be restored over it: "
+                f"{type(restore_error).__name__}",
+                moved_to=parked,
+            ) from unwind_error
+        raise
+    harden_session_files(session_dir)
+    logger.warning(
+        "whatsapp.baileys.session_restored from=%s parked=%s",
+        archive, parked if parked is not None else "nothing to park",
+    )
+    return archive, parked
+
+
 def session_archive_stamp(path: Path) -> datetime | None:
     """When `_reset_destination` named this archive, off the name.
 
@@ -1144,14 +1326,10 @@ class BaileysBridge:
         the sequence around this returns, not here, so the note is that all
         three mean "no window was opened and nothing was touched".
 
-        Awaits the initial relay publish, so a caller returns with the state
-        already readable by the web process; the window is installed *before*
-        that await, or a QR arriving during it would be discarded by a handler
-        that sees no window. Both gates are then re-read, which is
-        `reset_session`'s own rule for the same reason: they were answered
-        before two awaits, and returning a window `stop()` has since closed
-        would have the caller write a durable row for a window that does not
-        exist.
+        Awaits the initial relay publish through `_arm_pairing_window`, so a
+        caller returns with the state already readable by the web process. That
+        helper carries the install-before-the-first-await rule and the re-read
+        of both gates afterwards, shared with `adopt_pairing_window`.
 
         Never raises. A relay that cannot be written still leaves a window
         open — the code is then invisible to the UI and the durable row says
@@ -1171,6 +1349,134 @@ class BaileysBridge:
             requested_by=str(requested_by),
             destructive=bool(destructive),
         )
+        logger.info(
+            "whatsapp.pairing.window_opened window=%s by=%s destructive=%s "
+            "ttl=%.0fs",
+            window.window_id, window.requested_by, window.destructive,
+            self._pairing_window_seconds,
+        )
+        return await self._arm_pairing_window(window)
+
+    async def adopt_pairing_window(
+        self, window_id: str, requested_by: str, expires_at_wall: float,
+        *, destructive: bool = False, codes_relayed: bool = False,
+    ) -> PairingWindow | None:
+        """Re-arm a window a process restart left behind (ISSUE-504).
+
+        The credential is spent *before* the part that can be interrupted:
+        `repair_session` archives the session directory and only then opens the
+        window, so a scheduler restart in between leaves a deployment unpaired
+        with its credential at a timestamped sibling. On the reference
+        deployment that interruption is routine rather than rare — the update
+        cron restarts the scheduler on any commit, so a 300s window overlaps
+        one whenever anything lands.
+
+        **What survives is what makes this cheap.** The sidecar is its own unit
+        with no `PartOf=` on the scheduler, so it stays up against the emptied
+        directory and keeps offering a fresh QR every twenty seconds. Nothing
+        about the pairing was lost — only this daemon's record that somebody
+        was waiting for a code — so the fix is to reconstruct the window from
+        the durable row rather than to close it.
+
+        **No database write, and that is the property it rests on.** The row
+        already carries everything a window is made of, so this is an in-memory
+        reconstruction plus a relay republish; `_mirror_pairing_window` keeps
+        the row in step from the next tick exactly as it does for a window this
+        process opened.
+
+        `codes_relayed` says the previous process had already put a code on the
+        relay, which the row records as `awaiting_scan`. It is not bookkeeping:
+        see the comment at `qr_seq` below.
+
+        **`None` has four producers and, as with `open_pairing_window`, a
+        caller cannot tell them apart**: a window is already open, the bridge is
+        stopping, the row's deadline has already passed, or the session is
+        already up. All four mean nothing was touched.
+
+        That fourth one is this method's own and is a send-ledger guard rather
+        than tidiness. A `ready` frame clears `_unpaired_by_repair` and nothing
+        re-sends one until the link reconnects — so arming a window over a
+        session that has already come up would set the latch below with nothing
+        left to lift it, and every later send would be refused for the life of
+        the process. The row is then closed by the deadline arm, which is the
+        bound it was always going to be closed by.
+
+        Never raises, for `open_pairing_window`'s reason.
+        """
+        if self._pairing_window is not None:
+            return None
+        if self._stopping:
+            return None
+        if self._status.ready:
+            return None
+        remaining = float(expires_at_wall) - time.time()
+        if remaining <= 0:
+            return None
+        loop = asyncio.get_running_loop()
+        # **`opened_at` is now rather than the row's request time**, and it is
+        # read by one thing: `_watch_pairing`'s `sidecar_absent` deadline, which
+        # asks "has a code reached *this* process". Carrying the original would
+        # demote a freshly adopted window to `sidecar_absent` immediately on any
+        # window older than that timeout. The two clocks below are the real
+        # deadline and they are converted rather than restated, so the watchdog
+        # fires on the row's own durable instant.
+        opened_at = loop.time()
+        window = PairingWindow(
+            window_id=str(window_id),
+            opened_at=opened_at,
+            expires_at=opened_at + remaining,
+            expires_at_wall=float(expires_at_wall),
+            requested_by=str(requested_by),
+            destructive=bool(destructive),
+            # **A code the previous process relayed has to survive the hop**,
+            # and `qr_seq` is where it is kept. `_dispatch`'s `ready` branch
+            # reads it to tell a real pairing from a link blip re-announcing a
+            # session that was already up — so starting an adopted window at
+            # zero closes the very sequence this method exists for (a code
+            # relayed, the user scans, the scheduler dies before the `ready`)
+            # as `failed`, writes that to the durable row and alerts every
+            # admin to re-pair. Following that remedy archives the credential
+            # they had just paired. One rather than the true count: the counter
+            # is read as a boolean here and as a cache-buster by the relay, and
+            # the row records that a code went out rather than how many did.
+            qr_seq=1 if codes_relayed else 0,
+        )
+        # **State the dead process held that this one does not.** With it clear,
+        # `_send` reaches `writer.write` against a session directory that
+        # sequence emptied and the ledger settles `unknown` on a UNIQUE
+        # `logical_key` nothing deletes. The window arm of the send gate covers
+        # the span once the window is installed; this covers the tail after it
+        # expires, until a `ready` says the session is open.
+        self._unpaired_by_repair = True
+        logger.info(
+            "whatsapp.pairing.window_adopted window=%s by=%s destructive=%s "
+            "remaining=%.0fs",
+            window.window_id, window.requested_by, window.destructive,
+            remaining,
+        )
+        return await self._arm_pairing_window(window)
+
+    async def _arm_pairing_window(
+        self, window: PairingWindow,
+    ) -> PairingWindow | None:
+        """Install a window, start its watchdog, publish the relay, re-check.
+
+        Shared by the two ways a window comes into being — minted by
+        `open_pairing_window`, reconstructed by `adopt_pairing_window` — because
+        both of the rules in here are easy to lose in a second copy and neither
+        is visible at its own line.
+
+        The window is installed **before the first await**, or a QR arriving
+        during the publish would be discarded by a handler that sees no window.
+        Both gates are then re-read afterwards, which is `reset_session`'s own
+        rule for the same reason: they were answered before two awaits, and
+        returning a window `stop()` has since closed would have the caller write
+        a durable row for a window that does not exist.
+
+        Never raises. A relay that cannot be written still leaves a window
+        open — the code is then invisible to the UI and the durable row says
+        so, which is a worse pairing rather than a failed daemon.
+        """
         self._pairing_window = window
         self._pairing_watchdog = asyncio.create_task(self._watch_pairing(window))
         # `mkstemp` needs the directory to exist, and on the shape where the
@@ -1181,12 +1487,6 @@ class BaileysBridge:
         # this module writing somebody else's permissions.
         await self._guarded_relay_job(
             asyncio.to_thread(self._ensure_relay_parent),
-        )
-        logger.info(
-            "whatsapp.pairing.window_opened window=%s by=%s destructive=%s "
-            "ttl=%.0fs",
-            window.window_id, window.requested_by, window.destructive,
-            self._pairing_window_seconds,
         )
         await self._guarded_relay_job(self._publish_relay(window))
         if self._pairing_window is not window or self._stopping:
@@ -1603,40 +1903,12 @@ class BaileysBridge:
     def _reset_destination(self) -> Path:
         """Where a dead session directory goes: a timestamped sibling.
 
-        A **sibling**, because the move has to be one `rename(2)` inside one
-        directory — a copy-then-delete has a window where the credential
-        exists twice and a crash where it exists nowhere, and a destination on
-        another filesystem turns the rename into exactly that. Timestamped
-        rather than a fixed `.old`, so the second logout of a deployment's
-        life does not overwrite the record of the first. The stamp is
-        `ARCHIVE_STAMP_FORMAT`, which `session_archives` reads back — nothing
-        sweeps an archive, so a diagnostic has to be able to find every one of
-        them by name.
-
-        The stamp is one second wide, so the name is settled by probing rather
-        than by trusting the clock to be distinct: what stands at the
-        destination is the only copy of what was in the session directory, and
-        `rename(2)` onto an empty one would take it silently. **The probe is
-        the whole of that guarantee** — there is no `RENAME_NOREPLACE` behind
-        it, so a directory created at the chosen name between the `lexists`
-        and the rename is still taken. Not a live hazard on either shipped
-        shape, where the parent is the operator's own state directory, but it
-        is the probe rather than the syscall that holds.
-
-        Bounded at `_RESET_NAME_ATTEMPTS`, matching `session_log`'s solution
-        to the identical problem: a walk with no ceiling is a hang where a
-        stat is answering wrongly, and both callers would rather fail.
+        `archive_destination`'s rules, applied to this bridge's own directory.
+        The function is module level because `restore_session_archive` parks a
+        live directory with it, and two spellings of where a credential is
+        filed is two sets of names a diagnostic would have to know about.
         """
-        stamp = datetime.now(timezone.utc).strftime(ARCHIVE_STAMP_FORMAT)
-        base = self._session_dir.parent / f"{self._session_dir.name}.{stamp}"
-        candidate = base
-        suffix = 1
-        # `lexists`, not `exists`: a broken symlink standing at the name is
-        # something, and `rename(2)` would replace it.
-        while os.path.lexists(candidate) and suffix < _RESET_NAME_ATTEMPTS:
-            candidate = base.with_name(f"{base.name}-{suffix}")
-            suffix += 1
-        return candidate
+        return archive_destination(self._session_dir)
 
     async def reset_session(self) -> Path | None:
         """Move a dead session aside so the sidecar can offer a code again.
@@ -1864,39 +2136,19 @@ class BaileysBridge:
         self._permanent_fatal.clear()
 
     def _session_dir_holds_a_session(self) -> bool:
-        """Whether the session directory holds auth state worth archiving.
+        """Whether there is auth state here worth archiving.
 
-        **Auth state, not emptiness, and the difference is the whole of
-        whether this is reachable.** The sidecar writes two files of its own
-        into this directory — `sidecar.log`, appended on every boot before the
-        daemon link is even up, and `logout-backoff.json` — so on the external
-        unit shape, which is the only shape that reaches here, an emptiness
-        test answers True for a directory holding nothing but logs. That makes
-        the arm this feeds unreachable in exactly the case it was written for:
-        a window a process restart orphaned, whose credential is already at a
-        timestamped sibling and whose recovery is another window rather than an
-        archive of a log file.
-
-        **An allowlist of files to ignore, not one of files to count.**
-        `useMultiFileAuthState` writes `creds.json` plus a `.json` per Signal
-        key, with names this module has no business enumerating, so anything
-        unrecognised counts as auth state.
-
-        **Fails toward archiving** for the same reason: a directory this cannot
-        read answers True, because the cost of a needless archive is a
-        directory an operator deletes and the cost of a wrong `False` is a
-        credential overwritten in place.
+        `dir_holds_a_session`'s rules, applied to this bridge's own directory,
+        and a pointer rather than a restatement for `_reset_destination`'s
+        reason: the shared function is where the reasoning lives, and a second
+        copy of it here is the drift the sharing exists to prevent. What this
+        caller does with the answer is decide whether `_move_session_aside`
+        archives at all — a window a restart orphaned has already emptied the
+        directory, and archiving an empty one a second time accumulates
+        directories nothing sweeps while telling the operator two of them
+        matter.
         """
-        try:
-            with os.scandir(self._session_dir) as entries:
-                for entry in entries:
-                    if entry.name not in _SIDECAR_OWN_FILES:
-                        return True
-            return False
-        except FileNotFoundError:
-            return False
-        except OSError:
-            return True
+        return dir_holds_a_session(self._session_dir)
 
     def resume(self) -> bool:
         """Start a supervisor a permanent fatal ended. `False` where there is

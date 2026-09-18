@@ -59,11 +59,31 @@ Three things to know before pressing it:
 
 **It spends one sidecar restart, and spends it at the request rather than at the result.** On an unlinked session that costs nothing — the sidecar was already restarting on a loop, and this ends one cycle a few seconds early. On a working session it is a real reconnect, which is what the typed confirmation is about. If the sequence then aborts (the sidecar ignores the request, say), the restart has already been spent and the message says so.
 
-**The window lasts five minutes and closes for good.** Nothing scanned, and the session stays unpaired with the old credential already moved aside. Ask again rather than expecting the old session back. A second re-pair inside ten minutes is refused, naming the minutes left: repeating it is churn against a link WhatsApp watches.
+**The window lasts five minutes and closes for good.** Nothing scanned, and the session stays unpaired with the old credential already moved aside. Ask again rather than expecting the old session back, or put the old one back with `istota whatsapp restore-session` below. A second re-pair inside ten minutes is refused, naming the minutes left: repeating it is churn against a link WhatsApp watches.
+
+**A scheduler restart during the window is survivable.** The sidecar is a unit of its own and keeps offering codes, so the next scheduler picks the window back up from the database and the card carries on drawing — one poll interval, then up to twenty seconds for the next code. You do not have to start again. On a host whose deploy cron restarts services on every commit this used to be the common way a re-pair failed.
 
 **The old session is kept, not deleted.** It moves to a timestamped sibling of the session directory — `whatsapp-baileys-session.20260101T120000Z` beside `whatsapp-baileys-session` — so a session that turned out to be merely unreachable has lost no keys. Nothing sweeps those, deliberately: each is a full-account credential and a timer that deletes one is a credential-destroying automatic path with no operator present. Remove them by hand once the new session works. `istota doctor --only whatsapp.baileys_session` counts them and reports their permissions, so the accumulation is visible rather than quiet.
 
 From a terminal the same flow is `istota whatsapp pair`. With a bridge already running it writes the same request the web card writes and then draws each code in the terminal; with no daemon running it starts a sidecar of its own, which is the first-ever pair on a checkout. `--reset` is what reaches the destructive half in either mode, and in attach mode it asks for the same typed phrase the web control does.
+
+### Putting an old session back
+
+`istota whatsapp restore-session` moves an archived session back to the live directory. Use it when a re-pair was aimed at the wrong session, or when a window closed unscanned and the session it replaced was working.
+
+Stop the Istota daemon and any sidecar unit or compose service first: the command refuses while a bridge is answering its socket, and it cannot tell whether a separately-run sidecar is holding the directory. Then:
+
+```bash
+istota whatsapp restore-session --list     # what is there, and which hold credentials
+istota whatsapp restore-session            # the newest archive holding a session
+istota whatsapp restore-session --date 20260101T120000Z
+```
+
+Nothing you could want is deleted. A live directory holding a session is moved to a timestamped sibling of its own and the command prints both paths, so a restore aimed at the wrong stamp is undone by running it again against the parked one. The empty directory a failed re-pair leaves behind is removed rather than filed, so it does not accumulate as an archive beside the real ones. If the live directory holds a working session the command asks for the same typed phrase the re-pair control does; if it holds only that empty directory, it asks for nothing.
+
+It also clears any pending pairing request, because leaving one open would have the next scheduler pick it up and open a pairing window over the session you just restored.
+
+Start the services again afterwards. If WhatsApp has unlinked the restored device, `istota whatsapp pair --reset` pairs a new one.
 
 ### A code in a browser is a credential in a browser
 
@@ -243,6 +263,8 @@ STOP opts the binding out after one acknowledgement, START re-enables it, and HE
 ```bash
 istota whatsapp pair                    # Baileys: link the number by QR scan
 istota whatsapp pair --reset            # Baileys: same, after moving an unusable session aside
+istota whatsapp restore-session         # Baileys: put an archived session back (daemon stopped)
+istota whatsapp restore-session --list  # Baileys: list the archives, change nothing
 istota doctor --only whatsapp.          # local readiness, the session, the billing state
 istota whatsapp billing-status          # Cloud: read the circuit breaker without changing it
 istota whatsapp billing-unblock         # Cloud: clear it, after checking Meta billing
