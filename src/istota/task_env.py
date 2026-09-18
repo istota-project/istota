@@ -106,18 +106,39 @@ def _vault_credentials(config: Config, user_id: str) -> dict[str, str]:
 def _write_credential_shim(user_temp_dir: Path) -> Path | None:
     """Copy ``credential_shim.py`` to where the model can run it by name.
 
-    The source file travels as a file rather than as an entry point because the
-    istota package is not importable from inside the sandbox — the pattern
-    ``skills/developer`` already uses for ``devbox_exec_client.py``.
+    A per-task file rather than a console script because the directory has to
+    go on the *model's* PATH and on nothing else, and because it is placed and
+    removed with the task rather than with the installed package. That module's
+    own docstring carries the argument; it is not about reachability, since
+    ``istota-skill`` is an entry point and runs in the sandbox quite happily.
 
     Atomic, because tasks for one user run as threads in one process and share
     ``user_temp_dir``; a plain truncate-then-write can be read half-finished by
     a wrapper another task is running right now (``skills/developer._atomic_write``
     is where that was paid for).
 
+    **The directory's mode is asserted on an ``O_NOFOLLOW`` descriptor rather
+    than passed to ``mkdir``.** ``mkdir(mode=…)`` applies only to a directory
+    the call creates, and ``user_temp_dir`` persists across tasks — so a
+    pre-existing one keeps whatever mode it had, which is the rule
+    ``.claude/rules/whatsapp.md`` states for the Baileys session directory and
+    ``setup_wizard`` states for the env file. The same open is what refuses a
+    symlink standing at that name: the read-only re-bind in ``sandbox_plan``
+    stops a task planting one, and this is what covers a deployment that
+    already had one when the bind arrived.
+
     Returns the directory to prepend to the model's PATH, or ``None`` where
     nothing could be written — in which case the model simply has no such
     program, which is a degraded feature rather than a failed task.
+
+    **The read is pinned to UTF-8 and the handler catches ``ValueError`` beside
+    ``OSError``**, which is what makes that contract structural rather than
+    hopeful. ``Path.read_text()`` with no encoding resolves to the locale's,
+    the module carries non-ASCII prose, and a non-UTF-8 locale would therefore
+    raise ``UnicodeDecodeError`` — a ``ValueError``, straight past an
+    ``OSError`` handler and out of ``build_task_runtime``, which
+    ``execute_task`` does not guard. ``write_text_atomic`` already defaults to
+    UTF-8 on the way out, so only the read side was locale-dependent.
     """
     from .atomic_write import write_text_atomic
     from .credential_shim import SHIM_MODE, shim_path
@@ -125,9 +146,18 @@ def _write_credential_shim(user_temp_dir: Path) -> Path | None:
     dest = shim_path(user_temp_dir)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True, mode=SHIM_MODE)
+        fd = os.open(
+            dest.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            os.fchmod(fd, SHIM_MODE)
+        finally:
+            os.close(fd)
         source = Path(__file__).resolve().parent / "credential_shim.py"
-        write_text_atomic(dest, source.read_text(), mode=SHIM_MODE)
-    except OSError as exc:
+        write_text_atomic(
+            dest, source.read_text(encoding="utf-8"), mode=SHIM_MODE,
+        )
+    except (OSError, ValueError) as exc:
         logger.error("could not install the credential shim: %s", exc)
         return None
     return dest.parent

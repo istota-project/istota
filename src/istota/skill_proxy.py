@@ -27,6 +27,10 @@ logger = logging.getLogger("istota.skill_proxy")
 #: proxy sees a socket, not a process — so it decides a log level and nothing
 #: else. Anything absent or unrecognised is recorded as ``read``, which is the
 #: direction that does not under-report.
+#:
+#: ``skill`` has no producer yet and is here rather than added later: its
+#: producer is the credential stamp in ``skills/_credref``, which lands with
+#: `browse interact --fill-credential`. Two of the three are live today.
 VAULT_MODES = frozenset({"skill", "inject", "read"})
 VAULT_MODE_DEFAULT = "read"
 
@@ -539,8 +543,15 @@ class SkillProxy:
         also why it names no credential at all.
         """
         name = str(request.get("name", ""))
-        raw_mode = request.get("mode")
-        mode = raw_mode if raw_mode in VAULT_MODES else VAULT_MODE_DEFAULT
+        # Coerced like `name`, and for a sharper reason than tidiness: `in` on
+        # a frozenset hashes its left operand, so an unhashable `mode` off the
+        # socket — a list, a dict — would raise `TypeError` here, past the
+        # charge and past the log line. The outer handler then answers nothing
+        # at all, so a malformed request would be the one shape that is neither
+        # counted against the cap nor recorded in the audit trail.
+        mode = str(request.get("mode", ""))
+        if mode not in VAULT_MODES:
+            mode = VAULT_MODE_DEFAULT
         # Bounded and flattened before it reaches a log line. The name came off
         # a socket any process in the sandbox can speak to, so it is
         # attacker-chosen outright rather than merely KDBX-sourced, and an

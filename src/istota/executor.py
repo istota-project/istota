@@ -3715,7 +3715,7 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     supported config value silently revokes boundaries the sandbox is built on:
     ``sandbox_cache_dir = $HOME/.cache`` overmounts the read-only huggingface
     bind, ``= config.temp_dir`` hands every user's deferred-op directory to
-    every task and makes the credential-fetch helpers under ``.developer``
+    every task and makes the git credential helpers under ``.developer``
     writable again, and ``= $HOME/.local`` gives the model write access to the
     ``claude`` binary the daemon spawns host-side.
 
@@ -4592,7 +4592,8 @@ def native_fs_roots(
     every read-only user-data mount nested inside an earlier read-write one,
     which ``project_fs_roots`` derives rather than naming (rule 2 there).
     The two named ones:
-    ``.developer`` — the credential-fetch helper and the git credential helpers
+    ``.developer`` — the git credential helpers, and the framework credential
+    shim's own ``.istota`` beside it
     — which the claude_code path has protected since the RO re-bind was added
     and which this function silently left writable until it grew this return
     value. It is carried at the path *as written*, matching the bind, which is

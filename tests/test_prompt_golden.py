@@ -383,23 +383,22 @@ class Case:
     #: `[brain] room_selectable`, without which `resolve_brain_kind` refuses the
     #: pin and the case silently reproduces its sibling.
     #:
-    #: Seeds one `vault_entries` row for the user, which is what the prompt's
-    #: shared-credential lines are gated on. A raw INSERT rather than
-    #: `upsert_secret`, deliberately: the gate is
-    #: `secrets_vault.has_shared_credentials`, which goes through
-    #: `list_user_services` and never decrypts, so the case needs no master key
-    #: and the ciphertext column can hold anything. Seeding through the real
-    #: store would make every golden run depend on `ISTOTA_SECRET_KEY`.
-    #:
-    #: `base_nextcloud` is the empty-namespace half of the pair, so the diff
-    #: between the two goldens is exactly the two lines this buys.
-    shared_credentials: bool = False
     #: Pairing this with `history=True` would construct a real provider before
     #: assembly reaches the `use_selection` short-circuit — `execute_task`
     #: evaluates `_build_triage_completer` as a call argument, so it runs
     #: eagerly and a native route reaches `_build_native_completer`. No case
     #: does that today; the `_no_sockets` guard is what would catch it.
     brain: str | None = None
+    #: Seeds one `vault_entries` row for the user, which is what the prompt's
+    #: shared-credential lines are gated on, and sets `ISTOTA_SECRET_KEY` for
+    #: the duration — the gate refuses without one, because the read the proxy
+    #: serves from returns nothing without one. A raw INSERT rather than
+    #: `upsert_secret`: the gate goes through `list_user_services` and never
+    #: decrypts, so the ciphertext column can hold anything.
+    #:
+    #: `base_nextcloud` is the empty-namespace half of the pair, so the diff
+    #: between the two goldens is exactly the two lines this buys.
+    shared_credentials: bool = False
 
 
 CASES: tuple[Case, ...] = (
@@ -675,18 +674,24 @@ def _seed_history(config: Config, case: Case) -> None:
         conn.commit()
 
 
-def _seed_shared_credentials(config: Config, case: Case) -> None:
+def _seed_shared_credentials(config: Config, case: Case, monkeypatch) -> None:
     """One `vault_entries` row, written past the encryption layer.
 
     The prompt gate reads `list_user_services`, which returns key names and
-    never opens a Fernet — so the ciphertext column can hold anything and this
-    fixture needs no `ISTOTA_SECRET_KEY`. Writing through `upsert_secret`
-    instead would make every case in this module depend on that variable being
-    set, which `tests/support/env_isolation.py` goes to some trouble to keep
-    out of the suite.
+    never opens a Fernet — so the ciphertext column can hold anything, and a
+    row written through `upsert_secret` would be the same answer at the cost of
+    a real encrypt.
+
+    `ISTOTA_SECRET_KEY` is set anyway, and that is the *gate's* requirement
+    rather than this fixture's: `has_shared_credentials` refuses without one,
+    because the read the proxy serves from returns nothing without one and a
+    prompt promising credentials nothing can return is worse than no line.
+    Scoped to the case that needs it, so no other golden depends on the
+    variable.
     """
     if not case.shared_credentials:
         return
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "0" * 64)
     with db.get_db(config.db_path) as conn:
         conn.execute(
             "INSERT INTO secrets (user_id, service, key, encrypted_value) "
@@ -719,7 +724,7 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_memory(config, case)
     _seed_overlay(config, case)
     _seed_history(config, case)
-    _seed_shared_credentials(config, case)
+    _seed_shared_credentials(config, case, monkeypatch)
     task = _build_task(case)
 
     success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)

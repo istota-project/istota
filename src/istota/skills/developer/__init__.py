@@ -6,8 +6,11 @@ embedded in remote URLs, stripping them (:mod:`istota.git_remote_scrub`,
 ISSUE-270) before generating anything. Then generates, inside the task's user
 temp directory:
 
-- the credential-fetch helper and the per-platform git-credential-helper
-  scripts, plus the ``GIT_CONFIG_*`` vars that point git at them;
+- the per-platform git-credential-helper scripts and the ``GIT_CONFIG_*``
+  vars that point git at them. The helpers fetch their token by shelling out
+  to the framework credential shim (:mod:`istota.credential_shim`), which
+  ``task_env`` writes; this hook generated its own socket client until that
+  program existed;
 - ``gh`` and ``glab``, copies of :mod:`istota.forge_cli` that wrap the real
   binaries, and the policy file they read;
 - a seeded, read-only config directory per CLI.

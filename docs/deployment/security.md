@@ -71,7 +71,7 @@ An absolute `vault_path` removes the exposure completely: the resolver refuses o
 
 Each task's scratch space holds a `.developer` directory, written by the `developer` skill's `setup_env` hook. It holds two kinds of thing, and both need the same protection.
 
-The **credential plumbing**: `credential-fetch`, the git credential helper, and the `gh` / `glab` wrappers. A task that could replace one of them could intercept a forge token on its next use.
+The **credential plumbing**: the git credential helper and the `gh` / `glab` wrappers in `.developer`, and the `istota-credential` shim in `.istota` beside it. A task that could replace one of them could intercept a forge token on its next use, so both directories are re-bound read-only.
 
 The **policy the wrappers enforce**, which is the half that is easy to overlook: `forge-policy.json` — which carries the deny rules, the real binary path and the forge URL, precisely so the wrapper reads none of them from an environment the model's own shell can set — plus the seeded per-forge config dirs and the pinned-empty data dirs. Those last two are not incidental. `gh` expands aliases from `config.yml` *before* command dispatch, so a writable config dir is a complete bypass of the deny list; and it dispatches an unknown first argument to `gh-<name>` under the data dir, which no argv rule can see. A writable `.developer` would leave the deny list decorative rather than merely leaking a token.
 
@@ -116,11 +116,11 @@ Credential authorization is **decoupled from skill selection**. A skill is autho
 
 This avoids the failure mode where a keyword miss locks a skill out: e.g. a user has a Karakeep resource configured, the prompt didn't say "bookmark", `bookmarks` wasn't selected — under the old model the proxy would refuse to inject `KARAKEEP_API_KEY` and the CLI invocation would fail mysteriously. Under the new model the credential is injectable as soon as Claude decides it needs the bookmarks skill, regardless of selection.
 
-Doc-only skills (no CLI module) are eligible too: the `developer` skill consumes `GITLAB_TOKEN`/`GITHUB_TOKEN` via `credential-fetch` from the git credential helper and the `gh` / `glab` wrappers its `setup_env` hook writes into the task's `.developer` directory. Gating authorization on `cli=true` (the prior heuristic) would lock it out.
+Doc-only skills (no CLI module) are eligible too: the `developer` skill consumes `GITLAB_TOKEN`/`GITHUB_TOKEN` via `istota-credential env` from the git credential helper and the `gh` / `glab` wrappers its `setup_env` hook writes into the task's `.developer` directory. Gating authorization on `cli=true` (the prior heuristic) would lock it out.
 
 Auto-authorization uses `_resolve_env_spec(spec, ctx, fallbacks_disabled=True)` so an instance-wide `EnvironmentFile` fallback for an operator-set value cannot fan out and auto-authorize every user — preserving the per-user privacy posture.
 
-`derive_lookup_allowlist(authorized, skill_index)` is the union the proxy will respond to over `credential-fetch`, with `_PROXY_LOOKUP_BLOCKED = {"ISTOTA_SECRET_KEY"}` subtracted as a defense-in-depth hard reject. The master Fernet key flows into specific module-skill subprocess envs (so they can decrypt per-user secrets in-process) but is never returned over the lookup channel — `bash -c '.developer/credential-fetch ISTOTA_SECRET_KEY'` from inside Claude is rejected.
+`derive_lookup_allowlist(authorized, skill_index)` is the union the proxy will respond to over `istota-credential env`, with `_PROXY_LOOKUP_BLOCKED = {"ISTOTA_SECRET_KEY"}` subtracted as a defense-in-depth hard reject. The master Fernet key flows into specific module-skill subprocess envs (so they can decrypt per-user secrets in-process) but is never returned over the lookup channel — `istota-credential env ISTOTA_SECRET_KEY` from inside Claude is rejected.
 
 Threat model: a compromised Claude can only request credentials that already exist for this user (resources are user-scoped, instance config is operator-controlled).
 

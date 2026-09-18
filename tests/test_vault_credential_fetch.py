@@ -539,6 +539,20 @@ class TestTheShimRunVerb:
             ])
         assert result.returncode == -15
 
+    def test_stdin_survives_a_closed_fd_zero(self, sock_path):
+        """With stdin closed, `os.pipe()` may hand back fd 0 as the read end —
+        `dup2(0, 0)` is then a no-op and closing the source would give the child
+        no stdin at all rather than the value."""
+        with proxy(sock_path):
+            result = run_shim(
+                sock_path,
+                ["run", "--stdin", "github_pat", "--",
+                 sys.executable, "-c", REPORTER],
+                preexec_fn=lambda: os.close(0),
+            )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["stdin"] == VAULT["github_pat"]
+
     def test_stdin_delivers_the_value_and_sets_no_variable(self, sock_path):
         result = self._drive(sock_path, ["--stdin", "github_pat"])
         payload = json.loads(result.stdout)
@@ -842,6 +856,22 @@ class TestTheShimPlacement:
         )
         assert entries.index(prepend) < entries.index(shim_dir)
 
+    def test_a_decode_failure_degrades_rather_than_failing_the_task(
+        self, tmp_path, monkeypatch,
+    ):
+        """`build_task_runtime` is called from `execute_task` with no handler
+        around it, so the write's never-raises contract has to cover
+        `ValueError` as well as `OSError` — a non-UTF-8 locale makes the source
+        read raise `UnicodeDecodeError`, which is the first and not the
+        second."""
+        monkeypatch.setattr(
+            "istota.atomic_write.write_text_atomic",
+            lambda *a, **k: (_ for _ in ()).throw(ValueError("bad codec")),
+        )
+        user_temp = tmp_path / "temp" / "testuser"
+        user_temp.mkdir(parents=True)
+        assert task_env._write_credential_shim(user_temp) is None
+
     def test_nothing_is_written_when_the_proxy_is_off(
         self, tmp_path, runtime_inputs, monkeypatch,
     ):
@@ -942,22 +972,36 @@ class TestThePromptGate:
             conn.commit()
         return db_path
 
-    def test_presence_needs_no_master_key(self, tmp_path, monkeypatch):
+    def test_presence_never_decrypts(self, tmp_path, monkeypatch):
         """One `list_user_services` read: key names and timestamps, no Fernet,
-        no `last_accessed_at` bump. The gate runs on every task assembly."""
-        monkeypatch.delenv("ISTOTA_SECRET_KEY", raising=False)
+        no `last_accessed_at` bump. The gate runs on every task assembly, and
+        the row's ciphertext here is not ciphertext at all — a gate that
+        decrypted could not answer True against it."""
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
         db_path = self._db(tmp_path, [("vault_entries", "github_pat")])
         assert secrets_vault.has_shared_credentials(db_path, "alice") is True
 
-    def test_the_passphrase_alone_is_not_a_namespace(self, tmp_path):
+    def test_no_master_key_is_no_namespace(self, tmp_path, monkeypatch):
+        """The serving read (`get_service_secrets`) returns `{}` outright with
+        no key, so a gate that answered True here would put a line in the
+        system half about credentials `istota-credential list` cannot return,
+        with nothing anywhere saying why."""
+        monkeypatch.delenv("ISTOTA_SECRET_KEY", raising=False)
+        db_path = self._db(tmp_path, [("vault_entries", "github_pat")])
+        assert secrets_vault.has_shared_credentials(db_path, "alice") is False
+
+    def test_the_passphrase_alone_is_not_a_namespace(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
         db_path = self._db(tmp_path, [("vault", "passphrase")])
         assert secrets_vault.has_shared_credentials(db_path, "alice") is False
 
-    def test_another_users_namespace_does_not_count(self, tmp_path):
+    def test_another_users_namespace_does_not_count(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
         db_path = self._db(tmp_path, [("vault_entries", "github_pat")])
         assert secrets_vault.has_shared_credentials(db_path, "bob") is False
 
-    def test_a_missing_database_is_false_rather_than_a_raise(self, tmp_path):
+    def test_a_missing_database_is_false_rather_than_a_raise(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
         assert secrets_vault.has_shared_credentials(None, "alice") is False
         assert secrets_vault.has_shared_credentials(
             tmp_path / "nope.db", "alice",

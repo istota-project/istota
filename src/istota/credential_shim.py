@@ -2,12 +2,21 @@
 """The program a task runs to reach a credential without holding it.
 
 Copied verbatim into ``{user_temp_dir}/.istota/istota-credential`` by
-``task_env.build_task_runtime`` and put on the model's PATH — the pattern
-``skills/developer`` already uses for ``devbox_exec_client.py``, and for the
-same reason: the istota package is not importable from inside the sandbox, so
-the program has to travel as a file rather than as an entry point. **stdlib
-only, no relative imports, and nothing here may grow one**; the copy is the
-thing that runs.
+``task_env.build_task_runtime`` and put on the model's PATH. **stdlib only, no
+relative imports, and nothing here may grow one**; the copy is the thing that
+runs, in a process with no istota package on its path.
+
+**A per-task file rather than a console script**, which is what it is worth
+being exact about, since ``istota-skill`` speaks this same socket from inside
+the sandbox as an entry point and so proves the package *is* reachable there.
+Three reasons the entry point is wrong here and none of them is reachability.
+The program has to sit in a directory that goes on the *model's* PATH and on
+nothing else (``task_env`` states that rule at its application site), and a
+venv entry point is on every PATH including the host-side skill CLIs'. It is
+placed and removed with the task rather than with the installed package, so a
+deployment that has not reinstalled still runs the current one. And it is the
+program ``skills/developer`` used to generate as a string literal, promoted —
+the shape it replaces, not a new one.
 
 It replaces the five-line socket client ``skills/developer.setup_env`` used to
 generate as a string literal. Two socket clients for one protocol is the
@@ -90,21 +99,39 @@ STDIN_MAX_BYTES = 8192
 #: A POSIX-portable environment variable name.
 _VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: Variables ``run`` refuses to set, whatever the caller asked for. The first
-#: three are the model's own route back into this process's behaviour —
-#: rewriting ``PATH`` or either loader variable changes which program the exec
-#: resolves and which code it loads, and rewriting the socket path points the
-#: *next* fetch at something the model wrote. ``IFS`` is here because the
-#: overwhelmingly common child is ``sh -c``, where it re-splits every unquoted
-#: expansion in the script. None of this is a boundary — the model can set any
-#: of them in its own shell before calling this — it stops a credential
-#: injection from being the thing that does it.
+#: Variables ``run`` refuses to set, whatever the caller asked for.
+#:
+#: Three groups. ``PATH`` and the socket path decide which program the exec
+#: resolves and where the *next* fetch goes. The loader variables decide which
+#: code the child loads before its own first line — ``BASH_ENV`` and ``ENV``
+#: are here because the overwhelmingly common child is ``sh -c``, and bash
+#: sources ``$BASH_ENV`` for a non-interactive shell, which would run the
+#: credential value as a script (``executor.build_stripped_env`` strips that
+#: same name for the same reason). ``IFS`` re-splits every unquoted expansion
+#: in such a script.
+#:
+#: **Not a boundary, and the list is not a completeness claim.** The model can
+#: set any of these in its own shell before calling this, and there are more
+#: interpreters than this list names. What it stops is a *credential
+#: injection* being the thing that does it — a refusal a reader can check,
+#: rather than a guarantee nobody can keep.
 RESERVED_VARS = frozenset({
     "PATH",
+    "ISTOTA_SKILL_PROXY_SOCK",
+    # Loaders and interpreter startup.
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
-    "ISTOTA_SKILL_PROXY_SOCK",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "BASH_ENV",
+    "ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
     "IFS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "NODE_OPTIONS",
 })
 
 EXIT_REFUSED = 1
@@ -199,7 +226,13 @@ def _fetch(name: str, mode: str) -> str:
 
 def _cmd_list() -> int:
     reply = _request({"type": "vault_list"})
-    names = reply.get("names") or []
+    names = reply.get("names")
+    # Type-checked like every other field read off this socket. The proxy is
+    # ours, but a `str` here would print one character per line and a `dict`
+    # would print its keys, and neither failure says anything about what went
+    # wrong.
+    if not isinstance(names, list):
+        raise ProxyError("the credential proxy answered unparseably")
     for name in names:
         print(name)
     return 0
@@ -309,8 +342,19 @@ def _cmd_run(args: list[str]) -> int:
             os.write(write_fd, payload)
         finally:
             os.close(write_fd)
-        os.dup2(read_fd, 0)
-        os.close(read_fd)
+        # `read_fd` can *be* 0 where this process was started with stdin
+        # closed, since `os.pipe` takes the lowest free descriptor. `dup2` is
+        # then a no-op and closing the source would hand the child no stdin at
+        # all — and the fd still needs `set_inheritable`, because `os.pipe`
+        # returns close-on-exec descriptors while `dup2` clears that flag on
+        # its target. Without the second line the child's `sys.stdin` is
+        # `None` rather than the value, which is the bug this branch exists to
+        # avoid wearing a different mask.
+        if read_fd == 0:
+            os.set_inheritable(read_fd, True)
+        else:
+            os.dup2(read_fd, 0)
+            os.close(read_fd)
 
     try:
         os.execvpe(argv[0], argv, env)
@@ -349,6 +393,13 @@ def main(argv: list[str] | None = None) -> int:
         # is the one thing the caller can act on differently.
         if not os.environ.get("ISTOTA_SKILL_PROXY_SOCK", ""):
             return EXIT_NO_SOCKET
+        return EXIT_REFUSED
+    except (OSError, ValueError) as exc:
+        # The pipe, the dup and the encode, which are outside `_request`'s own
+        # contract. A traceback here would print the credential's surroundings
+        # into the model's tool output and exit 1 anyway; a named line exits 1
+        # and says which thing failed.
+        print(f"istota-credential: {verb}: {exc}", file=sys.stderr)
         return EXIT_REFUSED
 
 

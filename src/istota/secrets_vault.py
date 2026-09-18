@@ -755,16 +755,30 @@ def has_shared_credentials(db_path, user_id: str) -> bool:
     because the one caller is the prompt gate, which runs on every task
     assembly including the dry run the goldens take.
 
+    **Gated on the master key as well as on the rows**, so this answers the
+    same question the serving read answers. ``get_service_secrets`` — what
+    ``task_env`` hands the proxy — returns ``{}`` outright with no
+    ``ISTOTA_SECRET_KEY``, which is a real shipped shape (``doctor``'s
+    ``security.secret_key`` exists because the standalone wizard shipped
+    without one). Without this arm the system half would tell the model it has
+    credentials while ``istota-credential list`` returned nothing, with no line
+    anywhere saying why.
+
+    What it still cannot see is a row that will not decrypt under a *wrong*
+    key: this counts it and the serving read drops it. That is the same
+    asymmetry ``apply_vault`` records one screen up, and it is bounded — the
+    prompt over-promises by one name rather than by the namespace.
+
     Never raises and never reports a vault that is not there: a falsy
     ``db_path`` and an unreadable database are both False, which is the
     direction that withholds a prompt line rather than promising a namespace
     nothing can serve.
     """
-    if not db_path:
+    if not db_path or not secrets_store.secret_key_available():
         return False
     try:
         return bool(_stored_entry_names(Path(db_path), user_id))
-    except Exception as exc:  # pragma: no cover - a database that will not open
+    except Exception as exc:
         logger.debug("vault: could not count shared credentials: %s", exc)
         return False
 
