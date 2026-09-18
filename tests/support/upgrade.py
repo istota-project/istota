@@ -750,14 +750,127 @@ def anchor_schema_digest(repo: Path, commit: str) -> str:
     return schema_digest(read_anchor_schema(repo, commit))
 
 
+#: `CREATE VIRTUAL TABLE` is deliberately not matched, and neither is
+#: `CREATE TEMP`/`TEMPORARY TABLE`. Both exemptions are what `tables_added_since`
+#: wants rather than gaps in it: FTS5's shadow tables are in every schema alike
+#: so they cancel in the subtraction, and a temp table is not in the migrated
+#: file at all, so naming one would assert something that must be absent.
+#:
+#: The optional group ends on a word boundary rather than on whitespace, so
+#: `CREATE TABLE IF NOT EXISTS"foo"` reads as `foo`. Requiring `\s+` there fails
+#: the group and falls through to capturing the identifier straight after
+#: `CREATE TABLE`, which is the word `IF` — the same fall-through as ISSUE-503's
+#: comment, reached through legal DDL rather than through prose. No schema in
+#: this tree writes it that way; it is corrected here because the two failures
+#: share a cause and only one of them had a witness.
 _CREATE_TABLE = re.compile(
-    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"\[]?([A-Za-z_][A-Za-z0-9_]*)",
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\b\s*)?[`\"\[]?([A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
 
+#: What closes each of SQLite's three identifier quotings. A `--` inside one of
+#: these is part of a name rather than the start of a comment.
+_IDENTIFIER_QUOTES = {'"': '"', "`": "`", "[": "]"}
+
+
+def strip_sql_comments(text: str) -> str:
+    """`--` to end of line, except inside a quoted region.
+
+    `schema.sql` is two thirds prose — 608 comment lines against 62 tables —
+    and a comment is allowed to quote the DDL it describes. One of them does,
+    which is how a table called `IF` reached `tables_added_since` and made the
+    migration assertion report a schema that had not moved while every real
+    table in the set was present (ISSUE-503). Not scanning the comments is the
+    whole of that fix: the keyword group's word boundary is a separate defect
+    that this sentence does not reach, since the group fails there on the comma
+    after the closing backtick rather than on the missing whitespace.
+
+    Quoting is tracked rather than `re.sub`'d away, because the residual of the
+    simple version is the *silent* direction: a `--` inside a quoted name
+    truncates its line, and a `CREATE TABLE` after it on that line goes unread.
+    `tables_added_since` would then be quietly smaller, which weakens the
+    migration witness without failing anything. All four of SQLite's quotings
+    are tracked and not only `'…'`, because `_CREATE_TABLE` accepts a table name
+    in any of the other three, so handling one of them is what produced a
+    docstring claiming a class it had only narrowed.
+
+    A string literal's body is dropped rather than copied. It can hold anything,
+    `CREATE TABLE ghost` included, and no table is ever declared inside one —
+    the same "prose is not DDL" rule the comment strip applies. A quoted
+    identifier's body is kept, because that is where the name lives.
+
+    Every way this can be wrong is arranged to be wrong noisily, because a
+    phantom table fails loudly the way ISSUE-503 did while a missing one just
+    makes the witness smaller. An unterminated quote of either kind therefore
+    emits the rest of the file rather than swallowing it — for an identifier
+    that falls out of copying the body through, and for a literal it is the
+    explicit branch below, which exists because dropping the body is otherwise
+    exactly the silent failure this function is here to prevent. There is no
+    `/* */` handling because this schema uses none, and a stray `/*` would
+    likewise only under-strip. `schema.sql` is balanced, and
+    `TestTheTableExtractor.test_it_agrees_with_sqlite_on_the_committed_schema`
+    is what keeps saying so.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "'":
+            # `''` is SQL's escape for a quote inside a literal, so it advances
+            # the scan without closing it.
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if text[j + 1 : j + 2] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            if j >= n:
+                # Unterminated. Dropping the tail here would be the silent
+                # direction — a real `CREATE TABLE` below it would go unread
+                # and the witness would quietly shrink — so the rest is emitted
+                # raw and a comment in it reports a phantom instead.
+                out.append(text[i:])
+                break
+            out.append("''")
+            i = j + 1
+            continue
+        if ch in _IDENTIFIER_QUOTES:
+            closer = _IDENTIFIER_QUOTES[ch]
+            out.append(ch)
+            i += 1
+            while i < n:
+                if text[i] == closer:
+                    # `""` and ``` `` ``` escape the quote the same way `''`
+                    # does. `[...]` has no escape, so `]` always closes it.
+                    if closer != "]" and text[i + 1 : i + 2] == closer:
+                        out.append(closer * 2)
+                        i += 2
+                        continue
+                    out.append(closer)
+                    i += 1
+                    break
+                out.append(text[i])
+                i += 1
+            continue
+        if text[i : i + 2] == "--":
+            end = text.find("\n", i)
+            if end == -1:
+                break
+            # The newline is left for the next pass, so line structure — and
+            # with it anything anchored to a line — survives the strip.
+            i = end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
 
 def schema_tables(text: str) -> set[str]:
-    return set(_CREATE_TABLE.findall(text))
+    """Every table name the schema declares, prose excluded."""
+    return set(_CREATE_TABLE.findall(strip_sql_comments(text)))
 
 
 def tables_added_since(repo: Path, commit: str) -> set[str]:
