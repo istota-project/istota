@@ -141,9 +141,6 @@
    * refuses anything with no permanent fault and writes `session_live` onto the
    * row, which is what the card then renders.
    */
-  let offersDirect = $derived(
-    pairingOffered && !inProgress && (link === null || link.fatal_is_permanent),
-  );
 
   /**
    * The destructive, typed-confirmation unlink.
@@ -155,9 +152,65 @@
    * exists to produce, and a one-click way out of it must not sit beside a
    * status badge.
    */
-  let offersForced = $derived(
-    pairingOffered && !inProgress && !(link !== null && link.fatal_is_permanent),
+  /**
+   * The `window_id` of an unforced start this pane itself made.
+   *
+   * The forced control has to stay reachable where `link` is unreadable — every
+   * page load on the split deployment — without both controls being offered at
+   * once, which is the redundancy an operator reported. The row cannot say why
+   * it was refused: `_write_pairing_outcome` carries the reason as prose
+   * deliberately, because writing `session_live` into the state would have the
+   * poll's orphan arm fire on a row that never opened a window. So the client
+   * uses what it alone knows — that it asked unforced and the row came back
+   * terminal without `force` — rather than matching on that prose.
+   */
+  let ownUnforcedRequest = $state<string | null>(null);
+
+  /** Readable and carrying no latched fault, so it may well be working. */
+  let knownLive = $derived(link !== null && !link.fatal_is_permanent);
+
+  /**
+   * An unforced start this pane made, refused.
+   *
+   * **Off the row, never off `pairing`.** A refusal opens no window, so there
+   * is no frame and the rendered view has nothing to say about it; the row is
+   * where it lands. The row also still carries the request id we were handed,
+   * because the bridge's own window id is adopted at the `awaiting_sidecar`
+   * transition and a refusal never reaches one. `force` being 0 is what
+   * separates it from a window that was confirmed and then expired.
+   */
+  let ownAttemptRefused = $derived(
+    ownUnforcedRequest !== null &&
+      pairingRow !== null &&
+      pairingRow.terminal &&
+      !pairingRow.force &&
+      pairingRow.window_id === ownUnforcedRequest,
   );
+
+  /**
+   * The destructive, typed-confirmation unlink — and the two controls are now
+   * **mutually exclusive**, which is the correction an operator asked for.
+   *
+   * Before this, both gates were true wherever `link` was unreadable, which is
+   * every page load on the split deployment: the pane offered a one-click
+   * `Re-pair` and an `Unlink and re-pair` beside it, with a danger-zone
+   * paragraph explaining a trade the operator had not yet made. The two are
+   * meaningfully different there — the unforced start is refused against a
+   * working session while the forced one disconnects it — but that is a
+   * distinction no copy next to two buttons can carry.
+   *
+   * So the unreadable shape now starts with the one-click control alone, and
+   * the forced route appears only once the bridge has said the session is
+   * live. That is strictly safer than the pair: a working session cannot be
+   * disconnected from here without the operator first having been told it is
+   * working. The dead-session case keeps its single click, which is the shape
+   * the whole flow exists for.
+   */
+  let offersForced = $derived(pairingOffered && !inProgress && (knownLive || ownAttemptRefused));
+
+  /** Everything the forced control is not offered for. Derived from it rather
+   *  than re-deriving the link states, so the two cannot both be true. */
+  let offersDirect = $derived(pairingOffered && !inProgress && !offersForced);
 
   /** The stream sits behind the same gate as the other four pairing routes, so
    *  opening it on a Cloud deployment or with `pairing_enabled = false` is a
@@ -515,7 +568,8 @@
       // Both flags on every call, and neither inferred. `force` is the
       // operator's acceptance of a disconnect; the server refuses it without
       // its companion rather than filling one in.
-      await startWhatsAppPairing({ force, confirmDisconnect: force });
+      const started = await startWhatsAppPairing({ force, confirmDisconnect: force });
+      ownUnforcedRequest = force ? null : started.window_id;
       receipt = force
         ? 'Re-pair requested. The sidecar is being asked to stop; a code follows once it restarts.'
         : 'Pairing requested. The scheduler picks it up within one poll interval.';
@@ -693,7 +747,32 @@
         </div>
       {/if}
 
-      {#if offersDirect}
+      {#if offersForced}
+        <!-- One control, in the card. The confirmation is what carries the
+             weight here rather than the button's placement: an operator
+             reported the separate section and its paragraph as redundant, and
+             on the shape where `link` is unreadable they were — both controls
+             rendered at once. This is not a one-click way out of a working
+             session; it opens the typed confirmation. -->
+        <div class="form-actions" data-testid="forced-zone">
+          <Button variant="primary" onclick={() => (confirmOpen = true)} disabled={starting}
+            >Unlink and re-pair</Button
+          >
+          <ConfirmDialog
+            bind:open={confirmOpen}
+            title="Unlink and re-pair WhatsApp"
+            confirmLabel="Unlink and re-pair"
+            challenge={UNLINK_CHALLENGE}
+            message={'This disconnects the WhatsApp session, whether or not it is working, and ' +
+              'costs a real reconnect. The current credential is moved aside rather than deleted, ' +
+              'and a new code has to be scanned from the phone before messages can be sent again.'}
+            onConfirm={() => {
+              confirmOpen = false;
+              void start(true);
+            }}
+          />
+        </div>
+      {:else if offersDirect}
         <div class="form-actions">
           <Button
             variant="primary"
@@ -704,39 +783,6 @@
         </div>
       {/if}
     </section>
-
-    {#if offersForced}
-      <!-- Deliberately outside the card and deliberately quiet. On a working
-           session this is the only route to a re-pair, and it is a route with a
-           typed confirmation on it rather than a button beside a green badge. -->
-      <section class="danger-zone" data-testid="forced-zone">
-        <p class="caption">
-          Re-pairing a session that is working disconnects it and costs a reconnect. The sidecar is
-          asked to stop either way, so an abort part-way has already spent that restart.
-        </p>
-        <Button variant="ghost" size="sm" onclick={() => (confirmOpen = true)} disabled={starting}
-          >Unlink and re-pair</Button
-        >
-        <!-- Inside the block, not beside it: mounted unconditionally it stayed
-             confirmable through any later state change, and `onConfirm` sends
-             `force` whatever the card is now showing. The `$effect` above
-             closes it as well, which is what covers the unmount-and-return
-             path this placement alone would leave open. -->
-        <ConfirmDialog
-          bind:open={confirmOpen}
-          title="Unlink and re-pair WhatsApp"
-          confirmLabel="Unlink and re-pair"
-          challenge={UNLINK_CHALLENGE}
-          message={'This disconnects the WhatsApp session, whether or not it is working, and ' +
-            'costs a real reconnect. The current credential is moved aside rather than deleted, ' +
-            'and a new code has to be scanned from the phone before messages can be sent again.'}
-          onConfirm={() => {
-            confirmOpen = false;
-            void start(true);
-          }}
-        />
-      </section>
-    {/if}
   {:else}
     <!-- Reached when the payload carries no `whatsapp` entry, which is not the
          same as carrying no connections: the index returns exactly one member
@@ -788,11 +834,4 @@
 
   /* No border, no tint, no card. The destructive control is reachable and
      unremarkable, which is the whole point of it not being on the card. */
-  .danger-zone {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-2);
-    padding: 0 var(--space-1);
-  }
 </style>
