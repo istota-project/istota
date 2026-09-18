@@ -20,12 +20,26 @@ const mockVault: Record<string, unknown> = {
   editable: true,
   source: '',
   vault_path: '',
+  vault_root: '/mnt/shared/Users/alice',
   passphrase_present: false,
+  // The real field sets, taken from `secret_schema`. They are the point of the
+  // row: ticking `ntfy` hands the file five fields, not one, and a field the
+  // file does not hold is deleted from the secrets table.
   eligible_services: [
-    { service: 'carto', label: 'CARTO basemaps' },
-    { service: 'feeds', label: 'Feeds' },
-    { service: 'karakeep', label: 'Karakeep' },
-    { service: 'ntfy', label: 'ntfy push' },
+    { service: 'carto', label: 'CARTO basemaps', keys: ['API key'] },
+    { service: 'feeds', label: 'Feeds', keys: ['Tumblr API key (optional)'] },
+    { service: 'karakeep', label: 'Karakeep', keys: ['Base URL', 'API key'] },
+    {
+      service: 'ntfy',
+      label: 'ntfy push',
+      keys: [
+        'Server URL',
+        'Default topic',
+        'Access token (optional)',
+        'Username (optional)',
+        'Password (optional)',
+      ],
+    },
   ],
   owned: [],
   path: '',

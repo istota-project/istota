@@ -42,6 +42,11 @@ function button(name: RegExp) {
  * in the markup carries a newline and a run of indentation. Collapse it: the
  * assertions are about what is said, not about where prettier broke the line.
  */
+/** The passphrase input, found the way every other credential field is. */
+function passwordField(): HTMLElement {
+  return screen.getByLabelText(/master password/i);
+}
+
 function words(el: HTMLElement): string {
   return (el.textContent ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -116,9 +121,22 @@ const person: User = {
   },
 };
 
+// The real shapes, which is the point of the fixture: `ntfy` is five fields and
+// `karakeep` two, so a form that names only the service is naming the wrong
+// thing.
 const ELIGIBLE = [
-  { service: 'karakeep', label: 'Karakeep' },
-  { service: 'ntfy', label: 'ntfy push' },
+  { service: 'karakeep', label: 'Karakeep', keys: ['Base URL', 'API key'] },
+  {
+    service: 'ntfy',
+    label: 'ntfy push',
+    keys: [
+      'Server URL',
+      'Default topic',
+      'Access token (optional)',
+      'Username (optional)',
+      'Password (optional)',
+    ],
+  },
 ];
 
 /** The unconfigured answer: no vault, and the form's own half beside it. */
@@ -128,6 +146,7 @@ function unconfigured(over: Partial<VaultStatus> = {}): VaultStatus {
     editable: true,
     source: '',
     vault_path: '',
+    vault_root: '/mnt/shared/Users/alice',
     eligible_services: ELIGIBLE,
     passphrase_present: false,
     ...over,
@@ -189,11 +208,28 @@ describe('a user with no vault yet', () => {
     api.getVaultStatus.mockResolvedValue(unconfigured());
     await mount();
 
-    expect(screen.getByLabelText('Karakeep')).toBeTruthy();
-    expect(screen.getByLabelText('ntfy push')).toBeTruthy();
+    expect(screen.getByLabelText(/Karakeep/)).toBeTruthy();
+    expect(screen.getByLabelText(/ntfy push/)).toBeTruthy();
     // `vault` itself and the daemon-written services are not eligible and the
     // server does not send them, so nothing here should invent one.
     expect(screen.queryByLabelText(/garmin/i)).toBeNull();
+  });
+
+  it('names the fields each service hands over, not just the service', async () => {
+    // The checkbox label alone reads as "the API key". It is not: ntfy is five
+    // fields and karakeep two, and ownership includes *deletion* — a field the
+    // file does not hold is removed from the secrets table. A user picking from
+    // service names can lose a value they never had in mind.
+    api.getVaultStatus.mockResolvedValue(unconfigured());
+    await mount();
+
+    const form = screen.getByTestId('vault-form');
+    expect(words(form)).toContain('Base URL · API key');
+    expect(words(form)).toContain('Password (optional)');
+    // And the warning says deletion out loud, since that is the half a user
+    // cannot undo by unticking the box afterwards.
+    expect(words(form)).toMatch(/removes any the file does not/i);
+    expect(words(form)).toMatch(/put every value you already have into the file first/i);
   });
 
   it('says the path is relative and offers no way to write an absolute one', async () => {
@@ -201,8 +237,40 @@ describe('a user with no vault yet', () => {
     await mount();
 
     const form = screen.getByTestId('vault-form');
-    expect(words(form)).toMatch(/relative to your own files/i);
+    expect(words(form)).toMatch(/inside your own files/i);
     expect(words(form)).toMatch(/absolute path is an administrator setting/i);
+  });
+
+  it('says where a relative path lands, as it is typed', async () => {
+    // The example alone is ambiguous: the directory a relative path resolves
+    // under is the same one holding the inbox, memories and shared folders, so
+    // `config/vault.kdbx` reads as though it might be relative to any of them.
+    api.getVaultStatus.mockResolvedValue(unconfigured());
+    await mount();
+
+    // Before anything is typed, the root is still named.
+    expect(words(screen.getByTestId('vault-form'))).toContain('/mnt/shared/Users/alice');
+
+    await fireEvent.input(screen.getByTestId('vault-path-input'), {
+      target: { value: 'shared/vault.kdbx' },
+    });
+    const resolved = await screen.findByTestId('vault-resolved');
+    expect(words(resolved)).toContain('/mnt/shared/Users/alice/shared/vault.kdbx');
+  });
+
+  it('does not build a half path when the server could not name a root', async () => {
+    // A deployment whose root cannot be resolved falls back to naming the
+    // directory in words rather than showing a path with a missing front half,
+    // which would be worse than saying nothing.
+    api.getVaultStatus.mockResolvedValue(unconfigured({ vault_root: '' }));
+    await mount();
+
+    await fireEvent.input(screen.getByTestId('vault-path-input'), {
+      target: { value: 'vault.kdbx' },
+    });
+    expect(screen.queryByTestId('vault-resolved')).toBeNull();
+    // And the rule is still stated, in the field's own warning.
+    expect(words(screen.getByTestId('vault-form'))).toMatch(/inside your own files/i);
   });
 
   it('will not save an empty path', async () => {
@@ -220,7 +288,7 @@ describe('a user with no vault yet', () => {
     await fireEvent.input(screen.getByTestId('vault-path-input'), {
       target: { value: 'config/v.kdbx' },
     });
-    await fireEvent.click(screen.getByLabelText('Karakeep'));
+    await fireEvent.click(screen.getByLabelText(/Karakeep/));
     await fireEvent.click(button(/save vault settings/i)!);
 
     await waitFor(() =>
@@ -259,7 +327,7 @@ describe('a vault the operator set in config.toml', () => {
     // there is nothing to wonder about.
     expect(screen.queryByTestId('vault-path-input')).toBeNull();
     expect(button(/save vault settings/i)).toBeNull();
-    expect(button(/generate a new passphrase/i)).toBeNull();
+    expect(button(/generate/i)).toBeNull();
   });
 });
 
@@ -286,7 +354,7 @@ describe('the passphrase', () => {
     api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: 'MINTED-VALUE-123' });
     await mount();
 
-    await fireEvent.click(button(/generate a new passphrase/i)!);
+    await fireEvent.click(button(/generate/i)!);
 
     const shown = await screen.findByTestId('vault-minted');
     expect(words(shown)).toContain('MINTED-VALUE-123');
@@ -299,7 +367,7 @@ describe('the passphrase', () => {
     api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: 'FIRST-VALUE' });
     await mount();
 
-    await fireEvent.click(button(/generate a new passphrase/i)!);
+    await fireEvent.click(button(/generate/i)!);
 
     await waitFor(() => expect(api.setVaultPassphrase).toHaveBeenCalled());
     expect(api.setVaultPassphrase).toHaveBeenCalledWith({ generate: true, replace: false });
@@ -315,15 +383,18 @@ describe('the passphrase', () => {
     api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: 'SECOND-VALUE' });
     await mount();
 
-    await fireEvent.click(button(/generate a new passphrase/i)!);
+    await fireEvent.click(button(/generate/i)!);
     // Nothing has gone out yet, which is the assertion that distinguishes a
     // dialog from a dialog that fires and then asks.
     expect(api.setVaultPassphrase).not.toHaveBeenCalled();
 
-    const dialog = await screen.findByText(/will stop opening until you set the new passphrase/i);
+    const dialog = await screen.findByText(/will stop opening until you set the new password/i);
     expect(dialog).toBeTruthy();
 
-    await fireEvent.click(button(/generate a new one/i)!);
+    // The dialog's own confirm, which is deliberately not the card button's
+    // wording: two buttons reading "Generate a new one" is one ambiguous
+    // accessible name, and the destructive one should say what it destroys.
+    await fireEvent.click(button(/^replace it$/i)!);
     await waitFor(() => expect(api.setVaultPassphrase).toHaveBeenCalled());
     expect(api.setVaultPassphrase).toHaveBeenCalledWith({ generate: true, replace: true });
   });
@@ -335,10 +406,10 @@ describe('the passphrase', () => {
     api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: '' });
     await mount();
 
-    await fireEvent.input(screen.getByTestId('vault-passphrase-input'), {
+    await fireEvent.input(passwordField(), {
       target: { value: 'a-passphrase-long-enough-to-pass-the-floor' },
     });
-    await fireEvent.click(button(/use this passphrase/i)!);
+    await fireEvent.click(button(/save password/i)!);
 
     await waitFor(() => expect(api.setVaultPassphrase).toHaveBeenCalled());
     expect(api.setVaultPassphrase).toHaveBeenCalledWith({
@@ -354,9 +425,9 @@ describe('the passphrase', () => {
     api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: '' });
     await mount();
 
-    const input = screen.getByTestId('vault-passphrase-input') as HTMLInputElement;
+    const input = passwordField() as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'correct-horse-battery-staple-and-more' } });
-    await fireEvent.click(button(/use this passphrase/i)!);
+    await fireEvent.click(button(/save password/i)!);
 
     await waitFor(() => expect(api.setVaultPassphrase).toHaveBeenCalled());
     expect(screen.queryByTestId('vault-minted')).toBeNull();
@@ -370,15 +441,13 @@ describe('the passphrase', () => {
   it('is a password field, so it is not typed in the clear', async () => {
     api.getVaultStatus.mockResolvedValue(unconfigured());
     await mount();
-    expect((screen.getByTestId('vault-passphrase-input') as HTMLInputElement).type).toBe(
-      'password',
-    );
+    expect((passwordField() as HTMLInputElement).type).toBe('password');
   });
 
   it('will not send an empty typed value', async () => {
     api.getVaultStatus.mockResolvedValue(unconfigured());
     await mount();
-    expect((button(/use this passphrase/i) as HTMLButtonElement).disabled).toBe(true);
+    expect((button(/save password/i) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('says a passphrase is stored without offering to show it', async () => {
@@ -386,8 +455,11 @@ describe('the passphrase', () => {
     await mount();
 
     const form = screen.getByTestId('vault-form');
-    expect(words(form)).toMatch(/A passphrase is stored/i);
-    expect(words(form)).toMatch(/cannot show it to you/i);
+    // `SecretField` says a value is set through its placeholder rather than
+    // by rendering anything — which is the whole point of it, and why this
+    // assertion is on the attribute and not on the card's text.
+    expect((passwordField() as HTMLInputElement).placeholder).toMatch(/stored — enter to replace/i);
+    expect(words(form)).toMatch(/cannot be shown to you again/i);
   });
 
   it('reports a refusal from the floor the CLI applies', async () => {
@@ -397,10 +469,10 @@ describe('the passphrase', () => {
     );
     await mount();
 
-    await fireEvent.input(screen.getByTestId('vault-passphrase-input'), {
+    await fireEvent.input(passwordField(), {
       target: { value: 'short' },
     });
-    await fireEvent.click(button(/use this passphrase/i)!);
+    await fireEvent.click(button(/save password/i)!);
 
     const err = await screen.findByTestId('vault-error');
     expect(words(err)).toMatch(/at least 32 characters/i);

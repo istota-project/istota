@@ -10162,6 +10162,16 @@ def _vault_settings_payload(username: str) -> dict:
         "editable": _vault_is_web_editable(username),
         "source": _vault_config_source(username),
         "vault_path": _config.vault_path_for(username) if _config else "",
+        # What a relative path is relative to, so the form can show where the
+        # file will actually be rather than leaving the user to infer it from an
+        # example. `config/vault.kdbx` as a placeholder is genuinely ambiguous:
+        # the same directory holds the user's inbox, memories and shared
+        # folders, so a path could reasonably be read against any of them. The
+        # resolver's own root is the only thing that settles it.
+        #
+        # Not a disclosure: it is this user's own directory, and `path` below
+        # already carries the resolved leaf once a vault is configured.
+        "vault_root": _vault_display_root(username),
         "eligible_services": _vault_eligible_services(),
         # A fact about the user rather than about the path, which is why it is
         # on this half and why it is asked directly rather than read off the
@@ -10234,12 +10244,21 @@ VAULT_PATH_ABSOLUTE_REFUSAL = (
 
 
 def _vault_eligible_services() -> list[dict]:
-    """The checkbox list: every service a vault may own, with its label.
+    """The checkbox list: every service a vault may own, with its keys.
 
     Rendered server-side and validated server-side against the same set, so the
     form cannot offer a name the write would refuse and cannot accept one it did
     not offer. `secrets_vault.eligible_services` is the one predicate;
-    `secret_schema` supplies the label the cards below already use.
+    `secret_schema` supplies the labels the cards below already use.
+
+    **`keys` is on the payload because a service name is not what the user is
+    agreeing to.** Ticking `karakeep` does not hand the vault that service's
+    "API key" — it hands it `base_url` *and* `api_key`, and ntfy's three are
+    `server_url`, `topic` and `token`. Worse, ownership includes deletion: a key
+    the file's group does not hold is removed from the secrets table, so a user
+    who ticks a box thinking of one field can silently lose two. The field names
+    are in the schema already, and the form has no business restating them, so
+    they travel.
     """
     try:
         from . import secrets_vault
@@ -10253,11 +10272,25 @@ def _vault_eligible_services() -> list[dict]:
     # rather than a case with a producer.
     schema = all_known_services()
     eligible = secrets_vault.eligible_services()
-    return [
-        {"service": name, "label": schema.get(name, {}).get("label", name)}
-        for name in sorted(eligible)
-        if not schema.get(name, {}).get("cli_only")
-    ]
+    out = []
+    for name in sorted(eligible):
+        entry = schema.get(name, {})
+        if entry.get("cli_only"):
+            continue
+        out.append({
+            "service": name,
+            "label": entry.get("label", name),
+            # The writable fields, in the order the schema declares them, which
+            # is the order the service card below renders them in. A service
+            # with none is not vault-eligible at all (`eligible_services`
+            # drops it), so an empty list here has no producer.
+            "keys": [
+                f.get("label") or f.get("key", "")
+                for f in entry.get("fields", [])
+                if isinstance(f, dict)
+            ],
+        })
+    return out
 
 
 #: Why a `cli_only` service is not on the form. Read the filter above as a
@@ -10273,6 +10306,25 @@ def _vault_eligible_services() -> list[dict]:
 #: schema flag rather than by name so a later `cli_only` service is covered
 #: without anybody remembering this line exists.
 VAULT_WEB_EXCLUDES_CLI_ONLY = True
+
+
+def _vault_display_root(username: str) -> str:
+    """Where a relative `vault_path` lands, as a string for the form.
+
+    `workspace_root` is the resolver's own root rather than a second
+    derivation of it, so what the form shows is where the file will be. It
+    scopes the user id through `user_scope` and answers `None` for one that does
+    not name a plain child — which reads here as "cannot say", and the form
+    falls back to naming the directory in words.
+    """
+    if _config is None:
+        return ""
+    try:
+        root = _config.workspace_root(username)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("vault display root lookup failed for %r", username)
+        return ""
+    return str(root) if root is not None else ""
 
 
 def _vault_passphrase_present(username: str) -> bool:

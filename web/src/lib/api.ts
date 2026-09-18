@@ -1158,6 +1158,11 @@ export interface VaultStatus {
   /** The path as written, for the form field. `path` above is the *resolved*
    *  one and is only present once a vault is configured. */
   vault_path?: string;
+  /** What a relative `vault_path` is relative to — the user's own workspace
+   *  directory. On the payload so the form can show where the file will land
+   *  rather than leaving it to be inferred: the same directory holds the
+   *  inbox, memories and shared folders, so an example alone is ambiguous. */
+  vault_root?: string;
   /** Every service a vault may own, server-rendered so the form cannot offer a
    *  name the write would refuse. */
   eligible_services?: VaultEligibleService[];
@@ -1166,6 +1171,11 @@ export interface VaultStatus {
 export interface VaultEligibleService {
   service: string;
   label: string;
+  /** The writable fields the vault takes over for this service, in schema
+   *  order. On the payload because the service name is not what the user is
+   *  agreeing to: ticking `ntfy` hands the file five fields, not one, and a
+   *  field the file does not hold is *deleted* from the secrets table. */
+  keys: string[];
 }
 
 export interface VaultPassphraseResponse {

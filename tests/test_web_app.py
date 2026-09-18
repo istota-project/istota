@@ -3298,6 +3298,42 @@ class TestTheVaultWriteEndpoints:
             )
             assert resp.status_code == 400, name
 
+    async def test_each_offered_service_names_the_fields_it_hands_over(
+        self, tmp_path, client, app,
+    ):
+        """A service name is not what the user is agreeing to.
+
+        Ticking `ntfy` hands the file five fields and `karakeep` two, and
+        ownership includes deletion — a field the file's group does not hold is
+        removed from the secrets table. A payload carrying only the service name
+        leaves the form naming the wrong thing, and the field labels are in the
+        schema already, so there is nothing for the client to restate.
+
+        Asserted against the schema rather than against a written-out list, so
+        a field added to a service is covered without this test being edited —
+        and the `karakeep` clause afterwards is the control, since a payload
+        whose `keys` were all empty would satisfy the loop vacuously.
+        """
+        from istota.secret_schema import all_known_services
+
+        cookies = await self._setup(tmp_path, client, app)
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+        schema = all_known_services()
+
+        for offered in body["eligible_services"]:
+            expected = [
+                f.get("label") or f.get("key", "")
+                for f in schema[offered["service"]].get("fields", [])
+            ]
+            assert offered["keys"] == expected, offered["service"]
+
+        karakeep = next(
+            s for s in body["eligible_services"] if s["service"] == "karakeep"
+        )
+        assert karakeep["keys"] == ["Base URL", "API key"]
+
     async def test_an_unanswerable_source_is_not_writable(
         self, tmp_path, client, app,
     ):
