@@ -3396,9 +3396,17 @@ class TestTheVaultSettingsEndpoint:
         # for the word.
         assert body["passphrase_present"] is False
 
-    async def test_a_configured_user_gets_the_path_and_the_owned_set(
+    async def test_a_configured_user_gets_the_path_and_no_owned_set(
         self, tmp_path, client, app,
     ):
+        """`owned` is empty however `vault_services` is configured.
+
+        It used to be the services the vault overwrote. It overwrites none of
+        them now, so `vault_status` stopped filling the field rather than
+        leaving the card to say a vault is the authority for a `karakeep` form
+        that nothing competes for. The key survives until stage 6 takes the
+        whole `vault_services` surface; what it may never again be is non-empty.
+        """
         from istota import secrets_store
 
         secrets_store.set_secret(
@@ -3413,7 +3421,7 @@ class TestTheVaultSettingsEndpoint:
 
         assert body["configured"] is True
         assert body["path"].endswith("Users/alice/config/vault.kdbx")
-        assert body["owned"] == ["karakeep"]
+        assert body["owned"] == []
         assert body["passphrase_present"] is True
 
     async def test_it_reports_the_last_successful_sync_from_the_record(

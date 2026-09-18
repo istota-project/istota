@@ -9,7 +9,7 @@ visible, and :func:`istota.notification_store.sweep_expired_alerts` is the
 backstop for rows that fell below the render limit or belong to a user who never
 opens the panel.
 
-Five producers write here, each with its own key:
+Six producers write here, each with its own key:
 
 ===================================  ==================================
 ``task:{task_id}:{alert_type}``      deferred alerts the model wrote from
@@ -18,9 +18,18 @@ Five producers write here, each with its own key:
 ``expired:{task_id}``                a confirmation that timed out
 ``dmarc:{verdict}``                  the inbound-mail DMARC canary
 ``undelivered:{task_id}``            a task result that reached nobody
+``vault-unscoped``                   a credential vault whose file has no
+                                     ``istota`` group, so all of it is shared
 ===================================  ==================================
 
-Three rules hold across all five, and each exists because of a specific way this
+The last one is the only fixed key here — one row per user, raised on the first
+unscoped sync and never again, gated on the durable ``_vault_sync`` record
+rather than on this table. It is deliberately **not** on ``connected_service``,
+where the vault's own sync-failure row lives: that source's dedup key is the
+service name, so the two would collide and each bump the other. See
+``secrets_vault._report_unscoped``.
+
+Three rules hold across all six, and each exists because of a specific way this
 class can go wrong.
 
 **No ``link``, and no ``LINK`` action. Unconditionally.** The deferred-alert

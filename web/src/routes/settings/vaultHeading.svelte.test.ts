@@ -113,7 +113,7 @@ function configured(over: Partial<VaultStatus> = {}): VaultStatus {
   return {
     configured: true,
     path: '/mnt/shared/Users/alice/config/vault.kdbx',
-    owned: ['karakeep'],
+    entry_count: 2,
     passphrase_present: true,
     outcome: '',
     reason: '',
@@ -201,13 +201,18 @@ describe('a user with no credential vault', () => {
   });
 });
 
-describe('a user whose vault owns a service', () => {
-  it('names the owned service, the path and the last sync', async () => {
+describe('a user whose vault is working', () => {
+  it('names the shared count, the path and the last sync', async () => {
+    // It used to name the connected services the vault overwrote. It
+    // overwrites none of them now, so the sentence is about the namespace the
+    // file *is* the authority for — and the fixture no longer carries an
+    // `owned` list, because the server cannot produce one.
     api.getVaultStatus.mockResolvedValue(configured());
     await mount();
 
     const line = await findHeading();
-    expect(line.textContent).toContain('karakeep');
+    expect(line.textContent).toContain('2 shared credentials');
+    expect(line.textContent).not.toContain('karakeep');
     expect(line.textContent).toContain('/mnt/shared/Users/alice/config/vault.kdbx');
     // A relative reading, which is what the question "is it keeping up" wants.
     // The exact words are `formatRelative`'s; what this pins is that the value
@@ -288,15 +293,23 @@ describe('a user whose vault owns a service', () => {
     expect(line.textContent).not.toContain('Not working');
   });
 
-  it('says so when the vault owns nothing yet', async () => {
-    // `vault_services = []` is a usable dry-run state: the file is read and
-    // nothing is applied. A line claiming it is the authority for an empty list
-    // would be the wrong sentence for it.
-    api.getVaultStatus.mockResolvedValue(configured({ owned: [] }));
+  it('says so when nothing has been shared from it yet', async () => {
+    // A file in the folder with a passphrase behind it and no entries under
+    // the narrowing is a usable state, not a fault. A line claiming istota
+    // holds credentials from it would be the wrong sentence.
+    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 0 }));
     await mount();
 
     const line = await findHeading();
-    expect(line.textContent).toContain('no services are assigned');
+    expect(line.textContent).toContain('nothing has been shared');
+  });
+
+  it('renders the singular for one shared credential', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 1 }));
+    await mount();
+
+    const line = await findHeading();
+    expect(line.textContent).toContain('1 shared credential from this file');
   });
 });
 

@@ -27,6 +27,7 @@ covered without the sweep changing.
 from __future__ import annotations
 
 import importlib.util
+import gc
 import os
 import stat
 from pathlib import Path
@@ -466,6 +467,17 @@ class TestThePathArm:
         _add_mixed_users(vault_config)
 
         def _open_fds():
+            # `gc.collect()` first, and it does not weaken the measurement: a
+            # descriptor this check leaked is referenced by nothing and is held
+            # open regardless, while a sqlite or lxml handle that is merely
+            # awaiting finalization is not a leak and is exactly what an
+            # uncollected sample counts. Without it the reading depends on where
+            # the interpreter's generational threshold happens to fall inside a
+            # parse that allocates tens of thousands of objects — so an
+            # unrelated change to how many objects the call path builds moves
+            # `before` by four and reddens this test, which is how it behaved
+            # twice while this stage was written.
+            gc.collect()
             return len(os.listdir("/dev/fd"))
 
         _all(vault_config, probe)  # warm any lazy import before measuring
@@ -578,6 +590,107 @@ class TestThePathArm:
 
         result = _run(config, probe=False)["security.credential_vault.path"]
         assert result.status == OK
+
+
+class TestAFolderConventionUser:
+    """§7's enable is a file in the folder plus a passphrase, and §10 says this
+    check follows it. Every fixture above configures a `vault_path`, so the
+    arms that serve the ordinary shape — a user who chose their file from the
+    settings card and has no TOML line at all — were reached by nothing.
+    """
+
+    def _passphrase_only(self, make_config, tmp_path, *files):
+        """A user with a `vault/passphrase` row, no `vault_path`, and `files`
+        in their vault folder."""
+        database = tmp_path / "vault-folder.db"
+        db.init_db(database)
+        config = make_config(
+            db_path=database,
+            users={"alice": UserConfig(display_name="Alice", vault_path="")},
+        )
+        folder = (
+            Path(config.workspace_path)
+            / "Users" / "alice" / config.bot_dir_name / "vault"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            _write_vault(folder / name)
+        _provision(config)
+        return config, folder
+
+    def test_a_passphrase_with_no_path_is_a_configured_vault(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """The half `_vault_users` gained. Reading `vault_path` alone reported
+        every folder-convention user as having no vault at all, which after §7
+        is the ordinary shape rather than an edge."""
+        config, _folder = self._passphrase_only(make_config, tmp_path, "personal.kdbx")
+
+        assert doctor._vault_users(config) == {"alice": ""}
+        assert _run(config, probe=False)["security.credential_vault.path"].status == OK
+
+    def test_a_user_with_neither_is_still_absent(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """The control: without it the enumerator could be returning every
+        configured user, and the SKIP every deployment gets by default would
+        have stopped working."""
+        database = tmp_path / "none.db"
+        db.init_db(database)
+        config = make_config(
+            db_path=database,
+            users={"alice": UserConfig(display_name="Alice", vault_path="")},
+        )
+
+        assert doctor._vault_users(config) == {}
+        assert doctor.check_credential_vault(config, True)[0].status == SKIP
+
+    def test_an_empty_folder_warns_and_names_it(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """§10: `VAULT_DIR_EMPTY` reads as "configured and no file yet". A WARN
+        rather than a FAIL, because it is the user's to fix and their own card
+        already asks for exactly this."""
+        config, folder = self._passphrase_only(make_config, tmp_path)
+
+        result = _run(config, probe=False)["security.credential_vault.path"]
+
+        assert result.status == WARN
+        assert "alice" in result.detail
+        assert folder.name in result.detail
+        assert "vault folder" in result.remedy
+
+    def test_several_files_and_no_choice_warns(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """§10: `VAULT_DIR_UNCHOSEN` reads as "several files, none chosen".
+        Also not a fault — the dropdown is one click away."""
+        config, _folder = self._passphrase_only(
+            make_config, tmp_path, "personal.kdbx", "work.kdbx"
+        )
+
+        result = _run(config, probe=False)["security.credential_vault.path"]
+
+        assert result.status == WARN
+        assert "alice" in result.detail
+        assert "Settings" in result.remedy
+
+    def test_a_refused_toml_path_still_fails_beside_a_folder_user(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """The discriminating pair. A folder refusal WARNs and a refused
+        configured path FAILs, and the arm reports the worst class present — so
+        collapsing the two would either downgrade the operator's FAIL or
+        upgrade a user's dropdown into one."""
+        config, _folder = self._passphrase_only(make_config, tmp_path)
+        config.users["bob"] = UserConfig(
+            display_name="Bob", vault_path="no-such-dir/vault.kdbx"
+        )
+
+        result = _run(config, probe=False)["security.credential_vault.path"]
+
+        assert result.status == FAIL
+        assert "alice" in result.detail and "bob" in result.detail
 
 
 class TestThePassphraseArm:
@@ -694,18 +807,21 @@ class TestTheContentsCheck:
         Swept over the whole result rather than over named fields, so a field
         added later is covered without this changing.
 
-        **What is in the sweep and why the obvious members are the weak half.**
-        `VaultStatusReport` carries no key names at all — `key_counts` is a
-        count per service — and carries no values, so the three fixture strings
-        below are absent by the shape of the type rather than by this arm's
-        discretion, and a mutation cannot reach them. `UNOWNED_GROUP` is the
-        member that makes this test discriminating: it is a name written into
-        the *file*, it reaches the report through `groups` and `key_counts`, and
-        §12 records that a task in that user's own sandbox can write it. Printing
-        what the file turned out to hold turns this red on that member alone.
+        **What is in the sweep, and the discriminating member moved.** It used
+        to be that `VaultStatusReport` carried no credential names at all —
+        `key_counts` was a count per service — so the values below were absent
+        by the shape of the type and only `groups` could leak file text. Both
+        fields are gone: the report now carries `names`, the whole derived
+        namespace, written into the *file* by somebody a task in that user's
+        own sandbox can be. So `names` is what makes this discriminating, and
+        `UNOWNED_GROUP` below is a group title that appears in one of them.
+        Printing what the file turned out to hold — rather than how many —
+        turns this red on that member.
 
-        `karakeep` and `ntfy` are deliberately not swept for: those are operator
-        config, and `…schedule` reports them on purpose.
+        `karakeep` and `ntfy` used to be excluded from the sweep as operator
+        config the schedule arm reported on purpose. That arm reports no
+        service names any more, so the exclusion is about the fixture's own
+        group titles rather than about config.
         """
         _provision(vault_config)
         rendered = " ".join(

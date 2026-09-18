@@ -948,7 +948,15 @@ class TestTheFirstUnscopedSync:
     and this is what pays for the difference.
     """
 
-    def test_the_first_unscoped_sync_raises_once(self, unscoped, sends):
+    def test_the_first_unscoped_sync_raises_once_and_pushes_it(self, unscoped, sends):
+        """The **positive** half, and it is the one a row count cannot give.
+
+        `deliver_pending` reads `RaiseResult.deliver`, so a notice that was
+        written and never sent leaves exactly the row this test would otherwise
+        assert on — and the `deliver=False` case below would stay green beside
+        it. Two tests agreeing that nothing was pushed is not evidence either
+        way; one of them has to observe a push.
+        """
         from istota.secrets_vault import OUTCOME_OK, sync_user
 
         config, path = unscoped
@@ -957,6 +965,7 @@ class TestTheFirstUnscopedSync:
         rows = _alert_rows(config)
         assert len(rows) == 1
         assert rows[0]["dedup_key"] == "vault-unscoped"
+        assert [user for user, _text in sends.calls] == ["alice"]
 
     def test_a_second_unscoped_sync_does_not_raise_again(self, unscoped, sends):
         """Gated on the **durable** record rather than on in-process state: an
@@ -992,6 +1001,10 @@ class TestTheFirstUnscopedSync:
         assert API_KEY_VALUE not in rendered
         assert BASE_URL_VALUE not in rendered
         assert "karakeep_api_key" not in rendered
+        # The group name survives the body flattener, which maps backticks to a
+        # space — so a body that quoted it with them would deliver
+        # `named  istota .` and lose the one word the remedy needs copied.
+        assert '"istota"' in row["body"]
 
     def test_a_scoped_vault_raises_nothing(self, tmp_path, secret_key, sends):
         """The control: without it the notice could be firing on every sync."""

@@ -431,6 +431,88 @@ class TestRead:
         said = [m for m in _ours(caplog) if "aws_key" in m]
         assert len(said) == 1, said
 
+    def test_a_collision_where_only_one_entry_has_a_value_is_held(
+        self, tmp_path, caplog
+    ):
+        """The fat-finger case, and the one the removed `_near_miss_title`
+        existed for.
+
+        A user adds a second entry whose title slugs to the same name and
+        leaves its password blank — `API_KEY` beside `api_key`, `AWS Key`
+        beside `aws/key`. §2's deletion is licensed by "istota cannot say which
+        of two values it is", and with one value that premise is false. The
+        name is still not applied, because which *entry* owns it is genuinely
+        ambiguous; what must not happen is the stored credential being
+        destroyed over a duplicated title.
+
+        The measurement behind it is in the deleted `_near_miss_title`
+        docstring: `API_KEY` with a blank password beside a stored `api_key`
+        deleted the credential and put nothing in `skipped`.
+        """
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(kp.add_group(root, "aws"), "key", "", API_KEY_VALUE)
+        kp.add_entry(root, "AWS Key", "", "")
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert "aws_key" not in read.services
+        assert "aws_key" in read.held, "the stored credential would be deleted"
+        # Warned, unlike the zero-value collision: the user has a real
+        # credential that is not being applied and wants to know why.
+        assert ("aws_key", SKIP_DUPLICATE_NAME) in read.skipped
+        said = [m for m in _ours(caplog) if "aws_key" in m]
+        assert len(said) == 1, said
+
+    def test_a_held_collision_does_not_delete_the_stored_row(
+        self, tmp_path, db_path, secret_key_env
+    ):
+        """The hold driven through to the rows, which is where it matters.
+
+        `held` is a field; a test asserting only on the field passes against an
+        apply that ignores it.
+        """
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(kp.add_group(root, "aws"), "key", "", API_KEY_VALUE)
+        kp.save()
+        apply_vault(db_path, "alice", _read(path)[0])
+        assert _entry(db_path, "alice", "aws_key") == API_KEY_VALUE
+
+        kp.add_entry(root, "AWS Key", "", "")
+        kp.save()
+        result = apply_vault(db_path, "alice", _read(path)[0])
+
+        assert result.deleted == 0
+        assert _entry(db_path, "alice", "aws_key") == API_KEY_VALUE
+
+    def test_two_case_variant_roots_that_collide_hold_rather_than_delete(
+        self, tmp_path
+    ):
+        """The case-insensitive match makes a pair of top-level `istota` groups
+        reachable that the exact match could not produce — a KDBX merge, or a
+        user who made the folder twice. Every name they share collides.
+
+        Both roots are read rather than one being picked, because picking would
+        decide by XML order, which is what §2 refuses. The collision rule then
+        applies as it does anywhere else, and the one-value arm is what keeps a
+        duplicate folder from emptying the namespace.
+        """
+        kp, path = _new_db(tmp_path)
+        lower = kp.add_group(kp.root_group, "istota")
+        upper = kp.add_group(kp.root_group, "Istota")
+        kp.add_entry(lower, "shared", "", API_KEY_VALUE)
+        kp.add_entry(upper, "shared", "", "")
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.scoped is True
+        assert "shared" not in read.services
+        assert "shared" in read.held
+
     def test_the_group_form_alone_is_present(self, tmp_path):
         """The first half of the collision's control: with only one producer,
         the name is there — so the test above is about the collision rather
@@ -1419,22 +1501,64 @@ class TestScope:
         assert scoped.services == {} and scoped.scoped is True
         assert bare.services == {} and bare.scoped is False
 
-    def test_a_top_level_group_nominated_as_the_recycle_bin_does_not_scope(
+    def test_an_istota_group_nominated_as_the_recycle_bin_still_scopes(
         self, tmp_path
     ):
-        """A trashed `istota` group is not a narrowing, and the whole file is
-        then read — which for a file whose only other content is the bin means
-        nothing at all."""
-        kp, path = _standard_vault(tmp_path)
-        root = next(g for g in kp.root_group.subgroups if g.name == "istota")
+        """It contributes no entries and it still narrows the read.
+
+        The widening this refuses is reachable from a sandbox: the recycle bin
+        is a Meta element in a file a task in that user's own sandbox can
+        write, so treating "the `istota` group is the bin" as "there is no
+        `istota` group" would let a task turn a scoped vault into a read of the
+        user's whole file by editing one UUID.
+
+        **The discriminating content is the entry outside the group**, not the
+        empty result: a file whose only other content is the bin reads as `{}`
+        under either rule, which is how the earlier version of this test passed
+        while asserting the wider behaviour.
+        """
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "shared", "", API_KEY_VALUE)
+        kp.add_entry(
+            kp.add_group(kp.root_group, "Personal"), "outside", "", TOPIC_VALUE
+        )
         elem = kp._xpath("/KeePassFile/Meta/RecycleBinUUID", first=True)
         elem.text = base64.b64encode(root.uuid.bytes).decode()
         kp.save()
 
         read, _ = _read(path)
 
-        assert read.scoped is False
+        assert "personal_outside" not in read.services, read.services
+        assert read.scoped is True
         assert read.services == {}
+
+    def test_a_recycle_bin_is_excluded_from_an_unscoped_read(self, tmp_path):
+        """The one case where the bin check is the boundary rather than a
+        backstop.
+
+        A scoped read starts at the *children* of the `istota` group, and
+        KeePassXC's bin is a root-level group, so a trashed credential is
+        outside the read by construction. An unscoped read starts **at** the
+        file root, where the bin is an ordinary subgroup — and
+        `_visit_group`'s UUID test is then the only thing keeping a credential
+        the user deleted out of `vault_entries`, where their own tasks could
+        fetch it by name.
+        """
+        kp, path = _new_db(tmp_path)
+        kp.add_entry(kp.add_group(kp.root_group, "live"), "key", "", API_KEY_VALUE)
+        binned = kp.add_group(kp.root_group, "Recycle Bin")
+        kp.add_entry(binned, "old", "", TOPIC_VALUE)
+        kp.save()
+        elem = kp._xpath("/KeePassFile/Meta/RecycleBinUUID", first=True)
+        elem.text = base64.b64encode(binned.uuid.bytes).decode()
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.scoped is False
+        assert "recycle_bin_old" not in read.services, read.services
+        assert read.services == {"live_key": API_KEY_VALUE}
 
     def test_the_repr_carries_the_scope_and_still_no_value(self, tmp_path):
         kp, path = _new_db(tmp_path)

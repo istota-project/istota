@@ -271,6 +271,15 @@
   // closure defers the read and keeps the declared type.
   let vaultProblem = $derived.by(() => vault?.problem ?? '');
 
+  // The count and its noun as one string rather than two nodes. Prettier is
+  // free to reflow the markup, and a line break landing between `{count}` and
+  // the word after it puts a newline inside the sentence — invisible on screen
+  // and the reason a test asserting on the rendered text saw `2\n credentials`.
+  let vaultSharedCount = $derived.by(() => {
+    const n = vault?.entry_count ?? 0;
+    return `${n} shared credential${n === 1 ? '' : 's'}`;
+  });
+
   async function refreshVault() {
     try {
       const status = await getVaultStatus();
@@ -1079,12 +1088,19 @@
         {#if vault}
           <p class="hint vault" data-testid="vault-status">
             <strong>Credential vault:</strong>
-            {#if vault.owned && vault.owned.length > 0}
-              this file is the authority for
-              {#each vault.owned as name, i (name)}{#if i > 0},
-                {/if}<code>{name}</code>{/each}.
+            <!--
+              What the vault is the authority for is its own namespace of
+              shared credentials, not a list of connected services. It used to
+              name the services it overwrote; it overwrites none of them now,
+              so that sentence was false on every card that rendered it and its
+              empty-list fallback ("no services are assigned to it yet") was
+              false on the rest.
+            -->
+            {#if (vault.entry_count ?? 0) > 0}
+              istota holds {vaultSharedCount} from this file, and the file is the authority for all of
+              them — removing an entry removes the credential.
             {:else}
-              no services are assigned to it yet.
+              nothing has been shared from it yet.
             {/if}
             <!--
               The scope notice. A file with no top-level `istota` group is read

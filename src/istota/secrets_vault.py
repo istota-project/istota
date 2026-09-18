@@ -6,12 +6,18 @@ search or back up. This module is the answer's provisioning half: a KDBX file in
 the user's own workspace that istota decrypts and never writes, and the pass
 that copies what it holds into the encrypted ``secrets`` table.
 
-**The ``istota`` group is a consent boundary rather than a namespace prefix.**
-What is under it is shared with that user's own tasks; everything else in the
-file is parsed and discarded, so a user may point at the everyday KDBX they
-already keep. Below it the shape is theirs: entries directly under the root or
-in subgroups, each contributing one name per field, with the name derived from
-the path rather than typed (:func:`slug_name`).
+**The file is the consent boundary; the ``istota`` group is an optional
+narrowing inside it.** A top-level group of that name — matched
+case-insensitively, whitespace stripped — scopes the read to itself and
+everything outside is parsed and discarded. With no such group the **whole
+file** is shared, the database root standing in for ``istota/``. So the file a
+user puts in their vault folder is read in full unless they narrow it, and
+pointing at the everyday KDBX they already keep is the one thing not to do
+without creating the group first. An unscoped read is reported and never
+silent: on the settings card, in ``vault-status``, and once per user as a
+notification. Below the starting point the shape is theirs — entries directly
+under it or in subgroups, each contributing one name per field, with the name
+derived from the path rather than typed (:func:`slug_name`).
 
 **It is provisioning input, not a storage backend.** ``resolve_secret``'s order
 is unchanged, the table stays the live store, and a vault that is missing,
@@ -76,11 +82,22 @@ VAULT_READ_CAP_BYTES = 8 * 1024 * 1024
 #: inside it** (§1). A file with no such group is read in full, with the root
 #: standing in for ``istota/``. That inverts the earlier rule and dissolves its
 #: worst failure: under the old reading a missing or mistyped group was a
-#: successful parse of nothing, which the namespace sweep turned into the
-#: deletion of every stored credential — and a mistyped group is
-#: indistinguishable from a deliberately emptied vault. With no group meaning
-#: "read the root", an empty read happens only when the file is genuinely
-#: empty, which is unambiguous.
+#: successful parse of *nothing*, which the namespace sweep turned into the
+#: deletion of every stored credential, with the file's contents still sitting
+#: there unread. Under this one such a file is read, so the credentials are
+#: rewritten rather than destroyed.
+#:
+#: **What it does not do is make a renamed group harmless, and the honest form
+#: of the claim is narrower than "an empty read means an empty file".** Two
+#: things still produce an empty read — an empty file, and an ``istota`` group
+#: with nothing in it, which is the deliberate revocation §3 names. And a
+#: *renamed* group produces a read that is not empty but is **disjoint**: the
+#: group now contributes a path segment it did not before, so every derived
+#: name changes, the old ones are swept and the new ones are written in the
+#: same pass. That is recoverable — rename it back and one cycle restores every
+#: name — where the old rule's wipe was not, and it is reported rather than
+#: silent, because the read is unscoped and says so on three surfaces. It is
+#: still a surprise worth knowing about before editing this rule.
 #:
 #: **The case-insensitive match is load-bearing rather than a courtesy.**
 #: ``Istota`` is what a person types, and under an exact lowercase match it
@@ -89,8 +106,9 @@ VAULT_READ_CAP_BYTES = 8 * 1024 * 1024
 #: that was a wipe; under this one it is a disclosure.
 VAULT_ROOT_GROUP = "istota"
 
-#: How deep below ``istota/`` the walk goes, counted in subgroup levels — so
-#: ``8`` admits ``istota/a/b/c/d/e/f/g/h/<entry>``. A bound rather than a limit
+#: How deep below the read's root the walk goes — the ``istota`` group where
+#: one narrows the read, and the file root where none does — counted in
+#: subgroup levels, so ``8`` admits ``<root>/a/b/c/d/e/f/g/h/<entry>``. A bound rather than a limit
 #: anyone should meet: the names below flatten the path, so the depth that
 #: produces a usable name is bounded by ``VAULT_NAME_MAX_CHARS`` long before
 #: this. What it is really for is a file a task in that user's own sandbox can
@@ -735,13 +753,20 @@ def _digest(data: bytes) -> str:
 def _recyclebin_uuid(kp):
     """The recycle bin's UUID, or None where there is not one.
 
-    Defence in depth rather than the boundary. The walk below starts at the root
-    group's own children, and KeePassXC's recycle bin is a root-level group, so
-    both a trashed entry and a trashed ``istota`` group are already outside what
-    is read. What this covers is the layout that is not excluded by
-    construction: any group can be nominated as the recycle bin, including a
-    service group, at which point every entry in it is something the user
-    deleted sitting exactly where the walk looks.
+    **The boundary on the unscoped path, defence in depth only on the scoped
+    one**, and the distinction is new rather than pedantic. It used to be
+    defence in depth outright: the walk started at the *children* of a named
+    ``istota`` group, and KeePassXC's bin is a root-level group, so a trashed
+    entry and a trashed ``istota`` group were both outside what was read by
+    construction. §1's unscoped read starts **at** the file root, where a
+    root-level bin is an ordinary subgroup — so ``_visit_group``'s
+    ``subgroup.uuid == walk.recyclebin`` test is now the only thing keeping a
+    credential the user deleted out of ``vault_entries``, and out of the
+    namespace their own tasks can fetch by name. Do not remove it as redundant.
+
+    It still covers the layout neither path excludes by construction: any group
+    can be nominated as the bin, including one nested inside the read, at which
+    point everything the user deleted sits exactly where the walk looks.
 
     ``recyclebin_group`` reads the Meta element and decodes it, so a database
     whose Meta is absent or malformed raises rather than answering — and a
@@ -805,8 +830,15 @@ class _Walk:
     stopped: str = ""
 
 
-def _root_groups(kp, recyclebin) -> list:
-    """The top-level groups that narrow the read, in file order.
+def _root_groups(kp, recyclebin) -> tuple[list, list]:
+    """The top-level groups that narrow the read, and the ones to walk.
+
+    Two lists, because they answer different questions. The first is "does
+    anything narrow this read at all", which decides ``VaultRead.scoped`` and
+    therefore whether the file root is walked instead. The second is what to
+    walk, which excludes a group nominated as the recycle bin. They differ by
+    exactly that group, and collapsing them is the widening the second
+    paragraph below is about.
 
     The match strips surrounding whitespace and folds case, so ``Istota``,
     ``ISTOTA`` and ``"istota "`` all scope — see :data:`VAULT_ROOT_GROUP` for
@@ -814,18 +846,30 @@ def _root_groups(kp, recyclebin) -> list:
     group named ``istota`` nested inside another is an ordinary group and
     contributes a path segment like any other.
 
-    A group nominated as the recycle bin is excluded here whatever it is
-    called, which is the same rule ``_visit_group`` applies one level down.
-    Several matching groups are all read, which is what the old exact match
-    did; nothing chooses between them.
+    **A group nominated as the recycle bin still counts as one, and that is a
+    narrowing rather than an oversight.** It contributes no entries — the
+    caller drops it — but its *presence* keeps the read scoped, so the answer
+    is "this file narrows to a group that happens to hold only deleted things",
+    which reads nothing. Skipping it outright would leave no root at all, and
+    the caller would then read the **whole file**: a widening arranged by the
+    Meta element of a file a task in that user's own sandbox can write, which
+    is the one direction this module must never move by accident.
+
+    Several matching groups are all read, which is what the old exact match did
+    for duplicates; nothing chooses between them, because choosing would decide
+    by XML order. The casefold makes an `istota` / `Istota` pair newly
+    reachable, and a name they share is then an ordinary collision — held where
+    fewer than two of them supply a value, skipped where more do.
     """
     found = []
+    live = []
     for group in kp.root_group.subgroups:
-        if recyclebin is not None and group.uuid == recyclebin:
+        if str(group.name or "").strip().casefold() != VAULT_ROOT_GROUP:
             continue
-        if str(group.name or "").strip().casefold() == VAULT_ROOT_GROUP:
-            found.append(group)
-    return found
+        found.append(group)
+        if recyclebin is None or group.uuid != recyclebin:
+            live.append(group)
+    return found, live
 
 
 def _map_groups(kp, digest: str) -> VaultRead:
@@ -879,14 +923,17 @@ def _map_groups(kp, digest: str) -> VaultRead:
     collision.
     """
     walk = _Walk(recyclebin=_recyclebin_uuid(kp))
-    roots = _root_groups(kp, walk.recyclebin)
-    scoped = bool(roots)
+    named, roots = _root_groups(kp, walk.recyclebin)
+    # `named` rather than `roots`: a file whose only `istota` group is the
+    # recycle bin is a *scoped* read of nothing, not an unscoped read of
+    # everything. See `_root_groups`.
+    scoped = bool(named)
     # The database's own root group is the starting point when nothing narrows
     # the read, and it contributes **no** path segment — it stands in for
     # `istota/`, so `<root>/aws/key` produces `aws_key` exactly as
     # `istota/aws/key` does. Its own entries are read too: a KDBX exported out
     # of a password manager commonly has entries sitting at the top level.
-    for root in roots or [kp.root_group]:
+    for root in roots if scoped else [kp.root_group]:
         _visit_group(walk, root, (), 0)
 
     if not scoped:
@@ -926,27 +973,53 @@ def _map_groups(kp, digest: str) -> VaultRead:
     held: set[str] = set()
     for name, produced in walk.candidates.items():
         if len(produced) > 1:
-            if not any(produced):
-                # Nothing to choose between. The collision rule exists because
-                # istota cannot say which of two *values* is the credential,
-                # and where no producer supplied one there is no ambiguity —
-                # so this is the empty-field hold rather than a refusal, and it
-                # is silent for the same reason an empty field is. It is also
-                # the common shape: two entries colliding on their titles
-                # collide on their username and URL fields as well, and warning
-                # three times about one mistake names two fields the user never
-                # filled in.
+            values = sum(1 for value in produced if value)
+            if values < 2:
+                # **Held rather than deleted, and the count is the reason.**
+                # §2 licenses the deletion of a collided name on one premise:
+                # "istota cannot say which of two values it is." With fewer
+                # than two values that premise is simply false — there is
+                # nothing to choose between — so the licence does not apply and
+                # destroying the stored row is a loss with no argument behind
+                # it. The name is still absent from `services`, so nothing is
+                # *written* on ambiguous evidence; only the destruction is
+                # withheld.
+                #
+                # The one-value case is the one that costs a credential, and
+                # the tree had already measured it: `_near_miss_title`, removed
+                # with the service mapping this change replaces, existed for
+                # exactly it and its docstring recorded the observation —
+                # `API_KEY` with a blank password beside a stored `api_key`
+                # deleted the credential. Under the flat namespace both titles
+                # slug to one name, so the hazard survived the mechanism that
+                # used to cover it. Silent at zero values (an entry with no URL
+                # is the ordinary case and two colliding entries collide on
+                # their empty fields too, so warning there names fields the
+                # user never filled in) and warned at one, because at one the
+                # user has a real credential that is not being applied.
                 held.add(name)
+                if values:
+                    walk.skipped.append((name, SKIP_DUPLICATE_NAME))
+                    logger.warning(
+                        "vault: %s is produced by %d entries and only one of "
+                        "them has a value, so none is used and the stored "
+                        "credential is left alone; rename one",
+                        _label(name),
+                        len(produced),
+                    )
                 continue
-            # Absent, and therefore deleted if it was there before — which is
-            # correct, since istota cannot say which of the values it is. Not
-            # held for exactly that reason.
+            # Two or more real values. Absent, and therefore deleted if it was
+            # there before — which is correct, since istota cannot say which of
+            # them it is, and keeping whichever is already stored would make
+            # that answer depend on history rather than on the file. Not held
+            # for exactly that reason.
             walk.skipped.append((name, SKIP_DUPLICATE_NAME))
             logger.warning(
-                "vault: %s is produced by %d entries, so none of them is used; "
-                "rename one",
+                "vault: %s is produced by %d entries with %d different values, "
+                "so none of them is used; rename one",
                 _label(name),
                 len(produced),
+                values,
             )
             continue
         value = produced[0]
@@ -1502,17 +1575,19 @@ _RECORD_BUSY_TIMEOUT_MS = 2000
 
 def _record_sync_state(
     db_path, user_id: str, outcome: str, reason: str, *, unscoped: bool | None = None
-) -> bool:
+) -> None:
     """Write down what this cycle settled, for the processes that never see it.
 
-    Returns whether this cycle is the **transition into** an unscoped read —
-    the gate §1's one-shot notification is raised on. It is decided here rather
-    than by the caller because the previous record is already read inside this
-    transaction, and because the two alternatives are both wrong: an in-memory
-    latch re-notifies on every daemon restart, and the notification store's own
-    dedup bump gives the right first-and-not-second behaviour only until the
-    row closes. A record that could not be written returns False, so a lost
-    write costs the notice rather than firing it every cycle.
+    ``unscoped`` rides along for the surfaces that never open the file — the
+    settings card runs ``vault_status(parse=False)`` and can learn it no other
+    way. **It is state, not a latch**, and the distinction cost a review
+    finding: an earlier shape returned "this is the transition into an unscoped
+    read" from here and had :func:`_publish` raise the notice on it, which
+    commits the latch *before* the notice is written. A notice write that then
+    failed — and that path swallows every exception by contract — left the
+    record saying the user had been told, for ever, about the one condition
+    this feature exists to announce. The latch is the notification row itself
+    now; see :func:`_report_unscoped`.
 
     ``_SYNC_STATE`` is per-process and stays that way — §7's cache is about
     whether the *next cycle in this process* does work, and persisting it would
@@ -1556,15 +1631,11 @@ def _record_sync_state(
                 VAULT_SYNC_STATE_KEY,
                 body,
             )
-        return bool(json.loads(body).get("unscoped")) and not bool(
-            (previous or {}).get("unscoped")
-        )
     except Exception:  # noqa: BLE001 - a record of the work, not the work
         logger.warning(
             "vault: %s: the sync record was not written", _label(user_id),
             exc_info=True,
         )
-        return False
 
 
 #: ``user_id -> (digest, outcome)``. In memory, never persisted: a restart
@@ -1691,9 +1762,12 @@ class VaultStatusReport:
     configured: bool
     path: str = ""
     refusal: str = ""
-    #: Left over from the service mapping; populated by nothing. See
-    #: `VaultSyncResult.owned` — it goes in stage 6 with the rest of
-    #: `vault_services`.
+    #: Left over from the service mapping, and populated by nothing — which is
+    #: a statement about this module rather than a hope: `vault_status` used to
+    #: fill it from `vault_services_for` and stopped, because a vault owns no
+    #: typed service and a surface rendering "this file is the authority for
+    #: karakeep" beside a karakeep form nothing overwrites is the same lie the
+    #: 409 was. It goes in stage 6 with the rest of `vault_services`.
     owned: tuple[str, ...] = ()
     passphrase_present: bool = False
     outcome: str = ""
@@ -2110,7 +2184,7 @@ def _publish(config, result: VaultSyncResult, *, deliver: bool) -> VaultSyncResu
     # previous answer forward: a failed read is not evidence the file grew an
     # `istota` group, and clearing it here would re-arm the one-shot notice for
     # the next successful cycle.
-    first_unscoped = _record_sync_state(
+    _record_sync_state(
         config.db_path,
         result.user_id,
         result.outcome,
@@ -2124,7 +2198,10 @@ def _publish(config, result: VaultSyncResult, *, deliver: bool) -> VaultSyncResu
         transition=result.transition,
         deliver=deliver,
     )
-    if first_unscoped:
+    if result.unscoped and result.outcome == OUTCOME_OK:
+        # Unconditional on every unscoped cycle, and the once-ness is
+        # `_report_unscoped`'s own: it is the thing that has to observe its
+        # write succeed before anything records that the user was told.
         _report_unscoped(config, result.user_id, result.names, deliver=deliver)
     return result
 
@@ -2142,28 +2219,52 @@ _UNSCOPED_TITLE = "Your credential vault shares its whole file"
 
 
 def _unscoped_body(names: int) -> str:
-    """What the notice says. A count, never a name and never a value."""
+    """What the notice says. A count, never a name and never a value.
+
+    **No backticks**, and not as a style choice: ``task_alert.write`` puts every
+    body through ``flatten_body``, whose ``_BODY_MARKUP_CHARS`` maps ``` ` ``` to
+    a space — so a quoted name arrives as ``named  istota .`` The group name is
+    the one word this sentence needs a reader to copy exactly, so it is quoted
+    with characters that survive.
+    """
     return (
-        f"The KDBX file in your vault folder has no top-level `istota` group, "
-        f"so every credential in it is shared with your own tasks — "
+        f'The KDBX file in your vault folder has no top-level group named '
+        f'"istota", so every credential in it is shared with your own tasks — '
         f"{names} so far. That is how it is meant to work if you put a file "
         f"there for istota. If you copied in your everyday password database, "
-        f"move it out or put the credentials you meant to share under a "
-        f"top-level group named `istota`."
+        f"move it out, or put the credentials you meant to share under a "
+        f'top-level group named "istota".'
     )
 
 
 def _report_unscoped(config, user_id: str, names: int, *, deliver: bool) -> None:
-    """Raise the first-unscoped-read notice for this user, once.
+    """Raise the unscoped-read notice for this user, once ever.
 
-    The "once" is the caller's: :func:`_record_sync_state` returns True only on
-    the transition into an unscoped read, decided against the durable record
-    inside its own write transaction. Nothing here re-checks it.
+    **The notification row is the latch, and that is the correction rather than
+    the obvious shape.** The obvious shape reads the durable sync record for a
+    False-to-True transition and raises on it — which commits "this user has
+    been told" *before* anything writes the telling. This function swallows
+    every exception by contract, so a write that failed there left the record
+    latched for good and the user never learned that their whole password
+    database was shared. Asking the notifications table instead makes the two
+    the same fact: a row exists only because a write succeeded, so a failure
+    leaves no row and the next cycle tries again.
+
+    It asks for a row in **any** state rather than an open one.
+    ``task_alert`` is ``auto_resolve_on_seen``, so the row closes the moment
+    the user opens the panel with it visible — an open-row test would re-raise
+    on the next cycle after they read it, which is a notice per sync interval
+    for as long as the file stays that way.
+
+    The check and the write share one connection, so nothing can interleave
+    between them that this function would then act on.
 
     ``deliver`` is the row-versus-push fork :func:`_report` already draws, for
     the same reason: ``istota secret vault-sync`` writes the row and pushes
     nothing, because the operator running it is reading the warning off their
-    own terminal as it prints.
+    own terminal as it prints. That does consume the latch, so a vault first
+    synced by hand reaches the bell and not a push; accepted, and the same
+    property ``connected_service``'s fork has.
 
     Never raises, and never carries a name or a value.
     """
@@ -2175,6 +2276,13 @@ def _report_unscoped(config, user_id: str, names: int, *, deliver: bool) -> None
 
     try:
         with db.get_db(config.db_path) as conn:
+            told = conn.execute(
+                "SELECT 1 FROM notifications "
+                "WHERE user_id = ? AND source = ? AND dedup_key = ? LIMIT 1",
+                (user_id, task_alert.SOURCE, _UNSCOPED_DEDUP_KEY),
+            ).fetchone()
+            if told is not None:
+                return
             raised = task_alert.write(
                 conn,
                 user_id,
@@ -2355,7 +2463,6 @@ def vault_status(
     from . import db  # noqa: PLC0415 - see `sync_user`
     from . import storage  # noqa: PLC0415
 
-    owned = tuple(sorted(config.vault_services_for(user_id)))
     last = _SYNC_STATE.get(user_id, (None, ""))[1]
     # `configured` is the enable itself — `_vault_is_enabled`, the predicate
     # the cycle gates on — rather than a second opinion beside it. A file in
@@ -2367,8 +2474,7 @@ def vault_status(
     present = _passphrase_present(config, user_id)
     if not _vault_is_enabled(config, user_id):
         return VaultStatusReport(
-            user_id=user_id, configured=False, owned=owned,
-            passphrase_present=present,
+            user_id=user_id, configured=False, passphrase_present=present,
         )
     resolution = storage.vault_location_for(config, user_id)
 
@@ -2400,7 +2506,6 @@ def vault_status(
                 user_id=user_id,
                 configured=True,
                 refusal=resolution.refusal or "",
-                owned=owned,
                 passphrase_present=present,
                 outcome=type(exc).__name__ if exc is not None else "",
                 reason=resolution_reason(resolution.refusal),
@@ -2415,7 +2520,6 @@ def vault_status(
                 user_id=user_id,
                 configured=True,
                 path=str(location.path),
-                owned=owned,
                 passphrase_present=present,
                 last_outcome=last,
             )
@@ -2459,20 +2563,19 @@ def vault_status(
         scoped=read.scoped,
         truncated=read.truncated,
     )
-    # The `del` is kept from the shape this replaced, and it has two reasons.
-    # The stated one is lifetime: `read` is the only object in this process
-    # holding the user's whole decrypted namespace, and a local outlives its
-    # last use — into a traceback a caller renders, and into whatever a
-    # debugger or a profiler is holding. Dropping it at the line the names are
-    # taken is the narrowest window this function can give it.
+    # Lifetime, and kept from the shape this replaced: `read` is the only
+    # object in this process holding the user's whole decrypted namespace, and
+    # a local outlives its last use — into a traceback a caller renders, and
+    # into whatever a debugger or a profiler is holding. Dropping it on the
+    # line the names are taken is the narrowest window this function can give
+    # it.
     #
-    # The measured one is that `doctor`'s own leak check
-    # (`test_no_descriptor_is_left_open`) goes red without it. That is a
-    # *collection* effect rather than a descriptor this function owns — the
-    # parse allocates tens of thousands of objects, so when the interpreter
-    # next collects decides whether four already-finished sqlite and lxml
-    # handles are still listed in `/dev/fd` at the instant the check samples
-    # it. Recorded rather than explained away: the `del` is right on its own
-    # terms and the check is the thing that noticed it was gone.
+    # It briefly had a second justification — `doctor`'s leak check went red
+    # without it — and that was a measurement of the check rather than of this
+    # function. The parse allocates tens of thousands of objects, so where the
+    # interpreter's generational threshold fell decided whether a few
+    # already-finished sqlite and lxml handles were still listed in `/dev/fd`
+    # when the check sampled. The check collects before sampling now, so this
+    # `del` stands on the reason above alone.
     del read
     return out
