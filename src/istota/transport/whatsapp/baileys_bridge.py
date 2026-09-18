@@ -58,6 +58,7 @@ import inspect
 import logging
 import math
 import os
+import re
 import secrets
 import stat
 import threading
@@ -197,6 +198,17 @@ _SIDECAR_OWN_FILES = frozenset({"sidecar.log", "logout-backoff.json"})
 #: handful of suffixes covers it; the ceiling is there because an unbounded
 #: walk is a hang wherever a stat is answering wrongly.
 _RESET_NAME_ATTEMPTS = 1000
+
+#: How `_reset_destination` stamps an archived session directory. One spelling,
+#: read by the writer and by `session_archives`, because the two disagreeing
+#: means a diagnostic reporting one credential on a host holding several.
+ARCHIVE_STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
+
+#: The stamp as it appears at the end of an archive's name, plus the `-N`
+#: collision suffix `_reset_destination` appends when two resets land inside
+#: one second. Anchored at the end, so a name that merely contains a stamp is
+#: not an archive.
+_ARCHIVE_SUFFIX_RE = re.compile(r"\.(\d{8}T\d{6}Z)(?:-\d+)?\Z")
 
 #: A `fatal` naming one of these is not retried by respawning. The session is
 #: gone and only `istota whatsapp pair --reset` brings it back, so a respawn
@@ -670,6 +682,77 @@ def harden_session_files(path: Path) -> tuple[int, int]:
             continue
         narrowed += 1
     return narrowed, failed
+
+
+def session_archives(session_dir: Path) -> list[Path]:
+    """Every archived session `_reset_destination` has left beside this one.
+
+    **A re-pair moves the old credential aside rather than deleting it**, and
+    nothing sweeps the result — each archive is a full WhatsApp account and a
+    timer that deletes one is a credential-destroying automatic path with no
+    operator present. So a host that has re-paired N times holds N+1 copies,
+    and `survey_session_files` walks one directory. Before the pairing flow
+    there was exactly one credential on disk and `whatsapp.baileys_session`
+    covered it; this is what keeps that true, by giving the check the same
+    question about each archive.
+
+    **The name is the whole predicate, and it is the writer's own**:
+    `ARCHIVE_STAMP_FORMAT` plus the collision suffix, anchored at the end of
+    the name. A prefix test alone would claim `whatsapp-baileys-session.json`
+    beside the directory, and a second spelling here would be the copy
+    `.claude/rules/doctor.md` refuses — a diagnostic asks the owning module's
+    predicate rather than keeping its own. Sorted by name, which is
+    chronological because the stamp is fixed width, so the first entry is the
+    oldest.
+
+    Directories only, judged by `lstat`: a symlink at such a name points the
+    survey somewhere this deployment did not put a credential, and following it
+    would report another tree's modes as this one's.
+
+    Never raises, for the reason every `doctor` helper does not. An unreadable
+    parent yields no archives, which is honest rather than optimistic — the
+    check's live arms are what report a directory nothing here can read.
+    """
+    prefix = session_dir.name + "."
+    try:
+        entries = sorted(session_dir.parent.iterdir())
+    except OSError:
+        return []
+    found: list[Path] = []
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        if _ARCHIVE_SUFFIX_RE.search(entry.name) is None:
+            continue
+        try:
+            info = entry.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            continue
+        found.append(entry)
+    return found
+
+
+def session_archive_stamp(path: Path) -> datetime | None:
+    """When `_reset_destination` named this archive, off the name.
+
+    The name rather than `mtime`, because the name is the record the writer
+    made: a directory's mtime moves whenever an entry is added or removed, so
+    an operator who opened an archive to copy a key out of it would have moved
+    it. `None` for a name this cannot read, which `session_archives` filters
+    out already — the guard is here because a reader may hand over any path.
+
+    Never raises.
+    """
+    match = _ARCHIVE_SUFFIX_RE.search(path.name)
+    if match is None:
+        return None
+    try:
+        parsed = datetime.strptime(match.group(1), ARCHIVE_STAMP_FORMAT)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -1527,7 +1610,10 @@ class BaileysBridge:
         exists twice and a crash where it exists nowhere, and a destination on
         another filesystem turns the rename into exactly that. Timestamped
         rather than a fixed `.old`, so the second logout of a deployment's
-        life does not overwrite the record of the first.
+        life does not overwrite the record of the first. The stamp is
+        `ARCHIVE_STAMP_FORMAT`, which `session_archives` reads back — nothing
+        sweeps an archive, so a diagnostic has to be able to find every one of
+        them by name.
 
         The stamp is one second wide, so the name is settled by probing rather
         than by trusting the clock to be distinct: what stands at the
@@ -1543,7 +1629,7 @@ class BaileysBridge:
         to the identical problem: a walk with no ceiling is a hang where a
         stat is answering wrongly, and both callers would rather fail.
         """
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(timezone.utc).strftime(ARCHIVE_STAMP_FORMAT)
         base = self._session_dir.parent / f"{self._session_dir.name}.{stamp}"
         candidate = base
         suffix = 1
