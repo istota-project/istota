@@ -440,8 +440,15 @@ class TestTokenIsolation:
 
         `glab` gets its token from the skill proxy directly. `git push` gets
         one from the credential helper the developer skill writes, which shells
-        out to `credential-fetch`, which asks the same proxy. Two paths, and
-        only the stub's challenge makes the second observable at all.
+        out to `istota-credential env`, which asks the same proxy. Two paths,
+        and only the stub's challenge makes the second observable at all.
+
+        That second path is also the only place any tier drives the framework
+        credential shim inside a real sandbox: everything in
+        `tests/test_vault_credential_fetch.py` runs it as an ordinary child
+        process on the host. So a failure here after a change to
+        `credential_shim` or to where `task_env` writes it is about the shim,
+        not about git.
         """
         forge = stack.service("gitlab")
         stack.script(
