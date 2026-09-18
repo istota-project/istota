@@ -529,6 +529,14 @@ def _fill_actions(args):
 
     actions = []
     for dest, index in order:
+        source = literals if dest == "fill" else credentials
+        if index >= len(source):
+            # Only reachable from a hand-built namespace whose order record and
+            # value lists disagree. Named rather than left to `IndexError`,
+            # which `run_skill_cli` would report as a browser failure.
+            raise ValueError(
+                f"the {dest} order record does not match the values parsed"
+            )
         if dest == "fill":
             spec = literals[index]
             if "=" in spec:
@@ -549,6 +557,41 @@ def _fill_actions(args):
     return actions
 
 
+#: What a credential that came back in a response is replaced with.
+CREDENTIAL_REDACTION = "[credential]"
+
+
+def _scrub(payload, secrets):
+    """The response with any of `secrets` replaced, wherever a string holds one.
+
+    The container does not echo a filled value — `/interact` reports the
+    selector and `ok` — but three things it returns are not under that rule and
+    are read by the model: `page.url`, which carries the value outright when a
+    submit navigates a **GET** form; the page text, when the page itself echoes
+    what was typed into a confirmation or a validation message; and the `error`
+    string on the container's 500 branch, which is a third-party library's
+    exception text this repository does not control. So the one place that
+    knows which strings are credentials takes them back out, rather than the
+    claim resting on what three other programs happen to print.
+
+    It is a backstop and not a boundary: a page can encode, split or re-case a
+    value, and none of those is matched. What it removes is the plain case,
+    which is the one that actually happens.
+    """
+    if not secrets:
+        return payload
+    if isinstance(payload, str):
+        for secret in secrets:
+            if secret:
+                payload = payload.replace(secret, CREDENTIAL_REDACTION)
+        return payload
+    if isinstance(payload, dict):
+        return {key: _scrub(value, secrets) for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [_scrub(item, secrets) for item in payload]
+    return payload
+
+
 def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
@@ -567,7 +610,12 @@ def cmd_interact(args):
     }
 
     resp = httpx.post(f"{url}/interact", json=payload, timeout=REQUEST_TIMEOUT)
-    return _decode(resp)
+    secrets = [
+        pair.value.reveal()
+        for pair in (getattr(args, "fill_credential", None) or [])
+        if isinstance(pair, CredentialPair)
+    ]
+    return _scrub(_decode(resp), secrets)
 
 
 def _links_from_extract(data):
@@ -742,10 +790,10 @@ def build_parser():
         metavar="SELECTOR=NAME",
         help=(
             "Fill a form field with one of your shared credentials, named "
-            "rather than typed: SELECTOR=NAME. Prefer this to --fill for a "
-            "password or a token — the value is looked up outside the sandbox "
-            "and never enters your command, your output or the transcript. "
-            "`istota-credential list` names what is available."
+            "rather than typed: SELECTOR=NAME, split at the last =. Prefer "
+            "this to --fill for a password or a token — the value is looked "
+            "up outside the sandbox and never enters your command line or "
+            "your argv. `istota-credential list` names what is available."
         ),
     )
     p_int.add_argument("--scroll", choices=["up", "down"], help="Scroll direction")

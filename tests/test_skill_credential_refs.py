@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from istota import credential_shim
 from istota.skill_proxy import SkillProxy
 from istota.skills import _cli
 from istota.skills._credref import (
@@ -41,6 +42,13 @@ from istota.skills._credref import (
     SecretValue,
     credential_ref,
     stamped,
+)
+from istota.skills._hostpath import click_commands
+from tests.support.drift import source_of
+from tests.test_skill_host_paths_coverage import (
+    _click_module_for,
+    _module_for,
+    _skill_dirs,
 )
 
 #: Values distinct enough that a sweep over a whole rendered blob means
@@ -193,6 +201,44 @@ class TestResolution:
         assert isinstance(pair, CredentialPair)
         assert pair.label == "#password"
         assert pair.value.reveal() == VAULT["acme_password"]
+
+    def test_a_label_containing_an_equals_splits_at_the_last_one(self, proxy):
+        """A credential name cannot contain `=`; a CSS selector routinely does.
+
+        `secrets_vault.VAULT_NAME_RE` is `[a-z][a-z0-9_]{0,63}`, so the right
+        side of a `PAIR` is unambiguous and the left may hold as many `=` as it
+        likes. Splitting at the first one made the name `password]=acme_...`,
+        which is non-empty and so was sent to the proxy — charged against the
+        attempt's fetch budget and refused with a message about the vault
+        rather than about the selector.
+        """
+        proxy()
+        handler = Recorder()
+        drive(
+            build(form=PAIR),
+            ["go", "--secret", "input[type=password]=acme_password"],
+            handler,
+        )
+        pair = handler.calls[0].secret
+        assert pair.label == "input[type=password]"
+        assert pair.value.reveal() == VAULT["acme_password"]
+
+    def test_a_secret_value_refuses_to_be_serialized(self):
+        """`__slots__` closes `vars()`; the default reduction carries the slot.
+
+        Nothing in the tree pickles a namespace, so this is a guard on the
+        box's guarantee rather than a live route — but `copy.deepcopy` and
+        `multiprocessing` both go the same way, and none of the rendering
+        rules reaches those.
+        """
+        import copy
+        import pickle
+
+        value = SecretValue("acme_password", VAULT["acme_password"])
+        with pytest.raises(TypeError):
+            pickle.dumps(value)
+        with pytest.raises(TypeError):
+            copy.deepcopy(value)
 
     def test_an_appended_list_resolves_in_order(self, proxy):
         proxy()
@@ -398,7 +444,14 @@ class TestTheRefusal:
     def test_an_unanswering_socket_refuses_rather_than_raising(
         self, sock_path, monkeypatch, capsys,
     ):
-        """A listener that accepts and says nothing is a refusal, not a traceback."""
+        """A listener that accepts and says nothing is a refusal, not a traceback.
+
+        The shim's own 30-second wait is what the resolver inherits, and
+        waiting it out here would put half a minute into the default suite for
+        a property a one-second wait establishes just as well. Patched on the
+        module because `_request` reads the constant at call time.
+        """
+        monkeypatch.setattr(credential_shim, "SOCKET_TIMEOUT_SECONDS", 1)
         monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock_path))
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(sock_path))
@@ -419,23 +472,48 @@ class TestTheRefusal:
 
 
 def _skill_parsers():
-    """Every argparse skill CLI in the tree, by name, built."""
+    """Every argparse skill CLI in the tree, by name, built.
+
+    Discovery is `tests/test_skill_host_paths_coverage.py`'s, imported rather
+    than copied: that file already answers "which skills expose a parser, and
+    where does each one live" from the source text rather than from a list, and
+    a second copy here would be the drift the walk exists to catch. The import
+    is deliberately unguarded, as it is there — a skill whose module raises on
+    import has to fail this walk rather than quietly leave the enumeration,
+    which is how a walk comes to report green over a tree it never read.
+    """
     import importlib
 
-    root = Path(__file__).resolve().parents[1] / "src" / "istota" / "skills"
     out = []
-    for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        if skill_dir.name.startswith("_"):
+    for skill_dir in _skill_dirs():
+        module_name = _module_for(skill_dir)
+        if module_name is None:
             continue
-        module_name = f"istota.skills.{skill_dir.name}"
-        try:
-            module = importlib.import_module(module_name)
-        except Exception:  # pragma: no cover — a skill whose deps are absent
+        module = importlib.import_module(module_name)
+        out.append((skill_dir.name, module.build_parser()))
+    return out
+
+
+def _skill_click_params():
+    """Every Click parameter in the tree, as `(skill, dotted command, name)`.
+
+    There is no Click credential stamp — `_credref` has an argparse door and no
+    other — so this exists to make that absence loud rather than silent. A
+    Click skill growing a credential-shaped parameter has to fail the walk
+    below, because the stamp it would need does not exist yet and an
+    unresolved credential name is what `browse` refuses at its own handler.
+    """
+    import importlib
+
+    out = []
+    for skill_dir in _skill_dirs():
+        module_name = _click_module_for(skill_dir)
+        if module_name is None:
             continue
-        builder = getattr(module, "build_parser", None)
-        if builder is None:
-            continue
-        out.append((skill_dir.name, builder()))
+        group = importlib.import_module(module_name).build_cli()
+        for dotted, command in click_commands(group):
+            for param in getattr(command, "params", []):
+                out.append((skill_dir.name, dotted, param.name))
     return out
 
 
@@ -475,6 +553,27 @@ class TestTheCoverageWalk:
             f"no stamp: {missing}"
         )
 
+    def test_no_click_parameter_is_credential_shaped(self):
+        """The Click half, and it can only ever fail.
+
+        `_credref` has an argparse door and no Click one, unlike `_hostpath`,
+        which has both. So a credential-shaped Click parameter is not a missing
+        stamp but a missing *mechanism*, and this is what says so out loud
+        rather than leaving the Click tree outside the walk — which is how a
+        coverage check comes to be green about a tree it never read.
+        """
+        shaped = [
+            f"{skill} {dotted} {name}"
+            for skill, dotted, name in _skill_click_params()
+            if name.endswith("_credential") or name.startswith("credential_")
+        ]
+        assert shaped == [], (
+            "these Click parameters are named like a credential reference and "
+            "there is no Click credential stamp to resolve them: "
+            f"{shaped}. Add `click_credential_ref` to `skills/_credref.py` "
+            "before declaring one."
+        )
+
     def test_every_stamp_declares_a_form_the_resolver_knows(self):
         for skill, parser in _skill_parsers():
             for dotted, dest, form in stamped(parser):
@@ -507,15 +606,21 @@ class TestTheCoverageWalk:
 
     def test_a_stamped_skill_resolves_through_the_facade(self):
         """A stamp on a parser whose `main` never calls `parse_and_resolve`
-        is a declaration nothing enforces."""
+        is a declaration nothing enforces.
+
+        Read through `tests/support/drift.py`'s `source_of` rather than off
+        disk: a guard that reads lines without executing them is invisible to
+        testmon, so `scripts/qt` would never select it and it would be green
+        because it never ran (ISSUE-459, and AGENTS.md names the off-disk read
+        as the residual this avoids).
+        """
         import importlib
 
         for skill, parser in _skill_parsers():
             if not stamped(parser):
                 continue
             module = importlib.import_module(f"istota.skills.{skill}")
-            source = Path(module.__file__).read_text()
-            assert "parse_and_resolve" in source, skill
+            assert "parse_and_resolve" in source_of(module), skill
 
 
 def _all_arguments(parser, trail=()):

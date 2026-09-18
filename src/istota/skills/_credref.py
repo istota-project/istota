@@ -50,6 +50,15 @@ the first refusal for the same reason `_hostpath` does — the call is refused
 either way, and the names after it would spend budget on a call that is already
 over.
 
+**And the spend is at the parse, so a handler that then fails does not get it
+back.** A `browse interact` against a dead container or an expired session has
+already charged its credentials by the time the request fails, and five such
+attempts at two credentials each exhaust the default budget of ten with nothing
+typed. That is the cost of the pre-dispatch refusal rather than an oversight:
+resolving at dispatch would buy the refund and give up the guarantee that no
+handler ever runs on a half-resolved namespace, which is the property §4a asks
+for and the one the whole stamp exists to provide.
+
 Nothing from the package beyond `istota.credential_shim`, which is a stdlib-only
 leaf (it is copied verbatim into the task's own shim directory and runs with no
 istota package on its path), and `._hostpath`, itself a leaf over
@@ -121,6 +130,18 @@ class SecretValue:
     def __format__(self, spec: str) -> str:
         return format(repr(self), spec)
 
+    def __reduce__(self):
+        """Refuse to serialize. `__slots__` closes `vars()` and not this.
+
+        The default reduction carries the slot state, so `pickle` — and with
+        it `copy.deepcopy`, `multiprocessing` and anything that ships an object
+        between processes — would move the plaintext where no rendering rule
+        reaches. Nothing in the tree pickles a namespace today; refusing costs
+        nothing and keeps the box's guarantee from depending on that staying
+        true.
+        """
+        raise TypeError("a SecretValue may not be serialized")
+
 
 class CredentialPair:
     """`LABEL=NAME` resolved: the caller's label, and the value behind the name.
@@ -169,10 +190,13 @@ def stamped(parser: argparse.ArgumentParser) -> list[tuple[str, str, str]]:
 def _operation(dotted: str, action: argparse.Action) -> str:
     """How a refusal names what was refused: the verb and the flag.
 
-    Never the credential name and never any part of a value. The message goes
-    back to the model, and the log line goes to the daemon's log where the name
-    came off a socket and would need bounding; naming neither is cheaper than
-    bounding one.
+    This contributes neither the credential name nor any part of a value. The
+    assembled message can still carry a name, because the proxy's own refusal
+    does (`No shared credential named 'x'`, bounded by `label_for_display`) and
+    that text is carried through; what this keeps out is a second, unbounded
+    spelling of it. The log line below carries only what this builds, since it
+    goes to the daemon's log where a name off a socket would need bounding and
+    naming nothing at all is cheaper than bounding it.
     """
     flag = action.option_strings[0] if action.option_strings else action.dest
     return " ".join(part for part in (dotted.replace(".", " "), flag) if part)
@@ -184,7 +208,12 @@ def _resolve_name(name: str, operation: str) -> tuple[SecretValue | None, str | 
     The proxy's own message is carried through: it is already bounded and
     flattened (`label_for_display`), and it is the only place that knows
     whether the refusal was an absent name, the per-attempt cap, or a socket
-    that would not answer.
+    that would not answer. One arm of `ProxyError` is the client's own rather
+    than the proxy's — `fetch_credential` raises `no value for <name>` when the
+    reply carries no string value — and that one is not flattened. It is
+    reachable only from a proxy answering something this protocol does not
+    define, and the name in it is the caller's own argv string, so it reaches
+    the model that chose it and no log line at all.
     """
     if not name:
         return None, f"Empty credential name: {operation} refused."
@@ -200,7 +229,17 @@ def _resolve_one(
     """One stamped element under one form."""
     raw = "" if value is None else str(value).strip()
     if form == PAIR:
-        label, sep, name = raw.partition("=")
+        # The **last** `=`, not the first. A credential name cannot contain one
+        # — `secrets_vault.VAULT_NAME_RE` is `[a-z][a-z0-9_]{0,63}` — while a
+        # label routinely does: `input[type=password]=acme_pw` is the ordinary
+        # spelling of the field this exists for, and splitting at the first `=`
+        # makes the label `input[type` and the name `password]=acme_pw`, which
+        # is non-empty, so the malformed-value guard does not fire. The proxy
+        # then charges the attempt's fetch budget for it and answers with a
+        # refusal naming the vault rather than the selector. `--fill` splits the
+        # other way on purpose: there the *right* side is a literal value, which
+        # may contain `=`, and the left is the selector either way.
+        label, sep, name = raw.rpartition("=")
         if not sep or not label.strip():
             return None, (
                 f"Malformed {operation} value: expected SELECTOR=NAME."

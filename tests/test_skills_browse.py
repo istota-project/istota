@@ -1525,18 +1525,17 @@ class TestFillCredential:
             main(["interact", "s1", "--fill-credential", "#password=nope"])
         except SystemExit as exc:
             code = exc.code
-        # First, and independently of how the call ended: the handler never
-        # ran, so the browser was never asked to type anything. This is the
-        # assertion the pre-dispatch control turns red.
+        # "No request was sent" is true on BOTH sides of the pre-dispatch
+        # refusal, because `cmd_interact` refuses an unresolved reference
+        # itself — so this one assertion, useful as it is, discriminates
+        # nothing. What separates the two states is whose refusal this is: the
+        # two assertions below are what the control turns red, and
+        # `tests/test_skill_credential_refs.py::TestTheRefusal` carries the
+        # handler-did-not-run form against a recording handler.
         mock_post.assert_not_called()
         assert code == 1
         envelope = json.loads(capsys.readouterr().out.strip())
         assert envelope["reason"] == "vault_credential_refused"
-        # And the handler did not run at all. `cmd_interact` refuses an
-        # unresolved reference itself, so "no request was sent" is true on
-        # both sides of the pre-dispatch refusal; what separates them is whose
-        # refusal this is. Seeing the handler's message here means dispatch
-        # happened, which is the state the control produces.
         assert "not resolved" not in envelope["error"]
 
     @patch("istota.skills.browse.httpx.post")
@@ -1583,3 +1582,106 @@ class TestFillCredential:
             "--fill-credential", "#b=two",
         ])
         assert args.fill_credential == ["#a=one", "#b=two"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_attribute_selector_is_not_mis_split(
+        self, mock_url, mock_post, proxy,
+    ):
+        """`input[type=password]=name` splits at the LAST `=`.
+
+        A credential name cannot contain `=` (`secrets_vault.VAULT_NAME_RE`)
+        and an attribute selector routinely does, so splitting at the first one
+        made the label `input[type` and the name `password]=acme_password` —
+        non-empty, so it was sent to the proxy, charged against the attempt's
+        fetch budget, and refused with a message naming the vault rather than
+        the selector.
+        """
+        proxy()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok", "session_id": "s1", "actions": [],
+        }
+        mock_post.return_value = mock_resp
+
+        main([
+            "interact", "s1",
+            "--fill-credential", "input[type=password]=acme_password",
+        ])
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["actions"] == [
+            {
+                "type": "fill",
+                "selector": "input[type=password]",
+                "value": self.VAULT["acme_password"],
+            },
+        ]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_value_the_page_reflects_back_is_scrubbed(
+        self, mock_url, mock_post, proxy, capsys,
+    ):
+        """The container reports the selector, and the page is not under that rule.
+
+        `/interact` returns the page's own URL and text, so a GET form's
+        submission puts the value in the query string and a page that echoes
+        what was typed puts it in the body. The one process that knows which
+        strings are credentials takes them back out.
+        """
+        proxy()
+        secret = self.VAULT["acme_password"]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "session_id": "s1",
+            "url": f"https://site.example/login?password={secret}",
+            "text": f"We could not sign you in as {secret}",
+            "actions": [{"action": "fill", "selector": "#password", "ok": True}],
+        }
+        mock_post.return_value = mock_resp
+
+        main(["interact", "s1", "--fill-credential", "#password=acme_password"])
+
+        out = capsys.readouterr().out
+        assert secret not in out
+        assert "browsevalue" not in out
+        assert out.count("[credential]") == 2
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_container_error_body_is_scrubbed_too(
+        self, mock_url, mock_post, proxy, capsys,
+    ):
+        """The 500 branch stringifies a third-party exception we do not control."""
+        proxy()
+        secret = self.VAULT["acme_password"]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "error",
+            "error": f'page.fill: Timeout. Call log: fill("{secret}")',
+        }
+        mock_post.return_value = mock_resp
+
+        with pytest.raises(SystemExit):
+            main(["interact", "s1", "--fill-credential", "#password=acme_password"])
+
+        out = capsys.readouterr().out
+        assert secret not in out
+        assert "[credential]" in out
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_response_with_no_credential_fill_is_untouched(
+        self, mock_url, mock_post,
+    ):
+        """The control for the scrub: nothing is rewritten without a credential."""
+        parser = build_parser()
+        args = parser.parse_args(["interact", "s1", "--fill", "#a=b"])
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok", "session_id": "s1", "text": "[credential] is fine",
+        }
+        mock_post.return_value = mock_resp
+        assert cmd_interact(args)["text"] == "[credential] is fine"
