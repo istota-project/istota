@@ -556,6 +556,7 @@ heartbeat_check_interval = {{ istota_scheduler_heartbeat_check_interval }}
 db_health_check_interval = {{ istota_scheduler_db_health_check_interval }}
 worktree_reap_interval = {{ istota_scheduler_worktree_reap_interval }}
 sandbox_cache_sweep_interval = {{ istota_scheduler_sandbox_cache_sweep_interval }}
+vault_sync_interval = {{ istota_scheduler_vault_sync_interval }}
 avatar_import_interval = {{ istota_scheduler_avatar_import_interval }}
 main_loop_read_timeout_ms = {{ istota_scheduler_main_loop_read_timeout_ms }}
 db_backup_enabled = {{ istota_scheduler_db_backup_enabled | lower }}
@@ -854,14 +855,16 @@ shim_commands = {{ istota_developer_container_shim_commands | to_json }}
 # `istota user/resource/briefings schedule ensure` invocations in the playbook —
 # config.toml does not render that per-user data.
 #
-# The one exception: config-authored briefing *content blocks* are an
-# in-memory-only Config field (never stored in briefing_configs), so they must be
-# rendered into config.toml to reach the module-DB seeder. Only a content-only
-# `[[users.X.briefings]]` stub (name + cron + nested blocks/sources) is emitted,
-# and only for briefings that declare a `blocks:` list; schedule/delivery still
-# flow through the CLI/DB path above, and `_apply_user_briefings` re-attaches
-# these blocks onto the DB-sourced entry by name. To apply one definition across
-# users, loop it over `istota_users` in the playbook.
+# Two exceptions, both per-user settings with no DB column to reach: the
+# credential vault's `vault_path` / `vault_services`, and config-authored
+# briefing content blocks. Set both in `istota_users`; see defaults/main.yml.
+# To apply one briefing definition across users, loop it over `istota_users` in
+# the playbook.
+{% set _vault_users_toml = istota_users | istota_vault_users_toml %}
+{% if _vault_users_toml %}
+
+{{ _vault_users_toml }}
+{% endif %}
 {% set _briefing_blocks_toml = istota_users | istota_briefing_blocks_toml %}
 {% if _briefing_blocks_toml %}
 
