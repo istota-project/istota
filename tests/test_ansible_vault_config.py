@@ -133,15 +133,16 @@ class TestTheUserWithAVault:
 
 
 class TestTheTemplateDoesNotJudgeTheServiceNames:
-    def test_an_ineligible_service_is_rendered_as_written(self):
-        """Fidelity is the template's job; eligibility is the loader's.
+    def test_any_service_is_rendered_as_written_and_loads_as_written(self):
+        """Fidelity is the template's job, and there is no eligibility question
+        left for the loader to answer.
 
-        `garmin` is a service whose credentials the daemon mints for itself, so
-        `_validate_vault_services` drops it with a warning naming the line. That
-        warning is the operator-facing report, and it can only name a line that
-        was rendered — a template that filtered the name first would leave the
-        operator with an inventory entry that does nothing and nothing anywhere
-        saying why.
+        `garmin` used to be dropped at load with a warning naming the line — a
+        vault could not own a service whose credentials the daemon mints for
+        itself. A vault owns no typed service at all now, so the list is inert
+        wherever it is written and nothing filters it. The whole key leaves in
+        stage 6; what this pins meanwhile is that the two halves agree, so a
+        list rendered and a list loaded are the same list.
         """
         text = render(
             istota_users={
@@ -150,9 +151,8 @@ class TestTheTemplateDoesNotJudgeTheServiceNames:
         )
         assert '"garmin"' in text
 
-        # And the loader is still the thing that refuses it.
         config = load_config_from(text)
-        assert config.users["alice"].vault_services == []
+        assert config.users["alice"].vault_services == ["garmin"]
 
 
 class TestTheEscaping:

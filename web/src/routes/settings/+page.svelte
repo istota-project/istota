@@ -1086,6 +1086,22 @@
             {:else}
               no services are assigned to it yet.
             {/if}
+            <!--
+              The scope notice. A file with no top-level `istota` group is read
+              in full, which is how it is meant to work for a file put in the
+              vault folder for istota and is not what somebody who copied their
+              everyday password database in wants. It is a notice rather than a
+              refusal, so it says what happened and what to do, and it renders
+              only when a cycle has actually read the file that way.
+            -->
+            {#if vault.unscoped}
+              <span class="vault-problem" data-testid="vault-unscoped">
+                This file has no top-level <code>istota</code> group, so all
+                {vault.entry_count ?? 0} credential{(vault.entry_count ?? 0) === 1 ? '' : 's'} in it are
+                shared with your tasks. If that was not what you meant, move the file out or put what
+                you meant to share under a top-level group named <code>istota</code>.
+              </span>
+            {/if}
             {#if vault.path}
               It is read from <code>{vault.path}</code>, never written.
             {/if}

@@ -919,7 +919,6 @@ def cmd_secret(args):
         sys.exit(1)
 
     if args.action == "ensure":
-        _refuse_if_vault_owned(config, args)
         value = _secret_ensure_value(config, args)
         state = secrets_store.upsert_secret(
             db_path, args.user, args.service, args.key, value,
@@ -947,68 +946,6 @@ def cmd_secret(args):
         print(f"Secret remove for {args.user!r}: service={args.service} key={args.key}")
         print(f"STATE: {state}")
         return
-
-
-def _refuse_if_vault_owned(config, args) -> None:
-    """Refuse `secret ensure` on a service this user's credential vault owns.
-
-    Settled as a refusal rather than a warning, and the argument that decided it
-    is about the loop rather than about tone. The warning option rested on a CLI
-    write being "reverted within five minutes, which is a confusing way to learn
-    the rule" — and that premise is false: the write does not touch the vault
-    file, so the digest is unchanged, the sync cycle short-circuits before
-    parsing, and the value stands indefinitely. An allowed write is therefore a
-    **permanent** silent divergence from the file the user believes is
-    authoritative, which is worse than an irritating refusal. It is also what
-    lets the design claim vault-wins at all, by removing the last writer rather
-    than racing it.
-
-    ``--force`` stays for the operator deliberately testing a value before
-    putting it in the file, and says what will happen to it.
-
-    Scoped to ``ensure``. ``secret remove`` is deliberately not refused: it is
-    named in the design as the direct route for removing a credential, which is
-    the one thing the vault's absent-group rule will not do.
-
-    **That leaves `secret remove` and the web tier's DELETE taking opposite
-    positions on the same operation, which is deliberate and is about who is
-    asking rather than about what is done.** Both produce the same durable
-    divergence — a row gone from the table that the vault file still holds, and
-    nothing to put it back until the file next moves. The web route is the
-    *user's* hand on their own credential and §9 refuses it, because a user who
-    deletes there has no way to know the file is the authority. This is a host
-    shell: the operator has the file in front of them, and §6 names this command
-    as the escape hatch precisely because the vault cannot express a deletion
-    without one. Removing it would leave the absent-group rule with no
-    counterpart at all.
-
-    It costs nothing on the provisioning path, since the vault's own service is
-    subtracted from eligibility and the passphrase is therefore never
-    vault-owned.
-    """
-    from .secrets_vault import vault_owned_services
-
-    if args.service not in vault_owned_services(config, args.user):
-        return
-    if args.force:
-        print(
-            f"Warning: {args.service} is managed by {args.user}'s credential "
-            "vault. The next time that file is saved, this value will be "
-            "overwritten by whatever the vault holds.",
-            file=sys.stderr,
-        )
-        return
-    print(
-        f"Error: service {args.service!r} is managed by {args.user}'s credential "
-        "vault; edit the vault file instead.\n"
-        "       A write here does not touch the file, so it would not be "
-        "reverted — it would stand until the file next changes, silently "
-        "disagreeing with it.\n"
-        "       Pass --force to write it anyway (for testing a value before "
-        "putting it in the vault).",
-        file=sys.stderr,
-    )
-    sys.exit(1)
 
 
 def _secret_ensure_value(config, args) -> str:
@@ -1169,11 +1106,15 @@ def _print_vault_sync(result) -> None:
     if result.path:
         header += f"  path={result.path}"
     print(header)
-    if result.owned:
-        # Named rather than counted, because "2 written" says nothing about
-        # *which* two and the owned set is the thing an operator is checking
-        # against their file.
-        print(f"  owned: {', '.join(sorted(result.owned))}")
+    if result.unscoped:
+        # §1: the file has no `istota` group, so all of it is shared. A notice
+        # rather than a failure — but an operator running this by hand is
+        # exactly who should be told, and the durable notification only fires
+        # on the first such cycle.
+        print(
+            f"  unscoped: the file has no top-level 'istota' group, so all "
+            f"{result.names} credential(s) in it are shared"
+        )
     if result.reason:
         print(f"  reason: {result.reason}")
 
@@ -1191,19 +1132,31 @@ def _print_vault_sync(result) -> None:
         f"({applied.created} created, {applied.updated} updated), "
         f"{applied.unchanged} unchanged, {applied.deleted} deleted"
     )
-    for service, key in applied.deleted_keys:
-        print(f"  deleted: {secrets_vault.format_skip(service, key)}")
-    for service, key, reason in applied.skipped:
-        print(f"  skipped: {secrets_vault.format_skip(service, key)} ({reason})")
+    if not applied.swept:
+        # A truncated read withholds every deletion, so "0 deleted" above is
+        # not evidence the file still holds everything the table does.
+        print(
+            "  note: the read stopped at a cap, so nothing was deleted this "
+            "cycle"
+        )
+    # Every name below came out of the vault file, which a task in the user's
+    # own sandbox can overwrite, and the consumer is an operator's terminal —
+    # so an unflattened one can carry a newline and forge a line of this
+    # report.
+    label = secrets_vault.label_for_display
+    for name in applied.deleted_keys:
+        print(f"  deleted: {label(name)}")
+    for name, reason in applied.skipped:
+        print(f"  skipped: {label(name)} ({reason})")
     # Two independent signals of the same stale master key, and neither
     # substitutes for the other: `unreadable_overwrites` counts rows the pass
     # *wrote* over without being able to read them first, and
     # `SKIP_UNREADABLE_ROW` counts rows it declined to *delete* for the same
-    # reason. A vault whose group names every declared key produces only the
-    # first, which is why keying the warning on the skip list alone reported
-    # nothing in the cleanest instance of the condition.
+    # reason. A vault naming every stored name produces only the first, which
+    # is why keying the warning on the skip list alone reported nothing in the
+    # cleanest instance of the condition.
     held = sum(
-        1 for _s, _k, reason in applied.skipped
+        1 for _name, reason in applied.skipped
         if reason == secrets_vault.SKIP_UNREADABLE_ROW
     )
     if applied.unreadable_overwrites or held:
@@ -1226,7 +1179,6 @@ def _print_vault_status(report) -> None:
     print(f"  path:       {report.path or '(refused)'}")
     if report.refusal:
         print(f"  refused:    {report.refusal}")
-    print(f"  owned:      {', '.join(report.owned) or '(none)'}")
     print(
         "  passphrase: "
         + ("provisioned" if report.passphrase_present else "NOT PROVISIONED")
@@ -1249,29 +1201,32 @@ def _print_vault_status(report) -> None:
             print(f"  reason:     {report.reason}")
         return
 
-    if not report.groups:
+    if not report.parsed:
         return
     # Every name below came out of the vault file, which a task in the user's
     # own sandbox can overwrite, and the consumer is an operator's terminal —
-    # so they go through the same bound the sibling renderer applies via
-    # `format_skip`. An unflattened group name can carry a newline and forge a
-    # line of this report.
+    # so each goes through the module's own bound. An unflattened name can
+    # carry a newline and forge a line of this report.
     label = secrets_vault.label_for_display
-    print("  groups found in the file:")
-    for folded, spelling in sorted(report.groups.items()):
-        marker = "owned" if folded in report.owned else "not owned"
-        count = report.key_counts.get(folded, 0)
-        print(f"    {label(spelling)}  ({count} key(s), {marker})")
-    if report.absent:
+    if not report.scoped:
+        # §1's notice, on the surface an operator reaches for. The count is the
+        # thing that makes it actionable: "all 412 of them" is a different
+        # sentence from "all 3 of them".
         print(
-            "  owned but absent from the file (nothing is applied or deleted "
-            "for these): " + ", ".join(label(n) for n in report.absent)
+            f"  unscoped:   the file has no top-level "
+            f"'{secrets_vault.VAULT_ROOT_GROUP}' group, so all "
+            f"{len(report.names)} credential(s) in it are shared"
         )
-    if report.unowned:
+    if report.truncated:
         print(
-            "  in the file but not in vault_services (parsed and discarded): "
-            + ", ".join(label(n) for n in report.unowned)
+            f"  truncated:  the read stopped at the {report.truncated} cap, so "
+            "this is a prefix of the file and nothing is deleted"
         )
+    print(f"  shared:     {len(report.names)} credential(s)")
+    for name in report.names:
+        print(f"    {label(name)}")
+    for name, reason in report.skipped:
+        print(f"  skipped:    {label(name)} ({reason})")
 
 
 def cmd_email(args):
@@ -4574,8 +4529,9 @@ def main():
         "--force",
         action="store_true",
         help=(
-            "Write a service the user's credential vault owns. The next vault "
-            "save overwrites it."
+            "Replace an existing vault passphrase with a freshly generated "
+            "one. The vault file is encrypted under the stored value, so the "
+            "file becomes unopenable."
         ),
     )
 

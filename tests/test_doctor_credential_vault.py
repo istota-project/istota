@@ -84,6 +84,20 @@ def _write_vault(path: Path, *, password: str = PASSPHRASE) -> Path:
     return path
 
 
+def _write_unscoped_vault(config, user_id="alice") -> Path:
+    """Rewrite that user's vault with no top-level `istota` group (§1)."""
+    from pykeepass import create_database
+
+    path = (
+        Path(config.workspace_path) / "Users" / user_id / "config" / "vault.kdbx"
+    )
+    path.unlink()
+    kp = create_database(str(path), password=PASSPHRASE)
+    kp.add_entry(kp.add_group(kp.root_group, UNOWNED_GROUP), "whatever", "", "unused")
+    kp.save()
+    return path
+
+
 @pytest.fixture
 def secret_key_env():
     """A real `ISTOTA_SECRET_KEY`, so the passphrase round-trips for real."""
@@ -201,7 +215,7 @@ class TestWhenNoVaultIsConfigured:
         # `user_vault_config` row over the TOML attribute, so the value costs a
         # database read and every arm takes it from here rather than asking
         # again. Asserting the value too is what says the merge ran.
-        assert doctor._vault_paths(config) == {"bob": "   "}
+        assert doctor._vault_users(config) == {"bob": "   "}
 
         result = _run(config, probe=False)["security.credential_vault.path"]
         assert result.status == FAIL
@@ -281,13 +295,17 @@ class TestTheLibraryArm:
 
 
 class TestTheScheduleArm:
-    def test_a_scheduled_deployment_names_the_interval_and_the_owned_set(
+    def test_a_scheduled_deployment_names_the_interval_and_the_count(
         self, vault_config
     ):
+        """The owned-services line went with the service mapping: a vault owns
+        no typed service now, so the arm reports the interval and how many
+        vaults it applies to."""
         result = _run(vault_config)["security.credential_vault.schedule"]
         assert result.status == OK
         assert "300" in result.detail
-        assert "karakeep" in result.detail and "ntfy" in result.detail
+        assert "vault(s) configured" in result.detail
+        assert "karakeep" not in result.detail
 
     def test_a_zeroed_interval_warns_and_says_it_may_be_deliberate(
         self, vault_config
@@ -301,21 +319,21 @@ class TestTheScheduleArm:
         assert result.status == WARN
         assert "vault-sync" in result.remedy
 
-    def test_an_empty_owned_set_is_reported_rather_than_flagged(self, make_config):
-        """Reading the file and applying nothing is the documented dry run."""
+    def test_a_vault_that_declares_nothing_is_still_reported(self, make_config):
+        """There is nothing left to declare: the arm counts vaults rather than
+        asking what each one owns."""
         config = make_config(
             users={"alice": UserConfig(display_name="A", vault_path="v.kdbx")}
         )
         result = _run(config)["security.credential_vault.schedule"]
         assert result.status == OK
-        assert "owns nothing" in result.detail
+        assert "1 vault(s) configured" in result.detail
 
-    def test_an_ineligible_entry_warns_if_one_ever_reaches_here(self, make_config):
-        """The backstop arm. `config._validate_vault_services` drops an
-        ineligible name at load, so nothing reachable through `load_config`
-        arrives with one — this is built by hand, which is the only way to
-        exercise it and is why the arm is labelled defence in depth rather than
-        presented as a case with a remedy behind it."""
+    def test_a_stale_vault_services_line_reaches_no_finding(self, make_config):
+        """The eligibility backstop this replaced warned about a name a vault
+        may not own. There is no such name and no such question — a line left
+        in a rendered `config.toml` is inert, and the arm says nothing about
+        it."""
         config = make_config(
             users={
                 "alice": UserConfig(
@@ -326,8 +344,8 @@ class TestTheScheduleArm:
             }
         )
         result = _run(config)["security.credential_vault.schedule"]
-        assert result.status == WARN
-        assert "monarch" in result.detail
+        assert result.status == OK
+        assert "monarch" not in result.detail
 
 
 class TestThePathArm:
@@ -616,19 +634,29 @@ class TestTheContentsCheck:
     ):
         """Counts and never names, which is this arm's whole rule.
 
-        What is counted moves with the read: the change landing beside this one
-        replaces the owned-group count with the number of names the file
-        produced, so the numbers themselves are asserted there rather than
-        pinned to a shape that is about to go."""
+        The fixture's `istota` group holds three entries, each with a password
+        and nothing else, so the file produces exactly three names.
+        """
         _provision(vault_config)
         result = _contents(vault_config)
         assert result.status == OK
-        # Asserted as the interim state rather than as a substring that
-        # survives either shape: `report.groups` and `report.key_counts` are
-        # empty until the applying half lands, so a looser assertion would be
-        # satisfied by a check that had stopped reporting anything at all.
-        assert "0 of 2 owned group(s) present, 0 key(s)" in result.detail
+        assert "3 credential(s)" in result.detail
         assert "karakeep" not in result.detail and "api_key" not in result.detail
+
+    def test_an_unscoped_read_is_reported_as_a_posture(
+        self, vault_config, secret_key_env
+    ):
+        """§1: a vault reading its whole file shares everything in it, which is
+        an operator-visible security posture rather than a user preference. The
+        *names* still never appear."""
+        _provision(vault_config)
+        _write_unscoped_vault(vault_config)
+
+        result = _contents(vault_config)
+
+        assert result.status == OK
+        assert "whole file shared" in result.detail
+        assert UNOWNED_GROUP not in result.detail
 
     def test_a_wrong_passphrase_reports_the_class_and_not_the_sentence(
         self, vault_config, secret_key_env
@@ -846,30 +874,23 @@ class TestTheDatabaseDirectoryComparison:
 
 
 class TestAMalformedFieldDoesNotCostEveryFinding:
-    def test_a_non_iterable_vault_services_is_dropped_rather_than_raising(
-        self, vault_config
-    ):
-        """`list(x or ())` raises `TypeError` on an int, and `run_checks`
-        contains that into one synthetic FAIL replacing all four findings — so a
-        single malformed field costs the operator every answer the check had
-        already computed. Unreachable through `load_config`, which coerces the
-        field before the loader's own filter sees it, and guarded for the same
-        reason `_vault_users` guards the type of `vault_path`."""
-        vault_config.users["alice"].vault_services = 5
+    """No arm reads `vault_services` any more, so a malformed one is inert.
+
+    The reader this class was written against (`_vault_declared_services`) went
+    with the schedule arm's owned-services line. These stay as the standing
+    guard that a field nothing consumes cannot cost the operator every finding
+    the check had already computed — `run_checks` contains a raise into one
+    synthetic FAIL replacing all four.
+    """
+
+    @pytest.mark.parametrize("value", [5, ["karakeep", 7, None], "karakeep"])
+    def test_a_malformed_field_is_not_read_at_all(self, vault_config, value):
+        vault_config.users["alice"].vault_services = value
         results = _run(vault_config, probe=False)
         assert len(results) == 4
-        assert results["security.credential_vault.schedule"].detail.endswith(
-            "(alice owns nothing)"
-        )
-
-    def test_a_non_string_entry_is_dropped_rather_than_rendered(self, vault_config):
-        vault_config.users["alice"].vault_services = ["karakeep", 7, None]
-        result = _run(vault_config, probe=False)[
-            "security.credential_vault.schedule"
-        ]
-        assert "karakeep" in result.detail
-        assert "7" not in result.detail
-        assert "None" not in result.detail
+        detail = results["security.credential_vault.schedule"].detail
+        assert "1 vault(s) configured" in detail
+        assert "karakeep" not in detail and "7" not in detail
 
     def test_through_the_registry_a_malformed_field_still_yields_four_findings(
         self, vault_config

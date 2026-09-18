@@ -9938,97 +9938,6 @@ def _service_status(schema: dict, configured_keys: set[str]) -> str:
     return "missing"
 
 
-def _vault_owned_services(username: str) -> frozenset[str] | None:
-    """Which services this user's credential vault owns, or `None` if unknown.
-
-    Blocking, and called from `asyncio.to_thread` at every site: resolving a
-    `vault_path` walks directories under the workspace, which is a
-    `fuse.rclone` mount on the deployment shape this runs on — so on the event
-    loop a wedged mount would stall every other request in the web process.
-
-    The cheap half of the predicate is asked first inside `vault_owned_services`
-    itself, so a user who declares no `vault_services` — which is every user by
-    default — costs a dict lookup and touches no filesystem at all.
-
-    **`None` and `frozenset()` are different answers and the callers must not
-    collapse them.** An empty set is a real answer: this user's vault owns
-    nothing. `None` means the question could not be settled, and the two callers
-    want opposite things from that. The card builder wants a page that renders,
-    so it reads `None` as "no flag" — the state every deployment was in before
-    this stage. The 409 gate is the last writer §6's "no other writer is left"
-    argument depends on closing, so it must **not** fail open: an unresolvable
-    answer there is a 503, not permission.
-
-    `resolve_user_vault_path` handles its own `OSError` and `ValueError` and
-    answers a refusal rather than raising, so the `except` below is a
-    defect-only path — which is exactly the kind that must not quietly become
-    permission to write a credential.
-    """
-    if not _config:
-        return frozenset()
-    try:
-        from .secrets_vault import vault_owned_services
-
-        return vault_owned_services(_config, username)
-    except Exception:
-        logger.warning(
-            "could not resolve the vault-owned services for %r", username,
-            exc_info=True,
-        )
-        return None
-
-
-def _refuse_if_vault_managed(service: str, username: str, schema: dict) -> None:
-    """409 on a write to a key the user's credential vault owns.
-
-    **This is a boundary, not a nicety, and the disabled field in the UI is the
-    nicety.** §6 claims the vault is the live authority for its declared
-    services without a reconciliation loop, and the whole of that claim is that
-    no other writer is left: `DAEMON_WRITTEN_SERVICES` removes the services the
-    daemon rotates, open question 3 removes `istota secret ensure`, and these
-    two routes were the third and last.
-
-    What a write that got through here would cost is worth being exact about,
-    because the intuitive answer is wrong in the reassuring direction. It does
-    *not* get reverted on the next cycle: the write touches no byte of the KDBX,
-    so the digest is unchanged, the cycle short-circuits before parsing, and the
-    value stands indefinitely — a permanent, silent divergence from the file the
-    user believes is authoritative, discovered whenever they next wonder why an
-    edit did nothing.
-
-    Raised **after** the unknown-service 404 and **before** the unknown-key 400.
-    A name in no schema cannot be vault-owned, since `vault_services` is
-    filtered to eligible services at config load and eligibility starts from the
-    schema — so a 409 there would be answering about a service that does not
-    exist. A wrong *key* on an owned service is the other way round: the whole
-    service is refused, so which key was named does not matter.
-    """
-    from fastapi import HTTPException
-
-    owned = _vault_owned_services(username)
-    if owned is None:
-        # Fails closed. Whether this service is vault-owned is exactly the
-        # question that decides whether the write is allowed, so an
-        # unresolvable answer is a refusal to act rather than permission —
-        # and a 503 says "ask again" where a 409 would say "never".
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Could not determine whether your credential vault manages "
-                "this service, so the change was not saved. Try again."
-            ),
-        )
-    if service not in owned:
-        return
-    label = schema.get("label") or service
-    raise HTTPException(
-        status_code=409,
-        detail=(
-            f"{label} is managed by your credential vault; edit the vault file "
-            "instead."
-        ),
-    )
-
 
 def _build_service_card(
     service: str,
@@ -10036,7 +9945,6 @@ def _build_service_card(
     stored: dict[str, list[dict]],
     *,
     extra: dict | None = None,
-    vault_owned: frozenset[str] = frozenset(),
 ) -> dict:
     configured = {entry["key"] for entry in stored.get(service, [])}
     last_updated = max(
@@ -10057,10 +9965,14 @@ def _build_service_card(
         "hint": schema.get("hint", ""),
         "oauth": bool(schema.get("oauth", False)),
         "custom_ui": bool(schema.get("custom_ui", False)),
-        # Written on every card rather than only on an owned one: a missing key
-        # and a false one render identically in Svelte, so an absent flag would
-        # make the disabled state untestable from the payload.
-        "vault_managed": service in vault_owned,
+        # Always False now. The vault writes nothing but its own
+        # `vault_entries` namespace, so no typed service is vault-owned and
+        # nothing overwrites a value edited here — which is why the 409 that
+        # used to make such a card read-only went with the eligibility
+        # machinery. The key stays on the payload because
+        # `ServiceCard.svelte` still reads it; both it and this line leave in
+        # stage 6, with the rest of the `vault_services` surface.
+        "vault_managed": False,
     }
     if extra:
         card.update(extra)
@@ -10082,9 +9994,6 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
 
     username = user["username"]
     stored = secrets_store.list_user_services(_config.db_path, username)
-    # `or frozenset()`: a page that cannot resolve the vault still renders its
-    # cards. The gate is where an unresolvable answer has to bite.
-    vault_owned = await asyncio.to_thread(_vault_owned_services, username) or frozenset()
 
     cards: list[dict] = []
     for service, schema in _CONNECTED_SERVICE_SCHEMA.items():
@@ -10098,9 +10007,7 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
                 _config.google_workspace and _config.google_workspace.enabled
             )
         cards.append(
-            _build_service_card(
-                service, schema, stored, extra=extra, vault_owned=vault_owned,
-            )
+            _build_service_card(service, schema, stored, extra=extra)
         )
     return {"services": cards}
 
@@ -10205,10 +10112,22 @@ def _vault_settings_payload(username: str) -> dict:
         "last_sync_at": report.last_sync_at,
         "last_outcome": report.recorded_outcome,
         "last_reason": report.recorded_reason,
+        # §1: the last cycle read the whole file, because it holds no
+        # top-level `istota` group. Read off the durable record rather than
+        # off `report.scoped`, which is this call's own answer and is
+        # meaningless on the `parse=False` arm — the card must never open the
+        # file, so the syncing process is the only thing that can settle this
+        # and the record is how it says so.
+        "unscoped": report.recorded_unscoped,
+        # How many shared credentials istota holds *now*, from the `secrets`
+        # table rather than from the file — no parse, no Argon2id, no
+        # pykeepass in the web process. It is what makes the unscoped line
+        # actionable: "all 412 of them" is a different sentence from "all 3".
+        "entry_count": _vault_entry_count(username),
         # False here always, and it is not decoration: it is what tells a
-        # renderer that the four parse-only fields are empty because nothing
-        # looked, rather than because the file holds nothing. A future surface
-        # wanting the group listing asks the CLI; this one says it did not ask.
+        # renderer that the parse-only fields are empty because nothing
+        # looked, rather than because the file holds nothing. A surface wanting
+        # the name list asks the CLI; this one says it did not ask.
         "parsed": report.parsed,
         # The rendered verdict, empty when the vault is working. A live finding
         # outranks a recorded one: `reason` and `outcome` are what this request
@@ -10283,6 +10202,31 @@ def _vault_passphrase_present(username: str) -> bool:
     except Exception:  # pragma: no cover - defensive
         logger.debug("vault passphrase presence lookup failed for %r", username)
         return False
+
+
+def _vault_entry_count(username: str) -> int:
+    """How many shared credentials istota holds for this user. Count, no names.
+
+    `list_user_services` rather than `get_service_secrets`, and the difference
+    is not an optimisation: the latter decrypts every value to answer, which on
+    a settings page load would decrypt the user's whole shared namespace and
+    stamp `last_accessed_at` across it. This one returns key names and
+    timestamps and no plaintext at all — and only the length of the list
+    leaves here.
+
+    Zero on any failure, which is the same direction the sibling helpers
+    degrade in: this is one line on a card whose real content is the status
+    beside it.
+    """
+    if _config is None or not _config.db_path:
+        return 0
+    try:
+        from . import secrets_store, secrets_vault
+        stored = secrets_store.list_user_services(_config.db_path, username)
+        return len(stored.get(secrets_vault.VAULT_ENTRY_SERVICE, []))
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("vault entry count lookup failed for %r", username)
+        return 0
 
 
 #: What `_vault_config_source` answers when it could not tell. Distinct from
@@ -10518,9 +10462,11 @@ async def settings_vault(user: dict = Depends(_require_api_auth)) -> dict:
     too, so this only keeps the log honest — but a guard on one side only is
     the kind that gets removed because it looks redundant.
 
-    The reverse direction is deliberately *not* symmetric: `settings_vault` may
-    degrade because nothing turns on its answer, while `_refuse_if_vault_managed`
-    may not, because its answer is the authorization.
+    Nothing turns on its answer any more, which is a change rather than a
+    property of this function: the vault used to own typed services and a 409
+    refused an edit to one, so there was a sibling read whose failure had to
+    be a refusal. The vault writes only its own `vault_entries` namespace now,
+    so there is no authorization question left here at all.
     """
     if not _config:
         return {"configured": False}
@@ -10612,12 +10558,8 @@ async def settings_module_services(
     username = user["username"]
     enabled = _config.is_module_enabled(username, module)
     stored = secrets_store.list_user_services(_config.db_path, username)
-    # Two of the five vault-eligible services (`feeds`, `carto`) live on module
-    # pages, so a flag computed only in `/settings/services` would leave them
-    # with an editable form the 409 then refuses.
-    vault_owned = await asyncio.to_thread(_vault_owned_services, username) or frozenset()
     cards = [
-        _build_service_card(service, schema, stored, vault_owned=vault_owned)
+        _build_service_card(service, schema, stored)
         for service, schema in schemas.items()
     ]
     return {
@@ -10646,9 +10588,6 @@ async def settings_set_secret(
     schema = _all_known_services().get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
-    await asyncio.to_thread(
-        _refuse_if_vault_managed, service, user["username"], schema,
-    )
     valid_keys = {f["key"] for f in schema["fields"]}
     if key not in valid_keys:
         raise HTTPException(
@@ -10918,13 +10857,6 @@ async def settings_delete_secret(
     schema = _all_known_services().get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
-    # Symmetric with the PUT handler, and needed for its own reason rather than
-    # for symmetry: a delete that got through would leave the table without a
-    # row the vault file still holds, and nothing would put it back until the
-    # file next moved.
-    await asyncio.to_thread(
-        _refuse_if_vault_managed, service, user["username"], schema,
-    )
     valid_keys = {f["key"] for f in schema["fields"]}
     if key not in valid_keys:
         # Symmetric with the PUT handler — never let a caller delete arbitrary

@@ -893,3 +893,155 @@ class TestTheResolver:
         with db.get_db(config.db_path) as conn:
             view = connected_service.RESOLVER.resolve(config, conn, row)
         assert view is None
+
+
+# ---------------------------------------------------------------------------
+# §1: the first unscoped sync
+# ---------------------------------------------------------------------------
+
+
+def _write_unscoped_vault(path: Path, *, password: str = PASSPHRASE) -> None:
+    """A real KDBX with **no** top-level `istota` group, so the read is unscoped."""
+    from pykeepass import create_database
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kp = create_database(str(path), password=password)
+    group = kp.add_group(kp.root_group, "karakeep")
+    kp.add_entry(group, "base_url", "", BASE_URL_VALUE)
+    kp.add_entry(group, "api_key", "", API_KEY_VALUE)
+    kp.save()
+
+
+def _alert_rows(config: Config, user_id: str = "alice") -> list[dict]:
+    from istota.notification_resolvers import task_alert
+
+    with db.get_db(config.db_path) as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM notifications WHERE user_id = ? AND source = ? "
+                "ORDER BY id",
+                (user_id, task_alert.SOURCE),
+            ).fetchall()
+        ]
+
+
+@pytest.fixture
+def unscoped(tmp_path, secret_key):
+    """A configured user whose vault file has no `istota` group."""
+    config = _vault_config(
+        tmp_path, vault_path="config/vault.kdbx", services=[]
+    )
+    path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
+    _write_unscoped_vault(path)
+    secrets_store.set_secret(config.db_path, "alice", "vault", "passphrase", PASSPHRASE)
+    return config, path
+
+
+class TestTheFirstUnscopedSync:
+    """§1's notice: said once, and never on the ordinary scoped read.
+
+    It is the thing that catches "I pointed at my real password database"
+    within one sync interval instead of never. A notice rather than a refusal —
+    istota does not second-guess a file the user deliberately placed in their
+    own vault folder — but the two failure modes are not equally reversible,
+    and this is what pays for the difference.
+    """
+
+    def test_the_first_unscoped_sync_raises_once(self, unscoped, sends):
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config, path = unscoped
+
+        assert sync_user(config, "alice").outcome == OUTCOME_OK
+        rows = _alert_rows(config)
+        assert len(rows) == 1
+        assert rows[0]["dedup_key"] == "vault-unscoped"
+
+    def test_a_second_unscoped_sync_does_not_raise_again(self, unscoped, sends):
+        """Gated on the **durable** record rather than on in-process state: an
+        in-memory latch would re-notify on every daemon restart, which for a
+        deployment that updates every few minutes is a push every few minutes.
+        """
+        from istota.secrets_vault import reset_sync_state, sync_user
+
+        config, path = unscoped
+        sync_user(config, "alice")
+        # A fresh process, as far as the in-memory cache is concerned: the
+        # digest cache and the settled outcome are both dropped, so only the
+        # durable record can stop the second raise.
+        reset_sync_state()
+        path.write_bytes(path.read_bytes())
+        _write_unscoped_vault(path)
+
+        sync_user(config, "alice")
+
+        assert len(_alert_rows(config)) == 1
+
+    def test_the_body_carries_a_count_and_no_name_and_no_value(
+        self, unscoped, sends
+    ):
+        from istota.secrets_vault import sync_user
+
+        config, _path = unscoped
+        sync_user(config, "alice")
+
+        row = _alert_rows(config)[0]
+        rendered = f"{row['title']} {row['body']}"
+        assert "2" in rendered
+        assert API_KEY_VALUE not in rendered
+        assert BASE_URL_VALUE not in rendered
+        assert "karakeep_api_key" not in rendered
+
+    def test_a_scoped_vault_raises_nothing(self, tmp_path, secret_key, sends):
+        """The control: without it the notice could be firing on every sync."""
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config = _vault_config(
+            tmp_path, vault_path="config/vault.kdbx", services=[]
+        )
+        path = (
+            Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
+        )
+        _write_vault(path)
+        secrets_store.set_secret(
+            config.db_path, "alice", "vault", "passphrase", PASSPHRASE
+        )
+
+        assert sync_user(config, "alice").outcome == OUTCOME_OK
+        assert _alert_rows(config) == []
+
+    def test_a_failing_cycle_in_between_does_not_re_arm_the_notice(
+        self, unscoped, sends
+    ):
+        """`unscoped` is carried forward on a cycle that never opened the file,
+        for the reason `ok_at` is: a failed read is not evidence the file grew
+        an `istota` group. Without the carry the latch would be re-armed by any
+        transient failure and the push would repeat."""
+        from istota.secrets_vault import reset_sync_state, sync_user
+
+        config, path = unscoped
+        sync_user(config, "alice")
+        assert len(_alert_rows(config)) == 1
+
+        _corrupt(path)
+        reset_sync_state()
+        sync_user(config, "alice")
+        _write_unscoped_vault(path)
+        reset_sync_state()
+        sync_user(config, "alice")
+
+        assert len(_alert_rows(config)) == 1
+
+    def test_the_cli_fork_writes_the_row_and_pushes_nothing(self, unscoped, sends):
+        """`deliver=False` is what `istota secret vault-sync` passes: the
+        operator is reading the warning off their own terminal as it prints,
+        and a push out of a one-shot CLI means standing an `AsyncRuntime` up."""
+        from istota.secrets_vault import sync_user
+
+        config, _path = unscoped
+
+        sync_user(config, "alice", deliver=False)
+
+        assert len(_alert_rows(config)) == 1
+        assert sends.calls == []

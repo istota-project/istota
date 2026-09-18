@@ -299,3 +299,51 @@ describe('a user whose vault owns a service', () => {
     expect(line.textContent).toContain('no services are assigned');
   });
 });
+
+describe('the scope notice', () => {
+  it('says the whole file is shared when the last read was unscoped', async () => {
+    // A file with no top-level `istota` group is read in full. That is how it
+    // is meant to work for a file put in the vault folder *for* istota, and it
+    // is also what "I copied my everyday password database in" looks like — so
+    // the card says which it did and how many credentials that came to, within
+    // one sync interval rather than never.
+    api.getVaultStatus.mockResolvedValue(configured({ unscoped: true, entry_count: 412 }));
+    await mount();
+
+    const line = await findHeading();
+    expect(line.textContent).toContain('no top-level');
+    expect(line.textContent).toContain('412 credentials');
+    expect(screen.getByTestId('vault-unscoped')).toBeTruthy();
+  });
+
+  it('says nothing about scope on an ordinary scoped vault', async () => {
+    // The control. Without it the notice could be rendering for everyone, and a
+    // warning every user reads past is a warning nobody reads.
+    api.getVaultStatus.mockResolvedValue(configured({ unscoped: false, entry_count: 3 }));
+    await mount();
+
+    const line = await findHeading();
+    expect(line.textContent).not.toContain('no top-level');
+    expect(screen.queryByTestId('vault-unscoped')).toBeNull();
+  });
+
+  it('says nothing about scope before a cycle has read the file', async () => {
+    // `unscoped` comes off the durable sync record, so it is absent until a
+    // cycle has run. An absent field reads as "not yet known" rather than as
+    // the reassuring answer or the alarming one.
+    api.getVaultStatus.mockResolvedValue(configured({ unscoped: undefined }));
+    await mount();
+
+    const line = await findHeading();
+    expect(screen.queryByTestId('vault-unscoped')).toBeNull();
+    expect(line.textContent).toContain('Credential vault');
+  });
+
+  it('renders the singular for one shared credential', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ unscoped: true, entry_count: 1 }));
+    await mount();
+
+    const line = await findHeading();
+    expect(line.textContent).toContain('1 credential in it');
+  });
+});

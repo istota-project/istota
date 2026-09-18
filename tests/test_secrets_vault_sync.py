@@ -37,6 +37,7 @@ import pytest
 
 from istota import secrets_store, storage
 from istota.config import Config, UserConfig
+from istota.secrets_vault import VAULT_ENTRY_SERVICE
 
 PASSPHRASE = "sync-fixture-passphrase-not-a-real-one"
 ROTATED_PASSPHRASE = "sync-fixture-passphrase-after-rotation"
@@ -177,9 +178,13 @@ class TestTheDigestCache:
         assert result.outcome == OUTCOME_OK
         assert parse_calls.calls == 1
         assert result.apply is not None
-        # The rows and the counts are the applying half's, which the
-        # change landing beside this one restores over the flat
-        # `vault_entries` namespace. What is asserted here is the cycle.
+        assert result.apply.created == 2
+        assert (
+            secrets_store.get_secret(
+                config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
+            == API_KEY_VALUE
+        )
 
 
     def test_an_unchanged_digest_does_no_work(self, ready, parse_calls):
@@ -291,9 +296,14 @@ class TestWhichFailuresCacheTheirDigest:
         assert path.read_bytes() == digest_before, "the file must not have moved"
         assert second.outcome == OUTCOME_OK
         assert parse_calls.calls == 2
-        # The rows and the counts are the applying half's, which the
-        # change landing beside this one restores over the flat
-        # `vault_entries` namespace. What is asserted here is the cycle.
+        # Provisioning the right passphrase ends the locked state *and* applies,
+        # which is what makes the remedy the notification names a real one.
+        assert (
+            secrets_store.get_secret(
+                config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
+            == API_KEY_VALUE
+        )
 
 
     def test_an_absent_passphrase_is_not_cached_and_provisioning_ends_it(
@@ -617,9 +627,12 @@ class TestTheEdgeTriggeredProperty:
 
         "Vault-wins" is what this sounds like and is not what it is: the file
         asserts its version of the world at the moment it is written and says
-        nothing in between. What makes that safe is that no other writer to a
-        vault-owned key is left — `DAEMON_WRITTEN_SERVICES`, §9's 409 and open
-        question 3's refusal each remove one — rather than a loop correcting them.
+        nothing in between. What makes that safe is that the vault has a
+        namespace of its own and no other writer in it — `vault_entries` is not
+        in `secret_schema`, so neither the settings page nor `istota secret
+        ensure` can reach it — rather than a loop correcting them. The row this
+        test changes out of band is a *typed* service, which the vault stopped
+        owning entirely; the edge-triggered property is what it still pins.
 
         **A future reconciliation loop has to delete this test on purpose.** Do
         not "fix" it by parsing on every cycle; that is a design change with §7's
@@ -661,9 +674,14 @@ class TestTheEdgeTriggeredProperty:
         _write_vault(path)
         assert sync_user(config, "alice").outcome == OUTCOME_OK
         assert parse_calls.calls == 2
-        # The rows and the counts are the applying half's, which the
-        # change landing beside this one restores over the flat
-        # `vault_entries` namespace. What is asserted here is the cycle.
+        # The other half of §7's mitigation, restored with the apply: the parse
+        # re-asserts the whole namespace over a row changed out of band.
+        assert (
+            secrets_store.get_secret(
+                config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
+            == API_KEY_VALUE
+        )
 
 
 
@@ -879,9 +897,20 @@ class TestSyncAll:
         results = {r.user_id: r for r in sync_all(config)}
         assert results["alice"].outcome != OUTCOME_OK
         assert results["bob"].outcome == OUTCOME_OK
-        # The rows and the counts are the applying half's, which the
-        # change landing beside this one restores over the flat
-        # `vault_entries` namespace. What is asserted here is the cycle.
+        assert (
+            secrets_store.get_secret(
+                db_path, "bob", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
+            == API_KEY_VALUE
+        )
+        # alice's cycle never parsed, so nothing of hers was written *or*
+        # deleted — containment is about the rows as well as the exception.
+        assert (
+            secrets_store.get_secret(
+                db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
+            is None
+        )
 
 
     def test_a_raising_user_is_contained(self, ready, monkeypatch):
@@ -961,9 +990,13 @@ class TestTheEnableGate:
         result = sync_user(config, "alice")
         assert result.outcome == OUTCOME_OK
         assert result.apply is not None
-        # The rows and the counts are the applying half's, which the
-        # change landing beside this one restores over the flat
-        # `vault_entries` namespace. What is asserted here is the cycle.
+        assert result.apply.created == 2
+        assert (
+            secrets_store.get_secret(
+                config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
+            == API_KEY_VALUE
+        )
 
 
     def test_a_passphrase_and_an_empty_folder_is_a_missing_file(

@@ -135,18 +135,21 @@ class TestPrecedence:
         uvc.set_vault_config(db_path, "alice", vault_path="now.kdbx", vault_services=[])
         assert config.vault_path_for("alice") == "now.kdbx"
 
-    def test_an_ineligible_service_is_dropped_on_the_way_out(self, tmp_path, db_path):
-        # `_validate_vault_services` filters the TOML list at load time and
-        # cannot see a row written afterwards, so the accessor applies the same
-        # predicate — `secrets_vault.service_refusal`, asked rather than
-        # restated. Without this a row could name `vault` itself and the
-        # eligibility rule would hold on one surface only.
+    def test_a_stored_list_is_passed_through_unfiltered(self, tmp_path, db_path):
+        # The eligibility filter this accessor used to apply went with the
+        # predicate behind it: a vault owns no typed service now, so there is no
+        # ineligible name and nothing left to drop. Nothing reads the answer
+        # either — the field, this reader and the stored column all leave in
+        # stage 6 — so what is pinned here is that the list is inert rather than
+        # silently re-filtered by something else.
         config = _config(tmp_path, db_path)
         uvc.set_vault_config(
             db_path, "alice", vault_path="v.kdbx",
             vault_services=["karakeep", "vault", "nonesuch"],
         )
-        assert config.vault_services_for("alice") == ["karakeep"]
+        assert config.vault_services_for("alice") == [
+            "karakeep", "vault", "nonesuch",
+        ]
 
 
 class TestTheDeploymentWideGate:

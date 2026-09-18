@@ -1142,6 +1142,13 @@ export interface VaultStatus {
    *  server so the precedence between a live finding and a recorded one is
    *  stated once, in the language that owns the outcome constants. */
   problem?: string;
+  /** The last sync read the whole file, because it has no top-level `istota`
+   *  group. Off the durable sync record rather than off this request, which
+   *  never opens the file — so it is absent until a cycle has run. */
+  unscoped?: boolean;
+  /** How many shared credentials istota holds for this user, right now, from
+   *  the `secrets` table rather than from the file. */
+  entry_count?: number;
 
   // --- the form's own half, present whatever `configured` says --------------
   //

@@ -2626,54 +2626,20 @@ class Config:
     ) -> list[str]:
         """Which services this user's vault owns, DB row over TOML.
 
-        **Both halves go through the eligibility filter and they get there
-        differently**, which is the part to keep in view. A TOML list has
-        already been filtered in place by `_validate_vault_services` at load,
-        and re-filtering it costs a schema walk on a path with no new
-        information. A row written afterwards has been filtered by nothing that
-        load-time pass could see, and eligibility can change under a stored row
-        besides — an operator disabling a module makes a name that was fine when
-        it was saved ineligible now. So the row is filtered here, on the way
-        out, with `secrets_vault.service_refusal`: the same predicate
-        `apply_vault` applies, asked rather than restated.
-
-        The whole list is dropped if the filter cannot run, rather than passed
-        through: `apply_vault` refuses each name again on its own terms, so the
-        cost of being wrong here is a credential not written rather than one
-        written that should not have been.
+        **Nothing reads the answer any more and nothing filters it.** The vault
+        writes only its own `vault_entries` namespace, so there is no service a
+        vault can own and no eligibility question to ask — the predicate this
+        used to apply (`secrets_vault.service_refusal`) went with the mapping it
+        belonged to. The field, this reader and the stored column all leave in
+        stage 6; they survive here so the surfaces still spelling `owned` keep
+        compiling, and the list they get is inert.
         """
         row = self._vault_row(user_id, conn)
         if row is None or not getattr(row, "vault_path", ""):
             user = self.users.get(user_id)
             raw = getattr(user, "vault_services", None) if user is not None else None
             return list(raw) if isinstance(raw, list) else []
-        declared = list(getattr(row, "vault_services", None) or ())
-        if not declared:
-            return []
-        try:
-            from .secrets_vault import (  # noqa: PLC0415 - import cost
-                eligible_services,
-                service_refusal,
-            )
-            eligible = eligible_services()
-        except Exception:  # pragma: no cover - defensive
-            logger.warning(
-                "vault service eligibility could not be checked for %r; the "
-                "stored entries are dropped and refused again at sync time",
-                user_id, exc_info=True,
-            )
-            return []
-        kept: list[str] = []
-        for service in declared:
-            reason = service_refusal(service, eligible)
-            if reason is None:
-                kept.append(service)
-                continue
-            logger.warning(
-                "stored vault_services entry %r dropped for %s: %s",
-                service, user_id, reason,
-            )
-        return kept
+        return list(getattr(row, "vault_services", None) or ())
 
     def available_capabilities(self) -> set[str]:
         """Backing-service capabilities currently available in this deployment.
@@ -4550,75 +4516,31 @@ def load_config(config_path: Path | None = None) -> Config:
 
 
 def _validate_vault_services(config: "Config") -> None:
-    """Drop every ``vault_services`` name a vault may not own, with a warning.
+    """Coerce every ``vault_services`` entry to a string, and nothing else.
 
-    Dropped rather than raised. §4's rule is that a config refusing to boot
-    because a module was disabled is worse than one telling the operator which
-    line is inert, and it holds with more force here than usual: ``load_config``
-    runs in the scheduler, the web app, the webhook receiver and every
-    host-side skill CLI the proxy spawns per call, so a name that stopped being
-    eligible would stop all of them.
+    **The eligibility filter this used to be is gone with the predicate behind
+    it.** A vault owns no typed service any more — it writes only its own
+    `vault_entries` namespace — so there is no ineligible name to drop and no
+    line to tell the operator is inert. What is left is the type coercion, kept
+    because the field is still on the dataclass until stage 6 and a non-string
+    entry reaching a surface that renders it is a defect with a wide blast
+    radius: ``load_config`` runs in the scheduler, the web app, the webhook
+    receiver and every host-side skill CLI the proxy spawns per call.
 
-    **Not the boundary.** ``apply_vault`` refuses the same names again on its
-    own terms, against the set it is handed, and that is what actually stops a
-    write. This is what makes the refusal visible at the moment somebody could
-    act on it — a name dropped here is a line in the boot log, where a name
-    dropped only at apply time is a ``skipped`` triple inside a background gate
-    on a five-minute interval.
-
-    One predicate, asked rather than restated: ``secrets_vault.service_refusal``
-    is the same rule ``apply_vault`` applies, so the two cannot drift into
-    telling the operator a line is live and then refusing it. The import is
-    function-scoped — ``secrets_vault`` pulls ``secret_schema`` and
-    ``secrets_store``, and this module is imported by everything — and the loop
-    skips a user with nothing configured, so a deployment with no vault pays
-    neither the import nor the schema walk.
+    Dropped rather than raised, which is the rule that survives unchanged: a
+    config that refuses to boot over an inert line is worse than one that says
+    the line is inert.
     """
-    configured = [
-        (user_id, user)
-        for user_id, user in config.users.items()
-        if getattr(user, "vault_services", None)
-    ]
-    if not configured:
-        return
-    try:
-        from .secrets_vault import (  # noqa: PLC0415 - import cost
-            eligible_services,
-            service_refusal,
-        )
-        # Hoisted out of the loop below: it is a walk over the whole secret
-        # schema, and `service_refusal`'s own docstring says a caller asking
-        # about several names should pass it rather than rebuild it per name.
-        eligible = eligible_services()
-    except Exception:  # pragma: no cover - defensive; never fail config load
-        logger.warning(
-            "vault service eligibility could not be checked; the entries load "
-            "as written and are refused at sync time", exc_info=True,
-        )
-        return
-
-    for user_id, user in configured:
-        kept: list[str] = []
-        for service in user.vault_services:
-            # `_vault_services_value` guarantees `list[str]` on the TOML path
-            # and nothing else writes this field, so the type test is defence
-            # behind that rather than a case with a producer. It earns its line
-            # anyway: `_service_refusal` calls `.startswith`, and an
-            # `AttributeError` escaping here fails `load_config` in the
-            # scheduler, the web app, the webhook receiver and every host-side
-            # skill CLI the proxy spawns — the blast radius this function drops
-            # rather than raises to avoid. Past it the call cannot raise: a
-            # prefix test and a set membership over in-tree constants.
-            if not isinstance(service, str) or not service:
-                reason = "not a service name"
-            else:
-                reason = service_refusal(service, eligible)
-            if reason is None:
-                kept.append(service)
-                continue
+    for user_id, user in config.users.items():
+        declared = getattr(user, "vault_services", None)
+        if not declared:
+            continue
+        kept = [service for service in declared if isinstance(service, str) and service]
+        if len(kept) != len(declared):
             logger.warning(
-                "[users.%s] vault_services entry %r dropped: %s",
-                user_id, service, reason,
+                "[users.%s] vault_services dropped %d entry/entries that are "
+                "not service names",
+                user_id, len(declared) - len(kept),
             )
         user.vault_services = kept
 

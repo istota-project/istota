@@ -36,7 +36,6 @@ import base64
 import contextlib
 import dataclasses
 import hashlib
-import json
 import logging
 import os
 import sqlite3
@@ -48,16 +47,15 @@ from unittest import mock
 
 import pytest
 
-from istota import secret_schema
+from istota import secrets_store
 from istota import secrets_vault as secrets_vault_module
 from istota.config import UserConfig, load_config
 from istota.secrets_vault import (
-    DAEMON_WRITTEN_SERVICES,
     SKIP_DUPLICATE_NAME,
-    SKIP_INELIGIBLE_SERVICE,
     SKIP_OVERSIZE_VALUE,
-    SKIP_RESERVED_SERVICE,
+    SKIP_UNREADABLE_ROW,
     SKIP_UNUSABLE_NAME,
+    VAULT_ENTRY_SERVICE,
     VAULT_READ_CAP_BYTES,
     VaultCorrupt,
     VaultLibraryMissing,
@@ -65,10 +63,9 @@ from istota.secrets_vault import (
     VaultMissing,
     VaultRead,
     VaultUnreadable,
-    eligible_services,
+    apply_vault,
     parse_vault,
     read_vault_bytes,
-    service_refusal,
 )
 from istota.skills._loader import (
     OVERLAY_IS_A_SYMLINK,
@@ -750,25 +747,10 @@ class TestRead:
 
     # ---- what the walk excludes -----------------------------------------
 
-    def test_a_vault_with_no_istota_group_reads_as_empty_and_says_so(
-        self, tmp_path, caplog
-    ):
-        """"I emptied my vault" and "I mistyped the group name" reach the same
-        state, and only one of them was intended — so the absence is said out
-        loud even though it is not an error."""
-        kp, path = _new_db(tmp_path)
-        kp.add_entry(kp.add_group(kp.root_group, "Personal"), "key", "", API_KEY_VALUE)
-        kp.save()
-
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
-            read, _ = _read(path)
-
-        assert read.services == {}
-        assert any("istota" in m for m in _ours(caplog)), _ours(caplog)
-
-    def test_an_istota_group_nested_in_another_group_is_not_read(self, tmp_path):
-        """Only the root-level group is the consent boundary. A nested one is
-        somebody else's folder that happens to share a name."""
+    def test_an_istota_group_nested_in_another_group_does_not_scope(self, tmp_path):
+        """Only a **top-level** group narrows the read. A nested one is an
+        ordinary group that happens to share a name, so the read is unscoped
+        and it contributes a path segment like any other."""
         kp, path = _new_db(tmp_path)
         outer = kp.add_group(kp.root_group, "Personal")
         kp.add_entry(kp.add_group(outer, "istota"), "key", "", API_KEY_VALUE)
@@ -776,19 +758,8 @@ class TestRead:
 
         read, _ = _read(path)
 
-        assert read.services == {}
-
-    def test_the_top_level_group_name_is_not_folded(self, tmp_path):
-        """`Istota/` is not the vault's group. Matched exactly, so the file
-        either is shared or is not, with nothing in between."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "Istota")
-        kp.add_entry(kp.add_group(root, "karakeep"), "api_key", "", API_KEY_VALUE)
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.services == {}
+        assert read.scoped is False
+        assert read.services == {"personal_istota_key": API_KEY_VALUE}
 
     def test_an_empty_istota_group_reads_as_empty_without_a_warning(
         self, tmp_path, caplog
@@ -1114,6 +1085,7 @@ class TestRead:
             services={"karakeep_api_key": API_KEY_VALUE},
             held=frozenset({"karakeep_base_url"}),
             truncated="",
+            scoped=True,
             skipped=(("karakeep_topic", SKIP_DUPLICATE_NAME),),
         )
 
@@ -1318,6 +1290,163 @@ class TestRead:
         assert [r for r in caplog.records if r.name == "istota.secrets_vault"] == []
 
 
+class TestScope:
+    """§1: the file is the consent boundary, the `istota` group narrows it.
+
+    The rule this replaced made the group the boundary and read a file without
+    one as empty — which the §3 sweep turns into the deletion of every stored
+    credential, and a mistyped group is indistinguishable from a deliberately
+    emptied vault. Under this one an empty read happens only when the file is
+    genuinely empty.
+
+    The case-insensitive match is the half with teeth in the other direction.
+    `Istota` is what a person types, so under an exact lowercase match the most
+    likely spelling of the narrowing would fall through to the widest read —
+    which is a disclosure rather than a wipe, and the negative control below is
+    written to catch that direction specifically.
+    """
+
+    def test_a_top_level_istota_group_scopes_the_read(self, tmp_path):
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "shared", "", API_KEY_VALUE)
+        kp.add_entry(kp.add_group(kp.root_group, "Personal"), "private", "", TOPIC_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.scoped is True
+        assert read.services == {"shared": API_KEY_VALUE}
+        assert "personal_private" not in read.services
+
+    def test_no_istota_group_reads_the_whole_file(self, tmp_path):
+        """The root stands in for `istota/` and contributes no path segment, so
+        `<root>/aws/key` produces exactly what `istota/aws/key` would."""
+        kp, path = _new_db(tmp_path)
+        kp.add_entry(kp.add_group(kp.root_group, "aws"), "key", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.scoped is False
+        assert read.services == {"aws_key": API_KEY_VALUE}
+
+    def test_an_entry_at_the_root_of_an_unscoped_file_is_read(self, tmp_path):
+        """A KDBX exported out of a password manager commonly has entries
+        sitting at the top level rather than in a group. Walking only the root's
+        *subgroups* would drop every one of them."""
+        kp, path = _new_db(tmp_path)
+        kp.add_entry(kp.root_group, "github pat", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.scoped is False
+        assert read.services == {"github_pat": API_KEY_VALUE}
+
+    def test_an_unscoped_read_says_so_once_with_a_count_and_no_name(
+        self, tmp_path, caplog
+    ):
+        kp, path = _new_db(tmp_path)
+        kp.add_entry(kp.add_group(kp.root_group, "aws"), "key", "", API_KEY_VALUE)
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        messages = _ours(caplog)
+        assert len(messages) == 1, messages
+        assert "istota" in messages[0]
+        assert API_KEY_VALUE not in messages[0]
+        assert "aws_key" not in messages[0]
+        assert read.scoped is False
+
+    @pytest.mark.parametrize("spelling", ["Istota", "ISTOTA", "istota ", " IsToTa\t"])
+    def test_every_case_and_whitespace_variant_scopes(self, tmp_path, spelling):
+        """The whole of the fix, driven by each spelling a person actually
+        types. Under the old exact match every one of these fell through to the
+        unscoped read."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, spelling)
+        kp.add_entry(root, "shared", "", API_KEY_VALUE)
+        kp.add_entry(
+            kp.add_group(kp.root_group, "Personal"), "outside", "", TOPIC_VALUE
+        )
+        kp.save()
+
+        read, _ = _read(path)
+
+        # **The presence of the entry outside the group is the assertion, and
+        # it goes first**, because that is the failure this control has to
+        # discriminate. A test asserting that `shared` is *missing* goes red on
+        # a wipe and on a disclosure alike; this one goes red only when a
+        # credential the user kept outside the narrowing has been read. Under
+        # the reverted `group.name == VAULT_ROOT_GROUP` match this read is
+        # unscoped and `personal_outside` is in `services`, which is exactly
+        # the disclosure the case-insensitive match exists to prevent.
+        assert "personal_outside" not in read.services, read.services
+        assert read.scoped is True
+        assert read.services == {"shared": API_KEY_VALUE}
+
+    def test_several_matching_top_level_groups_are_all_read(self, tmp_path):
+        """Nothing chooses between them, which is what the old exact match did
+        for several groups all spelled `istota`."""
+        kp, path = _new_db(tmp_path)
+        kp.add_entry(kp.add_group(kp.root_group, "istota"), "one", "", API_KEY_VALUE)
+        kp.add_entry(kp.add_group(kp.root_group, "Istota"), "two", "", TOPIC_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.scoped is True
+        assert read.services == {"one": API_KEY_VALUE, "two": TOPIC_VALUE}
+
+    def test_an_empty_scoped_read_is_distinguishable_from_an_empty_unscoped_one(
+        self, tmp_path
+    ):
+        """Both produce no names and they mean different things: one is a user
+        revoking their namespace on purpose, the other is a genuinely empty
+        file. `scoped` is what separates them."""
+        kp, scoped_path = _new_db(tmp_path, name="scoped.kdbx")
+        kp.add_group(kp.root_group, "istota")
+        kp.save()
+        kp2, bare_path = _new_db(tmp_path, name="bare.kdbx")
+        kp2.save()
+
+        scoped, _ = _read(scoped_path)
+        bare, _ = _read(bare_path)
+
+        assert scoped.services == {} and scoped.scoped is True
+        assert bare.services == {} and bare.scoped is False
+
+    def test_a_top_level_group_nominated_as_the_recycle_bin_does_not_scope(
+        self, tmp_path
+    ):
+        """A trashed `istota` group is not a narrowing, and the whole file is
+        then read — which for a file whose only other content is the bin means
+        nothing at all."""
+        kp, path = _standard_vault(tmp_path)
+        root = next(g for g in kp.root_group.subgroups if g.name == "istota")
+        elem = kp._xpath("/KeePassFile/Meta/RecycleBinUUID", first=True)
+        elem.text = base64.b64encode(root.uuid.bytes).decode()
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.scoped is False
+        assert read.services == {}
+
+    def test_the_repr_carries_the_scope_and_still_no_value(self, tmp_path):
+        kp, path = _new_db(tmp_path)
+        kp.add_entry(kp.add_group(kp.root_group, "aws"), "key", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert "scoped=False" in repr(read)
+        assert API_KEY_VALUE not in repr(read)
+
+
 class TestTheLibraryStaysOutOfTheImportGraph:
     """`pykeepass` is an optional extra pulling two compiled extensions.
 
@@ -1331,7 +1460,6 @@ class TestTheLibraryStaysOutOfTheImportGraph:
         """A source guard, read through `source_of` so `scripts/qt` selects it —
         a test asserting against source text executes none of the lines it
         reads, so testmon would otherwise never run this one."""
-        from tests.support.drift import source_of
 
         from istota import secrets_vault
 
@@ -1356,140 +1484,337 @@ class TestTheLibraryStaysOutOfTheImportGraph:
         assert digest == hashlib.sha256(data).hexdigest()
 
 
-class TestEligibility:
-    """Which services a vault may own — computed from the schema, not listed.
+@pytest.fixture
+def secret_key_env():
+    """A real `ISTOTA_SECRET_KEY` for the duration of a test.
 
-    §4 derives it so that a service added to `secret_schema` is classified by
-    the rules rather than by somebody remembering this module exists.
+    Same shape as `tests/test_secrets_store.py`'s fixture: the apply tests run
+    against a real temp database through the real Fernet layer, because what
+    they assert is the state of rows after a write and a delete, and a stand-in
+    store would assert this suite's idea of `upsert_secret`'s three return
+    values rather than `upsert_secret`'s.
+    """
+    with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "deadbeef" * 8}):
+        yield
+
+
+def _vault_read(services, *, held=(), truncated="", scoped=True, skipped=()):
+    """A `VaultRead` shaped as `parse_vault` would have produced it.
+
+    `held` is the one field the applying half cannot derive from `services`: a
+    name the file produced and could not supply a value for. It defaults to
+    empty, which is the ordinary case, and the tests that turn on it pass it.
+
+    The seam cases — an empty password, a duplicate title — deliberately do
+    **not** use this helper. They go through a real KDBX and `parse_vault`,
+    because the whole question there is what the parse puts in `held`, and
+    building one here would assert this file's idea of the parse.
+    """
+    return VaultRead(
+        digest="0" * 64,
+        services=dict(services),
+        held=frozenset(held),
+        truncated=truncated,
+        scoped=scoped,
+        skipped=tuple(skipped),
+    )
+
+
+def _entry(db_path, user, name):
+    return secrets_store.get_secret(db_path, user, VAULT_ENTRY_SERVICE, name)
+
+
+class TestApply:
+    """Writing a read into `vault_entries`, and sweeping the namespace.
+
+    Every test here runs against a real temp database with a real master key:
+    the subject is the state of rows, and two of the three counting states
+    (`updated` against `unchanged`) are a property of what is already stored.
     """
 
-    def test_the_eligible_set_is_the_five_services_the_schema_yields_today(self):
-        """The exact set, so a new schema service has to be classified here on
-        purpose rather than becoming vault-ownable by arriving. One the daemon
-        rewrites on its own belongs in `DAEMON_WRITTEN_SERVICES`; one the
-        operator writes belongs in this list."""
-        assert eligible_services() == frozenset(
-            {"karakeep", "ntfy", "native_brain", "feeds", "carto"}
-        )
+    def test_a_first_apply_creates_every_name(self, db_path, secret_key_env):
+        read = _vault_read({"karakeep_api_key": API_KEY_VALUE,
+                            "github_pat": TOPIC_VALUE})
 
-    def test_a_service_with_no_writable_keys_is_not_eligible(self):
-        """`google_workspace` and `garmin` declare `"fields": []` because their
-        credentials are machine-managed blobs. The assertion on the key sets is
-        what keeps this test about the rule rather than about two names."""
-        keys = secret_schema.known_service_keys()
-        assert keys["google_workspace"] == frozenset()
-        assert keys["garmin"] == frozenset()
-        assert not ({"google_workspace", "garmin"} & eligible_services())
+        result = apply_vault(db_path, "alice", read)
 
-    def test_every_daemon_written_service_is_excluded(self):
-        """And two of them have writable keys, so the subtraction is doing the
-        work rather than the empty-key rule doing it for free."""
-        assert not (DAEMON_WRITTEN_SERVICES & eligible_services())
-        keys = secret_schema.known_service_keys()
-        assert keys["monarch"] and keys["overland"]
+        assert (result.created, result.updated, result.unchanged) == (2, 0, 0)
+        assert result.deleted == 0 and result.deleted_keys == []
+        assert result.skipped == []
+        assert result.swept is True
+        assert _entry(db_path, "alice", "karakeep_api_key") == API_KEY_VALUE
+        assert _entry(db_path, "alice", "github_pat") == TOPIC_VALUE
 
-    def test_the_two_exclusion_rules_hold_over_the_whole_schema(self):
-        """The quantified form of the two tests above, and the one that survives
-        a new schema service.
-
-        Both of those name the services the schema holds today, so a sixth
-        machine-managed blob added tomorrow is covered by neither: the empty-key
-        rule would go on being asserted about `google_workspace` and `garmin`
-        while the new one walked straight into `eligible_services()`. This walks
-        the schema instead, so the assertion is about the rule.
-
-        `source_of` is what makes `scripts/qt` select it. The two subjects are
-        module-level literals — `DAEMON_WRITTEN_SERVICES` and the schema dicts —
-        which execute at *import* and are therefore attributed to whichever test
-        in the worker imported the module first, so editing either records no
-        dependency on this test. Reading both modules' text registers one.
-        """
-        source_of(secrets_vault_module)
-        source_of(secret_schema)
-
-        keys = secret_schema.known_service_keys()
-        eligible = eligible_services()
-
-        keyless = {service for service, declared in keys.items() if not declared}
-        assert keyless, "no service declares an empty key set; the rule is untested"
-        assert not (keyless & eligible), (
-            "a service with no operator-writable keys is vault-eligible: "
-            f"{sorted(keyless & eligible)}"
-        )
-
-        assert DAEMON_WRITTEN_SERVICES, "the daemon-written set is empty"
-        assert not (DAEMON_WRITTEN_SERVICES & eligible), (
-            "a service the daemon rewrites on its own is vault-eligible: "
-            f"{sorted(DAEMON_WRITTEN_SERVICES & eligible)}"
-        )
-
-    def test_the_empty_key_rule_refuses_a_service_nothing_else_would(
-        self, monkeypatch
+    def test_an_unchanged_value_is_counted_apart_from_an_updated_one(
+        self, db_path, secret_key_env
     ):
-        """The half above that cannot fail against today's schema, made to.
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE,
+                                                   "b": TOPIC_VALUE}))
 
-        Found by control: deleting `if keys` from `eligible_services` leaves the
-        quantified test green, and Stage 2's named version green too. Both
-        keyless services — `google_workspace` and `garmin` — are also in
-        `DAEMON_WRITTEN_SERVICES`, so the subtraction refuses them a second time
-        and the empty-key rule is masked by a coincidence of today's schema
-        rather than exercised by it.
+        result = apply_vault(
+            db_path, "alice", _vault_read({"a": API_KEY_VALUE, "b": "moved"})
+        )
 
-        A keyless service outside that set is what separates the two rules, and
-        the schema has none to point at, so one is monkeypatched in — the
-        technique `test_a_reserved_connector_service_is_never_eligible` uses for
-        the same reason. The same mutation then turns this red and leaves its
-        neighbours alone.
+        assert (result.created, result.updated, result.unchanged) == (0, 1, 1)
+
+    # ---- the namespace sweep --------------------------------------------
+
+    def test_a_name_removed_from_the_file_is_deleted(self, db_path, secret_key_env):
+        """The whole of what makes deleting an entry revoke it."""
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE,
+                                                   "b": TOPIC_VALUE}))
+
+        result = apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
+
+        assert result.deleted == 1 and result.deleted_keys == ["b"]
+        assert _entry(db_path, "alice", "b") is None
+        assert _entry(db_path, "alice", "a") == API_KEY_VALUE
+
+    def test_an_empty_read_deletes_every_row(self, db_path, secret_key_env):
+        """How a user revokes the whole namespace: empty the `istota` group, or
+        empty the file. Both are unambiguous under §1."""
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE,
+                                                   "b": TOPIC_VALUE}))
+
+        result = apply_vault(db_path, "alice", _vault_read({}))
+
+        assert result.deleted == 2
+        assert sorted(result.deleted_keys) == ["a", "b"]
+
+    def test_deletion_is_scoped_to_the_user(self, db_path, secret_key_env):
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
+        apply_vault(db_path, "bob", _vault_read({"a": TOPIC_VALUE}))
+
+        apply_vault(db_path, "alice", _vault_read({}))
+
+        assert _entry(db_path, "alice", "a") is None
+        assert _entry(db_path, "bob", "a") == TOPIC_VALUE
+
+    def test_another_service_is_never_touched(self, db_path, secret_key_env):
+        """**The passphrase-isolation control**, and the one test in this file
+        whose failure mode is a deployment that cannot open its own vault.
+
+        The sweep enumerates `vault_entries` alone, and `vault/passphrase` is a
+        different service — so the isolation is structural rather than a filter
+        somebody has to keep right. A vault holding an entry the user titled
+        `passphrase` is what makes that concrete: applied against a database
+        already holding `vault/passphrase`, the stored passphrase is byte
+        -identical afterwards and a *separate* row carries the file's value.
         """
-        schema = dict(secret_schema.CONNECTED_SERVICE_SCHEMA)
-        schema["blob_only"] = {"label": "Blob only", "used_by": (), "fields": []}
-        monkeypatch.setattr(secret_schema, "CONNECTED_SERVICE_SCHEMA", schema)
+        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", "the-real-one")
+        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "typed")
 
-        assert secret_schema.known_service_keys()["blob_only"] == frozenset()
-        assert "blob_only" not in DAEMON_WRITTEN_SERVICES
-        assert "blob_only" not in eligible_services()
+        apply_vault(
+            db_path, "alice", _vault_read({"passphrase": API_KEY_VALUE})
+        )
 
-    def test_the_vault_service_is_excluded_once_the_schema_declares_it(
-        self, monkeypatch
+        assert secrets_store.get_secret(
+            db_path, "alice", "vault", "passphrase"
+        ) == "the-real-one"
+        assert secrets_store.get_secret(
+            db_path, "alice", "karakeep", "api_key"
+        ) == "typed"
+        assert _entry(db_path, "alice", "passphrase") == API_KEY_VALUE
+
+    def test_an_empty_read_leaves_the_passphrase_alone(self, db_path, secret_key_env):
+        """The other half of the control: a sweep that deleted every row of
+        every service would take the passphrase with it, and the vault could
+        never be opened again."""
+        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", "the-real-one")
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
+
+        apply_vault(db_path, "alice", _vault_read({}))
+
+        assert secrets_store.get_secret(
+            db_path, "alice", "vault", "passphrase"
+        ) == "the-real-one"
+
+    def test_every_write_happens_before_any_delete(
+        self, db_path, secret_key_env, monkeypatch
     ):
-        """§4 subtracts `vault` itself: the passphrase cannot live in the file it
-        unlocks.
+        """A failure part-way through must leave credentials present rather than
+        absent, which is why the deletions are planned and executed at the end
+        rather than inline."""
+        apply_vault(db_path, "alice", _vault_read({"old": TOPIC_VALUE}))
 
-        The schema entry is real now — Stage 4 added it — so the monkeypatch is
-        no longer what makes the exclusion visible. It stays because it is what
-        keeps the test honest if the entry is ever removed again: the exclusion
-        is vacuously true against a schema with no `vault` in it, which is the
-        state this was written in."""
-        schema = dict(secret_schema.CONNECTED_SERVICE_SCHEMA)
-        schema["vault"] = {
-            "label": "Credential vault",
-            "used_by": (),
-            "cli_only": True,
-            "fields": [{"key": "passphrase", "label": "Vault passphrase",
-                        "type": "password"}],
-        }
-        monkeypatch.setattr(secret_schema, "CONNECTED_SERVICE_SCHEMA", schema)
+        order: list[str] = []
+        real_upsert = secrets_store.upsert_secret
+        real_delete = secrets_store.delete_secret
 
-        assert secret_schema.known_service_keys()["vault"] == frozenset({"passphrase"})
-        assert "vault" not in eligible_services()
+        def _upsert(*args, **kwargs):
+            order.append("write")
+            return real_upsert(*args, **kwargs)
 
-    def test_a_reserved_connector_service_is_never_eligible(self, monkeypatch):
-        """`connector:<id>` is a reserved namespace with exactly one writer —
-        the connector route that validated the key against the resolved provider
-        manifest (`Specs/Drafts/generic-connectors.md`). It is outside the schema
-        today, so the exclusion is invisible unless something declares one; this
-        pins that the prefix is what refuses it rather than the absence being
-        what saves us. `secret_schema.is_reserved_service()` is that spec's and
-        will own the prefix when it lands."""
-        schema = dict(secret_schema.CONNECTED_SERVICE_SCHEMA)
-        schema["connector:acme"] = {
-            "label": "Acme", "used_by": (),
-            "fields": [{"key": "api_key", "label": "API key", "type": "password"}],
-        }
-        monkeypatch.setattr(secret_schema, "CONNECTED_SERVICE_SCHEMA", schema)
+        def _delete(*args, **kwargs):
+            order.append("delete")
+            return real_delete(*args, **kwargs)
 
-        assert "connector:acme" in secret_schema.known_service_keys()
-        assert "connector:acme" not in eligible_services()
+        monkeypatch.setattr(secrets_vault_module.secrets_store, "upsert_secret", _upsert)
+        monkeypatch.setattr(secrets_vault_module.secrets_store, "delete_secret", _delete)
+
+        apply_vault(db_path, "alice", _vault_read({"new": API_KEY_VALUE}))
+
+        assert order == ["write", "delete"]
+
+    # ---- what holds a deletion back --------------------------------------
+
+    def test_a_held_name_is_not_deleted(self, db_path, secret_key_env):
+        """The fat-finger case: a password field blanked in the file must not
+        delete the credential it was meant to change."""
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
+
+        result = apply_vault(db_path, "alice", _vault_read({}, held=["a"]))
+
+        assert result.deleted == 0 and result.deleted_keys == []
+        assert _entry(db_path, "alice", "a") == API_KEY_VALUE
+
+    def test_a_blanked_password_holds_its_row_through_a_real_parse(
+        self, tmp_path, db_path, secret_key_env
+    ):
+        """The seam, driven end to end rather than through the helper: what the
+        parse puts in `held` is the whole of what the apply declines to delete.
+        """
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "github pat", "", API_KEY_VALUE)
+        kp.save()
+        apply_vault(db_path, "alice", _read(path)[0])
+        assert _entry(db_path, "alice", "github_pat") == API_KEY_VALUE
+
+        entry = kp.find_entries(title="github pat", first=True)
+        entry.password = ""
+        kp.save()
+        result = apply_vault(db_path, "alice", _read(path)[0])
+
+        assert result.deleted == 0
+        assert _entry(db_path, "alice", "github_pat") == API_KEY_VALUE
+
+    def test_a_truncated_read_withholds_every_deletion(self, db_path, secret_key_env):
+        """A prefix of the file says nothing about a stored name's absence, so
+        the sweep is withheld whole rather than filtered — there is no way to
+        tell a name past the cap from one the user removed. Writes still land.
+        """
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE,
+                                                   "b": TOPIC_VALUE}))
+
+        result = apply_vault(
+            db_path, "alice", _vault_read({"a": "moved"}, truncated="entry")
+        )
+
+        assert result.swept is False
+        assert result.deleted == 0 and result.deleted_keys == []
+        assert _entry(db_path, "alice", "b") == TOPIC_VALUE
+        assert _entry(db_path, "alice", "a") == "moved"
+
+    def test_a_row_that_will_not_decrypt_is_never_deleted(
+        self, db_path, secret_key_env
+    ):
+        """A stale master key is a transient misconfiguration; a delete makes it
+        permanent. The credential comes back when the right key does and never
+        from a delete."""
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE secrets SET encrypted_value = ? "
+                "WHERE user_id = ? AND service = ? AND key = ?",
+                (b"not-a-fernet-token", "alice", VAULT_ENTRY_SERVICE, "a"),
+            )
+
+        result = apply_vault(db_path, "alice", _vault_read({}))
+
+        assert result.deleted == 0
+        assert result.skipped == [("a", SKIP_UNREADABLE_ROW)]
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM secrets WHERE user_id = ? AND service = ?",
+                ("alice", VAULT_ENTRY_SERVICE),
+            ).fetchone()
+        assert rows[0] == 1
+
+    def test_an_unreadable_row_overwritten_is_counted_rather_than_created(
+        self, db_path, secret_key_env
+    ):
+        """`upsert_secret` derives its own answer from `get_secret`, which
+        reports an undecryptable row as absent — so on a deployment with a stale
+        master key every write would otherwise read as `created` and the counts
+        an operator reads would be exactly backwards."""
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE secrets SET encrypted_value = ? "
+                "WHERE user_id = ? AND service = ? AND key = ?",
+                (b"not-a-fernet-token", "alice", VAULT_ENTRY_SERVICE, "a"),
+            )
+
+        result = apply_vault(db_path, "alice", _vault_read({"a": TOPIC_VALUE}))
+
+        assert (result.created, result.updated) == (0, 1)
+        assert result.unreadable_overwrites == 1
+        assert _entry(db_path, "alice", "a") == TOPIC_VALUE
+
+    def test_a_missing_master_key_refuses_the_whole_pass(self, db_path):
+        """Without it an empty read on a deployment that can neither read what
+        it is removing nor write a replacement would sweep the namespace flat.
+        """
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ISTOTA_SECRET_KEY", None)
+            with pytest.raises(secrets_store.SecretKeyMissingError):
+                apply_vault(db_path, "alice", _vault_read({}))
+
+    # ---- reporting -------------------------------------------------------
+
+    def test_the_reads_own_skips_travel_on_the_result(self, db_path, secret_key_env):
+        read = _vault_read({}, skipped=[("aws_key", SKIP_DUPLICATE_NAME)])
+
+        result = apply_vault(db_path, "alice", read)
+
+        assert result.skipped == [("aws_key", SKIP_DUPLICATE_NAME)]
+
+    def test_no_log_record_carries_a_value(self, db_path, secret_key_env, caplog):
+        apply_vault(db_path, "alice", _vault_read({"a": API_KEY_VALUE}))
+        with caplog.at_level(logging.DEBUG, logger="istota.secrets_vault"):
+            apply_vault(
+                db_path, "alice", _vault_read({"b": TOPIC_VALUE}, truncated="entry")
+            )
+            apply_vault(db_path, "alice", _vault_read({}))
+
+        for message in _ours(caplog):
+            assert API_KEY_VALUE not in message
+            assert TOPIC_VALUE not in message
+
+    def test_the_skip_vocabulary_is_exactly_five(self):
+        """The four service-mapping reasons went with the machinery that
+        produced them. A reason with no producer reads as a condition the apply
+        can still reach."""
+        assert secrets_vault_module.SKIP_REASONS == frozenset({
+            SKIP_UNUSABLE_NAME,
+            SKIP_DUPLICATE_NAME,
+            secrets_vault_module.SKIP_EMPTY_VALUE,
+            SKIP_OVERSIZE_VALUE,
+            SKIP_UNREADABLE_ROW,
+        })
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "SKIP_RESERVED_SERVICE",
+            "SKIP_INELIGIBLE_SERVICE",
+            "SKIP_UNKNOWN_KEY",
+            "SKIP_DELETE_HELD",
+            "eligible_services",
+            "service_refusal",
+            "_service_refusal",
+            "DAEMON_WRITTEN_SERVICES",
+            "_near_miss_title",
+            "vault_owned_services",
+            "format_skip",
+        ],
+    )
+    def test_the_removed_machinery_is_gone(self, name):
+        """A drift guard rather than a behaviour: each of these is on the
+        stage's own removal list, and one coming back would bring the service
+        mapping's reasoning with it."""
+        assert not hasattr(secrets_vault_module, name), name
 
 
 class TestReadingThroughADescriptor:
@@ -1628,117 +1953,6 @@ class TestTheConfigFields:
         where the line has to live."""
         text = (REPO / "config" / "config.example.toml").read_text()
         assert "vault_sync_interval" in text
-
-
-class TestTheEligibilityFilterAtLoad:
-    """A `vault_services` name a vault may not own is dropped, with a warning.
-
-    Dropped rather than raised: §4's rule is that a config refusing to boot
-    because a module was disabled is worse than one telling the operator which
-    line is inert. The filter is not the boundary — `apply_vault` refuses the
-    same names again on its own terms — it is what makes the refusal visible at
-    the moment somebody could act on it.
-    """
-
-    def _load_with(self, tmp_path, caplog, services):
-        body = "[users.alice]\nvault_services = %s\n" % json.dumps(services)
-        with caplog.at_level(logging.WARNING, logger="istota.config"):
-            config = _load_config_text(tmp_path, body)
-        return config.users["alice"].vault_services, [
-            r.getMessage() for r in caplog.records if r.name == "istota.config"
-        ]
-
-    def test_an_eligible_service_survives(self, tmp_path, caplog):
-        kept, said = self._load_with(tmp_path, caplog, ["karakeep"])
-        assert kept == ["karakeep"]
-        assert not [m for m in said if "vault_service" in m]
-
-    def test_a_daemon_written_service_is_dropped_and_named(self, tmp_path, caplog):
-        kept, said = self._load_with(tmp_path, caplog, ["karakeep", "monarch"])
-        assert kept == ["karakeep"]
-        warned = [m for m in said if "monarch" in m]
-        assert warned, said
-        assert SKIP_INELIGIBLE_SERVICE in warned[0]
-        assert "alice" in warned[0]
-
-    def test_a_reserved_connector_service_is_dropped_under_its_own_reason(
-        self, tmp_path, caplog
-    ):
-        """The reserved namespace has exactly one writer, and it is not this.
-
-        Reported as the namespace rather than as an ordinary unknown service, so
-        the refusal survives a connector service one day appearing in the
-        schema — which is the arrangement `apply_vault` already has.
-        """
-        kept, said = self._load_with(tmp_path, caplog, ["connector:acme"])
-        assert kept == []
-        warned = [m for m in said if "connector:acme" in m]
-        assert warned, said
-        assert SKIP_RESERVED_SERVICE in warned[0]
-
-    def test_the_vaults_own_service_is_dropped(self, tmp_path, caplog):
-        """The passphrase cannot live in the file it unlocks."""
-        kept, _said = self._load_with(tmp_path, caplog, ["vault"])
-        assert kept == []
-
-    def test_a_case_variant_is_dropped_rather_than_folded(self, tmp_path, caplog):
-        """§3 folds the *file's* service group and nothing else.
-
-        The fold exists because a phone keyboard autocapitalizes a group name.
-        `vault_services` is operator config in a file nobody types on a phone,
-        so a name that does not match is a typo — and folding it here would put
-        the normalization on both sides of one comparison.
-        """
-        kept, said = self._load_with(tmp_path, caplog, ["Karakeep"])
-        assert kept == []
-        assert [m for m in said if "Karakeep" in m], said
-
-    def test_surrounding_whitespace_is_stripped_rather_than_refused(
-        self, tmp_path, caplog
-    ):
-        kept, _said = self._load_with(tmp_path, caplog, [" karakeep "])
-        assert kept == ["karakeep"]
-
-    def test_an_empty_entry_is_dropped(self, tmp_path, caplog):
-        kept, _said = self._load_with(tmp_path, caplog, ["", "   "])
-        assert kept == []
-
-    def test_a_non_string_entry_is_dropped_rather_than_raising(
-        self, tmp_path, caplog
-    ):
-        kept, _said = self._load_with(tmp_path, caplog, [7, ["karakeep"]])
-        assert kept == []
-
-    def test_a_hand_built_config_carrying_junk_does_not_fail_the_load(self):
-        """Driven against the filter directly, because nothing can reach it.
-
-        `_vault_services_value` guarantees `list[str]` on the TOML path and
-        nothing else writes the field, so a `load_config` round trip cannot
-        exercise this — the shape guard upstream would have to be removed first,
-        and a test whose subject is reachable only through another bug is a test
-        that passes for the wrong reason. What it defends is worth a line
-        anyway: `_service_refusal` calls `.startswith`, and an `AttributeError`
-        escaping `load_config` stops the scheduler, the web app, the webhook
-        receiver and every host-side skill CLI the proxy spawns per call.
-        """
-        from istota.config import Config, _validate_vault_services
-
-        config = Config(users={"alice": UserConfig()})
-        config.users["alice"].vault_services = [7, None, ["karakeep"], "karakeep"]
-
-        _validate_vault_services(config)
-
-        assert config.users["alice"].vault_services == ["karakeep"]
-
-    def test_the_filter_agrees_with_what_apply_vault_would_refuse(self):
-        """One predicate, two callers. A second copy of the rule here is the
-        drift the rule exists to catch — a name the loader keeps and the apply
-        refuses is a line the operator was told was live."""
-        for service in sorted(eligible_services()):
-            assert service_refusal(service) is None
-        for service in sorted(DAEMON_WRITTEN_SERVICES):
-            assert service_refusal(service) is not None
-        assert service_refusal("connector:acme") == SKIP_RESERVED_SERVICE
 
 
 class TestTheProfileTableGuard:
