@@ -111,13 +111,13 @@ def tmp_dir(cfg: Path) -> Path:
     return cfg.parent / "tmp"
 
 
-def _write_vault(path: Path, *, password=PASSPHRASE, ntfy=False):
+def _write_vault(path: Path, *, password=PASSPHRASE, ntfy=False, group_name="karakeep"):
     from pykeepass import create_database
 
     path.parent.mkdir(parents=True, exist_ok=True)
     kp = create_database(str(path), password=password)
     root = kp.add_group(kp.root_group, "istota")
-    group = kp.add_group(root, "karakeep")
+    group = kp.add_group(root, group_name)
     kp.add_entry(group, "base_url", "", BASE_URL_VALUE)
     kp.add_entry(group, "api_key", "", API_KEY_VALUE)
     if ntfy:
@@ -161,6 +161,9 @@ class TestGenerate:
         assert out.count(stored) == 1
 
     def test_two_generates_do_not_produce_the_same_value(self, env, capsys):
+        """`--force` on the second, because a bare re-generate is refused —
+        see `TestGenerateNeverSilentlyRotates`. What is asserted here is the
+        generator, not the refusal."""
         from istota.cli import cmd_secret
 
         cfg, db_path, _mount = env
@@ -175,7 +178,7 @@ class TestGenerate:
         cmd_secret(_Args(**args))
         first = secrets_store.get_secret(db_path, "alice", "vault", "passphrase")
         capsys.readouterr()
-        cmd_secret(_Args(**args))
+        cmd_secret(_Args(force=True, **args))
         second = secrets_store.get_secret(db_path, "alice", "vault", "passphrase")
         assert first != second
 
@@ -223,6 +226,133 @@ class TestGenerate:
             )
         assert exc.value.code == 1
         assert secrets_store.secret_exists(db_path, "alice", "karakeep", "api_key") is False
+
+
+class TestGenerateNeverSilentlyRotates:
+    """The data-loss path, reachable by re-running the documented command.
+
+    Every credential in the vault file is encrypted under the stored passphrase.
+    Minting a new one overwrites the only copy the server has and leaves the file
+    unopenable — every later sync comes back `VaultLocked`, and the value that
+    would fix it is gone. The subcommand advertises itself as idempotent, so an
+    Ansible play re-running it is the ordinary case rather than the careless one.
+    """
+
+    def _provision(self, cfg, db_path):
+        from istota.cli import cmd_secret
+
+        cmd_secret(
+            _Args(
+                config=str(cfg),
+                action="ensure",
+                user="alice",
+                service="vault",
+                key="passphrase",
+                generate=True,
+            )
+        )
+        return secrets_store.get_secret(db_path, "alice", "vault", "passphrase")
+
+    def test_a_second_generate_is_refused_and_keeps_the_stored_value(
+        self, env, capsys
+    ):
+        from istota.cli import cmd_secret
+
+        cfg, db_path, _mount = env
+        first = self._provision(cfg, db_path)
+        capsys.readouterr()
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_secret(
+                _Args(
+                    config=str(cfg),
+                    action="ensure",
+                    user="alice",
+                    service="vault",
+                    key="passphrase",
+                    generate=True,
+                )
+            )
+        assert exc.value.code == 1
+        # The assertion that matters: the value that opens the file is still
+        # there. A refusal that had already written would be the defect with a
+        # message attached.
+        assert (
+            secrets_store.get_secret(db_path, "alice", "vault", "passphrase") == first
+        )
+        assert "--force" in capsys.readouterr().err
+
+    def test_force_rotates(self, env, capsys):
+        from istota.cli import cmd_secret
+
+        cfg, db_path, _mount = env
+        first = self._provision(cfg, db_path)
+        capsys.readouterr()
+
+        cmd_secret(
+            _Args(
+                config=str(cfg),
+                action="ensure",
+                user="alice",
+                service="vault",
+                key="passphrase",
+                generate=True,
+                force=True,
+            )
+        )
+        assert (
+            secrets_store.get_secret(db_path, "alice", "vault", "passphrase") != first
+        )
+
+    def test_a_supplied_value_still_replaces_without_force(self, env):
+        """Deliberately not refused, and the reason is the documented remedy.
+
+        The way out of `VaultLocked` is exactly this command: re-provisioning a
+        passphrase the operator already set in their KeePass client. Refusing it
+        would break the one sequence the reporting design tells them to run. What
+        cannot be right is minting a value nobody has encrypted anything with.
+        """
+        from istota.cli import cmd_secret
+
+        cfg, db_path, _mount = env
+        self._provision(cfg, db_path)
+        chosen = "a-passphrase-the-operator-already-set-in-keepassxc"
+
+        cmd_secret(
+            _Args(
+                config=str(cfg),
+                action="ensure",
+                user="alice",
+                service="vault",
+                key="passphrase",
+                value=chosen,
+            )
+        )
+        assert (
+            secrets_store.get_secret(db_path, "alice", "vault", "passphrase") == chosen
+        )
+
+    def test_the_refusal_does_not_reach_other_services(self, env):
+        """`--generate` is vault-only anyway, so this is a control against the
+        existence check being applied where it has no meaning."""
+        from istota.cli import cmd_secret
+
+        cfg, db_path, _mount = env
+        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "existing")
+        cmd_secret(
+            _Args(
+                config=str(cfg),
+                action="ensure",
+                user="alice",
+                service="karakeep",
+                key="api_key",
+                value="replacement",
+            )
+        )
+        assert (
+            secrets_store.get_secret(db_path, "alice", "karakeep", "api_key")
+            == "replacement"
+        )
 
 
 class TestTheFloor:
@@ -527,6 +657,27 @@ class TestVaultSync:
         assert "alice" in out
 
 
+class TestAnUnknownUser:
+    def test_vault_sync_refuses_a_user_nobody_configured(self, env, capsys):
+        """A typo'd `-u` used to read as "no vault configured", which is
+        indistinguishable from a correctly spelled user with the feature off."""
+        from istota.cli import cmd_secret
+
+        cfg, _db_path, _mount = env
+        with pytest.raises(SystemExit) as exc:
+            cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alicce"))
+        assert exc.value.code == 1
+        assert "alicce" in capsys.readouterr().err
+
+    def test_vault_status_refuses_one_too(self, env, capsys):
+        from istota.cli import cmd_secret
+
+        cfg, _db_path, _mount = env
+        with pytest.raises(SystemExit) as exc:
+            cmd_secret(_Args(config=str(cfg), action="vault-status", user="bob"))
+        assert exc.value.code == 1
+
+
 class TestVaultStatus:
     def test_an_unconfigured_user_exits_cleanly(self, env, capsys):
         from istota.cli import cmd_secret
@@ -552,6 +703,34 @@ class TestVaultStatus:
         assert API_KEY_VALUE not in out
         assert BASE_URL_VALUE not in out
         assert PASSPHRASE not in out
+
+    def test_a_group_name_cannot_forge_a_line_of_the_report(self, env, capsys):
+        """Every name in this report came out of the vault file, and a task in
+        the user's own sandbox can overwrite that file. The consumer is an
+        operator's terminal, so an unflattened newline in a group name writes a
+        line of the report — the same rule `format_skip` applies in the sibling
+        renderer, which is where the omission showed: removing the bound left
+        the whole file green.
+        """
+        from istota.cli import cmd_secret
+        from istota.secrets_vault import _LABEL_MAX_CHARS
+
+        cfg, db_path, mount = _with_vault(env)
+        forged = "karakeep\n    evil  (99 key(s), owned)\n" + "z" * 200
+        _write_vault(
+            mount / "Users" / "alice" / "config" / "vault.kdbx", group_name=forged
+        )
+        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
+
+        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
+        out = capsys.readouterr().out
+
+        # Flattened: the newline never reaches the terminal, so the forged line
+        # cannot stand on its own.
+        assert "\n    evil" not in out
+        # And bounded, so an unbounded name cannot push the rest off a screen.
+        assert "z" * (_LABEL_MAX_CHARS + 1) not in out
+        assert "…" in out
 
     def test_it_does_not_write_anything(self, env, capsys):
         """A status verb that applied would be a verb nobody could run safely."""

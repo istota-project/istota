@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from istota import secrets_store
+from istota import secrets_store, storage
 from istota.config import Config, UserConfig
 
 PASSPHRASE = "sync-fixture-passphrase-not-a-real-one"
@@ -399,6 +399,188 @@ class TestWhichFailuresCacheTheirDigest:
         assert sync_user(config, "alice").outcome == OUTCOME_OK
 
 
+class TestTheMasterKeyIsUnusable:
+    """`VaultKeyUnusable`, which exists because `get_secret` answers three
+    conditions with one `None`.
+
+    Its remedy is the deployment's `ISTOTA_SECRET_KEY` rather than anything the
+    user can do, which is why it is neither `VaultPassphraseMissing` (whose
+    remedy is `istota secret ensure`) nor cached (an unchanged file is no
+    evidence the key has been fixed). The third branch — a key that is present,
+    long enough, and simply wrong — is the one with novel logic behind it: it is
+    told from an absent row only by asking `secret_exists` after `get_secret`
+    has already answered `None`.
+    """
+
+    def _configured(self, tmp_path):
+        config = _vault_config(
+            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+        )
+        _write_vault(_user_root(config) / "config" / "vault.kdbx")
+        return config
+
+    def test_no_master_key_at_all(self, tmp_path, secret_key, monkeypatch, parse_calls):
+        from istota.secrets_vault import VaultKeyUnusable, sync_user
+
+        config = self._configured(tmp_path)
+        _provision_passphrase(config)
+        monkeypatch.delenv("ISTOTA_SECRET_KEY", raising=False)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == VaultKeyUnusable.__name__
+        # Checked before the parse, which is the point of checking it here at
+        # all rather than leaving it to `apply_vault`'s own refusal.
+        assert parse_calls.calls == 0
+
+    def test_a_master_key_below_the_stores_floor(
+        self, tmp_path, secret_key, monkeypatch, parse_calls
+    ):
+        from istota.secrets_vault import VaultKeyUnusable, sync_user
+
+        config = self._configured(tmp_path)
+        _provision_passphrase(config)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "too-short")
+
+        assert sync_user(config, "alice").outcome == VaultKeyUnusable.__name__
+        assert parse_calls.calls == 0
+
+    def test_a_wrong_master_key_is_not_reported_as_an_absent_passphrase(
+        self, tmp_path, secret_key, monkeypatch, parse_calls
+    ):
+        """The branch `secret_exists` exists for.
+
+        The row is there and the key cannot read it, which is a deployment fault
+        — reporting it as a missing passphrase would send the operator to
+        `istota secret ensure`, a command that cannot help and that would
+        overwrite a perfectly good row.
+        """
+        from istota.secrets_vault import VaultKeyUnusable, sync_user
+
+        config = self._configured(tmp_path)
+        _provision_passphrase(config)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "f00dcafe" * 8)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == VaultKeyUnusable.__name__
+        assert parse_calls.calls == 0
+
+    def test_it_is_not_cached_so_fixing_the_key_ends_it(
+        self, tmp_path, secret_key, monkeypatch, parse_calls
+    ):
+        from istota.secrets_vault import OUTCOME_OK, VaultKeyUnusable, sync_user
+
+        config = self._configured(tmp_path)
+        _provision_passphrase(config)
+        path = _user_root(config) / "config" / "vault.kdbx"
+        monkeypatch.delenv("ISTOTA_SECRET_KEY", raising=False)
+        assert sync_user(config, "alice").outcome == VaultKeyUnusable.__name__
+        bytes_before = path.read_bytes()
+
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", SECRET_KEY)
+        assert path.read_bytes() == bytes_before
+        assert sync_user(config, "alice").outcome == OUTCOME_OK
+        assert parse_calls.calls == 1
+
+    def test_the_reason_does_not_carry_the_keys_length(
+        self, tmp_path, secret_key, monkeypatch
+    ):
+        """`reason` is rendered per user and, from Stage 5, into a notification.
+
+        The store's own message names the key's length, which is a
+        deployment-level fact about the master key and does not belong on a
+        per-user surface. It goes to the daemon log instead.
+        """
+        from istota.secrets_vault import sync_user
+
+        config = self._configured(tmp_path)
+        _provision_passphrase(config)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "abcdefghij")
+
+        reason = sync_user(config, "alice").reason
+        assert "10" not in reason
+        assert "ISTOTA_SECRET_KEY" in reason
+
+
+class TestTheSkipCarriesTheSettledClass:
+    """`OUTCOME_UNCHANGED` is not evidence of health, and the result says so.
+
+    `VaultCorrupt` is cached, so a cycle over a file that is still unreadable
+    answers `unchanged` exactly as a cycle over a working one does. A consumer
+    reading that as success would close a notification about a vault that is
+    still broken, which is the one thing the reporting design exists to prevent.
+    """
+
+    def test_a_skip_after_a_corrupt_cycle_says_what_it_settled_on(
+        self, tmp_path, secret_key
+    ):
+        from istota.secrets_vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
+
+        config = _vault_config(
+            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+        )
+        path = _user_root(config) / "config" / "vault.kdbx"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not a KeePass database" * 8)
+        _provision_passphrase(config)
+
+        assert sync_user(config, "alice").outcome == VaultCorrupt.__name__
+        second = sync_user(config, "alice")
+        assert second.outcome == OUTCOME_UNCHANGED
+        assert second.last_outcome == VaultCorrupt.__name__
+
+    def test_a_skip_after_a_healthy_cycle_says_so_too(self, ready):
+        from istota.secrets_vault import OUTCOME_OK, OUTCOME_UNCHANGED, sync_user
+
+        config, _path = ready
+        assert sync_user(config, "alice").outcome == OUTCOME_OK
+        second = sync_user(config, "alice")
+        assert second.outcome == OUTCOME_UNCHANGED
+        # The discriminating half: the two skips are told apart by this field
+        # and by nothing else on the result.
+        assert second.last_outcome == OUTCOME_OK
+
+
+class TestTheCreatedCountIsNotInflatedByAStaleKey:
+    """`upsert_secret` derives created/updated from `get_secret`, which reports
+    an undecryptable row as absent — so without a pre-check every write on a
+    deployment with a stale master key reads as `created`."""
+
+    def test_an_overwritten_unreadable_row_counts_as_updated(
+        self, tmp_path, secret_key, monkeypatch
+    ):
+        from istota.secrets_vault import sync_user
+
+        config = _vault_config(
+            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+        )
+        _write_vault(_user_root(config) / "config" / "vault.kdbx")
+        _provision_passphrase(config)
+        # Two karakeep rows written under one key...
+        secrets_store.set_secret(config.db_path, "alice", "karakeep", "api_key", "old")
+        secrets_store.set_secret(config.db_path, "alice", "karakeep", "base_url", "old")
+
+        # ...and the vault's passphrase re-provisioned under the *new* key, so
+        # the passphrase itself is readable and only the credential rows are not.
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "f00dcafe" * 8)
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        applied = result.apply
+        assert applied is not None
+        assert applied.unreadable_overwrites == 2
+        assert (applied.created, applied.updated) == (0, 2)
+
+    def test_an_ordinary_first_write_still_counts_as_created(self, ready):
+        """The control: the pre-check must not turn every create into an update."""
+        from istota.secrets_vault import sync_user
+
+        config, _path = ready
+        applied = sync_user(config, "alice").apply
+        assert applied is not None
+        assert (applied.created, applied.updated) == (2, 0)
+        assert applied.unreadable_overwrites == 0
+
+
 class TestTheTransitionRule:
     """Retrying is not re-reporting, which needs the outcome class as state."""
 
@@ -572,7 +754,10 @@ class TestARefusedPath:
 
         result = sync_user(config, "alice")
         assert result.outcome == VaultPathRefused.__name__
-        assert result.reason  # a stable VAULT_PATH_* id, not a sentence
+        # The id itself, not merely "some reason". Carrying it to a surface is
+        # the entire justification for the resolver's return type changing, so a
+        # refactor that flattened it into a generic string has to go red here.
+        assert result.reason == storage.VAULT_PATH_INSIDE_WORKSPACE
         assert result.digest is None
 
     def test_a_refused_path_is_never_cached(self, tmp_path, secret_key):

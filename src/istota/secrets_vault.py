@@ -63,6 +63,13 @@ VAULT_ROOT_GROUP = "istota"
 #: How much of a group or key name a log line may carry (see ``_label``).
 _LABEL_MAX_CHARS = 64
 
+#: The same bound for a *path*. Wider because 64 characters truncates an
+#: ordinary resolved vault path — and the one WARNING that bound is applied in
+#: exists to tell an operator which file failed. Matches
+#: ``storage._VAULT_PATH_LOG_MAX_CHARS``, which bounds the same value one module
+#: over on its way out of ``config.toml``.
+_PATH_LABEL_MAX_CHARS = 200
+
 #: The service the vault's own passphrase is stored under. Subtracted from
 #: eligibility: the passphrase cannot live in the file it unlocks.
 VAULT_PASSPHRASE_SERVICE = "vault"
@@ -428,12 +435,22 @@ class VaultApplyResult:
     carries an empty key: the whole service was refused and no key of it was
     looked at. Reasons come from the fixed vocabulary above, never a sentence
     built around a name.
+
+    ``unreadable_overwrites`` counts the writes that landed on a row which was
+    present and would not decrypt. Those are the reason the ``created`` /
+    ``updated`` split cannot be taken from ``upsert_secret`` alone: it derives
+    its answer from ``get_secret``, which reports an undecryptable row as absent,
+    so every write on a deployment with a stale ``ISTOTA_SECRET_KEY`` would
+    otherwise read as ``created``. The pre-check below corrects the split and
+    this counts what it corrected, which is a condition an operator wants named
+    — it is the same stale key the deletion side already holds rows back for.
     """
 
     created: int = 0
     updated: int = 0
     unchanged: int = 0
     deleted: int = 0
+    unreadable_overwrites: int = 0
     deleted_keys: list[tuple[str, str]] = field(default_factory=list)
     skipped: list[tuple[str, str, str]] = field(default_factory=list)
 
@@ -553,11 +570,29 @@ def apply_vault(
                     _label(key),
                 )
                 continue
+            # Asked *before* the upsert, because `upsert_secret` derives its
+            # own answer from `get_secret` and a row that will not decrypt reads
+            # there as absent — so on a deployment with a stale master key every
+            # write reports `created` and the counts an operator reads are
+            # exactly backwards about what happened to their credentials.
+            existed = secrets_store.secret_exists(db_path, user_id, service, key)
             state = secrets_store.upsert_secret(
                 db_path, user_id, service, key, values[key]
             )
             written.add(key)
-            if state == "created":
+            if state == "created" and existed:
+                # Present, overwritten, and unreadable beforehand: the row was
+                # replaced rather than created, and the reason the store could
+                # not tell is a condition worth naming on its own.
+                result.updated += 1
+                result.unreadable_overwrites += 1
+                logger.warning(
+                    "vault: %s/%s was stored but would not decrypt, so it has "
+                    "been overwritten from the vault; check ISTOTA_SECRET_KEY",
+                    _label(service),
+                    _label(key),
+                )
+            elif state == "created":
                 result.created += 1
             elif state == "updated":
                 result.updated += 1
@@ -792,17 +827,30 @@ def _map_groups(kp, digest: str) -> VaultRead:
     )
 
 
-def _label(name: str) -> str:
-    """A group or key name, bounded and flattened, for a log line.
+def _label(name: str, limit: int = _LABEL_MAX_CHARS) -> str:
+    """A name out of the vault file, bounded and flattened, for a log line.
 
-    Both are arbitrary strings out of the file: unbounded in length and free to
-    contain newlines, so an unflattened one can forge a log record in the
-    daemon's own log. Self-inflicted rather than attacker-reachable — the file is
-    the user's — which is why this flattens rather than refusing. The rule is
-    ``transport``'s ``_slug``: bound every axis that came from outside.
+    Group and entry names are arbitrary strings out of the file: unbounded in
+    length and free to contain newlines, so an unflattened one can forge a log
+    record in the daemon's own log. §12 records that a task in the user's own
+    sandbox can overwrite that file, so they are attacker-reachable rather than
+    merely self-inflicted — which is why this flattens rather than trusting the
+    source. The rule is ``transport``'s ``_slug``: bound every axis that came
+    from outside.
+
+    ``limit`` is a parameter rather than a second copy of the function, because
+    the two callers want different bounds for the same rule: a key name at 64,
+    and a resolved path at ``_PATH_LABEL_MAX_CHARS``, where the shorter bound
+    would truncate exactly the thing the log line exists to say.
+
+    **Sliced before it is flattened**, which is the order rather than a detail:
+    a flatten-then-slice costs a per-character loop and a full copy of an
+    unbounded input to print a bounded one. Stage 3's review made the same
+    correction to ``storage._bounded_for_log``, which states the same rule for a
+    path out of ``config.toml``.
     """
-    flat = "".join(ch if ch.isprintable() else " " for ch in name)
-    return flat[:_LABEL_MAX_CHARS] + ("…" if len(flat) > _LABEL_MAX_CHARS else "")
+    head = "".join(ch if ch.isprintable() else " " for ch in str(name)[:limit])
+    return head + ("…" if len(str(name)) > limit else "")
 
 
 def _take_entry(
@@ -1012,6 +1060,19 @@ _CACHEABLE_OUTCOMES = frozenset({OUTCOME_OK, VaultCorrupt.__name__})
 #:
 #: A restart re-reports once, which is correct rather than merely tolerable: a
 #: daemon that has just started has told nobody anything.
+#:
+#: **Unsynchronised, and that rests on there being one in-process caller at a
+#: time rather than on anything here.** Today that holds: the startup
+#: ``sync_all`` is synchronous and completes before the daemon loop starts, the
+#: interval gate is spawned through ``_spawn_background_check``, whose in-flight
+#: registry refuses a second ``vault-sync`` thread, and the CLI is a separate
+#: process with a state of its own. It stops holding the moment a second
+#: in-process caller appears — a web request thread calling ``sync_user``, say —
+#: because ``_settle`` is a read-modify-write and, worse, two concurrent
+#: ``apply_vault`` passes interleave writes with a delete plan computed before
+#: them. A caller adding one takes a lock around ``sync_user`` rather than
+#: relying on this. ``vault_status`` is safe to call concurrently: it only reads
+#: this dict and settles nothing.
 _SYNC_STATE: dict[str, tuple[str | None, str]] = {}
 
 
@@ -1046,6 +1107,15 @@ class VaultSyncResult:
     settled on for this user, which is what the raise-once rule reads. A skip is
     never a transition and never overwrites the state.
 
+    ``last_outcome`` is what this process had already settled on, and it exists
+    because **``OUTCOME_UNCHANGED`` is not evidence of health**. A skip says only
+    that the bytes have not moved, and the digest of a file that failed to
+    *parse* is cached — so a cycle over a still-corrupt vault answers
+    ``unchanged`` exactly as a cycle over a working one does. A consumer reading
+    that as success would close a notification about a vault that is still
+    broken, which is the one thing §8 exists to prevent. On a skip this field
+    carries the cached class; everywhere else it is what the outcome replaced.
+
     **It never carries a ``VaultRead``.** That type holds every plaintext the
     vault carries between parse and apply, and this object is returned to a CLI
     that prints it and, later, to a web tier that serialises it.
@@ -1059,6 +1129,7 @@ class VaultSyncResult:
     path: str = ""
     owned: frozenset[str] = frozenset()
     apply: VaultApplyResult | None = None
+    last_outcome: str = ""
 
 
 @dataclass(frozen=True)
@@ -1102,6 +1173,18 @@ def format_skip(service: str, key: str) -> str:
     nobody may own.
     """
     return f"{_label(service)}/{_label(key)}" if key else _label(service)
+
+
+def label_for_display(name: str) -> str:
+    """One name out of the vault file, bounded and flattened for a human.
+
+    The public spelling of ``_label`` for a renderer outside this module.
+    ``format_skip`` already applies it to the names it composes; a report that
+    prints a group name straight out of ``VaultStatusReport`` needs the same
+    rule, because §12 records that a task in the user's own sandbox can
+    overwrite that file and the consumer is an operator's terminal.
+    """
+    return _label(name)
 
 
 def vault_owned_services(config, user_id: str) -> frozenset[str]:
@@ -1208,7 +1291,7 @@ def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
     except VaultError as exc:
         return _settle(user_id, exc, digest=None, path=path)
 
-    cached_digest, _last = _SYNC_STATE.get(user_id, (None, ""))
+    cached_digest, settled = _SYNC_STATE.get(user_id, (None, ""))
     if cached_digest is not None and cached_digest == digest:
         # The whole point of `read_vault_bytes` and `parse_vault` being two
         # functions. A single `read_vault(path, passphrase)` would spend an
@@ -1219,6 +1302,11 @@ def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
             digest=digest,
             path=path,
             owned=owned,
+            # The settled class travels with the skip. Without it `unchanged`
+            # is indistinguishable from `unchanged and healthy`, and the only
+            # cacheable failure is `VaultCorrupt` — so the shape that would be
+            # misread is exactly a vault that is still broken.
+            last_outcome=settled,
         )
 
     try:
@@ -1251,12 +1339,29 @@ def _resolve_passphrase(db_path, user_id: str) -> str:
         secrets_store.SecretKeyMissingError,
         secrets_store.SecretKeyTooWeakError,
     ) as exc:
-        raise VaultKeyUnusable(str(exc)) from exc
+        # The store's own message is logged and does not become the `reason`.
+        # It names the key's *length* on the too-weak arm, and `reason` is
+        # rendered per user — into `vault-status` and, from Stage 5, into a
+        # notification row — so a deployment-level fact about the master key
+        # would be published on a per-user surface. §3's rule is about values
+        # and this is adjacent to it rather than a breach of it; the daemon log
+        # is the right place for the detail.
+        logger.warning("vault: the master key is unusable: %s", exc)
+        raise VaultKeyUnusable(
+            "this deployment's ISTOTA_SECRET_KEY cannot read stored "
+            "credentials; see the daemon log"
+        ) from exc
 
     value = secrets_store.get_secret(
         db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
     )
-    if value:
+    if value is not None:
+        # `is not None` rather than truthiness. An empty string cannot be
+        # written through `upsert_secret` — `set_secret` reads it as a deletion —
+        # but a hand-edited row can hold one, and passing it through gets
+        # `VaultLocked` from the parse, which is the right remedy. Falling
+        # through instead would report a wrong master key for a row the master
+        # key had just decrypted perfectly.
         return value
     if secrets_store.secret_exists(
         db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
@@ -1303,11 +1408,11 @@ def _settle(
             "vault: %s: %s (path=%s): %s",
             _label(user_id),
             outcome,
-            _label(path) if path else "unresolved",
-            _label(reason),
+            _label(path, _PATH_LABEL_MAX_CHARS) if path else "unresolved",
+            _label(reason, _PATH_LABEL_MAX_CHARS),
         )
     elif transition and previous:
-        logger.info("vault: %s: reading again after %s", _label(user_id), previous)
+        logger.info("vault: %s: recovered from %s", _label(user_id), previous)
 
     if applied is not None and (applied.created or applied.updated or applied.deleted):
         logger.info(
@@ -1327,6 +1432,7 @@ def _settle(
         path=path,
         owned=owned,
         apply=applied,
+        last_outcome=previous,
     )
 
 
@@ -1365,11 +1471,20 @@ def sync_all(
 def vault_status(config, user_id: str) -> VaultStatusReport:
     """What this user's vault looks like right now, without applying anything.
 
-    **It reads and parses and writes nothing**, which is what makes it the verb
-    an operator can run while wondering whether to trust the file. It also
-    touches no sync state in either direction: it is not subject to the digest
-    cache — the operator is asking *now* — and it does not settle an outcome,
-    since an outcome nobody applied would suppress the next real cycle's report.
+    **It applies nothing** — no credential row is written, updated or deleted —
+    which is what makes it the verb an operator can run while wondering whether
+    to trust the file. It is not quite "writes nothing", and the exception is
+    worth stating rather than glossing: resolving the passphrase goes through
+    ``secrets_store.get_secret``, which stamps ``last_accessed_at`` on the
+    ``vault/passphrase`` row on every successful decrypt. That is one row, it is
+    the vault's own, and it is honest — the passphrase really was used — but it
+    is the same column ``apply_vault``'s docstring already warns is not evidence
+    a vault-owned credential is read by anything.
+
+    It also touches no sync state in either direction: it is not subject to the
+    digest cache — the operator is asking *now* — and it does not settle an
+    outcome, since an outcome nobody applied would suppress the next real
+    cycle's report.
 
     Parsing is what earns the command its keep. §3 records every
     ``istota/<service>`` group found, owned or not, precisely so this can tell a
@@ -1398,18 +1513,23 @@ def vault_status(config, user_id: str) -> VaultStatusReport:
         )
 
     location = resolution.location
-    present = secrets_store.secret_exists(
-        config.db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
-    )
-    report = VaultStatusReport(
-        user_id=user_id,
-        configured=True,
-        path=str(location.path),
-        owned=owned,
-        passphrase_present=present,
-        last_outcome=last,
-    )
+    # Everything from here to the close is inside the guard, including the
+    # presence lookup. That opens a SQLite connection and can raise on a locked
+    # or missing database, and it used to sit above the `try` — which leaks the
+    # descriptor. Harmless from a one-shot CLI process and not harmless from
+    # §9's long-lived web endpoint, which is one leaked fd per failed request.
     try:
+        present = secrets_store.secret_exists(
+            config.db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+        )
+        report = VaultStatusReport(
+            user_id=user_id,
+            configured=True,
+            path=str(location.path),
+            owned=owned,
+            passphrase_present=present,
+            last_outcome=last,
+        )
         try:
             data, _digest = read_vault_bytes(
                 location.path, dir_fd=location.dir_fd

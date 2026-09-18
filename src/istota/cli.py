@@ -1019,7 +1019,7 @@ def _secret_ensure_value(config, args) -> str:
     one command the documentation tells every operator to run, and the failure
     would look exactly like the floor working.
     """
-    from . import secrets_vault
+    from . import secrets_store, secrets_vault
 
     is_vault_passphrase = (
         args.service == secrets_vault.VAULT_PASSPHRASE_SERVICE
@@ -1027,6 +1027,35 @@ def _secret_ensure_value(config, args) -> str:
     )
 
     if args.generate:
+        if is_vault_passphrase and secrets_store.secret_exists(
+            config.db_path, args.user, args.service, args.key
+        ) and not args.force:
+            # The data-loss path, and it is reachable by re-running the exact
+            # command the documentation gives. Every credential in the vault
+            # file is encrypted under the passphrase this row holds; overwriting
+            # it with a freshly minted one destroys the only copy the server has
+            # and leaves the file unopenable — every later sync comes back
+            # `VaultLocked`, and the value that would fix it is gone. The
+            # subcommand advertises itself as idempotent, so an Ansible play
+            # re-running it is the ordinary case rather than the careless one.
+            #
+            # A *supplied* `--value` is deliberately not refused here: §7's
+            # rotation walkthrough is exactly that command, re-provisioning a
+            # passphrase the operator already set in KeePassXC. What cannot be
+            # right is minting a value nobody has used to encrypt anything.
+            print(
+                f"Error: {args.user} already has a vault passphrase, and "
+                "--generate would replace it with a new one.\n"
+                "       The vault file is encrypted under the stored value, so "
+                "replacing it makes the file unopenable and the old value is "
+                "not recoverable.\n"
+                "       To re-provision a passphrase you already know, pass "
+                "--value. To rotate for real, change the master password in "
+                "your KeePass client first, then pass --value.\n"
+                "       Pass --force to generate anyway.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         if args.value:
             print(
                 "Error: --generate and --value are two answers to one question; "
@@ -1076,6 +1105,16 @@ def _cmd_secret_vault(config, args) -> None:
     """
     from . import secrets_vault
 
+    if args.user and args.user not in config.users:
+        # Otherwise a typo'd id reaches `config.users.get(...)` -> None and is
+        # reported as "no vault configured", which is indistinguishable from a
+        # correctly spelled user with the feature off.
+        print(
+            f"Error: no configured user named {args.user!r} "
+            f"(known: {', '.join(sorted(config.users)) or 'none'})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     users = [args.user] if args.user else list(config.users)
     if not users:
         print("No users configured.")
@@ -1132,13 +1171,22 @@ def _print_vault_sync(result) -> None:
         print(f"  deleted: {secrets_vault.format_skip(service, key)}")
     for service, key, reason in applied.skipped:
         print(f"  skipped: {secrets_vault.format_skip(service, key)} ({reason})")
-    if any(
-        reason == secrets_vault.SKIP_UNREADABLE_ROW for _s, _k, reason in applied.skipped
-    ):
+    # Two independent signals of the same stale master key, and neither
+    # substitutes for the other: `unreadable_overwrites` counts rows the pass
+    # *wrote* over without being able to read them first, and
+    # `SKIP_UNREADABLE_ROW` counts rows it declined to *delete* for the same
+    # reason. A vault whose group names every declared key produces only the
+    # first, which is why keying the warning on the skip list alone reported
+    # nothing in the cleanest instance of the condition.
+    held = sum(
+        1 for _s, _k, reason in applied.skipped
+        if reason == secrets_vault.SKIP_UNREADABLE_ROW
+    )
+    if applied.unreadable_overwrites or held:
         print(
-            "  warning: some stored values could not be decrypted, so the "
-            "created/updated split above is not reliable. Check "
-            "ISTOTA_SECRET_KEY."
+            f"  warning: {applied.unreadable_overwrites} stored value(s) were "
+            f"overwritten without being readable first and {held} were held "
+            "back from deletion for the same reason. Check ISTOTA_SECRET_KEY."
         )
 
 
@@ -1167,20 +1215,26 @@ def _print_vault_status(report) -> None:
 
     if not report.groups:
         return
+    # Every name below came out of the vault file, which a task in the user's
+    # own sandbox can overwrite, and the consumer is an operator's terminal —
+    # so they go through the same bound the sibling renderer applies via
+    # `format_skip`. An unflattened group name can carry a newline and forge a
+    # line of this report.
+    label = secrets_vault.label_for_display
     print("  groups found in the file:")
     for folded, spelling in sorted(report.groups.items()):
         marker = "owned" if folded in report.owned else "not owned"
         count = report.key_counts.get(folded, 0)
-        print(f"    {spelling}  ({count} key(s), {marker})")
+        print(f"    {label(spelling)}  ({count} key(s), {marker})")
     if report.absent:
         print(
             "  owned but absent from the file (nothing is applied or deleted "
-            "for these): " + ", ".join(report.absent)
+            "for these): " + ", ".join(label(n) for n in report.absent)
         )
     if report.unowned:
         print(
             "  in the file but not in vault_services (parsed and discarded): "
-            + ", ".join(report.unowned)
+            + ", ".join(label(n) for n in report.unowned)
         )
 
 

@@ -8196,6 +8196,26 @@ class IntervalGate:
         return self.fixed_interval
 
 
+def vault_sync_enabled(config: Config) -> bool:
+    """Whether this deployment runs the KDBX credential vault sync at all.
+
+    **Read by the gate's ``enabled`` and by the startup call, which is the
+    point.** The gate carried the `bool(interval)` term the `IntervalGate`
+    contract requires while the startup `sync_all` was unconditional — so an
+    operator who set `vault_sync_interval = 0` to switch the feature off still
+    got one full apply on every daemon restart, deletions included. A switch
+    that leaves a destructive pass running is worse than no switch.
+
+    `> 0` rather than `bool()`: a negative interval is truthy, and
+    `_tick_interval_gates` bypasses the clock for any non-positive one — that
+    branch exists for `backup-stale-alert`'s deliberate every-tick shape, so a
+    negative value here would spawn a background sync roughly twice a second.
+    """
+    return config.scheduler.vault_sync_interval > 0 and any(
+        getattr(user, "vault_path", "") for user in config.users.values()
+    )
+
+
 def _db_backup_last_time(config: Config) -> float:
     """The persisted backup clock, for the ``db-backup`` gate's seed."""
     from . import db_backup as _db_backup
@@ -8571,17 +8591,23 @@ def build_interval_gates(
         # own delay on top. Off the loop thread because a cycle touches a FUSE
         # mount, runs Argon2id and may deliver a notification, none of which
         # belongs on the dispatch thread. A cycle whose digest has not moved
-        # stops at the hash and costs none of that.
+        # stops at the hash and costs none of that — with one deliberate
+        # exception: `VaultLocked` and the other remedied-elsewhere classes
+        # cache no digest, so a user whose stored passphrase is wrong spends a
+        # full key derivation every interval until somebody re-provisions it.
+        # That is the trade for the remedy working at all.
         IntervalGate(
             name="vault-sync",
             run=_vault_sync,
             field="vault_sync_interval",
-            enabled=lambda c: bool(
-                c.scheduler.vault_sync_interval
-                and any(
-                    getattr(u, "vault_path", "") for u in c.users.values()
-                )
-            ),
+            enabled=vault_sync_enabled,
+            # Seeded to *now*, unlike the sweeps above. `run_daemon` has already
+            # run one `sync_all` synchronously by the time the loop starts, so
+            # the epoch seed made the first tick a second pass ~0.5s later — free
+            # for a user whose digest is cached, and a second Argon2id derivation
+            # for one whose vault is locked, since that class is deliberately
+            # uncached.
+            seed=lambda c: time.time(),
             background=True,
             one_shot=True,
             on_error="Vault sync failed: %s",
@@ -9232,10 +9258,13 @@ def run_daemon(
     # on the same start. Startup alone is not enough — a user edits their file
     # at 3pm — so the `vault-sync` interval gate carries it from here on.
     # `sync_all` contains one user's failure rather than costing the rest.
+    # Gated on the same predicate as the interval gate: the pass deletes rows,
+    # so `vault_sync_interval = 0` has to mean off here too.
     try:
         from . import secrets_vault  # noqa: PLC0415
 
-        secrets_vault.sync_all(config)
+        if vault_sync_enabled(config):
+            secrets_vault.sync_all(config)
     except Exception as e:  # noqa: BLE001
         logger.warning("Vault sync skipped: %s", e)
 
