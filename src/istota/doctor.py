@@ -41,6 +41,7 @@ what happened to be imported.
 
 from __future__ import annotations
 
+import importlib.util
 import ipaddress
 import json
 import logging
@@ -2858,6 +2859,490 @@ def _secret_key_remedy(config: "Config") -> str:
         f"Docker persists one to /data/.secret_key on first boot; Ansible "
         f"passes it as the `istota_secret_key` variable."
     )
+
+
+#: How much of a user id a vault finding may carry. The ids come from
+#: ``config.toml`` rather than from the vault file, so this bounds a log line
+#: rather than defending a boundary — but the same result is rendered into the
+#: admin Health pane, and a newline in a TOML key would forge a row of it.
+_VAULT_LABEL_CHARS = 64
+
+
+def _vault_users(config: "Config") -> list[str]:
+    """Configured users with a ``vault_path``, in a stable order.
+
+    ``resolve_user_vault_path``'s own gate, restated rather than tightened: a
+    non-empty string is configured, and **a blank-but-present one counts**. That
+    is the resolver's line and the reason for it is the same here — an empty
+    value is the feature being off for this user, while ``vault_path = "  "`` is
+    a configured value that resolves to nothing, which the sync refuses and logs
+    every cycle. Skipping it here would leave the one surface the operator reads
+    silent about a line the daemon is complaining about hourly.
+    """
+    users = getattr(config, "users", None) or {}
+    return sorted(
+        user_id
+        for user_id, user in users.items()
+        if isinstance(getattr(user, "vault_path", ""), str)
+        and getattr(user, "vault_path", "")
+    )
+
+
+def _vault_label(user_id: str) -> str:
+    """One user id, flattened and capped, for a vault ``detail``."""
+    flat = " ".join(str(user_id).split())
+    if len(flat) <= _VAULT_LABEL_CHARS:
+        return flat
+    return flat[:_VAULT_LABEL_CHARS] + "…"
+
+
+def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
+    """Whether each configured KDBX credential vault can actually be applied.
+
+    The vault is provisioning input: a user edits a KeePass file in their own
+    workspace and the daemon copies what it holds into the encrypted ``secrets``
+    table. Every way that stops working is invisible in the direction that reads
+    as normal — the credentials already in the table keep working, so nothing
+    breaks loudly and the user's edits simply stop taking effect. The per-user
+    notification is what reaches *them*; this is the operator's half, and it is
+    the only surface that answers for every configured user at once.
+
+    Five findings, because they fail independently and are fixed in five
+    different places. A deployment where no user has a ``vault_path`` — which is
+    every deployment by default — gets one ``SKIP`` instead.
+
+    ``…library`` — is ``pykeepass`` installed. Tested with
+    ``importlib.util.find_spec`` and **never with an import**: this check runs on
+    the daemon's boot-path registry sweep, and importing the library there pulls
+    ``lxml``, ``argon2-cffi`` and ``pycryptodomex`` into the daemon whether or
+    not any user has a vault — the cost the ``vault`` extra and
+    ``parse_vault``'s function-scoped import exist to avoid. Its own finding
+    because "the extra is not installed" is an operator remedy and everything
+    else here is not.
+
+    ``…schedule`` — will a cycle ever run, and what will it own. A
+    ``vault_sync_interval`` of 0 is a documented off-switch rather than a defect,
+    so it ``WARN``s and says which it is; the same predicate
+    (``secrets_vault.sync_is_scheduled``) gates the startup pass and the gate, so
+    a zeroed interval means a configured vault that nothing applies. The owned
+    set rides here because it is the same question — what this is configured to
+    do — and because an empty ``vault_services`` is the documented dry-run state
+    rather than a mistake.
+
+    ``…path`` — does each ``vault_path`` resolve, and is there a plain file of a
+    sane size behind it. A **refused** path is the one ``FAIL``: the refusal set
+    includes the cross-user typo (``[users.alice]`` naming another user's
+    directory), which is the one case in this design about an attack rather than
+    a mistake, and the reason id is carried verbatim so an operator can grep the
+    daemon log for the same word. Everything else the file can be — absent,
+    zero-byte, a FIFO, over the size cap — is the user's own file being wrong,
+    which the notification already reaches them about, so it ``WARN``s here.
+
+    ``…passphrase`` — is a ``vault/passphrase`` row provisioned. **Presence
+    only**: ``secret_exists``, never a decrypt, so this arm costs one indexed
+    query per user and reveals nothing.
+
+    ``…contents`` — under ``probe``, open each vault and report **counts**.
+    §3 makes service and key names loggable in the sync log and a ``CheckResult``
+    is a different surface: it is rendered into the daemon's boot log *and* into
+    the admin Health pane, so a detail line enumerating one user's credential
+    keys is read by every admin. Counts are what goes in.
+
+    **The spec's parenthetical about when that arm runs is wrong about this
+    tree, and the correction matters more than the claim.** §10 says the arm is
+    "behind ``probe`` rather than running on the boot sweep". ``run_checks``
+    defaults ``probe=True``, and the two unattended callers — the scheduler's
+    startup run and its hourly sweep — take the default, as does the
+    ``self-check`` heartbeat. So this *does* run unattended, and the cost is a
+    bounded read plus one Argon2id derivation per configured vault per sweep,
+    plus a ``last_accessed_at`` stamp on that user's passphrase row. §10's
+    *conclusion* survives the correction and is why the arm stays: the sync
+    already does all three in this same process every time the file changes, and
+    a locked vault already spends one derivation every 300 seconds by design, so
+    nothing here widens the trust domain. What it adds is about a second of CPU
+    per vault user per sweep, and the same on the boot path.
+
+    Never raises, spawns nothing under any value of ``probe``, and closes the
+    directory descriptor ``resolve_user_vault_path`` hands over on every path —
+    a leak here is one descriptor per vault user per hourly sweep, which ends as
+    a daemon that cannot open a socket with nothing pointing back at this
+    function.
+
+    One cost stated rather than left for a reader to find: the path is resolved
+    twice per user per sweep, once here and once inside ``vault_status``. That
+    is two directory walks on a FUSE mount, and a *refused* path writes its
+    ``WARNING`` twice. Resolving once and threading the descriptor through would
+    mean this function owning a lifetime across the parse, which is what
+    ``vault_status``'s own ``finally`` exists to avoid.
+    """
+    prefix = "security.credential_vault"
+    users = _vault_users(config)
+    if not users:
+        return [
+            CheckResult(
+                prefix,
+                SKIP,
+                "no user has a vault_path configured, which is the default",
+            )
+        ]
+
+    from . import secrets_store, secrets_vault, storage  # noqa: PLC0415
+
+    return [
+        _vault_library_result(prefix),
+        _vault_schedule_result(config, secrets_vault, prefix, users),
+        _vault_path_result(config, secrets_vault, storage, prefix, users),
+        _vault_passphrase_result(config, secrets_store, secrets_vault, prefix, users),
+        _vault_contents_result(config, secrets_vault, prefix, users, probe),
+    ]
+
+
+def _vault_library_available() -> bool:
+    """Is ``pykeepass`` importable, asked without importing it.
+
+    ``find_spec`` walks the path finders and stops; ``import`` would execute the
+    package and its three compiled dependencies inside the daemon. The two are
+    not interchangeable here and a test pins the difference by patching
+    ``find_spec`` while the real library is installed.
+    """
+    try:
+        return importlib.util.find_spec("pykeepass") is not None
+    except Exception:  # noqa: BLE001 - a check never raises
+        # A broken or shadowed distribution raises out of the finder rather than
+        # answering None. Unimportable either way, which is the question asked.
+        return False
+
+
+def _vault_library_result(prefix: str) -> CheckResult:
+    if _vault_library_available():
+        return CheckResult(
+            f"{prefix}.library", OK, "pykeepass is importable on this host"
+        )
+    return CheckResult(
+        f"{prefix}.library",
+        FAIL,
+        "pykeepass is not installed, so no vault can be opened on this host and "
+        "every configured user's credential edits are silently not applied",
+        remedy=(
+            "Install the `vault` extra (`uv sync --extra vault`, or add it to "
+            "the extras the deployment installs)."
+        ),
+    )
+
+
+def _vault_schedule_result(config, secrets_vault, prefix: str, users) -> CheckResult:
+    """Whether a cycle will run, and what each configured vault is set to own."""
+    name = f"{prefix}.schedule"
+    interval = getattr(config.scheduler, "vault_sync_interval", 0)
+    owned: list[str] = []
+    ineligible: list[str] = []
+    for user_id in users:
+        user = config.users.get(user_id)
+        services = list(getattr(user, "vault_services", None) or ())
+        owned.append(
+            f"{_vault_label(user_id)} owns "
+            + (", ".join(sorted(map(str, services))) if services else "nothing")
+        )
+        for service in services:
+            # Defence in depth rather than a case with a remedy behind it.
+            # `config._validate_vault_services` drops an ineligible name at load
+            # with its own warning, so nothing reachable through `load_config`
+            # arrives here — the same disposition `storage` gives its
+            # unreachable `realpath` guard. It is here because the filter is
+            # what the operator is being told, and a filter that stopped
+            # running would otherwise show up as a deletion nobody explained.
+            if isinstance(service, str) and secrets_vault.service_refusal(service):
+                ineligible.append(f"{_vault_label(user_id)}: {_vault_label(service)}")
+
+    summary = "; ".join(owned)
+    if ineligible:
+        return CheckResult(
+            name,
+            WARN,
+            "a vault_services entry names a service a vault may not own, which "
+            "the config loader should have dropped: " + "; ".join(ineligible),
+            remedy=(
+                "Remove the entry from [users.<id>] vault_services. A service "
+                "whose credentials the daemon mints for itself can never be "
+                "vault-owned."
+            ),
+        )
+    if not secrets_vault.sync_is_scheduled(config):
+        return CheckResult(
+            name,
+            WARN,
+            f"[scheduler] vault_sync_interval = {interval}, so no vault is "
+            f"applied on a schedule or at start-up ({summary})",
+            remedy=(
+                "This is the documented off-switch, so leave it if it was "
+                "deliberate — `istota secret vault-sync` still applies a vault "
+                "by hand. Set a positive interval to turn the schedule back on."
+            ),
+        )
+    return CheckResult(
+        name, OK, f"a vault cycle runs every {interval}s ({summary})"
+    )
+
+
+def _vault_path_result(config, secrets_vault, storage, prefix: str, users) -> CheckResult:
+    """Per-user: does the configured path resolve, and is a usable file behind it."""
+    name = f"{prefix}.path"
+    refused: list[str] = []
+    problems: list[str] = []
+    notes: list[str] = []
+    ok = 0
+
+    db_dir = _vault_db_dir(config)
+    for user_id in users:
+        label = _vault_label(user_id)
+        try:
+            resolution = storage.resolve_user_vault_path(config, user_id)
+        except Exception as exc:  # noqa: BLE001 - the resolver never raises
+            refused.append(f"{label}: the resolver raised ({type(exc).__name__})")
+            continue
+        location = resolution.location
+        if location is None:
+            # `refusal` is a stable `VAULT_PATH_*` word rather than a sentence,
+            # which is the whole reason the resolver carries it: the same word
+            # is in the daemon log for every cycle that refused.
+            refused.append(f"{label}: {resolution.refusal or 'refused'}")
+            continue
+        try:
+            note = _vault_file_note(location, secrets_vault.VAULT_READ_CAP_BYTES)
+            # Only the absolute form, and the discriminator is the descriptor
+            # the resolver did not hand over. On the standalone shape the
+            # workspace, the temp dir and `db_path` all live under one
+            # directory, so an unconditional containment test would WARN about
+            # every ordinary *relative* vault there — and §1 refuses the
+            # absolute form under the workspace already, so a relative path
+            # landing under `db_path.parent` is that shape's normal state
+            # rather than a misaimed reader.
+            if location.dir_fd is None and db_dir is not None:
+                try:
+                    resolved = Path(os.path.realpath(location.path))
+                except (OSError, ValueError):
+                    resolved = location.path
+                if is_within(resolved, db_dir):
+                    notes.append(label)
+        finally:
+            if location.dir_fd is not None:
+                try:
+                    os.close(location.dir_fd)
+                except OSError:  # pragma: no cover - already closed
+                    pass
+        if note:
+            problems.append(f"{label}: {note}")
+        else:
+            ok += 1
+
+    if refused:
+        return CheckResult(
+            name,
+            FAIL,
+            "a configured vault_path is one the daemon may not open, so nothing "
+            "is read for that user: " + "; ".join(refused + problems),
+            remedy=(
+                "Correct [users.<id>] vault_path in config.toml. A relative "
+                "path resolves under that user's own workspace directory and "
+                "may not leave it; an absolute one is a host path and must "
+                "resolve outside every tree a task sandbox can write, which "
+                "includes another user's workspace."
+            ),
+        )
+    if problems:
+        return CheckResult(
+            name,
+            WARN,
+            "a configured vault_path resolves but has no usable file behind "
+            "it: " + "; ".join(problems),
+            remedy=(
+                "Check the file on the user's own device and the state of the "
+                "workspace mount — a zero-byte file is what a sync caught "
+                "mid-write looks like."
+            ),
+        )
+    detail = f"{ok} configured vault path(s) resolve to a readable file"
+    if notes:
+        return CheckResult(
+            name,
+            WARN,
+            f"{detail}, but an absolute vault_path resolves inside the "
+            f"framework database's own directory: " + ", ".join(notes),
+            remedy=(
+                "Point vault_path at the KDBX file rather than at the "
+                "database directory. Nothing is exposed — the reader gets "
+                "bytes that are not a KeePass database and reports a corrupt "
+                "vault — but the notification will describe the wrong problem."
+            ),
+        )
+    return CheckResult(name, OK, detail)
+
+
+def _vault_db_dir(config: "Config") -> Path | None:
+    """``db_path``'s resolved parent, or None when there is nothing to compare."""
+    raw = getattr(config, "db_path", "") or ""
+    try:
+        parent = Path(raw).expanduser().parent
+        return Path(os.path.realpath(parent))
+    except (OSError, ValueError):
+        return None
+
+
+def _vault_file_note(location, cap: int) -> str:
+    """What is wrong with the file at ``location``, or ``""``.
+
+    ``lstat`` through the descriptor the resolver opened, never a fresh walk of
+    the path: for the relative form every component above the leaf lives in the
+    tree bound read-write into that user's sandbox, so the descriptor is what
+    makes the answer about the file the read will open. ``follow_symlinks=False``
+    because the read refuses a symlinked leaf, so following one here would report
+    a file the sync will not open.
+
+    A ``stat`` rather than the read ``read_vault_bytes`` performs, deliberately:
+    that one opens the file and pulls up to 8 MiB off a FUSE mount, and this arm
+    runs unattended. It never blocks — ``stat`` does not wait on a FIFO the way
+    ``open(2)`` would — which is the property that makes it safe here at all.
+    The authoritative answer is still the read's; this is the cheap diagnostic
+    in front of it.
+    """
+    try:
+        if location.dir_fd is not None:
+            info = os.stat(
+                location.path.name, dir_fd=location.dir_fd, follow_symlinks=False
+            )
+        else:
+            info = os.lstat(location.path)
+    except FileNotFoundError:
+        return "nothing at the path"
+    except (OSError, ValueError) as exc:
+        return f"could not be examined ({type(exc).__name__})"
+    if stat.S_ISLNK(info.st_mode):
+        return "a symlink, which the reader refuses"
+    if not stat.S_ISREG(info.st_mode):
+        return "not a regular file, which the reader refuses"
+    if info.st_size == 0:
+        return "zero bytes, which is what a sync caught mid-write looks like"
+    if info.st_size > cap:
+        return f"{info.st_size} bytes, over the {cap}-byte read cap"
+    return ""
+
+
+def _vault_passphrase_result(
+    config, secrets_store, secrets_vault, prefix: str, users
+) -> CheckResult:
+    """Per-user: is a passphrase provisioned. Presence only, never a decrypt."""
+    name = f"{prefix}.passphrase"
+    missing: list[str] = []
+    unknown: list[str] = []
+    for user_id in users:
+        try:
+            present = secrets_store.secret_exists(
+                config.db_path,
+                user_id,
+                secrets_vault.VAULT_PASSPHRASE_SERVICE,
+                secrets_vault.VAULT_PASSPHRASE_KEY,
+            )
+        except Exception as exc:  # noqa: BLE001 - a check never raises
+            unknown.append(f"{_vault_label(user_id)} ({type(exc).__name__})")
+            continue
+        if not present:
+            missing.append(_vault_label(user_id))
+
+    if missing:
+        return CheckResult(
+            name,
+            FAIL,
+            "no vault passphrase is provisioned for " + ", ".join(missing)
+            + ", so their vault is configured and cannot be opened",
+            remedy=(
+                "Run `istota secret ensure -u <id> --service vault --key "
+                "passphrase --generate`, which mints one and prints it once. "
+                "The passphrase must be generated rather than chosen: the file "
+                "sits where a task can read its ciphertext, and a memorable "
+                "phrase is the one thing that makes that matter."
+            ),
+        )
+    if unknown:
+        return CheckResult(
+            name,
+            WARN,
+            "the secrets table could not be asked about a vault passphrase for "
+            + ", ".join(unknown),
+            remedy=(
+                "See security.secret_key and runtime.framework_db — this arm "
+                "reads one indexed row and nothing else."
+            ),
+        )
+    return CheckResult(
+        name,
+        OK,
+        f"a vault passphrase is provisioned for all {len(users)} configured "
+        f"vault(s)",
+    )
+
+
+def _vault_contents_result(
+    config, secrets_vault, prefix: str, users, probe: bool
+) -> CheckResult:
+    """Under ``probe``: open each vault and report counts, never key names."""
+    name = f"{prefix}.contents"
+    if not probe:
+        return CheckResult(
+            name, SKIP, "probing is disabled; no vault file was opened"
+        )
+    if not _vault_library_available():
+        return CheckResult(
+            name,
+            SKIP,
+            "pykeepass is not installed, so no vault could be opened "
+            "(see security.credential_vault.library)",
+        )
+
+    counts: list[str] = []
+    failures: list[str] = []
+    for user_id in users:
+        label = _vault_label(user_id)
+        try:
+            report = secrets_vault.vault_status(config, user_id, parse=True)
+        except Exception as exc:  # noqa: BLE001 - a check never raises
+            failures.append(f"{label}: the read raised ({type(exc).__name__})")
+            continue
+        if report.outcome != secrets_vault.OUTCOME_OK:
+            # The class only. Its human sentence is the notification's job and
+            # carries a remedy aimed at the user rather than at the operator.
+            failures.append(f"{label}: {report.outcome or 'no answer'}")
+            continue
+        present = [service for service in report.owned if service in report.groups]
+        keys = sum(report.key_counts.get(service, 0) for service in present)
+        # Counts, never names: this line reaches the boot log and the admin
+        # Health pane, where one user's credential key names are read by every
+        # admin. Which services a vault owns is operator config and is reported
+        # by `…schedule`; what the file turned out to hold is not.
+        #
+        # Half of that is structural rather than a rule kept here, which is
+        # worth knowing before somebody widens it: `VaultStatusReport` carries
+        # no key names and no values at all — `key_counts` is a count per
+        # service — so there is nothing in reach to print. What *is* in reach is
+        # `groups`, whose keys and values are group names written into the
+        # **file**, and §12 records that a task in that user's own sandbox can
+        # write them. That is the member the no-leak test discriminates on.
+        counts.append(
+            f"{label}: {len(present)} of {len(report.owned)} owned group(s) "
+            f"present, {keys} key(s)"
+        )
+
+    if failures:
+        return CheckResult(
+            name,
+            WARN,
+            "a configured vault could not be read: " + "; ".join(failures + counts),
+            remedy=(
+                "Run `istota secret vault-status -u <id>` for the full answer, "
+                "and `istota secret vault-sync -u <id>` once it is fixed rather "
+                "than waiting out the interval."
+            ),
+        )
+    return CheckResult(name, OK, "; ".join(counts) or "no vault was read")
 
 
 def check_skill_proxy(config: "Config", probe: bool) -> list[CheckResult]:
@@ -7590,6 +8075,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.sandbox_credentials", check_sandbox_credentials),
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
+    ("security.credential_vault", check_credential_vault),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
@@ -7689,6 +8175,10 @@ CHECK_SCOPES: dict[str, str] = {
     # thing it unlocks is that install's own secrets table. A bare `docker run`
     # has neither and would report a missing key about nothing.
     "security.secret_key": DEPLOYMENT,
+    # Deployment, not image: every question it asks is about an install — which
+    # users a rendered config declares, a file on that install's workspace, and
+    # a row in its own secrets table. A bare `docker run` has none of the three.
+    "security.credential_vault": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,
