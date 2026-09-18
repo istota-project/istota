@@ -481,3 +481,182 @@ class TestTheFloorDatabase:
             "to be a useful anchor, or schema.sql has genuinely not moved in a "
             "month and the migration assertion should be retired."
         )
+
+
+#: FTS5 materialises one shadow table per index with each of these suffixes.
+#: Enumerated rather than matched as a prefix: `memory_chunks_fts_*` would
+#: also swallow a real table that happened to be named that way, and the
+#: oracle below would then pass with that table asserted by nothing.
+_FTS5_SHADOW_SUFFIXES = ("data", "idx", "content", "docsize", "config")
+
+
+class TestTheTableExtractor:
+    """`schema_tables` reads SQL, and `schema.sql` is two thirds prose.
+
+    608 of its lines are `--` comments, and one of them quotes the DDL it is
+    describing. The extractor used to scan the whole file, so that sentence
+    contributed a table called `IF` to `tables_added_since` — which
+    `test_the_migrated_database_gained_the_tables_head_declares` then reported
+    as a table the migration had failed to create, under a message saying the
+    schema had not moved when every real table in the set was present
+    (ISSUE-503).
+
+    Both directions are pinned. A parser that invents a table fails loudly, the
+    way that one did; a parser that misses a real one makes the migration
+    witness quietly smaller, and nothing would say so.
+    """
+
+    def test_a_comment_quoting_the_ddl_contributes_no_table(self):
+        """The `schema.sql` shape that broke it, verbatim.
+
+        The backtick is the trigger: `EXISTS` with nothing but a backtick after
+        it fails the optional group, and the match falls through to the
+        identifier straight after `CREATE TABLE`, which is the word `IF`.
+        """
+        text = (
+            "-- WhatsApp. Five tables, all `CREATE TABLE IF NOT EXISTS`, so an "
+            "existing\n-- deployment database gains them at the next `init_db`.\n"
+        )
+        assert upgrade.schema_tables(text) == set()
+
+    def test_any_comment_naming_a_table_contributes_nothing(self):
+        """The class, not the one sentence.
+
+        Ending the optional group on a word boundary alone would leave this
+        one: a comment is allowed to name a table, and prose describing a
+        schema routinely does. Stripping comments before the scan closes it.
+        """
+        text = "-- see CREATE TABLE phantom below\nCREATE TABLE real_one (a INT);\n"
+        assert upgrade.schema_tables(text) == {"real_one"}
+
+    def test_a_real_if_not_exists_table_still_counts(self):
+        """The control against over-stripping.
+
+        Every table in `schema.sql` is declared this way, so a fix that dropped
+        them would empty the migration witness and pass in silence.
+        """
+        text = "CREATE TABLE IF NOT EXISTS whatsapp_runtime (\n    id INTEGER\n);\n"
+        assert upgrade.schema_tables(text) == {"whatsapp_runtime"}
+
+    def test_a_quoted_name_against_the_keyword_still_counts(self):
+        """`EXISTS"foo"` is legal DDL and is the same defect in real SQL.
+
+        The comment strip does not reach it — there is no comment — so the
+        optional group has to end on a word boundary rather than on whitespace.
+        """
+        for text in (
+            'CREATE TABLE IF NOT EXISTS"quoted"(a INT);',
+            "CREATE TABLE IF NOT EXISTS`quoted`(a INT);",
+            "CREATE TABLE IF NOT EXISTS[quoted](a INT);",
+        ):
+            assert upgrade.schema_tables(text) == {"quoted"}, text
+
+    def test_a_double_dash_inside_a_string_literal_is_not_a_comment(self):
+        """The silent direction: an over-eager strip loses the rest of the line.
+
+        `schema.sql` carries no such literal today, which is exactly why this
+        is pinned rather than left to be noticed.
+        """
+        text = "CREATE TABLE t (a TEXT DEFAULT '--'); CREATE TABLE after_it (b INT);"
+        assert upgrade.schema_tables(text) == {"t", "after_it"}
+
+
+    def test_a_double_dash_inside_a_quoted_identifier_is_not_a_comment(self):
+        """All four quotings, because the extractor accepts all four.
+
+        This is the same silent direction as the literal above, and it is the
+        one that was only narrowed rather than closed on the first pass: a
+        `--` inside a quoted *name* truncated the line, and a `CREATE TABLE`
+        after it on that line went unread.
+        """
+        for opener, closer in (('"', '"'), ("`", "`"), ("[", "]")):
+            text = (
+                f"CREATE TABLE {opener}we--ird{closer} (x); "
+                f"CREATE TABLE after_it (y);"
+            )
+            assert "after_it" in upgrade.schema_tables(text), text
+
+    def test_ddl_quoted_inside_a_string_literal_contributes_nothing(self):
+        """A literal is prose too, and no table is ever declared inside one."""
+        text = "INSERT INTO log VALUES ('saw CREATE TABLE ghost here');"
+        assert upgrade.schema_tables(text) == set()
+
+    def test_an_unterminated_literal_fails_noisily_rather_than_silently(self):
+        """The direction the literal-body drop could have got wrong.
+
+        Swallowing to end of file would lose every table below the stray
+        quote and leave `tables_added_since` quietly smaller. Emitting the
+        rest raw reports a phantom instead, which is the failure that gets
+        noticed.
+        """
+        text = "CREATE TABLE a (b TEXT DEFAULT 'oops);\nCREATE TABLE real_one (x);\n"
+        assert "real_one" in upgrade.schema_tables(text)
+
+    def test_a_temp_table_is_not_a_table_the_upgrade_must_have(self):
+        """Not a gap in the extractor — the behaviour `tables_added_since` wants.
+
+        A temp table lives in the temp schema and is gone with the connection,
+        so it is absent from the migrated file by definition. Matching one
+        would put a name in the witness that
+        `test_the_migrated_database_gained_the_tables_head_declares` then
+        requires to exist, and it never can. The sqlite oracle below cannot
+        see this either way, since a temp table is not in `sqlite_master`.
+        """
+        text = "CREATE TEMPORARY TABLE tmp1 (x); CREATE TABLE IF NOT EXISTS ok1 (y);"
+        assert upgrade.schema_tables(text) == {"ok1"}
+
+    def test_the_committed_schema_declares_no_keyword_as_a_table(self):
+        """The end-to-end shape, against the real file.
+
+        `tables_added_since` subtracts one schema from another, so a phantom
+        present in both cancels and only a *newly introduced* comment shows up.
+        That is why this survived until a release moved the anchor past the
+        commit that added the sentence.
+        """
+        names = upgrade.schema_tables((REPO_ROOT / "schema.sql").read_text())
+        keywords = {"if", "not", "exists", "table", "create", "temp", "temporary"}
+        offenders = sorted(n for n in names if n.lower() in keywords)
+        assert not offenders, (
+            f"schema_tables() reported a SQL keyword as a table name: "
+            f"{offenders}. Prose is being read as DDL."
+        )
+
+    def test_it_agrees_with_sqlite_on_the_committed_schema(self):
+        """The oracle: the parser that will actually create these tables.
+
+        A hand-written regex is an approximation of a SQL parser, and the only
+        way to know which way it is wrong is to ask the real one. Virtual
+        tables are the known, deliberate gap — `CREATE VIRTUAL TABLE` is not
+        matched, and SQLite additionally materialises five shadow tables per
+        FTS5 index. They are excluded here rather than added to the extractor:
+        they appear in both schemas, so they cancel in `tables_added_since`,
+        and pulling them in would couple the migration witness to FTS5
+        internals for no assertion it does not already make.
+        """
+        text = (REPO_ROOT / "schema.sql").read_text()
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(text)
+            virtual = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND sql LIKE 'CREATE VIRTUAL TABLE%'"
+                )
+            }
+            declared = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+                if not row[0].startswith("sqlite_")
+                and not any(
+                    row[0] == f"{v}_{suffix}"
+                    for v in virtual
+                    for suffix in _FTS5_SHADOW_SUFFIXES
+                )
+                and row[0] not in virtual
+            }
+        finally:
+            conn.close()
+        assert upgrade.schema_tables(text) == declared
