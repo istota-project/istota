@@ -28,9 +28,10 @@ logger = logging.getLogger("istota.skill_proxy")
 #: else. Anything absent or unrecognised is recorded as ``read``, which is the
 #: direction that does not under-report.
 #:
-#: ``skill`` has no producer yet and is here rather than added later: its
-#: producer is the credential stamp in ``skills/_credref``, which lands with
-#: `browse interact --fill-credential`. Two of the three are live today.
+#: All three have producers: ``skill`` is the credential stamp in
+#: ``skills/_credref``, resolving a stamped argument host-side before the
+#: handler runs (`browse interact --fill-credential`), and ``inject`` and
+#: ``read`` are the shim's ``run`` and ``get``.
 VAULT_MODES = frozenset({"skill", "inject", "read"})
 VAULT_MODE_DEFAULT = "read"
 

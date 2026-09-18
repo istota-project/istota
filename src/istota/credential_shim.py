@@ -210,12 +210,20 @@ def _request(payload: dict) -> dict:
     return reply
 
 
-def _fetch(name: str, mode: str) -> str:
+def fetch_credential(name: str, mode: str) -> str:
     """One shared credential, by name, under a declared mode.
 
     ``mode`` is a claim rather than a fact — the proxy sees a socket, not a
     process — and it is sent so the daemon's log can say which of the three
     paths asked. It is not a control and nothing here pretends otherwise.
+
+    **Public because it has a second caller inside the package**:
+    ``skills/_credref`` resolves a stamped argument through this same request,
+    with ``mode="skill"``. That is a *host-side* caller rather than a copy of
+    this program — the shim runs in the sandbox with no istota package on its
+    path, a skill CLI runs outside it with the package — and the two speaking
+    one client is the point. Raises ``ProxyError``, which is the whole error
+    surface either caller has to handle.
     """
     reply = _request({"type": "vault_credential", "name": name, "mode": mode})
     value = reply.get("value")
@@ -244,7 +252,7 @@ def _cmd_get(args: list[str]) -> int:
         return EXIT_REFUSED
     # `end=""`: a caller substituting this into a header or a git credential
     # line wants the bytes verbatim, and a trailing newline is not in them.
-    print(_fetch(args[0], "read"), end="")
+    print(fetch_credential(args[0], "read"), end="")
     return 0
 
 
@@ -320,10 +328,10 @@ def _cmd_run(args: list[str]) -> int:
     # place.
     env = dict(os.environ)
     for var, name in assignments:
-        env[var] = _fetch(name, "inject")
+        env[var] = fetch_credential(name, "inject")
     payload = b""
     if stdin_name is not None:
-        payload = _fetch(stdin_name, "inject").encode("utf-8")
+        payload = fetch_credential(stdin_name, "inject").encode("utf-8")
         if len(payload) > STDIN_MAX_BYTES:
             print(
                 f"istota-credential: the value is larger than the "

@@ -414,6 +414,72 @@ class TestTheFetchCap:
         assert "limit=1" in refusals[0].getMessage()
         assert "github_pat" not in refusals[0].getMessage()
 
+    def test_the_stamp_path_spends_from_the_same_counter(
+        self, sock_path, monkeypatch, capsys,
+    ):
+        """§4a and §4c share one budget, because they are one request type.
+
+        The skill path is `skills/_credref`, which resolves a stamped argument
+        host-side before the handler runs — so a `browse interact` filling
+        three credential fields against a limit of two is refused, and refused
+        *before dispatch*: the browser is never asked to type anything. The
+        discriminating assertion is that `httpx.post` was not called, which is
+        the fact a message check cannot establish.
+        """
+        from unittest.mock import patch
+
+        from istota.skills import browse
+
+        monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock_path))
+        with proxy(sock_path, vault_fetch_limit=2):
+            with patch.object(browse.httpx, "post") as post:
+                with patch.object(
+                    browse, "get_api_url", return_value="http://test:9223",
+                ):
+                    with pytest.raises(SystemExit) as exc:
+                        browse.main([
+                            "interact", "s1",
+                            "--fill-credential", "#user=home_assistant_url",
+                            "--fill-credential", "#token=home_assistant_token",
+                            "--fill-credential", "#pat=github_pat",
+                        ])
+        assert exc.value.code == 1
+        envelope = json.loads(capsys.readouterr().out.strip())
+        assert envelope["reason"] == "vault_credential_refused"
+        assert "limit" in envelope["error"].lower()
+        post.assert_not_called()
+        for value in VAULT.values():
+            assert value not in json.dumps(envelope)
+
+    def test_two_stamped_fills_fit_under_a_limit_of_two(
+        self, sock_path, monkeypatch, capsys,
+    ):
+        """The control for the case above: the same call one flag shorter
+        succeeds, so the refusal is the budget rather than the mechanism."""
+        from unittest.mock import MagicMock, patch
+
+        from istota.skills import browse
+
+        monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock_path))
+        response = MagicMock()
+        response.json.return_value = {
+            "status": "ok", "session_id": "s1", "actions": [],
+        }
+        with proxy(sock_path, vault_fetch_limit=2):
+            with patch.object(browse.httpx, "post", return_value=response) as post:
+                with patch.object(
+                    browse, "get_api_url", return_value="http://test:9223",
+                ):
+                    browse.main([
+                        "interact", "s1",
+                        "--fill-credential", "#token=home_assistant_token",
+                        "--fill-credential", "#pat=github_pat",
+                    ])
+        payload = post.call_args[1]["json"]
+        assert [a["value"] for a in payload["actions"]] == [
+            VAULT["home_assistant_token"], VAULT["github_pat"],
+        ]
+
 
 # ---------------------------------------------------------------------------
 # The shim

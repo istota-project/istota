@@ -1391,3 +1391,195 @@ class TestTheCatchAllNamesTheFailure:
         error = json.loads(capsys.readouterr().out)["error"]
         assert "RemoteProtocolError" in error
         assert not error.rstrip().endswith(":")
+
+
+class TestFillCredential:
+    """`interact --fill-credential`: the name in the argv, the value in the request.
+
+    Driven through `main` against a **real** `SkillProxy` over a real socket,
+    because the whole claim is about where the value comes from and where it
+    goes. The browser API is the one thing mocked, since it is on the far side
+    of the boundary this stage is about.
+    """
+
+    VAULT = {
+        "acme_password": "browsevalue-pw-aaaaaaaa",
+        "acme_token": "browsevalue-tok-bbbbbbbb",
+    }
+
+    @pytest.fixture
+    def proxy(self, monkeypatch):
+        import tempfile
+        from pathlib import Path as _Path
+
+        from istota.skill_proxy import SkillProxy
+
+        directory = tempfile.mkdtemp(prefix="bz_", dir="/tmp")
+        sock = _Path(directory) / "s.sock"
+        monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock))
+        started = []
+
+        def start(**kwargs):
+            kwargs.setdefault("vault_credentials", dict(self.VAULT))
+            server = SkillProxy(
+                sock, {}, {"PATH": "/usr/bin"}, task_id=3, **kwargs,
+            )
+            server.__enter__()
+            started.append(server)
+            return server
+
+        yield start
+        for server in started:
+            server.__exit__(None, None, None)
+        sock.unlink(missing_ok=True)
+        _Path(directory).rmdir()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_value_reaches_the_browser_and_the_name_does_not(
+        self, mock_url, mock_post, proxy, capsys,
+    ):
+        proxy()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok", "session_id": "s1",
+            "actions": [{"action": "fill", "selector": "#password", "ok": True}],
+        }
+        mock_post.return_value = mock_resp
+
+        main(["interact", "s1", "--fill-credential", "#password=acme_password"])
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["actions"] == [
+            {
+                "type": "fill",
+                "selector": "#password",
+                "value": self.VAULT["acme_password"],
+            },
+        ]
+        # The name is the model's own label and is not what the browser is
+        # told; the request carries the value alone.
+        assert "acme_password" not in json.dumps(payload)
+        # And the result the model reads back carries neither.
+        out = capsys.readouterr().out
+        assert self.VAULT["acme_password"] not in out
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_fills_are_sent_in_command_line_order(
+        self, mock_url, mock_post, proxy,
+    ):
+        proxy()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok", "session_id": "s1", "actions": [],
+        }
+        mock_post.return_value = mock_resp
+
+        main([
+            "interact", "s1",
+            "--fill", "#email=me@example.com",
+            "--fill-credential", "#password=acme_password",
+            "--fill", "#note=hello",
+            "--fill-credential", "#totp=acme_token",
+        ])
+
+        payload = mock_post.call_args[1]["json"]
+        assert [a["selector"] for a in payload["actions"]] == [
+            "#email", "#password", "#note", "#totp",
+        ]
+        assert [a["value"] for a in payload["actions"]] == [
+            "me@example.com",
+            self.VAULT["acme_password"],
+            "hello",
+            self.VAULT["acme_token"],
+        ]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_clicks_still_lead(self, mock_url, mock_post, proxy):
+        """Unchanged: clicks are emitted before the fills, as they always were."""
+        proxy()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok", "session_id": "s1", "actions": [],
+        }
+        mock_post.return_value = mock_resp
+
+        main([
+            "interact", "s1",
+            "--fill-credential", "#password=acme_password",
+            "--click", ".btn",
+        ])
+        payload = mock_post.call_args[1]["json"]
+        assert [a["type"] for a in payload["actions"]] == ["click", "fill"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_unknown_name_refuses_before_the_request(
+        self, mock_url, mock_post, proxy, capsys,
+    ):
+        proxy()
+        code = None
+        try:
+            main(["interact", "s1", "--fill-credential", "#password=nope"])
+        except SystemExit as exc:
+            code = exc.code
+        # First, and independently of how the call ended: the handler never
+        # ran, so the browser was never asked to type anything. This is the
+        # assertion the pre-dispatch control turns red.
+        mock_post.assert_not_called()
+        assert code == 1
+        envelope = json.loads(capsys.readouterr().out.strip())
+        assert envelope["reason"] == "vault_credential_refused"
+        # And the handler did not run at all. `cmd_interact` refuses an
+        # unresolved reference itself, so "no request was sent" is true on
+        # both sides of the pre-dispatch refusal; what separates them is whose
+        # refusal this is. Seeing the handler's message here means dispatch
+        # happened, which is the state the control produces.
+        assert "not resolved" not in envelope["error"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_error_envelope_carries_no_filled_value(
+        self, mock_url, mock_post, proxy, capsys,
+    ):
+        """`on_exception` names the endpoint and the exception, never a value."""
+        proxy()
+        mock_post.side_effect = httpx.ReadTimeout("timed out")
+        with pytest.raises(SystemExit):
+            main([
+                "interact", "s1",
+                "--fill-credential", "#password=acme_password",
+            ])
+        blob = capsys.readouterr().out
+        assert "browse interact" in blob
+        for value in self.VAULT.values():
+            assert value not in blob
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_unresolved_reference_is_never_typed_into_the_field(
+        self, mock_url, mock_post,
+    ):
+        """A namespace that skipped `parse_and_resolve` must not fill anything.
+
+        Filling the field with the credential's *name* would be a failed login
+        whose cause is invisible from the result, so the handler refuses.
+        """
+        parser = build_parser()
+        args = parser.parse_args(
+            ["interact", "s1", "--fill-credential", "#password=acme_password"],
+        )
+        with pytest.raises(ValueError, match="not resolved"):
+            cmd_interact(args)
+        mock_post.assert_not_called()
+
+    def test_the_parser_accepts_the_flag_repeatably(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "interact", "s1",
+            "--fill-credential", "#a=one",
+            "--fill-credential", "#b=two",
+        ])
+        assert args.fill_credential == ["#a=one", "#b=two"]

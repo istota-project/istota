@@ -49,9 +49,22 @@ istota-skill browse interact <id> --click ".button"
 istota-skill browse interact <id> --fill "#email=user@example.com"
 istota-skill browse interact <id> --scroll down --scroll-amount 1000
 
+# Log in without holding the password: name a shared credential instead
+istota-skill browse interact <id> --fill "#email=user@example.com" \
+                                 --fill-credential "#password=acme_password" \
+                                 --click "button[type=submit]"
+
 # Close session
 istota-skill browse close <id>
 ```
+
+## Logging in: use `--fill-credential`, never `--fill`
+
+`--fill-credential "SELECTOR=NAME"` fills a field with a credential the user has shared, named rather than typed. `NAME` is a name from `istota-credential list`; the value is looked up outside the sandbox, sent straight to the browser, and never reaches your command line, your output or the task transcript. Use it for every password, token, API key and one-time secret, and keep `--fill` for values that are not secret — an email address, a search term.
+
+Repeat the flag for several fields, and mix it with `--fill` freely: the fields are filled in the order you wrote the flags, so a form that wants the username first still gets it first.
+
+A name that is not in the user's shared credentials is refused before anything is typed, with `"reason": "vault_credential_refused"`. Run `istota-credential list` and use a name it prints; do not fall back to `--fill` with a value you obtained some other way.
 
 ## Output format
 

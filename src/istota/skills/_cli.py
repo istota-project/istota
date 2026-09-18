@@ -11,14 +11,20 @@ before this module existed: five copies checked the status inside the ``try``,
 sites that printed an error envelope and exited 0. (``skills/kv`` checked no
 status in ``main`` either, but every one of its error paths already exited 1.)
 
-Nothing from the package beyond ``._hostpath``, itself a leaf over
-``istota.skill_host_paths`` — so a skill subprocess pays nothing for it beyond
-what ``istota.skills.__init__`` already costs.
+Nothing from the package beyond ``._hostpath`` (a leaf over
+``istota.skill_host_paths``) and ``._credref`` (a leaf over
+``istota.credential_shim``, which is stdlib-only because a copy of it runs as
+the task's own shim with no istota package on its path) — so a skill subprocess
+pays nothing for it beyond what ``istota.skills.__init__`` already costs.
 
 ``parse_and_resolve`` is the other half of the facade's contract and is here
 rather than in ``_hostpath`` for that reason: the refusal has to come back as
 one JSON envelope on stdout with the status in the exit code, which is this
-module's rule, not the allowlist's.
+module's rule, not the allowlist's. It now enforces two stamps rather than one
+— a host path against the allowlist, and a shared-credential *name* against the
+user's own vault namespace, resolved over the proxy socket — and it is where
+they meet precisely because the envelope and the exit code are this module's
+and neither resolver's.
 
 Two things a reader will want to know before converting the next call site.
 
@@ -47,6 +53,7 @@ import json
 import sys
 from typing import Any, Callable, NoReturn
 
+from ._credref import resolve_parsed as resolve_credentials
 from ._hostpath import resolve_parsed
 
 
@@ -131,7 +138,8 @@ def parse_and_resolve(
     already have run by the time dispatch saw the value.
 
     A refusal is the facade's envelope on stdout and exit 1, with
-    ``reason="host_path_refused"`` so the model reads a boundary rather than a
+    ``reason="host_path_refused"`` — or ``reason="vault_credential_refused"``
+    for a credential stamp — so the model reads a boundary rather than a
     missing file. That is also why this is not an argparse ``type=`` callable,
     which is otherwise the tempting shape: argparse reports a ``type`` failure
     through ``parser.error()`` — usage text on stderr and exit 2 — and getting
@@ -141,7 +149,8 @@ def parse_and_resolve(
 
     A parser with no stamped argument behaves exactly as ``parse_args`` does,
     which is what let all twenty skill ``main`` functions be converted in one
-    step with nothing declared.
+    step with nothing declared, and is what lets the nineteen skills with no
+    credential stamp stay untouched now that there are two kinds.
     """
     args = parser.parse_args(argv)
     refusal = resolve_parsed(parser, args)
@@ -153,8 +162,23 @@ def parse_and_resolve(
         # exiting would return a namespace `resolve_parsed` left *partially*
         # rewritten — the dests before the refusing one absolute, the rest as
         # parsed, and nothing on it saying which is which — and every handler
-        # would then run on the mixture. There is one refusal site now, so
-        # there is one place to keep this true.
+        # would then run on the mixture. Both resolvers leave that mixture
+        # behind, so both refusal sites below keep the raise.
+        raise SystemExit(1)  # pragma: no cover — `fail` is NoReturn
+
+    # Host paths first, and the order is load-bearing rather than tidy: a path
+    # refusal is decided in this process against roots it already holds, while
+    # a credential refusal costs a request that spends from the task attempt's
+    # own fetch budget (`[security] vault_fetch_limit_per_task`). Resolving
+    # credentials first would charge that budget for a call the path check was
+    # about to refuse anyway.
+    credential_refusal = resolve_credentials(parser, args)
+    if credential_refusal is not None:
+        fail(credential_refusal, reason="vault_credential_refused")
+        # The same rule as above: `fail` exits, and the raise is what makes
+        # that independent of it. A credential refusal leaves the same partial
+        # namespace — the stamps before the refusing one boxed as
+        # `SecretValue`, the rest as parsed — and no handler may run on it.
         raise SystemExit(1)  # pragma: no cover — `fail` is NoReturn
     return args
 
