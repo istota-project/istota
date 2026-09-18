@@ -266,6 +266,13 @@ istota_scheduler_worktree_reap_interval: 21600 # developer-worktree reaping swee
 # Package-cache sweep (ISSUE-317). Inert unless a cache root resolves — the
 # derived one under istota_developer_repos_dir, or istota_security_sandbox_cache_dir.
 istota_scheduler_sandbox_cache_sweep_interval: 21600 # 6h; 0 disables
+# KDBX credential-vault sync (0 disables). Inert unless some user in
+# istota_users declares a vault_path. Startup alone is not enough — a user edits
+# their vault at 3pm and nothing happens until the next restart — and five
+# minutes is chosen against the rclone dir-cache lag, which adds its own delay
+# on top. A cycle whose file digest is unchanged stops at the hash, so the
+# steady-state cost is one bounded read per user rather than a key derivation.
+istota_scheduler_vault_sync_interval: 300
 # Nextcloud profile-picture import. Also gated by
 # istota_web_avatar_import_from_nextcloud and by a Nextcloud storage backend.
 # Six-hourly rather than daily: a new user sees the initial chip until the tick.
@@ -674,6 +681,26 @@ istota_experimental_features: []
 #         path: "/shared/Projects"
 #         name: "Projects"
 #         permissions: "write"
+#     # KDBX credential vault, off unless vault_path is set. These two are the
+#     # only per-user settings config.toml renders: they have no user_profiles
+#     # column, so inventory is the whole surface. The passphrase is a secret —
+#     # put it in istota_user_secrets below as service `vault`, key
+#     # `passphrase`, generated and at least 32 characters.
+#     # Full reference: docs/configuration/credentials.md#credential-vault.
+#     vault_path: "istota/config/vault.kdbx"
+#                                   # Relative to this user's workspace (they can
+#                                   # edit it from a phone); absolute is a host
+#                                   # path and must resolve outside every tree a
+#                                   # task sandbox can write.
+#     vault_services: ["karakeep", "ntfy"]
+#                                   # Services the file owns, deletions included:
+#                                   # a key its group does not hold is removed on
+#                                   # the first sync, so put everything you
+#                                   # already have into the file first. [] reads
+#                                   # the file and applies nothing — a dry run.
+#                                   # Eligible today: karakeep, ntfy,
+#                                   # native_brain, feeds, carto. Anything else
+#                                   # is dropped with a warning at load.
 #     default_briefings: false      # opt out of the shared [[default_briefings]] set
 #     briefing_email_html: false    # false = plain text only (default is HTML plus
 #                                   # a plain-text fallback part)

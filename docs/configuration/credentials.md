@@ -110,7 +110,29 @@ A relative `vault_path` resolves under that user's own workspace directory, whic
 
 `vault_services` is the list of services the file owns. Empty reads the file and applies nothing, which is a usable dry run. A service whose credentials the daemon mints for itself can never be vault-owned (Monarch, Overland, Garmin, Google Workspace), and a name like that is dropped with a warning when the config loads. Today's eligible set is `karakeep`, `ntfy`, `native_brain`, `feeds` and `carto`.
 
-Install the `vault` extra on the host. `pykeepass` and its six dependencies are optional because two of them carry compiled extensions, and a deployment with no vault should not pay for them.
+Install the `vault` extra on the host. `pykeepass` and its six dependencies are optional because two of them carry compiled extensions, and a deployment with no vault should not pay for them. Both shipped deployment shapes install it already: the Ansible role runs `uv sync --extra all`, and the Docker image bundles it.
+
+Neither shape lets you hand-edit that `config.toml`, because both rewrite it — the role's template task on every converge, the entrypoint on every boot. Write the two keys where the generator reads them.
+
+**Ansible**, per user in `istota_users`:
+
+```yaml
+istota_users:
+  alice:
+    vault_path: "istota/config/vault.kdbx"
+    vault_services: ["karakeep", "ntfy"]
+```
+
+A user who declares neither key gets no `[users.<id>]` block at all, which is the unchanged default for everybody else. `istota_scheduler_vault_sync_interval` sets the cadence.
+
+**Docker**, in `docker/.env` — single-user, so the keys are unprefixed:
+
+```
+USER_VAULT_PATH=istota/config/vault.kdbx
+USER_VAULT_SERVICES=karakeep,ntfy
+```
+
+with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
 ### The passphrase
 
@@ -121,6 +143,16 @@ istota secret ensure -u alice --service vault --key passphrase --generate
 ```
 
 **It must be generated rather than chosen, and that rule is the whole security argument for this feature.** The vault file sits in a tree bound read-write into that user's own task sandbox, so a prompt-injected task can read the ciphertext of every credential the vault holds and carry it out. Argon2id makes that useless against 256 random bits. It does not make it useless against a memorable phrase. Everything else here is a boundary against a mistake; this is the only one standing in front of an adversary.
+
+On Ansible you can provision it from inventory instead, alongside the other per-user secrets — the loop is service- and key-generic, and the vault's own service is never vault-owned, so nothing refuses it:
+
+```yaml
+istota_user_secrets:
+  alice:
+    - { service: vault, key: passphrase, value: "{{ vault_alice_kdbx_pass }}" }
+```
+
+Generate the value yourself (`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`) and keep it in Ansible Vault. Under 32 characters is refused. Re-running the play rewrites the same value, which is a no-op.
 
 `--generate` mints the value, stores it and prints it once. Copy it into the password manager you keep everything else in, and use it as the master password when you create the KDBX file. A *supplied* `--value` shorter than 32 characters is refused rather than warned about, because a warning is read after provisioning and by then the file is already encrypted under it.
 
