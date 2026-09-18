@@ -9285,12 +9285,83 @@ def _service_status(schema: dict, configured_keys: set[str]) -> str:
     return "missing"
 
 
+def _vault_owned_services(username: str) -> frozenset[str]:
+    """Which services this user's credential vault owns, or nothing.
+
+    Blocking, and called from `asyncio.to_thread` at every site: resolving a
+    `vault_path` walks directories under the workspace, which is a
+    `fuse.rclone` mount on the deployment shape this runs on — so on the event
+    loop a wedged mount would stall every other request in the web process.
+
+    The cheap half of the predicate is asked first inside `vault_owned_services`
+    itself, so a user who declares no `vault_services` — which is every user by
+    default — costs a dict lookup and touches no filesystem at all.
+
+    Never raises. A settings page must render for a user whose vault line is
+    broken, and the consequence of answering "nothing" is that a write is
+    allowed where it might have been refused — which is the state every
+    deployment was in before this stage, rather than a new exposure.
+    """
+    if not _config:
+        return frozenset()
+    try:
+        from .secrets_vault import vault_owned_services
+
+        return vault_owned_services(_config, username)
+    except Exception:
+        logger.warning(
+            "could not resolve the vault-owned services for %r", username,
+            exc_info=True,
+        )
+        return frozenset()
+
+
+def _refuse_if_vault_managed(service: str, username: str, schema: dict) -> None:
+    """409 on a write to a key the user's credential vault owns.
+
+    **This is a boundary, not a nicety, and the disabled field in the UI is the
+    nicety.** §6 claims the vault is the live authority for its declared
+    services without a reconciliation loop, and the whole of that claim is that
+    no other writer is left: `DAEMON_WRITTEN_SERVICES` removes the services the
+    daemon rotates, open question 3 removes `istota secret ensure`, and these
+    two routes were the third and last.
+
+    What a write that got through here would cost is worth being exact about,
+    because the intuitive answer is wrong in the reassuring direction. It does
+    *not* get reverted on the next cycle: the write touches no byte of the KDBX,
+    so the digest is unchanged, the cycle short-circuits before parsing, and the
+    value stands indefinitely — a permanent, silent divergence from the file the
+    user believes is authoritative, discovered whenever they next wonder why an
+    edit did nothing.
+
+    Raised **after** the unknown-service 404 and **before** the unknown-key 400.
+    A name in no schema cannot be vault-owned, since `vault_services` is
+    filtered to eligible services at config load and eligibility starts from the
+    schema — so a 409 there would be answering about a service that does not
+    exist. A wrong *key* on an owned service is the other way round: the whole
+    service is refused, so which key was named does not matter.
+    """
+    from fastapi import HTTPException
+
+    if service not in _vault_owned_services(username):
+        return
+    label = schema.get("label") or service
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{label} is managed by your credential vault; edit the vault file "
+            "instead."
+        ),
+    )
+
+
 def _build_service_card(
     service: str,
     schema: dict,
     stored: dict[str, list[dict]],
     *,
     extra: dict | None = None,
+    vault_owned: frozenset[str] = frozenset(),
 ) -> dict:
     configured = {entry["key"] for entry in stored.get(service, [])}
     last_updated = max(
@@ -9311,6 +9382,10 @@ def _build_service_card(
         "hint": schema.get("hint", ""),
         "oauth": bool(schema.get("oauth", False)),
         "custom_ui": bool(schema.get("custom_ui", False)),
+        # Written on every card rather than only on an owned one: a missing key
+        # and a false one render identically in Svelte, so an absent flag would
+        # make the disabled state untestable from the payload.
+        "vault_managed": service in vault_owned,
     }
     if extra:
         card.update(extra)
@@ -9332,6 +9407,7 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
 
     username = user["username"]
     stored = secrets_store.list_user_services(_config.db_path, username)
+    vault_owned = await asyncio.to_thread(_vault_owned_services, username)
 
     cards: list[dict] = []
     for service, schema in _CONNECTED_SERVICE_SCHEMA.items():
@@ -9344,8 +9420,75 @@ async def settings_services(user: dict = Depends(_require_api_auth)) -> dict:
             extra["enabled"] = bool(
                 _config.google_workspace and _config.google_workspace.enabled
             )
-        cards.append(_build_service_card(service, schema, stored, extra=extra))
+        cards.append(
+            _build_service_card(
+                service, schema, stored, extra=extra, vault_owned=vault_owned,
+            )
+        )
     return {"services": cards}
+
+
+def _vault_settings_payload(username: str) -> dict:
+    """The credential vault's read-only status, for the settings heading.
+
+    **Read-only in the strong sense: this endpoint has no writing sibling.** The
+    two fields that select the file (`vault_path`, `vault_services`) are
+    TOML-only because they are a security control rather than a preference — one
+    picks which file the daemon decrypts with a key it holds, the other which
+    credentials that file may overwrite — and the passphrase is `cli_only`
+    because it has to be *generated* rather than chosen. A form field is an
+    invitation to type a memorable passphrase, which is the one thing that makes
+    the file's presence inside the sandbox matter.
+
+    **It does not open the vault.** `vault_status(parse=False)` is why: an
+    Argon2id unlock is tuned to about a second, and none of what §9's heading
+    shows needs one. What the parse would add — the groups found in the file and
+    their key counts — is a diagnostic for whoever is debugging a mapping, which
+    is `istota secret vault-status` on a host shell.
+
+    Values never appear, and neither does the passphrase: `passphrase_present`
+    is a boolean, and `reason` is the `NOTIFICATION_REASONS` sentence rather
+    than an exception's text, so nothing interpolated into an error message can
+    reach a browser through here.
+
+    `last_success_at` is the field to render as "last synced". `last_sync_at`
+    moves on a failed cycle too.
+    """
+    from . import secrets_vault
+
+    report = secrets_vault.vault_status(_config, username, parse=False)
+    if not report.configured:
+        # The default for every user, and the shape the page renders nothing
+        # for. An empty object rather than a 404: the question was answered.
+        return {"configured": False}
+    return {
+        "configured": True,
+        "path": report.path,
+        "owned": list(report.owned),
+        "passphrase_present": report.passphrase_present,
+        # What this call found now — a refused path is a fact about the
+        # configuration rather than about a past cycle, so it must not be read
+        # out of the record.
+        "outcome": report.outcome,
+        "reason": report.reason,
+        "refusal": report.refusal,
+        # What the syncing process last settled, which is a different question
+        # and the only one answerable from this process at all.
+        "last_success_at": report.last_success_at,
+        "last_sync_at": report.last_sync_at,
+        "last_outcome": report.recorded_outcome,
+        "last_reason": report.recorded_reason,
+    }
+
+
+@api_router.get("/settings/vault")
+async def settings_vault(user: dict = Depends(_require_api_auth)) -> dict:
+    """The current user's credential vault status. Read-only; see the builder."""
+    if not _config:
+        return {"configured": False}
+    # Off the event loop: the builder resolves a path under the workspace, which
+    # is a FUSE mount on the deployment shape this runs on.
+    return await asyncio.to_thread(_vault_settings_payload, user["username"])
 
 
 @api_router.get("/settings/modules")
@@ -9424,8 +9567,12 @@ async def settings_module_services(
     username = user["username"]
     enabled = _config.is_module_enabled(username, module)
     stored = secrets_store.list_user_services(_config.db_path, username)
+    # Two of the five vault-eligible services (`feeds`, `carto`) live on module
+    # pages, so a flag computed only in `/settings/services` would leave them
+    # with an editable form the 409 then refuses.
+    vault_owned = await asyncio.to_thread(_vault_owned_services, username)
     cards = [
-        _build_service_card(service, schema, stored)
+        _build_service_card(service, schema, stored, vault_owned=vault_owned)
         for service, schema in schemas.items()
     ]
     return {
@@ -9454,6 +9601,9 @@ async def settings_set_secret(
     schema = _all_known_services().get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
+    await asyncio.to_thread(
+        _refuse_if_vault_managed, service, user["username"], schema,
+    )
     valid_keys = {f["key"] for f in schema["fields"]}
     if key not in valid_keys:
         raise HTTPException(
@@ -9723,6 +9873,13 @@ async def settings_delete_secret(
     schema = _all_known_services().get(service)
     if not schema:
         raise HTTPException(status_code=404, detail=f"Unknown service: {service}")
+    # Symmetric with the PUT handler, and needed for its own reason rather than
+    # for symmetry: a delete that got through would leave the table without a
+    # row the vault file still holds, and nothing would put it back until the
+    # file next moved.
+    await asyncio.to_thread(
+        _refuse_if_vault_managed, service, user["username"], schema,
+    )
     valid_keys = {f["key"] for f in schema["fields"]}
     if key not in valid_keys:
         # Symmetric with the PUT handler — never let a caller delete arbitrary

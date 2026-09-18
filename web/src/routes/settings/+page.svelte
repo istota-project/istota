@@ -5,6 +5,7 @@
     getSettingsServices,
     getModules,
     getProfile,
+    getVaultStatus,
     updateProfile,
     disconnectNextcloudToken,
     AuthError,
@@ -14,6 +15,7 @@
     type ServiceCard as ServiceCardData,
     type UserProfile,
     type NextcloudTokenStatus,
+    type VaultStatus,
   } from '$lib/api';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
   import {
@@ -63,6 +65,11 @@
   // null = operator hasn't enabled encrypted token storage → no card.
   let ncToken: NextcloudTokenStatus | null = $state(null);
   let ncTokenBusy = $state(false);
+  // null = this user has no credential vault, which is the default for
+  // everyone, and also what an unreachable endpoint resolves to. Both render
+  // nothing: a heading that always says something is a heading every user has
+  // to read past.
+  let vault: VaultStatus | null = $state(null);
 
   // Full IANA timezone list from the browser (no hardcoded list / extra dep).
   // Older engines may not implement supportedValuesOf — fall back to UTC.
@@ -229,6 +236,37 @@
       error = (e as Error).message || 'Failed to load settings';
     } finally {
       loading = false;
+    }
+    // Outside the `Promise.all` and outside the try, deliberately. The vault is
+    // an optional per-user feature nobody has by default, so a deployment where
+    // this endpoint is unreachable, slow or answering an error must not be a
+    // settings page that fails to load — the cards it governs are the page's
+    // actual content. Failure leaves `vault` null, which renders nothing, which
+    // is the same as the ordinary unconfigured case.
+    await refreshVault();
+  }
+
+  // The failing sentence, or empty when the vault is working. Two sources and
+  // the live one wins: `outcome` is what the request itself found, which today
+  // is only ever a refused `vault_path`, and `last_outcome` is what the syncing
+  // process last settled — a fact from another process and possibly another
+  // machine. A refused path is true *now* and outranks a cycle that ran before
+  // the operator introduced it.
+  let vaultProblem = $derived.by(() => {
+    if (!vault) return '';
+    if (vault.outcome) return vault.reason || vault.outcome;
+    if (vault.last_outcome && vault.last_outcome !== 'ok') {
+      return vault.last_reason || vault.last_outcome;
+    }
+    return '';
+  });
+
+  async function refreshVault() {
+    try {
+      const status = await getVaultStatus();
+      vault = status && status.configured ? status : null;
+    } catch {
+      vault = null;
     }
   }
 
@@ -899,6 +937,40 @@
           <a href="{base}/money/settings">money</a>,
           <a href="{base}/location/settings">location</a>).
         </p>
+        <!--
+          The vault goes on the heading rather than in the list of cards below
+          it, and nothing on it is writable. It is not a connected service —
+          every other entry there is a credential *for* something, and this is
+          the source those credentials come from, so a card among them would
+          make it a peer of the things whose fields it has just disabled. It is
+          also the referent the disabled-field sentence needs, which has to be
+          visible from every card that shows one: a heading is above all of
+          them where a sibling card is not.
+
+          Rendered only when there is a vault. Most deployments give nobody one.
+        -->
+        {#if vault}
+          <p class="hint vault" data-testid="vault-status">
+            <strong>Credential vault:</strong>
+            {#if vault.owned && vault.owned.length > 0}
+              this file is the authority for
+              {#each vault.owned as name, i (name)}{#if i > 0},
+                {/if}<code>{name}</code>{/each}.
+            {:else}
+              no services are assigned to it yet.
+            {/if}
+            {#if vault.path}
+              It is read from <code>{vault.path}</code>, never written.
+            {/if}
+            {#if vaultProblem}
+              <span class="vault-problem">Not working: {vaultProblem}</span>
+            {:else if vault.last_success_at}
+              Last synced {vault.last_success_at}.
+            {:else}
+              It has not synced yet.
+            {/if}
+          </p>
+        {/if}
       </div>
     {/if}
 
@@ -1002,5 +1074,29 @@
   .module-chip input[type='checkbox'] {
     margin: 0;
     width: auto;
+  }
+
+  /* A second paragraph under the same heading, separated from the first rather
+     than styled apart from it: it is the same kind of statement about the same
+     card list. `.hint` carries the size and colour. */
+  .vault {
+    margin-top: var(--space-2);
+  }
+
+  .vault code {
+    background: var(--surface-raised);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    font-size: 0.9em;
+    color: var(--text-muted);
+    /* A resolved filesystem path has no break opportunities of its own, so on a
+       phone it would otherwise push the whole heading block sideways. */
+    overflow-wrap: anywhere;
+  }
+
+  /* The one part of this paragraph that is not neutral prose. Colour alone
+     would not carry it — the sentence says "Not working" in words. */
+  .vault-problem {
+    color: var(--status-warn-fg);
   }
 </style>

@@ -1129,7 +1129,18 @@ def _cmd_secret_vault(config, args) -> None:
     # cache-shaped surprise, so it must not be subject to the cache it exists to
     # defeat. A fresh CLI process has an empty cache anyway — what this covers is
     # the in-process caller and the contract.
-    for result in secrets_vault.sync_all(config, users=users, force=True):
+    #
+    # `deliver=False`: the notification *row* is still written, because a
+    # failure seen here is a failure the user should find in their panel — the
+    # same reasoning `write_for_service` exists for on the Garmin skill-CLI leg.
+    # What is withheld is the push. The operator running this is reading the
+    # failure off their own terminal as it prints, so a push tells them nothing;
+    # and delivering one from a one-shot CLI process means standing an
+    # `AsyncRuntime` up and tearing it down for a Talk and ntfy fan-out nobody
+    # asked for. The daemon's own cycles still push.
+    for result in secrets_vault.sync_all(
+        config, users=users, force=True, deliver=False
+    ):
         _print_vault_sync(result)
 
 
@@ -1207,6 +1218,13 @@ def _print_vault_status(report) -> None:
         "  passphrase: "
         + ("provisioned" if report.passphrase_present else "NOT PROVISIONED")
     )
+    # The durable record, which is the only thing here that survives the
+    # process that wrote it. `last_success_at` rather than `last_sync_at`: the
+    # latter moves on a failed cycle too, so printing it as "last synced" would
+    # make a vault broken for a week read as having synced a moment ago.
+    print(f"  last sync:  {report.last_success_at or 'never (no record)'}")
+    if report.recorded_outcome and report.recorded_outcome != secrets_vault.OUTCOME_OK:
+        print(f"  last cycle: {report.recorded_outcome}")
     if report.outcome and report.outcome != secrets_vault.OUTCOME_OK:
         print(f"  status:     {report.outcome}")
         if report.reason:

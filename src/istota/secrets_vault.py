@@ -42,6 +42,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import io
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -1046,6 +1047,207 @@ class VaultKeyUnusable(VaultError):
 #: caught mid-flight is exactly the shape that should be looked at again.
 _CACHEABLE_OUTCOMES = frozenset({OUTCOME_OK, VaultCorrupt.__name__})
 
+
+# ---------------------------------------------------------------------------
+# What a failure says, per class
+# ---------------------------------------------------------------------------
+
+#: The service name this module raises its notification under, in
+#: ``connected_service``'s ``SERVICES`` allowlist. The same word as
+#: ``VAULT_PASSPHRASE_SERVICE``, and that is not a coincidence worth collapsing:
+#: one names a row in the secrets table and the other names a notification
+#: object id, and they are equal because both are "the vault" rather than
+#: because either is derived from the other.
+VAULT_NOTIFICATION_SERVICE = "vault"
+
+#: One sentence per outcome class, **code-owned and never ``str(exc)``**.
+#:
+#: §8 puts the class-specific text in ``raise_for_service``'s ``reason``
+#: argument rather than in ``connected_service``'s ``_REMEDY``, because that
+#: table is keyed by service and holds one static string each — so the classes
+#: cannot have a row apiece there. This is that text.
+#:
+#: **Why a table rather than the exception's own message.** ``reason`` is
+#: rendered into a notification body a browser displays, is copied into the
+#: row's ``params``, and is written into the per-user sync record below, which
+#: ``db_backup`` snapshots onto the mount. An exception message is safe only
+#: until somebody interpolates a path, a length or a value into one — and there
+#: is already a live example: ``secrets_store``'s too-weak-key message names the
+#: master key's *length*, which is why ``_resolve_passphrase`` logs that message
+#: and raises a fixed sentence instead. A table makes the property structural
+#: rather than a rule each raise site has to keep.
+#:
+#: **Eight classes, where §8 enumerates four and Stage 4 named three more.**
+#: ``VaultUnreadable`` is in neither enumeration and reaches ``_settle`` by
+#: exactly the route ``VaultMissing`` does, so it gets a sentence here and
+#: ``test_every_vault_error_class_has_a_sentence`` walks the subclasses rather
+#: than trusting either list.
+NOTIFICATION_REASONS: dict[str, str] = {
+    VaultLocked.__name__: (
+        "the stored passphrase does not match the file — re-provision it with "
+        "`istota secret ensure` and then run `istota secret vault-sync`"
+    ),
+    VaultCorrupt.__name__: (
+        "the file is not a readable KeePass database, which is also what a sync "
+        "caught mid-write looks like, so check the mount before suspecting the "
+        "file"
+    ),
+    VaultMissing.__name__: "there is nothing at the configured path",
+    VaultUnreadable.__name__: (
+        "the file at the configured path was refused unread — it is not a "
+        "regular file, or it is over the size cap"
+    ),
+    VaultLibraryMissing.__name__: (
+        "the `vault` extra is not installed on this host, which is an operator "
+        "remedy rather than one you can act on"
+    ),
+    VaultPassphraseMissing.__name__: (
+        "no vault passphrase has been provisioned yet — an operator provisions "
+        "it with `istota secret ensure --service vault --key passphrase "
+        "--generate`"
+    ),
+    VaultKeyUnusable.__name__: (
+        "this deployment's ISTOTA_SECRET_KEY cannot read stored credentials, "
+        "which is an operator remedy; the daemon log has the detail"
+    ),
+    VaultPathRefused.__name__: (
+        "the configured vault_path is not one the daemon may open — an operator "
+        "corrects it in config.toml"
+    ),
+}
+
+#: For an outcome with no row above. Reachable only through a defect, since the
+#: subclass walk in the tests requires every class to have one — but a raise
+#: that said nothing would be worse than a raise that said this.
+_DEFAULT_NOTIFICATION_REASON = "the vault could not be read; see the daemon log"
+
+
+def notification_reason(outcome: str) -> str:
+    """The sentence a given outcome class publishes, for every read surface."""
+    return NOTIFICATION_REASONS.get(outcome, _DEFAULT_NOTIFICATION_REASON)
+
+
+# ---------------------------------------------------------------------------
+# The durable record
+# ---------------------------------------------------------------------------
+
+#: A reserved ``istota_kv`` namespace, so the ``kv`` skill refuses it on every
+#: verb and the deferred-op replay refuses it again for a sandboxed task. The
+#: precedent is ``_session_log_sweep`` and ``_avatar_import``: framework state
+#: that happens to live in the KV store, written by the daemon and read by a
+#: process that never saw the work.
+#:
+#: **Per-user ``istota_kv`` rather than ``shared_kv``**, unlike those two: a
+#: vault belongs to one user and the table's key already carries a user id, so
+#: a shared row would need the id folded into the key by hand.
+VAULT_SYNC_STATE_NAMESPACE = "_vault_sync"
+VAULT_SYNC_STATE_KEY = "last_sync"
+
+
+def encode_sync_state(
+    outcome: str, reason: str, *, now: str, previous: dict | None
+) -> str:
+    """The row body for the cycle that just settled.
+
+    ``ok_at`` is carried forward from ``previous`` on a failure, because §9's
+    heading asks for the *last successful* sync and a failure must not erase the
+    answer. It is the field a reader should present as "last synced"; ``at``
+    moves on every settled cycle, failures included, and presenting *that* as
+    the sync time would make a vault that has been broken for a week read as
+    having synced a moment ago.
+
+    ``reason`` is the ``NOTIFICATION_REASONS`` sentence rather than the
+    exception's, for the reason that table gives: this row is read by the web
+    tier and snapshotted by ``db_backup`` onto the mount.
+    """
+    carried = (previous or {}).get("ok_at")
+    return json.dumps(
+        {
+            "at": now,
+            "outcome": outcome,
+            "reason": reason,
+            "ok_at": now if outcome == OUTCOME_OK else (carried or None),
+        },
+        sort_keys=True,
+    )
+
+
+def decode_sync_state(raw: object) -> dict | None:
+    """The last settled cycle's record, or ``None`` when there is not a usable one.
+
+    ``None`` rather than a raise on anything unparseable. Every reader is a
+    report — a settings endpoint, a CLI line, a notification resolver deciding
+    whether to keep a row open — and a row nobody can read is, for all three,
+    indistinguishable from no row at all.
+    """
+    if isinstance(raw, dict):
+        raw = raw.get("value")
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def read_sync_state(conn, user_id: str) -> dict | None:
+    """What the syncing process last settled for this user, on the caller's connection.
+
+    **Takes a connection rather than a path**, which is the opposite of every
+    other helper here, and deliberately: both readers already hold one. The
+    notification resolver is handed the panel's connection, and opening a second
+    one underneath it is the thirty-second busy-timeout hazard
+    ``.claude/rules/notifications.md`` opens with.
+    """
+    from . import db  # noqa: PLC0415 - see `sync_user` for the import rule
+
+    try:
+        return decode_sync_state(
+            db.kv_get(conn, user_id, VAULT_SYNC_STATE_NAMESPACE, VAULT_SYNC_STATE_KEY)
+        )
+    except Exception:  # noqa: BLE001 - a report, never the work
+        logger.warning("vault: could not read the sync record", exc_info=True)
+        return None
+
+
+def _record_sync_state(db_path, user_id: str, outcome: str, reason: str) -> None:
+    """Write down what this cycle settled, for the processes that never see it.
+
+    ``_SYNC_STATE`` is per-process and stays that way — §7's cache is about
+    whether the *next cycle in this process* does work, and persisting it would
+    change the restart semantics that section argues for. This is the other
+    question: what a process that never runs a sync can say about one. The web
+    tier renders the settings heading and the notification panel, and under the
+    Ansible shape it is a different unit from the scheduler entirely.
+    """
+    from . import db  # noqa: PLC0415
+
+    try:
+        with db.get_db(db_path) as conn:
+            # Read-modify-write on one connection inside one transaction, which
+            # is what lets `ok_at` carry forward without a second round trip.
+            previous = decode_sync_state(
+                db.kv_get(
+                    conn, user_id, VAULT_SYNC_STATE_NAMESPACE, VAULT_SYNC_STATE_KEY
+                )
+            )
+            db.kv_set(
+                conn,
+                user_id,
+                VAULT_SYNC_STATE_NAMESPACE,
+                VAULT_SYNC_STATE_KEY,
+                encode_sync_state(
+                    outcome, reason, now=db.iso_utc_now(), previous=previous
+                ),
+            )
+    except Exception:  # noqa: BLE001 - a record of the work, not the work
+        logger.warning(
+            "vault: %s: the sync record was not written", _label(user_id),
+            exc_info=True,
+        )
+
+
 #: ``user_id -> (digest, outcome)``. In memory, never persisted: a restart
 #: re-applies, every write is an idempotent upsert, and the alternative is a
 #: persistence question with no payoff.
@@ -1162,6 +1364,22 @@ class VaultStatusReport:
     absent: tuple[str, ...] = ()
     last_outcome: str = ""
 
+    #: The durable record of what the *syncing* process last settled, which is
+    #: a different question from the four fields above and is the only one a
+    #: process that never runs a sync can answer. ``last_success_at`` is what
+    #: §9's heading calls the last sync: ``last_sync_at`` moves on a failure
+    #: too, so presenting that one would make a vault broken for a week read as
+    #: having synced a moment ago.
+    last_sync_at: str = ""
+    last_success_at: str = ""
+    recorded_outcome: str = ""
+    recorded_reason: str = ""
+
+    #: False when the report was built without opening the file. The four
+    #: parse-only fields are then empty because nothing looked, which a renderer
+    #: has to be able to tell from "looked and found nothing".
+    parsed: bool = False
+
 
 def format_skip(service: str, key: str) -> str:
     """One ``skipped`` triple's subject, for a human-readable report.
@@ -1219,7 +1437,9 @@ def vault_owned_services(config, user_id: str) -> frozenset[str]:
     return declared
 
 
-def sync_user(config, user_id: str, *, force: bool = False) -> VaultSyncResult:
+def sync_user(
+    config, user_id: str, *, force: bool = False, deliver: bool = True
+) -> VaultSyncResult:
     """One user's vault, read and applied if the bytes have moved.
 
     The order is the design and each step earns its place ahead of the next:
@@ -1240,7 +1460,8 @@ def sync_user(config, user_id: str, *, force: bool = False) -> VaultSyncResult:
     ``_CACHEABLE_OUTCOMES``.
 
     ``force`` drops this user's cached state **before reading anything**, which
-    is what ``istota secret vault-sync`` passes.
+    is what ``istota secret vault-sync`` passes. ``deliver`` is the row-versus-
+    push fork for the same caller; see :func:`_report`.
 
     **It closes ``VaultLocation.dir_fd`` on every path**, including every
     failure path and the skip. A gate running per user per 300 seconds leaks one
@@ -1267,20 +1488,29 @@ def sync_user(config, user_id: str, *, force: bool = False) -> VaultSyncResult:
             # and not one to report a transition out of.
             return VaultSyncResult(user_id=user_id, outcome=OUTCOME_NOT_CONFIGURED)
         return _settle(
-            user_id, VaultPathRefused(resolution.refusal), digest=None, path=""
+            config,
+            user_id,
+            VaultPathRefused(resolution.refusal),
+            digest=None,
+            path="",
+            deliver=deliver,
         )
 
     location = resolution.location
     path = str(location.path)
     owned = frozenset(getattr(config.users.get(user_id), "vault_services", None) or ())
     try:
-        return _sync_resolved(config, user_id, location, path, owned)
+        return _sync_resolved(
+            config, user_id, location, path, owned, deliver=deliver
+        )
     finally:
         if location.dir_fd is not None:
             os.close(location.dir_fd)
 
 
-def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
+def _sync_resolved(
+    config, user_id, location, path, owned, *, deliver: bool = True
+) -> VaultSyncResult:
     """Everything after the path resolved, with the descriptor still open."""
     try:
         # `dir_fd` beside `path`, never one without the other: the descriptor is
@@ -1289,7 +1519,7 @@ def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
         # `tests/test_overlay_dir_containment.py` fails a call that drops it.
         data, digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
     except VaultError as exc:
-        return _settle(user_id, exc, digest=None, path=path)
+        return _settle(config, user_id, exc, digest=None, path=path, deliver=deliver)
 
     cached_digest, settled = _SYNC_STATE.get(user_id, (None, ""))
     if cached_digest is not None and cached_digest == digest:
@@ -1313,11 +1543,20 @@ def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
         passphrase = _resolve_passphrase(config.db_path, user_id)
         read = parse_vault(data, passphrase)
     except VaultError as exc:
-        return _settle(user_id, exc, digest=digest, path=path)
+        return _settle(
+            config, user_id, exc, digest=digest, path=path, deliver=deliver
+        )
 
     applied = apply_vault(config.db_path, user_id, read, owned)
     return _settle(
-        user_id, None, digest=digest, path=path, owned=owned, applied=applied
+        config,
+        user_id,
+        None,
+        digest=digest,
+        path=path,
+        owned=owned,
+        applied=applied,
+        deliver=deliver,
     )
 
 
@@ -1375,7 +1614,77 @@ def _resolve_passphrase(db_path, user_id: str) -> str:
     )
 
 
+def _report(
+    config, user_id: str, outcome: str, *, transition: bool, deliver: bool
+) -> None:
+    """The notification half of a settled cycle: raise once, close on success.
+
+    Three rules, and each is a decision rather than a consequence.
+
+    **Raise on a transition only.** The dedup bump does not redeliver, so a
+    second raise of an open row costs one UPDATE and no push — but it also
+    refreshes the body, and re-raising every cycle would make the panel row's
+    ``occurrences`` a count of cycles rather than of failures. A vault retried
+    every 300 seconds for a week is one row and one push.
+
+    **Close on every ``OUTCOME_OK``, not on a transition to it.** The
+    in-memory state is empty after a restart, so a daemon that raised a row and
+    then restarted has ``previous == ""`` on its next successful cycle — gated
+    on a transition *out of a failure*, that row would stand open for ever. The
+    close is an idempotent UPDATE matching nothing in the ordinary case, and
+    ``OUTCOME_OK`` only happens on a cycle where the digest moved.
+
+    **A skip reaches none of this**, because it never reaches ``_settle``. That
+    is the whole of the ``OUTCOME_UNCHANGED`` hazard: ``VaultCorrupt`` caches
+    its digest, so a cycle over a still-broken vault answers ``unchanged``
+    exactly as a healthy one does, and a close keyed on anything a skip returns
+    would close a warning about a vault that is still broken.
+
+    ``deliver`` is the row-versus-push fork ``connected_service`` already draws
+    for its own two callers. The daemon pushes; ``istota secret vault-sync``
+    writes the row and pushes nothing, because the operator running it is
+    looking at the failure on their own terminal, and because a push out of a
+    short-lived CLI process means standing an ``AsyncRuntime`` up to deliver it.
+
+    **Never raises, including out of a cancelled delivery.** The guards inside
+    ``connected_service`` catch ``Exception``, and a push goes through
+    ``run_coro``, whose ``future.result()`` raises ``CancelledError`` — a
+    ``BaseException`` — when the loop is torn down mid-send. In a plain thread
+    that means the delivery failed, not that this thread was cancelled, so it is
+    caught here beside ``Exception``; ``KeyboardInterrupt`` and ``SystemExit``
+    still propagate. Without this a daemon shutdown landing inside a vault
+    cycle's notification would escape ``sync_all``'s own ``except Exception``.
+    """
+    import asyncio  # noqa: PLC0415 - for the exception type alone
+
+    from .notification_resolvers import connected_service  # noqa: PLC0415
+
+    try:
+        if outcome == OUTCOME_OK:
+            connected_service.close_for_service(
+                config.db_path, user_id, VAULT_NOTIFICATION_SERVICE, by="vault_sync",
+            )
+            return
+        if not transition:
+            return
+        reason = notification_reason(outcome)
+        if deliver:
+            connected_service.raise_for_service(
+                config, user_id, VAULT_NOTIFICATION_SERVICE, reason=reason,
+            )
+        else:
+            connected_service.write_for_service(
+                config.db_path, user_id, VAULT_NOTIFICATION_SERVICE, reason=reason,
+            )
+    except (Exception, asyncio.CancelledError):  # noqa: BLE001 - see above
+        logger.warning(
+            "vault: %s: the notification for %s was not written",
+            _label(user_id), _label(outcome), exc_info=True,
+        )
+
+
 def _settle(
+    config,
     user_id: str,
     exc: VaultError | None,
     *,
@@ -1383,12 +1692,20 @@ def _settle(
     path: str,
     owned: frozenset[str] = frozenset(),
     applied: VaultApplyResult | None = None,
+    deliver: bool = True,
 ) -> VaultSyncResult:
     """Record the outcome, decide whether it is a transition, and say so once.
 
     The digest is stored **only** for a cacheable outcome, so the skip test one
     call up is a plain equality rather than a second condition that has to agree
     with ``_CACHEABLE_OUTCOMES``.
+
+    Three surfaces are written from here and the order is the cheap-to-recover
+    one: the in-memory state first (free, and the transition rule depends on
+    it), then the log, then the durable record, then the notification. Each of
+    the last two is guarded on its own, so losing either costs that surface and
+    not the cycle — the outcome this function returns is already settled by the
+    time either runs.
     """
     outcome = OUTCOME_OK if exc is None else type(exc).__name__
     reason = "" if exc is None else str(exc)
@@ -1423,6 +1740,15 @@ def _settle(
             applied.deleted,
         )
 
+    # The published sentence, never `reason` — see `NOTIFICATION_REASONS`.
+    _record_sync_state(
+        config.db_path,
+        user_id,
+        outcome,
+        "" if exc is None else notification_reason(outcome),
+    )
+    _report(config, user_id, outcome, transition=transition, deliver=deliver)
+
     return VaultSyncResult(
         user_id=user_id,
         outcome=outcome,
@@ -1437,7 +1763,11 @@ def _settle(
 
 
 def sync_all(
-    config, *, users: list[str] | None = None, force: bool = False
+    config,
+    *,
+    users: list[str] | None = None,
+    force: bool = False,
+    deliver: bool = True,
 ) -> list[VaultSyncResult]:
     """Every configured user's vault, one at a time, containing each failure.
 
@@ -1449,13 +1779,20 @@ def sync_all(
     Anything outside the ``VaultError`` closed set is a bug rather than a vault
     condition, so it is logged with a stack and reported as ``OUTCOME_ERROR``
     rather than folded into an error class a notification would then explain
-    wrongly.
+    wrongly. **That arm deliberately reaches neither the sync record nor a
+    notification**: it never enters ``_settle``, so nothing is settled, nothing
+    is published, and the next cycle transitions from whatever the last real
+    outcome was. A raise here is a defect in this module, and a defect must not
+    be published to a user as a statement about their vault file — the stack in
+    the daemon log is the right and only surface for it.
     """
     wanted = list(config.users) if users is None else users
     results: list[VaultSyncResult] = []
     for user_id in wanted:
         try:
-            results.append(sync_user(config, user_id, force=force))
+            results.append(
+                sync_user(config, user_id, force=force, deliver=deliver)
+            )
         except Exception:  # noqa: BLE001 - a background gate, one user of many
             logger.exception("vault: %s: sync failed unexpectedly", _label(user_id))
             results.append(
@@ -1468,7 +1805,9 @@ def sync_all(
     return results
 
 
-def vault_status(config, user_id: str) -> VaultStatusReport:
+def vault_status(
+    config, user_id: str, *, parse: bool = True
+) -> VaultStatusReport:
     """What this user's vault looks like right now, without applying anything.
 
     **It applies nothing** — no credential row is written, updated or deleted —
@@ -1490,8 +1829,30 @@ def vault_status(config, user_id: str) -> VaultStatusReport:
     ``istota/<service>`` group found, owned or not, precisely so this can tell a
     user their group name matches nothing — the hardest failure in this design to
     diagnose from their end, because the file looks right.
+
+    **``parse=False`` is §9's endpoint, and it is not an optimisation.** An
+    Argon2id unlock is tuned to about a second, and a settings page that spent
+    one per load would spend it inside a FastAPI handler — where, on the event
+    loop, it stalls every other request in the web process, and where a wedged
+    ``fuse.rclone`` mount stalls them indefinitely. The endpoint does not need
+    the parse either: §9's heading asks for the path, the owned services, the
+    last successful sync and the failing class, and every one of those is either
+    config, a resolve, or the durable record below. So this stays one function
+    returning one shape — ``usage_render``'s rule for a fact with a CLI and a web
+    surface — with the four parse-only fields empty and ``parsed`` False to say
+    so. What ``parse=False`` still does is *resolve*, because a refused path is
+    the one failing state that is true of the configuration rather than of a
+    past cycle, and reporting a stale ``VaultPathRefused`` — or missing a fresh
+    one — would be wrong in both directions.
+
+    The **durable record** is read on both arms. It is what makes this verb
+    answer at all in a process that has never run a sync: the web process under
+    the Ansible shape is a different unit from the scheduler, and a CLI
+    invocation is a different process again, so ``last_outcome`` is empty for
+    both and always has been.
     """
-    from . import storage  # noqa: PLC0415 - see `sync_user`
+    from . import db  # noqa: PLC0415 - see `sync_user`
+    from . import storage  # noqa: PLC0415
 
     user = config.users.get(user_id)
     raw = getattr(user, "vault_path", "") if user is not None else ""
@@ -1500,16 +1861,35 @@ def vault_status(config, user_id: str) -> VaultStatusReport:
     if not raw:
         return VaultStatusReport(user_id=user_id, configured=False, owned=owned)
 
+    recorded: dict | None = None
+    try:
+        with db.get_db(config.db_path) as conn:
+            recorded = read_sync_state(conn, user_id)
+    except Exception:  # noqa: BLE001 - a report, never the work
+        logger.warning("vault: could not open the database for the sync record")
+    recorded = recorded or {}
+
+    def _with_record(report: VaultStatusReport) -> VaultStatusReport:
+        return dataclasses.replace(
+            report,
+            last_sync_at=str(recorded.get("at") or ""),
+            last_success_at=str(recorded.get("ok_at") or ""),
+            recorded_outcome=str(recorded.get("outcome") or ""),
+            recorded_reason=str(recorded.get("reason") or ""),
+        )
+
     resolution = storage.resolve_user_vault_path(config, user_id)
     if resolution.location is None:
-        return VaultStatusReport(
-            user_id=user_id,
-            configured=True,
-            refusal=resolution.refusal or "",
-            owned=owned,
-            outcome=VaultPathRefused.__name__,
-            reason=resolution.refusal or "",
-            last_outcome=last,
+        return _with_record(
+            VaultStatusReport(
+                user_id=user_id,
+                configured=True,
+                refusal=resolution.refusal or "",
+                owned=owned,
+                outcome=VaultPathRefused.__name__,
+                reason=notification_reason(VaultPathRefused.__name__),
+                last_outcome=last,
+            )
         )
 
     location = resolution.location
@@ -1522,14 +1902,24 @@ def vault_status(config, user_id: str) -> VaultStatusReport:
         present = secrets_store.secret_exists(
             config.db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
         )
-        report = VaultStatusReport(
-            user_id=user_id,
-            configured=True,
-            path=str(location.path),
-            owned=owned,
-            passphrase_present=present,
-            last_outcome=last,
+        report = _with_record(
+            VaultStatusReport(
+                user_id=user_id,
+                configured=True,
+                path=str(location.path),
+                owned=owned,
+                passphrase_present=present,
+                last_outcome=last,
+            )
         )
+        if not parse:
+            # The resolve was the point; nothing below it is answerable without
+            # opening the file. `outcome` stays empty rather than being filled
+            # in from the record, because the two say different things — one is
+            # what this call found, the other is what a past cycle settled — and
+            # a renderer that could not tell them apart would report a week-old
+            # failure as the current state of a file it never looked at.
+            return report
         try:
             data, _digest = read_vault_bytes(
                 location.path, dir_fd=location.dir_fd
@@ -1538,7 +1928,7 @@ def vault_status(config, user_id: str) -> VaultStatusReport:
             read = parse_vault(data, passphrase)
         except VaultError as exc:
             return dataclasses.replace(
-                report, outcome=type(exc).__name__, reason=str(exc)
+                report, outcome=type(exc).__name__, reason=str(exc), parsed=True
             )
     finally:
         if location.dir_fd is not None:
@@ -1548,6 +1938,7 @@ def vault_status(config, user_id: str) -> VaultStatusReport:
     return dataclasses.replace(
         report,
         outcome=OUTCOME_OK,
+        parsed=True,
         groups=dict(read.group_present),
         key_counts={
             service: len(values) for service, values in read.services.items()
