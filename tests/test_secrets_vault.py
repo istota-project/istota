@@ -48,16 +48,16 @@ from unittest import mock
 
 import pytest
 
-from istota import secret_schema, secrets_store
+from istota import secret_schema
 from istota import secrets_vault as secrets_vault_module
 from istota.config import UserConfig, load_config
 from istota.secrets_vault import (
     DAEMON_WRITTEN_SERVICES,
-    SKIP_DELETE_HELD,
+    SKIP_DUPLICATE_NAME,
     SKIP_INELIGIBLE_SERVICE,
+    SKIP_OVERSIZE_VALUE,
     SKIP_RESERVED_SERVICE,
-    SKIP_UNKNOWN_KEY,
-    SKIP_UNREADABLE_ROW,
+    SKIP_UNUSABLE_NAME,
     VAULT_READ_CAP_BYTES,
     VaultCorrupt,
     VaultLibraryMissing,
@@ -65,7 +65,6 @@ from istota.secrets_vault import (
     VaultMissing,
     VaultRead,
     VaultUnreadable,
-    apply_vault,
     eligible_services,
     parse_vault,
     read_vault_bytes,
@@ -88,6 +87,20 @@ PASSPHRASE = "fixture-passphrase-not-a-real-one"
 API_KEY_VALUE = "ak-vault-fixture-alpha"
 BASE_URL_VALUE = "https://karakeep.example.com"
 TOPIC_VALUE = "ntfy-fixture-topic"
+USERNAME_VALUE = "un-vault-fixture-delta"
+CUSTOM_VALUE = "cf-vault-fixture-epsilon"
+NOTES_VALUE = "nt-vault-fixture-zeta"
+
+
+def _ours(caplog):
+    """Every message this module logged, and nothing anyone else did.
+
+    `caplog.records` non-empty proves nothing on its own: pykeepass emits five
+    DEBUG records during an ordinary parse, so a sweep over all of them was
+    satisfied by a third party's output and stayed green with all three
+    warnings deleted.
+    """
+    return [r.getMessage() for r in caplog.records if r.name == "istota.secrets_vault"]
 
 
 def _new_db(tmp_path, *, password=PASSPHRASE, name="vault.kdbx"):
@@ -177,20 +190,61 @@ def _library_absent():
 class TestRead:
     """`read_vault_bytes` and `parse_vault` against real KDBX files."""
 
-    # ---- the mapping ---------------------------------------------------
+    # ---- the names -----------------------------------------------------
 
-    def test_the_mapping(self, tmp_path):
-        """Group path `istota/<service>`, entry title is the key, password the
-        value."""
+    def test_the_names_a_flat_entry_produces(self, tmp_path):
+        """An entry sitting directly under `istota/` is a name of its own.
+
+        The path below the root group is the whole of the derivation, so the
+        shortest path is one segment — and that shape is the one the previous
+        design threw away, because it had no service to file it under."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "GitHub PAT", "", API_KEY_VALUE)
+        kp.save()
+
+        read, digest = _read(path)
+
+        assert read.services == {"github_pat": API_KEY_VALUE}
+        assert read.digest == digest
+
+    def test_the_names_a_nested_entry_produces(self, tmp_path):
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(kp.add_group(root, "Home Assistant"), "Token", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"home_assistant_token": API_KEY_VALUE}
+
+    def test_the_names_a_three_level_nested_entry_produces(self, tmp_path):
+        """Every group between the root and the entry is a segment, in order."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        work = kp.add_group(root, "Work")
+        aws = kp.add_group(work, "AWS")
+        kp.add_entry(kp.add_group(aws, "prod"), "Access Key", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"work_aws_prod_access_key": API_KEY_VALUE}
+
+    def test_the_standard_vault_reads_as_four_names(self, tmp_path):
+        """The fixture the rest of the file is built on, in the new vocabulary.
+
+        Its entries are laid out the way the old service mapping wanted them,
+        which is now simply a two-segment path and nothing special."""
         _, path = _standard_vault(tmp_path)
 
         read, digest = _read(path)
 
         assert read.services == {
-            "karakeep": {"base_url": BASE_URL_VALUE, "api_key": API_KEY_VALUE},
-            "ntfy": {"topic": TOPIC_VALUE},
+            "karakeep_base_url": BASE_URL_VALUE,
+            "karakeep_api_key": API_KEY_VALUE,
+            "ntfy_topic": TOPIC_VALUE,
         }
-        assert read.group_present == {"karakeep": "karakeep", "ntfy": "ntfy"}
         assert read.digest == digest
 
     def test_the_digest_is_the_sha256_of_the_file_bytes(self, tmp_path):
@@ -204,156 +258,500 @@ class TestRead:
         assert data == path.read_bytes()
         assert parse_vault(data, PASSPHRASE).digest == digest
 
-    def test_everything_but_the_title_and_the_password_is_ignored(self, tmp_path):
-        """Username, URL and notes are not keys and not values."""
+    def test_username_url_and_a_custom_field_each_take_a_suffix(self, tmp_path):
+        """One entry, four credentials — the case the previous design could not
+        express at all, and the reason custom string fields are read now."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(
-            karakeep,
-            "api_key",
-            "a-username",
-            API_KEY_VALUE,
-            url="https://example.invalid",
-            notes="a note",
+        entry = kp.add_entry(
+            root, "Acme", USERNAME_VALUE, API_KEY_VALUE, url=BASE_URL_VALUE
         )
+        entry.set_custom_property("API Key", CUSTOM_VALUE)
         kp.save()
 
         read, _ = _read(path)
 
-        assert read.services == {"karakeep": {"api_key": API_KEY_VALUE}}
+        assert read.services == {
+            "acme": API_KEY_VALUE,
+            "acme_username": USERNAME_VALUE,
+            "acme_url": BASE_URL_VALUE,
+            "acme_api_key": CUSTOM_VALUE,
+        }
+
+    def test_a_note_is_not_read(self, tmp_path):
+        """Notes are free text and frequently hold something other than a
+        credential. A user who wants one read puts it in a custom field."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "Acme", "", API_KEY_VALUE, notes=NOTES_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"acme": API_KEY_VALUE}
+        assert NOTES_VALUE not in read.services.values()
 
     def test_values_are_stripped_of_surrounding_whitespace(self, tmp_path):
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", f"  {API_KEY_VALUE}\n")
+        kp.add_entry(root, "Acme", "", f"  {API_KEY_VALUE}\n")
         kp.save()
 
         read, _ = _read(path)
 
-        assert read.services["karakeep"]["api_key"] == API_KEY_VALUE
+        assert read.services == {"acme": API_KEY_VALUE}
 
-    def test_an_entry_directly_under_the_root_group_is_ignored(self, tmp_path):
-        """`istota/<key>` with no service subgroup belongs to no service."""
+    def test_an_entry_with_only_a_username_is_legitimate(self, tmp_path, caplog):
+        """One name, no warning. Every entry has an empty URL field and most
+        have an empty username, so an empty field is the ordinary case rather
+        than a mistake — which is why it is silent."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        kp.add_entry(root, "api_key", "", API_KEY_VALUE)
+        kp.add_entry(root, "Acme", USERNAME_VALUE, "")
         kp.save()
 
-        read, _ = _read(path)
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
 
-        assert read.services == {}
-        assert read.group_present == {}
+        assert read.services == {"acme_username": USERNAME_VALUE}
+        assert _ours(caplog) == []
 
-    def test_a_vault_with_no_istota_group_reads_as_empty(self, tmp_path):
-        """Not an error: a KDBX that parses and mentions no service is a vault
-        with no opinion, which §6 rule 1 turns into silence rather than
-        deletion."""
-        kp, path = _new_db(tmp_path)
-        other = kp.add_group(kp.root_group, "Personal")
-        kp.add_entry(other, "api_key", "", API_KEY_VALUE)
-        kp.save()
+    # ---- what an empty field holds back --------------------------------
 
-        read, _ = _read(path)
+    def test_an_empty_field_produces_no_name_and_holds_it(self, tmp_path):
+        """The one piece of state the applying half cannot derive.
 
-        assert read.services == {}
-        assert read.group_present == {}
-
-    def test_an_empty_service_group_is_still_present(self, tmp_path):
-        """Presence, not content, is what §6's deletion rule fires on, so a
-        group holding no entries has to reach `group_present` with an empty
-        bucket beside it rather than being dropped as uninteresting."""
+        The namespace sweep deletes every stored name the read does not hold,
+        so a blanked password field — the fat-finger case — would delete the
+        credential it was meant to change. `held` is what stops that, and it
+        covers every field of the entry rather than the password alone."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        kp.add_group(root, "ntfy")
+        kp.add_entry(root, "Acme", "", "")
+        kp.add_entry(root, "Other", "", API_KEY_VALUE)
         kp.save()
 
         read, _ = _read(path)
 
-        assert read.group_present == {"ntfy": "ntfy"}
-        assert read.services == {"ntfy": {}}
+        assert read.services == {"other": API_KEY_VALUE}
+        assert {"acme", "acme_username", "acme_url"} <= read.held
+        # Deleting a credential means deleting the entry, so a name no entry
+        # produced at all is neither written nor held.
+        assert "gone" not in read.held
 
-    # ---- the skip rules ------------------------------------------------
-
-    def test_an_empty_password_is_skipped_rather_than_deleting(self, tmp_path):
-        """`set_secret` reads an empty value as a deletion, and the vault
-        deliberately does not expose that: an empty password field is a far
-        likelier fat-finger than a deliberate one, so the key is dropped from
-        the read entirely. Deleting a credential means deleting the entry."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", "")
-        kp.add_entry(karakeep, "base_url", "", BASE_URL_VALUE)
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.services == {"karakeep": {"base_url": BASE_URL_VALUE}}
-        assert "karakeep" in read.group_present
-
-    def test_a_whitespace_only_password_is_skipped_too(self, tmp_path):
-        """Values are stripped before the emptiness test, or a key whose value
-        is a stray newline lands in the table as an empty string — which
+    def test_a_whitespace_only_value_is_held_too(self, tmp_path):
+        """Values are stripped before the emptiness test, or a value that is a
+        stray newline lands in the table as an empty string — which
         `set_secret` reads as a deletion."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        kp.add_entry(kp.add_group(root, "karakeep"), "api_key", "", "   \n ")
+        kp.add_entry(root, "Acme", "", "   \n ")
         kp.save()
 
         read, _ = _read(path)
 
-        assert read.services == {"karakeep": {}}
+        assert read.services == {}
+        assert "acme" in read.held
 
-    def test_a_duplicate_title_skips_that_key_and_only_that_key(self, tmp_path):
-        """Picking either copy silently would make which credential is live
-        depend on the XML order."""
+    def test_an_entry_with_nothing_in_it_says_so_once(self, tmp_path, caplog):
+        """The old empty-password warning, kept for the case that is still a
+        mistake: an entry that sets nothing at all."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", "ak-first")
-        kp.add_entry(karakeep, "api_key", "", "ak-second", force_creation=True)
-        kp.add_entry(karakeep, "base_url", "", BASE_URL_VALUE)
+        kp.add_entry(root, "Acme", "", "")
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert read.services == {}
+        said = _ours(caplog)
+        assert len(said) == 1, said
+        assert "acme" in said[0].lower() and "delete the entry" in said[0]
+
+    def test_a_value_over_the_byte_cap_is_skipped_and_held(self, tmp_path, caplog):
+        """Refusing the new value *and* destroying the old one is a combination
+        no rule here intends, so an oversize value takes the same hold an empty
+        one does. The warning names the size and never the value."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        oversize = "z" * (secrets_vault_module.VAULT_MAX_VALUE_BYTES + 1)
+        kp.add_entry(root, "Acme", "", oversize)
+        kp.add_entry(root, "Other", "", API_KEY_VALUE)
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert read.services == {"other": API_KEY_VALUE}
+        assert "acme" in read.held
+        assert ("acme", SKIP_OVERSIZE_VALUE) in read.skipped
+        said = _ours(caplog)
+        assert len(said) == 1, said
+        assert "acme" in said[0] and str(len(oversize)) in said[0]
+        assert oversize not in said[0]
+
+    def test_a_value_at_the_byte_cap_is_read(self, tmp_path):
+        """The boundary, in bytes rather than characters: a multi-byte value is
+        measured as UTF-8, which is what the column stores."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        cap = secrets_vault_module.VAULT_MAX_VALUE_BYTES
+        kp.add_entry(root, "Acme", "", "z" * cap)
+        kp.add_entry(root, "Wide", "", "é" * (cap // 2))
+        kp.add_entry(root, "Over", "", "é" * (cap // 2 + 1))
         kp.save()
 
         read, _ = _read(path)
 
-        assert read.services == {"karakeep": {"base_url": BASE_URL_VALUE}}
+        assert set(read.services) == {"acme", "wide"}
+        assert "over" in read.held
 
-    def test_a_duplicate_whose_first_copy_is_empty_is_still_a_duplicate(
+    # ---- one name, one producer ----------------------------------------
+
+    def test_two_entries_that_produce_one_name_are_both_absent(
+        self, tmp_path, caplog
+    ):
+        """The derivation flattens, so `istota/aws/key` and `istota/AWS Key`
+        are the same name. Choosing either silently would make which credential
+        is live depend on the XML order.
+
+        Not *held*, deliberately: a collided name is absent, and therefore
+        deleted if it was stored before, because istota cannot say which of the
+        two values it is."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(kp.add_group(root, "aws"), "key", "", "ak-from-the-group")
+        kp.add_entry(root, "AWS Key", "", "ak-from-the-flat-entry")
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert "aws_key" not in read.services
+        assert "aws_key" not in read.held
+        assert ("aws_key", SKIP_DUPLICATE_NAME) in read.skipped
+        said = [m for m in _ours(caplog) if "aws_key" in m]
+        assert len(said) == 1, said
+
+    def test_the_group_form_alone_is_present(self, tmp_path):
+        """The first half of the collision's control: with only one producer,
+        the name is there — so the test above is about the collision rather
+        than about either entry being unreadable."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(kp.add_group(root, "aws"), "key", "", "ak-from-the-group")
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services["aws_key"] == "ak-from-the-group"
+
+    def test_the_flat_form_alone_is_present(self, tmp_path):
+        """The other half."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "AWS Key", "", "ak-from-the-flat-entry")
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services["aws_key"] == "ak-from-the-flat-entry"
+
+    def test_a_custom_field_can_collide_with_a_standard_one(self, tmp_path):
+        """`custom_properties` excludes the *exactly* reserved field names, so a
+        custom `Url` is a custom field that slugs onto the standard URL field's
+        name — which is the collision rule working rather than a case to
+        special-case. (`URL` itself is refused by pykeepass, so a file cannot
+        hold both spellings of the reserved name.)"""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        entry = kp.add_entry(root, "Acme", "", API_KEY_VALUE, url=BASE_URL_VALUE)
+        entry.set_custom_property("Url", "https://collides.invalid")
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"acme": API_KEY_VALUE}
+        assert ("acme_url", SKIP_DUPLICATE_NAME) in read.skipped
+
+    def test_an_empty_field_still_collides(self, tmp_path):
+        """A name is produced by the *field*, not by its value, so an empty one
+        collides exactly as a filled one does. Otherwise emptying one of two
+        colliding entries would silently promote the other, which is the same
+        XML-order dependence one step removed."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(kp.add_group(root, "aws"), "key", "", "")
+        kp.add_entry(root, "AWS Key", "", "ak-from-the-flat-entry")
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert "aws_key" not in read.services
+        assert ("aws_key", SKIP_DUPLICATE_NAME) in read.skipped
+
+    def test_two_spellings_of_one_group_collide(self, tmp_path):
+        """Case folding happens inside the name, so `Karakeep` and `karakeep`
+        are one namespace rather than two."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(kp.add_group(root, "Karakeep"), "api_key", "", "ak-upper")
+        kp.add_entry(kp.add_group(root, "karakeep"), "api_key", "", "ak-lower")
+        kp.add_entry(kp.add_group(root, "ntfy"), "topic", "", TOPIC_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"ntfy_topic": TOPIC_VALUE}
+
+    def test_an_edited_entrys_history_is_not_a_collision(self, tmp_path):
+        """The expensive one if `Group.entries` ever stops meaning current
+        entries: a KDBX keeps previous versions of an edited entry as `History`
+        children, so every credential the user has ever changed would collide
+        with itself — silently, and for the names they touch most."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        entry = kp.add_entry(root, "Acme", "", "ak-the-old-value")
+        entry.save_history()
+        entry.password = API_KEY_VALUE
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"acme": API_KEY_VALUE}
+
+    # ---- names that cannot be used --------------------------------------
+
+    def test_a_title_that_slugs_to_nothing_is_skipped(self, tmp_path, caplog):
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "!!!", "", API_KEY_VALUE)
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert read.services == {}
+        assert read.skipped == (("!!!", SKIP_UNUSABLE_NAME),)
+        assert any("!!!" in m for m in _ours(caplog)), _ours(caplog)
+
+    def test_a_name_starting_with_a_digit_is_skipped(self, tmp_path):
+        """The name is what a person types in a shell and what a script may
+        export as a variable."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "9lives", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {}
+        assert read.skipped == (("9lives", SKIP_UNUSABLE_NAME),)
+
+    def test_a_name_over_the_length_cap_is_skipped(self, tmp_path):
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        cap = secrets_vault_module.VAULT_NAME_MAX_CHARS
+        kp.add_entry(root, "a" * cap, "", API_KEY_VALUE)
+        kp.add_entry(root, "b" * (cap + 1), "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert set(read.services) == {"a" * cap}
+        assert read.skipped == (("b" * (cap + 1), SKIP_UNUSABLE_NAME),)
+
+    def test_a_group_segment_that_slugs_to_nothing_refuses_the_whole_name(
         self, tmp_path
     ):
-        """The ordering case, and the branch a refactor reorders.
+        """The trailing-underscore trap, and why an empty segment is refused
+        rather than dropped.
 
-        An empty-password entry has to be recorded as *seen* before it is
-        skipped, or `api_key` (empty) followed by `api_key` (a value) resolves
-        to the second one — which is the silent XML-order dependence the rule
-        above exists to refuse, arrived at from the other direction."""
+        `^[a-z][a-z0-9_]{0,63}$` admits a trailing underscore, so joining an
+        empty segment would answer `aws_` for `istota/aws/!!!` — a name the user
+        never wrote, which every other junk-titled entry in that group produces
+        identically."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", "")
-        kp.add_entry(karakeep, "api_key", "", API_KEY_VALUE, force_creation=True)
+        kp.add_entry(kp.add_group(root, "   "), "key", "", API_KEY_VALUE)
+        kp.add_entry(kp.add_group(root, "aws"), "!!!", "", API_KEY_VALUE)
         kp.save()
 
         read, _ = _read(path)
 
-        assert read.services == {"karakeep": {}}
+        assert read.services == {}
+        assert not any(name.endswith("_") for name in read.services)
+        assert {reason for _name, reason in read.skipped} == {SKIP_UNUSABLE_NAME}
+
+    def test_a_custom_field_whose_name_is_unusable_is_skipped_alone(self, tmp_path):
+        """One field refused does not cost the entry its other names."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        entry = kp.add_entry(root, "Acme", "", API_KEY_VALUE)
+        entry.set_custom_property("???", CUSTOM_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"acme": API_KEY_VALUE}
+        assert read.skipped == (("Acme/???", SKIP_UNUSABLE_NAME),)
 
     def test_an_untitled_entry_is_skipped(self, tmp_path):
-        """An entry with no title names no key. It must not raise on the way
+        """An entry with no title names nothing. It must not raise on the way
         past, which a bare `title.strip()` would."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "", "", API_KEY_VALUE)
-        kp.add_entry(karakeep, "base_url", "", BASE_URL_VALUE)
+        kp.add_entry(root, "", "", API_KEY_VALUE)
+        kp.add_entry(root, "Other", "", BASE_URL_VALUE)
         kp.save()
 
         read, _ = _read(path)
 
-        assert read.services == {"karakeep": {"base_url": BASE_URL_VALUE}}
+        assert read.services == {"other": BASE_URL_VALUE}
+
+    def test_slug_name_is_pure(self):
+        """The rules on their own, so the walk's tests are about the walk.
+
+        Every call site warns for itself, because only the caller knows which
+        entry and which field produced the name."""
+        from istota.secrets_vault import slug_name
+
+        assert slug_name(["GitHub PAT"]) == "github_pat"
+        assert slug_name(["Home Assistant", "Token"]) == "home_assistant_token"
+        assert slug_name(["  spaced  out  "]) == "spaced_out"
+        assert slug_name(["a-b_c.d"]) == "a_b_c_d"
+        # No transliteration is attempted: what survives is the ASCII, which
+        # is the rule being literal rather than clever. Two names that collapse
+        # to the same thing collide, which is where that is answered.
+        assert slug_name(["ÉTÉ"]) == "t"
+        assert slug_name([]) is None
+        assert slug_name([""]) is None
+        assert slug_name(["aws", ""]) is None
+        assert slug_name(["9lives"]) is None
+        assert slug_name(["x" * 65]) is None
+        assert slug_name(["x" * 64]) == "x" * 64
+
+    # ---- the caps --------------------------------------------------------
+
+    def test_the_shipped_caps(self):
+        """Module constants rather than settings: an operator who needs a
+        different *parse* cap is a signal to revisit the design."""
+        assert secrets_vault_module.VAULT_MAX_DEPTH == 8
+        assert secrets_vault_module.VAULT_MAX_ENTRIES == 512
+        assert secrets_vault_module.VAULT_MAX_NAMES == 1024
+        assert secrets_vault_module.VAULT_MAX_VALUE_BYTES == 8192
+        assert secrets_vault_module.VAULT_NAME_MAX_CHARS == 64
+
+    def test_groups_deeper_than_the_cap_are_not_walked(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The cap is counted in subgroup levels below the root group, so a
+        cap of 1 admits `istota/<group>/<entry>` and nothing below it."""
+        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_DEPTH", 1)
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        shallow = kp.add_group(root, "aws")
+        kp.add_entry(shallow, "key", "", API_KEY_VALUE)
+        kp.add_entry(kp.add_group(shallow, "deeper"), "key", "", BASE_URL_VALUE)
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert read.services == {"aws_key": API_KEY_VALUE}
+        assert any("deeper than 1" in m for m in _ours(caplog)), _ours(caplog)
+
+    def test_the_entry_cap_stops_the_walk_and_applies_what_it_read(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_ENTRIES", 2)
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        for index in range(4):
+            kp.add_entry(root, f"entry{index}", "", f"value-{index}")
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert set(read.services) == {"entry0", "entry1"}
+        assert any("entry cap" in m for m in _ours(caplog)), _ours(caplog)
+
+    def test_the_name_cap_stops_the_walk_and_applies_what_it_read(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Names are counted as they are produced, so the cap can fall inside
+        an entry — the password, the username and the URL are three."""
+        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_NAMES", 2)
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        kp.add_entry(root, "Acme", USERNAME_VALUE, API_KEY_VALUE, url=BASE_URL_VALUE)
+        kp.add_entry(root, "Other", "", TOPIC_VALUE)
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert read.services == {"acme": API_KEY_VALUE, "acme_username": USERNAME_VALUE}
+        assert any("name cap" in m for m in _ours(caplog)), _ours(caplog)
+
+    # ---- what the walk excludes -----------------------------------------
+
+    def test_a_vault_with_no_istota_group_reads_as_empty_and_says_so(
+        self, tmp_path, caplog
+    ):
+        """"I emptied my vault" and "I mistyped the group name" reach the same
+        state, and only one of them was intended — so the absence is said out
+        loud even though it is not an error."""
+        kp, path = _new_db(tmp_path)
+        kp.add_entry(kp.add_group(kp.root_group, "Personal"), "key", "", API_KEY_VALUE)
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert read.services == {}
+        assert any("istota" in m for m in _ours(caplog)), _ours(caplog)
+
+    def test_an_istota_group_nested_in_another_group_is_not_read(self, tmp_path):
+        """Only the root-level group is the consent boundary. A nested one is
+        somebody else's folder that happens to share a name."""
+        kp, path = _new_db(tmp_path)
+        outer = kp.add_group(kp.root_group, "Personal")
+        kp.add_entry(kp.add_group(outer, "istota"), "key", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {}
+
+    def test_the_top_level_group_name_is_not_folded(self, tmp_path):
+        """`Istota/` is not the vault's group. Matched exactly, so the file
+        either is shared or is not, with nothing in between."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "Istota")
+        kp.add_entry(kp.add_group(root, "karakeep"), "api_key", "", API_KEY_VALUE)
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {}
+
+    def test_an_empty_istota_group_reads_as_empty_without_a_warning(
+        self, tmp_path, caplog
+    ):
+        """The group is there, so the absent-group warning must not fire: the
+        two states have different remedies and only one of them is a typo."""
+        kp, path = _new_db(tmp_path)
+        kp.add_group(kp.root_group, "istota")
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        assert read.services == {} and read.held == frozenset()
+        assert _ours(caplog) == []
 
     # ---- the recycle bin -----------------------------------------------
 
@@ -367,7 +765,9 @@ class TestRead:
 
         read, _ = _read(path)
 
-        assert read.services["karakeep"] == {"base_url": BASE_URL_VALUE}
+        assert "karakeep_api_key" not in read.services
+        assert "karakeep_api_key" not in read.held
+        assert read.services["karakeep_base_url"] == BASE_URL_VALUE
 
     def test_a_trashed_istota_group_is_excluded(self, tmp_path):
         """Trashing the whole group moves it *under* the recycle bin, where a
@@ -381,19 +781,19 @@ class TestRead:
         read, _ = _read(path)
 
         assert read.services == {}
-        assert read.group_present == {}
 
-    def test_a_service_group_nominated_as_the_recycle_bin_is_excluded(
+    def test_a_nested_group_nominated_as_the_recycle_bin_is_excluded(
         self, tmp_path
     ):
         """The defensive half, for the layout the walk does not exclude by
         construction.
 
-        KeePassXC lets any group be the recycle bin, so `istota/karakeep` can be
-        one — at which point every entry in it is something the user deleted,
-        sitting exactly where the walk looks. Nominated here by writing the Meta
-        element, because there is no public setter and the point is the file
-        this reader will meet rather than the API that produced it."""
+        KeePassXC lets any group be the recycle bin, so a group inside
+        `istota/` can be one — at which point every entry in it is something
+        the user deleted, sitting exactly where the walk looks. Nominated here
+        by writing the Meta element, because there is no public setter and the
+        point is the file this reader will meet rather than the API that
+        produced it."""
         kp, path = _standard_vault(tmp_path)
         karakeep = kp.find_groups(name="karakeep", first=True)
         elem = kp._xpath("/KeePassFile/Meta/RecycleBinUUID", first=True)
@@ -402,8 +802,29 @@ class TestRead:
 
         read, _ = _read(path)
 
-        assert read.services == {"ntfy": {"topic": TOPIC_VALUE}}
-        assert read.group_present == {"ntfy": "ntfy"}
+        assert read.services == {"ntfy_topic": TOPIC_VALUE}
+
+    def test_a_deeply_nested_group_nominated_as_the_recycle_bin_is_excluded(
+        self, tmp_path
+    ):
+        """The bin is tested at every level of the recursion rather than at the
+        top two, which is what the walk being recursive changed."""
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        work = kp.add_group(root, "work")
+        binned = kp.add_group(work, "old")
+        kp.add_entry(binned, "key", "", API_KEY_VALUE)
+        kp.add_entry(work, "key", "", BASE_URL_VALUE)
+        kp.save()
+        elem = kp._xpath("/KeePassFile/Meta/RecycleBinUUID", first=True)
+        elem.text = base64.b64encode(
+            kp.find_groups(name="old", first=True).uuid.bytes
+        ).decode()
+        kp.save()
+
+        read, _ = _read(path)
+
+        assert read.services == {"work_key": BASE_URL_VALUE}
 
     def test_the_istota_group_nominated_as_the_recycle_bin_is_excluded(
         self, tmp_path
@@ -424,143 +845,6 @@ class TestRead:
         read, _ = _read(path)
 
         assert read.services == {}
-        assert read.group_present == {}
-
-    # ---- what the walk's shape excludes --------------------------------
-
-    def test_an_entry_nested_deeper_than_one_subgroup_is_not_a_key(self, tmp_path):
-        """`istota/<service>/<key>` and no deeper.
-
-        Implemented by *not* recursing — `Group.entries` is direct children —
-        so nothing in the module states this and only a fixture holds it. A
-        pykeepass change to recursive `entries`, or a refactor to
-        `find_entries(..., recursive=True)`, would start importing credentials
-        from an arbitrary depth with the rest of this file green."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", API_KEY_VALUE)
-        deeper = kp.add_group(karakeep, "deeper")
-        kp.add_entry(deeper, "base_url", "", BASE_URL_VALUE)
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.services == {"karakeep": {"api_key": API_KEY_VALUE}}
-
-    def test_an_edited_entrys_history_is_not_a_duplicate_of_it(self, tmp_path):
-        """The expensive one if `Group.entries` ever stops meaning current
-        entries: a KDBX keeps previous versions of an edited entry as `History`
-        children, so every credential the user has ever changed would become a
-        duplicate hard-skip — silently, and for the keys they touch most."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        entry = kp.add_entry(karakeep, "api_key", "", "ak-the-old-value")
-        entry.save_history()
-        entry.password = API_KEY_VALUE
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.services == {"karakeep": {"api_key": API_KEY_VALUE}}
-
-    def test_a_whitespace_only_group_name_is_not_a_service(self, tmp_path):
-        """§6's deletion rule fires on presence in `group_present`, so a junk row
-        there is a row that can delete. The name is not stripped for *matching* —
-        §3 strips values and normalizes nothing else — only tested for being
-        entirely whitespace."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        kp.add_entry(kp.add_group(root, "   "), "api_key", "", API_KEY_VALUE)
-        kp.add_entry(kp.add_group(root, "karakeep"), "api_key", "", API_KEY_VALUE)
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.group_present == {"karakeep": "karakeep"}
-        assert read.services == {"karakeep": {"api_key": API_KEY_VALUE}}
-
-    # ---- ownership and folding -----------------------------------------
-
-    def test_an_unowned_group_is_parsed_and_reported(self, tmp_path):
-        """`parse_vault` knows nothing about `vault_services`: it reports every
-        group it found, so `vault-status` can tell a user their group name
-        matches no owned service."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        kp.add_entry(kp.add_group(root, "not_a_service"), "api_key", "", API_KEY_VALUE)
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.group_present == {"not_a_service": "not_a_service"}
-        assert read.services == {"not_a_service": {"api_key": API_KEY_VALUE}}
-
-    def test_the_service_segment_is_matched_case_folded(self, tmp_path):
-        """`Karakeep` owns `karakeep`. A phone keyboard autocapitalizes a group
-        name it takes for the start of a sentence, and a file that looks right
-        owning nothing is the hardest failure here to diagnose."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        kp.add_entry(kp.add_group(root, "Karakeep"), "api_key", "", API_KEY_VALUE)
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.services == {"karakeep": {"api_key": API_KEY_VALUE}}
-        # The folded name is what `vault_services` is compared against; the
-        # value is the spelling to print back, so a user is shown the name they
-        # typed rather than one they never wrote.
-        assert read.group_present == {"karakeep": "Karakeep"}
-
-    def test_an_entry_title_is_not_folded(self, tmp_path):
-        """Only the service segment folds. A key that does not match the schema
-        is reported as a typo at apply time rather than silently accepted."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        kp.add_entry(kp.add_group(root, "karakeep"), "API_KEY", "", API_KEY_VALUE)
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.services == {"karakeep": {"API_KEY": API_KEY_VALUE}}
-
-    def test_the_top_level_group_name_is_not_folded(self, tmp_path):
-        """The other half of "nothing else does". `Istota/` is not the vault's
-        group, and reporting nothing is what sends the user to `vault-status`
-        rather than leaving them with a half-read file."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "Istota")
-        kp.add_entry(kp.add_group(root, "karakeep"), "api_key", "", API_KEY_VALUE)
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.services == {}
-        assert read.group_present == {}
-
-    def test_groups_that_fold_together_are_pooled(self, tmp_path):
-        """Two spellings of one service are one service.
-
-        The spec does not name this case; it is the duplicate-title rule's own
-        premise one level up, since `Karakeep/api_key` beside `karakeep/api_key`
-        is the same order-dependent choice. Distinct keys merge, a key in both
-        is a duplicate skip, and `group_present` keeps the first spelling
-        found."""
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        upper = kp.add_group(root, "Karakeep")
-        lower = kp.add_group(root, "karakeep")
-        kp.add_entry(upper, "base_url", "", BASE_URL_VALUE)
-        kp.add_entry(upper, "api_key", "", "ak-from-upper")
-        kp.add_entry(lower, "api_key", "", "ak-from-lower")
-        kp.save()
-
-        read, _ = _read(path)
-
-        assert read.services == {"karakeep": {"base_url": BASE_URL_VALUE}}
-        assert read.group_present == {"karakeep": "Karakeep"}
 
     # ---- the read boundary ---------------------------------------------
 
@@ -659,9 +943,10 @@ class TestRead:
         with pytest.raises(VaultLocked):
             parse_vault(data, PASSPHRASE)
 
-        assert parse_vault(data, "a-rotated-passphrase").services["ntfy"] == {
-            "topic": TOPIC_VALUE
-        }
+        assert (
+            parse_vault(data, "a-rotated-passphrase").services["ntfy_topic"]
+            == TOPIC_VALUE
+        )
 
     def test_a_truncated_file_reads_as_corrupt(self, tmp_path):
         """A half-synced file. KDBX4 HMACs the whole payload, so it fails to
@@ -735,9 +1020,10 @@ class TestRead:
 
         with pytest.raises(VaultLocked):
             parse_vault(data, "the-wrong-passphrase")
-        assert parse_vault(data, PASSPHRASE).group_present == {
-            "karakeep": "karakeep",
-            "ntfy": "ntfy",
+        assert set(parse_vault(data, PASSPHRASE).services) == {
+            "karakeep_base_url",
+            "karakeep_api_key",
+            "ntfy_topic",
         }
 
     # ---- the properties the rest of the design rests on ----------------
@@ -773,51 +1059,69 @@ class TestRead:
         to write that call themselves to leak it."""
         read = VaultRead(
             digest="0" * 64,
-            services={"karakeep": {"api_key": API_KEY_VALUE}},
-            group_present={"karakeep": "karakeep"},
-            entry_titles={"karakeep": frozenset({"api_key"})},
+            services={"karakeep_api_key": API_KEY_VALUE},
+            held=frozenset({"karakeep_base_url"}),
+            skipped=(("karakeep_topic", SKIP_DUPLICATE_NAME),),
         )
 
         rendered = repr(read)
 
         assert API_KEY_VALUE not in rendered
         assert "0" * 64 in rendered
-        assert "karakeep" in rendered
+        assert "karakeep_api_key" in rendered
+        # The other two fields carry names as well, and a reader needs them.
+        assert "karakeep_base_url" in rendered and "karakeep_topic" in rendered
         # A list's repr calls repr on each element, so a `__str__`-only override
         # would be bypassed by every real failure this protects.
         assert API_KEY_VALUE not in repr([read])
 
-    def test_no_log_record_carries_a_value(self, tmp_path, caplog):
-        """Counts, service names and key names are loggable. Values are not, at
-        any level — so the fixture below walks every branch that logs."""
+    def test_no_log_record_carries_a_value(self, tmp_path, caplog, monkeypatch):
+        """Names and counts are loggable. Values are not, at any level — so the
+        fixture below walks **every** branch that logs.
+
+        Seven of them now: the collision, the untitled counter, the entry that
+        sets nothing, the unusable name, the oversize value and the two caps.
+        The names in the file are attacker-reachable strings, since a task in
+        the user's own sandbox can write it, and the values are the credentials
+        the whole module exists to keep out of a log line."""
+        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_VALUE_BYTES", 16)
+        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_DEPTH", 1)
+        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_ENTRIES", 7)
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", API_KEY_VALUE)
-        kp.add_entry(karakeep, "api_key", "", "ak-the-duplicate", force_creation=True)
-        kp.add_entry(karakeep, "base_url", "", "")
-        kp.add_entry(karakeep, "", "", "untitled-value")
-        ntfy = kp.add_group(root, "ntfy")
-        kp.add_entry(ntfy, "topic", "", TOPIC_VALUE)
+        aws = kp.add_group(root, "aws")
+        # A collision: `aws/key` and the flat `AWS Key` are one name.
+        kp.add_entry(aws, "key", "", API_KEY_VALUE)
+        kp.add_entry(root, "AWS Key", "", "ak-the-duplicate")
+        # No title, nothing set, an unusable name, and a value over the cap.
+        kp.add_entry(root, "", "", "untitled-value")
+        kp.add_entry(root, "Blank", "", "")
+        kp.add_entry(root, "!!!", "", "unusable-name-value")
+        kp.add_entry(root, "Oversize", "", "oversize-fixture-value-past-the-cap")
+        kp.add_entry(root, "Last", "", "ok")
+        # One group past the depth cap, and one entry past the entry cap.
+        kp.add_entry(kp.add_group(aws, "deeper"), "key", "", "too-deep-value")
+        kp.add_entry(kp.add_group(root, "zzz"), "key", "", "past-the-entry-cap-value")
         kp.save()
         secrets = {
             API_KEY_VALUE,
             "ak-the-duplicate",
             "untitled-value",
-            TOPIC_VALUE,
+            "unusable-name-value",
+            "oversize-fixture-value-past-the-cap",
+            "too-deep-value",
+            "past-the-entry-cap-value",
             PASSPHRASE,
         }
 
         with caplog.at_level(logging.DEBUG):
             read, _ = _read(path)
 
-        assert read.services == {"karakeep": {}, "ntfy": {"topic": TOPIC_VALUE}}
-        # Scoped to this module's own logger, and counted. `caplog.records`
-        # non-empty proves nothing on its own: pykeepass emits five DEBUG
-        # records during an ordinary parse, so the sweep was satisfied by a
-        # third party's output and stayed green with all three warnings deleted.
-        ours = [r for r in caplog.records if r.name == "istota.secrets_vault"]
-        assert len(ours) == 3, [r.getMessage() for r in ours]
+        # Every branch below ran: the assertion is the log, but a sweep over a
+        # parse that logged nothing would pass just as happily.
+        said = _ours(caplog)
+        assert len(said) == 7, said
+        assert set(read.services) == {"last"}
         for record in caplog.records:
             rendered = f"{record.getMessage()} {record.args!r} {record.exc_text!r}"
             for value in secrets:
@@ -825,29 +1129,24 @@ class TestRead:
                     f"{record.name} logged a fixture value: {record.getMessage()!r}"
                 )
 
-    def test_each_skip_says_which_key_it_skipped(self, tmp_path, caplog):
-        """§3 asks for a warning naming the service and the key, and the
-        behavioural assertions above cannot see whether one was emitted — they
-        prove the branch ran, not that it said anything."""
+    def test_each_skip_says_which_name_it_skipped(self, tmp_path, caplog):
+        """The behavioural assertions above cannot see whether a warning was
+        emitted — they prove the branch ran, not that it said anything."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", API_KEY_VALUE)
-        kp.add_entry(karakeep, "api_key", "", "ak-the-duplicate", force_creation=True)
-        kp.add_entry(karakeep, "base_url", "", "")
-        kp.add_entry(karakeep, "", "", "untitled-value")
+        kp.add_entry(kp.add_group(root, "aws"), "key", "", API_KEY_VALUE)
+        kp.add_entry(root, "AWS Key", "", "ak-the-duplicate")
+        kp.add_entry(root, "Blank", "", "")
+        kp.add_entry(root, "", "", "untitled-value")
         kp.save()
 
         with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
             _read(path)
 
-        said = [r.getMessage() for r in caplog.records
-                if r.name == "istota.secrets_vault"]
-        assert any("karakeep" in m and "api_key" in m and "more than once" in m
-                   for m in said), said
-        assert any("karakeep" in m and "base_url" in m and "empty password" in m
-                   for m in said), said
-        assert any("karakeep" in m and "no title" in m for m in said), said
+        said = _ours(caplog)
+        assert any("aws_key" in m and "produced by" in m for m in said), said
+        assert any("Blank" in m and "no value in any field" in m for m in said), said
+        assert any("no title" in m for m in said), said
 
     def test_untitled_entries_are_counted_rather_than_named_one_by_one(
         self, tmp_path, caplog
@@ -866,31 +1165,27 @@ class TestRead:
         with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
             _read(path)
 
-        said = [r.getMessage() for r in caplog.records
-                if r.name == "istota.secrets_vault"]
-        assert said == ["vault: karakeep has 4 entries with no title, skipped"]
+        assert _ours(caplog) == ["vault: 4 entries had no title, skipped"]
 
     def test_a_name_cannot_forge_a_log_line(self, tmp_path, caplog):
         """Group and entry names are arbitrary strings out of the file:
         unbounded, and free to carry a newline. Unflattened, one of them can put
-        a whole fabricated record into the daemon's log. Self-inflicted rather
-        than attacker-reachable — the file is the user's — so this flattens and
-        bounds rather than refusing."""
+        a whole fabricated record into the daemon's log. §12 records that a task
+        in the user's own sandbox can overwrite that file, so they are
+        attacker-reachable rather than merely self-inflicted."""
         kp, path = _new_db(tmp_path)
         root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api\nkey ERROR forged line", "", "")
-        kp.add_entry(kp.add_group(root, "x" * 400), "api_key", "", "")
+        kp.add_entry(root, "9lives\nERROR forged line", "", API_KEY_VALUE)
+        kp.add_entry(kp.add_group(root, "x" * 400), "api_key", "", API_KEY_VALUE)
         kp.save()
 
         with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
             _read(path)
 
-        for record in caplog.records:
-            if record.name != "istota.secrets_vault":
-                continue
-            assert "\n" not in record.getMessage()
-            assert len(record.getMessage()) < 300
+        assert _ours(caplog), "the fixture reached no warning at all"
+        for message in _ours(caplog):
+            assert "\n" not in message
+            assert len(message) < 300
 
     def test_the_catch_all_does_not_render_the_exception(self, tmp_path, caplog):
         """The branch the `exc_info` departure was made for, driven.
@@ -998,48 +1293,6 @@ class TestTheLibraryStaysOutOfTheImportGraph:
 
         assert data == path.read_bytes()
         assert digest == hashlib.sha256(data).hexdigest()
-
-
-@pytest.fixture
-def secret_key_env():
-    """A real `ISTOTA_SECRET_KEY` for the duration of a test.
-
-    Same shape as `tests/test_secrets_store.py`'s fixture: the apply tests run
-    against a real temp database through the real Fernet layer, because what
-    they assert is the state of rows after a write and a delete, and a stand-in
-    store would assert this suite's idea of `upsert_secret`'s three return
-    values rather than `upsert_secret`'s.
-    """
-    with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "deadbeef" * 8}):
-        yield
-
-
-def _vault_read(services, *, present=None, titles=None):
-    """A `VaultRead` shaped as `parse_vault` would have produced it.
-
-    `present` names the groups found in the file, which is a wider set than the
-    ones holding usable values — an empty group is present. `titles` names the
-    entry titles found in a group whether or not a value was taken from each,
-    which is the set the deletion rule reads; it defaults to the keys that did
-    yield a value, which is the ordinary case.
-
-    The two seam cases — an empty password and a duplicate title — deliberately
-    do **not** use this helper. They go through a real KDBX and `parse_vault`,
-    because the whole question there is that `entry_titles` carries a title
-    whose value was skipped, and building one here would assert this file's idea
-    of the parse rather than the parse.
-    """
-    names = list(present) if present is not None else list(services)
-    return VaultRead(
-        digest="0" * 64,
-        services={name: dict(services.get(name, {})) for name in names},
-        group_present={name: name for name in names},
-        entry_titles={
-            name: frozenset(titles[name]) if titles and name in titles
-            else frozenset(services.get(name, {}))
-            for name in names
-        },
-    )
 
 
 class TestEligibility:
@@ -1176,572 +1429,6 @@ class TestEligibility:
 
         assert "connector:acme" in secret_schema.known_service_keys()
         assert "connector:acme" not in eligible_services()
-
-
-class TestApply:
-    """Writing a read into the secrets table, and deleting out of it.
-
-    Every test here runs against a real temp database with a real master key:
-    the subject is the state of rows, and two of the three counting states
-    (`updated` against `unchanged`) are a property of what is already stored.
-    """
-
-    def test_a_first_apply_creates_every_key_in_the_group(
-        self, db_path, secret_key_env
-    ):
-        read = _vault_read({"karakeep": {"base_url": BASE_URL_VALUE,
-                                         "api_key": API_KEY_VALUE}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert (result.created, result.updated, result.unchanged) == (2, 0, 0)
-        assert result.deleted == 0 and result.deleted_keys == []
-        assert result.skipped == []
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == API_KEY_VALUE
-
-    def test_a_second_identical_apply_is_all_unchanged(
-        self, db_path, secret_key_env
-    ):
-        """The idempotence §7 rests on: a save that changed no credential still
-        changes the file's bytes, so a full parse and apply runs on every save
-        the user makes and must cost nothing."""
-        read = _vault_read({"karakeep": {"base_url": BASE_URL_VALUE,
-                                         "api_key": API_KEY_VALUE}})
-        apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert (result.created, result.updated, result.unchanged) == (0, 0, 2)
-        assert result.deleted == 0
-
-    def test_a_changed_value_counts_as_updated(self, db_path, secret_key_env):
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        read = _vault_read({"karakeep": {"api_key": API_KEY_VALUE}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert (result.created, result.updated, result.unchanged) == (0, 1, 0)
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == API_KEY_VALUE
-
-    def test_only_the_owned_services_are_written(self, db_path, secret_key_env):
-        """`vault_services` is an explicit opt-in, so a group the operator did
-        not name is parsed and discarded — which is what makes the file safe to
-        keep other things in."""
-        read = _vault_read({"karakeep": {"api_key": API_KEY_VALUE},
-                            "ntfy": {"topic": TOPIC_VALUE}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert result.created == 1
-        assert secrets_store.get_secret(db_path, "alice", "ntfy", "topic") is None
-
-    def test_a_key_the_schema_does_not_declare_is_skipped(
-        self, db_path, secret_key_env
-    ):
-        """A typo, and the CLI and the web tier refuse it for the same reason.
-        Reported rather than dropped, since the user's file says something this
-        deployment cannot act on."""
-        read = _vault_read({"karakeep": {"api_key": API_KEY_VALUE,
-                                         "api-key": "ak-the-typo"}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert result.created == 1
-        assert result.skipped == [("karakeep", "api-key", SKIP_UNKNOWN_KEY)]
-        with sqlite3.connect(db_path) as conn:
-            rows = conn.execute(
-                "SELECT key FROM secrets WHERE user_id=? AND service=?",
-                ("alice", "karakeep"),
-            ).fetchall()
-        assert [r[0] for r in rows] == ["api_key"]
-
-    def test_an_ineligible_service_in_owned_is_refused(
-        self, db_path, secret_key_env
-    ):
-        """Stage 3 drops an ineligible name at config load, so reaching here is
-        already a bug — which is exactly why this refuses rather than trusting
-        the caller. `monarch` is the sharp case: it has writable keys and the
-        daemon mints them, so a write here reverts a freshly minted cookie."""
-        read = _vault_read({"monarch": {"session_id": "sid-from-the-file"}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"monarch"}))
-
-        assert result.skipped == [("monarch", "", SKIP_INELIGIBLE_SERVICE)]
-        assert (result.created, result.updated, result.deleted) == (0, 0, 0)
-        assert secrets_store.get_secret(
-            db_path, "alice", "monarch", "session_id") is None
-
-    def test_a_reserved_connector_service_in_owned_is_refused(
-        self, db_path, secret_key_env
-    ):
-        """Open question 2, pinned here rather than left to follow from the
-        schema lookup returning nothing.
-
-        `connector:<id>` is a reserved namespace whose rows have one writer —
-        the connector route that validated the key against the resolved provider
-        manifest — so a vault writing one would be a second generic writer with
-        no validation behind it, which is the thing the reservation exists to
-        prevent (`Specs/Drafts/generic-connectors.md`). Refused on its own terms
-        and with its own reason, so the refusal survives a connector service
-        later appearing in the schema."""
-        read = _vault_read({"connector:acme": {"api_key": "ak-from-the-file"}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"connector:acme"}))
-
-        assert result.skipped == [("connector:acme", "", SKIP_RESERVED_SERVICE)]
-        assert (result.created, result.updated, result.deleted) == (0, 0, 0)
-        with sqlite3.connect(db_path) as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM secrets WHERE user_id=?", ("alice",)
-            ).fetchone()[0]
-        assert count == 0
-
-    def test_a_key_missing_from_a_present_group_is_deleted(
-        self, db_path, secret_key_env
-    ):
-        """Deletion propagates *within* a present group: the file is the live
-        authority for a service it mentions, or editing it could not remove a
-        credential at all."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        secrets_store.set_secret(
-            db_path, "alice", "karakeep", "base_url", BASE_URL_VALUE)
-        read = _vault_read({"karakeep": {"base_url": BASE_URL_VALUE}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert result.deleted == 1
-        assert result.deleted_keys == [("karakeep", "api_key")]
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") is None
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "base_url") == BASE_URL_VALUE
-
-    def test_an_absent_group_deletes_nothing(self, db_path, secret_key_env):
-        """Rule 1, and the guard against the catastrophic case: a vault that
-        parses and has lost its contents — a resync that put back an emptier
-        copy, or a user who deleted the wrong group — must be silence rather
-        than a wipe of every credential it used to own."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        read = _vault_read({"ntfy": {"topic": TOPIC_VALUE}})
-
-        result = apply_vault(db_path, "alice", read,
-                             frozenset({"karakeep", "ntfy"}))
-
-        assert result.deleted == 0 and result.deleted_keys == []
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == "ak-old"
-
-    def test_an_empty_group_deletes_every_key_it_used_to_own(
-        self, db_path, secret_key_env
-    ):
-        """The other side of rule 1, so the line between the two is covered: an
-        *empty* group is present, and present means the vault has an opinion.
-        Deleting every entry in a group is how a user removes the last
-        credential of a service without also removing the service."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        read = _vault_read({}, present=["karakeep"])
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert result.deleted_keys == [("karakeep", "api_key")]
-
-    def test_adopting_a_service_deletes_the_keys_the_vault_does_not_mention(
-        self, db_path, secret_key_env
-    ):
-        """§6's documented surprise, and the reason `deleted_keys` exists.
-
-        The group is present the moment the operator adds the service to
-        `vault_services`, so the deletion rule fires on the first sync against
-        every schema key the table holds and the group lacks. `ntfy` is the live
-        case: five declared keys, a user who set them in the settings UI, a
-        vault group holding only `topic`. The count alone would tell the
-        operator that four credentials went without saying which, which is the
-        difference between an actionable report and a visible one."""
-        for key, value in (
-            ("topic", "old-topic"), ("server_url", "https://ntfy.example.com"),
-            ("token", "tk-ntfy"), ("username", "alice"), ("password", "pw-ntfy"),
-        ):
-            secrets_store.set_secret(db_path, "alice", "ntfy", key, value)
-        read = _vault_read({"ntfy": {"topic": TOPIC_VALUE}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"ntfy"}))
-
-        assert result.updated == 1
-        assert result.deleted == 4
-        assert result.deleted == len(result.deleted_keys)
-        assert sorted(result.deleted_keys) == [
-            ("ntfy", "password"), ("ntfy", "server_url"),
-            ("ntfy", "token"), ("ntfy", "username"),
-        ]
-        assert secrets_store.get_service_secrets(db_path, "alice", "ntfy") == {
-            "topic": TOPIC_VALUE
-        }
-
-    def test_an_empty_password_does_not_delete_the_stored_credential(
-        self, tmp_path, db_path, secret_key_env
-    ):
-        """§3: an empty password is a skip, **not** a deletion, and deleting a
-        credential means deleting the entry.
-
-        Driven through a real KDBX rather than a hand-built `VaultRead`, because
-        the whole question is what survives the parse: an entry whose value was
-        skipped is absent from `services` and present in `entry_titles`, and a
-        deletion computed from `services` would delete the row — turning the
-        likeliest fat-finger in the format into silent credential loss, in the
-        exact case §3 calls safe."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", "")
-        kp.save()
-        read, _ = _read(path)
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert read.services["karakeep"] == {}
-        assert result.deleted == 0 and result.deleted_keys == []
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == "ak-old"
-
-    def test_a_duplicate_title_does_not_delete_the_stored_credential(
-        self, tmp_path, db_path, secret_key_env
-    ):
-        """The same seam from the other skip rule. A duplicate is a hard skip for
-        that key — "we cannot tell which of these you meant" — and reading it as
-        a deletion would make the safe answer the destructive one."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key", "", API_KEY_VALUE)
-        kp.add_entry(karakeep, "api_key", "", "ak-the-duplicate",
-                     force_creation=True)
-        kp.save()
-        read, _ = _read(path)
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert read.services["karakeep"] == {}
-        assert result.deleted == 0
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == "ak-old"
-
-    def test_a_present_group_only_deletes_keys_the_schema_declares(
-        self, db_path, secret_key_env
-    ):
-        """An orphan row under an owned service — a key the schema no longer
-        declares, or one written before it was removed — is not this pass's to
-        remove. The vault says nothing about a key it has no way to express."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "legacy_token", "tk")
-        read = _vault_read({"karakeep": {"api_key": API_KEY_VALUE}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert result.deleted_keys == []
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "legacy_token") == "tk"
-
-    def test_deletion_is_scoped_to_the_user(self, db_path, secret_key_env):
-        """Every write and delete here carries `user_id`, and a vault is one
-        user's file. Bob's rows are not alice's vault's to remove."""
-        secrets_store.set_secret(db_path, "bob", "karakeep", "api_key", "bob-key")
-        read = _vault_read({}, present=["karakeep"])
-
-        apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert secrets_store.get_secret(
-            db_path, "bob", "karakeep", "api_key") == "bob-key"
-
-    def test_nothing_is_deleted_without_the_master_key(self, db_path):
-        """The one path that reaches a delete with no `ISTOTA_SECRET_KEY` is a
-        present group holding nothing: no upsert runs, so nothing raises on the
-        way in, and the pass would remove every row on a deployment where it can
-        neither read what it is removing nor write a replacement. Refused at the
-        top, in the store's own vocabulary.
-
-        The surviving row is asserted as well as the refusal, because
-        "DID NOT RAISE" on its own would leave the destructive half of the claim
-        untested — and `delete_secret` needs no key, so it is the half that
-        happens. Read back through sqlite rather than `get_secret`, which
-        answers None for a present row when the key is gone."""
-        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "deadbeef" * 8}):
-            secrets_store.set_secret(
-                db_path, "alice", "karakeep", "api_key", "ak-old")
-        read = _vault_read({}, present=["karakeep"])
-
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("ISTOTA_SECRET_KEY", None)
-            with pytest.raises(secrets_store.SecretKeyMissingError):
-                apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert secrets_store.secret_exists(
-            db_path, "alice", "karakeep", "api_key")
-
-    def test_every_write_happens_before_any_delete(self, db_path, secret_key_env):
-        """Ordering is the safety property: a failure part-way through leaves
-        credentials present rather than absent. Driven by failing the second
-        service's write and requiring the first service's pending deletion not to
-        have happened — the deletion itself is asserted on the happy path above,
-        so this is about the order and not about the rule."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        read = _vault_read({"karakeep": {"base_url": BASE_URL_VALUE},
-                            "ntfy": {"topic": TOPIC_VALUE}})
-        real_upsert = secrets_store.upsert_secret
-
-        def _fail_on_ntfy(db, user, service, key, value):
-            if service == "ntfy":
-                raise sqlite3.OperationalError("database is locked")
-            return real_upsert(db, user, service, key, value)
-
-        with mock.patch.object(secrets_store, "upsert_secret", _fail_on_ntfy):
-            with pytest.raises(sqlite3.OperationalError):
-                apply_vault(db_path, "alice", read,
-                            frozenset({"karakeep", "ntfy"}))
-
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == "ak-old"
-        # Without this, a reversed iteration passes the test vacuously: `ntfy`
-        # would raise first, `karakeep` would never be reached, and nothing
-        # written or deleted still satisfies the assertion above.
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "base_url") == BASE_URL_VALUE
-
-    def test_no_log_record_carries_a_value_on_the_apply_path(
-        self, db_path, secret_key_env, caplog
-    ):
-        """The read half's rule, on the half that holds the plaintext longest:
-        apply is where every value the vault carries is handled, and its
-        warnings name services and keys."""
-        read = _vault_read({"karakeep": {"api_key": API_KEY_VALUE,
-                                         "api-key": "ak-the-typo"},
-                            "monarch": {"session_id": "sid-from-the-file"}})
-
-        with caplog.at_level(logging.DEBUG):
-            apply_vault(db_path, "alice", read,
-                        frozenset({"karakeep", "monarch"}))
-
-        assert [r for r in caplog.records if r.name == "istota.secrets_vault"]
-        for record in caplog.records:
-            rendered = f"{record.getMessage()} {record.args!r} {record.exc_text!r}"
-            for value in (API_KEY_VALUE, "ak-the-typo", "sid-from-the-file"):
-                assert value not in rendered, record.getMessage()
-
-    def test_a_refusal_names_the_service_and_a_skip_names_the_key(
-        self, db_path, secret_key_env, caplog
-    ):
-        """The behavioural assertions above see that a branch ran, not that it
-        said anything — the gap `test_each_skip_says_which_key_it_skipped`
-        closes on the read half."""
-        read = _vault_read({"karakeep": {"api-key": "ak-the-typo"},
-                            "monarch": {"session_id": "sid-from-the-file"}})
-
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
-            apply_vault(db_path, "alice", read,
-                        frozenset({"karakeep", "monarch"}))
-
-        said = [r.getMessage() for r in caplog.records
-                if r.name == "istota.secrets_vault"]
-        assert any("karakeep" in m and "api-key" in m for m in said), said
-        assert any("monarch" in m for m in said), said
-
-    def test_a_row_that_will_not_decrypt_is_never_deleted(self, db_path):
-        """The master-key guard tests presence and a length floor, which is all
-        `secret_key_available` can see — so a key that is *wrong* passes it, and
-        without this arm the pass writes fresh rows and deletes every one it
-        could not read.
-
-        That is the expensive direction: a half-loaded `secrets.env` or a
-        rotation applied to the wrong host is transient, and the credentials
-        come back when the right key does. They do not come back from a delete,
-        and the pass runs unattended every five minutes."""
-        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "a" * 64}):
-            secrets_store.set_secret(db_path, "alice", "ntfy", "token", "tk-ntfy")
-            secrets_store.set_secret(db_path, "alice", "ntfy", "username", "alice")
-        read = _vault_read({"ntfy": {"topic": TOPIC_VALUE}})
-
-        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "b" * 64}):
-            result = apply_vault(db_path, "alice", read, frozenset({"ntfy"}))
-
-        assert result.deleted == 0 and result.deleted_keys == []
-        assert sorted(result.skipped) == [
-            ("ntfy", "token", SKIP_UNREADABLE_ROW),
-            ("ntfy", "username", SKIP_UNREADABLE_ROW),
-        ]
-        assert secrets_store.secret_exists(db_path, "alice", "ntfy", "token")
-        assert secrets_store.secret_exists(db_path, "alice", "ntfy", "username")
-        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "a" * 64}):
-            assert secrets_store.get_secret(
-                db_path, "alice", "ntfy", "token") == "tk-ntfy"
-
-    def test_a_key_below_the_length_floor_is_refused_as_too_weak(self, db_path):
-        """`secret_key_available` collapses "absent" and "below the floor" into
-        one False, and the two have different remedies — the distinction
-        `doctor`'s `security.secret_key` check is built around. A 16-character
-        key told the operator the variable was not set, which is false and
-        points at the wrong fix."""
-        read = _vault_read({}, present=["karakeep"])
-
-        with mock.patch.dict(os.environ, {"ISTOTA_SECRET_KEY": "short"}):
-            with pytest.raises(secrets_store.SecretKeyTooWeakError) as caught:
-                apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert "not set" not in str(caught.value)
-        assert "Refusing to apply a vault" in str(caught.value)
-
-    def test_a_near_miss_entry_title_holds_the_deletion_it_would_have_caused(
-        self, tmp_path, db_path, secret_key_env
-    ):
-        """A title of `api_key ` is refused as a key this service does not
-        declare — §3 matches titles exactly — and the deletion rule would then
-        remove the very credential that entry was meant to set. Refuse the new
-        value and destroy the old one, from one trailing space on a phone
-        keyboard, with two branches that know nothing about each other.
-
-        The fuzzy match only ever holds a deletion back. Nothing is written on
-        it, so a title this cannot interpret still fails closed."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "api_key ", "", API_KEY_VALUE)
-        kp.save()
-        read, _ = _read(path)
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert ("karakeep", "api_key ", SKIP_UNKNOWN_KEY) in result.skipped
-        assert ("karakeep", "api_key", SKIP_DELETE_HELD) in result.skipped
-        assert result.deleted == 0
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == "ak-old"
-
-    def test_a_near_miss_title_with_an_empty_password_holds_the_deletion_too(
-        self, tmp_path, db_path, secret_key_env
-    ):
-        """The shape the first version of the hold missed.
-
-        An unknown key only reaches `skipped` if it carried a value, so a
-        near-miss title whose password field is *empty* is dropped at parse,
-        lands in no skip list, and its spelling is exactly what keeps the real
-        key out of `entry_titles` — measured before the fix: the credential was
-        deleted and `skipped` was empty, so the user got neither the value nor a
-        word about losing the old one. Two fat-fingers in one entry is not an
-        exotic case; it is the same entry the empty-password rule already calls
-        the likeliest mistake in the format, typed with the caps lock on.
-
-        The hold therefore reads the group's titles rather than this pass's
-        skips, which also covers a duplicated near-miss."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        kp, path = _new_db(tmp_path)
-        root = kp.add_group(kp.root_group, "istota")
-        karakeep = kp.add_group(root, "karakeep")
-        kp.add_entry(karakeep, "API_KEY", "", "")
-        kp.save()
-        read, _ = _read(path)
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert read.services["karakeep"] == {}
-        assert ("karakeep", "api_key", SKIP_DELETE_HELD) in result.skipped
-        assert result.deleted == 0
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == "ak-old"
-
-    def test_a_case_variant_entry_title_holds_the_deletion_too(
-        self, db_path, secret_key_env
-    ):
-        """The other axis a phone keyboard moves. §3 folds the service segment
-        for exactly this reason and leaves titles exact; that is right for
-        deciding what to write and not for deciding what to destroy."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        read = _vault_read({"karakeep": {"API_KEY": API_KEY_VALUE}})
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert ("karakeep", "api_key", SKIP_DELETE_HELD) in result.skipped
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == "ak-old"
-
-    def test_a_read_missing_a_present_group_raises_rather_than_deleting(
-        self, db_path, secret_key_env
-    ):
-        """`entry_titles` is indexed rather than defaulted, here as well as on
-        the dataclass. An absent entry reads as "the group contains nothing",
-        which plans a deletion for every declared key — so the convenient
-        default is the destructive one, and a caller that built a `VaultRead`
-        wrong must hear about it rather than have its rows removed."""
-        secrets_store.set_secret(db_path, "alice", "karakeep", "api_key", "ak-old")
-        read = VaultRead(
-            digest="0" * 64,
-            services={"karakeep": {}},
-            group_present={"karakeep": "karakeep"},
-            entry_titles={},
-        )
-
-        with pytest.raises(KeyError):
-            apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert secrets_store.secret_exists(db_path, "alice", "karakeep", "api_key")
-
-    def test_a_key_written_by_this_pass_is_never_deleted_by_it(
-        self, db_path, secret_key_env
-    ):
-        """`values <= entry_titles` holds on every path `_map_groups` can
-        produce, so this shape needs a hand-built read — which is the point:
-        the invariant belongs to `apply_vault` rather than being inherited from
-        a collaborator that a later stage's CLI verb is not bound by. Writing a
-        credential and deleting it in the same call is the worst outcome
-        available here, since the row is gone and the counts say it was set."""
-        read = VaultRead(
-            digest="0" * 64,
-            services={"karakeep": {"api_key": API_KEY_VALUE}},
-            group_present={"karakeep": "karakeep"},
-            entry_titles={"karakeep": frozenset()},
-        )
-
-        result = apply_vault(db_path, "alice", read, frozenset({"karakeep"}))
-
-        assert result.created == 1
-        assert result.deleted_keys == []
-        assert secrets_store.get_secret(
-            db_path, "alice", "karakeep", "api_key") == API_KEY_VALUE
-
-    def test_a_partial_delete_still_says_which_credentials_went(
-        self, db_path, secret_key_env, caplog
-    ):
-        """Each delete commits its own transaction, so a raise part-way through
-        the loop — a locked database on a background gate contending with the
-        scheduler's own writers — leaves rows gone with nothing on any surface
-        saying which, since the result object never returns. The plan is logged
-        before the loop for that reason: it over-reports on a partial failure,
-        which is the direction to be wrong in."""
-        for key in ("token", "username", "password"):
-            secrets_store.set_secret(db_path, "alice", "ntfy", key, f"v-{key}")
-        read = _vault_read({"ntfy": {"topic": TOPIC_VALUE}})
-        real_delete = secrets_store.delete_secret
-        calls = []
-
-        def _fail_on_the_second(db, user, service, key):
-            calls.append(key)
-            if len(calls) == 2:
-                raise sqlite3.OperationalError("database is locked")
-            return real_delete(db, user, service, key)
-
-        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
-            with mock.patch.object(secrets_store, "delete_secret",
-                                   _fail_on_the_second):
-                with pytest.raises(sqlite3.OperationalError):
-                    apply_vault(db_path, "alice", read, frozenset({"ntfy"}))
-
-        said = [r.getMessage() for r in caplog.records
-                if r.name == "istota.secrets_vault"]
-        planned = [m for m in said if "deleting 3 credential(s)" in m]
-        assert planned, said
-        for key in ("token", "username", "password"):
-            assert f"ntfy/{key}" in planned[0]
 
 
 class TestReadingThroughADescriptor:

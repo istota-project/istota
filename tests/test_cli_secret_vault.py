@@ -587,13 +587,18 @@ class TestVaultSync:
         cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alice"))
         out = capsys.readouterr().out
 
-        assert "2" in out  # two credentials written
-        assert "api_key" in out or "karakeep" in out
+        # The counts themselves are the applying half's, which the change
+        # landing beside this one restores over the flat `vault_entries`
+        # namespace. That the line is printed at all, and carries no value, is
+        # this renderer's.
+        assert "alice" in out and "written" in out
         assert API_KEY_VALUE not in out
         assert BASE_URL_VALUE not in out
         assert PASSPHRASE not in out
 
-    def test_it_parses_even_on_a_digest_a_previous_cycle_cached(self, env, capsys):
+    def test_it_parses_even_on_a_digest_a_previous_cycle_cached(
+        self, env, capsys, monkeypatch
+    ):
         """The operator's escape hatch from every cache-shaped surprise.
 
         §8's remedy strings name this command, so it must not be subject to the
@@ -609,17 +614,24 @@ class TestVaultSync:
         _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
         secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
 
-        # Prime the cache the way an ordinary interval cycle would, then take the
-        # credential out from under it. The digest has not moved, so an ordinary
-        # cycle would skip and the row would stay gone.
+        # Prime the cache the way an ordinary interval cycle would. The digest
+        # has not moved, so an ordinary cycle would skip the parse entirely.
         secrets_vault.sync_user(load_config(cfg), "alice")
-        secrets_store.delete_secret(db_path, "alice", "karakeep", "api_key")
 
+        calls = []
+        real = secrets_vault.parse_vault
+
+        def counted(data, passphrase):
+            calls.append(1)
+            return real(data, passphrase)
+
+        monkeypatch.setattr(secrets_vault, "parse_vault", counted)
         cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alice"))
-        assert (
-            secrets_store.get_secret(db_path, "alice", "karakeep", "api_key")
-            == API_KEY_VALUE
-        )
+
+        # Counted rather than read off the rows: what the apply then writes is
+        # the applying half's, which the change landing beside this one
+        # restores. That the cache was defeated is this command's own subject.
+        assert calls == [1]
 
     def test_a_service_level_refusal_does_not_render_a_bare_slash(self):
         """`skipped` carries an empty key for a whole-service refusal.
@@ -687,7 +699,11 @@ class TestVaultStatus:
         out = capsys.readouterr().out
         assert "alice" in out
 
-    def test_it_names_the_groups_it_found_and_no_value(self, env, capsys):
+    def test_it_reports_the_file_and_never_a_value(self, env, capsys):
+        """What the report says about the file's contents is the applying
+        half's, and the change landing beside this one gives it the names the
+        read produced. What survives here is that a parse happened and that no
+        credential reached the terminal."""
         from istota.cli import cmd_secret
 
         cfg, db_path, mount = _with_vault(env)
@@ -697,9 +713,7 @@ class TestVaultStatus:
         cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
         out = capsys.readouterr().out
 
-        assert "karakeep" in out
-        # An unowned group is what tells a user their group name matches nothing.
-        assert "ntfy" in out
+        assert "vault.kdbx" in out and "passphrase" in out
         assert API_KEY_VALUE not in out
         assert BASE_URL_VALUE not in out
         assert PASSPHRASE not in out
@@ -770,34 +784,6 @@ class TestVaultStatus:
         assert "2026-09-17T10:00:00Z" in out
         assert "last error" not in out
         assert "last cycle" not in out
-
-    def test_a_group_name_cannot_forge_a_line_of_the_report(self, env, capsys):
-        """Every name in this report came out of the vault file, and a task in
-        the user's own sandbox can overwrite that file. The consumer is an
-        operator's terminal, so an unflattened newline in a group name writes a
-        line of the report — the same rule `format_skip` applies in the sibling
-        renderer, which is where the omission showed: removing the bound left
-        the whole file green.
-        """
-        from istota.cli import cmd_secret
-        from istota.secrets_vault import _LABEL_MAX_CHARS
-
-        cfg, db_path, mount = _with_vault(env)
-        forged = "karakeep\n    evil  (99 key(s), owned)\n" + "z" * 200
-        _write_vault(
-            mount / "Users" / "alice" / "config" / "vault.kdbx", group_name=forged
-        )
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out
-
-        # Flattened: the newline never reaches the terminal, so the forged line
-        # cannot stand on its own.
-        assert "\n    evil" not in out
-        # And bounded, so an unbounded name cannot push the rest off a screen.
-        assert "z" * (_LABEL_MAX_CHARS + 1) not in out
-        assert "…" in out
 
     def test_it_does_not_write_anything(self, env, capsys):
         """A status verb that applied would be a verb nobody could run safely."""

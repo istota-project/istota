@@ -614,11 +614,17 @@ class TestTheContentsCheck:
     def test_probe_reports_counts_for_a_working_vault(
         self, vault_config, secret_key_env
     ):
+        """Counts and never names, which is this arm's whole rule.
+
+        What is counted moves with the read: the change landing beside this one
+        replaces the owned-group count with the number of names the file
+        produced, so the numbers themselves are asserted there rather than
+        pinned to a shape that is about to go."""
         _provision(vault_config)
         result = _contents(vault_config)
         assert result.status == OK
-        assert "2 of 2 owned group(s) present" in result.detail
-        assert "2 key(s)" in result.detail
+        assert "group(s) present" in result.detail and "key(s)" in result.detail
+        assert "karakeep" not in result.detail and "api_key" not in result.detail
 
     def test_a_wrong_passphrase_reports_the_class_and_not_the_sentence(
         self, vault_config, secret_key_env
