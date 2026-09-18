@@ -240,62 +240,19 @@ describe('the WhatsApp card — which control each state offers', () => {
     expect(screen.getByText(/may be mid-reconnect/)).toBeInTheDocument();
   });
 
-  it('offers the one-click start alone on the split deployment, not both', async () => {
+  it('offers the confirmed control alone where the link cannot be read', async () => {
     // `link: null` is not an edge case — it is every page load on the canonical
     // Ansible deployment, where the bridge lives in the scheduler unit. Both
-    // controls used to render here, with a danger-zone paragraph explaining a
-    // trade the operator had not yet made; an operator reported the second one
-    // as redundant and was right. The one-click start is safe because the
-    // bridge refuses an unforced re-pair of a session with no permanent fault
-    // and records that on the row, which is what reveals the forced route.
+    // controls used to render here, which an operator reported; the first fix
+    // showed the one-click start and revealed the confirmed one after the
+    // bridge refused, and that dead-ended on reload because the gate lived in
+    // client state. So an unreadable link takes the phrase: exactly one
+    // control, and it is the one that cannot act without a confirmation.
     await mount({ link: null });
 
-    expect(screen.getByRole('button', { name: REPAIR })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: UNLINK })).toBeNull();
-    expect(screen.queryByTestId('forced-zone')).toBeNull();
-    expect(screen.getByText(/cannot read the live link/)).toBeInTheDocument();
-  });
-
-  it('reveals the forced route once its own unforced start is refused', async () => {
-    // The progressive disclosure that keeps the forced path reachable where
-    // `link` is unreadable. Asserted end to end rather than by poking the
-    // derived: press the one-click control, have the row come back terminal
-    // without `force` under the id the POST handed us — which is what the
-    // bridge's `session_live` refusal leaves, since a refusal opens no window
-    // and so never adopts the bridge's own window id.
-    await mount({ link: null });
-
-    api.startWhatsAppPairing.mockResolvedValue({
-      window_id: 'req-1',
-      state: 'requested',
-      force: false,
-    });
-    // `refreshPairing` reads the row through `getWhatsAppPairing`, not the
-    // index — mocking the index here leaves the row untouched and the gate
-    // false, which is how the first draft of this test failed.
-    api.getWhatsAppPairing.mockResolvedValue({
-      pairing: {
-        window_id: 'req-1',
-        state: 'failed',
-        row_state: 'failed',
-        terminal: true,
-        requested_by: 'operator',
-        requested_at: null,
-        expires_at: null,
-        expires_at_epoch: null,
-        message: 'the WhatsApp session has reported no permanent fault',
-        force: false,
-        qr_seq: 0,
-        qr_available: false,
-      },
-    });
-
-    await fireEvent.click(screen.getByRole('button', { name: REPAIR }));
-
-    await waitFor(() => expect(screen.getByTestId('forced-zone')).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: UNLINK })).toBeInTheDocument();
-    // Mutually exclusive, which is the property the report was about.
     expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
+    expect(screen.getAllByRole('button', { name: UNLINK })).toHaveLength(1);
+    expect(screen.getByText(/cannot read the live link/)).toBeInTheDocument();
   });
 
   it('offers no control and opens no stream on the Cloud adapter', async () => {

@@ -152,65 +152,46 @@
    * exists to produce, and a one-click way out of it must not sit beside a
    * status badge.
    */
-  /**
-   * The `window_id` of an unforced start this pane itself made.
-   *
-   * The forced control has to stay reachable where `link` is unreadable — every
-   * page load on the split deployment — without both controls being offered at
-   * once, which is the redundancy an operator reported. The row cannot say why
-   * it was refused: `_write_pairing_outcome` carries the reason as prose
-   * deliberately, because writing `session_live` into the state would have the
-   * poll's orphan arm fire on a row that never opened a window. So the client
-   * uses what it alone knows — that it asked unforced and the row came back
-   * terminal without `force` — rather than matching on that prose.
-   */
-  let ownUnforcedRequest = $state<string | null>(null);
-
-  /** Readable and carrying no latched fault, so it may well be working. */
-  let knownLive = $derived(link !== null && !link.fatal_is_permanent);
 
   /**
-   * An unforced start this pane made, refused.
+   * The session has said, itself, that it is finished — the only state in
+   * which a re-pair destroys nothing.
    *
-   * **Off the row, never off `pairing`.** A refusal opens no window, so there
-   * is no frame and the rendered view has nothing to say about it; the row is
-   * where it lands. The row also still carries the request id we were handed,
-   * because the bridge's own window id is adopted at the `awaiting_sidecar`
-   * transition and a refusal never reaches one. `force` being 0 is what
-   * separates it from a window that was confirmed and then expired.
+   * **Everything else takes the confirmation, including a link this process
+   * cannot read**, and that asymmetry is the whole of the control's gating.
+   * The two are derived from one predicate so they are mutually exclusive by
+   * construction: an operator reported seeing both at once, and they were
+   * right — the old pair of conditions were independently true wherever
+   * `link` was null, which is every page load on the split deployment.
    */
-  let ownAttemptRefused = $derived(
-    ownUnforcedRequest !== null &&
-      pairingRow !== null &&
-      pairingRow.terminal &&
-      !pairingRow.force &&
-      pairingRow.window_id === ownUnforcedRequest,
-  );
+  let knownDead = $derived(link !== null && link.fatal_is_permanent);
+
+  /** One click, no phrase. The fault is latched, so there is nothing to lose
+   *  and nothing to warn about — and this is the case the whole flow exists
+   *  for, so it must be the shortest route through the pane. */
+  let offersDirect = $derived(pairingOffered && !inProgress && knownDead);
 
   /**
-   * The destructive, typed-confirmation unlink — and the two controls are now
-   * **mutually exclusive**, which is the correction an operator asked for.
+   * The confirmed unlink, for every other state.
    *
-   * Before this, both gates were true wherever `link` was unreadable, which is
-   * every page load on the split deployment: the pane offered a one-click
-   * `Re-pair` and an `Unlink and re-pair` beside it, with a danger-zone
-   * paragraph explaining a trade the operator had not yet made. The two are
-   * meaningfully different there — the unforced start is refused against a
-   * working session while the forced one disconnects it — but that is a
-   * distinction no copy next to two buttons can carry.
+   * **It deliberately does not depend on having watched a refusal**, which is
+   * what the first attempt at this did: it offered the one-click control where
+   * `link` was unreadable and revealed the confirmed one once the bridge
+   * answered `session_live`. That dead-ends twice over. The gate lived in
+   * client state, so a reload after the refusal lost it and left the pane with
+   * a refusal message and no way to act on it — and the refusal reason reaches
+   * the client as prose (`_write_pairing_outcome` carries it that way on
+   * purpose, since writing `session_live` into the state would have the poll's
+   * orphan arm fire on a row that never opened a window), so there was nothing
+   * durable to key on either.
    *
-   * So the unreadable shape now starts with the one-click control alone, and
-   * the forced route appears only once the bridge has said the session is
-   * live. That is strictly safer than the pair: a working session cannot be
-   * disconnected from here without the operator first having been told it is
-   * working. The dead-session case keeps its single click, which is the shape
-   * the whole flow exists for.
+   * So an unreadable link takes the phrase. On the split deployment that is
+   * every re-pair, which costs one typed word on a rare recovery action and
+   * buys a pane that cannot strand the operator. The confirmation is honest
+   * there rather than merely cautious: from this process the session may well
+   * be working, and nothing here can tell.
    */
-  let offersForced = $derived(pairingOffered && !inProgress && (knownLive || ownAttemptRefused));
-
-  /** Everything the forced control is not offered for. Derived from it rather
-   *  than re-deriving the link states, so the two cannot both be true. */
-  let offersDirect = $derived(pairingOffered && !inProgress && !offersForced);
+  let offersForced = $derived(pairingOffered && !inProgress && !knownDead);
 
   /** The stream sits behind the same gate as the other four pairing routes, so
    *  opening it on a Cloud deployment or with `pairing_enabled = false` is a
@@ -568,8 +549,7 @@
       // Both flags on every call, and neither inferred. `force` is the
       // operator's acceptance of a disconnect; the server refuses it without
       // its companion rather than filling one in.
-      const started = await startWhatsAppPairing({ force, confirmDisconnect: force });
-      ownUnforcedRequest = force ? null : started.window_id;
+      await startWhatsAppPairing({ force, confirmDisconnect: force });
       receipt = force
         ? 'Re-pair requested. The sidecar is being asked to stop; a code follows once it restarts.'
         : 'Pairing requested. The scheduler picks it up within one poll interval.';
