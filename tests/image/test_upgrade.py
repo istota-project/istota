@@ -27,7 +27,7 @@ and that is the fix working rather than a gap in the test. What is asserted is:
 
   * no `FAIL` on any check, in either shape — the regression assertion, and the
     one that would go red if a future migration or config rename broke the old
-    file. One exemption, by name and with its own guard:
+    file. A short exemption list, by name and with its own guard:
     `TestTheUpgradeStaysClean.NOT_ABOUT_THE_UPGRADE`. This is the only tier that
     runs doctor unscoped, so it is the only one where a check about the *host*
     lands inside an assertion about the *upgrade*;
@@ -426,9 +426,36 @@ class TestTheUpgradeStaysClean:
     #: else, and softening the check itself is the failure `doctor.py`'s scope
     #: comment warns about.
     #:
+    #: `security.skill_model_credential.value` is the second, and the same
+    #: category (ISSUE-503). It answers whether the daemon holds one of
+    #: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN`
+    #: to inject into `code_review`'s subprocess. `_docker_run` passes no `-e`
+    #: for any of the three and has no reason to, so the answer is a correct
+    #: FAIL on every image in this tier on every machine — a statement about
+    #: the container's environment, not about the upgrade.
+    #:
+    #: Passing a dummy credential instead was rejected twice over. It would
+    #: make the check report `ok` about a variable this file had just set,
+    #: which asserts nothing that could ever fail — the shape
+    #: `.claude/rules/testbed.md` catalogues as a probe indistinguishable from
+    #: a no-op. And a credential-shaped value in `docker run` argv is readable
+    #: from `ps` by any other user on the host, which is the rule `_docker_run`
+    #: and `capture_release_config` are both already written around.
+    #:
+    #: Nothing is lost by excluding it. `security.skill_model_credential` emits
+    #: two results and only `.value` reads the environment; `.wiring` is the
+    #: drift guard — the one that catches `SKILL_MODEL_CALLERS` naming a
+    #: renamed skill — and it stays inside the no-FAIL assertion. `.value` is
+    #: emitted only when `.wiring` resolved a live caller, so if that wiring
+    #: breaks the row disappears and `test_the_excluded_checks_still_ran`
+    #: below goes red. The exclusion is watched from both sides.
+    #:
     #: An exclusion by name, never by scope or by status: a DEPLOYMENT-wide
     #: exemption would discard the drift findings that are this tier's subject.
-    NOT_ABOUT_THE_UPGRADE = ("security.sandbox_effective",)
+    NOT_ABOUT_THE_UPGRADE = (
+        "security.sandbox_effective",
+        "security.skill_model_credential.value",
+    )
 
     @pytest.mark.parametrize("shape", ["code", "volume"])
     def test_no_check_fails(self, shape, request):
