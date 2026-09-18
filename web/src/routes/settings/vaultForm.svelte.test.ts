@@ -299,16 +299,43 @@ describe('the file in the folder', () => {
 
 describe('a vault whose file is set in configuration', () => {
   it('is explained rather than shown as a dead form', async () => {
-    api.getVaultStatus.mockResolvedValue(configured({ source: 'toml', editable: false }));
+    api.getVaultStatus.mockResolvedValue(
+      configured({ source: 'toml', editable: false, files: ['a.kdbx', 'b.kdbx'] }),
+    );
     await mount();
 
     const form = screen.getByTestId('vault-form');
     expect(words(form)).toMatch(/set in this deployment's configuration/i);
-    // Not disabled controls with no explanation: the controls are absent, so
-    // there is nothing to wonder about.
+    // Not disabled controls with no explanation: the file controls are absent,
+    // so there is nothing to wonder about.
     expect(control('Vault file')).toBeNull();
     expect(screen.queryByTestId('vault-folder')).toBeNull();
-    expect(button(/generate/i)).toBeNull();
+  });
+
+  it('still offers the passphrase, which belongs to the user either way', async () => {
+    // Only the *file* half is somebody else's decision. The passphrase is a
+    // credential Istota holds to open the file, not a setting an operator
+    // made — withholding it left a user whose vault came from the older form
+    // with no way to store one at all.
+    api.getVaultStatus.mockResolvedValue(
+      configured({ source: 'toml', editable: false, passphrase_present: false }),
+    );
+    await mount();
+
+    expect(passwordField()).toBeTruthy();
+    expect(button(/generate/i)).toBeTruthy();
+  });
+
+  it('names the older form rather than the deployment for a stored path', async () => {
+    // `source: 'db'` is a path this user stored themselves, through the form
+    // this card replaces. Telling them an administrator set it is false, and
+    // it hides the one command that gives them the folder back.
+    api.getVaultStatus.mockResolvedValue(configured({ source: 'db', editable: false }));
+    await mount();
+
+    const note = screen.getByTestId('vault-not-selectable');
+    expect(words(note)).toMatch(/istota user ensure --clear-vault-config/);
+    expect(words(note)).not.toMatch(/deployment's configuration/i);
   });
 });
 

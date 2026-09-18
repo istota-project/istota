@@ -1528,9 +1528,16 @@ def _vault_is_enabled(config, user_id: str) -> bool:
     passphrase half, which is the safe direction for a background gate: the
     next cycle asks again, where the other way round is a resolve and a read on
     every user of a deployment whose database is gone.
+
+    **Present-but-blank counts as configured**, deliberately, which is why the
+    test is ``raw != ""`` rather than ``raw.strip()``:
+    ``resolve_user_vault_path``'s own contract is that ``vault_path = "  "`` is
+    "a configured value that resolves to nothing, which must not be silence",
+    and it refuses it by name. A gate that stripped would sit upstream of that
+    refusal and make it unreachable.
     """
     raw = config.vault_path_for(user_id)
-    if isinstance(raw, str) and raw.strip():
+    if isinstance(raw, str) and raw != "":
         return True
     return _passphrase_present(config, user_id)
 
@@ -2019,20 +2026,22 @@ def vault_status(
     from . import db  # noqa: PLC0415 - see `sync_user`
     from . import storage  # noqa: PLC0415
 
-    raw = config.vault_path_for(user_id)
     owned = tuple(sorted(config.vault_services_for(user_id)))
     last = _SYNC_STATE.get(user_id, (None, ""))[1]
-    # `configured` is the pair §7 makes the enable — a passphrase, or an
-    # operator's path — plus the folder having settled on a file, which covers
-    # the user who has dropped one in and not yet generated a passphrase. Read
-    # off `vault_path_for` alone it would answer False for every folder user,
-    # and the card would have no sync record to render.
+    # `configured` is the enable itself — `_vault_is_enabled`, the predicate
+    # the cycle gates on — rather than a second opinion beside it. A file in
+    # the folder with no passphrase is deliberately *not* configured: nothing
+    # can open it, the cycle skips that user, and a report saying otherwise
+    # would have the card claim a read that never happens. Read off
+    # `vault_path_for` alone it would answer False for every folder user, and
+    # the card would have no sync record to render.
     present = _passphrase_present(config, user_id)
+    if not _vault_is_enabled(config, user_id):
+        return VaultStatusReport(
+            user_id=user_id, configured=False, owned=owned,
+            passphrase_present=present,
+        )
     resolution = storage.vault_location_for(config, user_id)
-    if not (raw or present or resolution.location is not None):
-        # Nothing to close: this arm is reached only where the resolution found
-        # no file, which is where it holds no descriptor.
-        return VaultStatusReport(user_id=user_id, configured=False, owned=owned)
 
     recorded: dict | None = None
     try:

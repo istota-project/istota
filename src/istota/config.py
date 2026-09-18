@@ -2583,11 +2583,20 @@ class Config:
         and that is the enable rather than a proxy for it: a vault is a file in
         the folder *and* a passphrase, the passphrase is the half that cannot
         become true by accident, and a file with no passphrase can be read by
-        nothing. It is also one indexed lookup where the path half is a
+        nothing. It is one read of a small table where the path half would be a
         directory listing per user. An operator's `[users.<id>] vault_path` is
-        still asked first, because it needs no database at all — but it is the
-        same pair in the end: without a passphrase, that user's cycle reports
-        `VaultNoPassphrase` and applies nothing.
+        still asked first, because it needs no database at all.
+
+        **A `user_vault_config` row is deliberately not consulted any more, and
+        the cost is one cohort.** Nothing writes that table now, so a row is
+        one the retired settings form left behind — and such a user has a
+        passphrase, or their vault never worked, so the passphrase half already
+        covers every deployment where a row is doing anything. What it does not
+        cover is a leftover row with no passphrase behind it: that deployment
+        schedules no cycle, so `secrets_vault` never reports the
+        `VaultPassphraseMissing` its own gate would raise. Accepted rather than
+        kept, since restoring the row half means a listing on every tick for a
+        table that is about to go.
 
         Degrades to the TOML answer rather than switching a configured vault
         off — the safe direction, since the other one is a deployment that

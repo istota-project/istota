@@ -299,6 +299,10 @@
 
   let vaultEditable = $derived.by(() => vaultForm?.editable ?? false);
   let vaultConfigured = $derived.by(() => vaultForm?.configured ?? false);
+  // Only to say *whose* setting outranks the choice: `toml` is an operator's
+  // line, and `db` is a path this user stored through the form this card
+  // replaces, which nothing writes any more.
+  let vaultSource = $derived.by(() => vaultForm?.source ?? '');
   let vaultHasPassphrase = $derived.by(() => vaultForm?.passphrase_present ?? false);
   let vaultDir = $derived.by(() => vaultForm?.vault_dir ?? '');
   let vaultFiles = $derived.by(() => vaultForm?.files ?? []);
@@ -1149,108 +1153,127 @@
         {/snippet}
 
         <div class="vault-form" data-testid="vault-form">
+          <!--
+            Only the *file* half is withheld when something outranks it. The
+            passphrase is the user's own either way — it is a credential Istota
+            holds to open their file, not a setting an operator made — and
+            withholding it left a user whose vault came from the form this
+            replaced with no way to store one at all.
+          -->
           {#if !vaultEditable}
-            <p class="caption">
-              Your credential vault's file is set in this deployment's configuration, so it is not
-              selectable here. Ask your administrator to change it.
+            <p class="caption" data-testid="vault-not-selectable">
+              {#if vaultSource === 'toml'}
+                Your credential vault's file is set in this deployment's configuration, so it is not
+                selectable here. Ask your administrator to change it.
+              {:else}
+                Your credential vault still points at a file you named before this page offered a
+                folder. An administrator clears that with <code
+                  >istota user ensure --clear-vault-config</code
+                >, and the file below is then selectable here.
+              {/if}
             </p>
-          {:else}
-            <SecretField
-              label="Master password"
-              configured={vaultHasPassphrase}
-              value={passphraseInput}
-              disabled={vaultBusy}
-              onValueChange={(next) => (passphraseInput = next)}
-            />
-            <!--
+          {/if}
+          <SecretField
+            label="Master password"
+            configured={vaultHasPassphrase}
+            value={passphraseInput}
+            disabled={vaultBusy}
+            onValueChange={(next) => (passphraseInput = next)}
+          />
+          <!--
               The one sentence that stops Generate reading as a write to a file
               the card has just called read-only. Istota reads the *file*; the
               master password is a credential Istota has to *hold* in order to
               open it, which is a different thing.
             -->
-            <p class="caption">
-              The password your KeePassXC file is encrypted with. Istota stores it so it can open
-              the file — it is never written back to the file, and cannot be shown to you again. If
-              you have not made the file yet, generate one here and use it as the master password
-              when you create it.
-            </p>
-            <div class="vault-actions control-row">
-              <Button
-                variant="secondary"
-                size="sm"
-                onclick={saveTypedVaultPassphrase}
-                loading={vaultBusy}
-                disabled={!passphraseInput}
-              >
-                Save password
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onclick={generateVaultPassphrase}
-                disabled={vaultBusy}
-              >
-                {vaultHasPassphrase ? 'Generate a new one' : 'Generate one for me'}
-              </Button>
-            </div>
-            {#if mintedPassphrase}
-              <!--
+          <p class="caption">
+            The password your KeePassXC file is encrypted with. Istota stores it so it can open the
+            file — it is never written back to the file, and cannot be shown to you again. If you
+            have not made the file yet, generate one here and use it as the master password when you
+            create it.
+          </p>
+          <div class="vault-actions control-row">
+            <Button
+              variant="secondary"
+              size="sm"
+              onclick={saveTypedVaultPassphrase}
+              loading={vaultBusy}
+              disabled={!passphraseInput}
+            >
+              Save password
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onclick={generateVaultPassphrase}
+              disabled={vaultBusy}
+            >
+              {vaultHasPassphrase ? 'Generate a new one' : 'Generate one for me'}
+            </Button>
+          </div>
+          {#if mintedPassphrase}
+            <!--
                 The one place this value is ever rendered. There is no route
                 that reads it back, so it is here or nowhere — which is why it
                 is a bordered block rather than a line of prose, and why it is
                 not a `notify()`: a transient banner that expires takes the
                 only copy with it.
               -->
-              <p class="vault-minted" data-testid="vault-minted">
-                <strong>Copy this now — it will not be shown again:</strong>
-                <code>{mintedPassphrase}</code>
-              </p>
-            {/if}
+            <p class="vault-minted" data-testid="vault-minted">
+              <strong>Copy this now — it will not be shown again:</strong>
+              <code>{mintedPassphrase}</code>
+            </p>
+          {/if}
 
-            <!--
+          <!--
               The file half, and it is a folder plus a name rather than a path.
               There is nothing to type: the user drops their KeePassXC file into
               the folder named below and the server offers what it found. With
               one file there is no question to ask, which is why the dropdown is
               absent for it and a line of prose says which file is being read.
 
+              Withheld when a configured path outranks it, which the sentence
+              above has already explained — offering a choice the server would
+              refuse is a control that does nothing.
+
               `warning`, not `hint`: a hint renders behind a hover "?" and is
               discoverable rather than seen, and web/AGENTS.md's rule is that
               nothing the user has to act on goes there. Putting the file
               somewhere is the action.
             -->
-            {#if vaultFiles.length === 0}
-              <p class="caption vault-folder" data-testid="vault-folder">
-                {#if vaultDir}
-                  Put your KeePassXC file in <code>{vaultDir}</code> and it will show up here.
-                {:else}
-                  Istota cannot reach your files on this deployment, so the vault file is an
-                  administrator setting.
-                {/if}
-              </p>
-            {:else if vaultFiles.length === 1}
-              <p class="caption vault-folder" data-testid="vault-folder">
-                Reading <code>{vaultFiles[0]}</code> from <code>{vaultDir}</code>.
-              </p>
-            {:else}
-              <Field
-                label="Vault file"
-                warning="There is more than one file in your vault folder, so Istota needs to know which one to read."
-                wide
-              >
-                <Select
-                  value={vaultFile}
-                  options={vaultFileOptions}
-                  disabled={vaultBusy}
-                  fullWidth
-                  ariaLabel="Vault file"
-                  onValueChange={chooseVaultFile}
-                />
-              </Field>
-              <p class="caption vault-folder" data-testid="vault-folder">
-                From <code>{vaultDir}</code>
-              </p>
-            {/if}
+          {#if !vaultEditable}
+            <!-- nothing: the sentence at the top of the card says why -->
+          {:else if vaultFiles.length === 0}
+            <p class="caption vault-folder" data-testid="vault-folder">
+              {#if vaultDir}
+                Put your KeePassXC file in <code>{vaultDir}</code> and it will show up here.
+              {:else}
+                Istota cannot reach your files on this deployment, so the vault file is an
+                administrator setting.
+              {/if}
+            </p>
+          {:else if vaultFiles.length === 1}
+            <p class="caption vault-folder" data-testid="vault-folder">
+              Reading <code>{vaultFiles[0]}</code> from <code>{vaultDir}</code>.
+            </p>
+          {:else}
+            <Field
+              label="Vault file"
+              warning="There is more than one file in your vault folder, so Istota needs to know which one to read."
+              wide
+            >
+              <Select
+                value={vaultFile}
+                options={vaultFileOptions}
+                disabled={vaultBusy}
+                fullWidth
+                ariaLabel="Vault file"
+                onValueChange={chooseVaultFile}
+              />
+            </Field>
+            <p class="caption vault-folder" data-testid="vault-folder">
+              From <code>{vaultDir}</code>
+            </p>
           {/if}
           {#if vaultError}
             <p class="banner error" data-testid="vault-error">{vaultError}</p>

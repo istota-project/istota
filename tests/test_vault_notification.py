@@ -723,10 +723,42 @@ class TestTheResolver:
     def test_a_vault_the_operator_has_unconfigured_is_gone(self, broken, sends):
         """The orphaned-row case, answered by the resolver rather than by a sweep.
 
-        Nothing settles an outcome for a user with no `vault_path`, so removing
-        the line from `config.toml` leaves any open row with nothing that would
-        ever close it. A resolver answering `None` is what `list_open` reads as
-        "the object is gone", which is the whole anti-staleness story.
+        Nothing settles an outcome for a user with no vault at all, so switching
+        one off leaves any open row with nothing that would ever close it. A
+        resolver answering `None` is what `list_open` reads as "the object is
+        gone", which is the whole anti-staleness story.
+
+        **Both halves have to go**, which is what the second removal below is
+        for: a vault is a path *or* a stored passphrase now, since a user who
+        chose their file out of the folder has no path anywhere.
+        """
+        from istota import secrets_store
+        from istota.secrets_vault import (
+            VAULT_PASSPHRASE_KEY,
+            VAULT_PASSPHRASE_SERVICE,
+            sync_user,
+        )
+
+        config, _path = broken
+        sync_user(config, "alice")
+        row = self._row(config)
+
+        config.users["alice"].vault_path = ""
+        secrets_store.delete_secret(
+            config.db_path, "alice", VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY,
+        )
+        with db.get_db(config.db_path) as conn:
+            view = connected_service.RESOLVER.resolve(config, conn, row)
+        assert view is None
+
+    def test_a_folder_vault_is_not_read_as_gone(self, broken, sends):
+        """The regression this arm was written against.
+
+        A user who chose their file out of `{bot_dir}/vault/` stores no path
+        anywhere `vault_path_for` reads, so a path-only test answered "the vault
+        is gone" for every one of them — closing, on the next panel render, the
+        row that had just told them their vault was broken. `sync_user` raises
+        only on a class *transition*, so nothing would raise it again.
         """
         config, _path = broken
         from istota.secrets_vault import sync_user
@@ -734,10 +766,13 @@ class TestTheResolver:
         sync_user(config, "alice")
         row = self._row(config)
 
+        # The passphrase the fixture provisioned stays; only the path goes,
+        # which is exactly the folder-configured user's shape.
         config.users["alice"].vault_path = ""
         with db.get_db(config.db_path) as conn:
             view = connected_service.RESOLVER.resolve(config, conn, row)
-        assert view is None
+        assert view is not None
+        assert "Credential vault" in view.title
 
     def test_a_row_with_no_record_behind_it_still_renders(self, broken, sends):
         """The safe direction, and the one an absent record has to take.

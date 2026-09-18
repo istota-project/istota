@@ -741,6 +741,75 @@ class TestTheFolderListing:
             _seed(folder / f"v{i:03d}.kdbx")
         assert len(list_vault_files(config, "alice")) == VAULT_DIR_MAX_FILES
 
+    def test_the_cap_takes_the_first_names_rather_than_the_first_entries(
+        self, tmp_path,
+    ):
+        """Sorted before it is capped, which is what makes the cap survivable.
+
+        Capping the scan instead makes the surviving set a property of
+        directory order — so a `.kdbx` a task creates can push the user's own
+        file out of the listing *and* out of the membership test their stored
+        choice is checked against, silently.
+        """
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        mine = "aaa-mine.kdbx"
+        _seed(folder / mine)
+        for i in range(VAULT_DIR_MAX_FILES + 20):
+            _seed(folder / f"zzz-{i:03d}.kdbx")
+
+        names = list_vault_files(config, "alice")
+        assert len(names) == VAULT_DIR_MAX_FILES
+        assert names[0] == mine
+        assert names == sorted(names)
+
+    def test_a_name_that_will_not_travel_is_skipped(self, tmp_path):
+        """A surrogate-decoded name is one entry's problem, not the card's.
+
+        `os.scandir` decodes with `surrogateescape`, and the settings payload is
+        rendered by `json.dumps(..., ensure_ascii=False).encode("utf-8")`, which
+        raises on a lone surrogate — so one `touch $'\\xff.kdbx'` in a folder the
+        task can write would 500 the whole settings card.
+        """
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        _seed(folder / "personal.kdbx")
+        try:
+            os.close(os.open(
+                os.path.join(os.fsencode(folder), b"\xff-broken.kdbx"),
+                os.O_CREAT | os.O_WRONLY, 0o600,
+            ))
+        except (OSError, ValueError):  # pragma: no cover - a filesystem that refuses
+            pytest.skip("this filesystem will not take an undecodable name")
+
+        names = list_vault_files(config, "alice")
+        assert names == ["personal.kdbx"]
+        # The control for the assertion above: the name really is one that
+        # cannot be rendered, so the skip is doing something.
+        import json
+        with pytest.raises(UnicodeEncodeError):
+            json.dumps(
+                os.fsdecode(b"\xff-broken.kdbx"), ensure_ascii=False,
+            ).encode("utf-8")
+
+    def test_the_scan_is_bounded_by_entries_as_well(self, tmp_path, caplog):
+        """The result cap bounds what comes back, not what is walked.
+
+        A folder of files that are not `.kdbx` matches nothing and used to be
+        walked in full, on a FUSE mount, on every settings load and every sync
+        tick — and its entry count is not the user's alone to decide.
+        """
+        from istota.storage import VAULT_DIR_MAX_SCAN
+
+        config = _config(tmp_path, alice=UserConfig())
+        folder = _vault_dir(config)
+        for i in range(VAULT_DIR_MAX_SCAN + 10):
+            _seed(folder / f"noise{i:05d}.txt")
+
+        with caplog.at_level("WARNING", logger="istota.storage"):
+            assert list_vault_files(config, "alice") == []
+        assert any("stopped at" in r.getMessage() for r in caplog.records)
+
 
 class TestWhichFileTheFolderSettlesOn:
     """`vault_location_for`'s four rules, and what each refusal means.

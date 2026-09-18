@@ -100,7 +100,9 @@ It is **provisioning input, not a storage backend**. The table stays the live st
 
 Two ways, and which one is right depends on who is deciding.
 
-**From the web UI**, under Settings, Connected services. The user names a file in their own workspace, ticks the services it owns, and generates a passphrase. This is the ordinary route and needs no operator. The form takes a **relative path only** — a path under that user's own files — and that restriction is the point of it rather than a simplification: see [what a vault costs](#what-a-vault-costs) below.
+**From the web UI**, under Settings, Connected services. The user copies their `.kdbx` into the `vault` folder inside their own Istota folder and generates a passphrase. This is the ordinary route and needs no operator. There is no path to type: the folder is provisioned for every user, the card lists the `.kdbx` files it holds, and one file is read on sight. With several there the card asks which, and what is stored is that **filename** — not a path, so there is nothing to spell wrongly and nowhere else for it to point. Deleting or renaming the chosen file brings the question back rather than leaving Istota reading nothing.
+
+A file with no passphrase behind it is not a vault and nothing reads it, which is why the card says "Not set up" until both halves are there. Turning a vault off is removing either one.
 
 **From `config.toml`**, per user, when an operator wants to decide it for them or wants the absolute form:
 
@@ -112,9 +114,9 @@ vault_services = ["karakeep", "ntfy"]
 
 A relative `vault_path` resolves under that user's own workspace directory, which is where a phone or a laptop can reach it. An absolute one is a host path and must resolve outside every tree a task sandbox can write; that form keeps the file away from a task entirely, at the cost of the user no longer being able to edit it from a phone. Empty — the default — means the feature is off for that user.
 
-**The absolute form is operator-only, deliberately.** It is checked against the list of trees a sandbox binds read-write, which is the right question for a path an operator wrote and is not a line a user may put themselves on the far side of: an absolute path chosen by a user would read any file the daemon can read, as the daemon, and decrypt the result into that user's own credential rows. The web form refuses one and says so.
+**A path is operator-only, deliberately** — and the absolute form is the reason. It is checked against the list of trees a sandbox binds read-write, which is the right question for a path an operator wrote and is not a line a user may put themselves on the far side of: an absolute path chosen by a user would read any file the daemon can read, as the daemon, and decrypt the result into that user's own credential rows. The web card offers no path at all, which is what makes the question unaskable there rather than refused.
 
-**A vault set in `config.toml` is not editable from the web UI**, and that is about precedence rather than permission. A stored selection outranks the TOML line, so letting the form overwrite one would make the operator's file silently inert. The page says where the setting came from instead. `istota user ensure --clear-vault-config --user alice` removes a stored selection and gives the TOML line back, which is the escape hatch for an operator who wants to take the decision over.
+**A `vault_path` outranks the folder**, and that is about precedence rather than permission. The card says so instead of offering a choice the line would override. `istota user ensure --clear-vault-config --user alice` removes a selection stored by the older web form, which is the escape hatch for a user whose card still reports one.
 
 `vault_services` is the list of services the file owns. Empty reads the file and applies nothing, which is a usable dry run. A service whose credentials the daemon mints for itself can never be vault-owned (Monarch, Overland, Garmin, Google Workspace), and a name like that is dropped with a warning when the config loads. Today's eligible set is `karakeep`, `ntfy`, `native_brain`, `feeds` and `carto`.
 
@@ -203,7 +205,7 @@ For a service in `vault_services`, the vault is the authority:
 
 A vault-owned service's fields render disabled, with a sentence saying the vault owns them. `PUT` and `DELETE` on those keys answer 409. The "Connected services" heading carries a status line: the resolved path, the owned services, when Istota last applied the file, and the error class when it is failing.
 
-Under it is the form that sets the vault up: the file, the services it owns, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is an absolute path — see [turning it on](#turning-it-on) — and it does not render for a vault an operator set in `config.toml`, which it says instead.
+Under it is the card that sets the vault up: the folder to put the file in, the files found there, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is a path of any kind — see [turning it on](#turning-it-on) — and the file half is withheld for a vault a `vault_path` already names, which it says instead. The passphrase half renders either way: it is a credential the user owns rather than a setting an operator made.
 
 **"Last applied" is not a health check, and a healthy vault shows an old stamp.** The record is written only by a cycle that did work, and a cycle over an unchanged file does none — so a vault nobody has edited for three weeks reports a three-week-old timestamp and is working perfectly.
 
@@ -215,12 +217,14 @@ Each of these leaves the credentials in the table alone and raises a notificatio
 |---|---|
 | The stored passphrase does not open the file | Re-provision it, then run `istota secret vault-sync` |
 | The file is not a readable KeePass database | Also what a sync caught mid-write looks like — check the mount before suspecting the file |
-| Nothing at the configured path | Check `vault_path`, and that the file has synced to the server |
+| There is no vault file to read | Check the `vault` folder in your own files, and that the file has synced to the server; or check `vault_path` where an operator set one |
 | The `vault` extra is not installed | An operator remedy, not a user one |
 | No passphrase provisioned | `istota secret ensure … --generate` |
 | `ISTOTA_SECRET_KEY` cannot read the stored passphrase | A deployment problem; see `security.secret_key` in `istota doctor` |
 | The file was refused unread — not a regular file, or over the 8 MiB cap | Check what is actually at the path; a symlink and a FIFO are both refused |
 | `vault_path` is one the daemon may not open | An operator corrects the line in `config.toml` |
+
+Two more states the card reports and nothing notifies about, because neither is a failure and both are one step from being answered: the folder holds no `.kdbx` at all, and it holds several with none chosen. The second is a dropdown away.
 
 `istota secret vault-status -u alice` prints the whole answer for one user: the resolved path, whether a passphrase is provisioned, the groups the file holds, which of them are owned, and which owned services the file does not mention.
 
@@ -241,7 +245,9 @@ The secrets table still holds a copy of everything. What the vault removes is th
 
 The security accounting is that the vault adds no confidentiality and one new exposure. Every credential in it is also a row in the table, and the passphrase that opens it is another row in that same table, so one secret — `ISTOTA_SECRET_KEY` — opens both. What changes is *where* credential ciphertext sits: none of it used to be reachable from inside a sandbox, and now a copy of every owned credential is, in a file a task can read, copy out, delete or overwrite. Deleting or corrupting it is a denial of service that leaves every credential working and raises a notification. Replacing it with an older copy the user keeps in the same tree is a real rollback vector, bounded by `vault_services`.
 
-The generated passphrase is the entire mitigation. The absolute `vault_path` form removes the exposure completely by putting the file outside every tree a sandbox can reach, at the cost of the phone; it is not the default because editing from a phone is the feature, and it is the reason the web form takes relative paths only — the form's own users are inside the tree the absolute form exists to escape, so handing them that form would be handing them an arbitrary read as the daemon.
+The generated passphrase is the entire mitigation. The absolute `vault_path` form removes the exposure completely by putting the file outside every tree a sandbox can reach, at the cost of the phone; it is not the default because editing from a phone is the feature, and it is the reason the web card offers no path of any kind — the card's own users are inside the tree the absolute form exists to escape, so handing them a path field would be handing them an arbitrary read as the daemon.
+
+The folder is inside that tree too, and the consequences are bounded rather than absent. A task can add a `.kdbx` there, which moves a one-file folder to "several, none chosen" until the user picks — a denial of service, and a visible one on the card. It cannot plant a vault that is *read*: the passphrase is a row in a table no sandbox binds, so a planted file fails to open and applies nothing.
 
 ## How credentials flow at runtime
 

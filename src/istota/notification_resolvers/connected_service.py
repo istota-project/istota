@@ -447,12 +447,14 @@ def _vault_is_working(
 
     Two ways it has, and they are different facts.
 
-    **The vault is gone**, by either of the two ways an operator switches it
-    off. Removing `vault_path` from `config.toml` is one; setting
-    `scheduler.vault_sync_interval = 0` is the other, and it is the one that is
-    easy to miss because the config line stays where it was. Both leave nothing
-    that would ever settle another outcome for this user, so an open row would
-    stand for the life of the deployment with no surface able to close it. A
+    **The vault is gone**, by any of the ways it is switched off. Removing the
+    file from `{bot_dir}/vault/` is one, removing the `vault/passphrase` row is
+    another, removing `vault_path` from `config.toml` is a third; setting
+    `scheduler.vault_sync_interval = 0` is the last, and it is the one that is
+    easy to miss because everything else stays where it was. All of them leave
+    nothing that would ever settle another outcome for this user, so an open
+    row would stand for the life of the deployment with no surface able to
+    close it. A
     resolver answering None is what `list_open` reads as "the object is gone",
     and that backstop is the whole reason it exists — this is the one source
     where the object is a config line rather than a database row, so its
@@ -469,20 +471,60 @@ def _vault_is_working(
     """
     from .. import secrets_vault
 
-    # Through the accessor rather than off the `UserConfig`: since the settings
-    # endpoint can write a `user_vault_config` row, the TOML attribute is only
-    # half the answer, and this arm decides whether the row that told the user
-    # their vault was broken may be closed. Reading the stale half would hold a
-    # row open for a vault the user has since switched off, and close one for a
-    # vault they have just switched on.
+    # Two halves, because either one on its own is a vault. `vault_path_for` is
+    # the accessor rather than the `UserConfig` attribute, since a stored row
+    # outranks the TOML line; the passphrase is what a user who chose a file
+    # out of their vault folder has instead of a path, and they now have no
+    # path at all — so reading the path half alone answered "the vault is
+    # gone" for every one of them and closed the row that had just told them
+    # their vault was broken.
+    #
+    # **Raw SQL on `conn`, never `secrets_store.secret_exists`.** That opens a
+    # second connection, and this runs underneath the panel's own — the
+    # thirty-second busy-timeout hazard the module docstring above opens with.
+    # Presence, never a value, so nothing here needs to decrypt.
     if not (config.vault_path_for(user_id) or "").strip():
-        return True
+        if not _has_vault_passphrase(user_id, conn):
+            return True
     if not secrets_vault.sync_is_scheduled(config):
         return True
     record = secrets_vault.read_sync_state(conn, user_id)
     if not record:
         return False
     return record.get("outcome") == secrets_vault.OUTCOME_OK
+
+
+def _has_vault_passphrase(user_id: str, conn: "sqlite3.Connection") -> bool:
+    """Is a `vault/passphrase` row present. Presence, never a value.
+
+    One statement on the caller's own connection, for the reason `_is_connected`
+    gives: a second connection opened underneath the panel's waits out the
+    busy timeout. Nothing decrypts, so this answers the same with a missing or
+    rotated master key — which is right, since a row that will not decrypt is
+    still a vault somebody configured.
+
+    Never raises: this whole resolver runs inside `list_open`'s liveness sweep,
+    where an exception would take the panel with it. A database that cannot
+    answer reads as "no passphrase", which combines with the path half to leave
+    the row *open* rather than closing it — the safe direction, and the same
+    one the arms above take.
+    """
+    from .. import secrets_vault
+
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM secrets WHERE user_id = ? AND service = ? AND key = ? "
+            "LIMIT 1",
+            (
+                user_id,
+                secrets_vault.VAULT_PASSPHRASE_SERVICE,
+                secrets_vault.VAULT_PASSPHRASE_KEY,
+            ),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - a liveness sweep, never the work
+        logger.debug("vault passphrase presence lookup failed for %r", user_id)
+        return False
+    return row is not None
 
 
 RESOLVER = ConnectedServiceResolver()

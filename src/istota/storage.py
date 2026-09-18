@@ -917,8 +917,20 @@ VAULT_FILE_SUFFIX = ".kdbx"
 
 #: How many names a listing may carry. A folder holding more than this is a
 #: user who has put something else there, and the card cannot render a
-#: thousand-entry dropdown usefully either.
+#: thousand-entry dropdown usefully either. Applied **after** sorting, so which
+#: names survive is a property of the names rather than of directory order —
+#: capping first let a `.kdbx` a task created push the user's own file out of
+#: both the listing and the membership test the stored choice is checked by.
 VAULT_DIR_MAX_FILES = 50
+
+#: How many directory entries the scan will look at, matching or not.
+#:
+#: A separate ceiling because the one above bounds the *result*: a folder
+#: holding a million files that are not `.kdbx` matches nothing and was walked
+#: in full, on a FUSE mount, on every settings load and every sync tick. The
+#: folder is bound read-write into that user's own sandbox, so its entry count
+#: is not theirs alone to decide.
+VAULT_DIR_MAX_SCAN = 5000
 
 #: Where the chosen filename is remembered. A reserved per-user KV namespace,
 #: beside ``_vault_sync``: the value selects which file the daemon decrypts, so
@@ -974,18 +986,27 @@ def list_vault_files(config: "Config", user_id: str) -> list[str]:
     if fd is None:
         return []
     names: list[str] = []
+    scanned = 0
     try:
         with os.scandir(fd) as entries:
             for entry in entries:
-                if len(names) >= VAULT_DIR_MAX_FILES:
+                scanned += 1
+                if scanned > VAULT_DIR_MAX_SCAN:
                     logger.warning(
-                        "vault folder listing for %s stopped at %d files",
-                        _bounded_for_log(user_id), VAULT_DIR_MAX_FILES,
+                        "vault folder scan for %s stopped at %d entries",
+                        _bounded_for_log(user_id), VAULT_DIR_MAX_SCAN,
                     )
                     break
                 try:
                     if not entry.name.lower().endswith(VAULT_FILE_SUFFIX):
                         continue
+                    # A name `os.scandir` decoded with surrogates is skipped
+                    # here rather than carried: it rides the settings payload,
+                    # and `json.dumps(..., ensure_ascii=False).encode("utf-8")`
+                    # — what starlette renders with — raises on a lone
+                    # surrogate. The folder is model-writable, so one
+                    # `touch $'\xff.kdbx'` would otherwise 500 the card.
+                    entry.name.encode("utf-8")
                     # One test, and `follow_symlinks=False` is what makes it
                     # two rules: a symlink to a real file in the same folder
                     # answers True to a *following* `is_file` and must not be a
@@ -996,7 +1017,9 @@ def list_vault_files(config: "Config", user_id: str) -> list[str]:
                     # red for, which is the one property the skip has to keep.
                     if not entry.is_file(follow_symlinks=False):
                         continue
-                except OSError:  # pragma: no cover - a stat that raced a delete
+                except (OSError, UnicodeEncodeError):
+                    # A stat that raced a delete, or a name that will not
+                    # travel. Both are one entry's problem, not the listing's.
                     continue
                 names.append(entry.name)
     except (OSError, ValueError):
@@ -1004,7 +1027,15 @@ def list_vault_files(config: "Config", user_id: str) -> list[str]:
         return []
     finally:
         os.close(fd)
-    return sorted(names)
+    # Sorted **before** the cap: which names survive has to be a property of
+    # the names, not of the order the filesystem happened to hand them over.
+    names.sort()
+    if len(names) > VAULT_DIR_MAX_FILES:
+        logger.warning(
+            "vault folder listing for %s carries %d of %d files",
+            _bounded_for_log(user_id), VAULT_DIR_MAX_FILES, len(names),
+        )
+    return names[:VAULT_DIR_MAX_FILES]
 
 
 def stored_vault_file(config: "Config", user_id: str) -> str:
@@ -1078,13 +1109,15 @@ def vault_location_for(config: "Config", user_id: str) -> VaultResolution:
     if not names:
         return VaultResolution(location=None, refusal=VAULT_DIR_EMPTY)
 
-    chosen = ""
-    if len(names) == 1:
+    # Rule 2 before rule 3, in that order, because that is the order the rules
+    # are written in. The two answer alike in every case a folder can be in —
+    # a stored name that is still there wins either way, and one that is gone
+    # falls through — so the ordering is about the code reading as the rule
+    # rather than about behaviour.
+    stored = stored_vault_file(config, user_id)
+    chosen = stored if stored in names else ""
+    if not chosen and len(names) == 1:
         chosen = names[0]
-    else:
-        stored = stored_vault_file(config, user_id)
-        if stored in names:
-            chosen = stored
     if not chosen:
         return VaultResolution(location=None, refusal=VAULT_DIR_UNCHOSEN)
 
@@ -1114,9 +1147,14 @@ def vault_location_for(config: "Config", user_id: str) -> VaultResolution:
 def vault_dir_display(config: "Config", user_id: str) -> str:
     """Where the folder is, for the card's instruction. Display only.
 
-    Composed rather than resolved, and it says so: it is what the user sees in
-    their own files (``Istota/vault``), not what the daemon opens. ``""``
-    without a workspace, where the folder cannot exist.
+    The daemon-side path, composed rather than resolved — the same string the
+    form's ``vault_root`` carried before it, and the same one the refusal log
+    lines name, so an operator reading a support question sees what the user
+    was shown. It is **not** the path the user navigates to: they reach these
+    files through their own file client, where the deployment's mount point is
+    not a thing they can type.
+
+    ``""`` without a workspace, where the folder cannot exist at all.
     """
     if not config.has_workspace or not is_scopable_user_id(user_id):
         return ""

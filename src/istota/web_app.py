@@ -10169,7 +10169,13 @@ def _vault_settings_payload(username: str) -> dict:
         "files": files,
         # What resolution settled on, empty when nothing did — the folder is
         # empty, or it holds several and none is chosen.
-        "vault_file": Path(report.path).name if report.path else "",
+        #
+        # Asked of the resolver rather than read off `report.path`, because the
+        # two answer different questions: the report has a path only for a
+        # vault that is *switched on*, and the dropdown has to show the user
+        # their own selection while they are still setting one up — a file
+        # copied in, no passphrase generated yet.
+        "vault_file": _vault_selected_file(username),
         # A fact about the user rather than about the file, which is why it is
         # on this half and why it is asked directly rather than read off the
         # report: somebody who generated a passphrase a minute ago and has not
@@ -10225,6 +10231,37 @@ def _vault_settings_payload(username: str) -> dict:
             )
         ),
     }
+
+
+def _vault_selected_file(username: str) -> str:
+    """Which file the folder settles on for this user, as a bare name.
+
+    One call into the resolver rather than a second copy of its four rules, so
+    what the dropdown shows selected is what the sync would open. The
+    descriptor it hands back is closed here: this asks a question and opens
+    nothing.
+
+    `""` where nothing settled, and also for a configured *path* — an absolute
+    one has no name in the folder, and a relative one is not a name the
+    dropdown may offer, since selecting it would store a value that line
+    outranks.
+    """
+    if _config is None:
+        return ""
+    from . import storage
+
+    try:
+        resolution = storage.vault_location_for(_config, username)
+    except Exception:  # pragma: no cover - the resolver's own contract is no raise
+        logger.debug("vault file resolution failed for %r", username)
+        return ""
+    location = resolution.location
+    if location is None:
+        return ""
+    if location.dir_fd is not None:
+        os.close(location.dir_fd)
+    name = location.path.name
+    return name if name in storage.list_vault_files(_config, username) else ""
 
 
 def _vault_passphrase_present(username: str) -> bool:
