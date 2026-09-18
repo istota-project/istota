@@ -291,7 +291,59 @@ describe('the passphrase', () => {
     const shown = await screen.findByTestId('vault-minted');
     expect(words(shown)).toContain('MINTED-VALUE-123');
     expect(words(shown)).toMatch(/will not be shown again/i);
-    expect(api.setVaultPassphrase).toHaveBeenCalledWith({ generate: true });
+    expect(api.setVaultPassphrase).toHaveBeenCalledWith({ generate: true, replace: false });
+  });
+
+  it('generates straight away when there is nothing to destroy', async () => {
+    api.getVaultStatus.mockResolvedValue(unconfigured());
+    api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: 'FIRST-VALUE' });
+    await mount();
+
+    await fireEvent.click(button(/generate a new passphrase/i)!);
+
+    await waitFor(() => expect(api.setVaultPassphrase).toHaveBeenCalled());
+    expect(api.setVaultPassphrase).toHaveBeenCalledWith({ generate: true, replace: false });
+  });
+
+  it('asks before replacing one, and does not send until confirmed', async () => {
+    // The page's one irreversible action. The KDBX is encrypted under the
+    // stored value and generating does not re-encrypt it, so a second mint
+    // destroys the only copy of the passphrase that opens the file. The server
+    // refuses it without `replace`; this is the half that means a user is told
+    // rather than shown a 409.
+    api.getVaultStatus.mockResolvedValue(configured({ passphrase_present: true }));
+    api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: 'SECOND-VALUE' });
+    await mount();
+
+    await fireEvent.click(button(/generate a new passphrase/i)!);
+    // Nothing has gone out yet, which is the assertion that distinguishes a
+    // dialog from a dialog that fires and then asks.
+    expect(api.setVaultPassphrase).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByText(/will stop opening until you set the new passphrase/i);
+    expect(dialog).toBeTruthy();
+
+    await fireEvent.click(button(/generate a new one/i)!);
+    await waitFor(() => expect(api.setVaultPassphrase).toHaveBeenCalled());
+    expect(api.setVaultPassphrase).toHaveBeenCalledWith({ generate: true, replace: true });
+  });
+
+  it('never sends replace on the typed path', async () => {
+    // Generate-only, matching the CLI's `--force`: re-storing a value the user
+    // is holding destroys nothing they cannot type again.
+    api.getVaultStatus.mockResolvedValue(configured({ passphrase_present: true }));
+    api.setVaultPassphrase.mockResolvedValue({ ok: true, generated: '' });
+    await mount();
+
+    await fireEvent.input(screen.getByTestId('vault-passphrase-input'), {
+      target: { value: 'a-passphrase-long-enough-to-pass-the-floor' },
+    });
+    await fireEvent.click(button(/use this passphrase/i)!);
+
+    await waitFor(() => expect(api.setVaultPassphrase).toHaveBeenCalled());
+    expect(api.setVaultPassphrase).toHaveBeenCalledWith({
+      passphrase: 'a-passphrase-long-enough-to-pass-the-floor',
+    });
   });
 
   it('never renders a typed one back', async () => {

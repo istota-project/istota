@@ -57,9 +57,11 @@ from .user_scope import is_scopable_user_id
 logger = logging.getLogger(__name__)
 
 #: Who wrote the row. Recorded rather than enforced — it is for an operator
-#: reading the table, and both values are ordinary writers.
+#: reading the table, not a permission. Only `web` is written today: the CLI
+#: half of this module is `clear_vault_config`, which removes a row rather than
+#: labelling one, so a `SOURCE_CLI` constant would be a name with no writer. Add
+#: it beside its first caller rather than ahead of one.
 SOURCE_WEB = "web"
-SOURCE_CLI = "cli"
 
 
 @dataclass(frozen=True)

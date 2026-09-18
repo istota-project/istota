@@ -739,14 +739,31 @@ class UserConfig:
     # `vault_services` is the services the file owns — empty is a usable dry-run
     # state, since the vault is then read and nothing is applied.
     #
-    # **TOML-only, and that is a security control rather than a placement.**
-    # Every other per-user scalar above is overlaid from `user_profiles` by
-    # `_apply_user_profiles`, and that table is writable from the settings UI.
-    # `vault_path` selects which file the daemon decrypts with a key it holds
-    # and `vault_services` selects which credentials that file may overwrite and
-    # delete, so neither may be settable by anything downstream of a task.
-    # `tests/test_secrets_vault.py::TestTheProfileTableGuard` holds the absence
-    # from both the column set and the overlay.
+    # **These two are the TOML half of the answer, not the answer.** A
+    # `user_vault_config` row outranks them, so read the merged value through
+    # `Config.vault_path_for` / `vault_services_for` and never off this object —
+    # a consumer left on the attribute ignores what the user set in the browser
+    # while reading a real value, which is the failure that looks like nothing
+    # is wrong. `tests/test_user_vault_config.py` sweeps `src/` for the
+    # attribute and permits it in this module alone.
+    #
+    # **Not in `user_profiles`, and that is a security control rather than a
+    # placement.** Every other per-user scalar above is overlaid from that table
+    # by `_apply_user_profiles`, and it is writable by anything that grows a
+    # profile-writing verb. `vault_path` selects which file the daemon decrypts
+    # with a key it holds and `vault_services` selects which credentials that
+    # file may overwrite and delete, so neither may be settable by anything
+    # downstream of a task. `user_vault_config` is a table of its own for
+    # exactly that reason, written by the settings endpoint and `istota user
+    # ensure` and by nothing else;
+    # `tests/test_secrets_vault.py::TestTheProfileTableGuard` still holds the
+    # absence from `user_profiles`' column set and from the overlay.
+    #
+    # The **absolute** form of `vault_path` is settable here and nowhere else:
+    # it is checked against the trees a sandbox binds read-write rather than
+    # against one user's own directory, which is the right question for a path
+    # an operator wrote and not a line a user may put themselves on the far side
+    # of. The web form refuses one.
     vault_path: str = ""
     vault_services: list[str] = field(default_factory=list)
 
@@ -2552,6 +2569,36 @@ class Config:
         user = self.users.get(user_id)
         raw = getattr(user, "vault_path", "") if user is not None else ""
         return self.VAULT_SOURCE_TOML if raw else ""
+
+    def any_vault_configured(self) -> bool:
+        """Does **any** user on this deployment have a vault, in one read.
+
+        The scheduler's gate asks this on every dispatch tick, and
+        `any(self.vault_path_for(u) for u in self.users)` is the wrong shape for
+        that: `any` short-circuits on the first truthy value, so it is cheap
+        exactly when somebody has a vault and costs one database open *per user*
+        when nobody does — which is every deployment by default, for ever. The
+        TOML half needs no database at all and is asked first; the row half is
+        one listing rather than one lookup per user.
+
+        `list_vault_configs` never raises and answers `{}` for a missing table,
+        so this degrades to the TOML answer rather than switching a configured
+        vault off — the safe direction, since the other one is a deployment that
+        silently stops applying a file the user is still editing.
+        """
+        for user in self.users.values():
+            raw = getattr(user, "vault_path", "")
+            if isinstance(raw, str) and raw:
+                return True
+        if self.db_path is None or not Path(self.db_path).exists():
+            return False
+        try:
+            from . import user_vault_config as _uvc  # noqa: PLC0415 - import cost
+            rows = _uvc.list_vault_configs(Path(self.db_path))
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("vault config listing failed: %s", e)
+            return False
+        return any(row.vault_path for row in rows.values())
 
     def vault_services_for(
         self, user_id: str, conn: "sqlite3.Connection | None" = None

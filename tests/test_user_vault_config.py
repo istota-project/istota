@@ -149,6 +149,68 @@ class TestPrecedence:
         assert config.vault_services_for("alice") == ["karakeep"]
 
 
+class TestTheDeploymentWideGate:
+    """`any_vault_configured`, which the scheduler asks every dispatch tick.
+
+    Shaped for that cadence rather than for readability: the obvious
+    `any(config.vault_path_for(u) for u in config.users)` short-circuits on the
+    first truthy value, so it is cheap exactly when somebody has a vault and
+    costs one database open *per user* when nobody does — which is every
+    deployment by default, on every tick, for ever.
+    """
+
+    def test_a_deployment_with_nothing_configured_says_so(self, tmp_path, db_path):
+        assert _config(tmp_path, db_path).any_vault_configured() is False
+
+    def test_a_toml_vault_turns_it_on_without_touching_the_database(
+        self, tmp_path, db_path
+    ):
+        config = _config(tmp_path, db_path, vault_path="v.kdbx")
+        # The TOML half is asked first and answers without a row, which is what
+        # keeps an operator-configured deployment off the listing entirely.
+        assert config.any_vault_configured() is True
+
+    def test_a_stored_row_turns_it_on(self, tmp_path, db_path):
+        config = _config(tmp_path, db_path)
+        assert config.any_vault_configured() is False
+        uvc.set_vault_config(db_path, "alice", vault_path="v.kdbx", vault_services=[])
+        assert config.any_vault_configured() is True
+
+    def test_it_costs_one_listing_rather_than_one_lookup_per_user(
+        self, tmp_path, db_path
+    ):
+        # The property the shape exists for, measured rather than asserted about
+        # in a comment: with nobody configured — the case that cannot
+        # short-circuit — the count must not scale with the user list.
+        from istota import user_vault_config as mod
+
+        config = _config(tmp_path, db_path)
+        config.users = {f"u{i}": UserConfig() for i in range(8)}
+
+        calls = {"n": 0}
+        real = mod.list_vault_configs
+
+        def counted(*a, **kw):
+            calls["n"] += 1
+            return real(*a, **kw)
+
+        mod.list_vault_configs = counted
+        try:
+            assert config.any_vault_configured() is False
+        finally:
+            mod.list_vault_configs = real
+        assert calls["n"] == 1
+
+    def test_an_unreadable_store_reads_as_the_toml_answer(self, tmp_path):
+        # No database at all. Degrading to the TOML half is the safe direction:
+        # the other one switches a configured vault off, which is a deployment
+        # that silently stops applying a file the user is still editing.
+        config = Config()
+        config.db_path = tmp_path / "absent.db"
+        config.users = {"alice": UserConfig(vault_path="v.kdbx")}
+        assert config.any_vault_configured() is True
+
+
 class TestNothingDownstreamOfATaskWritesIt:
     """The property the separate table exists for.
 

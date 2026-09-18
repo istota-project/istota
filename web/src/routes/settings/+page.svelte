@@ -341,21 +341,42 @@
     }
   }
 
+  let confirmingVaultReplace = $state(false);
+
+  /**
+   * Generate, or ask first when there is one to destroy.
+   *
+   * The server refuses a generate over an existing passphrase without
+   * `replace`, on the same reasoning `istota secret ensure --generate` refuses
+   * one without `--force`: minting a second value destroys the only copy this
+   * deployment has of the one the KDBX is already encrypted under, and the
+   * vault then fails to open until the user re-keys the file by hand. So this
+   * is the page's one irreversible action, and it takes a `ConfirmDialog` like
+   * every other.
+   */
   function generateVaultPassphrase() {
+    if (vaultHasPassphrase) {
+      confirmingVaultReplace = true;
+      return;
+    }
     return saveVaultPassphrase(true);
+  }
+
+  function replaceVaultPassphrase() {
+    return saveVaultPassphrase(true, true);
   }
 
   function saveTypedVaultPassphrase() {
     return saveVaultPassphrase(false);
   }
 
-  async function saveVaultPassphrase(generate: boolean) {
+  async function saveVaultPassphrase(generate: boolean, replace = false) {
     vaultBusy = true;
     vaultError = '';
     mintedPassphrase = '';
     try {
       const resp = await setVaultPassphrase(
-        generate ? { generate: true } : { passphrase: passphraseInput },
+        generate ? { generate: true, replace } : { passphrase: passphraseInput },
       );
       // Shown once, here, because nothing reads it back — the user needs it to
       // open their own KDBX. The typed path returns an empty string, since the
@@ -1223,6 +1244,14 @@
             {#if vaultError}
               <p class="banner error" data-testid="vault-error">{vaultError}</p>
             {/if}
+            <ConfirmDialog
+              bind:open={confirmingVaultReplace}
+              title="Replace the vault passphrase"
+              message="Are you sure? Your vault file is encrypted with the passphrase Istota already has, and generating a new one does not re-encrypt it — the vault will stop opening until you set the new passphrase on the file yourself in KeePassXC."
+              confirmLabel="Generate a new one"
+              confirmVariant="danger"
+              onConfirm={replaceVaultPassphrase}
+            />
           </div>
         {/if}
       </div>

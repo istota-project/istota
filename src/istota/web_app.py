@@ -10256,7 +10256,23 @@ def _vault_eligible_services() -> list[dict]:
     return [
         {"service": name, "label": schema.get(name, {}).get("label", name)}
         for name in sorted(eligible)
+        if not schema.get(name, {}).get("cli_only")
     ]
+
+
+#: Why a `cli_only` service is not on the form. Read the filter above as a
+#: policy rather than a tidy-up: `cli_only` marks a service the settings page
+#: deliberately does not offer, and `native_brain` is the one that makes the
+#: difference concrete. Its schema comment says a web knob setting only the key
+#: would be a per-user *billing* override dressed up as bring-your-own-brain,
+#: and a vault the user configures is exactly such a knob one step removed —
+#: tick the box, put `api_key` in your own KDBX, and the override is yours.
+#: Before this form that took an operator writing `vault_services` in TOML, and
+#: it still does: `eligible_services` is unchanged, `apply_vault` still applies
+#: such a name, and only the *web-settable* set is narrower. Filtered on the
+#: schema flag rather than by name so a later `cli_only` service is covered
+#: without anybody remembering this line exists.
+VAULT_WEB_EXCLUDES_CLI_ONLY = True
 
 
 def _vault_passphrase_present(username: str) -> bool:
@@ -10280,33 +10296,49 @@ def _vault_passphrase_present(username: str) -> bool:
         return False
 
 
+#: What `_vault_config_source` answers when it could not tell. Distinct from
+#: `""`, which is a real answer meaning nothing is configured — the two used to
+#: collapse, and the collapse made `_vault_is_web_editable` fail *open* while
+#: its own docstring claimed it failed closed.
+VAULT_SOURCE_UNKNOWN = "unknown"
+
+
 def _vault_config_source(username: str) -> str:
-    """Where this user's live vault selection comes from: `db`, `toml` or `""`.
+    """Where this user's live vault selection comes from.
+
+    `db`, `toml`, `""` for nothing configured, or `VAULT_SOURCE_UNKNOWN` when
+    the question could not be answered at all.
 
     `Config`'s answer, not a second one. The question needs both raw halves read
     apart, and that shape lives next to the fields rather than in whichever
     surface asks first.
     """
     if _config is None:
-        return ""
+        return VAULT_SOURCE_UNKNOWN
     try:
         return _config.vault_config_source(username)
     except Exception:  # pragma: no cover - defensive
         logger.debug("vault config source lookup failed for %r", username)
-        return ""
+        return VAULT_SOURCE_UNKNOWN
 
 
 def _vault_is_web_editable(username: str) -> bool:
     """Whether this surface may write this user's vault selection.
 
-    False for a TOML-configured vault, and that is the whole of the rule — see
-    `_vault_settings_payload` for why it is about precedence rather than about
-    permission. It fails **closed**: a source this cannot determine is not one
-    to write over.
+    False for a TOML-configured vault, and that is the substance of the rule —
+    see `_vault_settings_payload` for why it is about precedence rather than
+    about permission.
+
+    It fails **closed**, and that is a property of this function rather than of
+    the one above: an unanswerable source is not one to write over, since the
+    thing it might be is an operator's line. Written as a test for the two
+    values that permit a write, never as `!= TOML` — that spelling reads the
+    same and admits every future value, including the one meaning "I could not
+    look".
     """
     from .config import Config
 
-    return _vault_config_source(username) != Config.VAULT_SOURCE_TOML
+    return _vault_config_source(username) in ("", Config.VAULT_SOURCE_DB)
 
 
 def _write_vault_config(username: str, vault_path: str, services: list) -> dict:
@@ -10480,6 +10512,26 @@ async def settings_vault_passphrase(
 
     generate = bool(payload.get("generate"))
     supplied = payload.get("passphrase", "")
+    replace = bool(payload.get("replace"))
+    if generate and not replace and _vault_passphrase_present(user["username"]):
+        # The CLI's `--force` gate, on the same reasoning and not a second one:
+        # minting a second passphrase destroys the only copy this deployment
+        # has of the value the KDBX is already encrypted under, so the vault
+        # fails `VaultLocked` until the user re-keys the file by hand. The CLI
+        # refuses without `--force`; a click that did it silently would be the
+        # one irreversible thing on this page.
+        #
+        # Generate-only, exactly as `--force` is: a *typed* value is one the
+        # user already holds, so re-storing it destroys nothing they cannot
+        # type again.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "a vault passphrase is already stored, and generating a new one "
+                "will not re-encrypt a file saved under the old one; pass "
+                "replace to overwrite it"
+            ),
+        )
     if generate and supplied:
         # Refused rather than resolved one way. Both fields set is a client
         # asking for two different things, and picking either silently discards

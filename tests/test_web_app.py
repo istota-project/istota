@@ -3189,6 +3189,140 @@ class TestTheVaultWriteEndpoints:
             self._db_path, "alice", "vault", "passphrase",
         ) == long
 
+    async def test_generate_will_not_silently_replace_an_existing_one(
+        self, tmp_path, client, app,
+    ):
+        """The CLI's `--force` gate, and the reason is not caution.
+
+        The KDBX is already encrypted under the stored value and generating does
+        not re-encrypt it, so a second mint destroys the only copy this
+        deployment has of the passphrase that opens the file — the vault fails
+        `VaultLocked` until the user re-keys it by hand. `istota secret ensure
+        --generate` refuses that without `--force`; a click that did it silently
+        would be the one irreversible thing on the settings page.
+        """
+        from istota import secrets_store
+
+        cookies = await self._setup(tmp_path, client, app)
+        first = (await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"generate": True},
+        )).json()["generated"]
+
+        blocked = await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"generate": True},
+        )
+        assert blocked.status_code == 409
+        # Untouched, which is the half that matters: a refusal that had already
+        # overwritten the row would be worse than no refusal.
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "vault", "passphrase",
+        ) == first
+
+        forced = await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"generate": True, "replace": True},
+        )
+        assert forced.status_code == 200
+        assert forced.json()["generated"] != first
+
+    async def test_a_typed_value_may_replace_one_without_the_flag(
+        self, tmp_path, client, app,
+    ):
+        """Generate-only, exactly as `--force` is.
+
+        A typed passphrase is one the user is holding, so re-storing it destroys
+        nothing they cannot type again. Gating it too would make the ordinary
+        "I rotated the file, here is the new passphrase" flow take a
+        confirmation about losing a value the user has in front of them.
+        """
+        from istota import secrets_store
+
+        cookies = await self._setup(tmp_path, client, app)
+        await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"generate": True},
+        )
+        typed = "q" * 40
+        resp = await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"passphrase": typed},
+        )
+        assert resp.status_code == 200
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "vault", "passphrase",
+        ) == typed
+
+    async def test_a_cli_only_service_is_not_offered_by_the_form(
+        self, tmp_path, client, app,
+    ):
+        """`native_brain` is vault-*eligible* and is not web-settable.
+
+        Its schema comment says a web knob setting only the key would be a
+        per-user billing override dressed up as bring-your-own-brain, and a
+        vault the user configures is that knob one step removed. So the form
+        neither offers it nor accepts it, while `vault_services` in
+        `config.toml` still does — the operator route is unchanged and only the
+        web-settable set is narrower.
+
+        Filtered on the schema's `cli_only` flag rather than by name, so the
+        assertion is over every flagged service rather than over the one that
+        prompted it.
+        """
+        from istota.secret_schema import all_known_services
+        from istota.secrets_vault import eligible_services
+
+        schema = all_known_services()
+        flagged = {
+            name for name in eligible_services()
+            if schema.get(name, {}).get("cli_only")
+        }
+        assert flagged, "the assertion below is vacuous without one"
+
+        cookies = await self._setup(tmp_path, client, app)
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+        offered = {s["service"] for s in body["eligible_services"]}
+        assert not (offered & flagged)
+        # And the eligible set it was filtered from is unchanged, so the control
+        # says the filter narrowed something rather than that the names were
+        # never there.
+        assert flagged <= eligible_services()
+
+        for name in sorted(flagged):
+            resp = await client.put(
+                "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+                json={"vault_path": "config/vault.kdbx", "vault_services": [name]},
+            )
+            assert resp.status_code == 400, name
+
+    async def test_an_unanswerable_source_is_not_writable(
+        self, tmp_path, client, app,
+    ):
+        """`_vault_is_web_editable` fails closed, and that is a real branch.
+
+        An unknown source might be an operator's line, so writing over it is the
+        one thing that cannot be taken back. Written as a test for the two
+        values that permit a write rather than as `!= 'toml'`, which reads the
+        same and admits every value added later — including the one meaning
+        "I could not look".
+        """
+        import istota.web_app as mod
+
+        cookies = await self._setup(tmp_path, client, app)
+        with patch.object(
+            mod._config, "vault_config_source", side_effect=RuntimeError("boom"),
+        ):
+            assert mod._vault_config_source("alice") == mod.VAULT_SOURCE_UNKNOWN
+            assert mod._vault_is_web_editable("alice") is False
+            resp = await client.put(
+                "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+                json={"vault_path": "config/vault.kdbx", "vault_services": []},
+            )
+        assert resp.status_code == 409
+
     async def test_generate_and_a_typed_value_together_are_refused(
         self, tmp_path, client, app,
     ):

@@ -1194,14 +1194,19 @@ export async function clearVaultConfig(): Promise<void> {
 /**
  * Store the vault passphrase.
  *
- * Exactly one of the two arguments. `generate` is the path meant to be taken:
+ * Exactly one of the two shapes. `generate` is the path meant to be taken:
  * the KDBX sits in a tree bound read-write into that user's own sandbox, so a
  * task that reads its ciphertext is defeated by 256 random bits and is not
  * defeated by a memorable phrase. A typed value is accepted at the same floor
  * the CLI applies.
+ *
+ * `replace` is the CLI's `--force`, and it is generate-only for the same
+ * reason: minting a second passphrase destroys the only copy of the one the
+ * KDBX is encrypted under, so the server answers 409 without it. Re-storing a
+ * value the user typed destroys nothing they cannot type again.
  */
 export async function setVaultPassphrase(
-  opts: { generate: true } | { passphrase: string },
+  opts: { generate: true; replace?: boolean } | { passphrase: string },
 ): Promise<VaultPassphraseResponse> {
   return apiFetch<VaultPassphraseResponse>('/settings/vault/passphrase', {
     method: 'PUT',
