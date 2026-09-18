@@ -560,7 +560,10 @@ class TestRead:
         read, _ = _read(path)
 
         assert set(read.services) == {"a" * cap}
-        assert read.skipped == (("b" * (cap + 1), SKIP_UNUSABLE_NAME),)
+        # The skip record carries the original bounded and flattened, because
+        # it outlives the log line: it reaches `vault-status` and the read's
+        # own repr, and an entry title is unbounded file text.
+        assert read.skipped == (("b" * cap + "…", SKIP_UNUSABLE_NAME),)
 
     def test_a_group_segment_that_slugs_to_nothing_refuses_the_whole_name(
         self, tmp_path
@@ -661,6 +664,20 @@ class TestRead:
 
         assert read.services == {"aws_key": API_KEY_VALUE}
         assert any("deeper than 1" in m for m in _ours(caplog)), _ours(caplog)
+        # Not truncation: a group below the depth cap is excluded by a rule
+        # rather than interrupted by a budget, so nothing under it has ever
+        # been readable and there is no stored name it can strand.
+        assert read.truncated == ""
+
+    def test_an_untruncated_read_says_so(self, tmp_path):
+        """The control for the two assertions above: an ordinary read must not
+        claim to be a prefix, or the applying half would stop deleting
+        anything at all."""
+        _, path = _standard_vault(tmp_path)
+
+        read, _ = _read(path)
+
+        assert read.truncated == ""
 
     def test_the_entry_cap_stops_the_walk_and_applies_what_it_read(
         self, tmp_path, monkeypatch, caplog
@@ -677,6 +694,10 @@ class TestRead:
 
         assert set(read.services) == {"entry0", "entry1"}
         assert any("entry cap" in m for m in _ours(caplog)), _ours(caplog)
+        # The applying half may not read the names it did not reach as names
+        # the user removed, so the read says it is a prefix of the file, and
+        # which bound cut it.
+        assert read.truncated == "entry"
 
     def test_the_name_cap_stops_the_walk_and_applies_what_it_read(
         self, tmp_path, monkeypatch, caplog
@@ -695,6 +716,37 @@ class TestRead:
 
         assert read.services == {"acme": API_KEY_VALUE, "acme_username": USERNAME_VALUE}
         assert any("name cap" in m for m in _ours(caplog)), _ours(caplog)
+        assert read.truncated == "name"
+
+    def test_a_field_that_produces_no_name_still_spends_the_budget(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """The cap counts fields considered, not names produced.
+
+        A field whose name cannot be derived is not free: it writes a skip
+        record and a daemon WARNING, and `Entry.custom_properties` is unbounded
+        in cardinality. Counting only the successful branch left one entry
+        whose custom fields all slug to nothing emitting one of each per field,
+        past every cap, from a file a task in that user's own sandbox can
+        write."""
+        monkeypatch.setattr(secrets_vault_module, "VAULT_MAX_NAMES", 4)
+        kp, path = _new_db(tmp_path)
+        root = kp.add_group(kp.root_group, "istota")
+        entry = kp.add_entry(root, "Acme", "", API_KEY_VALUE)
+        for index in range(20):
+            entry.set_custom_property("!" * (index + 1), f"junk-{index}")
+        kp.add_entry(root, "Other", "", BASE_URL_VALUE)
+        kp.save()
+
+        with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
+            read, _ = _read(path)
+
+        # Four fields: the password, the username, the URL, and one custom
+        # field that produced nothing. The walk stops there.
+        assert read.services == {"acme": API_KEY_VALUE}
+        assert read.truncated == "name"
+        assert len(read.skipped) == 1
+        assert len(_ours(caplog)) == 2, _ours(caplog)
 
     # ---- what the walk excludes -----------------------------------------
 
@@ -1061,6 +1113,7 @@ class TestRead:
             digest="0" * 64,
             services={"karakeep_api_key": API_KEY_VALUE},
             held=frozenset({"karakeep_base_url"}),
+            truncated="",
             skipped=(("karakeep_topic", SKIP_DUPLICATE_NAME),),
         )
 
@@ -1180,12 +1233,20 @@ class TestRead:
         kp.save()
 
         with caplog.at_level(logging.WARNING, logger="istota.secrets_vault"):
-            _read(path)
+            read, _ = _read(path)
 
         assert _ours(caplog), "the fixture reached no warning at all"
         for message in _ours(caplog):
             assert "\n" not in message
             assert len(message) < 300
+        # The same two strings land in the skip records, which outlive the log
+        # line: they reach `vault-status` and the read's own repr, so they are
+        # bounded and flattened where they are produced rather than where they
+        # are rendered.
+        assert read.skipped, "the fixture produced no skip record"
+        for name, _reason in read.skipped:
+            assert "\n" not in name
+            assert len(name) <= secrets_vault_module._LABEL_MAX_CHARS + 1
 
     def test_the_catch_all_does_not_render_the_exception(self, tmp_path, caplog):
         """The branch the `exc_info` departure was made for, driven.

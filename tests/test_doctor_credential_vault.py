@@ -623,7 +623,11 @@ class TestTheContentsCheck:
         _provision(vault_config)
         result = _contents(vault_config)
         assert result.status == OK
-        assert "group(s) present" in result.detail and "key(s)" in result.detail
+        # Asserted as the interim state rather than as a substring that
+        # survives either shape: `report.groups` and `report.key_counts` are
+        # empty until the applying half lands, so a looser assertion would be
+        # satisfied by a check that had stopped reporting anything at all.
+        assert "0 of 2 owned group(s) present, 0 key(s)" in result.detail
         assert "karakeep" not in result.detail and "api_key" not in result.detail
 
     def test_a_wrong_passphrase_reports_the_class_and_not_the_sentence(

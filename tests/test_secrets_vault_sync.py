@@ -642,8 +642,14 @@ class TestTheEdgeTriggeredProperty:
             == "changed-out-of-band"
         )
 
-    def test_the_next_save_re_asserts_the_whole_owned_set(self, ready, parse_calls):
-        """The mitigation §7 names: any save at all corrects the drift."""
+    def test_the_next_save_parses_again(self, ready, parse_calls):
+        """Half of the mitigation §7 names: any save at all moves the digest,
+        so the cycle parses rather than skipping.
+
+        The other half — that the parse then re-asserts the whole set over a
+        row changed out of band — is the applying half's, and the change
+        landing beside this one restores it. The name and this docstring say
+        what is asserted here rather than what the pair asserts together."""
         from istota.secrets_vault import OUTCOME_OK, sync_user
 
         config, path = ready

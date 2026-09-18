@@ -699,11 +699,16 @@ class TestVaultStatus:
         out = capsys.readouterr().out
         assert "alice" in out
 
-    def test_it_reports_the_file_and_never_a_value(self, env, capsys):
-        """What the report says about the file's contents is the applying
-        half's, and the change landing beside this one gives it the names the
-        read produced. What survives here is that a parse happened and that no
-        credential reached the terminal."""
+    def test_it_reports_the_file_and_the_passphrase(self, env, capsys):
+        """The header, which is what the report is reduced to for one change.
+
+        Everything the renderer says about the file's *contents* is the
+        applying half's, and the change landing beside this one gives it the
+        names the read produced — so the value sweep below is deliberately
+        vacuous at this commit and is kept as the assertion that goes on
+        holding once there is something to print. Asserted as the exact interim
+        shape so that restoring the contents section turns this red rather than
+        leaving it quietly passing on a header."""
         from istota.cli import cmd_secret
 
         cfg, db_path, mount = _with_vault(env)
@@ -713,7 +718,10 @@ class TestVaultStatus:
         cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
         out = capsys.readouterr().out
 
-        assert "vault.kdbx" in out and "passphrase" in out
+        assert "vault.kdbx" in out and "passphrase: provisioned" in out
+        # Nothing about the contents is printed yet, and saying so exactly is
+        # what makes the next change visible here.
+        assert "key(s)" not in out and "group" not in out
         assert API_KEY_VALUE not in out
         assert BASE_URL_VALUE not in out
         assert PASSPHRASE not in out

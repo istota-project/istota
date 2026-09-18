@@ -81,10 +81,18 @@ VAULT_ROOT_GROUP = "istota"
 #: overwrite — a self-referential group would otherwise be walked forever.
 VAULT_MAX_DEPTH = 8
 
-#: How many entries one walk visits, and how many names one walk produces.
+#: How many entries one walk visits, and how many *fields* it considers.
 #: Both stop the walk and warn rather than failing the sync: half a namespace
 #: applied is a user with some credentials working, and a refusal is a user
 #: with none.
+#:
+#: The second is spelled as a bound on names produced and enforced as a bound
+#: on fields examined, which is the same guarantee and a tighter one. A field
+#: that produces *no* name still costs a skip record and a daemon WARNING, and
+#: ``Entry.custom_properties`` is unbounded in cardinality — so counting only
+#: what a field produced left one entry whose custom fields all slug to nothing
+#: emitting one record and one log line each, past every cap, from a file a
+#: task in that user's own sandbox can write.
 VAULT_MAX_ENTRIES = 512
 VAULT_MAX_NAMES = 1024
 
@@ -102,10 +110,15 @@ VAULT_NAME_MAX_CHARS = 64
 #: because the name is what a person types in a shell and what a script may
 #: export as a variable, and because it lands in the ``secrets`` table's ``key``
 #: column and in log lines.
-VAULT_NAME_RE = re.compile(rf"[a-z][a-z0-9_]{{0,{VAULT_NAME_MAX_CHARS - 1}}}")
+VAULT_NAME_RE = re.compile(rf"\A[a-z][a-z0-9_]{{0,{VAULT_NAME_MAX_CHARS - 1}}}\Z")
 
 #: Every run of characters a segment may not keep. Each becomes one ``_``.
 _SLUG_DROP_RE = re.compile(r"[^a-z0-9]+")
+
+#: Which of ``_Walk.stopped``'s values mean the read is a prefix of the file.
+#: A set rather than ``bool(walk.stopped)``, so a cap added later has to answer
+#: this question on purpose.
+_TRUNCATING_CAPS = frozenset({"entry", "name"})
 
 #: The suffixes the three standard fields contribute, as a *segment* handed to
 #: :func:`slug_name` rather than as a string appended to its answer — so the
@@ -242,6 +255,36 @@ class VaultRead:
     Required rather than defaulted, like the field it replaces: a hand-built
     ``VaultRead`` that omitted it would get the destructive reading silently.
 
+    ``truncated`` names the cap the walk stopped at, and is empty when it did
+    not: this read is then a **prefix** of the file rather than the whole of
+    it. It is the second thing the applying half cannot derive, and the second
+    one a default would get wrong in the destructive direction: the namespace sweep deletes every stored name
+    the read does not hold, and on a truncated read the names past the cap are
+    absent for a reason that has nothing to do with the user removing them. The
+    same never-destroy-what-you-cannot-read rule the unreadable-row hold
+    follows says an incomplete read may not delete at all.
+
+    Only the entry and name caps set it. The depth cap does not, because a
+    group below :data:`VAULT_MAX_DEPTH` is excluded by a rule rather than
+    interrupted by a budget — nothing under it has ever been readable, so there
+    is no row it could have written and none it can strand.
+
+    **A truncated read also weakens the collision rule, and that is accepted
+    rather than unnoticed.** Where a cap falls between two producers of one
+    name, only the first reached ``candidates``, so the name resolves to a
+    single value and is applied — which is exactly the XML-order dependence the
+    rule exists to refuse. Withholding writes as well as deletions would close
+    it and is refused: the whole point of a cap that applies what it read is
+    that a 513-entry vault gives the user 512 working credentials rather than
+    none. Deletions are the half that must be withheld, because they are the
+    half that cannot be undone by fixing the cause.
+
+    Required rather than defaulted, like ``held``: a hand-built
+    :class:`VaultRead` that omitted it would claim a complete read. It carries
+    the cap's name rather than a flag because the applying half reports why it
+    withheld a sweep, and "the vault holds more than istota will read" is a
+    different sentence from "the vault produces more names than it will read".
+
     ``skipped`` is ``(name, reason)`` for what the read refused, from the fixed
     vocabulary above, carried so the applying half can report it beside its own
     skips. ``name`` is the produced name where there was one and the bounded
@@ -251,6 +294,7 @@ class VaultRead:
     digest: str
     services: dict[str, str]
     held: frozenset[str]
+    truncated: str
     skipped: tuple[tuple[str, str], ...] = ()
 
     def __repr__(self) -> str:
@@ -278,7 +322,8 @@ class VaultRead:
         return (
             f"VaultRead(digest={self.digest!r}, "
             f"names={sorted(self.services)!r}, "
-            f"held={sorted(self.held)!r}, skipped={self.skipped!r})"
+            f"held={sorted(self.held)!r}, truncated={self.truncated!r}, "
+            f"skipped={self.skipped!r})"
         )
 
 
@@ -668,7 +713,7 @@ class _Walk:
     candidates: dict[str, list[str]] = field(default_factory=dict)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     entries_visited: int = 0
-    names_produced: int = 0
+    fields_examined: int = 0
     untitled: int = 0
     depth_dropped: int = 0
     stopped: str = ""
@@ -788,6 +833,12 @@ def _map_groups(kp, digest: str) -> VaultRead:
             # blanking a password field must not delete the credential.
             held.add(name)
             continue
+        # `surrogatepass` is belt-and-braces rather than a live case: lxml
+        # refuses to serialize a lone surrogate, measured against pykeepass
+        # 4.2.0, so no KDBX can hold one. It is kept because the alternative is
+        # this measurement raising, and `secrets_store`'s own encode is strict
+        # — so a value that somehow carried one would abort a pass part-way
+        # rather than being skipped here.
         size = len(value.encode("utf-8", "surrogatepass"))
         if size > VAULT_MAX_VALUE_BYTES:
             walk.skipped.append((name, SKIP_OVERSIZE_VALUE))
@@ -806,6 +857,8 @@ def _map_groups(kp, digest: str) -> VaultRead:
         digest=digest,
         services=services,
         held=frozenset(held),
+        # The depth cap is deliberately not truncation: see `VaultRead`.
+        truncated=walk.stopped if walk.stopped in _TRUNCATING_CAPS else "",
         skipped=tuple(walk.skipped),
     )
 
@@ -860,7 +913,7 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
         logger.warning(
             "vault: %s does not produce a usable name (letter first, at most "
             "%d characters of a-z, 0-9 and _), skipped",
-            _label(_original(path)),
+            _original(path),
             VAULT_NAME_MAX_CHARS,
         )
         return
@@ -874,14 +927,20 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
     # field named `URL` is the one shape that can collide with a standard one —
     # which is the collision rule doing its job rather than a case to special
     # -case here.
-    for field_name, raw in sorted(entry.custom_properties.items()):
+    for field_name, raw in sorted(
+        entry.custom_properties.items(), key=lambda kv: str(kv[0])
+    ):
         fields.append(((*path, field_name), raw))
 
     produced = 0
     for segments, raw in fields:
-        if walk.names_produced >= VAULT_MAX_NAMES:
+        # Counted **before** the name is derived rather than after: the branch
+        # below that produces no name is not free, and a cap only the
+        # successful branch pays is not a cap.
+        if walk.fields_examined >= VAULT_MAX_NAMES:
             walk.stopped = "name"
             return
+        walk.fields_examined += 1
         value = str(raw or "").strip()
         name = slug_name(segments)
         if name is None:
@@ -894,11 +953,10 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
                 walk.skipped.append((_original(segments), SKIP_UNUSABLE_NAME))
                 logger.warning(
                     "vault: the field %s does not produce a usable name, skipped",
-                    _label(_original(segments)),
+                    _original(segments),
                 )
             continue
         walk.candidates.setdefault(name, []).append(value)
-        walk.names_produced += 1
         if value:
             produced += 1
 
@@ -909,13 +967,22 @@ def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
         logger.warning(
             "vault: %s has no value in any field, so nothing is set from it; "
             "delete the entry to remove the credential",
-            _label(_original(path)),
+            _original(path),
         )
 
 
 def _original(segments: Sequence[str]) -> str:
-    """The path as the file spells it, for a log line and a skip record."""
-    return "/".join(str(segment) for segment in segments)
+    """The path as the file spells it, bounded and flattened.
+
+    Bounded **where it is produced** rather than where it is rendered, because
+    this is the one string in a :class:`VaultRead` that is file text rather
+    than a derived name: it is what a skip record carries when the refusal is
+    that no usable name could be derived, and a skip record outlives the log
+    line — it reaches ``vault-status`` and the read's own ``__repr__``. An
+    entry title is unbounded and free to carry a newline, and the file is
+    writable by a task in that user's own sandbox.
+    """
+    return _label("/".join(str(segment) for segment in segments))
 
 
 def _label(name: str, limit: int = _LABEL_MAX_CHARS) -> str:
