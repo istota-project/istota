@@ -39,9 +39,11 @@ touched, so nobody has to write a logging call to leak it.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -848,3 +850,588 @@ def _take_entry(
         )
         return
     values[title] = value
+
+
+# ---------------------------------------------------------------------------
+# The passphrase
+# ---------------------------------------------------------------------------
+
+#: The key the vault passphrase is stored under, in the ``vault`` service.
+VAULT_PASSPHRASE_KEY = "passphrase"
+
+#: Bytes of entropy ``--generate`` mints. 32 random bytes rendered urlsafe-base64
+#: is 43 characters, which is the ``openssl rand -base64 32`` form the spec
+#: documented as the fallback, at the same strength. The precedent in the tree is
+#: the Overland ingest token (``secrets.token_urlsafe(32)``), whose docstring
+#: settles the same question for the same reason: the value has to reach a device
+#: the server cannot write to, and the alternative is a human choosing one.
+VAULT_PASSPHRASE_BYTES = 32
+
+#: The floor a *supplied* passphrase must clear. **A proxy that does not measure
+#: the property, used anyway with that stated**: a 24-character memorable
+#: passphrase clears any reasonable character count at perhaps 40 bits, so this
+#: catches the careless case and not the confident one. Measuring entropy
+#: properly means a wordlist and a policy this module has no business owning;
+#: refusing short values and making ``--generate`` the path everybody takes gets
+#: the same outcome without one.
+#:
+#: Deliberately **not** ``secrets_store._MIN_KEY_LEN``, which happens to be the
+#: same number today. That is the floor on the deployment's master Fernet key, a
+#: different credential with a different lifecycle, and sharing the constant
+#: would mean a change to either silently moving the other. ``doctor`` reads the
+#: store's constant rather than copying it because there it is the *same* rule;
+#: here it is not.
+VAULT_PASSPHRASE_MIN_CHARS = 32
+
+
+def generate_passphrase() -> str:
+    """A fresh vault passphrase, for ``istota secret ensure --generate``.
+
+    **Minted rather than documented, and that is the property the whole design
+    rests on.** The vault file sits in a tree bound read-write into the user's
+    own sandbox, so a prompt-injected task can read the ciphertext of every
+    credential that user owns and carry it out. Argon2id makes that useless
+    against 256 random bits and does not make it useless against a memorable
+    phrase. Everything else in this design is a boundary against a mistake; this
+    is the boundary against an adversary, and it is the only one.
+    """
+    import secrets as _secrets  # noqa: PLC0415 - stdlib, shadowed by the package
+
+    return _secrets.token_urlsafe(VAULT_PASSPHRASE_BYTES)
+
+
+def passphrase_refusal(value: str) -> str | None:
+    """Why this *supplied* passphrase is refused, or None.
+
+    **Refused rather than warned about.** A warning in ``vault-status`` is read
+    after provisioning by whoever goes looking, which is not the person who has
+    just typed a weak passphrase — and by then the file is encrypted under it.
+
+    Applied to a supplied value and never to a generated one. That is not a
+    detail: the floor exists to make ``--generate`` the path everybody takes, so
+    a floor that could refuse ``--generate`` itself would break the remedy it was
+    built to serve. It reads the module global at call time rather than binding
+    it, so a caller cannot import the number and drift from the rule.
+    """
+    if len(value.strip()) < VAULT_PASSPHRASE_MIN_CHARS:
+        return (
+            f"a vault passphrase must be at least {VAULT_PASSPHRASE_MIN_CHARS} "
+            "characters, and should be generated rather than chosen"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Outcomes
+# ---------------------------------------------------------------------------
+
+#: A cycle that read, parsed and applied.
+OUTCOME_OK = "ok"
+#: The digest matched a cached one, so nothing was parsed and nothing written.
+OUTCOME_UNCHANGED = "unchanged"
+#: No ``vault_path`` for this user — the feature is off, which is the default.
+OUTCOME_NOT_CONFIGURED = "not_configured"
+#: ``sync_all``'s containment: something outside the closed set of vault errors
+#: escaped ``sync_user``. A bug, reported rather than swallowed.
+OUTCOME_ERROR = "error"
+
+
+class VaultPathRefused(VaultError):
+    """The configured ``vault_path`` is one the resolver may not open.
+
+    ``str(exc)`` is a stable ``storage.VAULT_PATH_*`` id. Its own class because
+    the remedy is a **config edit** rather than anything to do with the file,
+    which puts it in the uncached set twice over: an unchanged digest would be no
+    evidence a config error had been fixed, and there are no bytes to hash in the
+    first place.
+
+    Before this the resolver answered a bare ``None`` and the reason reached the
+    daemon log and nothing else — so the cross-user typo §1 exists to close, the
+    one case in this design about an attack rather than a mistake, reached no
+    notification and no status row.
+    """
+
+
+class VaultPassphraseMissing(VaultError):
+    """No ``vault/passphrase`` row for this user, so nothing can be opened.
+
+    Distinct from ``VaultLocked`` although the remedy is the same command: §7
+    lists the two separately, ``vault-status`` has to tell "never provisioned"
+    from "does not match", and this one never reaches the unlock at all — so a
+    cycle in this state costs no key derivation.
+    """
+
+
+class VaultKeyUnusable(VaultError):
+    """``ISTOTA_SECRET_KEY`` cannot read this deployment's stored passphrase.
+
+    Absent, below the store's own floor, or simply the wrong key — which
+    ``get_secret`` reports as ``None``, indistinguishable from an absent row
+    unless ``secret_exists`` is asked as well. One class for the three because
+    they share a remedy, and it is the deployment's rather than the user's.
+
+    Checked **before** the parse, so a broken deployment costs no key derivation,
+    and reported here rather than left to ``apply_vault``'s own refusal — which
+    is a backstop that only fires once the vault has already been opened.
+    """
+
+
+#: The outcomes whose digest a later cycle may skip on. **Success and
+#: ``VaultCorrupt`` only**, and the rule is whether the remedy changes the file:
+#: both of these are resolved by the bytes moving, so an unchanged digest is
+#: genuine evidence that nothing has been fixed — which is what keeps a
+#: permanently broken vault from logging every five minutes forever.
+#:
+#: Everything else is resolved somewhere other than the file — ``VaultLocked``
+#: and ``VaultPassphraseMissing`` by ``istota secret ensure``,
+#: ``VaultLibraryMissing`` by installing the extra, ``VaultKeyUnusable`` by
+#: fixing the deployment's key, ``VaultPathRefused`` by a config edit — so
+#: caching any of them makes the remedy inert: the operator follows a correct
+#: instruction, the digest is unchanged, the next cycle skips, and nothing
+#: happens until a restart.
+#:
+#: ``VaultMissing`` and ``VaultUnreadable`` are in the uncached set by
+#: construction rather than by decision, since every refusal path in
+#: ``read_overlay_bytes`` answers before a read and so has no bytes to hash. A
+#: **zero-byte** file is the one ``VaultCorrupt`` that is uncached for the same
+#: reason, and cheaply so: its retry is one bounded ``open(2)``, and a write
+#: caught mid-flight is exactly the shape that should be looked at again.
+_CACHEABLE_OUTCOMES = frozenset({OUTCOME_OK, VaultCorrupt.__name__})
+
+#: ``user_id -> (digest, outcome)``. In memory, never persisted: a restart
+#: re-applies, every write is an idempotent upsert, and the alternative is a
+#: persistence question with no payoff.
+#:
+#: **Two fields, because retrying is not re-reporting.** The digest decides
+#: whether the next cycle does any *work*, and is ``None`` for every outcome
+#: outside ``_CACHEABLE_OUTCOMES`` — so a wrongful skip is structurally
+#: impossible for those, rather than prevented by a condition somebody has to
+#: keep getting right. The outcome decides whether the next cycle *says*
+#: anything, which is what lets a vault retried every cycle for a week produce
+#: one log line and one panel row rather than two thousand.
+#:
+#: A restart re-reports once, which is correct rather than merely tolerable: a
+#: daemon that has just started has told nobody anything.
+_SYNC_STATE: dict[str, tuple[str | None, str]] = {}
+
+
+def reset_sync_state(user_id: str | None = None) -> None:
+    """Forget what this process settled on, for one user or for all of them.
+
+    ``istota secret vault-sync`` is the operator's escape hatch from every
+    cache-shaped surprise §7 can still produce, so it must not be subject to the
+    cache it exists to defeat — and §8's remedy strings name that command for
+    exactly this reason. It lives here rather than in the CLI branch because a
+    fresh CLI process has an empty cache anyway: the caller that needs the clear
+    is an in-process one.
+
+    Also the test seam. The state is module-level, so a leftover digest would
+    make a later test's first cycle a skip.
+    """
+    if user_id is None:
+        _SYNC_STATE.clear()
+    else:
+        _SYNC_STATE.pop(user_id, None)
+
+
+@dataclass(frozen=True)
+class VaultSyncResult:
+    """What one user's cycle did, in the vocabulary every surface reports.
+
+    ``outcome`` is one of the ``OUTCOME_*`` constants or a ``VaultError``
+    subclass's name — a stable word rather than a sentence, because the CLI
+    groups by it and §8's notification keys on it.
+
+    ``transition`` is whether this outcome differs from the last one this process
+    settled on for this user, which is what the raise-once rule reads. A skip is
+    never a transition and never overwrites the state.
+
+    **It never carries a ``VaultRead``.** That type holds every plaintext the
+    vault carries between parse and apply, and this object is returned to a CLI
+    that prints it and, later, to a web tier that serialises it.
+    """
+
+    user_id: str
+    outcome: str
+    digest: str | None = None
+    transition: bool = False
+    reason: str = ""
+    path: str = ""
+    owned: frozenset[str] = frozenset()
+    apply: VaultApplyResult | None = None
+
+
+@dataclass(frozen=True)
+class VaultStatusReport:
+    """What ``vault-status`` knows, as data rather than as printed lines.
+
+    One answer, two renderers — the rule ``usage_render`` already states for a
+    fact with a CLI and a web surface. The CLI formats this; §9's
+    ``GET /settings/vault`` will serialise the same fields.
+
+    **Names and counts only, never a value.** ``groups`` maps the folded service
+    name to the spelling as it stands in the file, which is what tells a user
+    whose group is ``Karakeep`` that it matched; ``key_counts`` is how many
+    usable entries each group holds; ``unowned`` and ``absent`` are the two ways
+    a group and ``vault_services`` fail to line up, and between them they answer
+    the hardest failure in this design to diagnose from the user's end.
+    """
+
+    user_id: str
+    configured: bool
+    path: str = ""
+    refusal: str = ""
+    owned: tuple[str, ...] = ()
+    passphrase_present: bool = False
+    outcome: str = ""
+    reason: str = ""
+    groups: dict[str, str] = field(default_factory=dict)
+    key_counts: dict[str, int] = field(default_factory=dict)
+    unowned: tuple[str, ...] = ()
+    absent: tuple[str, ...] = ()
+    last_outcome: str = ""
+
+
+def format_skip(service: str, key: str) -> str:
+    """One ``skipped`` triple's subject, for a human-readable report.
+
+    ``VaultApplyResult.skipped`` carries an **empty key** for a service-level
+    refusal — the whole service was refused and no key of it was looked at — so
+    rendering ``f"{service}/{key}"`` blindly prints ``monarch/`` with nothing
+    after the slash, which reads as a key named ``""`` rather than as a service
+    nobody may own.
+    """
+    return f"{_label(service)}/{_label(key)}" if key else _label(service)
+
+
+def vault_owned_services(config, user_id: str) -> frozenset[str]:
+    """Which of this user's services the vault owns, right now.
+
+    The predicate §9's ``vault_managed`` and open question 3's CLI refusal both
+    read: the service is in ``vault_services`` **and** the user's ``vault_path``
+    resolves. A configured-but-refused path owns nothing in practice, and
+    refusing an operator's write on the strength of a line that does not work is
+    a refusal with no remedy behind it.
+
+    **The cheap half is asked first**, deliberately. Resolving walks directories
+    and opens a descriptor, and it logs a refusal — so testing the service set
+    afterwards would make every ``istota secret ensure`` for every user pay a
+    directory walk, and would emit ``vault_path_refused`` as a side effect of
+    commands that have nothing to do with the vault.
+
+    Closes the descriptor it opens: this asks a question and opens nothing.
+    """
+    user = config.users.get(user_id)
+    declared = frozenset(getattr(user, "vault_services", None) or ())
+    if not declared:
+        return frozenset()
+
+    from . import storage  # noqa: PLC0415 - see `sync_user` for why
+
+    location = storage.resolve_user_vault_path(config, user_id).location
+    if location is None:
+        return frozenset()
+    if location.dir_fd is not None:
+        os.close(location.dir_fd)
+    return declared
+
+
+def sync_user(config, user_id: str, *, force: bool = False) -> VaultSyncResult:
+    """One user's vault, read and applied if the bytes have moved.
+
+    The order is the design and each step earns its place ahead of the next:
+
+    1. **Resolve.** No ``vault_path`` is not a failure and is reported as
+       ``OUTCOME_NOT_CONFIGURED``; a *refused* path is ``VaultPathRefused``.
+    2. **Read the bytes and hash them.** Bounded and cheap, and it needs no
+       library at all — ``pykeepass`` is not imported on a cycle that stops here.
+    3. **Compare the digest.** An unchanged file stops the cycle: no key
+       derivation, no database touch, no log line. This is ahead of the
+       passphrase lookup because that lookup is a database read.
+    4. **The master key, then the passphrase.** Both before the parse, so a
+       deployment that cannot decrypt its own store spends no Argon2id.
+    5. **Parse, then apply.**
+
+    **Which failures cache their digest is the whole of §7**, and getting it
+    wrong makes §8's remedies a lie rather than merely slow — see
+    ``_CACHEABLE_OUTCOMES``.
+
+    ``force`` drops this user's cached state **before reading anything**, which
+    is what ``istota secret vault-sync`` passes.
+
+    **It closes ``VaultLocation.dir_fd`` on every path**, including every
+    failure path and the skip. A gate running per user per 300 seconds leaks one
+    descriptor a cycle otherwise, which ends as a daemon that cannot open a
+    socket, days later, with nothing pointing here.
+
+    Raises nothing from the closed set of ``VaultError`` classes — each becomes
+    an outcome. Anything else propagates to ``sync_all``, which contains it and
+    reports it as a bug rather than as a vault condition.
+    """
+    # Function-scoped: `storage` imports `config`, and `config`'s own load-time
+    # validator already function-scopes its import of *this* module to keep
+    # `secret_schema` and `secrets_store` out of every `load_config`. A module
+    # scope import here would hand that cost straight back.
+    from . import storage  # noqa: PLC0415
+
+    if force:
+        reset_sync_state(user_id)
+
+    resolution = storage.resolve_user_vault_path(config, user_id)
+    if resolution.location is None:
+        if resolution.refusal is None:
+            # The feature is off for this user. Not a state worth remembering,
+            # and not one to report a transition out of.
+            return VaultSyncResult(user_id=user_id, outcome=OUTCOME_NOT_CONFIGURED)
+        return _settle(
+            user_id, VaultPathRefused(resolution.refusal), digest=None, path=""
+        )
+
+    location = resolution.location
+    path = str(location.path)
+    owned = frozenset(getattr(config.users.get(user_id), "vault_services", None) or ())
+    try:
+        return _sync_resolved(config, user_id, location, path, owned)
+    finally:
+        if location.dir_fd is not None:
+            os.close(location.dir_fd)
+
+
+def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
+    """Everything after the path resolved, with the descriptor still open."""
+    try:
+        # `dir_fd` beside `path`, never one without the other: the descriptor is
+        # what covers every component above the leaf, which for the relative form
+        # all live in the tree bound read-write into this user's own sandbox.
+        # `tests/test_overlay_dir_containment.py` fails a call that drops it.
+        data, digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
+    except VaultError as exc:
+        return _settle(user_id, exc, digest=None, path=path)
+
+    cached_digest, _last = _SYNC_STATE.get(user_id, (None, ""))
+    if cached_digest is not None and cached_digest == digest:
+        # The whole point of `read_vault_bytes` and `parse_vault` being two
+        # functions. A single `read_vault(path, passphrase)` would spend an
+        # Argon2id unlock every cycle to learn that nothing had changed.
+        return VaultSyncResult(
+            user_id=user_id,
+            outcome=OUTCOME_UNCHANGED,
+            digest=digest,
+            path=path,
+            owned=owned,
+        )
+
+    try:
+        passphrase = _resolve_passphrase(config.db_path, user_id)
+        read = parse_vault(data, passphrase)
+    except VaultError as exc:
+        return _settle(user_id, exc, digest=digest, path=path)
+
+    applied = apply_vault(config.db_path, user_id, read, owned)
+    return _settle(
+        user_id, None, digest=digest, path=path, owned=owned, applied=applied
+    )
+
+
+def _resolve_passphrase(db_path, user_id: str) -> str:
+    """The stored passphrase, or the class that says why there is not one.
+
+    ``get_secret`` answers ``None`` for three different conditions — no master
+    key, a master key that will not decrypt this row, and no row — and they have
+    two different remedies, so the ambiguity is resolved here rather than
+    reported as one. ``secret_exists`` is what separates the last from the other
+    two, exactly as ``import_from_user_configs`` uses it.
+    """
+    try:
+        # The store's own validator, so the message matches the condition — the
+        # precedent `apply_vault` and `doctor.security.secret_key` both follow.
+        # The key itself is not bound.
+        secrets_store._validated_key()
+    except (
+        secrets_store.SecretKeyMissingError,
+        secrets_store.SecretKeyTooWeakError,
+    ) as exc:
+        raise VaultKeyUnusable(str(exc)) from exc
+
+    value = secrets_store.get_secret(
+        db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+    )
+    if value:
+        return value
+    if secrets_store.secret_exists(
+        db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+    ):
+        raise VaultKeyUnusable(
+            "a vault passphrase is stored but will not decrypt; "
+            "check ISTOTA_SECRET_KEY"
+        )
+    raise VaultPassphraseMissing(
+        "no vault passphrase is provisioned for this user"
+    )
+
+
+def _settle(
+    user_id: str,
+    exc: VaultError | None,
+    *,
+    digest: str | None,
+    path: str,
+    owned: frozenset[str] = frozenset(),
+    applied: VaultApplyResult | None = None,
+) -> VaultSyncResult:
+    """Record the outcome, decide whether it is a transition, and say so once.
+
+    The digest is stored **only** for a cacheable outcome, so the skip test one
+    call up is a plain equality rather than a second condition that has to agree
+    with ``_CACHEABLE_OUTCOMES``.
+    """
+    outcome = OUTCOME_OK if exc is None else type(exc).__name__
+    reason = "" if exc is None else str(exc)
+    _, previous = _SYNC_STATE.get(user_id, (None, ""))
+    transition = outcome != previous
+    _SYNC_STATE[user_id] = (
+        digest if outcome in _CACHEABLE_OUTCOMES else None,
+        outcome,
+    )
+
+    if transition and exc is not None:
+        # One WARNING per transition *into* a failing state, carrying the user,
+        # the resolved path and the mapped class — never the passphrase and
+        # never a value. Both interpolated strings are bounded, since the path
+        # comes out of `config.toml` and can carry a newline.
+        logger.warning(
+            "vault: %s: %s (path=%s): %s",
+            _label(user_id),
+            outcome,
+            _label(path) if path else "unresolved",
+            _label(reason),
+        )
+    elif transition and previous:
+        logger.info("vault: %s: reading again after %s", _label(user_id), previous)
+
+    if applied is not None and (applied.created or applied.updated or applied.deleted):
+        logger.info(
+            "vault: %s: %d written, %d unchanged, %d deleted",
+            _label(user_id),
+            applied.created + applied.updated,
+            applied.unchanged,
+            applied.deleted,
+        )
+
+    return VaultSyncResult(
+        user_id=user_id,
+        outcome=outcome,
+        digest=digest,
+        transition=transition,
+        reason=reason,
+        path=path,
+        owned=owned,
+        apply=applied,
+    )
+
+
+def sync_all(
+    config, *, users: list[str] | None = None, force: bool = False
+) -> list[VaultSyncResult]:
+    """Every configured user's vault, one at a time, containing each failure.
+
+    One user's vault is not another's, and a raise out of one must not cost the
+    rest — the gate that calls this runs unattended every 300 seconds, so the
+    alternative is a single malformed config silently stopping the feature for
+    the whole deployment.
+
+    Anything outside the ``VaultError`` closed set is a bug rather than a vault
+    condition, so it is logged with a stack and reported as ``OUTCOME_ERROR``
+    rather than folded into an error class a notification would then explain
+    wrongly.
+    """
+    wanted = list(config.users) if users is None else users
+    results: list[VaultSyncResult] = []
+    for user_id in wanted:
+        try:
+            results.append(sync_user(config, user_id, force=force))
+        except Exception:  # noqa: BLE001 - a background gate, one user of many
+            logger.exception("vault: %s: sync failed unexpectedly", _label(user_id))
+            results.append(
+                VaultSyncResult(
+                    user_id=user_id,
+                    outcome=OUTCOME_ERROR,
+                    reason="an unexpected error; see the daemon log",
+                )
+            )
+    return results
+
+
+def vault_status(config, user_id: str) -> VaultStatusReport:
+    """What this user's vault looks like right now, without applying anything.
+
+    **It reads and parses and writes nothing**, which is what makes it the verb
+    an operator can run while wondering whether to trust the file. It also
+    touches no sync state in either direction: it is not subject to the digest
+    cache — the operator is asking *now* — and it does not settle an outcome,
+    since an outcome nobody applied would suppress the next real cycle's report.
+
+    Parsing is what earns the command its keep. §3 records every
+    ``istota/<service>`` group found, owned or not, precisely so this can tell a
+    user their group name matches nothing — the hardest failure in this design to
+    diagnose from their end, because the file looks right.
+    """
+    from . import storage  # noqa: PLC0415 - see `sync_user`
+
+    user = config.users.get(user_id)
+    raw = getattr(user, "vault_path", "") if user is not None else ""
+    owned = tuple(sorted(getattr(user, "vault_services", None) or ()))
+    last = _SYNC_STATE.get(user_id, (None, ""))[1]
+    if not raw:
+        return VaultStatusReport(user_id=user_id, configured=False, owned=owned)
+
+    resolution = storage.resolve_user_vault_path(config, user_id)
+    if resolution.location is None:
+        return VaultStatusReport(
+            user_id=user_id,
+            configured=True,
+            refusal=resolution.refusal or "",
+            owned=owned,
+            outcome=VaultPathRefused.__name__,
+            reason=resolution.refusal or "",
+            last_outcome=last,
+        )
+
+    location = resolution.location
+    present = secrets_store.secret_exists(
+        config.db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+    )
+    report = VaultStatusReport(
+        user_id=user_id,
+        configured=True,
+        path=str(location.path),
+        owned=owned,
+        passphrase_present=present,
+        last_outcome=last,
+    )
+    try:
+        try:
+            data, _digest = read_vault_bytes(
+                location.path, dir_fd=location.dir_fd
+            )
+            passphrase = _resolve_passphrase(config.db_path, user_id)
+            read = parse_vault(data, passphrase)
+        except VaultError as exc:
+            return dataclasses.replace(
+                report, outcome=type(exc).__name__, reason=str(exc)
+            )
+    finally:
+        if location.dir_fd is not None:
+            os.close(location.dir_fd)
+
+    owned_set = set(owned)
+    return dataclasses.replace(
+        report,
+        outcome=OUTCOME_OK,
+        groups=dict(read.group_present),
+        key_counts={
+            service: len(values) for service, values in read.services.items()
+        },
+        unowned=tuple(sorted(set(read.group_present) - owned_set)),
+        absent=tuple(sorted(owned_set - set(read.group_present))),
+    )

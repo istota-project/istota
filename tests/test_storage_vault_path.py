@@ -87,7 +87,7 @@ def _resolve(config: Config, user_id: str = "alice"):
     on a read holds the location itself, since the descriptor is the whole
     mechanism.
     """
-    location = resolve_user_vault_path(config, user_id)
+    location = resolve_user_vault_path(config, user_id).location
     if location is not None and location.dir_fd is not None:
         os.close(location.dir_fd)
     return location
@@ -101,7 +101,7 @@ class TestTheRelativeForm:
         root = _user_root(config, "alice")
         _seed(root / "istota" / "config" / "vault.kdbx")
 
-        location = resolve_user_vault_path(config, "alice")
+        location = resolve_user_vault_path(config, "alice").location
         assert location is not None
         try:
             assert location.path == root.resolve() / "istota" / "config" / "vault.kdbx"
@@ -119,7 +119,7 @@ class TestTheRelativeForm:
         root = _user_root(config, "alice")
         _seed(root / "vault.kdbx")
 
-        location = resolve_user_vault_path(config, "alice")
+        location = resolve_user_vault_path(config, "alice").location
         assert location is not None
         try:
             assert location.path == root.resolve() / "vault.kdbx"
@@ -141,7 +141,7 @@ class TestTheRelativeForm:
         _seed(root / "config" / "vault.kdbx")
         outside = _seed(tmp_path / "outside" / "vault.kdbx", DECOY_BYTES)
 
-        location = resolve_user_vault_path(config, "alice")
+        location = resolve_user_vault_path(config, "alice").location
         assert location is not None
         try:
             (root / "config").rename(root / "config.real")
@@ -202,7 +202,7 @@ class TestTheRelativeForm:
         _seed(root / "config" / "real.kdbx")
         (root / "config" / "vault.kdbx").symlink_to(root / "config" / "real.kdbx")
 
-        location = resolve_user_vault_path(config, "alice")
+        location = resolve_user_vault_path(config, "alice").location
         assert location is not None
         try:
             with pytest.raises(VaultUnreadable) as exc:
@@ -249,7 +249,7 @@ class TestTheAbsoluteForm:
         vault = _seed(tmp_path / "etc" / "vault.kdbx")
         config = _config(tmp_path, alice=UserConfig(vault_path=str(vault)))
 
-        location = resolve_user_vault_path(config, "alice")
+        location = resolve_user_vault_path(config, "alice").location
         assert location is not None
         assert location.path == vault.resolve()
         # No descriptor, and that is the form's own property rather than an
@@ -477,7 +477,7 @@ class TestWhatIsRefusedBeforeEitherBranch:
         root = _user_root(config, "alice")
         (root / "config").mkdir()
 
-        location = resolve_user_vault_path(config, "alice")
+        location = resolve_user_vault_path(config, "alice").location
         assert location is not None
         try:
             assert location.path == root.resolve() / "config"

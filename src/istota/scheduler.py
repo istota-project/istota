@@ -8351,6 +8351,11 @@ def build_interval_gates(
             now=now,
         )
 
+    def _vault_sync(now: float) -> None:
+        from . import secrets_vault
+
+        secrets_vault.sync_all(config)
+
     def _heartbeats(now: float) -> None:
         _run_heartbeat_checks(config)
 
@@ -8559,6 +8564,28 @@ def build_interval_gates(
                 and c.scheduler.skill_overlay_reindex_interval
             ),
             background=True,
+        ),
+        # The KDBX credential vault. Startup alone is not enough — a user edits
+        # their file at 3pm and nothing would happen until the next restart — and
+        # five minutes is chosen against the rclone dir-cache lag, which adds its
+        # own delay on top. Off the loop thread because a cycle touches a FUSE
+        # mount, runs Argon2id and may deliver a notification, none of which
+        # belongs on the dispatch thread. A cycle whose digest has not moved
+        # stops at the hash and costs none of that.
+        IntervalGate(
+            name="vault-sync",
+            run=_vault_sync,
+            field="vault_sync_interval",
+            enabled=lambda c: bool(
+                c.scheduler.vault_sync_interval
+                and any(
+                    getattr(u, "vault_path", "") for u in c.users.values()
+                )
+            ),
+            background=True,
+            one_shot=True,
+            on_error="Vault sync failed: %s",
+            one_shot_on_error="Vault sync failed: %s",
         ),
         # Off-host durability for the local DBs. Off the loop thread because
         # this one writes to the rclone FUSE mount, where a degraded mount makes
@@ -9198,6 +9225,19 @@ def run_daemon(
         secrets_store.import_from_user_configs(config.db_path, config.users)
     except Exception as e:  # noqa: BLE001
         logger.warning("Secrets import skipped: %s", e)
+
+    # The KDBX credential vault, immediately after the TOML importer above and
+    # deliberately not before it: the vault is the live authority for the
+    # services it owns, so a vault-owned row has to win over a TOML-seeded one
+    # on the same start. Startup alone is not enough — a user edits their file
+    # at 3pm — so the `vault-sync` interval gate carries it from here on.
+    # `sync_all` contains one user's failure rather than costing the rest.
+    try:
+        from . import secrets_vault  # noqa: PLC0415
+
+        secrets_vault.sync_all(config)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Vault sync skipped: %s", e)
 
     # Phase 6: migrate per-user TOML profile fields into the user_profiles
     # table on first run. Idempotent — only writes rows that don't exist.

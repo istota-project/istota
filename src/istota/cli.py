@@ -853,15 +853,24 @@ def cmd_secret(args):
     ``secret_schema`` registry — operators get a loud error on a typo
     instead of an orphan row that no skill ever reads.
 
-    Plaintext values are never echoed to stdout. The ``ensure`` action
-    prints the decision (created / updated / noop) but not the value;
-    ``list`` prints (service, key, last_updated) tuples only.
+    Plaintext values are never echoed to stdout, with **one** exception:
+    ``--generate`` prints the value it minted, once. That is the whole point of
+    the flag — the vault passphrase has to reach the operator's own password
+    manager and the alternative is a human choosing one — and it is the reason
+    this verb is never to be run through a task shell, where a host-side CLI
+    invoked from the developer skill puts the value in a session transcript.
+    Everywhere else ``ensure`` prints the decision (created / updated / noop)
+    and ``list`` prints (service, key, last_updated) tuples only.
     """
     from . import secrets_store
     from .secret_schema import all_known_services, known_service_keys
 
     config = load_config(Path(args.config) if args.config else None)
     db_path = config.db_path
+
+    if args.action in ("vault-sync", "vault-status"):
+        _cmd_secret_vault(config, args)
+        return
 
     if args.action == "list":
         if not args.user:
@@ -909,17 +918,24 @@ def cmd_secret(args):
         sys.exit(1)
 
     if args.action == "ensure":
-        if not args.value:
-            print(
-                "Error: --value is required for ensure (use `secret remove` to clear)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        _refuse_if_vault_owned(config, args)
+        value = _secret_ensure_value(config, args)
         state = secrets_store.upsert_secret(
-            db_path, args.user, args.service, args.key, args.value,
+            db_path, args.user, args.service, args.key, value,
         )
         print(f"Secret ensured for {args.user!r}: service={args.service} key={args.key}")
         print(f"STATE: {state}")
+        if args.generate:
+            # The one place this CLI prints a plaintext, and it prints it once.
+            # The operator has to copy it into their own password manager;
+            # every extra copy is another line of scrollback, another tmux
+            # buffer and another thing whatever logs that shell keeps.
+            print()
+            print(f"Vault passphrase (shown once, store it now): {value}")
+            print(
+                "Keep it in your own password manager. Istota cannot show it "
+                "again, and losing it means re-encrypting the vault file."
+            )
         return
 
     if args.action == "remove":
@@ -930,6 +946,242 @@ def cmd_secret(args):
         print(f"Secret remove for {args.user!r}: service={args.service} key={args.key}")
         print(f"STATE: {state}")
         return
+
+
+def _refuse_if_vault_owned(config, args) -> None:
+    """Refuse `secret ensure` on a service this user's credential vault owns.
+
+    Settled as a refusal rather than a warning, and the argument that decided it
+    is about the loop rather than about tone. The warning option rested on a CLI
+    write being "reverted within five minutes, which is a confusing way to learn
+    the rule" — and that premise is false: the write does not touch the vault
+    file, so the digest is unchanged, the sync cycle short-circuits before
+    parsing, and the value stands indefinitely. An allowed write is therefore a
+    **permanent** silent divergence from the file the user believes is
+    authoritative, which is worse than an irritating refusal. It is also what
+    lets the design claim vault-wins at all, by removing the last writer rather
+    than racing it.
+
+    ``--force`` stays for the operator deliberately testing a value before
+    putting it in the file, and says what will happen to it.
+
+    Scoped to ``ensure``. ``secret remove`` is deliberately not refused: it is
+    named in the design as the direct route for removing a credential, which is
+    the one thing the vault's absent-group rule will not do.
+
+    It costs nothing on the provisioning path, since the vault's own service is
+    subtracted from eligibility and the passphrase is therefore never
+    vault-owned.
+    """
+    from .secrets_vault import vault_owned_services
+
+    if args.service not in vault_owned_services(config, args.user):
+        return
+    if args.force:
+        print(
+            f"Warning: {args.service} is managed by {args.user}'s credential "
+            "vault. The next time that file is saved, this value will be "
+            "overwritten by whatever the vault holds.",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"Error: service {args.service!r} is managed by {args.user}'s credential "
+        "vault; edit the vault file instead.\n"
+        "       A write here does not touch the file, so it would not be "
+        "reverted — it would stand until the file next changes, silently "
+        "disagreeing with it.\n"
+        "       Pass --force to write it anyway (for testing a value before "
+        "putting it in the vault).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _secret_ensure_value(config, args) -> str:
+    """The value `secret ensure` will store: supplied, or minted by --generate.
+
+    Three rules meet here and the third is the one worth reading twice.
+
+    ``--generate`` is **only** for the vault passphrase. Every other credential
+    in the schema is issued by the far side — a Karakeep API key is Karakeep's
+    to mint — so generating one would store a value nothing on the other end
+    recognises. The vault passphrase is the one credential this deployment
+    issues to itself.
+
+    ``--generate`` with ``--value`` is two answers to one question and is
+    refused rather than resolved by precedence, in either direction.
+
+    **The floor applies to a supplied value and never to a generated one**, and
+    that asymmetry is the point rather than an oversight. ``--generate`` exists
+    *because* of the floor: a floor applied to the generated value too — or
+    checked before the branch, against an absent ``--value`` — would refuse the
+    one command the documentation tells every operator to run, and the failure
+    would look exactly like the floor working.
+    """
+    from . import secrets_vault
+
+    is_vault_passphrase = (
+        args.service == secrets_vault.VAULT_PASSPHRASE_SERVICE
+        and args.key == secrets_vault.VAULT_PASSPHRASE_KEY
+    )
+
+    if args.generate:
+        if args.value:
+            print(
+                "Error: --generate and --value are two answers to one question; "
+                "pass one.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not is_vault_passphrase:
+            print(
+                f"Error: --generate is only supported for --service "
+                f"{secrets_vault.VAULT_PASSPHRASE_SERVICE} --key "
+                f"{secrets_vault.VAULT_PASSPHRASE_KEY}. Every other credential "
+                "here is issued by the service it belongs to.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return secrets_vault.generate_passphrase()
+
+    if not args.value:
+        print(
+            "Error: --value is required for ensure (use `secret remove` to clear)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if is_vault_passphrase:
+        refusal = secrets_vault.passphrase_refusal(args.value)
+        if refusal is not None:
+            print(
+                f"Error: {refusal}.\n"
+                "       The vault file sits where a task can read its "
+                "ciphertext, and a generated passphrase is the only thing "
+                "standing in front of that.\n"
+                "       Use `--generate` instead of `--value`.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    return args.value
+
+
+def _cmd_secret_vault(config, args) -> None:
+    """`istota secret vault-sync` and `istota secret vault-status`.
+
+    Both default to every configured user and take ``-u`` for one. Neither
+    prints a credential value: counts, service names, key names and group names
+    only, which is the same rule the sync's own log lines follow.
+    """
+    from . import secrets_vault
+
+    users = [args.user] if args.user else list(config.users)
+    if not users:
+        print("No users configured.")
+        return
+
+    if args.action == "vault-status":
+        for user_id in users:
+            _print_vault_status(secrets_vault.vault_status(config, user_id))
+        return
+
+    # `force=True`: this command is the operator's escape hatch from every
+    # cache-shaped surprise, so it must not be subject to the cache it exists to
+    # defeat. A fresh CLI process has an empty cache anyway — what this covers is
+    # the in-process caller and the contract.
+    for result in secrets_vault.sync_all(config, users=users, force=True):
+        _print_vault_sync(result)
+
+
+def _print_vault_sync(result) -> None:
+    """One user's sync, as lines. Counts and names, never a value."""
+    from . import secrets_vault
+
+    if result.outcome == secrets_vault.OUTCOME_NOT_CONFIGURED:
+        print(f"{result.user_id}: no vault configured")
+        return
+
+    header = f"{result.user_id}: {result.outcome}"
+    if result.path:
+        header += f"  path={result.path}"
+    print(header)
+    if result.owned:
+        # Named rather than counted, because "2 written" says nothing about
+        # *which* two and the owned set is the thing an operator is checking
+        # against their file.
+        print(f"  owned: {', '.join(sorted(result.owned))}")
+    if result.reason:
+        print(f"  reason: {result.reason}")
+
+    applied = result.apply
+    if applied is None:
+        return
+    # `created + updated` is the figure that is always right. The *split*
+    # between them is derived from whether the stored row could be read
+    # (`upsert_secret` compares via `get_secret`), so on a deployment whose
+    # master key cannot decrypt what is already there, every write reads as
+    # `created`. Reporting the total first is what keeps the line honest;
+    # the warning below is what names the condition when it is detectable.
+    print(
+        f"  {applied.created + applied.updated} written "
+        f"({applied.created} created, {applied.updated} updated), "
+        f"{applied.unchanged} unchanged, {applied.deleted} deleted"
+    )
+    for service, key in applied.deleted_keys:
+        print(f"  deleted: {secrets_vault.format_skip(service, key)}")
+    for service, key, reason in applied.skipped:
+        print(f"  skipped: {secrets_vault.format_skip(service, key)} ({reason})")
+    if any(
+        reason == secrets_vault.SKIP_UNREADABLE_ROW for _s, _k, reason in applied.skipped
+    ):
+        print(
+            "  warning: some stored values could not be decrypted, so the "
+            "created/updated split above is not reliable. Check "
+            "ISTOTA_SECRET_KEY."
+        )
+
+
+def _print_vault_status(report) -> None:
+    """One user's vault, as lines. Names and counts, never a value."""
+    from . import secrets_vault
+
+    if not report.configured:
+        print(f"{report.user_id}: no vault configured")
+        return
+
+    print(f"{report.user_id}:")
+    print(f"  path:       {report.path or '(refused)'}")
+    if report.refusal:
+        print(f"  refused:    {report.refusal}")
+    print(f"  owned:      {', '.join(report.owned) or '(none)'}")
+    print(
+        "  passphrase: "
+        + ("provisioned" if report.passphrase_present else "NOT PROVISIONED")
+    )
+    if report.outcome and report.outcome != secrets_vault.OUTCOME_OK:
+        print(f"  status:     {report.outcome}")
+        if report.reason:
+            print(f"  reason:     {report.reason}")
+        return
+
+    if not report.groups:
+        return
+    print("  groups found in the file:")
+    for folded, spelling in sorted(report.groups.items()):
+        marker = "owned" if folded in report.owned else "not owned"
+        count = report.key_counts.get(folded, 0)
+        print(f"    {spelling}  ({count} key(s), {marker})")
+    if report.absent:
+        print(
+            "  owned but absent from the file (nothing is applied or deleted "
+            "for these): " + ", ".join(report.absent)
+        )
+    if report.unowned:
+        print(
+            "  in the file but not in vault_services (parsed and discarded): "
+            + ", ".join(report.unowned)
+        )
 
 
 def cmd_email(args):
@@ -3386,7 +3638,9 @@ def main():
         help="Manage per-user encrypted secrets (Ansible-friendly, idempotent)",
     )
     secret_parser.add_argument(
-        "action", choices=["ensure", "list", "remove"], help="Action",
+        "action",
+        choices=["ensure", "list", "remove", "vault-sync", "vault-status"],
+        help="Action",
     )
     secret_parser.add_argument("-u", "--user", help="User id")
     secret_parser.add_argument(
@@ -3397,6 +3651,22 @@ def main():
     secret_parser.add_argument(
         "--value",
         help="Secret value (ensure only). Use `secret remove` to clear.",
+    )
+    secret_parser.add_argument(
+        "--generate",
+        action="store_true",
+        help=(
+            "Mint the value instead of supplying one, and print it once "
+            "(vault passphrase only)."
+        ),
+    )
+    secret_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Write a service the user's credential vault owns. The next vault "
+            "save overwrites it."
+        ),
     )
 
     # email

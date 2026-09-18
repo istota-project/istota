@@ -501,6 +501,34 @@ class VaultLocation:
     dir_fd: int | None
 
 
+@dataclass(frozen=True)
+class VaultResolution:
+    """The answer :func:`resolve_user_vault_path` gives, refusal included.
+
+    Three states, and the third is the one this type exists for:
+
+    - ``location`` set, ``refusal`` None — open this file.
+    - both None — the feature is off for this user, which is every user by
+      default. Not a failure and nothing reports it.
+    - ``location`` None, ``refusal`` set — a *configured* path this may not
+      reach, carrying one of the ``VAULT_PATH_*`` ids below.
+
+    **The third used to be a bare ``None`` and the reason reached the daemon log
+    and nothing else.** That is the invisible-failure class §8 was written
+    against, in the one place in this design that is about an attack rather than
+    a mistake: the cross-user typo — ``[users.alice]`` naming
+    ``{mount}/Users/bob/config/vault.kdbx`` — is refused here and the operator
+    had no surface that said so. ``secrets_vault.sync_user`` turns the id into
+    its own outcome class so a notification can carry it.
+
+    The id is a **stable word, not a sentence**: it is grepped in the log, keyed
+    on by a report, and rendered into a panel row.
+    """
+
+    location: "VaultLocation | None"
+    refusal: str | None
+
+
 #: Why a configured ``vault_path`` was refused. Stable ids, in the log line the
 #: refusal writes: the condition persists across every sync cycle, so an
 #: operator grepping for one wants a word rather than a sentence.
@@ -516,14 +544,16 @@ VAULT_PATH_NO_SUCH_DIRECTORY = "no_directory_at_the_configured_path"
 
 def resolve_user_vault_path(
     config: "Config", user_id: str
-) -> VaultLocation | None:
-    """Which KDBX file this user's vault sync may open, or None.
+) -> VaultResolution:
+    """Which KDBX file this user's vault sync may open, and why not where not.
 
     The daemon holds the passphrase and the model does not, so this decides
-    what gets decrypted and written into the secrets table. ``None`` means
-    there is nothing to open — the feature is off for this user, or the
-    configured path is one this may not reach — and every refusal is logged,
-    because a configured path that resolves to nothing must not be silence.
+    what gets decrypted and written into the secrets table. A
+    :class:`VaultResolution` with no ``location`` means there is nothing to
+    open, and its ``refusal`` is what separates "the feature is off for this
+    user" from "the configured path is one this may not reach". Every refusal is
+    also logged, because a configured path that resolves to nothing must not be
+    silence.
 
     **Two forms, two mechanisms, because their exposure differs.**
 
@@ -605,21 +635,21 @@ def resolve_user_vault_path(
     raw = getattr(user, "vault_path", "") if user is not None else ""
     if not isinstance(raw, str) or not raw:
         # The feature is off for this user, which is every user by default, so
-        # this one answer is the silent one.
-        return None
+        # this one answer is the silent one — and the one state where *neither*
+        # field is set, which is how a caller tells "not configured" from
+        # "configured and refused" without a second predicate.
+        return VaultResolution(location=None, refusal=None)
     if not raw.strip():
         # Blank but *present* is a configured value that resolves to nothing,
         # which the contract above says must not be silence.
-        _refuse_vault_path(user_id, raw, VAULT_PATH_NOT_A_FILENAME)
-        return None
+        return _refuse_vault_path(user_id, raw, VAULT_PATH_NOT_A_FILENAME)
 
     written = Path(raw)
     if written.is_absolute():
         return _absolute_vault_location(config, user_id, written)
 
     if not config.has_workspace:
-        _refuse_vault_path(user_id, raw, VAULT_PATH_NO_WORKSPACE)
-        return None
+        return _refuse_vault_path(user_id, raw, VAULT_PATH_NO_WORKSPACE)
     # `{root}/{user_id}` is a join, and a join is not the check it reads as: an
     # empty id collapses to `{workspace}/Users`, the parent of every user's
     # directory. `is_scopable_user_id` is asked *first* rather than left to
@@ -628,12 +658,10 @@ def resolve_user_vault_path(
     # callers, and here it would resolve a relative `vault_path` against the
     # whole shared tree.
     if not is_scopable_user_id(user_id):
-        _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_USER)
-        return None
+        return _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_USER)
     user_root = config.workspace_root(user_id)
     if user_root is None:
-        _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_USER)
-        return None
+        return _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_USER)
 
     parts = written.parts
     if not parts or not _is_plain_component(parts[-1]):
@@ -643,16 +671,14 @@ def resolve_user_vault_path(
         # pathlib erases both, so `"config/"` is `Path("config")` and refusing
         # it would refuse an ordinary, if wrong, leaf name. That one is the
         # read's to answer, as `not a regular file`.
-        _refuse_vault_path(user_id, raw, VAULT_PATH_NOT_A_FILENAME)
-        return None
+        return _refuse_vault_path(user_id, raw, VAULT_PATH_NOT_A_FILENAME)
 
     if not all(_is_plain_component(part) for part in parts[:-1]):
         # `open_overlay_dir` applies this same rule in its own pre-loop check
         # and answers None, which would arrive below as a containment refusal —
         # so a NUL or an interior `..` would be reported as though the tree had
         # refused it. Asked here so the reason names what is actually wrong.
-        _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_COMPONENT)
-        return None
+        return _refuse_vault_path(user_id, raw, VAULT_PATH_BAD_COMPONENT)
 
     fd = open_overlay_dir(user_root, *parts[:-1])
     if fd is None:
@@ -669,11 +695,10 @@ def resolve_user_vault_path(
             absent = not os.path.lexists(user_root.joinpath(*parts[:-1]))
         except (OSError, ValueError):  # pragma: no cover - the components are plain
             absent = False
-        _refuse_vault_path(
+        return _refuse_vault_path(
             user_id, raw,
             VAULT_PATH_NO_SUCH_DIRECTORY if absent else VAULT_PATH_OUTSIDE_USER_TREE,
         )
-        return None
     try:
         # Defence in depth rather than a case with a test behind it: `user_root`
         # is composed by the daemon from `workspace_path` and a `user_id` that
@@ -682,30 +707,33 @@ def resolve_user_vault_path(
         root = Path(os.path.realpath(user_root))
     except (OSError, ValueError):
         os.close(fd)
-        _refuse_vault_path(user_id, raw, VAULT_PATH_UNRESOLVABLE)
-        return None
+        return _refuse_vault_path(user_id, raw, VAULT_PATH_UNRESOLVABLE)
     # The *root* is realpath'd and the components the operator wrote are not.
     # `read_overlay_bytes` opens `path.name` relative to the descriptor, so
     # resolving the whole join would hand it a symlinked leaf's **target** name
     # and the read would open a different file from the one the walk contained
     # — silently, and only when the leaf happens to be a link.
-    return VaultLocation(path=root.joinpath(*parts), dir_fd=fd)
+    return VaultResolution(
+        location=VaultLocation(path=root.joinpath(*parts), dir_fd=fd), refusal=None
+    )
 
 
 def _absolute_vault_location(
     config: "Config", user_id: str, written: Path
-) -> VaultLocation | None:
+) -> VaultResolution:
     """The absolute branch: resolved, and refused if it lands in a written tree."""
     try:
         resolved = Path(os.path.realpath(written))
     except (OSError, ValueError):
-        _refuse_vault_path(user_id, str(written), VAULT_PATH_UNRESOLVABLE)
-        return None
+        return _refuse_vault_path(user_id, str(written), VAULT_PATH_UNRESOLVABLE)
     for root in _sandbox_writable_roots(config):
         if resolved == root or root in resolved.parents:
-            _refuse_vault_path(user_id, str(written), VAULT_PATH_INSIDE_WORKSPACE)
-            return None
-    return VaultLocation(path=resolved, dir_fd=None)
+            return _refuse_vault_path(
+                user_id, str(written), VAULT_PATH_INSIDE_WORKSPACE
+            )
+    return VaultResolution(
+        location=VaultLocation(path=resolved, dir_fd=None), refusal=None
+    )
 
 
 def _sandbox_writable_roots(config: "Config") -> list[Path]:
@@ -770,13 +798,23 @@ def _is_plain_component(name: str) -> bool:
 _VAULT_PATH_LOG_MAX_CHARS = 200
 
 
-def _refuse_vault_path(user_id: object, vault_path: str, reason: str) -> None:
+def _refuse_vault_path(
+    user_id: object, vault_path: str, reason: str
+) -> VaultResolution:
     """One line per refused cycle, naming what an operator has to change.
+
+    **It returns the refusal rather than only logging it**, and every refusal
+    site in this module is ``return _refuse_vault_path(...)``. That is the whole
+    of the drift guard: a refusal added later cannot produce a reason-less
+    ``None``, because the only way to build the refusing ``VaultResolution`` is
+    to come through here and name an id.
 
     Not deduplicated. The condition persists, so a misconfigured user costs one
     line per sync interval — which is the cost of a *configured* path that is
     actively refused, and is the direction to be wrong in for a value deciding
-    which file the daemon decrypts with a key it holds.
+    which file the daemon decrypts with a key it holds. The **notification** side
+    is deduplicated instead, by ``secrets_vault.sync_user``'s transition rule:
+    the log is the sequence and the panel row is the state.
 
     Both interpolated values are bounded and flattened. Self-inflicted rather
     than attacker-reachable, since a ``config.toml`` is the operator's — but a
@@ -789,6 +827,7 @@ def _refuse_vault_path(user_id: object, vault_path: str, reason: str) -> None:
         "vault_path_refused user=%s reason=%s path=%s",
         _bounded_for_log(user_id), reason, _bounded_for_log(vault_path),
     )
+    return VaultResolution(location=None, refusal=reason)
 
 
 def _bounded_for_log(value: object) -> str:
