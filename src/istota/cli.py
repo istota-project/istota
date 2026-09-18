@@ -3,6 +3,7 @@
 import argparse
 import importlib.metadata
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -1718,25 +1719,52 @@ WHATSAPP_PAIR_PICKUP_SECONDS = 30.0
 #: How long past the request's own deadline attach mode keeps reading before it
 #: gives up. The row is closed by the scheduler's deadline arm, so a scheduler
 #: that died mid-window leaves nothing to stamp it terminal and an unbounded
-#: loop would wait for ever. Long enough for one tick of the daemon's own poll,
-#: short enough that an operator is not left watching a dead window.
+#: loop would wait for ever. The deployment's own `poll_interval` is *added* to
+#: this rather than assumed to be the default, since the deadline arm stamps
+#: `expired` up to one tick late and a fixed grace would make a healthy window
+#: on a slow-polling deployment report that the poll was not running.
 WHATSAPP_PAIR_GRACE_SECONDS = 15.0
+
+#: Consecutive failed reads of the request row before attach mode stops
+#: watching. A contended write lock is the ordinary failure on a per-tick
+#: connection and the daemon's own poll treats it as a lost tick, so one is not
+#: a reason to abandon a live window; a persistent one is.
+WHATSAPP_PAIR_READ_FAILURES = 5
+
+#: Said on every path that stops watching without the window having closed.
+#: One sentence rather than three, because the operator's position is identical
+#: whether they pressed Ctrl-C, the reads stopped answering, or nothing closed
+#: the row: the window is in the daemon and a scan still completes it.
+_WHATSAPP_WINDOW_STILL_OPEN = (
+    "Any pairing window is still open in the daemon and a scan still "
+    "completes it; cancel it from Admin, Connections if you meant to abandon "
+    "it."
+)
 
 #: What to say on each state the row or the relay can report. The prose the
 #: daemon wrote is printed under it, since that is where the unit, the remedy
 #: and the archived path are named. `awaiting_scan` has no entry: the code
 #: itself is what that state has to say.
+#:
+#: Keyed by `db`'s own constants rather than by literals, so a renamed state is
+#: a key that moves with it rather than a note that silently stops printing —
+#: `.get` answers `None` and this loop carries on. What that cannot catch is a
+#: *new* state nobody wrote a note for, which is what the completeness test in
+#: `tests/test_whatsapp_pair_cli.py` is for.
 _WHATSAPP_PAIRING_NOTES = {
-    "requested": "Waiting for the daemon to pick the request up.",
-    "servicing": "The daemon is stopping the sidecar and clearing the session.",
-    "awaiting_sidecar": (
+    db.WHATSAPP_PAIRING_REQUESTED:
+        "Waiting for the daemon to pick the request up.",
+    db.WHATSAPP_PAIRING_SERVICING:
+        "The daemon is stopping the sidecar and clearing the session.",
+    db.WHATSAPP_PAIRING_AWAITING_SIDECAR: (
         "The session was cleared. Waiting for the sidecar to come back — its "
         "supervisor restarts it on its own interval, 30s by default."
     ),
-    "sidecar_absent": "The sidecar has not come back.",
-    "paired": "Paired. The WhatsApp session is linked and open.",
-    "expired": "The pairing window closed without a scan.",
-    "failed": "The pairing request failed.",
+    db.WHATSAPP_PAIRING_SIDECAR_ABSENT: "The sidecar has not come back.",
+    db.WHATSAPP_PAIRING_PAIRED:
+        "Paired. The WhatsApp session is linked and open.",
+    db.WHATSAPP_PAIRING_EXPIRED: "The pairing window closed without a scan.",
+    db.WHATSAPP_PAIRING_FAILED: "The pairing request failed.",
 }
 
 
@@ -1774,10 +1802,21 @@ def _whatsapp_attach_refusal(config) -> str | None:
             "there is nowhere for the pairing code to be published."
         )
     if not relay.is_absolute():
+        # **Which key to name depends on which one made it relative.**
+        # `default_pairing_relay_path` falls back to `{db_path.parent}`, so a
+        # relative `db_path` — the bare-`Config` shape doctor's
+        # `config_visibility` gate exists for — produces a relative relay
+        # through no act of the operator, and naming `pairing_relay_path` there
+        # points at a key they never set.
+        configured = (config.whatsapp.baileys.pairing_relay_path or "").strip()
+        culprit = (
+            "[whatsapp.baileys] pairing_relay_path" if configured
+            else "db_path, which it is derived from"
+        )
         return (
-            f"[whatsapp.baileys] pairing_relay_path is relative ({relay}), so "
-            "this terminal and the daemon would each resolve it against their "
-            "own working directory. Set it to an absolute path."
+            f"The pairing relay would be written to a relative path ({relay}), "
+            "so this terminal and the daemon would each resolve it against "
+            f"their own working directory. Set {culprit} to an absolute path."
         )
     try:
         from . import sandbox_plan
@@ -1880,23 +1919,62 @@ def _whatsapp_cli_actor() -> str:
         return "cli"
 
 
+def _scheduler_poll_interval(config) -> float:
+    """The deployment's task-poll interval, or 0 where it cannot be read.
+
+    Defensive rather than a plain attribute read, because its one caller is
+    inside the never-raise follow loop and the value only widens a grace
+    period: a config this cannot reach costs an earlier give-up message, which
+    is the pre-existing behaviour, and never a traceback mid-pairing.
+    """
+    try:
+        interval = float(config.scheduler.poll_interval)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+    return interval if math.isfinite(interval) and interval > 0 else 0.0
+
+
+def _as_relay_text(value) -> str:
+    """A relay string field, or empty. The CLI's `web_app._as_int` counterpart.
+
+    `read_relay` validates the three fields its own deadline and window checks
+    need and hands everything else back as the file held it, so a caller that
+    interpolates or draws one has to narrow it. Empty rather than `str(value)`,
+    because for the payload "not a string" means the file is not one this
+    process wrote and drawing it would be worse than saying there is no code.
+    """
+    return value if isinstance(value, str) else ""
+
+
 def _whatsapp_pairing_view(config) -> dict | None:
     """The request row joined to the live relay, or `None` where none exists.
 
     **The sibling of `web_app._pairing_state_payload`, and deliberately not
-    shared with it.** That one strips the payload to a `qr_available` boolean,
-    because the whole web design rests on the code never reaching a browser as
-    text; this caller is the one legitimate consumer of the payload outside the
-    bridge, since a terminal is where an operator asked for it. What the two do
-    share is the rule, which is six lines: the row first and its terminal state
-    as a veto, then the relay matched on the row's **current** `window_id`.
+    shared with it.** That one is **authoritative for the shared rule** — it
+    landed with the routes and the reader-side terminal check was specified
+    against it — and `tests/test_whatsapp_pairing_parity.py` is what holds the
+    two in step, driving both against one row and one relay file and stating
+    the divergences.
+
+    What they share is the rule, which is six lines: the row first and its
+    terminal state as a veto, then the relay matched on the row's **current**
+    `window_id`, then the live state and message winning over the row's.
+
+    What differs is the **return shape**, and that is the whole ground for two
+    copies. It is not that the payload never enters the web process — it does,
+    since `_pairing_state_payload` reads `live.get("qr")` to compute
+    `qr_available` — it is that the payload never *leaves* it: a shared
+    function returning the code would put a full-account credential in the
+    frame that builds a route's response body, and this caller is the one
+    legitimate consumer of it, since a terminal is where an operator asked for
+    it. The web copy also prefers the relay's own `expires_at` where this one
+    always takes the row's; both are stated in the parity test.
 
     That id is not the one `request_whatsapp_pairing` returned. The row adopts
     the bridge's own window id when a window actually opens, because the relay
     file carries that one — so a reader pinned to the request id stops seeing
     the relay at the first real transition.
     """
-    from . import db
     from .transport.whatsapp import pairing_relay
     from .transport.whatsapp.baileys_bridge import default_pairing_relay_path
 
@@ -1921,7 +1999,12 @@ def _whatsapp_pairing_view(config) -> dict | None:
         # only durable record of where the old credential went.
         "message": (live or {}).get("message") or row["message"],
         "expires_at": db.sql_epoch_from_datetime(row["expires_at"]),
-        "qr": (live or {}).get("qr") or "",
+        # `str` or nothing. `read_relay` type-checks `window_id`, `state` and
+        # `expires_at` and passes the rest through as the file held it, and
+        # `_render_qr` is annotated `str` — its `segno.make` would raise on
+        # anything else and degrade to *printing* the value, which is the one
+        # thing this payload must not do on a fallback path.
+        "qr": _as_relay_text((live or {}).get("qr")),
         "qr_seq": (live or {}).get("qr_seq") or 0,
         # What the follower pins on. The window id cannot be that, since the
         # row rotates onto the bridge's own at the first transition; this pair
@@ -1949,7 +2032,6 @@ def _whatsapp_pair_attached(config, socket_path, *, reset: bool) -> int:
     web admin writes, from a terminal, and a window one of them opens is
     visible to the other.
     """
-    from . import db
     from .transport.whatsapp.baileys_bridge import (
         configured_pairing_window_seconds,
     )
@@ -1962,6 +2044,14 @@ def _whatsapp_pair_attached(config, socket_path, *, reset: bool) -> int:
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
+    # **The already-in-progress refusal is pre-read ahead of the prompt**, so
+    # nobody types a confirmation phrase and is then told nothing was written.
+    # Best-effort and deliberately not authoritative: the SQL guard inside
+    # `request_whatsapp_pairing` is what decides the race, and a read that
+    # cannot answer must not refuse a pairing on its own.
+    if _whatsapp_pairing_is_open(config):
+        print(_WHATSAPP_PAIRING_IN_PROGRESS, file=sys.stderr)
+        return 1
     if reset and not _whatsapp_confirm_unlink():
         return 1
 
@@ -1973,6 +2063,23 @@ def _whatsapp_pair_attached(config, socket_path, *, reset: bool) -> int:
                 window_seconds=configured_pairing_window_seconds(config),
                 force=reset,
             )
+            # **Read back in the same block as the write**, which is what the
+            # follower pins on. Seeding that pin from the follower's own first
+            # tick leaves a second in which a replacement request is adopted as
+            # this operator's — the failure the pin exists for, narrowed rather
+            # than closed. One statement later is not zero, and the residual is
+            # stated in `_whatsapp_follow_pairing`.
+            #
+            # Guarded on its own, because by this point the request **has been
+            # written**: letting a failed read-back escape to the handler below
+            # would report a failed write over a request that landed, and the
+            # follower already seeds the pin from its first tick when handed
+            # nothing. So the cost of losing this read is the narrowing, not
+            # the pairing.
+            try:
+                row = db.read_whatsapp_pairing(conn) if request_id else None
+            except Exception:  # noqa: BLE001 — see above
+                row = None
     except Exception as exc:  # noqa: BLE001 — an operator wants a sentence
         print(
             f"The pairing request could not be written to {config.db_path}: "
@@ -1981,27 +2088,59 @@ def _whatsapp_pair_attached(config, socket_path, *, reset: bool) -> int:
         )
         return 1
     if request_id is None:
-        print(
-            "A WhatsApp pairing request is already in progress, so this one "
-            "was not written. Wait for it to finish, or cancel it from Admin, "
-            "Connections.",
-            file=sys.stderr,
-        )
+        print(_WHATSAPP_PAIRING_IN_PROGRESS, file=sys.stderr)
         return 1
 
     print("Requested. Waiting for the daemon to pick it up.")
-    return _whatsapp_follow_pairing(config)
+    following = None if row is None else (row["requested_at"], row["requested_by"])
+    return _whatsapp_follow_pairing(config, following=following)
 
 
-def _whatsapp_follow_pairing(config) -> int:
+#: Said by two callers — the pre-read ahead of the confirmation prompt and the
+#: authoritative SQL guard's own refusal — so the operator sees one sentence
+#: whichever of them answered.
+_WHATSAPP_PAIRING_IN_PROGRESS = (
+    "A WhatsApp pairing request is already in progress, so this one was not "
+    "written. Wait for it to finish, or cancel it from Admin, Connections."
+)
+
+
+def _whatsapp_pairing_is_open(config) -> bool:
+    """Whether a pairing request is already live. `False` where unknown.
+
+    Deliberately optimistic on a read it cannot make: this only exists to move
+    a refusal ahead of a typed prompt, and a database blip must not refuse a
+    pairing the authoritative guard would have allowed.
+    """
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            row = db.read_whatsapp_pairing(conn)
+    except Exception:  # noqa: BLE001 — see above
+        return False
+    return row is not None and row["state"] not in (
+        db.WHATSAPP_PAIRING_TERMINAL_STATES
+    )
+
+
+def _whatsapp_follow_pairing(config, *, following: tuple | None = None) -> int:
     """Follow the request row to its outcome, drawing each code. The exit code.
 
-    **Its own wall-clock ceiling, because the row's belongs to the scheduler.**
-    The arm that closes a wedged row runs in the daemon's poll, so a scheduler
-    that died mid-window leaves nothing to stamp the row terminal, and an
-    unbounded loop would then wait for ever on a code that cannot come. The
-    deadline is re-read every tick rather than captured once, since the row's
-    own is refreshed from the request's to the window's when one opens.
+    **Two wall-clock ceilings, because the row's own belongs to the
+    scheduler.** The arm that closes a wedged row runs in the daemon's poll, so
+    a scheduler that died mid-window leaves nothing to stamp the row terminal,
+    and an unbounded loop would then wait for ever on a code that cannot come.
+    The row's deadline is re-read every tick rather than captured once, since
+    it is refreshed from the request's to the window's when one opens — and
+    `WHATSAPP_PAIR_TIMEOUT_SECONDS` is the backstop for a row whose deadline
+    cannot be read at all, where `None` means "nothing to compare against"
+    rather than "expired" and so bounds nothing by itself. No writer produces
+    such a row today, which makes that arm a guard rather than a fix.
+
+    The grace on the row's deadline carries the **scheduler's poll interval**,
+    which is operator-settable: the deadline arm stamps `expired` up to one
+    tick late, so a fixed grace makes a perfectly healthy window on a
+    slow-polling deployment report that the poll is not running.
 
     Each code is drawn **once per rotation**, not once per tick: WhatsApp
     rotates the payload about every twenty seconds and this reads every second,
@@ -2017,31 +2156,45 @@ def _whatsapp_follow_pairing(config) -> int:
     and it is already in the caller's frame on every tick, so comparing it
     holds nothing this loop was not holding anyway.
 
+    **A read that fails is a skipped tick, not the end of the watch.** The
+    ordinary failure on a per-tick connection is a contended write lock, and
+    the daemon's own poll treats exactly that as a lost tick costing nothing —
+    where ending the watch abandons a live window that keeps publishing a
+    full-account credential with nobody looking at it. Only
+    `WHATSAPP_PAIR_READ_FAILURES` consecutive failures give up, and that path
+    says what Ctrl-C says, because the window is in the same state either way.
+
     Ctrl-C leaves the window open deliberately. It lives in the daemon, and a
     scan that lands while nobody is watching still pairs — closing it from here
     would abandon a window whose session directory has already moved aside.
     """
     import time
 
-    from . import db
 
     started = time.monotonic()
     drawn = ""
     # `requested` is pre-seeded: the caller has just said the same thing.
     said = {db.WHATSAPP_PAIRING_REQUESTED}
     pickup_warned = False
-    following: tuple | None = None
+    read_failures = 0
+    grace = WHATSAPP_PAIR_GRACE_SECONDS + _scheduler_poll_interval(config)
     try:
         while True:
             try:
                 view = _whatsapp_pairing_view(config)
             except Exception as exc:  # noqa: BLE001 — a read must not raise past here
+                read_failures += 1
+                if read_failures < WHATSAPP_PAIR_READ_FAILURES:
+                    time.sleep(WHATSAPP_PAIR_POLL_SECONDS)
+                    continue
                 print(
-                    "The pairing request could not be read: "
-                    f"{type(exc).__name__}.",
+                    "\nThe pairing request could not be read "
+                    f"{read_failures} times running ({type(exc).__name__}), "
+                    "so this stopped watching. " + _WHATSAPP_WINDOW_STILL_OPEN,
                     file=sys.stderr,
                 )
                 return 1
+            read_failures = 0
             if view is None:
                 # Cleared from under us: a web admin's cancel landing between
                 # two reads, or the poll's own row-without-id escape.
@@ -2058,6 +2211,14 @@ def _whatsapp_follow_pairing(config) -> int:
             # and an exit 0 over a re-pair that had just failed. Pinned on the
             # request stamp rather than the window id, which the row rotates
             # onto the bridge's own at the first transition.
+            #
+            # `following` comes from the caller's own read-back, in the same
+            # block as the write. Seeded here instead, a replacement landing
+            # before the first tick would be adopted as this operator's. Two
+            # residuals stand: the stamp is one-second resolution and
+            # `requested_by` is the OS user, so two CLI requests by one user
+            # inside one second are indistinguishable, and the read-back is one
+            # statement after the write rather than zero.
             identity = (view["requested_at"], view["requested_by"])
             if following is None:
                 following = identity
@@ -2093,34 +2254,37 @@ def _whatsapp_follow_pairing(config) -> int:
             ):
                 pickup_warned = True
                 print(
-                    "\nNo bridge has picked this request up. Check the "
-                    "scheduler — `systemctl status istota-scheduler` on the "
-                    "Ansible shape — and that something is still listening on "
-                    "the bridge socket. Still waiting.",
+                    "\nNo bridge has picked this request up. Either the "
+                    "scheduler is not running — `systemctl status "
+                    "istota-scheduler` on the Ansible shape — or whatever is "
+                    "listening on the bridge socket is not a daemon, which is "
+                    "what another `istota whatsapp pair` on this host looks "
+                    "like. Still waiting.",
                     file=sys.stderr,
                 )
 
+            # Naming the poll as the *only* explanation is what the pickup
+            # warning above corrects: a listener that is not a daemon's has
+            # nothing polling behind it and no poll is at fault.
             deadline = view["expires_at"]
-            if (
-                deadline is not None
-                and time.time() > deadline + WHATSAPP_PAIR_GRACE_SECONDS
+            expired = (
+                deadline is not None and time.time() > deadline + grace
+            )
+            if expired or time.monotonic() - started > (
+                WHATSAPP_PAIR_TIMEOUT_SECONDS + grace
             ):
                 print(
-                    "\nThe pairing window's deadline has passed and the daemon "
-                    "has not closed the request, so its poll is not running. "
-                    "The request closes on its own once it is.",
+                    "\nNothing has closed this pairing request, so either the "
+                    "daemon's poll is not running or nothing was listening for "
+                    "it. The request closes on its own at the next tick of a "
+                    "scheduler. " + _WHATSAPP_WINDOW_STILL_OPEN,
                     file=sys.stderr,
                 )
                 return 1
 
             time.sleep(WHATSAPP_PAIR_POLL_SECONDS)
     except KeyboardInterrupt:
-        print(
-            "\nStopped watching. The pairing window is still open in the "
-            "daemon and a scan still completes it; cancel it from Admin, "
-            "Connections if you meant to abandon it.",
-            file=sys.stderr,
-        )
+        print("\nStopped watching. " + _WHATSAPP_WINDOW_STILL_OPEN, file=sys.stderr)
         return 1
 
 
@@ -4319,7 +4483,8 @@ def main():
             "Move the current session to a timestamped sibling directory and "
             "pair again. Nothing is deleted. Where a bridge is running this "
             "re-pairs even a working session, so it asks for a typed "
-            "confirmation first"
+            "confirmation first; where none is, it moves the session aside "
+            "only if the sidecar reports it cannot be used"
         ),
     )
     whatsapp_subparsers.add_parser(
