@@ -255,15 +255,45 @@ class TestTheBridgeCheck:
         assert "sidecar_command" in result.remedy
 
     def test_an_unpaired_session_warns_and_says_how_to_pair(self, tmp_path):
-        """The state every install starts in, so not a failure."""
+        """The state every install starts in, so not a failure.
+
+        `session_unpaired` is what makes it that state rather than the
+        reconnecting one below (ISSUE-506): both reach the same arm with
+        `ready` false, and before the field existed the remedy had to offer
+        both and let the operator pick.
+        """
         baileys_bridge.set_active_bridge(_Status(
-            listening=True, connected=True, ready=False,
+            listening=True, connected=True, ready=False, session_unpaired=True,
         ))
 
         result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
 
         assert result.status == doctor.WARN
+        assert "no paired WhatsApp session" in result.detail
+        assert "every send is refused" in result.detail
         assert "istota whatsapp pair" in result.remedy
+
+    def test_a_reconnecting_session_does_not_tell_them_to_re_pair(
+        self, tmp_path,
+    ):
+        """The other half of the arm, and the reason the field is read rather
+        than the arm reporting both possibilities.
+
+        A session that is merely reconnecting has a credential and needs
+        nothing from the operator; telling them to pair would have them
+        archive a working one. Sends are refused here too, by the sidecar
+        rather than by the latch, so the detail does not claim otherwise.
+        """
+        baileys_bridge.set_active_bridge(_Status(
+            listening=True, connected=True, ready=False, session_unpaired=False,
+        ))
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_bridge")
+
+        assert result.status == doctor.WARN
+        assert "session is not open" in result.detail
+        assert "pair" not in result.remedy
+        assert "reconnecting" in result.remedy
 
     def test_a_refused_connection_warns_with_its_own_remedy(self, tmp_path):
         """The counter behind the corruption this whole stage refuses a

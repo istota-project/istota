@@ -55,6 +55,7 @@ import asyncio
 import contextlib
 import dataclasses
 import inspect
+import json
 import logging
 import math
 import os
@@ -772,6 +773,68 @@ def dir_holds_a_session(path: Path) -> bool:
         return True
 
 
+#: What `useMultiFileAuthState` calls the file holding the account's own
+#: credential, as opposed to the per-key files beside it. Restated from the
+#: library rather than shared, for `_SIDECAR_OWN_FILES`' reason.
+_CREDS_FILE = "creds.json"
+
+#: The fields in that file that say pairing completed. `initAuthCreds` writes
+#: `registered: false` before anything is paired and the login flow sets it
+#: true; `me` is the account the device was linked as, and is absent until the
+#: same moment. Either is sufficient evidence, because a library we do not
+#: ship is free to change which one it leads with and the cost of reading the
+#: wrong one here is bounded in both directions — see `session_is_registered`.
+_REGISTERED_FIELDS = ("registered", "me")
+
+
+def session_is_registered(path: Path) -> bool:
+    """Whether the session directory holds a credential that has **completed
+    pairing**, which is the only thing that says this session can send.
+
+    **A different question from `dir_holds_a_session`, deliberately, and not a
+    second copy of it.** That one answers "is there anything here worth
+    archiving", and its four callers are all about not destroying a credential
+    — so it counts any file it does not recognise and fails toward True. This
+    one gates the outbound send ledger, where the answers are not symmetric: a
+    wrong True means no refusal, no `ready` ever arrives because nothing is
+    paired, and every send settles `unknown` on a `logical_key` that is UNIQUE
+    and never deleted, which is the permanent state ISSUE-506 exists to close.
+    A wrong False merely refuses sends until the first `ready`, which after a
+    daemon restart is the next link the sidecar dials. So this one fails toward
+    **not registered** and the other one keeps failing toward True.
+
+    **File presence cannot answer it.** On the Ansible and Docker shapes the
+    sidecar is its own unit and runs whether or not the scheduler is up, so it
+    sits against an emptied directory offering a fresh code every twenty
+    seconds with `saveCreds` bound to `creds.update` — and a Baileys release is
+    free to persist noise keys, prekeys or an unregistered `creds.json` at any
+    point in that loop. Every one of those is a file, none of them is a session
+    that can send, and this is exactly the state ISSUE-506 is about: a window
+    that expired unscanned, or a host nobody has paired yet. Reading the
+    registration field is what separates them.
+
+    **Both misreadings are bounded, which is what licenses reading a field out
+    of a library this repository does not ship.** If a future Baileys stops
+    writing both fields, a genuinely paired host reads as unregistered and its
+    sends are refused until the sidecar's first `ready` — seconds, on the boot
+    where this is read. If it writes one of them before pairing completes, this
+    answers True and the caller is back to the behaviour that shipped before
+    ISSUE-506 rather than to something worse. Neither direction can strand a
+    working deployment, because a `ready` clears the latch whatever set it.
+
+    Never raises. An absent, unreadable, truncated or non-object `creds.json`
+    is not evidence of a registered session, so all of them answer False.
+    """
+    try:
+        with open(path / _CREDS_FILE, "rb") as handle:
+            creds = json.loads(handle.read().decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(creds, dict):
+        return False
+    return any(creds.get(field) for field in _REGISTERED_FIELDS)
+
+
 def archive_destination(session_dir: Path) -> Path:
     """Where a session directory goes when it is moved aside: a timestamped
     sibling that nothing stands at yet.
@@ -1105,6 +1168,15 @@ class BridgeStatus:
     #: all — and a deployment retrying every 30s looks from here exactly like
     #: one backing off correctly.
     fatal_run_unrecorded: bool = False
+    #: Whether `_send` is refusing every send because this bridge holds no
+    #: paired session (ISSUE-506). Derived in the `status` property from the
+    #: live latch, like `pairing_state` below, so it cannot drift from what
+    #: the gate reads. It exists because `_send` answers `REASON_SESSION_FATAL`
+    #: for this *and* for a logged-out session, so the reason string alone
+    #: cannot tell an operator which they have — and on a host nobody has
+    #: paired yet this state can last days with `connected` and `ready`
+    #: reporting nothing unusual about it.
+    session_unpaired: bool = False
     restarts: int = 0
     malformed_lines: int = 0
     dropped_events: int = 0
@@ -1194,15 +1266,26 @@ class BaileysBridge:
         # re-entrant. Set synchronously before the first await and cleared in a
         # `finally`.
         self._repairing = False
-        # Whether a repair has emptied the session directory and no `ready`
-        # has arrived since. **Not the same question as the fatal latch**,
-        # which the repair had to clear so a supervisor could be resumed, and
-        # not the same as the window, which expires long before anybody
-        # scans. It is what keeps `_send` answering `failed` rather than
-        # `unknown` for a session this process knowingly left unpaired; a
-        # `ready` clears it, which is the only evidence that the session is
-        # open again.
-        self._unpaired_by_repair = False
+        # Whether this bridge has reason to believe the session directory
+        # holds no session that can send, and no `ready` has arrived since.
+        # **Not the same question as the fatal latch**, which a repair has to
+        # clear so a supervisor can be resumed, and not the same as the
+        # window, which expires long before anybody scans. It is what keeps
+        # `_send` answering `failed` rather than `unknown` for a session this
+        # process knows is not open; a `ready` clears it, which is the only
+        # evidence that it is.
+        #
+        # **Four producers, one question, and the fourth is why the name is
+        # not `_unpaired_by_repair` any more.** Three set it because *this*
+        # process emptied the directory or inherited a window from one that
+        # did: `repair_session`, `reset_session` and `adopt_pairing_window`.
+        # The fourth is `start()`, which reads the directory — a latch dies
+        # with its process while an emptied directory does not, so a window
+        # that expired unscanned and then a restart left the new bridge
+        # writing sends at a sidecar with no credential, settling `unknown`
+        # for the life of the deployment (ISSUE-506). A host that has never
+        # paired is the same state with nothing behind it.
+        self._session_unpaired = False
         # Loop-monotonic, and `None` until a restart has been spent on this
         # bridge. See `RESET_COOLDOWN`.
         self._last_reset_at: float | None = None
@@ -1297,6 +1380,7 @@ class BaileysBridge:
         self._status.pairing_expires_at = (
             None if window is None else window.expires_at_wall
         )
+        self._status.session_unpaired = self._session_unpaired
         return self._status
 
     # -- pairing window -----------------------------------------------------
@@ -1394,7 +1478,7 @@ class BaileysBridge:
         already up. All four mean nothing was touched.
 
         That fourth one is this method's own and is a send-ledger guard rather
-        than tidiness. A `ready` frame clears `_unpaired_by_repair` and nothing
+        than tidiness. A `ready` frame clears `_session_unpaired` and nothing
         re-sends one until the link reconnects — so arming a window over a
         session that has already come up would set the latch below with nothing
         left to lift it, and every later send would be refused for the life of
@@ -1447,7 +1531,7 @@ class BaileysBridge:
         # `logical_key` nothing deletes. The window arm of the send gate covers
         # the span once the window is installed; this covers the tail after it
         # expires, until a `ready` says the session is open.
-        self._unpaired_by_repair = True
+        self._session_unpaired = True
         logger.info(
             "whatsapp.pairing.window_adopted window=%s by=%s destructive=%s "
             "remaining=%.0fs",
@@ -1815,6 +1899,37 @@ class BaileysBridge:
             self._status.session_files_hardened,
             self._status.session_files_unfixed,
         ) = harden_session_files(self._session_dir)
+        # **The credential on disk is the evidence a fresh process has and the
+        # latch is not** (ISSUE-506). `_session_unpaired` lives in memory, so a
+        # window that expired with nobody scanning leaves an unpaired directory
+        # behind and a restart clears the only thing refusing sends against it;
+        # from then on every send reaches `writer.write` and settles `unknown`,
+        # the one ledger state an operator cannot resolve, on a `logical_key`
+        # that is UNIQUE and never deleted. The same read covers a host that
+        # has never paired: the sidecar's own `not_connected` guard does not,
+        # because `open_()` assigns `this.sock` from `makeWASocket` before the
+        # connection opens, and every answer past that guard is
+        # `definite: false`.
+        #
+        # **`session_is_registered`, not `dir_holds_a_session`, and the
+        # difference is the whole of whether this works on the shape that
+        # matters.** The sidecar is its own unit on both deployment shapes, so
+        # in exactly these two states it is up and looping on a fresh code
+        # every twenty seconds with `saveCreds` bound — leaving files in the
+        # directory that the archive predicate counts and that are not a
+        # session anybody can send from. That predicate also fails toward True,
+        # which is right for a caller deciding whether to move a credential and
+        # is the dangerous direction here. See both docstrings.
+        self._session_unpaired = not session_is_registered(self._session_dir)
+        if self._session_unpaired:
+            # Labelled like its neighbours, and worth a line at boot: from here
+            # every send is refused until somebody scans a code, which on a
+            # host nobody has paired yet can be days.
+            logger.info(
+                "whatsapp.baileys.session_unpaired dir=%s: no paired "
+                "credential, so sends are refused until a code is scanned",
+                self._session_dir,
+            )
         await self._listen()
         self._worker = asyncio.create_task(self._drain_inbound())
         if self._sidecar_argv:
@@ -2443,8 +2558,8 @@ class BaileysBridge:
         # `RESET_COOLDOWN`.
         self._last_reset_at = asyncio.get_running_loop().time()
         # The session is knowingly unpaired from here until somebody scans.
-        # See `_unpaired_by_repair` and `_send`'s two arms.
-        self._unpaired_by_repair = True
+        # See `_session_unpaired` and `_send`'s two arms.
+        self._session_unpaired = True
         return await self._open_window_after(
             requested_by, moved, restart_spent=True,
         )
@@ -2627,8 +2742,8 @@ class BaileysBridge:
             )
         # Set on both arms above — the move and the bare latch clear — since
         # either leaves a session directory with no auth state in it. See
-        # `_unpaired_by_repair` and `_send`'s two arms.
-        self._unpaired_by_repair = True
+        # `_session_unpaired` and `_send`'s two arms.
+        self._session_unpaired = True
         # A no-op on this shape by construction — there is no supervisor to
         # resume when `sidecar_argv` is empty — and called anyway, so the two
         # entry points end the same way rather than one of them relying on a
@@ -3121,10 +3236,14 @@ class BaileysBridge:
             self._permanent_fatal.clear()
             # The session is open, so it is paired — the one thing that can
             # say so, and therefore the only thing that lifts `_send`'s
-            # post-repair refusal. Cleared here whether or not a window is
-            # still open, since the arm below closes the window on either
-            # branch and a session that is up needs no further protection.
-            self._unpaired_by_repair = False
+            # unpaired refusal, whichever of its four producers set it.
+            # That includes the one `start()` sets from a directory holding no
+            # credential: a host pairing for the first time sends the moment
+            # the code lands rather than waiting for a restart. Cleared here
+            # whether or not a window is still open, since the arm below
+            # closes the window on either branch and a session that is up
+            # needs no further protection.
+            self._session_unpaired = False
             # A scan is what closes a pairing window, and it closes it from
             # this side rather than from a reader's — so a code scanned while
             # no browser is watching still pairs. The window is dropped
@@ -3512,8 +3631,22 @@ class BaileysBridge:
         #   session directory this sequence emptied — so every later send goes
         #   to an unpaired sidecar and settles `unknown` indefinitely, which is
         #   the same regression the window arm exists to prevent, just outside
-        #   the window. `_unpaired_by_repair` carries it until a `ready` says
+        #   the window. `_session_unpaired` carries it until a `ready` says
         #   the session is open.
+        #
+        # **And the latch is not the span either, because it dies with the
+        # process while the emptied directory does not** (ISSUE-506). A window
+        # that expired unscanned, then a scheduler restart, gives the new
+        # bridge a clear latch against a directory the previous process
+        # emptied — the same `unknown` rows again, now for the life of the
+        # deployment rather than of one process. A host that has never paired
+        # is the same state with no re-pair behind it, and the sidecar's own
+        # `not_connected` guard does not answer it: `open_()` assigns
+        # `this.sock` from `makeWASocket` before the connection opens, so the
+        # guard passes and every answer past it — a throw, a reply with no
+        # message id, a hang the daemon ends at `send_timeout` with the write
+        # mark set — is ambiguous. `start()` therefore seeds the latch from
+        # the directory itself, which is evidence a fresh process has.
         #
         # Gating on `self._status.ready` instead would cover both and is
         # deliberately not done: `_handle_fatal` states that a transient fatal
@@ -3525,7 +3658,7 @@ class BaileysBridge:
         # `REASON_SESSION_FATAL` reads "needs re-pairing", which is exactly
         # what an emptied directory nobody has scanned into is — so the two
         # states share one answer rather than acquiring a third string.
-        if self._status.fatal_is_permanent or self._unpaired_by_repair:
+        if self._status.fatal_is_permanent or self._session_unpaired:
             return proto.local_failure(proto.REASON_SESSION_FATAL, definite=True)
         request_id = secrets.token_hex(8)
         try:

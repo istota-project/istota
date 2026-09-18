@@ -8009,14 +8009,31 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
         # Connected but not paired, or mid-reconnect. Not a failure: an
         # unpaired deployment is the state every install starts in, and the
         # refusal at the send is what says so per message.
+        #
+        # **`session_unpaired` is what separates the two, and it is the whole
+        # reason the field exists** (ISSUE-506). Both states reach this arm
+        # and they want opposite remedies — one wants a pairing, the other
+        # wants patience — and the send gate answers `REASON_SESSION_FATAL`
+        # for the first, which reads identically to a logged-out session. So
+        # the arm says which it is rather than offering both and letting the
+        # operator guess; on a host nobody has paired this can stand for days.
+        unpaired = bool(status.get("session_unpaired"))
         return CheckResult(
             name, WARN,
-            f"the sidecar is connected and the WhatsApp session is not open; "
-            f"{counters}",
+            (
+                "the sidecar is connected and there is no paired WhatsApp "
+                f"session, so every send is refused; {counters}"
+                if unpaired else
+                "the sidecar is connected and the WhatsApp session is not "
+                f"open; {counters}"
+            ),
             remedy=(
-                "If this deployment has never been paired, run `istota "
-                "whatsapp pair`. Otherwise the session is reconnecting; check "
-                "`sidecar.log` in the session directory."
+                "Pair from the admin Connections pane, or run `istota "
+                "whatsapp pair`. Sends are recorded as failed until a code "
+                "is scanned; they are not queued."
+                if unpaired else
+                "The session is reconnecting; check `sidecar.log` in the "
+                "session directory."
             ),
             scope=DEPLOYMENT,
         )
