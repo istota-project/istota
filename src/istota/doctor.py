@@ -7476,7 +7476,11 @@ def _baileys_pairing_window(
     The payload cannot reach here — `BridgeStatus` carries the window's state
     and deadline and no code, which `tests/test_whatsapp_pairing_relay.py`
     pins over the dataclass's field names — so nothing in this function has to
-    be careful about that, and nothing later may make it have to be.
+    be careful about that, and nothing later may make it have to be. `state`
+    is rendered as it arrives rather than bounded, and that is safe for the
+    same reason the fatal reason beside it is *not*: this one is one of
+    `pairing_relay`'s own module constants, written by the bridge, where a
+    fatal reason is a string the sidecar chose.
     """
     expires_at = status.get("pairing_expires_at")
     left = ""
@@ -7568,7 +7572,10 @@ def check_whatsapp_pairing_relay(config: "Config", probe: bool) -> CheckResult:
             f"no WhatsApp pairing code is on disk ({path} does not exist)",
             scope=DEPLOYMENT,
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # `ValueError` because an embedded null byte in a configured
+        # `pairing_relay_path` raises that rather than an `OSError`, and this
+        # runs on the daemon's boot path.
         return CheckResult(
             name, WARN,
             f"{path} could not be read ({type(exc).__name__}), so the pairing "
@@ -7689,11 +7696,14 @@ def check_whatsapp_baileys_session(config: "Config", probe: bool) -> CheckResult
     oldest = session_archive_stamp(archives[0])
     age = ""
     if oldest is not None:
+        # Through `_duration`, which clamps a negative to zero: the stamp is a
+        # wall-clock reading from whichever host wrote it, so a clock that
+        # moved would otherwise render a negative age into the boot log.
         seconds = (datetime.now(timezone.utc) - oldest).total_seconds()
-        age = f", oldest {_duration(seconds)} old"
+        age = f", the oldest {_duration(seconds)} old"
     note = (
-        f"{len(archives)} archived session(s) sit beside it{age}, holding "
-        f"{wide} file(s) wider than 0600"
+        f"{len(archives)} archived session(s) sit beside it, holding "
+        f"{wide} file(s) wider than 0600{age}"
     )
     archive_remedy = (
         "Each archive is a full-account WhatsApp credential a re-pair moved "
@@ -7764,7 +7774,11 @@ def _baileys_live_session(name: str, path: Path) -> CheckResult:
             ),
             scope=DEPLOYMENT,
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # `ValueError` because an embedded null byte in a configured
+        # `session_dir` raises that rather than an `OSError` — measured, and
+        # it escaped to `run_checks`' catch-all, which reported the exception
+        # text as a `FAIL` about a deployment whose session was fine.
         return CheckResult(
             name, WARN,
             f"{path} could not be read ({type(exc).__name__}), so the paired "

@@ -716,7 +716,11 @@ def session_archives(session_dir: Path) -> list[Path]:
     prefix = session_dir.name + "."
     try:
         entries = sorted(session_dir.parent.iterdir())
-    except OSError:
+    except (OSError, ValueError):
+        # `ValueError` beside `OSError` at every filesystem touch, which is
+        # `du.py`'s rule and is here for its reason: an embedded null byte in
+        # a configured `session_dir` raises that rather than an `OSError`, and
+        # this is called from a check with a never-raises contract.
         return []
     found: list[Path] = []
     for entry in entries:
@@ -1876,7 +1880,7 @@ class BaileysBridge:
         test answers True for a directory holding nothing but logs. That makes
         the arm this feeds unreachable in exactly the case it was written for:
         a window a process restart orphaned, whose credential is already at a
-        `.old-` sibling and whose recovery is another window rather than an
+        timestamped sibling and whose recovery is another window rather than an
         archive of a log file.
 
         **An allowlist of files to ignore, not one of files to count.**
@@ -2366,9 +2370,9 @@ class BaileysBridge:
         else:
             # **An empty directory is not archived a second time.** The routine
             # case is a window a process restart orphaned: the credential is
-            # already at a `.old-` sibling, so the recovery is another window
-            # against the directory that move emptied, not another archive of
-            # nothing. The reference deployment restarts its units on every
+            # already at a timestamped sibling, so the recovery is another
+            # window against the directory that move emptied, not another
+            # archive of nothing. The reference deployment restarts its units on every
             # commit, so this arm is ordinary rather than exceptional.
             self._clear_fatal_latch()
             logger.info(

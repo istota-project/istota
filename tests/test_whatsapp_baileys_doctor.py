@@ -15,8 +15,10 @@ ERROR in the log, a definite refusal on every send, and nobody told.
 from __future__ import annotations
 
 import os
+import pathlib
 import stat
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -934,3 +936,72 @@ class TestTheSessionArchives:
         assert second.is_dir() and exposed_archive.is_dir()
         assert result.status == doctor.FAIL
         assert "2 archived" in result.detail
+
+
+class TestTheNeverRaisesContract:
+    """Both new arms run on the daemon's boot path, so neither may raise.
+
+    `run_checks` does catch — it reports a raising check as a `FAIL` with the
+    exception text — but that is the backstop rather than the contract, and a
+    diagnostic that fails on its own instrument reports the wrong subsystem.
+    The case that gets past an `OSError` handler is an embedded null byte in a
+    configured path, which the filesystem calls answer with `ValueError`;
+    `du.py` states the same rule for the same reason.
+    """
+
+    def test_a_session_dir_whose_parent_cannot_be_listed_yields_no_archives(self):
+        """The enumerator's own contract, driven rather than read.
+
+        The null byte has to be in the **parent**, which is what this walks.
+        The first draft put it in the leaf name and passed with the
+        `ValueError` handler removed — `iterdir` on `/tmp` succeeds and the
+        prefix filter then matches nothing, so the case could not fail. Its
+        control is what said so.
+        """
+        found = baileys_bridge.session_archives(
+            pathlib.Path("/tmp/sessions\x00/whatsapp-baileys-session"),
+        )
+
+        assert found == []
+
+    def test_a_relay_path_with_a_null_byte_is_reported_rather_than_raised(
+        self, tmp_path,
+    ):
+        cfg = _config(tmp_path, pairing_relay_path="/tmp/pair\x00ing.json")
+
+        result = _run(cfg, "whatsapp.pairing_relay")
+
+        assert result.status == doctor.WARN
+        assert "could not be read" in result.detail
+
+    def test_a_session_dir_with_a_null_byte_is_reported_rather_than_raised(
+        self, tmp_path,
+    ):
+        cfg = _config(tmp_path, session_dir="/tmp/session\x00dir")
+
+        result = _run(cfg, "whatsapp.baileys_session")
+
+        assert result.status == doctor.WARN
+        assert "could not be read" in result.detail
+
+    def test_a_stamp_in_the_future_reads_as_no_age_rather_than_a_negative_one(
+        self, tmp_path,
+    ):
+        """Clock skew, and the reason the age goes through `_duration`, which
+        clamps. A host whose archive is stamped ahead of `now` must not render
+        a negative duration into the boot log."""
+        session = tmp_path / "whatsapp-baileys-session"
+        session.mkdir(mode=0o700)
+        (session / "creds.json").write_text("{}")
+        os.chmod(session / "creds.json", 0o600)
+        ahead = datetime.now(timezone.utc) + timedelta(days=2)
+        archive = tmp_path / (
+            "whatsapp-baileys-session."
+            + ahead.strftime(baileys_bridge.ARCHIVE_STAMP_FORMAT)
+        )
+        archive.mkdir(mode=0o700)
+
+        result = _run(_config(tmp_path), "whatsapp.baileys_session")
+
+        assert result.status == doctor.OK
+        assert "the oldest 0s old" in result.detail
