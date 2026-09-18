@@ -8223,8 +8223,13 @@ def vault_sync_enabled(config: Config) -> bool:
     # The interval half is `secrets_vault.sync_is_scheduled`, not a second copy:
     # the notification resolver needs the same rule and cannot import this
     # module, so the predicate lives beside the thing it governs.
+    # Through the accessor, so a user who configured their vault in the browser
+    # turns the gate on. `config.users` still supplies the *keys*: a user with a
+    # `user_vault_config` row has a `user_profiles` row too — the web login that
+    # wrote one seeded the other — and `_apply_user_profiles` synthesises a
+    # `UserConfig` for a DB-only user, so the key set covers them.
     return secrets_vault.sync_is_scheduled(config) and any(
-        getattr(user, "vault_path", "") for user in config.users.values()
+        config.vault_path_for(user_id) for user_id in config.users
     )
 
 

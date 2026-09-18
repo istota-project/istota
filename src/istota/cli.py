@@ -1697,6 +1697,20 @@ def cmd_user_ensure(args):
             + user_profiles.mask_sms_phone_number(profile.sms_phone_number)
         )
 
+    # The vault selection is its own table for the reason that table exists —
+    # `user_profiles` is the general settings overlay and these two fields are a
+    # security control. Only the *clear* is here: setting a path from the CLI
+    # would be a second way to say what `[users.<id>] vault_path` already says,
+    # and the two would then disagree about which wins. Taking a row away is the
+    # thing TOML cannot express, since a stored row outranks it.
+    if getattr(args, "clear_vault_config", False):
+        from . import user_vault_config
+
+        if user_vault_config.clear_vault_config(db_path, user_id):
+            print(f"Cleared the stored vault selection for {user_id}.")
+        else:
+            print(f"{user_id} had no stored vault selection.")
+
     # The WhatsApp binding is its own table, written after the profile row so a
     # rejected identity leaves the profile update the operator also asked for
     # in place rather than half-applied in the other direction.
@@ -4641,6 +4655,16 @@ def main():
         help=(
             "Clear only the learned WhatsApp identity (BSUID, send id, "
             "username, service window), keeping the bootstrap number."
+        ),
+    )
+    user_ensure_parser.add_argument(
+        "--clear-vault-config",
+        action="store_true",
+        help=(
+            "Remove the user's stored credential-vault selection, so a "
+            "[users.<id>] vault_path in config.toml becomes live again. The "
+            "operator's escape hatch: a stored row outranks the TOML line, and "
+            "this is the only thing that can take one away."
         ),
     )
     user_ensure_parser.add_argument(

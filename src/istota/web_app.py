@@ -10146,15 +10146,42 @@ def _vault_settings_payload(username: str) -> dict:
     from . import secrets_vault
 
     report = secrets_vault.vault_status(_config, username, parse=False)
+    # The form's own fields, present whatever the status. They have to be: the
+    # user this page most needs to serve is the one with no vault yet, and a
+    # payload that carried the checkbox list only once a vault existed would
+    # make the feature unreachable from the surface that configures it.
+    #
+    # `editable` is the half worth reading twice. It is False for a vault
+    # `config.toml` set, and it is not a permission — it is a statement about
+    # which of two places the live value comes from. Letting the form overwrite
+    # an operator's TOML line with a DB row that outranks it would make the
+    # operator's file silently inert; and the absolute form, which is the one an
+    # operator has a reason to use, is refused from here anyway, so the form
+    # could not express what it would be replacing.
+    form = {
+        "editable": _vault_is_web_editable(username),
+        "source": _vault_config_source(username),
+        "vault_path": _config.vault_path_for(username) if _config else "",
+        "eligible_services": _vault_eligible_services(),
+        # A fact about the user rather than about the path, which is why it is
+        # on this half and why it is asked directly rather than read off the
+        # report: `vault_status` returns early with `configured=False` for a
+        # user with no `vault_path`, so its `passphrase_present` is False for
+        # everyone who has not set a path yet — including somebody who
+        # generated a passphrase a minute ago and is now filling in the form.
+        # There is no other route that would tell them, because the value is
+        # readable by nothing.
+        "passphrase_present": _vault_passphrase_present(username),
+    }
     if not report.configured:
-        # The default for every user, and the shape the page renders nothing
-        # for. An empty object rather than a 404: the question was answered.
-        return {"configured": False}
+        # The default for every user. The heading renders nothing for this, and
+        # the form renders for it — which is why the two read different keys.
+        return {"configured": False, **form}
     return {
         "configured": True,
+        **form,
         "path": report.path,
         "owned": list(report.owned),
-        "passphrase_present": report.passphrase_present,
         # What this call found now — a refused path is a fact about the
         # configuration rather than about a past cycle, so it must not be read
         # out of the record.
@@ -10188,6 +10215,316 @@ def _vault_settings_payload(username: str) -> dict:
             )
         ),
     }
+
+
+#: What a `vault_path` written through this surface may not be. The absolute
+#: form is refused here and nowhere else in the stack, because it is the one
+#: whose containment is checked against `storage._sandbox_writable_roots` — the
+#: trees a sandbox binds read-write — rather than against one user's own
+#: directory. That check is right for a path an operator wrote into
+#: `config.toml`, and it is not a boundary a user may place themselves on the
+#: other side of: an absolute path here would read any daemon-readable file
+#: named by it, as the daemon user, with the result decrypted into that user's
+#: own credential rows. The relative form is the feature — a file in the
+#: workspace, editable from a phone — and it is all this surface offers.
+VAULT_PATH_ABSOLUTE_REFUSAL = (
+    "a vault path set here must be relative to your own workspace; an absolute "
+    "path is an operator setting in config.toml"
+)
+
+
+def _vault_eligible_services() -> list[dict]:
+    """The checkbox list: every service a vault may own, with its label.
+
+    Rendered server-side and validated server-side against the same set, so the
+    form cannot offer a name the write would refuse and cannot accept one it did
+    not offer. `secrets_vault.eligible_services` is the one predicate;
+    `secret_schema` supplies the label the cards below already use.
+    """
+    try:
+        from . import secrets_vault
+        from .secret_schema import all_known_services
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("could not build the vault service list", exc_info=True)
+        return []
+    # `all_known_services` is the connected-service table and the module ones
+    # folded together, which is the same walk `eligible_services` filters — so
+    # every eligible name has a row here and the `.get` fallback is defence
+    # rather than a case with a producer.
+    schema = all_known_services()
+    eligible = secrets_vault.eligible_services()
+    return [
+        {"service": name, "label": schema.get(name, {}).get("label", name)}
+        for name in sorted(eligible)
+    ]
+
+
+def _vault_passphrase_present(username: str) -> bool:
+    """Whether this user has a stored vault passphrase. Presence, never a value.
+
+    `secret_exists` rather than `get_secret`: the question is whether a row
+    stands, and a read would decrypt a credential to answer it — which also
+    stamps `last_accessed_at` on every settings page load.
+    """
+    if _config is None or not _config.db_path:
+        return False
+    try:
+        from . import secrets_store, secrets_vault
+        return secrets_store.secret_exists(
+            _config.db_path, username,
+            secrets_vault.VAULT_PASSPHRASE_SERVICE,
+            secrets_vault.VAULT_PASSPHRASE_KEY,
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("vault passphrase presence lookup failed for %r", username)
+        return False
+
+
+def _vault_config_source(username: str) -> str:
+    """Where this user's live vault selection comes from: `db`, `toml` or `""`.
+
+    `Config`'s answer, not a second one. The question needs both raw halves read
+    apart, and that shape lives next to the fields rather than in whichever
+    surface asks first.
+    """
+    if _config is None:
+        return ""
+    try:
+        return _config.vault_config_source(username)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("vault config source lookup failed for %r", username)
+        return ""
+
+
+def _vault_is_web_editable(username: str) -> bool:
+    """Whether this surface may write this user's vault selection.
+
+    False for a TOML-configured vault, and that is the whole of the rule — see
+    `_vault_settings_payload` for why it is about precedence rather than about
+    permission. It fails **closed**: a source this cannot determine is not one
+    to write over.
+    """
+    from .config import Config
+
+    return _vault_config_source(username) != Config.VAULT_SOURCE_TOML
+
+
+def _write_vault_config(username: str, vault_path: str, services: list) -> dict:
+    """Validate and store one user's vault selection. Raises HTTPException.
+
+    Off the event loop by its caller: the resolve walks directories under the
+    workspace, which is a FUSE mount on the deployment shape this runs on.
+
+    **The path is resolved before it is stored, and that is the point of doing
+    it here.** `resolve_user_vault_path(candidate=...)` is the resolver itself
+    asked about a value nobody has written yet — one implementation, so a path
+    this accepts is one the sync can open, and a refusal is a 400 naming the
+    reason rather than a `vault_path_refused` line in the daemon log five
+    minutes later that nobody is looking at.
+    """
+    from fastapi import HTTPException
+
+    from . import storage, user_vault_config
+
+    if not _vault_is_web_editable(username):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "this vault is configured in config.toml; an operator has to "
+                "change it there"
+            ),
+        )
+    candidate = (vault_path or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="vault path is required")
+    # Both spellings, because the daemon's answer is the one that matters and a
+    # Windows-style root is not absolute to `PurePosixPath`. Neither is the
+    # containment check — that is the resolver's, below.
+    if Path(candidate).is_absolute() or candidate.startswith("/"):
+        raise HTTPException(status_code=400, detail=VAULT_PATH_ABSOLUTE_REFUSAL)
+
+    eligible = {row["service"] for row in _vault_eligible_services()}
+    chosen = []
+    for name in services:
+        if not isinstance(name, str) or name not in eligible:
+            raise HTTPException(
+                status_code=400, detail=f"not a service a vault may own: {name!r}"
+            )
+        chosen.append(name)
+
+    resolution = storage.resolve_user_vault_path(
+        _config, username, candidate=candidate
+    )
+    if resolution.location is None:
+        # `refusal` is one of `storage`'s own `VAULT_PATH_*` words, a fixed
+        # string from a code-owned table with nothing interpolated into it, so
+        # it is safe to return — and it is the only thing that says *which*
+        # refusal this is.
+        raise HTTPException(
+            status_code=400,
+            detail=f"that vault path cannot be used: {resolution.refusal}",
+        )
+    if resolution.location.dir_fd is not None:
+        # The resolver hands over a descriptor pinned to the leaf's parent and
+        # the caller closes it. This one asks a question and opens nothing.
+        os.close(resolution.location.dir_fd)
+
+    user_vault_config.set_vault_config(
+        _config.db_path, username,
+        vault_path=candidate, vault_services=sorted(set(chosen)),
+        source=user_vault_config.SOURCE_WEB,
+    )
+    return {"ok": True, "vault_path": candidate, "vault_services": sorted(set(chosen))}
+
+
+@api_router.put("/settings/vault")
+async def settings_vault_update(
+    payload: dict,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Set this user's vault file and the services it owns.
+
+    Body: ``{"vault_path": "config/vault.kdbx", "vault_services": ["karakeep"]}``.
+    Relative paths only; see `VAULT_PATH_ABSOLUTE_REFUSAL`.
+
+    Unlike its GET sibling this may **not** degrade — a settings read that fails
+    costs a status line, and a settings write that fails quietly leaves the user
+    believing the daemon is about to decrypt a file it has never heard of.
+    """
+    from fastapi import HTTPException
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    services = payload.get("vault_services", [])
+    if not isinstance(services, list):
+        raise HTTPException(status_code=400, detail="vault_services must be a list")
+    path = payload.get("vault_path", "")
+    if not isinstance(path, str):
+        raise HTTPException(status_code=400, detail="vault_path must be a string")
+    return await asyncio.to_thread(
+        _write_vault_config, user["username"], path, services
+    )
+
+
+@api_router.delete("/settings/vault")
+async def settings_vault_clear(
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Switch this user's vault off by removing the row.
+
+    Removes rather than blanks, so a `[users.<id>] vault_path` underneath it
+    becomes live again rather than being permanently shadowed by an empty value
+    — see `user_vault_config`'s module docstring. It does **not** touch the KDBX
+    file, and it does not touch the passphrase: both are the user's, and a
+    settings toggle that deleted a credential store would be the wrong shape of
+    surprise.
+    """
+    from fastapi import HTTPException
+
+    from . import user_vault_config
+
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+    if not _vault_is_web_editable(user["username"]):
+        raise HTTPException(
+            status_code=409,
+            detail="this vault is configured in config.toml",
+        )
+    removed = await asyncio.to_thread(
+        user_vault_config.clear_vault_config, _config.db_path, user["username"]
+    )
+    return {"ok": True, "cleared": removed}
+
+
+@api_router.put("/settings/vault/passphrase")
+async def settings_vault_passphrase(
+    payload: dict,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+) -> dict:
+    """Store this user's vault passphrase. Write-only in the strong sense.
+
+    Body is one of ``{"generate": true}`` or ``{"passphrase": "..."}``.
+
+    **Generate is the path meant to be taken, and the reason is the only
+    boundary in this design that is about an adversary rather than a mistake.**
+    The KDBX file sits in a tree bound read-write into that user's own sandbox,
+    so a prompt-injected task can read its ciphertext and carry it out. Argon2id
+    makes that useless against 256 random bits and does not make it useless
+    against a memorable phrase. `secrets_vault.generate_passphrase` mints it.
+
+    A typed value is accepted at `secrets_vault.passphrase_refusal`'s floor —
+    the same function `istota secret ensure` applies, asked rather than
+    restated, so the rule cannot come to mean two things on two surfaces. That
+    floor is a proxy and says so in its own docstring: it catches the careless
+    case, not the confident one.
+
+    **The generated value is returned exactly once and is readable by nothing
+    afterwards.** The user needs it to open their own KDBX, so there is no shape
+    of this feature where it is never shown; what there is instead is no route
+    that shows it a second time. A typed value is never echoed, nothing here is
+    logged, and no GET payload carries either.
+    """
+    from fastapi import HTTPException
+
+    from . import secrets_store, secrets_vault
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    if _config is None or not _config.db_path:
+        raise HTTPException(status_code=503, detail="config not loaded")
+
+    generate = bool(payload.get("generate"))
+    supplied = payload.get("passphrase", "")
+    if generate and supplied:
+        # Refused rather than resolved one way. Both fields set is a client
+        # asking for two different things, and picking either silently discards
+        # a credential the user may believe they set.
+        raise HTTPException(
+            status_code=400, detail="pass either generate or passphrase, not both"
+        )
+    if generate:
+        value = secrets_vault.generate_passphrase()
+    else:
+        if not isinstance(supplied, str):
+            raise HTTPException(status_code=400, detail="passphrase must be a string")
+        refusal = secrets_vault.passphrase_refusal(supplied)
+        if refusal:
+            raise HTTPException(status_code=400, detail=refusal)
+        value = supplied
+
+    def _store() -> None:
+        secrets_store.set_secret(
+            _config.db_path, user["username"],
+            secrets_vault.VAULT_PASSPHRASE_SERVICE,
+            secrets_vault.VAULT_PASSPHRASE_KEY,
+            value,
+        )
+
+    try:
+        await asyncio.to_thread(_store)
+    except Exception as e:
+        # The store's own message names the master key's *length* on its
+        # too-weak arm, which is a deployment-level fact on a per-user surface.
+        # The daemon log is where that detail belongs.
+        logger.warning(
+            "could not store the vault passphrase for %r: %s", user["username"], e,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="the passphrase could not be stored; see the daemon log",
+        )
+    # No user id and no length: this line is the one place a value could leak
+    # through a mistake in a later edit, so it carries nothing but the fact.
+    logger.info("vault passphrase stored")
+    # `generated` only on the generate path. A typed value is never echoed — the
+    # client already has it, and putting it in a response body is a copy in a
+    # proxy log for no gain.
+    return {"ok": True, "generated": value if generate else ""}
 
 
 @api_router.get("/settings/vault")

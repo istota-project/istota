@@ -2868,8 +2868,8 @@ def _secret_key_remedy(config: "Config") -> str:
 _VAULT_LABEL_CHARS = 64
 
 
-def _vault_users(config: "Config") -> list[str]:
-    """Configured users with a ``vault_path``, in a stable order.
+def _vault_paths(config: "Config") -> dict[str, str]:
+    """Each configured user's ``vault_path``, resolved once, in a stable order.
 
     ``resolve_user_vault_path``'s own gate, restated rather than tightened: a
     non-empty string is configured, and **a blank-but-present one counts**. That
@@ -2878,14 +2878,21 @@ def _vault_users(config: "Config") -> list[str]:
     a configured value that resolves to nothing, which the sync refuses and logs
     every cycle. Skipping it here would leave the one surface the operator reads
     silent about a line the daemon is complaining about hourly.
+
+    **A mapping rather than a list of ids, because the value now costs a
+    database read.** ``Config.vault_path_for`` merges a ``user_vault_config``
+    row over the TOML attribute, so asking for it again in each arm turns this
+    check's "a config read per user" into a connection per arm per user — on a
+    check that runs at boot, hourly, behind ``!check`` and on every admin Health
+    pane render. Every arm below takes the value from here.
     """
     users = getattr(config, "users", None) or {}
-    return sorted(
-        user_id
-        for user_id, user in users.items()
-        if isinstance(getattr(user, "vault_path", ""), str)
-        and getattr(user, "vault_path", "")
-    )
+    found: dict[str, str] = {}
+    for user_id in sorted(users):
+        path = config.vault_path_for(user_id)
+        if isinstance(path, str) and path:
+            found[user_id] = path
+    return found
 
 
 def _vault_label(user_id: str) -> str:
@@ -2957,7 +2964,8 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     function.
     """
     prefix = "security.credential_vault"
-    users = _vault_users(config)
+    paths = _vault_paths(config)
+    users = list(paths)
     if not users:
         return [
             CheckResult(
@@ -2972,7 +2980,7 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     return [
         _vault_library_result(prefix),
         _vault_schedule_result(config, secrets_vault, prefix, users),
-        _vault_path_result(config, secrets_vault, storage, prefix, users),
+        _vault_path_result(config, secrets_vault, storage, prefix, paths),
         _vault_passphrase_result(config, secrets_store, secrets_vault, prefix, users),
     ]
 
@@ -3024,7 +3032,7 @@ def check_vault_contents(config: "Config", probe: bool) -> CheckResult:
     ``config.skill_overlays``, already walking the same mount on the same sweep.
     """
     name = "security.vault_contents"
-    users = _vault_users(config)
+    users = list(_vault_paths(config))
     if not users:
         return CheckResult(
             name, SKIP, "no user has a vault_path configured, which is the default"
@@ -3077,7 +3085,7 @@ def _vault_library_result(prefix: str) -> CheckResult:
     )
 
 
-def _vault_declared_services(user) -> list[str]:
+def _vault_declared_services(config, user_id: str) -> list[str]:
     """One user's ``vault_services``, as a list of strings whatever it holds.
 
     ``list(x or ())`` is the obvious spelling and raises ``TypeError`` on a
@@ -3086,11 +3094,11 @@ def _vault_declared_services(user) -> list[str]:
     so a single malformed field costs the operator every answer this check had
     already computed. Unreachable through ``load_config``, which coerces the
     field to ``list[str]`` before the loader's own eligibility filter sees it,
-    and guarded anyway for the same reason ``_vault_users`` guards the type of
+    and guarded anyway for the same reason ``_vault_paths`` guards the type of
     ``vault_path`` two functions up: the cost of being wrong is out of all
     proportion to the cost of asking.
     """
-    raw = getattr(user, "vault_services", None)
+    raw = config.vault_services_for(user_id)
     if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
         return []
     return [service for service in raw if isinstance(service, str)]
@@ -3103,8 +3111,7 @@ def _vault_schedule_result(config, secrets_vault, prefix: str, users) -> CheckRe
     owned: list[str] = []
     ineligible: list[str] = []
     for user_id in users:
-        user = config.users.get(user_id)
-        services = _vault_declared_services(user)
+        services = _vault_declared_services(config, user_id)
         owned.append(
             f"{_vault_label(user_id)} owns "
             + (", ".join(sorted(_vault_label(s) for s in services)) if services else "nothing")
@@ -3176,7 +3183,7 @@ _VAULT_PATH_REMEDIES = {
 }
 
 
-def _vault_path_result(config, secrets_vault, storage, prefix: str, users) -> CheckResult:
+def _vault_path_result(config, secrets_vault, storage, prefix: str, paths) -> CheckResult:
     """Per-user: does the configured path resolve, and is a usable file behind it.
 
     **One finding per user, never a first-non-empty-list return**, and that is a
@@ -3206,10 +3213,17 @@ def _vault_path_result(config, secrets_vault, storage, prefix: str, users) -> Ch
     ok = 0
 
     db_dir = _vault_db_dir(config)
-    for user_id in users:
+    for user_id, written in paths.items():
         label = _vault_label(user_id)
         try:
-            resolution = storage.resolve_user_vault_path(config, user_id)
+            # `candidate=` is the value `_vault_paths` already read, handed back
+            # rather than re-read: the resolver would otherwise open the
+            # database again per user to fetch a string this function is
+            # holding. Same value, same code path — `candidate` is the
+            # resolver's own "validate this" entry point, not a second rule.
+            resolution = storage.resolve_user_vault_path(
+                config, user_id, candidate=written
+            )
         except Exception as exc:  # noqa: BLE001 - the resolver never raises
             findings.append(f"{label}: the resolver raised ({type(exc).__name__})")
             classes.add("refused")

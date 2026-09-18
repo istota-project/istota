@@ -98,7 +98,11 @@ It is **provisioning input, not a storage backend**. The table stays the live st
 
 ### Turning it on
 
-Two keys in the user's `[users.<id>]` block of `config.toml`, and nowhere else — they are deliberately not in `user_profiles` and cannot be set from the web UI, because one selects which file the daemon decrypts and the other selects which credentials that file may overwrite:
+Two ways, and which one is right depends on who is deciding.
+
+**From the web UI**, under Settings, Connected services. The user names a file in their own workspace, ticks the services it owns, and generates a passphrase. This is the ordinary route and needs no operator. The form takes a **relative path only** — a path under that user's own files — and that restriction is the point of it rather than a simplification: see [what a vault costs](#what-a-vault-costs) below.
+
+**From `config.toml`**, per user, when an operator wants to decide it for them or wants the absolute form:
 
 ```toml
 [users.alice]
@@ -107,6 +111,10 @@ vault_services = ["karakeep", "ntfy"]
 ```
 
 A relative `vault_path` resolves under that user's own workspace directory, which is where a phone or a laptop can reach it. An absolute one is a host path and must resolve outside every tree a task sandbox can write; that form keeps the file away from a task entirely, at the cost of the user no longer being able to edit it from a phone. Empty — the default — means the feature is off for that user.
+
+**The absolute form is operator-only, deliberately.** It is checked against the list of trees a sandbox binds read-write, which is the right question for a path an operator wrote and is not a line a user may put themselves on the far side of: an absolute path chosen by a user would read any file the daemon can read, as the daemon, and decrypt the result into that user's own credential rows. The web form refuses one and says so.
+
+**A vault set in `config.toml` is not editable from the web UI**, and that is about precedence rather than permission. A stored selection outranks the TOML line, so letting the form overwrite one would make the operator's file silently inert. The page says where the setting came from instead. `istota user ensure --clear-vault-config --user alice` removes a stored selection and gives the TOML line back, which is the escape hatch for an operator who wants to take the decision over.
 
 `vault_services` is the list of services the file owns. Empty reads the file and applies nothing, which is a usable dry run. A service whose credentials the daemon mints for itself can never be vault-owned (Monarch, Overland, Garmin, Google Workspace), and a name like that is dropped with a warning when the config loads. Today's eligible set is `karakeep`, `ntfy`, `native_brain`, `feeds` and `carto`.
 
@@ -136,7 +144,7 @@ with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
 ### The passphrase
 
-The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. Provision it once, from a host shell:
+The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault section of Settings, Connected services — **Generate a new passphrase** — or from a host shell:
 
 ```bash
 istota secret ensure -u alice --service vault --key passphrase --generate
@@ -158,7 +166,7 @@ Generate the value yourself (`python3 -c "import secrets; print(secrets.token_ur
 
 `--generate` refuses to replace a passphrase that is already there unless you pass `--force`. Minting a second one destroys the only copy the server has of the value the file is encrypted under, and the command otherwise advertises itself as idempotent — so an Ansible play re-running the documented provisioning line is the ordinary case rather than a careless one.
 
-There is no web form for the passphrase, on purpose: a form field is an invitation to type a memorable one.
+The web form takes a typed passphrase too, at the same 32-character floor, and puts Generate first for the reason above. A generated value is shown once, in the response that mints it, because nothing reads it back — there is no route that could, and you need it to open your own KDBX. Copy it before you navigate away.
 
 ### The file
 
@@ -193,7 +201,9 @@ For a service in `vault_services`, the vault is the authority:
 
 ### What the settings UI does
 
-A vault-owned service's fields render disabled, with a sentence saying the vault owns them. `PUT` and `DELETE` on those keys answer 409. The "Connected services" heading carries a read-only status line: the resolved path, the owned services, when Istota last applied the file, and the error class when it is failing.
+A vault-owned service's fields render disabled, with a sentence saying the vault owns them. `PUT` and `DELETE` on those keys answer 409. The "Connected services" heading carries a status line: the resolved path, the owned services, when Istota last applied the file, and the error class when it is failing.
+
+Under it is the form that sets the vault up: the file, the services it owns, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is an absolute path — see [turning it on](#turning-it-on) — and it does not render for a vault an operator set in `config.toml`, which it says instead.
 
 **"Last applied" is not a health check, and a healthy vault shows an old stamp.** The record is written only by a cycle that did work, and a cycle over an unchanged file does none — so a vault nobody has edited for three weeks reports a three-week-old timestamp and is working perfectly.
 
@@ -231,7 +241,7 @@ The secrets table still holds a copy of everything. What the vault removes is th
 
 The security accounting is that the vault adds no confidentiality and one new exposure. Every credential in it is also a row in the table, and the passphrase that opens it is another row in that same table, so one secret — `ISTOTA_SECRET_KEY` — opens both. What changes is *where* credential ciphertext sits: none of it used to be reachable from inside a sandbox, and now a copy of every owned credential is, in a file a task can read, copy out, delete or overwrite. Deleting or corrupting it is a denial of service that leaves every credential working and raises a notification. Replacing it with an older copy the user keeps in the same tree is a real rollback vector, bounded by `vault_services`.
 
-The generated passphrase is the entire mitigation. The absolute `vault_path` form removes the exposure completely by putting the file outside every tree a sandbox can reach, at the cost of the phone; it is not the default because editing from a phone is the feature.
+The generated passphrase is the entire mitigation. The absolute `vault_path` form removes the exposure completely by putting the file outside every tree a sandbox can reach, at the cost of the phone; it is not the default because editing from a phone is the feature, and it is the reason the web form takes relative paths only — the form's own users are inside the tree the absolute form exists to escape, so handing them that form would be handing them an arbitrary read as the daemon.
 
 ## How credentials flow at runtime
 

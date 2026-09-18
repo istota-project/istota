@@ -2474,6 +2474,139 @@ class Config:
             tz_str = (uc.timezone if uc else "") or "UTC"
         return tz_str
 
+    # ------------------------------------------------------------------
+    # The credential vault's two selecting fields
+    # ------------------------------------------------------------------
+    #
+    # Read through these, never off the `UserConfig` attribute. The attribute
+    # is the *TOML* half of the answer and a `user_vault_config` row outranks
+    # it, so a consumer left on `getattr(user, "vault_path", "")` silently
+    # ignores what the user set in the browser — and does so by reading a real
+    # value, which is the failure class that looks like nothing is wrong.
+    # `tests/test_user_vault_config.py::TestConfigIsTheOnlyReaderOfTheRawFields`
+    # sweeps `src/` for the attribute rather than naming the consumers.
+    #
+    # Live rather than load-time, unlike `_apply_user_profiles`: the scheduler
+    # holds one `Config` for its whole life and the vault gate runs on a
+    # five-minute interval, so an overlay applied at load would mean a change
+    # made in the browser did nothing until a restart.
+
+    def _vault_row(
+        self, user_id: str, conn: "sqlite3.Connection | None" = None
+    ) -> "object | None":
+        """This user's `user_vault_config` row, or None.
+
+        None covers three cases a caller must not tell apart: no row, no
+        database, and a read that failed. Each falls back to TOML, which is the
+        only safe direction — the alternative is one unreadable row switching a
+        configured vault off deployment-wide.
+        """
+        if self.db_path is None or not Path(self.db_path).exists():
+            return None
+        try:
+            from . import user_vault_config as _uvc  # noqa: PLC0415 - import cost
+            return _uvc.get_vault_config(Path(self.db_path), user_id, conn=conn)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("vault config DB read failed for %r: %s", user_id, e)
+            return None
+
+    def vault_path_for(
+        self, user_id: str, conn: "sqlite3.Connection | None" = None
+    ) -> str:
+        """The KDBX path configured for this user, DB row over TOML.
+
+        Empty means the feature is off for this user, which is every user by
+        default. The value is returned **as written** — resolving it, and
+        refusing it, is `storage.resolve_user_vault_path`'s job, and a second
+        opinion here would be a second copy of a containment rule.
+        """
+        row = self._vault_row(user_id, conn)
+        if row is not None and getattr(row, "vault_path", ""):
+            return row.vault_path
+        user = self.users.get(user_id)
+        raw = getattr(user, "vault_path", "") if user is not None else ""
+        return raw if isinstance(raw, str) else ""
+
+    #: Where a user's live vault selection comes from.
+    VAULT_SOURCE_DB = "db"
+    VAULT_SOURCE_TOML = "toml"
+
+    def vault_config_source(
+        self, user_id: str, conn: "sqlite3.Connection | None" = None
+    ) -> str:
+        """`"db"`, `"toml"`, or `""` when nothing is configured.
+
+        Three states rather than a boolean, because a surface has to say three
+        different things: this is yours to change, this was set for you by an
+        operator, and there is nothing here.
+
+        It lives beside the two places rather than in the surface that asks,
+        because answering it means reading both raw halves *apart* — the one
+        shape `tests/test_user_vault_config.py` refuses everywhere else, since a
+        reader who copies it is one edit away from using the TOML half as the
+        merged value.
+        """
+        row = self._vault_row(user_id, conn)
+        if row is not None and getattr(row, "vault_path", ""):
+            return self.VAULT_SOURCE_DB
+        user = self.users.get(user_id)
+        raw = getattr(user, "vault_path", "") if user is not None else ""
+        return self.VAULT_SOURCE_TOML if raw else ""
+
+    def vault_services_for(
+        self, user_id: str, conn: "sqlite3.Connection | None" = None
+    ) -> list[str]:
+        """Which services this user's vault owns, DB row over TOML.
+
+        **Both halves go through the eligibility filter and they get there
+        differently**, which is the part to keep in view. A TOML list has
+        already been filtered in place by `_validate_vault_services` at load,
+        and re-filtering it costs a schema walk on a path with no new
+        information. A row written afterwards has been filtered by nothing that
+        load-time pass could see, and eligibility can change under a stored row
+        besides — an operator disabling a module makes a name that was fine when
+        it was saved ineligible now. So the row is filtered here, on the way
+        out, with `secrets_vault.service_refusal`: the same predicate
+        `apply_vault` applies, asked rather than restated.
+
+        The whole list is dropped if the filter cannot run, rather than passed
+        through: `apply_vault` refuses each name again on its own terms, so the
+        cost of being wrong here is a credential not written rather than one
+        written that should not have been.
+        """
+        row = self._vault_row(user_id, conn)
+        if row is None or not getattr(row, "vault_path", ""):
+            user = self.users.get(user_id)
+            raw = getattr(user, "vault_services", None) if user is not None else None
+            return list(raw) if isinstance(raw, list) else []
+        declared = list(getattr(row, "vault_services", None) or ())
+        if not declared:
+            return []
+        try:
+            from .secrets_vault import (  # noqa: PLC0415 - import cost
+                eligible_services,
+                service_refusal,
+            )
+            eligible = eligible_services()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning(
+                "vault service eligibility could not be checked for %r; the "
+                "stored entries are dropped and refused again at sync time",
+                user_id, exc_info=True,
+            )
+            return []
+        kept: list[str] = []
+        for service in declared:
+            reason = service_refusal(service, eligible)
+            if reason is None:
+                kept.append(service)
+                continue
+            logger.warning(
+                "stored vault_services entry %r dropped for %s: %s",
+                service, user_id, reason,
+            )
+        return kept
+
     def available_capabilities(self) -> set[str]:
         """Backing-service capabilities currently available in this deployment.
 

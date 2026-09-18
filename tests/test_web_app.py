@@ -2894,6 +2894,317 @@ class TestVaultOwnedServices:
         assert cards["feeds"]["vault_managed"] is True
 
 
+#: The CSRF dependency wants a same-site Origin; the test config's web base
+#: is `https://example.com`. A request without one is refused, which is what
+#: `test_every_mutating_route_needs_a_session` leans on.
+ORIGIN = {"Origin": "https://example.com"}
+
+
+@_needs_web_deps
+class TestTheVaultWriteEndpoints:
+    """The write path §9 deliberately did not have, and the two refusals it adds.
+
+    The read endpoint above is read-only "in the strong sense: it has no writing
+    sibling". It has three now, and the security property that made the fields
+    TOML-only is preserved rather than dropped — by putting them in a table of
+    their own that nothing downstream of a task writes
+    (`tests/test_user_vault_config.py`), and by keeping the *absolute* form out
+    of a user's hands, which is what this class is mostly about.
+
+    Read the absolute-path assertions as the boundary ones. A relative path
+    resolves under the user's own workspace, so the worst a user can do with it
+    is point at a file they already own. An absolute path is checked against
+    `storage._sandbox_writable_roots` — "is this outside every tree a sandbox
+    binds" — which is the right question for a path an operator wrote and is not
+    a line a user may put themselves on the far side of: it would read any
+    daemon-readable file, as the daemon user, and decrypt the result into that
+    user's own credential rows.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _secret_key(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "vault-write.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _config(self, tmp_path, *, vault_path="", services=()):
+        mount = tmp_path / "vaultmount"
+        (mount / "Users" / "alice" / "config").mkdir(parents=True, exist_ok=True)
+        cfg = _make_config(
+            tmp_path,
+            mount_path=str(mount),
+            users={
+                "alice": UserConfig(
+                    display_name="Alice",
+                    vault_path=vault_path,
+                    vault_services=list(services),
+                ),
+            },
+        )
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login_alice(self, client, app):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": "alice",
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def _setup(self, tmp_path, client, app, **kw):
+        _patch_app(self._config(tmp_path, **kw))
+        return await self._login_alice(client, app)
+
+    # -- the ordinary case ------------------------------------------------
+
+    async def test_a_relative_path_is_stored_and_wins_over_toml(
+        self, tmp_path, client, app,
+    ):
+        from istota import user_vault_config
+
+        cookies = await self._setup(tmp_path, client, app)
+        resp = await client.put(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+            json={"vault_path": "config/vault.kdbx", "vault_services": ["karakeep"]},
+        )
+        assert resp.status_code == 200, resp.text
+        row = user_vault_config.get_vault_config(self._db_path, "alice")
+        assert row is not None
+        assert row.vault_path == "config/vault.kdbx"
+        assert row.vault_services == ["karakeep"]
+        # And it is what the daemon will read, which is the half a stored row
+        # alone does not establish.
+        import istota.web_app as mod
+        assert mod._config.vault_path_for("alice") == "config/vault.kdbx"
+
+    async def test_the_get_reports_it_as_the_users_own(self, tmp_path, client, app):
+        cookies = await self._setup(tmp_path, client, app)
+        await client.put(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+            json={"vault_path": "config/vault.kdbx", "vault_services": []},
+        )
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+        assert body["source"] == "db"
+        assert body["editable"] is True
+        assert body["vault_path"] == "config/vault.kdbx"
+
+    async def test_clearing_removes_the_row_and_reveals_the_toml_value(
+        self, tmp_path, client, app,
+    ):
+        # The state this is about: an operator has a `[users.alice] vault_path`
+        # *and* the user has a row. Clearing must give the operator's line back
+        # rather than shadowing it with an empty value for ever.
+        import istota.web_app as mod
+        from istota import user_vault_config
+
+        cookies = await self._setup(tmp_path, client, app)
+        user_vault_config.set_vault_config(
+            self._db_path, "alice",
+            vault_path="config/mine.kdbx", vault_services=[],
+        )
+        mod._config.users["alice"].vault_path = "config/operator.kdbx"
+        assert mod._config.vault_path_for("alice") == "config/mine.kdbx"
+
+        resp = await client.delete(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["cleared"] is True
+        assert mod._config.vault_path_for("alice") == "config/operator.kdbx"
+
+    # -- the boundary ------------------------------------------------------
+
+    async def test_an_absolute_path_is_refused(self, tmp_path, client, app):
+        from istota import user_vault_config
+
+        cookies = await self._setup(tmp_path, client, app)
+        resp = await client.put(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+            json={"vault_path": "/etc/istota/secrets.env", "vault_services": []},
+        )
+        assert resp.status_code == 400
+        assert "relative" in resp.json()["detail"]
+        assert user_vault_config.get_vault_config(self._db_path, "alice") is None
+
+    async def test_a_traversing_path_is_refused_by_the_resolver(
+        self, tmp_path, client, app,
+    ):
+        # Not by a second rule here. `..` is a child by name and the parent on
+        # disk, so the refusal has to come from the thing that resolves —
+        # `resolve_user_vault_path`, asked about a candidate rather than about a
+        # stored value. A check written here would be a second copy of a
+        # containment rule, which is the failure mode this whole area is
+        # arranged against.
+        from istota import user_vault_config
+
+        cookies = await self._setup(tmp_path, client, app)
+        resp = await client.put(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+            json={"vault_path": "../bob/config/vault.kdbx", "vault_services": []},
+        )
+        assert resp.status_code == 400
+        assert user_vault_config.get_vault_config(self._db_path, "alice") is None
+
+    async def test_a_service_the_vault_may_not_own_is_refused(
+        self, tmp_path, client, app,
+    ):
+        from istota import user_vault_config
+
+        cookies = await self._setup(tmp_path, client, app)
+        for name in ("vault", "garmin", "nonesuch"):
+            resp = await client.put(
+                "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+                json={"vault_path": "config/vault.kdbx", "vault_services": [name]},
+            )
+            assert resp.status_code == 400, name
+        assert user_vault_config.get_vault_config(self._db_path, "alice") is None
+
+    async def test_a_toml_configured_vault_is_not_writable_from_here(
+        self, tmp_path, client, app,
+    ):
+        # Precedence rather than permission: a row would outrank the operator's
+        # line, so accepting the write would make their `config.toml` silently
+        # inert. The page says so instead.
+        from istota import user_vault_config
+
+        cookies = await self._setup(
+            tmp_path, client, app, vault_path="config/operator.kdbx",
+        )
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+        assert body["editable"] is False
+        assert body["source"] == "toml"
+
+        resp = await client.put(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+            json={"vault_path": "config/mine.kdbx", "vault_services": []},
+        )
+        assert resp.status_code == 409
+        assert (await client.delete(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+        )).status_code == 409
+        assert user_vault_config.get_vault_config(self._db_path, "alice") is None
+
+    async def test_every_mutating_route_needs_a_session(
+        self, tmp_path, client, app,
+    ):
+        _patch_app(self._config(tmp_path))
+        assert (await client.put(
+            "/istota/api/settings/vault",
+            json={"vault_path": "config/v.kdbx", "vault_services": []},
+        )).status_code in (401, 403)
+        assert (await client.delete("/istota/api/settings/vault")).status_code in (
+            401, 403,
+        )
+        assert (await client.put(
+            "/istota/api/settings/vault/passphrase", json={"generate": True},
+        )).status_code in (401, 403)
+
+    async def test_every_mutating_route_carries_the_origin_check(self):
+        # The `web_router_stubs` pattern: the dependency is what the host app
+        # overrides, so the assertion is that each route declares it rather than
+        # that a forged request is refused — which is `_verify_origin`'s own
+        # subject and is tested where that lives.
+        import istota.web_app as mod
+
+        # `route.path` carries `api_router`'s own `/istota/api` prefix.
+        wanted = {
+            ("PUT", "/istota/api/settings/vault"),
+            ("DELETE", "/istota/api/settings/vault"),
+            ("PUT", "/istota/api/settings/vault/passphrase"),
+        }
+        seen = set()
+        for route in mod.api_router.routes:
+            for method in getattr(route, "methods", ()):
+                if (method, route.path) in wanted:
+                    names = [d.call.__name__ for d in route.dependant.dependencies]
+                    assert "_verify_origin" in names, (method, route.path, names)
+                    assert "_require_api_auth" in names, (method, route.path, names)
+                    seen.add((method, route.path))
+        assert seen == wanted, seen
+
+    # -- the passphrase ----------------------------------------------------
+
+    async def test_generate_returns_the_value_once_and_stores_it(
+        self, tmp_path, client, app,
+    ):
+        from istota import secrets_store, secrets_vault
+
+        cookies = await self._setup(tmp_path, client, app)
+        resp = await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"generate": True},
+        )
+        assert resp.status_code == 200
+        minted = resp.json()["generated"]
+        assert len(minted) >= secrets_vault.VAULT_PASSPHRASE_MIN_CHARS
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "vault", "passphrase",
+        ) == minted
+
+        # Once. Nothing reads it back — the GET reports presence and the write
+        # route has no read verb, so the only copy after this response is the
+        # user's.
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+        assert body["passphrase_present"] is True
+        assert minted not in json.dumps(body)
+
+    async def test_a_typed_passphrase_is_held_to_the_cli_floor(
+        self, tmp_path, client, app,
+    ):
+        from istota import secrets_store, secrets_vault
+
+        cookies = await self._setup(tmp_path, client, app)
+        short = "x" * (secrets_vault.VAULT_PASSPHRASE_MIN_CHARS - 1)
+        resp = await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"passphrase": short},
+        )
+        assert resp.status_code == 400
+        # The same sentence the CLI prints, because it is the same function.
+        assert resp.json()["detail"] == secrets_vault.passphrase_refusal(short)
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "vault", "passphrase",
+        ) is None
+
+        long = "y" * secrets_vault.VAULT_PASSPHRASE_MIN_CHARS
+        ok = await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"passphrase": long},
+        )
+        assert ok.status_code == 200
+        # Never echoed: the client already has it, and a response body is a copy
+        # in a proxy log for no gain.
+        assert ok.json()["generated"] == ""
+        assert long not in json.dumps(ok.json())
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "vault", "passphrase",
+        ) == long
+
+    async def test_generate_and_a_typed_value_together_are_refused(
+        self, tmp_path, client, app,
+    ):
+        from istota import secrets_store
+
+        cookies = await self._setup(tmp_path, client, app)
+        resp = await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"generate": True, "passphrase": "z" * 40},
+        )
+        assert resp.status_code == 400
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "vault", "passphrase",
+        ) is None
+
+
 @_needs_web_deps
 class TestTheVaultSettingsEndpoint:
     """§9's read-only status, which is the only place a user can see their vault.
@@ -2979,7 +3290,21 @@ class TestTheVaultSettingsEndpoint:
 
         resp = await client.get("/istota/api/settings/vault", cookies=cookies)
         assert resp.status_code == 200
-        assert resp.json() == {"configured": False}
+        body = resp.json()
+        # Still the bare no for the *heading*, which is what renders nothing.
+        assert body["configured"] is False
+        # And the form's own fields, which have to be here precisely because
+        # this user has no vault: a payload carrying the checkbox list only once
+        # a vault existed would make the feature unreachable from the surface
+        # that configures it.
+        assert body["editable"] is True
+        assert body["source"] == ""
+        assert body["vault_path"] == ""
+        assert any(s["service"] == "karakeep" for s in body["eligible_services"])
+        # `passphrase_present` is a boolean and is meant to be here; what must
+        # never be is a value, so the sweep is for the thing itself rather than
+        # for the word.
+        assert body["passphrase_present"] is False
 
     async def test_a_configured_user_gets_the_path_and_the_owned_set(
         self, tmp_path, client, app,

@@ -1093,13 +1093,30 @@ export async function getSettingsServices(): Promise<ServicesResponse> {
   return apiFetch<ServicesResponse>('/settings/services');
 }
 
-// --- Credential vault (read-only) ---
+// --- Credential vault ---
 //
-// The vault has no writing endpoint at all: its two config fields are TOML-only
-// because they decide which file the daemon decrypts and which credentials that
-// file may overwrite, and the passphrase is CLI-only because it has to be
-// generated rather than chosen. This is the only surface that shows a user their
-// own vault's path and sync state.
+// A user can now select their own vault file and the services it owns, and set
+// its passphrase. What has not changed is why those two config fields used to be
+// TOML-only: they decide which file the daemon decrypts and which credentials
+// that file may overwrite, so they are not on `user_profiles` with every other
+// per-user setting — they are in a table of their own that nothing downstream of
+// a task writes.
+//
+// Two rules the client has to respect rather than re-derive:
+//
+// **Relative paths only.** The absolute form is the escape hatch that puts the
+// file outside every tree a sandbox binds, checked against a list of those trees
+// rather than against one user's own directory. It stays an operator setting in
+// `config.toml`; the server refuses one from here, and the form should not offer
+// it.
+//
+// **`editable: false` is about precedence, not permission.** A vault an operator
+// set in `config.toml` is not writable from here, because a stored row would
+// outrank that line and make their file silently inert.
+//
+// The passphrase is write-only. `passphrase_present` is a boolean and there is
+// no route that reads the value back, so a generated one is shown exactly once,
+// in the response that mints it.
 
 export interface VaultStatus {
   /** False for every user who has not been given a vault, which is the default.
@@ -1127,10 +1144,70 @@ export interface VaultStatus {
    *  server so the precedence between a live finding and a recorded one is
    *  stated once, in the language that owns the outcome constants. */
   problem?: string;
+
+  // --- the form's own half, present whatever `configured` says --------------
+  //
+  // Present even for a user with no vault, because that user is the one the
+  // form exists for.
+
+  /** Whether this surface may write the selection. False for a vault set in
+   *  `config.toml` — see the note above: precedence, not permission. */
+  editable?: boolean;
+  /** `'db'` (the user's own), `'toml'` (an operator's), or `''` (nothing set). */
+  source?: '' | 'db' | 'toml';
+  /** The path as written, for the form field. `path` above is the *resolved*
+   *  one and is only present once a vault is configured. */
+  vault_path?: string;
+  /** Every service a vault may own, server-rendered so the form cannot offer a
+   *  name the write would refuse. */
+  eligible_services?: VaultEligibleService[];
+}
+
+export interface VaultEligibleService {
+  service: string;
+  label: string;
+}
+
+export interface VaultPassphraseResponse {
+  ok: boolean;
+  /** The minted value, on the generate path only and exactly once — nothing
+   *  reads it back. Empty for a typed passphrase, which the client already has. */
+  generated: string;
 }
 
 export async function getVaultStatus(): Promise<VaultStatus> {
   return apiFetch<VaultStatus>('/settings/vault');
+}
+
+export async function updateVaultConfig(vaultPath: string, vaultServices: string[]): Promise<void> {
+  await apiFetch('/settings/vault', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vault_path: vaultPath, vault_services: vaultServices }),
+  });
+}
+
+export async function clearVaultConfig(): Promise<void> {
+  await apiFetch('/settings/vault', { method: 'DELETE' });
+}
+
+/**
+ * Store the vault passphrase.
+ *
+ * Exactly one of the two arguments. `generate` is the path meant to be taken:
+ * the KDBX sits in a tree bound read-write into that user's own sandbox, so a
+ * task that reads its ciphertext is defeated by 256 random bits and is not
+ * defeated by a memorable phrase. A typed value is accepted at the same floor
+ * the CLI applies.
+ */
+export async function setVaultPassphrase(
+  opts: { generate: true } | { passphrase: string },
+): Promise<VaultPassphraseResponse> {
+  return apiFetch<VaultPassphraseResponse>('/settings/vault/passphrase', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
 }
 
 // --- Google Workspace (ISSUE-240) ---
