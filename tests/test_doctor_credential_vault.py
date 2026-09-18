@@ -197,7 +197,11 @@ class TestWhenNoVaultIsConfigured:
                 "bob": UserConfig(display_name="B", vault_path="   "),
             }
         )
-        assert doctor._vault_users(config) == ["bob"]
+        # A mapping now, not a list of ids: `vault_path_for` merges a
+        # `user_vault_config` row over the TOML attribute, so the value costs a
+        # database read and every arm takes it from here rather than asking
+        # again. Asserting the value too is what says the merge ran.
+        assert doctor._vault_paths(config) == {"bob": "   "}
 
         result = _run(config, probe=False)["security.credential_vault.path"]
         assert result.status == FAIL

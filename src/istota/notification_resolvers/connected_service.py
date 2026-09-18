@@ -469,8 +469,13 @@ def _vault_is_working(
     """
     from .. import secrets_vault
 
-    user = getattr(config, "users", {}).get(user_id)
-    if not (getattr(user, "vault_path", "") or "").strip():
+    # Through the accessor rather than off the `UserConfig`: since the settings
+    # endpoint can write a `user_vault_config` row, the TOML attribute is only
+    # half the answer, and this arm decides whether the row that told the user
+    # their vault was broken may be closed. Reading the stale half would hold a
+    # row open for a vault the user has since switched off, and close one for a
+    # vault they have just switched on.
+    if not (config.vault_path_for(user_id) or "").strip():
         return True
     if not secrets_vault.sync_is_scheduled(config):
         return True

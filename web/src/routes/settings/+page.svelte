@@ -13,6 +13,9 @@
     getModules,
     getProfile,
     getVaultStatus,
+    updateVaultConfig,
+    clearVaultConfig,
+    setVaultPassphrase,
     updateProfile,
     disconnectNextcloudToken,
     AuthError,
@@ -44,6 +47,7 @@
     Button,
     ConfirmDialog,
     Field,
+    Input,
     Select,
     type SelectOption,
   } from '$lib/components/ui';
@@ -61,6 +65,7 @@
     SettingsLayout,
     SettingsCard,
     SettingsField,
+    SecretField,
   } from '$lib/components/settings';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
 
@@ -77,6 +82,9 @@
   // nothing: a heading that always says something is a heading every user has
   // to read past.
   let vault: VaultStatus | null = $state(null);
+  // The whole response, including the form's half — which is present for a user
+  // with no vault, where `vault` above is deliberately null.
+  let vaultForm: VaultStatus | null = $state(null);
 
   // Full IANA timezone list from the browser (no hardcoded list / extra dep).
   // Older engines may not implement supportedValuesOf — fall back to UTC.
@@ -267,9 +275,137 @@
   async function refreshVault() {
     try {
       const status = await getVaultStatus();
+      // Two pieces of state off one response, and the split is the same one the
+      // server makes. `vault` is the *status line*, which renders only for a
+      // configured vault — a heading that always says something is a heading
+      // every user reads past for the life of the deployment. `vaultForm` is
+      // the *form*, which renders whenever this surface may write, including
+      // for the user who has no vault at all: that user is the one the form
+      // exists for.
       vault = status && status.configured ? status : null;
+      vaultForm = status ?? null;
+      vaultPathInput = status?.vault_path ?? '';
+      vaultServicesInput = new Set(status?.owned ?? []);
     } catch {
       vault = null;
+      vaultForm = null;
+    }
+  }
+
+  // Emptied on every successful save and on every navigation away: it is a
+  // credential, and leaving it in a reactive variable keeps it in the page for
+  // as long as the tab is open.
+  let mintedPassphrase = $state('');
+  let vaultBusy = $state(false);
+  let vaultError = $state('');
+  let vaultPathInput = $state('');
+  let vaultServicesInput: Set<string> = $state(new Set());
+  let passphraseInput = $state('');
+
+  let vaultEditable = $derived.by(() => vaultForm?.editable ?? false);
+  let vaultSource = $derived.by(() => vaultForm?.source ?? '');
+  let vaultEligible = $derived.by(() => vaultForm?.eligible_services ?? []);
+  let vaultHasPassphrase = $derived.by(() => vaultForm?.passphrase_present ?? false);
+  let vaultRoot = $derived.by(() => vaultForm?.vault_root ?? '');
+
+  /**
+   * Where the file will actually be, shown as the user types.
+   *
+   * `config/vault.kdbx` on its own does not say what it is relative to, and the
+   * directory it resolves under is the same one holding the inbox, memories and
+   * shared folders — so the example reads as though it might be relative to any
+   * of them. The root comes from the server's own resolver rather than being
+   * assembled here, and a deployment that cannot report one falls back to
+   * naming the directory in words instead of showing a half-built path.
+   */
+  let vaultResolvedPath = $derived.by(() => {
+    const typed = vaultPathInput.trim().replace(/^\/+/, '');
+    if (!typed || !vaultRoot) return '';
+    return `${vaultRoot.replace(/\/+$/, '')}/${typed}`;
+  });
+
+  function toggleVaultService(service: string, on: boolean) {
+    const next = new Set(vaultServicesInput);
+    if (on) next.add(service);
+    else next.delete(service);
+    vaultServicesInput = next;
+  }
+
+  async function saveVaultConfig() {
+    vaultBusy = true;
+    vaultError = '';
+    try {
+      await updateVaultConfig(vaultPathInput.trim(), [...vaultServicesInput]);
+      await refreshVault();
+      notifySuccess('Vault settings saved');
+    } catch (e) {
+      vaultError = (e as Error).message || 'Could not save the vault settings';
+    } finally {
+      vaultBusy = false;
+    }
+  }
+
+  async function switchVaultOff() {
+    vaultBusy = true;
+    vaultError = '';
+    try {
+      await clearVaultConfig();
+      await refreshVault();
+      notifySuccess('Credential vault switched off');
+    } catch (e) {
+      vaultError = (e as Error).message || 'Could not switch the vault off';
+    } finally {
+      vaultBusy = false;
+    }
+  }
+
+  let confirmingVaultReplace = $state(false);
+
+  /**
+   * Generate, or ask first when there is one to destroy.
+   *
+   * The server refuses a generate over an existing passphrase without
+   * `replace`, on the same reasoning `istota secret ensure --generate` refuses
+   * one without `--force`: minting a second value destroys the only copy this
+   * deployment has of the one the KDBX is already encrypted under, and the
+   * vault then fails to open until the user re-keys the file by hand. So this
+   * is the page's one irreversible action, and it takes a `ConfirmDialog` like
+   * every other.
+   */
+  function generateVaultPassphrase() {
+    if (vaultHasPassphrase) {
+      confirmingVaultReplace = true;
+      return;
+    }
+    return saveVaultPassphrase(true);
+  }
+
+  function replaceVaultPassphrase() {
+    return saveVaultPassphrase(true, true);
+  }
+
+  function saveTypedVaultPassphrase() {
+    return saveVaultPassphrase(false);
+  }
+
+  async function saveVaultPassphrase(generate: boolean, replace = false) {
+    vaultBusy = true;
+    vaultError = '';
+    mintedPassphrase = '';
+    try {
+      const resp = await setVaultPassphrase(
+        generate ? { generate: true, replace } : { passphrase: passphraseInput },
+      );
+      // Shown once, here, because nothing reads it back — the user needs it to
+      // open their own KDBX. The typed path returns an empty string, since the
+      // client already has that value.
+      mintedPassphrase = resp.generated ?? '';
+      passphraseInput = '';
+      await refreshVault();
+    } catch (e) {
+      vaultError = (e as Error).message || 'Could not store the passphrase';
+    } finally {
+      vaultBusy = false;
     }
   }
 
@@ -985,6 +1121,206 @@
       </div>
     {/if}
 
+    <!--
+      A `SettingsCard` with a `SecretField`, so it is the same shape as every
+      service card beside it — a peer of the things whose credentials it
+      supplies rather than something hanging off the section heading. The vault
+      *status line* stays on the heading, because it is the referent the
+      disabled-field sentence on each managed card points at and has to be
+      visible from all of them; this is the form that sets the thing up, and a
+      form is a card.
+
+      It renders for a user with *no* vault, which is the state it exists to
+      move them out of — and is exactly the state the heading above is silent
+      for.
+
+      The passphrase is a `SecretField` for the reason every other credential
+      on this page is one: it is write-only, it is bullet-masked, and
+      `configured` says it is set without echoing it. Generate sits beside it
+      rather than above it — the security argument for a random value is real
+      (see the caption) but it is one way of filling a field, not a mode of its
+      own.
+
+      What the card deliberately does not offer is an absolute-path field: an
+      absolute path is checked against the trees a sandbox binds rather than
+      against this user's own directory, which is the right question for a path
+      an operator wrote into config.toml and not a line a user may put
+      themselves on the far side of.
+    -->
+    {#if vaultForm}
+      <SettingsCard
+        title="Credential vault"
+        description="Keep your credentials in a KeePassXC file instead of typing each one in here. Istota reads the file and never writes to it, so it stays yours to edit on any device."
+      >
+        {#snippet status()}
+          <span class="status-pill status-{vaultSource ? 'configured' : 'missing'}">
+            {vaultSource ? 'Configured' : 'Not set up'}
+          </span>
+        {/snippet}
+
+        <div class="vault-form" data-testid="vault-form">
+          {#if vaultSource === 'toml'}
+            <p class="caption">
+              Your credential vault is set in this deployment's configuration file, so it is not
+              editable here. Ask your administrator to change it.
+            </p>
+          {:else}
+            <SecretField
+              label="Master password"
+              configured={vaultHasPassphrase}
+              value={passphraseInput}
+              disabled={vaultBusy}
+              onValueChange={(next) => (passphraseInput = next)}
+            />
+            <!--
+              The one sentence that stops Generate reading as a write to a file
+              the card has just called read-only. Istota reads the *file*; the
+              master password is a credential Istota has to *hold* in order to
+              open it, which is a different thing.
+            -->
+            <p class="caption">
+              The password your KeePassXC file is encrypted with. Istota stores it so it can open
+              the file — it is never written back to the file, and cannot be shown to you again. If
+              you have not made the file yet, generate one here and use it as the master password
+              when you create it.
+            </p>
+            <div class="vault-actions control-row">
+              <Button
+                variant="secondary"
+                size="sm"
+                onclick={saveTypedVaultPassphrase}
+                loading={vaultBusy}
+                disabled={!passphraseInput}
+              >
+                Save password
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onclick={generateVaultPassphrase}
+                disabled={vaultBusy}
+              >
+                {vaultHasPassphrase ? 'Generate a new one' : 'Generate one for me'}
+              </Button>
+            </div>
+            {#if mintedPassphrase}
+              <!--
+                The one place this value is ever rendered. There is no route
+                that reads it back, so it is here or nowhere — which is why it
+                is a bordered block rather than a line of prose, and why it is
+                not a `notify()`: a transient banner that expires takes the
+                only copy with it.
+              -->
+              <p class="vault-minted" data-testid="vault-minted">
+                <strong>Copy this now — it will not be shown again:</strong>
+                <code>{mintedPassphrase}</code>
+              </p>
+            {/if}
+
+            <!--
+              `warning`, not `hint`: a hint renders behind a hover "?" and is
+              discoverable rather than seen, and web/AGENTS.md's rule is that
+              nothing the user has to act on goes there. The relative-path rule
+              is a constraint — type an absolute path and the save is refused —
+              so it renders inline.
+            -->
+            <Field
+              label="Vault file"
+              warning="A path inside your own files — the same place as your inbox, memories and shared folders. An absolute path is an administrator setting."
+              wide
+            >
+              <Input
+                bind:value={vaultPathInput}
+                placeholder="vault.kdbx"
+                monospace
+                disabled={vaultBusy}
+                data-testid="vault-path-input"
+              />
+            </Field>
+            <!--
+              Shown as it is typed, because the ambiguity is not in the rule but
+              in the example: `config/vault.kdbx` could be read against any of
+              the folders sitting beside it. The root is the server's, from the
+              same resolver that will open the file.
+            -->
+            {#if vaultResolvedPath}
+              <p class="caption vault-resolved" data-testid="vault-resolved">
+                Istota will read <code>{vaultResolvedPath}</code>
+              </p>
+            {:else if vaultRoot}
+              <p class="caption vault-resolved">
+                Paths are relative to <code>{vaultRoot}</code>
+              </p>
+            {/if}
+
+            <!--
+              Each row names the fields it hands over, because the service name
+              is not what is being agreed to: ticking ntfy gives the file five
+              fields and karakeep two, and the checkbox label alone reads as
+              "the API key". Ownership includes deletion — a field the file does
+              not hold is removed from the secrets table — so a user picking
+              from names alone can lose a value they never had in mind.
+            -->
+            <Field
+              label="Services this file is the authority for"
+              warning="Put every value you already have into the file first. Istota replaces these fields with whatever the file holds, and removes any the file does not — then their inputs below become read-only. Leave them all unticked to have the file read and nothing applied."
+              labelled={false}
+              wide
+            >
+              <div class="vault-services">
+                {#each vaultEligible as svc (svc.service)}
+                  <label class="vault-service">
+                    <input
+                      type="checkbox"
+                      checked={vaultServicesInput.has(svc.service)}
+                      disabled={vaultBusy}
+                      onchange={(e) =>
+                        toggleVaultService(
+                          svc.service,
+                          (e.currentTarget as HTMLInputElement).checked,
+                        )}
+                    />
+                    <span class="vault-service-name">
+                      {svc.label}
+                      {#if svc.keys?.length}
+                        <small class="caption">{svc.keys.join(' · ')}</small>
+                      {/if}
+                    </span>
+                  </label>
+                {/each}
+              </div>
+            </Field>
+
+            <div class="vault-actions control-row">
+              <Button
+                onclick={saveVaultConfig}
+                loading={vaultBusy}
+                disabled={!vaultPathInput.trim()}
+              >
+                Save vault settings
+              </Button>
+              {#if vaultSource === 'db'}
+                <Button variant="secondary" onclick={switchVaultOff} disabled={vaultBusy}>
+                  Switch off
+                </Button>
+              {/if}
+            </div>
+          {/if}
+          {#if vaultError}
+            <p class="banner error" data-testid="vault-error">{vaultError}</p>
+          {/if}
+          <ConfirmDialog
+            bind:open={confirmingVaultReplace}
+            title="Replace the vault password"
+            message="Are you sure? Your vault file is encrypted with the password Istota already has, and generating a new one does not re-encrypt it — the vault will stop opening until you set the new password on the file yourself in KeePassXC."
+            confirmLabel="Replace it"
+            confirmVariant="danger"
+            onConfirm={replaceVaultPassphrase}
+          />
+        </div>
+      </SettingsCard>
+    {/if}
+
     {#if ncToken}
       {@const nc = ncToken}
       <SettingsCard
@@ -1109,5 +1445,84 @@
      would not carry it — the sentence says "Not working" in words. */
   .vault-problem {
     color: var(--status-warn-fg);
+  }
+
+  .vault-form :global(.micro-label) {
+    margin: 0;
+  }
+
+  .vault-form {
+    margin-top: var(--space-3);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .vault-services {
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  /* A resolved path has no break opportunities of its own, so on a phone it
+     would push the card sideways. Same rule the heading's `.vault code` uses. */
+  .vault-resolved code {
+    overflow-wrap: anywhere;
+  }
+
+  .vault-service {
+    display: flex;
+    /* `flex-start`, not `center`: the row is now two lines — the service name
+       and the fields it hands over — and centring would float the checkbox
+       against the gap between them. */
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+
+  .vault-service-name {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* The field list. `.caption` carries the size and colour; only the leading is
+     the call site's, since these sit directly under the name they belong to
+     rather than as a paragraph of their own. */
+  .vault-service-name :global(.caption) {
+    line-height: 1.4;
+  }
+
+  /* `width: auto` so the checkbox is not stretched by the form-control rule
+     above, which sizes text inputs. */
+  .vault-service input {
+    width: auto;
+  }
+
+  .vault-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* The minted passphrase. Deliberately loud: it is shown once and there is no
+     route that shows it again, so a user who scrolls past it has lost it. */
+  .vault-minted {
+    padding: var(--space-2);
+    border: 1px solid var(--status-warn-fg);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+  }
+
+  .vault-minted code {
+    display: block;
+    margin-top: var(--space-1);
+    /* No break opportunities of its own, and it must be selectable whole. */
+    overflow-wrap: anywhere;
+    user-select: all;
   }
 </style>

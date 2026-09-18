@@ -7,6 +7,53 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROOM_COLORS } from './src/lib/roomColors';
 
+/**
+ * The dev server's vault state, mutated by the three write routes above.
+ *
+ * Starts unconfigured with no passphrase, because that is the state every real
+ * user is in and the one the form exists to move them out of. `eligible_services`
+ * excludes `native_brain` the way the server does: it is vault-*eligible* and
+ * `cli_only`, so the form does not offer it.
+ */
+const mockVault: Record<string, unknown> = {
+  configured: false,
+  editable: true,
+  source: '',
+  vault_path: '',
+  vault_root: '/mnt/shared/Users/alice',
+  passphrase_present: false,
+  // The real field sets, taken from `secret_schema`. They are the point of the
+  // row: ticking `ntfy` hands the file five fields, not one, and a field the
+  // file does not hold is deleted from the secrets table.
+  eligible_services: [
+    { service: 'carto', label: 'CARTO basemaps', keys: ['API key'] },
+    { service: 'feeds', label: 'Feeds', keys: ['Tumblr API key (optional)'] },
+    { service: 'karakeep', label: 'Karakeep', keys: ['Base URL', 'API key'] },
+    {
+      service: 'ntfy',
+      label: 'ntfy push',
+      keys: [
+        'Server URL',
+        'Default topic',
+        'Access token (optional)',
+        'Username (optional)',
+        'Password (optional)',
+      ],
+    },
+  ],
+  owned: [],
+  path: '',
+  outcome: '',
+  reason: '',
+  refusal: '',
+  last_success_at: '',
+  last_sync_at: '',
+  last_outcome: '',
+  last_reason: '',
+  parsed: false,
+  problem: '',
+};
+
 interface MockReq {
   url: string;
   method: string;
@@ -3685,12 +3732,62 @@ const handlers: MockHandler[] = [
     if (url === '/istota/api/settings/modules' && method === 'GET') {
       return mockModulesResponse();
     }
-    // The vault is off for almost every real user and the heading renders
+    // The vault is off for almost every real user and the *heading* renders
     // nothing when it is, so the mock answers the same way: a dev server
     // showing a vault line by default would misrepresent the default install.
-    // Flip `configured` here to see the populated shape.
+    // The *form* below it does render for this answer, which is the state it
+    // exists for — somebody with no vault setting one up. Edit `mockVault` to
+    // see the configured shape.
     if (url === '/istota/api/settings/vault' && method === 'GET') {
-      return { configured: false };
+      return { ...mockVault };
+    }
+    if (url === '/istota/api/settings/vault' && method === 'PUT') {
+      const b = body as { vault_path?: string; vault_services?: string[] };
+      const path = (b?.vault_path ?? '').trim();
+      if (!path) return { error: 'vault path is required' };
+      // The one refusal worth modelling here, because it is the boundary the
+      // form is built around: an absolute path is an operator setting, checked
+      // against the trees a task sandbox can write rather than against one
+      // user's own directory.
+      if (path.startsWith('/')) {
+        return {
+          error:
+            'a vault path set here must be relative to your own workspace; an absolute path is an operator setting in config.toml',
+        };
+      }
+      mockVault.configured = true;
+      mockVault.source = 'db';
+      mockVault.vault_path = path;
+      mockVault.owned = [...(b?.vault_services ?? [])];
+      mockVault.path = `/mnt/shared/Users/${user.username}/${path}`;
+      return { ok: true, vault_path: path, vault_services: mockVault.owned };
+    }
+    if (url === '/istota/api/settings/vault' && method === 'DELETE') {
+      const had = mockVault.source === 'db';
+      mockVault.configured = false;
+      mockVault.source = '';
+      mockVault.vault_path = '';
+      mockVault.owned = [];
+      return { ok: true, cleared: had };
+    }
+    if (url === '/istota/api/settings/vault/passphrase' && method === 'PUT') {
+      const b = body as { generate?: boolean; passphrase?: string; replace?: boolean };
+      if (b?.generate && mockVault.passphrase_present && !b?.replace) {
+        return {
+          error:
+            'a vault passphrase is already stored, and generating a new one will not re-encrypt a file saved under the old one; pass replace to overwrite it',
+        };
+      }
+      if (!b?.generate && (b?.passphrase ?? '').trim().length < 32) {
+        return {
+          error:
+            'a vault passphrase must be at least 32 characters, and should be generated rather than chosen',
+        };
+      }
+      mockVault.passphrase_present = true;
+      // Returned once on the generate path and never echoed on the typed one,
+      // which is the server's own rule.
+      return { ok: true, generated: b?.generate ? `mock-${Date.now()}-passphrase` : '' };
     }
     if (url === '/istota/api/settings/nextcloud-token' && method === 'DELETE') {
       user.nextcloud_token = { connected: false, expires_at: null };

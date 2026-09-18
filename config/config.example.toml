@@ -1888,8 +1888,16 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
                                # applies nothing, which is a usable dry run. A name the
                                # vault may not own — a service whose credentials the daemon
                                # mints for itself — is dropped with a warning at load.
-                               # These two keys are TOML-only by design: they are not in
-                               # `user_profiles` and cannot be set from the web UI.
+                               # A user can set both of these for themselves from the
+                               # settings page, and a stored selection outranks what you
+                               # write here — so a vault set below is shown to them but
+                               # not editable, since a row would silently shadow this
+                               # line. `istota user ensure --clear-vault-config` removes
+                               # one. What the web form does not offer is the *absolute*
+                               # path form above: it is checked against the trees a task
+                               # sandbox can write, which is the right question for a
+                               # path you wrote and not a line to let a user answer for
+                               # themselves. Neither key is in `user_profiles`.
 
 # Alice's resources — only `folder` (an out-of-workspace sandbox mount)
 # is declarable after the Resources sunset. todo/reminders/notes are

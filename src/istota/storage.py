@@ -543,7 +543,7 @@ VAULT_PATH_NO_SUCH_DIRECTORY = "no_directory_at_the_configured_path"
 
 
 def resolve_user_vault_path(
-    config: "Config", user_id: str
+    config: "Config", user_id: str, *, candidate: str | None = None
 ) -> VaultResolution:
     """Which KDBX file this user's vault sync may open, and why not where not.
 
@@ -631,8 +631,17 @@ def resolve_user_vault_path(
     """
     from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
 
-    user = config.users.get(user_id)
-    raw = getattr(user, "vault_path", "") if user is not None else ""
+    # `candidate` asks the same question of a value nobody has stored yet, which
+    # is what the settings endpoint needs: a path is validated *before* it is
+    # written, so a refusal is a 400 the user can act on rather than a
+    # `vault_path_refused` line in the daemon log five minutes later. One
+    # implementation rather than a validator beside it — a second copy of a
+    # containment rule is the thing this resolver's own docstring is longest
+    # about. `None` and `""` are distinct: `None` means "read the configured
+    # value", `""` is a candidate that resolves to nothing and is refused.
+    raw = (
+        config.vault_path_for(user_id) if candidate is None else candidate
+    )
     if not isinstance(raw, str) or not raw:
         # The feature is off for this user, which is every user by default, so
         # this one answer is the silent one — and the one state where *neither*

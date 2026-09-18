@@ -65,6 +65,8 @@ Two things follow that are worth knowing before turning it on. Deleting or corru
 
 An absolute `vault_path` removes the exposure completely: the resolver refuses one that lands under the workspace, `temp_dir` or `developer.repos_dir`, so the accepted form is a host path no sandbox binds at all. It is not the default because editing the file from a phone is the feature.
 
+**That form is yours, not the user's.** A user can configure their own vault from the settings page, and the form there takes a relative path only. The check an absolute path is subject to asks whether it lands outside every tree a sandbox binds, which is the right question for a path you wrote and is not a line to let anybody answer for themselves: a user-chosen absolute path would read any file the daemon can read, as the daemon, and decrypt the result into that user's own credential rows. A vault you set in `config.toml` is also not editable from the page, since a stored selection outranks your line and would make it silently inert; `istota user ensure --clear-vault-config --user <id>` takes a stored one away.
+
 ### The `.developer` carve-out
 
 Each task's scratch space holds a `.developer` directory, written by the `developer` skill's `setup_env` hook. It holds two kinds of thing, and both need the same protection.

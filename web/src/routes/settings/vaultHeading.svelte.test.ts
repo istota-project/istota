@@ -9,13 +9,23 @@
  * settings page must not fail to load over a feature its actual content does
  * not depend on.
  *
- * Where it does render, it is read-only by construction rather than by
- * omission: the vault has no writing endpoint at all. The two fields selecting
- * the file are TOML-only because they decide which file the daemon decrypts and
- * which credentials it may overwrite, and the passphrase is CLI-only because it
- * has to be generated — a form field there is an invitation to type a memorable
- * one, which is the single thing making the file's presence in the sandbox
- * matter.
+ * Where it does render, it is a *status line* and nothing else. That used to be
+ * the whole story — the vault had no writing endpoint at all — and it no longer
+ * is: the form that writes it is a sibling of this heading and is covered by
+ * `vaultForm.svelte.test.ts`. What is still true, and is what this file asserts,
+ * is that the heading itself reports and never edits, and that nothing it
+ * renders is a credential.
+ *
+ * The security property behind the old read-only rule survives the change
+ * rather than being dropped. The two fields still decide which file the daemon
+ * decrypts and which credentials it may overwrite, so they are not on
+ * `user_profiles` with every other per-user setting; they are in a table of
+ * their own that nothing downstream of a task writes. The passphrase is still
+ * meant to be *generated* rather than chosen — the file sits in a tree bound
+ * read-write into that user's own sandbox, so 256 random bits are what stand
+ * between a prompt-injected task and the credentials inside it — which is why
+ * the form leads with a Generate button and holds a typed value to the same
+ * floor the CLI applies.
  *
  * It sits on the heading rather than in the card list below it because it is
  * not a connected service: it is the *source* those credentials come from, and

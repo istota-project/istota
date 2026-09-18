@@ -1460,8 +1460,7 @@ def vault_owned_services(config, user_id: str) -> frozenset[str]:
 
     Closes the descriptor it opens: this asks a question and opens nothing.
     """
-    user = config.users.get(user_id)
-    declared = frozenset(getattr(user, "vault_services", None) or ())
+    declared = frozenset(config.vault_services_for(user_id))
     if not declared:
         return frozenset()
 
@@ -1538,7 +1537,7 @@ def sync_user(
 
     location = resolution.location
     path = str(location.path)
-    owned = frozenset(getattr(config.users.get(user_id), "vault_services", None) or ())
+    owned = frozenset(config.vault_services_for(user_id))
     try:
         result = _sync_resolved(config, user_id, location, path, owned)
     finally:
@@ -1909,9 +1908,8 @@ def vault_status(
     from . import db  # noqa: PLC0415 - see `sync_user`
     from . import storage  # noqa: PLC0415
 
-    user = config.users.get(user_id)
-    raw = getattr(user, "vault_path", "") if user is not None else ""
-    owned = tuple(sorted(getattr(user, "vault_services", None) or ()))
+    raw = config.vault_path_for(user_id)
+    owned = tuple(sorted(config.vault_services_for(user_id)))
     last = _SYNC_STATE.get(user_id, (None, ""))[1]
     if not raw:
         return VaultStatusReport(user_id=user_id, configured=False, owned=owned)
