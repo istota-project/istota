@@ -13,17 +13,21 @@ wrote down for `doctor`'s socket-free `web.avatar_import` check to read, and
 `_session_log_sweep`, the same shape for the native-brain transcript sweep —
 what the scheduler's cleanup tick reclaimed, so `runtime.session_log_dir` can
 say whether the size ceiling rather than `retention_days` is the retention in
-force. Those rows are written by the daemon, by the host-side `memory` skill
-CLI and by the `provision-rooms` CLI, and read by neither the model nor the
-`kv` skill.
+force — and `_vault_sync`, what the credential-vault pass last settled for one
+user, which the web process reads to render the settings heading and to decide
+whether a vault notification is still live, neither of those being a question
+the syncing process's own in-memory state can answer from another unit. Those
+rows are written by the daemon, by the host-side `memory` skill CLI and by the
+`provision-rooms` CLI, and read by neither the model nor the `kv` skill.
 
 Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
 before it dispatches a verb, so `--shared` — which reads and writes the
 deployment-wide `shared_kv` — is covered by the same line. `_avatar_import` and
 `_session_log_sweep` are `shared_kv` namespaces and would otherwise be
-reachable.
+reachable; `_vault_sync` is a per-user one, because a vault belongs to one user
+and that table's key already carries a user id.
 
-The rule is a name prefix rather than a list, so a sixth reserved namespace
+The rule is a name prefix rather than a list, so a seventh reserved namespace
 costs nothing here or at either enforcement point. Both of those are needed
 and neither substitutes for the other:
 

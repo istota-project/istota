@@ -108,6 +108,36 @@ CONNECTED_SERVICE_SCHEMA: dict[str, dict] = {
             {"key": "api_key", "label": "Provider API key", "type": "password"},
         ],
     },
+    "vault": {
+        "label": "Credential vault",
+        # The passphrase that opens this user's KDBX credential vault. Read by
+        # `secrets_vault.sync_user` in the daemon and by nothing else.
+        "used_by": (),
+        # cli_only, and for a sharper reason than `native_brain`'s. §5 of the
+        # vault spec requires a *generated* passphrase: the file sits in a tree
+        # bound read-write into that user's own sandbox, so a prompt-injected
+        # task can carry its ciphertext out, and Argon2id makes that useless
+        # against 256 random bits and not against a memorable phrase. A form
+        # field is an invitation to type a memorable one, which is the single
+        # thing that makes the file's presence in the sandbox matter — so there
+        # is no form field, and `istota secret ensure --service vault --key
+        # passphrase --generate` is the documented path.
+        #
+        # It is stored here, like every other secret, because the secrets table
+        # is the only credential store in the deployment unreadable from both
+        # directions an attacker arrives from: `build_bwrap_cmd` masks
+        # `db_path.parent` out of every sandbox, and the master Fernet key never
+        # enters any subprocess env, so a host-side skill CLI handed
+        # `ISTOTA_DB_PATH` sees ciphertext it cannot decrypt.
+        #
+        # It must never appear in a skill manifest `env:` block — credential
+        # injection into a task is driven entirely by manifest env specs, so a
+        # passphrase no manifest names can reach a task by no route at all.
+        "cli_only": True,
+        "fields": [
+            {"key": "passphrase", "label": "Vault passphrase", "type": "password"},
+        ],
+    },
 }
 
 # Module-owned credential blocks. Outer dict key = module name (must be in

@@ -26,6 +26,7 @@ import re
 from pathlib import Path
 
 from istota import config as config_module
+from istota import secret_schema
 from istota.transport import registry as registry_module
 from tests.support.drift import source_of
 
@@ -229,4 +230,79 @@ class TestTheSecretOverrideInventory:
         assert not missing, (
             "config sections with an env override but no row in "
             "docs/configuration/credentials.md: " + ", ".join(missing)
+        )
+
+
+class TestThePerUserServiceInventory:
+    """Every service in the secrets schema has a row in `credentials.md`.
+
+    The guard above walks `_env_secret_overrides`, which is the *global*
+    credential inventory, so it sees nothing when a **per-user** service is
+    added: `vault` went into `CONNECTED_SERVICE_SCHEMA` carrying a passphrase
+    and the whole ISSUE-495 apparatus stayed green, because a service is not an
+    env override and nothing else here reads the schema. That is the shape the
+    module docstring describes — a page enumerating a whole surface, touched by
+    no feature branch — one dict over.
+
+    Widened rather than written down as a known gap, on the rule the vendored
+    devbox leaves record: a guard that names its own subjects covers only the
+    ones its author thought of. This walks the schema.
+    """
+
+    def services(self) -> dict[str, str]:
+        """`{service key: label}` for every declared service, connected and module.
+
+        The imported dicts rather than a regex over their source: they are plain
+        data with a public accessor, so there is nothing to parse and no shape
+        for a new entry to hide in. `source_of` is still needed — they are
+        module-level literals evaluated at *import*, so an edit to one is
+        attributed to whichever test imported the module first and `scripts/qt`
+        would not reselect this guard on exactly the change it exists to catch.
+        """
+        source_of(secret_schema)
+        known = secret_schema.all_known_services()
+        assert known, "the secrets schema parsed empty"
+        return {
+            service: str(schema.get("label", ""))
+            for service, schema in known.items()
+        }
+
+    def test_every_service_is_named_in_the_credential_inventory(self):
+        """Presence per service, matched on the schema key or on the label.
+
+        Neither alone works, and that is a property of the page rather than a
+        looseness worth removing. The doc names `ntfy` and `feeds` by their
+        schema key while the schema labels them "ntfy push" and "Feeds
+        (Tumblr)"; it names "Google Workspace" and "Native brain provider" in
+        words while the keys carry underscores. So a service passes on either
+        spelling, with `_` read as a space.
+
+        Scoped to the table rows, for the reason the override guard beside it
+        gives: searched file-wide, several of these are named in the surrounding
+        prose and a deleted row would not be seen.
+        """
+        doc = (ROOT / "docs" / "configuration" / "credentials.md").read_text()
+        rows = "\n".join(
+            ln for ln in doc.splitlines() if ln.startswith("|")
+        ).casefold()
+
+        missing = sorted(
+            service
+            for service, label in self.services().items()
+            if service.replace("_", " ").casefold() not in rows
+            and not (label and label.casefold() in rows)
+        )
+        assert not missing, (
+            "declared in secret_schema, absent from the tables in "
+            "docs/configuration/credentials.md: " + ", ".join(missing)
+        )
+
+    def test_the_guard_reads_a_populated_schema(self):
+        """Non-vacuity. Every assertion above is an absence, so a schema that
+        parsed to `{}` — or to entries carrying neither a key nor a label —
+        would pass about nothing."""
+        services = self.services()
+        assert len(services) >= 8, f"only {len(services)} services parsed"
+        assert all(services.values()), (
+            "a service declares no label, so half the match above is dead for it"
         )

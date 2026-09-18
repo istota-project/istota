@@ -3685,6 +3685,13 @@ const handlers: MockHandler[] = [
     if (url === '/istota/api/settings/modules' && method === 'GET') {
       return mockModulesResponse();
     }
+    // The vault is off for almost every real user and the heading renders
+    // nothing when it is, so the mock answers the same way: a dev server
+    // showing a vault line by default would misrepresent the default install.
+    // Flip `configured` here to see the populated shape.
+    if (url === '/istota/api/settings/vault' && method === 'GET') {
+      return { configured: false };
+    }
     if (url === '/istota/api/settings/nextcloud-token' && method === 'DELETE') {
       user.nextcloud_token = { connected: false, expires_at: null };
       return { ok: true };

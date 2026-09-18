@@ -1,6 +1,7 @@
 """A connected third-party service whose stored credential stopped working.
 
-Two services: Garmin, and the user-scoped Nextcloud OAuth pair (ISSUE-333).
+Three services: Garmin, the user-scoped Nextcloud OAuth pair (ISSUE-333), and
+the per-user credential vault.
 
 Garmin. A six-hourly sync hits an auth error,
 `garmin.mark_token_error` wipes the OAuth blob so the settings card stops
@@ -17,6 +18,15 @@ exactly like Garmin, the moment of the error is the only moment anything knows.
 `web_tokens.note_credential_lost` writes and delivers; `web_tokens.store_tokens`
 closes on the next successful login, and the settings Disconnect handler closes
 on a deliberate teardown.
+
+The vault. Nothing breaks when a KDBX stops being readable — every credential it
+had already written keeps working — so the failure is silent by construction and
+the user's edits simply stop taking effect. `secrets_vault._report` raises on the
+transition into a failing class and closes on the next successful sync; the
+sequence of classes lives in the daemon log, because a change of class is a bump
+rather than a second notice. It is also the one service here whose object is a
+line in `config.toml` rather than a database row, which is why
+:func:`_vault_is_working` has an arm for the object having been removed.
 
 **`object_id` is a service name, not an integer**, so it gets the explicit
 segment check the spec asks for in place of the `int()` coercion the other
@@ -74,6 +84,11 @@ SEVERITY = "warning"
 RECONNECT_HREFS: dict[str, str] = {
     "garmin": "/settings",
     "nextcloud": "/reconnect",
+    # The vault's own status sits on the "Connected services" heading of that
+    # page, which is where a user can see the resolved path, the owned services
+    # and the failing class. There is nothing to reconnect *to*, which is what
+    # the action label below says instead.
+    "vault": "/settings",
 }
 
 # Retained as the fallback for a service with no entry above, and because it is
@@ -85,7 +100,17 @@ RECONNECT_HREF = "/settings"
 SERVICES: dict[str, str] = {
     "garmin": "Garmin Connect",
     "nextcloud": "Nextcloud",
+    "vault": "Credential vault",
 }
+
+# The primary action's words, per service. "Reconnect" is right for a credential
+# whose remedy is an OAuth round trip and is meaningless for a vault, whose
+# remedy is editing a file on the user's own laptop or phone — the link only
+# takes them to where the failure is described. Same reasoning as the two tables
+# below: an instruction naming the wrong remedy is worse than a vague one.
+_ACTION_LABELS: dict[str, str] = {"vault": "Open settings"}
+
+_DEFAULT_ACTION_LABEL = "Reconnect"
 
 # What stops working, per service, in the user's own terms. Garmin's is a sync
 # that stops and data that stops arriving; Nextcloud's is neither — nothing is
@@ -102,6 +127,17 @@ _CONSEQUENCE: dict[str, str] = {
         "chat are being reposted by the bot instead of appearing under your own "
         "name, and read state is no longer syncing with Talk."
     ),
+    # Neither sentence above is true here, and the generic one is the falsest of
+    # the three: nothing was rejected, nothing stopped syncing, and no credential
+    # stopped working. What stopped is the *provisioning* pass, so the file has
+    # quietly ceased to be the authority the user believes it is. Saying the
+    # stored credentials still work is the half that keeps this from reading as
+    # an outage.
+    "vault": (
+        "Your {label} could not be read, so credentials you change in the vault "
+        "file are no longer taking effect. The credentials already stored keep "
+        "working."
+    ),
 }
 
 _DEFAULT_CONSEQUENCE = (
@@ -114,6 +150,10 @@ _DEFAULT_CONSEQUENCE = (
 _REMEDY: dict[str, str] = {
     "garmin": "Reconnect under Settings → Connected services.",
     "nextcloud": "Reconnect to restore both — it takes one round trip and keeps you signed in.",
+    # Generic on purpose: the class-specific instruction travels as `reason`,
+    # because this table holds one static string per *service* and the vault
+    # fails eight distinguishable ways. See `secrets_vault.NOTIFICATION_REASONS`.
+    "vault": "The vault's status is under Settings → Connected services.",
 }
 
 _DEFAULT_REMEDY = "Reconnect under Settings → Connected services."
@@ -337,7 +377,7 @@ class ConnectedServiceResolver:
             )
             return None
 
-        if _is_connected(config, row.user_id, service):
+        if _is_connected(config, row.user_id, service, conn):
             return None
 
         reason = ""
@@ -350,26 +390,39 @@ class ConnectedServiceResolver:
             severity=row.severity,
             actions=(
                 NotificationAction(
-                    id="reconnect", label="Reconnect", kind="primary",
+                    id="reconnect",
+                    label=_ACTION_LABELS.get(service, _DEFAULT_ACTION_LABEL),
+                    kind="primary",
                     method="LINK", href=reconnect_href(service),
                 ),
             ),
         )
 
 
-def _is_connected(config: "Config", user_id: str, service: str) -> bool:
+def _is_connected(
+    config: "Config", user_id: str, service: str, conn: "sqlite3.Connection",
+) -> bool:
     """Whether the stored credential is usable again.
 
-    Reads the framework DB through the service's own status helper rather than
-    the panel's connection: `secrets_store` opens its own, and it is the only
-    thing that knows how to decrypt. It answers `{}` — and so this answers
-    False — when `ISTOTA_SECRET_KEY` is out of scope, which is the safe
-    direction: an unreadable store leaves the row open rather than closing a
-    warning nobody has acted on.
+    The two credential services read the framework DB through their own status
+    helper rather than through `conn`: `secrets_store` opens its own connection
+    and is the only thing that knows how to decrypt. Both answer False when
+    `ISTOTA_SECRET_KEY` is out of scope, which is the safe direction — an
+    unreadable store leaves the row open rather than closing a warning nobody
+    has acted on.
+
+    **The vault arm uses `conn` instead, and the difference is not a style
+    choice.** What it needs is a plain `istota_kv` row, and opening a second
+    connection to read one — underneath the panel's own, which is mid-sweep —
+    is the thirty-second busy-timeout hazard `.claude/rules/notifications.md`
+    opens with. The two arms above are grandfathered rather than endorsed; a
+    third one that only needs a row should take this one's shape.
     """
     db_path = getattr(config, "db_path", None)
     if db_path is None:
         return False
+    if service == "vault":
+        return _vault_is_working(config, user_id, conn)
     if service == "garmin":
         from ..health import garmin
 
@@ -385,6 +438,46 @@ def _is_connected(config: "Config", user_id: str, service: str) -> bool:
 
         return web_tokens.token_status(db_path, user_id) is not None
     return False
+
+
+def _vault_is_working(
+    config: "Config", user_id: str, conn: "sqlite3.Connection",
+) -> bool:
+    """Whether this user's vault has stopped being a thing to warn about.
+
+    Two ways it has, and they are different facts.
+
+    **The vault is gone**, by either of the two ways an operator switches it
+    off. Removing `vault_path` from `config.toml` is one; setting
+    `scheduler.vault_sync_interval = 0` is the other, and it is the one that is
+    easy to miss because the config line stays where it was. Both leave nothing
+    that would ever settle another outcome for this user, so an open row would
+    stand for the life of the deployment with no surface able to close it. A
+    resolver answering None is what `list_open` reads as "the object is gone",
+    and that backstop is the whole reason it exists — this is the one source
+    where the object is a config line rather than a database row, so its
+    disappearance is invisible to everything else.
+
+    **The last settled cycle succeeded.** `close_for_service` is the primary
+    path and this is behind it, for the case where the close was lost: a busy
+    database, a daemon killed between the apply and the close, or a row raised
+    by a build that predates the close existing at all.
+
+    Everything else is False, which leaves the row open. That is the safe
+    direction and it covers the case that matters most — a record this cannot
+    parse, or none at all, must not read as recovery.
+    """
+    from .. import secrets_vault
+
+    user = getattr(config, "users", {}).get(user_id)
+    if not (getattr(user, "vault_path", "") or "").strip():
+        return True
+    if not secrets_vault.sync_is_scheduled(config):
+        return True
+    record = secrets_vault.read_sync_state(conn, user_id)
+    if not record:
+        return False
+    return record.get("outcome") == secrets_vault.OUTCOME_OK
 
 
 RESOLVER = ConnectedServiceResolver()

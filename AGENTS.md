@@ -88,6 +88,7 @@ src/istota/
 ├── du.py                 # Du-style tree measurement and the first-level directory scan → leaf-modules.md
 ├── rclone_client.py      # The rclone API `storage` and the files skill each had a copy of → leaf-modules.md
 ├── secrets_store.py      # Encrypted credential store (Fernet via scrypt-derived key)
+├── secrets_vault.py      # A user's KDBX credential vault: read, mapped, and applied to the secrets table; never written
 ├── secret_schema.py      # Shared service/key schema for `istota secret` CLI + web UI
 ├── google_scopes.py      # The Google service ↔ OAuth scope table, bounded by the operator's configured ceiling
 ├── modules.py            # MODULE_NAMES (feeds, money, location, health, briefings) + EXPERIMENTAL_MODULES (empty)

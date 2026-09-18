@@ -31,6 +31,10 @@ class _FakeArgs:
             "service": None,
             "key": None,
             "value": None,
+            # Defaulted here rather than read with `getattr` in `cmd_secret`,
+            # which would hide a flag the parser stopped declaring.
+            "generate": False,
+            "force": False,
         }
         defaults.update(kwargs)
         self.__dict__.update(defaults)

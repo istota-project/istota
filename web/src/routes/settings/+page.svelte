@@ -1,10 +1,18 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
+  // The tree's own date rendering. A local `toLocaleString` here was a second
+  // copy of it, and `dateFormat.test.ts`'s drift guard is what said so — by
+  // name, in the default suite. `formatRelative` rather than `formatDateTime`:
+  // this stamp answers "is it keeping up", which a relative reading says
+  // directly, and it falls back to an absolute date past its own threshold for
+  // the vault nobody has edited in a month.
+  import { formatRelative } from '$lib/dateFormat';
   import {
     getSettingsServices,
     getModules,
     getProfile,
+    getVaultStatus,
     updateProfile,
     disconnectNextcloudToken,
     AuthError,
@@ -14,6 +22,7 @@
     type ServiceCard as ServiceCardData,
     type UserProfile,
     type NextcloudTokenStatus,
+    type VaultStatus,
   } from '$lib/api';
   import { normalizeExternalTurnDisplay } from '$lib/stores/externalTurns';
   import {
@@ -63,6 +72,11 @@
   // null = operator hasn't enabled encrypted token storage → no card.
   let ncToken: NextcloudTokenStatus | null = $state(null);
   let ncTokenBusy = $state(false);
+  // null = this user has no credential vault, which is the default for
+  // everyone, and also what an unreachable endpoint resolves to. Both render
+  // nothing: a heading that always says something is a heading every user has
+  // to read past.
+  let vault: VaultStatus | null = $state(null);
 
   // Full IANA timezone list from the browser (no hardcoded list / extra dep).
   // Older engines may not implement supportedValuesOf — fall back to UTC.
@@ -229,6 +243,33 @@
       error = (e as Error).message || 'Failed to load settings';
     } finally {
       loading = false;
+    }
+    // Outside the `Promise.all` and outside the try, deliberately. The vault is
+    // an optional per-user feature nobody has by default, so a deployment where
+    // this endpoint is unreachable, slow or answering an error must not be a
+    // settings page that fails to load — the cards it governs are the page's
+    // actual content. Failure leaves `vault` null, which renders nothing, which
+    // is the same as the ordinary unconfigured case.
+    await refreshVault();
+  }
+
+  // The failing sentence, or empty when the vault is working. Computed by the
+  // server: the precedence between a live finding and a recorded one is a rule,
+  // and restating it here was a second copy of it — one that compared against
+  // the literal `'ok'`, hardcoding a Python constant in TypeScript with nothing
+  // holding the two in step.
+  // `.by` rather than the expression form: a bare `$derived(vault?.problem)` is
+  // narrowed by control-flow analysis to the `null` the state was initialised
+  // with, since every assignment to `vault` is further down the file. The
+  // closure defers the read and keeps the declared type.
+  let vaultProblem = $derived.by(() => vault?.problem ?? '');
+
+  async function refreshVault() {
+    try {
+      const status = await getVaultStatus();
+      vault = status && status.configured ? status : null;
+    } catch {
+      vault = null;
     }
   }
 
@@ -899,6 +940,48 @@
           <a href="{base}/money/settings">money</a>,
           <a href="{base}/location/settings">location</a>).
         </p>
+        <!--
+          The vault goes on the heading rather than in the list of cards below
+          it, and nothing on it is writable. It is not a connected service —
+          every other entry there is a credential *for* something, and this is
+          the source those credentials come from, so a card among them would
+          make it a peer of the things whose fields it has just disabled. It is
+          also the referent the disabled-field sentence needs, which has to be
+          visible from every card that shows one: a heading is above all of
+          them where a sibling card is not.
+
+          Rendered only when there is a vault. Most deployments give nobody one.
+        -->
+        {#if vault}
+          <p class="hint vault" data-testid="vault-status">
+            <strong>Credential vault:</strong>
+            {#if vault.owned && vault.owned.length > 0}
+              this file is the authority for
+              {#each vault.owned as name, i (name)}{#if i > 0},
+                {/if}<code>{name}</code>{/each}.
+            {:else}
+              no services are assigned to it yet.
+            {/if}
+            {#if vault.path}
+              It is read from <code>{vault.path}</code>, never written.
+            {/if}
+            {#if vaultProblem}
+              <span class="vault-problem">Not working: {vaultProblem}</span>
+            {:else if vault.last_success_at}
+              <!--
+                "applied", not "synced". Istota re-reads the file only when its
+                bytes change, so a vault nobody has edited for three weeks
+                reports a three-week-old timestamp and is working perfectly —
+                calling that "last synced" reads as staleness and sends a user
+                looking for a fault that is not there.
+              -->
+              Istota last applied it {formatRelative(vault.last_success_at)}, and re-reads it
+              whenever the file changes.
+            {:else}
+              Nothing has been applied from it yet.
+            {/if}
+          </p>
+        {/if}
       </div>
     {/if}
 
@@ -1002,5 +1085,29 @@
   .module-chip input[type='checkbox'] {
     margin: 0;
     width: auto;
+  }
+
+  /* A second paragraph under the same heading, separated from the first rather
+     than styled apart from it: it is the same kind of statement about the same
+     card list. `.hint` carries the size and colour. */
+  .vault {
+    margin-top: var(--space-2);
+  }
+
+  .vault code {
+    background: var(--surface-raised);
+    padding: 0 var(--space-1);
+    border-radius: var(--radius-sm);
+    font-size: 0.9em;
+    color: var(--text-muted);
+    /* A resolved filesystem path has no break opportunities of its own, so on a
+       phone it would otherwise push the whole heading block sideways. */
+    overflow-wrap: anywhere;
+  }
+
+  /* The one part of this paragraph that is not neutral prose. Colour alone
+     would not carry it — the sentence says "Not working" in words. */
+  .vault-problem {
+    color: var(--status-warn-fg);
   }
 </style>

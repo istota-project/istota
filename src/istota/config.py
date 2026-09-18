@@ -344,6 +344,14 @@ class SchedulerConfig:
     # it: the two answer the same disk, and a cache that went over its ceiling
     # is not urgent — it is over budget, not broken.
     sandbox_cache_sweep_interval: int = 21600
+    # Seconds between KDBX credential-vault syncs (0 = off; the gate is also
+    # inert unless some user has a `vault_path`). Startup alone is not enough —
+    # a user edits their vault at 3pm and nothing happens until the next restart
+    # — and five minutes is chosen against the rclone dir-cache lag, which adds
+    # its own delay on top; a shorter interval mostly buys more `stat` calls. A
+    # cycle whose digest is unchanged stops at the hash, so the steady-state
+    # cost is one bounded read per user rather than an Argon2id unlock.
+    vault_sync_interval: int = 300
     # Seconds between Nextcloud profile-picture import ticks (0 = off). Six
     # hours, and the number is a compromise the spec names rather than a round
     # figure: the import runs on a cadence rather than at login (a 10-second
@@ -724,6 +732,23 @@ class UserConfig:
     default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
     timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
+    # The KDBX credential vault. Empty `vault_path` means the feature is off for
+    # this user, which is every user by default; a relative path resolves under
+    # `{workspace}/Users/{user_id}` and an absolute one must resolve outside
+    # `workspace_path` entirely (`storage.resolve_user_vault_path`).
+    # `vault_services` is the services the file owns — empty is a usable dry-run
+    # state, since the vault is then read and nothing is applied.
+    #
+    # **TOML-only, and that is a security control rather than a placement.**
+    # Every other per-user scalar above is overlaid from `user_profiles` by
+    # `_apply_user_profiles`, and that table is writable from the settings UI.
+    # `vault_path` selects which file the daemon decrypts with a key it holds
+    # and `vault_services` selects which credentials that file may overwrite and
+    # delete, so neither may be settable by anything downstream of a task.
+    # `tests/test_secrets_vault.py::TestTheProfileTableGuard` holds the absence
+    # from both the column set and the overlay.
+    vault_path: str = ""
+    vault_services: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2738,7 +2763,64 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
         timezone_follow_location=bool(
             user_data.get("timezone_follow_location", False)
         ),
+        vault_path=_vault_path_value(user_id, user_data.get("vault_path", "")),
+        vault_services=_vault_services_value(
+            user_id, user_data.get("vault_services", [])
+        ),
     )
+
+
+def _vault_path_value(user_id: str, raw: object) -> str:
+    """``vault_path`` as a string, or ``""`` with a warning.
+
+    Coerced rather than taken raw because this is the value
+    ``storage.resolve_user_vault_path`` builds a ``Path`` from, and ``Path(7)``
+    raises ``TypeError`` out of a resolver whose contract is that it never
+    raises. Not stripped: the resolver reads a blank-but-present value as
+    unconfigured on its own, and a path with meaningful surrounding whitespace
+    is not this function's to rewrite.
+    """
+    if isinstance(raw, str):
+        return raw
+    if raw in (None, ""):
+        return ""
+    logging.getLogger("istota.config").warning(
+        "[users.%s] vault_path is not a string (%s); the vault is off for this "
+        "user", user_id, type(raw).__name__,
+    )
+    return ""
+
+
+def _vault_services_value(user_id: str, raw: object) -> list[str]:
+    """``vault_services`` as a list of stripped names, or ``[]`` with a warning.
+
+    A bare string is the case worth the guard: ``vault_services = "karakeep"``
+    is TOML somebody will write, and it *iterates*, so without this it becomes
+    eight one-letter services — each of them a name the eligibility filter then
+    refuses on its own line, about a service nobody wrote.
+
+    Eligibility is a separate pass (:func:`_validate_vault_services`), which
+    runs after the user table is assembled. This one is only about the shape.
+    """
+    log = logging.getLogger("istota.config")
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        if raw not in (None, [], ()):
+            log.warning(
+                "[users.%s] vault_services is not a list of service names (%s); "
+                "the vault owns nothing for this user",
+                user_id, type(raw).__name__,
+            )
+        return []
+    names: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            log.warning(
+                "[users.%s] vault_services entry is not a service name (%s), "
+                "dropped", user_id, type(entry).__name__,
+            )
+            continue
+        names.append(entry.strip())
+    return names
 
 
 #: What a `shim_commands` entry may look like. A shim's name becomes a filename
@@ -4261,8 +4343,83 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_sms(config)
     _validate_whatsapp(config)
     _validate_forge_clis(config)
+    _validate_vault_services(config)
 
     return config
+
+
+def _validate_vault_services(config: "Config") -> None:
+    """Drop every ``vault_services`` name a vault may not own, with a warning.
+
+    Dropped rather than raised. §4's rule is that a config refusing to boot
+    because a module was disabled is worse than one telling the operator which
+    line is inert, and it holds with more force here than usual: ``load_config``
+    runs in the scheduler, the web app, the webhook receiver and every
+    host-side skill CLI the proxy spawns per call, so a name that stopped being
+    eligible would stop all of them.
+
+    **Not the boundary.** ``apply_vault`` refuses the same names again on its
+    own terms, against the set it is handed, and that is what actually stops a
+    write. This is what makes the refusal visible at the moment somebody could
+    act on it — a name dropped here is a line in the boot log, where a name
+    dropped only at apply time is a ``skipped`` triple inside a background gate
+    on a five-minute interval.
+
+    One predicate, asked rather than restated: ``secrets_vault.service_refusal``
+    is the same rule ``apply_vault`` applies, so the two cannot drift into
+    telling the operator a line is live and then refusing it. The import is
+    function-scoped — ``secrets_vault`` pulls ``secret_schema`` and
+    ``secrets_store``, and this module is imported by everything — and the loop
+    skips a user with nothing configured, so a deployment with no vault pays
+    neither the import nor the schema walk.
+    """
+    configured = [
+        (user_id, user)
+        for user_id, user in config.users.items()
+        if getattr(user, "vault_services", None)
+    ]
+    if not configured:
+        return
+    try:
+        from .secrets_vault import (  # noqa: PLC0415 - import cost
+            eligible_services,
+            service_refusal,
+        )
+        # Hoisted out of the loop below: it is a walk over the whole secret
+        # schema, and `service_refusal`'s own docstring says a caller asking
+        # about several names should pass it rather than rebuild it per name.
+        eligible = eligible_services()
+    except Exception:  # pragma: no cover - defensive; never fail config load
+        logger.warning(
+            "vault service eligibility could not be checked; the entries load "
+            "as written and are refused at sync time", exc_info=True,
+        )
+        return
+
+    for user_id, user in configured:
+        kept: list[str] = []
+        for service in user.vault_services:
+            # `_vault_services_value` guarantees `list[str]` on the TOML path
+            # and nothing else writes this field, so the type test is defence
+            # behind that rather than a case with a producer. It earns its line
+            # anyway: `_service_refusal` calls `.startswith`, and an
+            # `AttributeError` escaping here fails `load_config` in the
+            # scheduler, the web app, the webhook receiver and every host-side
+            # skill CLI the proxy spawns — the blast radius this function drops
+            # rather than raises to avoid. Past it the call cannot raise: a
+            # prefix test and a set membership over in-tree constants.
+            if not isinstance(service, str) or not service:
+                reason = "not a service name"
+            else:
+                reason = service_refusal(service, eligible)
+            if reason is None:
+                kept.append(service)
+                continue
+            logger.warning(
+                "[users.%s] vault_services entry %r dropped: %s",
+                user_id, service, reason,
+            )
+        user.vault_services = kept
 
 
 SMS_PROVIDER_NAMES = ("twilio", "telnyx")

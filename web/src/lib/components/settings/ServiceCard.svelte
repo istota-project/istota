@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { base } from '$app/paths';
   import { ConfirmDialog } from '$lib/components/ui';
   import { setSecret, deleteSecret, type ServiceCard as ServiceCardData } from '$lib/api';
   import { useSettingsSave } from '$lib/stores/settingsSave.svelte';
@@ -86,12 +87,22 @@
     }
   }
 
+  // The user's credential vault owns this service, so the fields here are not
+  // where it is edited. The server refuses a write with a 409 either way — this
+  // is what stops somebody typing a value into a form that was never going to
+  // take it, which is the failure the disabled state exists to prevent rather
+  // than the boundary.
+  let vaultManaged = $derived(service.vault_managed === true);
+
   // The credential fields are part of the page's state, not a form of their
   // own, so they save from the app bar with everything else. A service with no
-  // writable fields withdraws and leaves the button to the rest of the page.
+  // writable fields withdraws and leaves the button to the rest of the page,
+  // and a vault-managed one has none it can write.
   // Clearing a stored secret stays an immediate, separately confirmed action:
   // it is a deletion, not an edit awaiting a save.
-  useSettingsSave(() => (service.fields.length > 0 ? { dirty, saving, save: saveAll } : null));
+  useSettingsSave(() =>
+    service.fields.length > 0 && !vaultManaged ? { dirty, saving, save: saveAll } : null,
+  );
 </script>
 
 <section class="card" data-status={service.status}>
@@ -138,15 +149,38 @@
   {#if service.fields.length === 0}
     <p class="empty">No settings for this service.</p>
   {:else}
+    {#if vaultManaged}
+      <!--
+        Above the fields rather than below them: it is the reason they are
+        disabled, and a reader who meets a greyed-out input first has to hunt
+        for the explanation.
+
+        Self-contained, and that is a correction rather than the original
+        design. The first version leaned on the "Connected services" heading
+        for its referent — which file, and where — on the ground that the
+        heading sits above every card showing this. It does not: this component
+        also renders on the feeds, location and money settings pages, which have
+        no such heading, and `feeds` and `carto` are two of the five services a
+        vault may own. So the two services most likely to show this sentence
+        were exactly the two with nothing to read it against. The link carries
+        the referent everywhere; on /settings it points at the page already
+        open, where the heading answers it in place.
+      -->
+      <p class="hint vault-managed">
+        These credentials come from your credential vault, so they are not edited here — change them
+        in the vault file. Its path and sync status are under Connected services in
+        <a href="{base}/settings">Settings</a>.
+      </p>
+    {/if}
     {#each service.fields as f (f.key)}
       <SecretField
         label={f.label}
         type={f.type}
         configured={service.configured_keys.includes(f.key)}
         value={pending[f.key] ?? ''}
-        disabled={saving}
+        disabled={saving || vaultManaged}
         onValueChange={(v) => setFieldValue(f.key, v)}
-        onRequestClear={() => (confirmingClearKey = f.key)}
+        onRequestClear={vaultManaged ? undefined : () => (confirmingClearKey = f.key)}
       />
     {/each}
     {#if saveError}
@@ -192,5 +226,11 @@
   .saved-flash {
     font-size: var(--text-xs);
     color: var(--status-success-fg);
+  }
+
+  /* `.hint` carries the size and colour; this only keeps the sentence off the
+     first field, which has no margin of its own above it. */
+  .vault-managed {
+    margin-bottom: var(--space-1);
   }
 </style>

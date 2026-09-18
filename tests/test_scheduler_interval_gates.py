@@ -36,6 +36,7 @@ from istota.config import (
     NextcloudConfig,
     SchedulerConfig,
     SecurityConfig,
+    UserConfig,
     WebConfig,
 )
 from istota.scheduler import (
@@ -74,6 +75,7 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     # clock-bypass reason. See `tests/test_whatsapp_pairing_poll.py`.
     ("whatsapp-pairing", None),
     ("skill-overlay-reindex", "skill_overlay_reindex_interval"),
+    ("vault-sync", "vault_sync_interval"),
     ("db-backup", "db_backup_interval"),
     ("backup-stale-alert", None),
     ("scheduler-stats", "scheduler_stats_interval"),
@@ -105,6 +107,7 @@ EXPECTED_BACKGROUND = {
     "sandbox-cache-sweep",
     "avatar-import",
     "skill-overlay-reindex",
+    "vault-sync",
     "db-backup",
     "heartbeats",
 }
@@ -126,6 +129,7 @@ EXPECTED_ONE_SHOT = [
     "email-poll",
     "shared-files",
     "tasks-file-poll",
+    "vault-sync",
     "heartbeats",
 ]
 
@@ -212,11 +216,23 @@ class TestTheDispatchShape:
 class TestTheClockSeeds:
     def test_most_gates_are_due_on_the_first_tick(self):
         config = Config()
-        seeded_elsewhere = {"doctor", "scheduler-stats", "db-backup"}
+        seeded_elsewhere = {"doctor", "scheduler-stats", "db-backup", "vault-sync"}
         for gate in _gates(config):
             if gate.name in seeded_elsewhere:
                 continue
             assert gate.seed(config) == 0.0, gate.name
+
+    def test_the_vault_sync_clock_starts_at_now(self):
+        """Seeded to now, not 0, and for the doctor gate's reason rather than
+        the stats gate's: `run_daemon` has already run one `sync_all`
+        synchronously before the loop starts, so an epoch seed makes the first
+        tick a second pass half a second later — a wasted read for a user whose
+        digest is cached, and a second Argon2id derivation for one whose vault is
+        locked, since that class deliberately caches nothing."""
+        config = Config()
+        before = time.time()
+        seeded = _by_name(config)["vault-sync"].seed(config)
+        assert before <= seeded <= time.time()
 
     def test_the_doctor_and_stats_clocks_start_at_now(self):
         """Seeded to now, not 0. The boot doctor run already swept, and a stats
@@ -352,6 +368,51 @@ class TestTheEnablingConditions:
         no_interval = _config()
         no_interval.scheduler.avatar_import_interval = 0
         assert gate.enabled(no_interval) is False
+
+    def test_vault_sync_is_off_until_some_user_configures_one(self):
+        """The feature is off for every user until an operator turns it on, and
+        the gate is what makes that cost nothing: with no `vault_path` anywhere
+        the cycle is not merely a no-op, it does not run at all."""
+        gate = _by_name()["vault-sync"]
+
+        def _config(**users):
+            return Config(
+                users=dict(users),
+                scheduler=SchedulerConfig(vault_sync_interval=60),
+            )
+
+        assert gate.enabled(_config()) is False
+        assert gate.enabled(_config(alice=UserConfig())) is False
+        assert gate.enabled(_config(alice=UserConfig(vault_path="v.kdbx"))) is True
+        # One configured user is enough; the others are simply skipped inside.
+        mixed = _config(alice=UserConfig(), bob=UserConfig(vault_path="v.kdbx"))
+        assert gate.enabled(mixed) is True
+        no_interval = _config(alice=UserConfig(vault_path="v.kdbx"))
+        no_interval.scheduler.vault_sync_interval = 0
+        assert gate.enabled(no_interval) is False
+
+    def test_the_startup_call_and_the_gate_read_one_predicate(self):
+        """The pass deletes rows, so `vault_sync_interval = 0` has to mean off
+        on both triggers. The gate carried the `bool(interval)` term while the
+        startup `sync_all` was unconditional, which left an operator who had
+        switched the feature off getting one full apply per daemon restart."""
+        assert _by_name()["vault-sync"].enabled is sched.vault_sync_enabled
+
+    def test_a_negative_interval_does_not_run_the_gate_every_tick(self):
+        """`bool(-1)` is truthy and `_tick_interval_gates` bypasses the clock
+        for any non-positive interval — that branch exists for
+        `backup-stale-alert`'s deliberate every-tick shape."""
+        config = Config(
+            users={"alice": UserConfig(vault_path="v.kdbx")},
+            scheduler=SchedulerConfig(vault_sync_interval=-1),
+        )
+        assert _by_name()["vault-sync"].enabled(config) is False
+
+    def test_vault_sync_reads_its_interval_from_the_config_field(self):
+        gate = _by_name()["vault-sync"]
+        config = Config(scheduler=SchedulerConfig(vault_sync_interval=900))
+        assert gate.field == "vault_sync_interval"
+        assert gate.interval(config) == 900
 
     def test_overlay_reindex_needs_memory_search_and_a_mount(self, tmp_path):
         gate = _by_name()["skill-overlay-reindex"]
@@ -684,6 +745,7 @@ class TestTheOneShotRunner:
         config = Config()
         config.location.enabled = True
         config.email.enabled = True
+        config.users = {"alice": UserConfig(vault_path="vault.kdbx")}
         _run_interval_gates_once(_recorded_table(config, order), config)
         assert order == EXPECTED_ONE_SHOT
 
@@ -694,7 +756,9 @@ class TestTheOneShotRunner:
         config.email.enabled = False
         _run_interval_gates_once(_recorded_table(config, order), config)
         assert order == [
-            n for n in EXPECTED_ONE_SHOT if n not in {"travel-timezone", "email-poll"}
+            n
+            for n in EXPECTED_ONE_SHOT
+            if n not in {"travel-timezone", "email-poll", "vault-sync"}
         ]
 
     def test_it_never_backgrounds(self, monkeypatch):

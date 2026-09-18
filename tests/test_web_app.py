@@ -2565,6 +2565,604 @@ class TestSettingsEndpoints:
 
 
 @_needs_web_deps
+class TestVaultOwnedServices:
+    """§9: the web tier is the last writer a vault-owned key still had.
+
+    §6 claims vault-wins without a reconciliation loop, and the whole of that
+    claim is that no other writer is left: `DAEMON_WRITTEN_SERVICES` removes the
+    rotating services, open question 3 removes `istota secret ensure`, and these
+    two routes are the third. A write that gets through here does **not** get
+    reverted five minutes later — the file is untouched, so the digest is
+    unchanged, the cycle short-circuits before parsing, and the value stands
+    indefinitely against the file the user believes is authoritative. That is a
+    permanent silent divergence, which is why this is a refusal rather than a
+    disabled input, and why the disabled input alone would not do: the input is
+    a courtesy and the 409 is the boundary.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _secret_key(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "vault-web.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _vault_config(self, tmp_path, *, services):
+        """Alice owns `services` through a vault whose path resolves.
+
+        The directory has to exist — `resolve_user_vault_path` walks the
+        components above the leaf with `O_NOFOLLOW | O_DIRECTORY` — but the KDBX
+        itself does not: ownership is "declared **and** the path resolves", and
+        the leaf is never opened to answer that. So this fixture deliberately
+        writes no file, which also keeps the test off `pykeepass`.
+        """
+        mount = tmp_path / "vaultmount"
+        (mount / "Users" / "alice" / "config").mkdir(parents=True, exist_ok=True)
+        cfg = _make_config(
+            tmp_path,
+            mount_path=str(mount),
+            users={
+                "alice": UserConfig(
+                    display_name="Alice",
+                    vault_path="config/vault.kdbx",
+                    vault_services=list(services),
+                ),
+                "bob": UserConfig(display_name="Bob"),
+            },
+        )
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login_alice(self, client, app):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": "alice",
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    async def test_put_on_a_vault_owned_service_is_refused(
+        self, tmp_path, client, app,
+    ):
+        from istota import secrets_store
+
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.put(
+            "/istota/api/settings/secrets/karakeep/api_key",
+            json={"value": "typed-into-the-form"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "vault" in detail.lower()
+        # The refusal has to be a refusal. A 409 whose write already landed is
+        # the defect wearing a label.
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "karakeep", "api_key",
+        ) is None
+
+    async def test_delete_on_a_vault_owned_service_is_refused(
+        self, tmp_path, client, app,
+    ):
+        """DELETE is the half that is easy to forget and is the same divergence.
+
+        `set_secret` reads an empty value as a deletion, so a DELETE that got
+        through would leave the table without a row the vault file still holds —
+        and nothing would put it back until the file next moved.
+        """
+        from istota import secrets_store
+
+        secrets_store.set_secret(
+            self._db_path, "alice", "karakeep", "api_key", "already-stored",
+        )
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.delete(
+            "/istota/api/settings/secrets/karakeep/api_key",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        assert resp.status_code == 409
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "karakeep", "api_key",
+        ) == "already-stored"
+
+    async def test_a_service_the_vault_does_not_own_still_writes(
+        self, tmp_path, client, app,
+    ):
+        """The control. Without it the refusal could be refusing everything."""
+        from istota import secrets_store
+
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.put(
+            "/istota/api/settings/secrets/monarch/session_id",
+            json={"value": "SID-alice"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        assert resp.status_code == 200
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "monarch", "session_id",
+        ) == "SID-alice"
+
+    async def test_a_user_with_no_vault_is_unaffected(self, tmp_path, client, app):
+        """Ownership is per user, and the refusal has to be too.
+
+        Bob declares no vault, so karakeep is his to write even while alice's
+        vault owns the same service name.
+        """
+        import istota.web_app as mod
+        from istota import secrets_store
+
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": "bob",
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        cookies = resp.cookies
+
+        resp = await client.put(
+            "/istota/api/settings/secrets/karakeep/api_key",
+            json={"value": "bobs-own-key"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        assert resp.status_code == 200
+        assert secrets_store.get_secret(
+            self._db_path, "bob", "karakeep", "api_key",
+        ) == "bobs-own-key"
+
+    async def test_a_declared_service_whose_path_does_not_resolve_owns_nothing(
+        self, tmp_path, client, app,
+    ):
+        """A configured line that does not work is not an authority.
+
+        Refusing an operator's write on the strength of a `vault_path` that
+        resolves to nothing is a refusal with no remedy behind it — the file
+        they would be told to edit is one the daemon cannot read either.
+        """
+        from istota import secrets_store
+
+        cfg = self._vault_config(tmp_path, services=["karakeep"])
+        cfg.users["alice"].vault_path = "no-such-dir/vault.kdbx"
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.put(
+            "/istota/api/settings/secrets/karakeep/api_key",
+            json={"value": "still-writable"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        assert resp.status_code == 200
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "karakeep", "api_key",
+        ) == "still-writable"
+
+    async def test_an_unknown_key_on_an_owned_service_is_the_409(
+        self, tmp_path, client, app,
+    ):
+        """The ordering the gate's docstring states and nothing was driving.
+
+        409 sits between the unknown-service 404 and the unknown-key 400: the
+        whole service is refused, so which key was named does not matter. Moving
+        the call three lines down would leave every other test in this class
+        green while turning the stated contract false — on the class the change
+        itself calls the boundary.
+        """
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+
+        put = await client.put(
+            "/istota/api/settings/secrets/karakeep/not_a_declared_key",
+            json={"value": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert put.status_code == 409
+
+        delete = await client.delete(
+            "/istota/api/settings/secrets/karakeep/not_a_declared_key",
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert delete.status_code == 409
+
+    async def test_an_unresolvable_answer_refuses_the_write(
+        self, tmp_path, client, app, monkeypatch,
+    ):
+        """The gate fails closed, which is the opposite of the card's rule.
+
+        `_vault_owned_services` answers `None` when it could not settle the
+        question at all. Whether a service is vault-owned is exactly what
+        decides this write, so an unresolvable answer must not become
+        permission — this is the last writer §6's "no other writer is left"
+        argument depends on closing, and a defect-only exception path that
+        quietly opens it is the worst kind.
+        """
+        import istota.web_app as mod
+        from istota import secrets_store
+
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+        monkeypatch.setattr(mod, "_vault_owned_services", lambda username: None)
+
+        resp = await client.put(
+            "/istota/api/settings/secrets/karakeep/api_key",
+            json={"value": "should-not-land"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+
+        assert resp.status_code == 503
+        assert secrets_store.get_secret(
+            self._db_path, "alice", "karakeep", "api_key",
+        ) is None
+
+    async def test_an_unresolvable_answer_still_renders_the_cards(
+        self, tmp_path, client, app, monkeypatch,
+    ):
+        """And the card path takes the opposite branch, deliberately.
+
+        A settings page must render for a user whose vault line is broken. The
+        cost of answering "no flag" there is an editable form the 409 then
+        refuses, which is an irritation; the cost of the gate guessing is a
+        credential written against a file that owns it.
+        """
+        import istota.web_app as mod
+
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+        monkeypatch.setattr(mod, "_vault_owned_services", lambda username: None)
+
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        assert resp.status_code == 200
+        cards = {c["service"]: c for c in resp.json()["services"]}
+        assert cards["karakeep"]["vault_managed"] is False
+
+    async def test_an_unknown_service_is_still_a_404(self, tmp_path, client, app):
+        """Ordering: the service lookup answers before the vault gate.
+
+        A name that is in no schema cannot be vault-owned — `vault_services` is
+        filtered to eligible services at config load, and eligibility starts
+        from the schema — so a 409 here would be answering about a service that
+        does not exist.
+        """
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.put(
+            "/istota/api/settings/secrets/bogus/api_key",
+            json={"value": "x"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 404
+
+    async def test_the_card_says_the_vault_manages_it(self, tmp_path, client, app):
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.get("/istota/api/settings/services", cookies=cookies)
+        assert resp.status_code == 200
+        cards = {c["service"]: c for c in resp.json()["services"]}
+        assert cards["karakeep"]["vault_managed"] is True
+
+    async def test_a_card_for_an_unowned_service_is_not_managed(
+        self, tmp_path, client, app,
+    ):
+        """Every card carries the flag, so the control is a card saying False.
+
+        A missing key and a False one render identically in Svelte, so asserting
+        only the True case would pass against a card that never carried it.
+        """
+        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.get(
+            "/istota/api/settings/module-services/money", cookies=cookies,
+        )
+        cards = {c["service"]: c for c in resp.json()["services"]}
+        assert cards["monarch"]["vault_managed"] is False
+
+    async def test_a_module_card_carries_the_flag_too(self, tmp_path, client, app):
+        """`_build_service_card` is one place, and both endpoints go through it.
+
+        `feeds` and `carto` are eligible and live on module pages, so a flag
+        computed in `/settings/services` alone would leave two of the five
+        owned services with an editable form.
+        """
+        _patch_app(self._vault_config(tmp_path, services=["feeds"]))
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.get(
+            "/istota/api/settings/module-services/feeds", cookies=cookies,
+        )
+        cards = {c["service"]: c for c in resp.json()["services"]}
+        assert cards["feeds"]["vault_managed"] is True
+
+
+@_needs_web_deps
+class TestTheVaultSettingsEndpoint:
+    """§9's read-only status, which is the only place a user can see their vault.
+
+    `admin_config_view` excludes `users` from its walk and reports a count, so
+    no other web surface shows an operator or a user the resolved `vault_path`
+    at all — `doctor` and `istota secret vault-status` are both host-shell tools.
+    That is what makes this part of §8's answer rather than a nicety on top of
+    it: the notification is what reaches them, and this is where they look once
+    it has.
+
+    Two properties carry the class. It **does not open the file**, which is not
+    an optimisation — an Argon2id unlock inside a FastAPI handler is a second of
+    the web process's event loop per settings load, and none of what the heading
+    shows needs one. And it **never carries a value**, which is asserted by
+    sweeping the whole response rather than by naming fields, so a field added
+    later is covered without the sweep being updated.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _secret_key(self, monkeypatch, tmp_path):
+        from istota import db
+        db_path = tmp_path / "vault-endpoint.db"
+        db.init_db(db_path)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
+        self._db_path = db_path
+
+    def _config(self, tmp_path, *, vault_path="config/vault.kdbx", services=("karakeep",)):
+        mount = tmp_path / "vaultmount"
+        (mount / "Users" / "alice" / "config").mkdir(parents=True, exist_ok=True)
+        cfg = _make_config(
+            tmp_path,
+            mount_path=str(mount),
+            users={
+                "alice": UserConfig(
+                    display_name="Alice",
+                    vault_path=vault_path,
+                    vault_services=list(services),
+                ),
+            },
+        )
+        cfg.db_path = self._db_path
+        return cfg
+
+    async def _login_alice(self, client, app):
+        import istota.web_app as mod
+        mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
+            "user_id": "alice",
+        })
+        resp = await client.get("/istota/callback", follow_redirects=False)
+        return resp.cookies
+
+    def _record(self, outcome, reason=""):
+        """Stand in for a sync the scheduler ran in another process.
+
+        Which is the whole point of the durable record: under the Ansible shape
+        the web unit is not the scheduler unit, so this is the only way the fact
+        crosses. Writing it directly also keeps this class off `pykeepass`.
+        """
+        from istota import db, secrets_vault
+
+        with db.get_db(self._db_path) as conn:
+            db.kv_set(
+                conn, "alice",
+                secrets_vault.VAULT_SYNC_STATE_NAMESPACE,
+                secrets_vault.VAULT_SYNC_STATE_KEY,
+                secrets_vault.encode_sync_state(
+                    outcome, reason, now="2026-09-17T10:00:00Z", previous=None,
+                ),
+            )
+
+    async def test_an_unconfigured_user_gets_a_bare_no(self, tmp_path, client, app):
+        """The default for everyone, and the shape the page renders nothing for.
+
+        A heading that always says something is a heading every user has to read
+        past, so this answer has to be distinguishable at a glance rather than by
+        inspecting fields that happen to be empty.
+        """
+        cfg = _make_config(tmp_path, users={"alice": UserConfig(display_name="Alice")})
+        cfg.db_path = self._db_path
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.get("/istota/api/settings/vault", cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json() == {"configured": False}
+
+    async def test_a_configured_user_gets_the_path_and_the_owned_set(
+        self, tmp_path, client, app,
+    ):
+        from istota import secrets_store
+
+        secrets_store.set_secret(
+            self._db_path, "alice", "vault", "passphrase", "x" * 40,
+        )
+        _patch_app(self._config(tmp_path))
+        cookies = await self._login_alice(client, app)
+
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+
+        assert body["configured"] is True
+        assert body["path"].endswith("Users/alice/config/vault.kdbx")
+        assert body["owned"] == ["karakeep"]
+        assert body["passphrase_present"] is True
+
+    async def test_it_reports_the_last_successful_sync_from_the_record(
+        self, tmp_path, client, app,
+    ):
+        """`_SYNC_STATE` is per-process and this process never runs a sync."""
+        from istota.secrets_vault import OUTCOME_OK
+
+        self._record(OUTCOME_OK)
+        _patch_app(self._config(tmp_path))
+        cookies = await self._login_alice(client, app)
+
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+
+        assert body["last_success_at"] == "2026-09-17T10:00:00Z"
+        assert body["last_outcome"] == OUTCOME_OK
+        # A working vault has no verdict to render, which is what makes the
+        # heading say nothing alarming rather than saying "ok".
+        assert body["problem"] == ""
+
+    async def test_a_failing_cycle_is_reported_with_its_class_and_sentence(
+        self, tmp_path, client, app,
+    ):
+        """And `last_success_at` survives it, which is the field the heading shows.
+
+        A failure that erased the last-success stamp would make a vault broken
+        for an hour indistinguishable from one that has never worked.
+        """
+        from istota import db, secrets_vault
+
+        self._record(secrets_vault.OUTCOME_OK)
+        with db.get_db(self._db_path) as conn:
+            previous = secrets_vault.read_sync_state(conn, "alice")
+            db.kv_set(
+                conn, "alice",
+                secrets_vault.VAULT_SYNC_STATE_NAMESPACE,
+                secrets_vault.VAULT_SYNC_STATE_KEY,
+                secrets_vault.encode_sync_state(
+                    secrets_vault.VaultLocked.__name__,
+                    secrets_vault.notification_reason(
+                        secrets_vault.VaultLocked.__name__
+                    ),
+                    now="2026-09-17T11:00:00Z",
+                    previous=previous,
+                ),
+            )
+        _patch_app(self._config(tmp_path))
+        cookies = await self._login_alice(client, app)
+
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+
+        assert body["last_outcome"] == "VaultLocked"
+        assert "passphrase does not match" in body["last_reason"]
+        assert body["last_success_at"] == "2026-09-17T10:00:00Z"
+        assert body["last_sync_at"] == "2026-09-17T11:00:00Z"
+        # The rendered verdict, resolved here rather than in the browser: the
+        # precedence between a live finding and a recorded one is a rule, and a
+        # rule restated in TypeScript is a second copy of it.
+        assert "passphrase does not match" in body["problem"]
+
+    async def test_a_refused_path_is_reported_live_rather_than_from_the_record(
+        self, tmp_path, client, app,
+    ):
+        """The one failing state that is about the configuration, not a cycle.
+
+        Reading it out of the record would report a stale refusal after an
+        operator fixed the line, and miss a fresh one they had just introduced.
+        """
+        _patch_app(self._config(tmp_path, vault_path="no-such-dir/vault.kdbx"))
+        cookies = await self._login_alice(client, app)
+
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+
+        assert body["outcome"] == "VaultPathRefused"
+        # One of `storage`'s own VAULT_PATH_* constants: a fixed word from a
+        # code-owned table, which is what makes it the one field here that is
+        # not a NOTIFICATION_REASONS sentence and still safe to publish.
+        assert body["refusal"]
+        assert "config.toml" in body["reason"]
+        # No cycle has run, so the record half is empty — and that is a
+        # different emptiness from the live answer above.
+        assert body["last_outcome"] == ""
+        # The live finding is what the verdict carries.
+        assert "config.toml" in body["problem"]
+
+    async def test_it_does_not_open_the_vault(self, tmp_path, client, app, monkeypatch):
+        """The discriminating assertion, and without it the property is invisible.
+
+        A response built with `parse=True` carries exactly the same fields — the
+        parse only adds group names and key counts, which this endpoint does not
+        return — so nothing else here would go red if somebody dropped the flag
+        and put a one-second key derivation on the web process's event loop.
+        """
+        from istota import secrets_vault
+
+        calls = []
+
+        def refuse(data, passphrase):
+            calls.append(passphrase)
+            raise AssertionError("the settings endpoint must not unlock the vault")
+
+        monkeypatch.setattr(secrets_vault, "parse_vault", refuse)
+        # A real, non-empty file at the configured path, so the read would
+        # succeed and the parse would be reached if one were attempted.
+        cfg = self._config(tmp_path)
+        vault = Path(cfg.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
+        vault.write_bytes(b"not a KeePass database, but forty-odd real bytes")
+        from istota import secrets_store
+        secrets_store.set_secret(
+            self._db_path, "alice", "vault", "passphrase", "x" * 40,
+        )
+        _patch_app(cfg)
+        cookies = await self._login_alice(client, app)
+
+        resp = await client.get("/istota/api/settings/vault", cookies=cookies)
+
+        assert resp.status_code == 200
+        assert calls == []
+        # The payload says so too, which is what lets a renderer tell "the group
+        # list is empty because nothing looked" from "because the file is empty".
+        assert resp.json()["parsed"] is False
+
+    async def test_no_response_carries_a_passphrase_or_a_value(
+        self, tmp_path, client, app,
+    ):
+        """Swept over the whole body rather than field by field.
+
+        A field added to this payload later is covered without anybody
+        remembering to extend the sweep, which is the opposite of how the field
+        list would have to be maintained.
+        """
+        from istota import secrets_store
+
+        passphrase = "endpoint-fixture-passphrase-not-a-real-one"
+        secrets_store.set_secret(
+            self._db_path, "alice", "vault", "passphrase", passphrase,
+        )
+        secrets_store.set_secret(
+            self._db_path, "alice", "karakeep", "api_key", "ak-endpoint-fixture",
+        )
+        self._record("VaultLocked", "the stored passphrase does not match the file")
+        _patch_app(self._config(tmp_path))
+        cookies = await self._login_alice(client, app)
+
+        raw = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).text
+
+        assert passphrase not in raw
+        assert "ak-endpoint-fixture" not in raw
+        assert "test-key" not in raw
+
+    async def test_it_needs_a_session(self, client, app):
+        resp = await client.get("/istota/api/settings/vault")
+        assert resp.status_code in (401, 403)
+
+
+@_needs_web_deps
 class TestGenerateIngestToken:
     """Server-minted ingest token for the location receiver.
 

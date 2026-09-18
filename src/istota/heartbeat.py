@@ -690,6 +690,12 @@ _SELF_CHECK_SKIPPED = (
     "developer.container",
     # Spawns `iptables`.
     "security.devbox_netfilter",
+    # One workspace read, one Fernet decrypt and one Argon2id derivation — about
+    # a second — per configured credential vault, and the decrypt stamps
+    # `last_accessed_at` on that user's passphrase row. Paid per user for an
+    # answer nothing here acts on, which is what this list is for; the four
+    # cheap `security.credential_vault` arms are not skipped and still report.
+    "security.vault_contents",
 )
 
 

@@ -67,6 +67,17 @@ default_destination = "talk"   # talk | email | sms | ntfy | web | surface:chann
 # Where replies to inbound email threads are delivered
 email_reply_routing = "origin+thread"   # origin+thread (default) | origin | thread
 
+# A KeePass (KDBX) file this user maintains, which Istota reads and never
+# writes. Relative resolves under their own workspace directory, so they can
+# edit it from a phone; absolute is a host path and must resolve outside every
+# tree a task sandbox can write. Empty (the default) = off for this user.
+vault_path = "istota/config/vault.kdbx"
+
+# Which services that file owns. The vault is the authority for these,
+# deletions included, so put every key you already hold into the file before
+# adding its service here. Empty = read it and apply nothing (a dry run).
+vault_services = ["karakeep", "ntfy"]
+
 # Purpose-keyed routing table — overrides default_destination per purpose.
 # Purposes: reply, alert, log, briefing, notification
 [users.alice.routing]
@@ -75,6 +86,8 @@ log = "web:<room-token>"       # verbose execution log streamed to a web chat ro
 ```
 
 > ntfy push notifications are **not** a profile field. They live in the encrypted `secrets` table — provision via the web UI (`/istota/settings` → Connected services → ntfy push) or `istota secret ensure --user alice --service ntfy --key topic --value …`.
+
+`vault_path` and `vault_services` are **TOML-only**, and that is a security control rather than an omission. Every other per-user scalar above is overlaid from `user_profiles`, which the settings UI writes; these two are not in that table and no web route sets them. One decides which file the daemon decrypts with a key it holds, and the other decides which credentials that file may overwrite, so neither may be settable by anything downstream of a task. The vault's passphrase is a per-user secret and is CLI-only for its own reason. See [credentials](credentials.md#credential-vault) for the file format, the adoption rule that deletes keys the file does not mention, and why the passphrase has to be generated.
 
 The SMS number is an identity binding, not a delivery address alone. A message from it can create tasks and answer pending SMS confirmations as this user. Set or clear it with `istota user ensure --name alice --sms-number +15551234567` or `--clear-sms-number`; assignments must be exact E.164 numbers and unique across users. See [SMS](../features/sms.md).
 

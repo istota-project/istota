@@ -1079,6 +1079,10 @@ export interface ServiceCard {
   custom_ui?: boolean;
   connected?: boolean; // google_workspace OAuth state
   enabled?: boolean; // google_workspace module flag
+  /** The user's credential vault owns this service, so its fields are not
+   *  editable here — the vault file is the authority and a write would be
+   *  refused with a 409. Present on every card, true on few. */
+  vault_managed?: boolean;
 }
 
 export interface ServicesResponse {
@@ -1087,6 +1091,46 @@ export interface ServicesResponse {
 
 export async function getSettingsServices(): Promise<ServicesResponse> {
   return apiFetch<ServicesResponse>('/settings/services');
+}
+
+// --- Credential vault (read-only) ---
+//
+// The vault has no writing endpoint at all: its two config fields are TOML-only
+// because they decide which file the daemon decrypts and which credentials that
+// file may overwrite, and the passphrase is CLI-only because it has to be
+// generated rather than chosen. This is the only surface that shows a user their
+// own vault's path and sync state.
+
+export interface VaultStatus {
+  /** False for every user who has not been given a vault, which is the default.
+   *  The settings heading renders nothing at all in that case. */
+  configured: boolean;
+  path?: string;
+  owned?: string[];
+  passphrase_present?: boolean;
+  /** What the request itself found. Empty unless the configured path is one the
+   *  daemon may not open — the endpoint does not unlock the file. */
+  outcome?: string;
+  reason?: string;
+  refusal?: string;
+  /** When the vault was last successfully applied. `last_sync_at` moves on a
+   *  failed cycle too, so this is the one to render. ISO-8601 UTC off the wire:
+   *  render it through a local-time conversion, not raw. */
+  last_success_at?: string;
+  last_sync_at?: string;
+  last_outcome?: string;
+  last_reason?: string;
+  /** False here always — the endpoint does not unlock the file, so the group
+   *  listing a parse would produce is absent because nothing looked. */
+  parsed?: boolean;
+  /** The rendered verdict, empty when the vault is working. Computed by the
+   *  server so the precedence between a live finding and a recorded one is
+   *  stated once, in the language that owns the outcome constants. */
+  problem?: string;
+}
+
+export async function getVaultStatus(): Promise<VaultStatus> {
+  return apiFetch<VaultStatus>('/settings/vault');
 }
 
 // --- Google Workspace (ISSUE-240) ---
