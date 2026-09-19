@@ -75,6 +75,45 @@ class WhatsAppUserIdentity:
 
 
 @dataclass(frozen=True)
+class WhatsAppInboundMedia:
+    """A file this message carried, already on disk before any lock is taken.
+
+    The bytes are staged before the transaction opens and the transaction sees
+    a path, because a media fetch is a network round trip and one under
+    `BEGIN IMMEDIATE` stalls the receiver — and, under `istota serve`, the web
+    UI with it. So this record describes a file that already exists rather
+    than something still to be fetched.
+
+    **`mime_type` is the sniff's answer and nothing else's.** Both adapters
+    hand over a declared type and neither is trusted: a sender controls what
+    they upload, and the file is about to be decoded by Pillow and copied into
+    somebody's workspace. A declared type that disagrees with the sniff is a
+    debug line and changes nothing, because one of the two read the bytes.
+
+    **`attached_for_user` is the pre-check's answer, not the authoritative
+    one.** The unlocked pre-check resolves the sender so the file has an inbox
+    to go to; the authoritative resolution happens inside the transaction, and
+    a binding can change in between — a re-enrollment, a cleared identity, a
+    bootstrap latch. The transaction compares the two and drops the media on a
+    mismatch, which is what stops one user's photo reaching another's task.
+    It lives here rather than on the event because it describes this file's
+    destination and means nothing for a message that carried none.
+
+    `error` carries a fixed local reason for a fetch that failed, so a caller
+    can answer honestly instead of degrading to "that message type is not
+    supported yet". It is **required rather than defaulted**, this module's
+    rule for a new record: only `InboundWhatsAppEvent.media` gets a default,
+    because only it has existing constructions to leave unchanged. When
+    `error` is set, `staged_path` is `""`.
+    """
+    staged_path: str
+    mime_type: str
+    byte_count: int
+    attached_for_user: str
+    error: str | None
+
+
+@dataclass(frozen=True)
 class InboundWhatsAppEvent:
     """One inbound message, in whichever adapter's terms it arrived.
 
@@ -101,6 +140,14 @@ class InboundWhatsAppEvent:
     callback_data: str | None
     reply_to_message_id: str | None
     sent_at: datetime
+    #: The file this message carried, or `None` for one that carried none.
+    #:
+    #: Defaulted so every existing construction — the webhook normalizer's,
+    #: the protocol decoder's and the dozens in the suite — is unchanged by
+    #: the field's arrival, which is the `jid: str | None = None` precedent
+    #: one record up. A caption rides `text` rather than a field of its own,
+    #: so every text gate applies to it with no new code.
+    media: WhatsAppInboundMedia | None = None
 
 
 @dataclass(frozen=True)

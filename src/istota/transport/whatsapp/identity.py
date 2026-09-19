@@ -523,6 +523,74 @@ def resolve_inbound_identity(
     return arm(conn, identity)
 
 
+def _precheck_cloud(conn, identity: WhatsAppUserIdentity) -> str | None:
+    """`_resolve_cloud`'s reads, with nothing written."""
+    bsuid = identity.bsuid
+    if not bsuid:
+        return None
+    bound = db.get_whatsapp_binding_by_bsuid(conn, bsuid)
+    if bound is not None:
+        return bound.user_id
+    number = _e164_from_wa_id(identity.wa_id)
+    candidate = db.get_whatsapp_binding_by_phone(conn, number) if number else None
+    if candidate is None or candidate.bsuid:
+        # A candidate already carrying a *different* BSUID is the recycled
+        # line, which the arm above refuses and so does this.
+        return None
+    return candidate.user_id
+
+
+def _precheck_baileys(conn, identity: WhatsAppUserIdentity) -> str | None:
+    """`_resolve_baileys`'s reads, with nothing written."""
+    jid = normalize_jid(identity.jid)
+    if not jid:
+        return None
+    bound = db.get_whatsapp_binding_by_jid(conn, jid)
+    if bound is not None:
+        return bound.user_id
+    number = jid_number(jid)
+    candidate = db.get_whatsapp_binding_by_phone(conn, number) if number else None
+    if candidate is None or candidate.jid:
+        return None
+    return candidate.user_id
+
+
+_PRECHECK_ARMS = {
+    db.WHATSAPP_LEGACY_PROVIDER: _precheck_cloud,
+    db.WHATSAPP_BAILEYS_PROVIDER: _precheck_baileys,
+}
+
+
+def resolve_for_precheck(
+    conn, identity: WhatsAppUserIdentity, *, provider: str
+) -> str | None:
+    """Which user this sender *probably* is, read-only and non-authoritative.
+
+    The read half of the two arms above and nothing else: no latch, no alert,
+    no disposition. `media.precheck` is the caller, on a connection opened
+    `sqlite_util.connect_read_only` outside any transaction, because the file
+    it is about has to be copied into *a user's* inbox before the write lock
+    is taken and the authoritative answer does not exist until after it. The
+    latch the bootstrap arm performs is exactly what must not happen here.
+
+    **A pre-filter, not a boundary.** The answer is allowed to be stale — a
+    binding can change between this call and the transaction — so the caller
+    carries it on the event and the transaction compares it against
+    `resolve_inbound_identity`'s, which stays the only authoritative one.
+    Being wrong in the other direction is safe by construction: `None` costs
+    the sender their attachment, never their message.
+
+    Here rather than in `media.py` because the lookup order is this module's,
+    and a second copy of it drifting is how a pre-filter starts naming a user
+    the transaction would refuse. An unrecognised provider resolves nobody,
+    for the reason `resolve_inbound_identity` gives.
+    """
+    arm = _PRECHECK_ARMS.get(provider)
+    if arm is None:
+        return None
+    return arm(conn, identity)
+
+
 def identity_fingerprint(identity: WhatsAppUserIdentity, *, provider: str) -> str:
     """What a log line may say about the sender of a refused message.
 
@@ -543,5 +611,6 @@ __all__ = [
     "identity_fingerprint",
     "jid_number",
     "normalize_jid",
+    "resolve_for_precheck",
     "resolve_inbound_identity",
 ]
