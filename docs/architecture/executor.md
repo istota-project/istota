@@ -83,7 +83,7 @@ When the skill proxy is enabled (default), credential vars are split out of Clau
 
 Authorization is decoupled from skill selection. `derive_authorized_skills(selected, skill_index, ctx)` returns the union of selected skills plus any skill whose sensitive `EnvSpec`s actually resolve under the task's context. So a user with Karakeep configured can always reach `KARAKEEP_API_KEY`, even if keyword selection missed the bookmarks skill on a given prompt. Critical correctness note: the auth-side resolution passes `fallbacks_disabled=True` so an instance-wide `EnvironmentFile` value cannot fan a global secret out to per-user auto-authorization.
 
-`derive_skill_credential_map(authorized, skill_index)` builds the per-skill map the proxy uses to scope credential injection — a skill CLI invocation only ever sees credentials its own manifest declared. `derive_lookup_allowlist(authorized, skill_index)` is the union the proxy will respond to over `credential-fetch`, with `_PROXY_LOOKUP_BLOCKED = {"ISTOTA_SECRET_KEY"}` subtracted as a defense-in-depth hard reject so a buggy `setup_env` hook can't expose the master Fernet key over the lookup channel.
+`derive_skill_credential_map(authorized, skill_index)` builds the per-skill map the proxy uses to scope credential injection — a skill CLI invocation only ever sees credentials its own manifest declared. `derive_lookup_allowlist(authorized, skill_index)` is the union the proxy will respond to over its `credential` request type — reached from a task as `istota-credential env <VAR>` — with `_PROXY_LOOKUP_BLOCKED = {"ISTOTA_SECRET_KEY"}` subtracted as a defense-in-depth hard reject so a buggy `setup_env` hook can't expose the master Fernet key over the lookup channel.
 
 See [security](../deployment/security.md#authorization-model) for the full model and rejection logging.
 
@@ -149,7 +149,7 @@ Malformed results are reclassified as failures and retried.
 | `derive_proxy_only_set()` | The second bucket: `ISTOTA_DB_PATH` plus manifest `proxy_only: true` vars (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`). Routed to the proxy without credential semantics — not secrets, just paths the model has no business holding |
 | `derive_authorized_skills()` | Selected skills ∪ skills whose sensitive `EnvSpec`s resolve under this task's context. Takes `hook_env` so a credential produced by a `setup_env` hook (the `google_workspace` case) can authorize its own skill |
 | `derive_skill_credential_map()` | Per-skill credential map used by the proxy (replaces `_build_skill_credential_map`) |
-| `derive_lookup_allowlist()` | Vars the proxy will respond to over `credential-fetch`, minus `_PROXY_LOOKUP_BLOCKED` |
+| `derive_lookup_allowlist()` | Vars the proxy will respond to over `istota-credential env`, minus `_PROXY_LOOKUP_BLOCKED` |
 | `discover_calendars_for_task()` | Best-effort CalDAV discovery; returns `[]` on any failure. Reused across LLM and subprocess dispatch paths |
 | `build_bwrap_cmd()` | Builds bubblewrap sandbox command wrapper |
 | `custom_system_prompt_path()` | `config/system-prompt.md` as an absolute path when `custom_system_prompt` is on — one source for both the `BrainRequest` field and the sandbox bind |

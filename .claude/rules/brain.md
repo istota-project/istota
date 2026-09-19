@@ -1284,7 +1284,7 @@ NativeBrain pi-parity capabilities (over `openai_compat`, the sole transport):
   per-skill map for the skills in `SKILL_MODEL_CALLERS` alone, a copy rather
   than a third split because `ClaudeCodeBrain` needs the same value in the
   model's own env, and `_PROXY_LOOKUP_BLOCKED` keeps it out of the
-  `credential-fetch` allowlist, which is a union anything holding the socket can
+  manifest-lookup allowlist, which is a union anything holding the socket can
   read from.
   Four things about the shape are deliberate. It is a **name list, not a
   `CLAUDE_*` prefix rule**, because a prefix would also swallow an operator's
