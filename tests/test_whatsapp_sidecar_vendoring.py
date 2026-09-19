@@ -503,6 +503,24 @@ class TestTheSidecarsPayloadsAreReadable:
 
         assert proto.inbound_event(payload).media is None
 
+    @pytest.mark.parametrize("absent", ["media_mime", "media_bytes"])
+    def test_an_absent_advisory_field_does_not_cost_the_image(self, absent):
+        """Both are carried for the log line and neither decides anything, so
+        losing a photo over a missing label would put the strictness on the
+        wrong field. The two arms used to disagree: an absent `media_mime`
+        read as `""` while an absent `media_bytes` dropped the media."""
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT,
+            message_type="image",
+            media_name="0123456789abcdef0123456789abcdef.jpg",
+            media_mime="image/jpeg",
+            media_bytes=4096,
+        ))
+        del payload[absent]
+
+        assert proto.inbound_event(payload).media is not None
+
     def test_a_group_message_carrying_media_drops_it(self):
         """A group message is refused before any identity lookup, so nothing
         will ever consume the file; the sweep takes it."""
@@ -521,10 +539,15 @@ class TestTheSidecarsPayloadsAreReadable:
         [
             ("media_mime", 7),
             ("media_mime", "x" * (proto.MAX_MEDIA_MIME_CHARS + 1)),
+            # A log line is where this value goes, so a newline or an escape
+            # off the wire forges one there.
+            ("media_mime", "image/jpeg\nWARNING forged"),
+            ("media_mime", "image/jpeg\x1b[31m"),
             ("media_bytes", "8192"),
             ("media_bytes", True),
             ("media_bytes", -1),
             ("media_error", 7),
+            ("media_error", ""),
         ],
     )
     def test_a_malformed_media_field_costs_the_media_and_not_the_message(
@@ -1000,17 +1023,18 @@ class TestTheSidecarsInboundMedia:
             f"m.mediaExtension({json.dumps(declared)})"
         ) == expected
 
-    def test_the_advisory_suffixes_are_ones_the_daemon_would_also_choose(self):
-        """A subset check, and **not** a claim that the sidecar's answer is
-        trusted: nothing downstream reads it. What agreeing buys is that the
-        staged stem in `sidecar.log` and the inbox copy's suffix match in the
-        ordinary case, so the two logs can be read side by side."""
-        produced = set(self._call(
-            "Object.values(m.MEDIA_EXTENSIONS).concat("
-            "[m.mediaExtension('application/pdf')])"
-        ))
+    def test_the_advisory_suffixes_are_the_ones_the_daemon_would_choose(self):
+        """**Not** a claim that the sidecar's answer is trusted: nothing
+        downstream reads it. What agreeing buys is that the staged stem in
+        `sidecar.log` and the inbox copy's suffix match in the ordinary case,
+        so the two logs can be read side by side.
 
-        assert produced <= set(image_sniff.EXTENSION_BY_MEDIA_TYPE.values()) | {"bin"}
+        Equality rather than a subset over values, which is what this asserted
+        first and which passes on an emptied table, on a deleted key, and on
+        `image/jpeg` mapped to `png` — the claim is about the *mapping*, so a
+        value-set check could not carry it.
+        """
+        assert self._call("m.MEDIA_EXTENSIONS") == image_sniff.EXTENSION_BY_MEDIA_TYPE
 
     # --- the staged write --------------------------------------------------
 
@@ -1172,11 +1196,45 @@ class TestTheSidecarsControlFlow:
         """Beside the socket and the session directory. A sidecar with
         nowhere to stage would type an image `image` and send a frame naming
         no file, which the daemon reads as media it cannot place — a
-        deployment fault arriving as a per-message one."""
-        body = _js_function("main")
+        deployment fault arriving as a per-message one.
 
-        assert "MEDIA_DIR" in body
-        assert "process.exit(2)" in body
+        **Driven, because the obvious source assertion cannot fail.**
+        `process.exit(2)` was already in `main()` before this change, for the
+        socket and session-directory refusal, so `"process.exit(2)" in body`
+        is pre-satisfied and stays green for a `main()` that reads the
+        variable and carries on — the exact defect this is about.
+        """
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        env = dict(os.environ)
+        env["ISTOTA_BAILEYS_SOCKET"] = "/nonexistent/sock"
+        env["ISTOTA_BAILEYS_SESSION_DIR"] = "/nonexistent/session"
+        env.pop("ISTOTA_BAILEYS_MEDIA_DIR", None)
+
+        # Short, because the expected behaviour is an immediate exit. A
+        # program that does *not* refuse stays up retrying its socket for
+        # ever, so the bound is what turns that into a red rather than a
+        # hang — and a long one spends itself on every run of the failing
+        # case for no extra confidence.
+        try:
+            result = subprocess.run(
+                [node, str(PROGRAM)], capture_output=True, text=True,
+                timeout=10, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                "the sidecar started without ISTOTA_BAILEYS_MEDIA_DIR; it "
+                "would type every photo `image` and name no file"
+            )
+
+        # The socket and session-directory variables are both set, so a 2
+        # here is about the third one. With all three absent every version of
+        # this program exits 2 and the case would say nothing at all.
+        assert result.returncode == 2
+        # Rule 1 holds even on the refusal path: the reason goes to the log
+        # inside the session directory, never to stdio.
+        assert result.stdout == "" and result.stderr == ""
 
     def test_the_socket_is_given_a_way_to_answer_a_retry(self):
         """The cache is inert unless Baileys is handed it. `getMessage`

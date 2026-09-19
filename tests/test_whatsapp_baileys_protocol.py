@@ -393,7 +393,16 @@ class TestTheModuleBoundary:
             names = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.level:
-                    names.add(node.module or "")
+                    # A relative import naming no module — `from . import x` —
+                    # contributes the *names* it binds. Collapsing it to `""`
+                    # made `from . import media` and
+                    # `from . import media, outbound` the identical set, so the
+                    # guard stopped discriminating at exactly the moment it was
+                    # widened to allow one sibling.
+                    if node.module:
+                        names.add(node.module)
+                    else:
+                        names.update(alias.name for alias in node.names)
                 elif isinstance(node, ast.Import):
                     names.update(
                         alias.name for alias in node.names
@@ -401,12 +410,23 @@ class TestTheModuleBoundary:
                     )
             return names
 
-        # `""` is a relative import naming no module — `from . import media`.
-        assert package_imports(protocol_module) == {"", "_types"}
-        assert "media" in {
-            alias.name
-            for node in ast.walk(ast.parse(Path(protocol_module.__file__).read_text()))
-            if isinstance(node, ast.ImportFrom) and node.level and not node.module
-            for alias in node.names
-        }
+        assert package_imports(protocol_module) == {"_types", "media"}
         assert package_imports(types_module) == set()
+
+        # The control for the widening: a second sibling on the same
+        # `from . import` line has to move the set, or allowing one sibling
+        # quietly allowed every sibling.
+        import textwrap
+
+        widened = ast.parse(textwrap.dedent('''
+            from . import media, outbound
+            from ._types import InboundWhatsAppEvent
+        '''))
+        names = set()
+        for node in ast.walk(widened):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                if node.module:
+                    names.add(node.module)
+                else:
+                    names.update(alias.name for alias in node.names)
+        assert names == {"_types", "media", "outbound"}

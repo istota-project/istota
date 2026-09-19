@@ -142,6 +142,15 @@ const MEDIA_EXTENSION_FALLBACK = 'bin';
 // gone quiet rather than one message that failed.
 const MEDIA_DOWNLOAD_TIMEOUT_MS = 60_000;
 
+// How many `messages.upsert` batches may wait on the serialized inbound
+// chain. Bounded and dropped loudly rather than allowed to grow, which is the
+// rule the daemon's own inbound worker follows: with a per-download bound of
+// a minute, an unbounded chain turns a burst of photos into head-of-line
+// delay measured in hours, and the messages at the back are stale by the time
+// they are read. Dropping the newest is the honest half of that trade and is
+// the one thing a counter can report.
+const MAX_INBOUND_QUEUE = 64;
+
 const SOCKET_PATH = process.env.ISTOTA_BAILEYS_SOCKET || '';
 const SESSION_DIR = process.env.ISTOTA_BAILEYS_SESSION_DIR || '';
 // Where a staged image is written, and required at startup beside the two
@@ -554,7 +563,12 @@ function writeStaged(name, buffer) {
     0o600,
   );
   try {
-    fs.writeSync(fd, buffer);
+    // `writeFileSync` on a descriptor loops until the buffer is gone.
+    // `writeSync` issues one `write(2)` and *returns* the count, so a partial
+    // write is not an error — and a truncated image still sniffs correctly off
+    // its header, so it would be copied into somebody's inbox and fail the
+    // decode with the model told the fetch succeeded.
+    fs.writeFileSync(fd, buffer);
   } finally {
     fs.closeSync(fd);
   }
@@ -1000,6 +1014,8 @@ class Session {
     // appended to it rather than handled where it arrives, so a photo's
     // download cannot be overtaken by the text message behind it.
     this.inbound = Promise.resolve();
+    this.inboundDepth = 0;
+    this.inboundDropped = 0;
   }
 
   announceReady() {
@@ -1256,11 +1272,22 @@ class Session {
    */
   onMessages(event) {
     if (!event || !Array.isArray(event.messages)) return;
+    if (this.inboundDepth >= MAX_INBOUND_QUEUE) {
+      this.inboundDropped += 1;
+      log('warn', 'inbound batch dropped', {
+        why: 'queue_full', dropped: this.inboundDropped,
+      });
+      return;
+    }
+    this.inboundDepth += 1;
     this.inbound = this.inbound
       .then(() => this.handleMessages(event))
       .catch((err) => {
         log('error', 'an inbound batch escaped', { kind: err && err.name });
-      });
+      })
+      // After the catch, so it runs on both paths: a depth that only
+      // decremented on success would ratchet to the bound and stay there.
+      .then(() => { this.inboundDepth -= 1; });
   }
 
   async handleMessages(event) {
@@ -1319,7 +1346,7 @@ class Session {
       // one carries `media_error` and the daemon answers "that image could
       // not be fetched", which is a different and better answer from "that
       // message type is not supported yet".
-      this.link.send(MSG_INBOUND, {
+      const delivered = this.link.send(MSG_INBOUND, {
         message_id: message.key.id,
         jid,
         username: group ? null : message.pushName || null,
@@ -1334,6 +1361,15 @@ class Session {
         media_bytes: media.media_bytes,
         media_error: media.media_error,
       });
+      if (!delivered) {
+        // `Link.send` answers false for a destroyed socket and says nothing.
+        // Before the chain existed the send happened inside the event
+        // handler, so this could only lose a message to an encode failure;
+        // now a download can outlive the daemon link and the loss is silent.
+        log('warn', 'an inbound message reached nobody', {
+          why: 'link_unavailable', staged: Boolean(media.media_name),
+        });
+      }
     }
   }
 
@@ -1358,7 +1394,12 @@ class Session {
    * and a Boom error carries the whole request.
    */
   async downloadMedia(message) {
-    const failure = (key) => {
+    const failure = (raw) => {
+      // The same guard `answer` puts in front of `SEND_REASONS`, and for the
+      // same reason: a key outside the daemon's table renders as the generic
+      // sentence for ever, so a typo at a call site below would cost the
+      // diagnostic silently. This is the only producer of a `media_error`.
+      const key = MEDIA_ERRORS.has(raw) ? raw : 'download_failed';
       log('warn', 'inbound media was not staged', { why: key });
       return {
         media_name: null, media_mime: null, media_bytes: 0, media_error: key,
@@ -1368,7 +1409,12 @@ class Session {
     const mime = typeof part.mimetype === 'string' ? part.mimetype : null;
     const collector = newMediaCollector();
     let stream = null;
-    try {
+    // The connect, the `reuploadRequest` round trip and the body all sit
+    // inside one deadline. An earlier shape armed the timer *after*
+    // `downloadMediaMessage` resolved, which left the CDN connect and the
+    // reupload — the two slowest things here, and the ones that hang —
+    // bounded by nothing at all.
+    const fetchAll = async () => {
       const baileys = await loadBaileys();
       stream = await baileys.downloadMediaMessage(
         message,
@@ -1376,35 +1422,55 @@ class Session {
         {},
         {
           logger: silentLogger(),
-          reuploadRequest: this.sock && this.sock.updateMediaMessage,
+          // Wrapped rather than passed as a bare property reference: a method
+          // read off the socket is called by Baileys with no receiver. The
+          // wrapper is correct whether or not the library happens to close
+          // over its own state, and `undefined` is what its own guard expects
+          // when there is no socket — after a logout `this.sock` is null.
+          reuploadRequest: this.sock
+            ? (media) => this.sock.updateMediaMessage(media)
+            : undefined,
         },
       );
       await new Promise((resolve, reject) => {
-        // Bounded, because the inbound chain is serial: a hung fetch holds
-        // every message behind it, which is a surface gone quiet rather than
-        // one message lost.
-        const deadline = setTimeout(() => {
-          reject(new Error('media download timed out'));
-        }, MEDIA_DOWNLOAD_TIMEOUT_MS);
-        const settle = (err) => {
-          clearTimeout(deadline);
-          if (err) reject(err); else resolve();
-        };
+        const settle = (err) => { if (err) reject(err); else resolve(); };
         stream.on('data', (chunk) => {
           if (!collectMediaChunk(collector, chunk)) settle(null);
         });
         stream.on('end', () => settle(null));
         stream.on('error', (err) => settle(err));
       });
+    };
+    let deadline = null;
+    try {
+      // Bounded, because the inbound chain is serial: a hung fetch holds
+      // every message behind it, which is a surface gone quiet rather than
+      // one message lost. Racing releases the chain; it cannot cancel a fetch
+      // already inside the library, so `destroy` below is what stops the
+      // bytes still arriving.
+      await Promise.race([
+        fetchAll(),
+        new Promise((resolve, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error('media download timed out')),
+            MEDIA_DOWNLOAD_TIMEOUT_MS,
+          );
+        }),
+      ]);
     } catch (err) {
       return failure('download_failed');
     } finally {
+      clearTimeout(deadline);
       // Whether the cap fired, the deadline did, or the stream ended: the
       // reader is detached either way and a stream abandoned mid-body would
       // otherwise keep its socket.
       try { if (stream && stream.destroy) stream.destroy(); } catch (err) {}
     }
     if (collector.overCap) return failure('over_the_cap');
+    // A fetch that yielded nothing is a failure rather than a zero-byte
+    // image: staging one costs a file the daemon sniffs, refuses and sweeps,
+    // and reports success on the frame while doing it.
+    if (collector.received === 0) return failure('download_failed');
     const name = stagedMediaName(mediaExtension(mime));
     try {
       writeStaged(name, Buffer.concat(collector.chunks));
@@ -1618,12 +1684,29 @@ function main() {
     // and send a frame naming no file, so a deployment fault would arrive as
     // a per-message one and the reason would be nowhere.
     //
-    // There *is* a log destination by this line, so unlike the pair above it
-    // says so before it goes — an operator upgrading this program ahead of
-    // the unit or the compose service that sets the variable reads the one
-    // sentence that explains the exit loop.
+    // This one says so first, where the pair above cannot. It is still not a
+    // guarantee — `log` writes inside the session directory and swallows a
+    // failure, so on a first install where nothing has created that directory
+    // yet the sentence goes nowhere and the exit code is all there is. On an
+    // upgraded deployment, which is the shape that meets this, the session
+    // directory holds a paired credential and the line lands.
     log('error', 'no media staging directory is configured; refusing to run', {
       variable: 'ISTOTA_BAILEYS_MEDIA_DIR',
+    });
+    process.exit(2);
+  }
+  try {
+    // The daemon's `media.ensure_media_dir` is authoritative for the mode and
+    // runs when the bridge starts; this only has to make the directory exist.
+    // On Ansible and compose the sidecar is a unit of its own with no ordering
+    // guarantee against the daemon, so without this a boot in the other order
+    // answers `write_failed` for every image until the daemon catches up —
+    // and `recursive: true` makes an existing directory a no-op, so the
+    // daemon stays the only thing that ever narrows one.
+    fs.mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    log('error', 'the media staging directory could not be created', {
+      kind: err && err.code,
     });
     process.exit(2);
   }

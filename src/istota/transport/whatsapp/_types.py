@@ -84,11 +84,21 @@ class WhatsAppInboundMedia:
     UI with it. So this record describes a file that already exists rather
     than something still to be fetched.
 
-    **`mime_type` is the sniff's answer and nothing else's.** Both adapters
-    hand over a declared type and neither is trusted: a sender controls what
-    they upload, and the file is about to be decoded by Pillow and copied into
-    somebody's workspace. A declared type that disagrees with the sniff is a
-    debug line and changes nothing, because one of the two read the bytes.
+    **`mime_type` is the *declared* type, and nothing decides anything on
+    it.** An earlier version of this paragraph said it was the sniff's answer,
+    which no producer can honour: the record is built at decode, before the
+    daemon has opened the file, so the only type in hand is the one the
+    adapter declared. The sniff is still what is authoritative —
+    `media.stage_to_attachment` reads the bytes and names the inbox copy from
+    its own answer, because a sender controls what they upload and the file is
+    about to be decoded by Pillow and copied into somebody's workspace. This
+    field is carried for the log line, so a disagreement between the two is a
+    debug matter rather than a decision.
+
+    One consequence, left open deliberately: `stage_to_attachment` returns a
+    path and discards the media type it sniffed, so nothing downstream can
+    compare the two and the debug line has no site to run at. Giving it a
+    `(path, media_type)` return is the change that would close it.
 
     **`attached_for_user` is the pre-check's answer, not the authoritative
     one.** The unlocked pre-check resolves the sender so the file has an inbox

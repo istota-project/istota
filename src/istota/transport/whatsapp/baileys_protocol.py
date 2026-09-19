@@ -127,7 +127,10 @@ MAX_USERNAME_CHARS = 256
 #: reaches a log line. It is **advisory** and nothing branches on it:
 #: `media.stage_to_attachment` sniffs the bytes and names the inbox copy from
 #: its own answer, because the sender chose what they uploaded. 128 is well
-#: past any real `type/subtype; parameters` and short enough to log whole.
+#: past any real `type/subtype; parameters` and short enough to log whole —
+#: which is also why the value is held to printable characters beside the
+#: length: a log line is where it goes, and a newline or an ANSI escape off
+#: the wire forges one there.
 MAX_MEDIA_MIME_CHARS = 128
 
 #: Every `media_error` the sidecar may name, and the local sentence each
@@ -379,12 +382,22 @@ def _inbound_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:
     mime_raw = payload.get("media_mime")
     if mime_raw is None:
         mime = ""
-    elif isinstance(mime_raw, str) and len(mime_raw) <= MAX_MEDIA_MIME_CHARS:
+    elif (
+        isinstance(mime_raw, str)
+        and len(mime_raw) <= MAX_MEDIA_MIME_CHARS
+        and mime_raw.isprintable()
+    ):
         mime = mime_raw
     else:
         return _dropped_media("media_mime")
 
-    byte_count = payload.get("media_bytes")
+    # Absent reads as nought, matching the mime arm above: both are advisory,
+    # so losing an image over a missing log label would be the strictness
+    # landing on the wrong field. A value of the wrong *type* or a negative
+    # one still drops, because that is a sidecar this side cannot read.
+    byte_count = payload.get("media_bytes", 0)
+    if byte_count is None:
+        byte_count = 0
     if isinstance(byte_count, bool) or not isinstance(byte_count, int):
         return _dropped_media("media_bytes")
     if byte_count < 0:
@@ -447,10 +460,15 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
     will ever consume a file for a message refused above every identity
     lookup; the staged file orphans and the sweep takes it.
 
-    An image's caption rides `text` rather than a field of its own, so every
-    gate in `_dispatch_inbound` applies to it with no new code — `STOP` typed
-    as a caption opts out, a caption starting with `!` is a command, and a
-    caption that parses as a confirmation answer answers one. `_inbound_media`
+    An image's caption rides `text` rather than a field of its own, so that
+    every gate in `_dispatch_inbound` can apply to it with no new code —
+    `STOP` typed as a caption opting out, a caption starting with `!` being a
+    command, a caption that parses as a confirmation answer answering one.
+    **None of that is live in this tree yet**: `_dispatch_inbound` returns for
+    any `message_type` outside `_TEXT_TYPES` well above the STOP/START/HELP
+    block, so today an image's caption reaches none of them. Narrowing that
+    gate is the stage that makes the sentence true; carrying the caption on
+    `text` is what makes it cost no new code when it does. `_inbound_media`
     owns the four media fields.
     """
     message_type = _optional_text(payload.get("message_type")) or "unknown"
