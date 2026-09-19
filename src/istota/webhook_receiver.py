@@ -432,6 +432,9 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
     """
     from . import db  # noqa: PLC0415
     from .config import whatsapp_webhooks_enabled  # noqa: PLC0415
+    from .transport.whatsapp.providers.whatsapp_cloud import (  # noqa: PLC0415
+        stage_cloud_media,
+    )
     from .transport.whatsapp.webhook import (  # noqa: PLC0415
         MAX_WEBHOOK_BODY,
         WhatsAppWebhookError,
@@ -458,6 +461,20 @@ async def receive_whatsapp(request: Request, background: BackgroundTasks):
     except WhatsAppWebhookError as exc:
         logger.info("whatsapp.inbound.rejected reason=%s", str(exc))
         return Response(status_code=exc.status_code)
+
+    # **Between the parse and the transaction, and that position is the whole
+    # design.** Meta's media endpoint needs the access token, so the daemon is
+    # the fetcher on this adapter — and a Graph round trip under
+    # `BEGIN IMMEDIATE` would wait out the 30-second busy timeout against the
+    # lock `handle_whatsapp_batch` holds, on a router that under `istota serve`
+    # is mounted on the web app's own event loop. So the bytes land on disk
+    # here and the transaction below sees a path.
+    #
+    # Not wrapped: `stage_cloud_media` never raises by contract, and a guard
+    # here would turn a bug in it into a batch that looks staged. A batch
+    # carrying no media returns immediately and touches no directory, which is
+    # the common case — most callbacks are delivery statuses.
+    events = await stage_cloud_media(config, events)
 
     try:
         with db.get_db(config.db_path) as conn:

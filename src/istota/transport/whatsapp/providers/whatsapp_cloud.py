@@ -34,10 +34,20 @@ driven by tests.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import os
+from collections.abc import Sequence
+from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .. import message_fingerprint
 from .._types import (
+    InboundWhatsAppEvent,
+    WhatsAppEvent,
+    WhatsAppInboundMedia,
     WhatsAppSendFailure,
     WhatsAppSendOutcome,
     WhatsAppSendRequest,
@@ -183,4 +193,232 @@ async def _send(config: "Config", request: WhatsAppSendRequest):
         await client.aclose()
 
 
-__all__ = ["CLOUD_CAPS", "build_adapter"]
+# ---------------------------------------------------------------------------
+# Inbound media: the fetch, and the two common calls around it
+# ---------------------------------------------------------------------------
+
+
+def _is_pending(event: object) -> bool:
+    """Whether this event names bytes the daemon still has to fetch.
+
+    Four conditions, and each excludes a record that has already been decided:
+    a delivery status is not an inbound message at all, a message that carried
+    nothing has no record, a record carrying an `error` was refused upstream
+    (a `group_id` message never gets one in the first place — `_inbound_event`
+    resets the type above the record, so a group image is refused before the
+    fetch as well as before the transaction), and one already carrying a
+    `staged_path` has been staged by somebody.
+    """
+    if not isinstance(event, InboundWhatsAppEvent):
+        return False
+    media = event.media
+    return (
+        media is not None
+        and media.error is None
+        and bool(media.remote_id)
+        and not media.staged_path
+    )
+
+
+def _media_failed(reason: str) -> WhatsAppInboundMedia:
+    """A record naming a failure and no file. `baileys_bridge`'s own helper."""
+    return WhatsAppInboundMedia(
+        staged_path="", mime_type="", byte_count=0, attached_for_user="",
+        error=reason,
+    )
+
+
+async def stage_cloud_media(
+    config: "Config", events: Sequence[WhatsAppEvent]
+) -> tuple[WhatsAppEvent, ...]:
+    """Put each message's file in its user's inbox, before any lock is taken.
+
+    The Cloud half of the ordering this whole area exists for, and the route
+    calls it between `parse_webhook` and `handle_whatsapp_batch`. Meta's media
+    endpoint needs the access token, so unlike Baileys the daemon is the
+    fetcher here — and a Graph round trip under `BEGIN IMMEDIATE` waits out the
+    30-second busy timeout against the lock the caller holds, on a router that
+    under `istota serve` sits on the web app's event loop. So the bytes land on
+    disk first and the transaction sees a path.
+
+    Three calls per pending event, in the order the spec fixes:
+
+    1. **Pre-check.** Unlocked, read-only, allowed to be stale, and *before*
+       the fetch rather than after it — this is the one adapter where the check
+       can keep a stranger's media off the wire entirely, which is what bounds
+       the disk-fill vector a published business number carries. `None` means
+       nothing is fetched at all: an unknown sender, a message id already
+       claimed (which is what closes Meta's redelivery loop), a sender who has
+       opted out, or a read that could not be answered.
+    2. **Fetch.** `client.fetch_media` owns the per-file cap on both sides of
+       the wire; this function owns the *staging ceiling*, asked before the
+       round trip rather than after it.
+    3. **Consume.** `media.stage_to_attachment`, which sniffs the bytes, names
+       the inbox copy from its own answer and unlinks the staged file. The
+       sniff is asked first, for the reason `baileys_bridge.stage_inbound_media`
+       step 2 gives: a file that is not a decodable image is not an image at
+       all and takes the `unsupported_type` reply the surface already had,
+       while one that could not be placed is istota's own failure and says so.
+
+    **Never raises**, which is the contract the route rests on: `_stage_one`
+    carries a catch-all and everything outside it is a list rebuild. A media
+    failure must cost the media and never the batch, because any exception
+    reaching the route answers 503 and Meta redelivers.
+
+    **A batch carrying no media touches nothing** — no directory is made and no
+    sweep is run. Delivery-status callbacks are the common case on this
+    surface, and the Baileys side draws the same line ("an event carrying no
+    media never reaches here").
+    """
+    from .. import media as media_rules  # noqa: PLC0415
+
+    pending = [index for index, event in enumerate(events) if _is_pending(event)]
+    if not pending:
+        return tuple(events)
+
+    staged = list(events)
+    try:
+        media_dir = media_rules.ensure_media_dir(
+            media_rules.default_media_dir(config)
+        )
+    except Exception:
+        # The directory is the whole staging story, so nothing can be fetched
+        # without it — but the messages still arrive, and their captions are
+        # messages. `exc_info` is kept: a staging directory that cannot be made
+        # private is an operator fault rather than anything off the wire.
+        logger.warning(
+            "whatsapp.media.staging_unavailable: the staging directory could "
+            "not be prepared", exc_info=True,
+        )
+        for index in pending:
+            staged[index] = replace(
+                events[index], media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+            )
+        return tuple(staged)
+
+    try:
+        for index in pending:
+            staged[index] = await _stage_one(config, media_dir, events[index])
+    finally:
+        # After the consume, never before it — `_prune_parked_statuses`'
+        # arrangement, and the reason `stage_inbound_media` moved its own sweep
+        # into a `finally`: a sweep in front of the fetch puts the 600-second
+        # window ahead of the file this call is about.
+        with contextlib.suppress(Exception):
+            media_rules.prune_media_dir(media_dir)
+    return tuple(staged)
+
+
+async def _stage_one(
+    config: "Config", media_dir, event: InboundWhatsAppEvent
+) -> InboundWhatsAppEvent:
+    """One message's file, from Meta's media id to a path in an inbox.
+
+    Never raises. The two blocking calls — the read-only pre-check and the
+    WebDAV copy — go to a thread, because this runs on the event loop the
+    receiver and (under `istota serve`) the web UI share, and the copy is the
+    long pole.
+    """
+    from .... import db, sqlite_util  # noqa: PLC0415
+    from .. import media as media_rules  # noqa: PLC0415
+    from ..client import WhatsAppMediaError, make_client  # noqa: PLC0415
+
+    incoming = event.media
+    if incoming is None:  # pragma: no cover - `_is_pending` is the caller's gate
+        return event
+    staged_path = None
+    fd = None
+    try:
+        user_id = await asyncio.to_thread(
+            media_rules.precheck,
+            lambda: sqlite_util.connect_read_only(config.db_path),
+            identity=event.from_user,
+            message_id=event.message_id,
+            provider=db.WHATSAPP_LEGACY_PROVIDER,
+        )
+        if user_id is None:
+            logger.info(
+                "whatsapp.media.unattributed message=%s: the pre-check named "
+                "no user, so nothing is fetched",
+                message_fingerprint(event.message_id),
+            )
+            return replace(
+                event, media=_media_failed(media_rules.MEDIA_UNATTRIBUTED),
+            )
+        # Asked with the *cap* rather than with Meta's declared size, which is
+        # one round trip away and would be paid for a fetch this may refuse.
+        # Conservative in the direction that matters: the steady state is an
+        # empty directory, so this only bites when something has filled it,
+        # which is the case the ceiling exists for.
+        if not await asyncio.to_thread(
+            media_rules.has_staging_room, media_dir,
+            incoming_bytes=media_rules.MAX_MEDIA_BYTES,
+        ):
+            return replace(
+                event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+            )
+
+        # `bin`, because the bytes have not been read yet and the only type in
+        # hand is the one the sender chose. The staged suffix is advisory by
+        # design — `stage_to_attachment` re-derives the inbox copy's from its
+        # own sniff, which is what carries a HEIC past the pipeline's suffix
+        # screen whatever it was staged as.
+        name = media_rules.staged_name(event.message_id, "bin")
+        fd = media_rules.open_staged_write(media_dir, name)
+        staged_path = Path(media_dir) / name
+        client = make_client(config)
+        try:
+            declared, written = await client.fetch_media(
+                incoming.remote_id, fd, max_bytes=media_rules.MAX_MEDIA_BYTES,
+            )
+        finally:
+            os.close(fd)
+            fd = None
+            await client.aclose()
+
+        # No "can it be opened" question here, unlike the Baileys step: this
+        # call wrote the file moments ago and holds the only name for it, so
+        # `None` from the sniff means the bytes are not a decodable image
+        # rather than that the file went missing.
+        if media_rules.sniff_staged(staged_path) is None:
+            media_rules.discard_staged(staged_path)
+            return replace(event, media=None)
+        attachment = await asyncio.to_thread(
+            media_rules.stage_to_attachment, config, user_id, staged_path,
+        )
+        if attachment is None:
+            return replace(
+                event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+            )
+        return replace(
+            event,
+            media=replace(
+                incoming, staged_path=attachment, attached_for_user=user_id,
+                mime_type=declared or incoming.mime_type, byte_count=written,
+            ),
+        )
+    except WhatsAppMediaError as exc:
+        # The fetcher's own refusal, already named by one of its fixed reasons.
+        return replace(event, media=_media_failed(exc.reason))
+    except Exception:
+        # No `exc_info` and no path: a traceback here prints frames holding the
+        # media URL, which carries the recipient and the token's path segment.
+        logger.warning(
+            "whatsapp.media.staging_failed message=%s",
+            message_fingerprint(event.message_id),
+        )
+        return replace(event, media=_media_failed(media_rules.MEDIA_NOT_PLACED))
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if staged_path is not None:
+            # The sweep is the backstop, not the mechanism: every staged file
+            # istota consumes *and* every one it drops is unlinked when it is
+            # decided, which is what keeps a failed fetch from occupying the
+            # ceiling for ten minutes. A consumed one is already gone and
+            # `discard_staged` tolerates that.
+            media_rules.discard_staged(staged_path)
+
+
+__all__ = ["CLOUD_CAPS", "build_adapter", "stage_cloud_media"]

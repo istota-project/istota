@@ -21,6 +21,7 @@ allowed to be stale — a binding that changed underneath it.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import os
 import sqlite3
@@ -39,11 +40,14 @@ from istota.transport.whatsapp._types import (
     WhatsAppUserIdentity,
 )
 from istota.transport.whatsapp.baileys_bridge import stage_inbound_media
+from istota.transport.whatsapp.providers.whatsapp_cloud import stage_cloud_media
 from istota.transport.whatsapp.webhook import (
     MEDIA_FAILED_REPLY,
     handle_whatsapp_batch,
+    normalize_payload,
 )
 
+from .support.graph_media import MEDIA_ID, Graph, install_client
 from .support.whatsapp_config import build_whatsapp_config
 
 USER_NUMBER = "+15551234567"
@@ -511,6 +515,58 @@ def _image_event(name, *, caption="what is this?", message_id="BAE5F00D"):
     )
 
 
+def _cloud_config(tmp_path) -> Config:
+    """The same deployment as `_config`, configured for the Cloud adapter."""
+    path = tmp_path / "db" / "istota.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db.init_db(path)
+    return Config(
+        db_path=path,
+        temp_dir=tmp_path / "tmp",
+        workspace_path=tmp_path / "mount",
+        whatsapp=build_whatsapp_config(
+            enabled=True,
+            waba_id="123456789012345",
+            phone_number_id="223456789012345",
+            business_phone_number="+15551230000",
+            access_token="wa-access-token",
+            app_secret="wa-app-secret",
+            verify_token="wa-verify-token",
+        ),
+        users={"alice": UserConfig(), "bob": UserConfig()},
+    )
+
+
+def _cloud_image_events(config):
+    """One normalized `image` event, as the signed route produces it."""
+    return normalize_payload(config, {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "id": "123456789012345",
+            "changes": [{"field": "messages", "value": {
+                "messaging_product": "whatsapp",
+                "metadata": {
+                    "display_phone_number": "15551230000",
+                    "phone_number_id": "223456789012345",
+                },
+                "contacts": [{
+                    "user_id": USER_BSUID, "wa_id": USER_NUMBER.lstrip("+"),
+                    "profile": {"name": "Alice"},
+                }],
+                "messages": [{
+                    "id": "wamid.img", "from": USER_BSUID,
+                    "timestamp": str(
+                        int(datetime.now(timezone.utc).timestamp())
+                    ),
+                    "type": "image",
+                    "image": {"id": MEDIA_ID, "mime_type": "image/jpeg",
+                              "caption": "what is this?"},
+                }],
+            }}],
+        }],
+    })
+
+
 class TestTheBaileysStagingStep:
     """Everything between the frame and the transaction, on the worker thread.
 
@@ -713,6 +769,11 @@ class TestNothingStagesUnderTheWriteLock:
     the receiver and the web UI together. The pre-check is read-only and the
     copy touches no database at all, so both complete while another connection
     holds the write lock.
+
+    **Both adapters, because the claim is about both.** Baileys does its
+    staging on the bridge's worker thread and Cloud does its whole fetch inside
+    the route, which is the harder case: the Graph round trip is there as well
+    as the pre-check and the copy.
     """
 
     def test_the_stage_completes_while_a_second_thread_holds_the_lock(
@@ -768,6 +829,65 @@ class TestNothingStagesUnderTheWriteLock:
         assert elapsed < 2.0
         assert staged.media.attached_for_user == "alice"
         assert staged.media.staged_path.startswith("/Users/alice/inbox/")
+
+    def test_the_cloud_route_fetches_while_a_second_thread_holds_the_lock(
+        self, tmp_path, monkeypatch,
+    ):
+        """The Cloud arm: the Graph round trip is inside the request, and the
+        request must not be inside the transaction.
+
+        The stub answers instantly, so this cannot measure Meta — what it
+        measures is whether the staging step waits on a lock, which is the only
+        thing on this path that could take seconds against a local database.
+        """
+        config = _cloud_config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            db.set_whatsapp_binding(
+                conn, "alice",
+                bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID,
+            )
+        install_client(monkeypatch, Graph())
+        events = _cloud_image_events(config)
+        holding = threading.Event()
+        release = threading.Event()
+        held: list[Exception] = []
+
+        def hold_the_write_lock():
+            try:
+                conn = sqlite3.connect(config.db_path, timeout=30.0)
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        "INSERT INTO processed_whatsapp "
+                        "(message_id, user_id, task_id, disposition, "
+                        " message_type, received_at) "
+                        "VALUES ('lock.holder', 'alice', NULL, 'task', "
+                        " 'text', datetime('now'))"
+                    )
+                    holding.set()
+                    release.wait(timeout=30)
+                    conn.rollback()
+                finally:
+                    conn.close()
+            except Exception as exc:  # pragma: no cover - reported below
+                held.append(exc)
+                holding.set()
+
+        writer = threading.Thread(target=hold_the_write_lock)
+        writer.start()
+        try:
+            assert holding.wait(timeout=10)
+            assert not held, held
+            started = time.monotonic()
+            staged = asyncio.run(stage_cloud_media(config, events))
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            writer.join(timeout=30)
+
+        assert elapsed < 2.0
+        assert staged[0].media.attached_for_user == "alice"
+        assert staged[0].media.staged_path.startswith("/Users/alice/inbox/")
 
 
 class TestABindingThatChangedUnderneathThePreCheck:

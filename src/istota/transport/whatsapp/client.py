@@ -22,11 +22,22 @@ no application idempotency token that could settle it. The ledger reads that
 one bit and never resends either — the distinction is what an operator is told
 and nothing more, which is why erring towards ambiguous is safe and erring
 towards definite is not.
+
+`fetch_media` is the inbound direction and has no such ambiguity to model: a
+fetch that did not complete costs the image and nothing else, so every failure
+is one fixed reason out of the table below. What it does own is the *per-file
+byte cap*, twice — against the size Meta declares before a byte moves, and
+again against the bytes that actually arrive, because a declared size is a
+claim. Past this call the daemon only ever sees a file that already exists and
+the cap has no enforcement point left.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import re
 from typing import TYPE_CHECKING
 
 import httpx
@@ -52,6 +63,50 @@ _TEMPLATE_LANGUAGE_REASON = "the configured template language is not a Meta code
 
 SIGNATURE_HEADER = pywa_utils.HUB_SIG
 """``X-Hub-Signature-256``, read from PyWa rather than spelled again here."""
+
+#: What a media fetch may say out loud, on the same rule the send reasons
+#: follow: Meta's prose, PyWa's exception text and an httpx repr all carry the
+#: request URL, and a *media* URL carries the recipient's identifiers and the
+#: access token's path segment besides. Every failure below is one of these
+#: three, chosen by classification and never built from an exception.
+MEDIA_FETCH_FAILED_REASON = "the image could not be downloaded from WhatsApp"
+MEDIA_OVER_CAP_REASON = "the image was larger than this surface accepts"
+MEDIA_WRITE_FAILED_REASON = "the image could not be written to disk"
+
+#: The Meta media id, held to one ordinary URL path segment.
+#:
+#: `is_staged_name`'s rule applied to the other value off the wire that becomes
+#: a path: PyWa interpolates this id into ``/{media_id}`` on a session whose
+#: headers carry the access token, so a ``/``, a ``?`` or a ``#`` in it steers
+#: a credentialed request somewhere the caller did not name. Meta signs the
+#: payload the id arrives in, which makes this defence in depth rather than the
+#: boundary — and the join is still where containment is decided.
+_MEDIA_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:=-]{0,254}")
+
+#: A declared media type, bounded for the reason `baileys_protocol` bounds its
+#: own: it is a string that reaches a log line, so a newline or an ANSI escape
+#: in it forges one there. Nothing branches on the value — the sniff in
+#: `media.stage_to_attachment` is what decides what the bytes are.
+_MAX_DECLARED_MIME_CHARS = 128
+
+#: How much of Meta's answer is read at a time. 64 KiB is PyWa's own default
+#: and the size its generator yields.
+_MEDIA_CHUNK_BYTES = 64 * 1024
+
+
+class WhatsAppMediaError(Exception):
+    """A media fetch that did not complete, carrying one of the fixed reasons.
+
+    An exception rather than a return value because there is no partial
+    success to report: the caller has opened a descriptor and either gets the
+    bytes or unlinks the file. ``reason`` is what reaches the event record, so
+    it is always one of the module constants above and never text from a
+    provider.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 def verify_signature(app_secret: str, raw_body: bytes, signature: str) -> bool:
@@ -218,6 +273,96 @@ class WhatsAppClient:
             return WhatsAppSendFailure(False, None, _UNREADABLE_REASON)
         return WhatsAppSendResult(message_id)
 
+    async def fetch_media(
+        self, media_id: str, dest_fd: int, *, max_bytes: int
+    ) -> tuple[str, int]:
+        """Stream one inbound file onto a descriptor the caller opened.
+
+        Returns ``(declared media type, bytes written)`` and raises
+        `WhatsAppMediaError` for everything else. The caller owns the
+        descriptor and owns the file behind it on every path: this method does
+        not close it, does not name it and does not unlink it.
+
+        **Never `download_media`.** PyWa's own downloader derives the filename
+        from ``Content-Disposition`` or from a hash of the URL — both
+        server-chosen — and the daemon names its own files, for the reason
+        `media.staged_name` gives. `get_media_url` plus `stream_media` are the
+        only two Graph calls on this path, and
+        `tests/test_whatsapp_cloud_media.py` reads this module's text to hold
+        that.
+
+        **The cap is enforced twice and the second time is the one that
+        matters.** `MediaURL.file_size` is what Meta says before a byte moves,
+        so refusing there costs one round trip instead of a whole download; but
+        it is Meta reporting what an uploader told it, so the bytes that
+        actually arrive are counted too, and the chunk that would take the
+        total past the cap is never written.
+
+        **Nothing here logs the URL, the error body or the filename.** A media
+        URL carries the recipient's identifiers and the token's path segment,
+        which is why the send path already turns `exc_info` off on its
+        ambiguous branch; the same applies to every branch of this one.
+        """
+        if not _MEDIA_ID_RE.fullmatch(media_id or ""):
+            logger.warning(
+                "whatsapp.media.fetch_refused reason=media_id: the id is not "
+                "one ordinary path segment",
+            )
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON)
+        try:
+            located = await self._client.get_media_url(media_id)
+        except Exception:
+            # No `exc_info` and no id: a PyWa `WhatsAppError` carries Meta's
+            # prose and the response, and an httpx repr carries the Graph URL.
+            logger.warning("whatsapp.media.fetch_failed reason=media_url")
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON) from None
+        declared = getattr(located, "mime_type", "")
+        declared = (
+            declared[:_MAX_DECLARED_MIME_CHARS] if isinstance(declared, str) else ""
+        )
+        size = _as_byte_count(getattr(located, "file_size", None))
+        if size is not None and size > max_bytes:
+            logger.warning(
+                "whatsapp.media.refused reason=declared_size bytes=%d cap=%d",
+                size, max_bytes,
+            )
+            raise WhatsAppMediaError(MEDIA_OVER_CAP_REASON)
+        url = getattr(located, "url", None)
+        if not isinstance(url, str) or not url:
+            logger.warning("whatsapp.media.fetch_failed reason=no_media_url")
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON)
+
+        written = 0
+        # `aclosing`, not a bare `async for`: breaking out of the loop at the
+        # cap abandons PyWa's async generator with its httpx stream context
+        # still open, which a mock transport never shows and a production
+        # connection pool does.
+        stream = self._client.stream_media(url, chunk_size=_MEDIA_CHUNK_BYTES)
+        try:
+            async with contextlib.aclosing(stream):
+                async for chunk in stream:
+                    if written + len(chunk) > max_bytes:
+                        logger.warning(
+                            "whatsapp.media.refused reason=stream_cap "
+                            "bytes=%d cap=%d",
+                            written + len(chunk), max_bytes,
+                        )
+                        raise WhatsAppMediaError(MEDIA_OVER_CAP_REASON)
+                    _write_all(dest_fd, chunk)
+                    written += len(chunk)
+        except WhatsAppMediaError:
+            raise
+        except OSError:
+            logger.warning("whatsapp.media.fetch_failed reason=write")
+            raise WhatsAppMediaError(MEDIA_WRITE_FAILED_REASON) from None
+        except Exception:
+            logger.warning("whatsapp.media.fetch_failed reason=stream")
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON) from None
+        logger.info(
+            "whatsapp.media.fetched declared=%s bytes=%d", declared, written,
+        )
+        return declared, written
+
     async def _call(self, request: WhatsAppSendRequest, template_language=None):
         if request.kind == "template":
             from pywa.types.templates import BodyText  # noqa: PLC0415
@@ -249,6 +394,39 @@ class WhatsAppClient:
                 await self._session.aclose()
             except Exception:  # pragma: no cover - closing must not raise
                 logger.debug("whatsapp.client.close_failed", exc_info=True)
+
+
+def _as_byte_count(value: object) -> int | None:
+    """Meta's ``file_size`` as a non-negative int, or ``None``.
+
+    The field is documented as a number and has arrived as a string from other
+    Graph endpoints, so both are read. Anything else is `None`, which means
+    "Meta said nothing about the size" — the in-stream cap is what covers that
+    case, and reading an unparseable value as zero would silently retire the
+    cheaper gate.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
+    return None
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """`os.write` until the whole chunk is on disk.
+
+    A short write is legal and is not an error, so the obvious single call
+    silently truncates a file this surface is about to hand to Pillow.
+    """
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 def _template_language(code: str):
@@ -302,8 +480,12 @@ def make_client(config: "Config") -> WhatsAppClient:
 
 
 __all__ = [
+    "MEDIA_FETCH_FAILED_REASON",
+    "MEDIA_OVER_CAP_REASON",
+    "MEDIA_WRITE_FAILED_REASON",
     "SIGNATURE_HEADER",
     "WhatsAppClient",
+    "WhatsAppMediaError",
     "make_client",
     "verify_signature",
 ]
