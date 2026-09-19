@@ -308,11 +308,10 @@
 
   let vaultEditable = $derived.by(() => vaultForm?.editable ?? false);
   let vaultConfigured = $derived.by(() => vaultForm?.configured ?? false);
-  // Only to say *whose* setting outranks the choice: `toml` is an operator's
-  // line, and `db` is a path this user stored through the form this card
-  // replaces, which nothing writes any more.
-  let vaultSource = $derived.by(() => vaultForm?.source ?? '');
   let vaultHasPassphrase = $derived.by(() => vaultForm?.passphrase_present ?? false);
+  // Off `vault` rather than `vaultForm`: the names ride on the configured half
+  // of the payload, which is also the half the status line renders from.
+  let vaultEntryNames = $derived.by(() => vault?.entry_names ?? []);
   let vaultDir = $derived.by(() => vaultForm?.vault_dir ?? '');
   let vaultFiles = $derived.by(() => vaultForm?.files ?? []);
   let vaultFile = $derived.by(() => vaultForm?.vault_file ?? '');
@@ -1077,11 +1076,9 @@
           The vault goes on the heading rather than in the list of cards below
           it, and nothing on it is writable. It is not a connected service —
           every other entry there is a credential *for* something, and this is
-          the source those credentials come from, so a card among them would
-          make it a peer of the things whose fields it has just disabled. It is
-          also the referent the disabled-field sentence needs, which has to be
-          visible from every card that shows one: a heading is above all of
-          them where a sibling card is not.
+          the source a *different* set of credentials comes from, so a card
+          among them would read as a peer of things it has nothing to do with.
+          It owns no service card's fields any more and disables none of them.
 
           Rendered only when there is a vault. Most deployments give nobody one.
         -->
@@ -1120,6 +1117,23 @@
             {/if}
             {#if vault.path}
               It is read from <code>{vault.path}</code>, never written.
+            {/if}
+            <!--
+              The names, which is the feedback this feature has never had: after
+              dropping a file in and generating a passphrase, a name that
+              arrived is a credential istota holds and one that is missing is a
+              group misspelled or an entry with a warning behind it. Names only
+              — no value reaches this payload at all — and this user's own,
+              which is why it is here and not in `doctor`, whose vault check
+              reports counts to every admin.
+            -->
+            {#if vaultEntryNames.length > 0}
+              <span class="vault-names" data-testid="vault-entry-names">
+                What it holds: {#each vaultEntryNames as name, i}<code>{name}</code>{i <
+                  vaultEntryNames.length - 1
+                    ? ', '
+                    : ''}{/each}{vault.entry_names_truncated ? ', and more' : '.'}
+              </span>
             {/if}
             {#if vaultProblem}
               <span class="vault-problem">Not working: {vaultProblem}</span>
@@ -1194,15 +1208,8 @@
           -->
           {#if !vaultEditable}
             <p class="caption" data-testid="vault-not-selectable">
-              {#if vaultSource === 'toml'}
-                Your credential vault's file is set in this deployment's configuration, so it is not
-                selectable here. Ask your administrator to change it.
-              {:else}
-                Your credential vault still points at a file you named before this page offered a
-                folder. An administrator clears that with <code
-                  >istota user ensure --clear-vault-config</code
-                >, and the file below is then selectable here.
-              {/if}
+              Your credential vault's file is set in this deployment's configuration, so it is not
+              selectable here. Ask your administrator to change it.
             </p>
           {/if}
           <SecretField

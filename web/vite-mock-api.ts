@@ -8,40 +8,20 @@ import { fileURLToPath } from 'node:url';
 import { ROOM_COLORS } from './src/lib/roomColors';
 
 /**
- * The dev server's vault state, mutated by the three write routes above.
+ * The dev server's vault state, mutated by the two write routes below.
  *
- * Starts unconfigured with no passphrase, because that is the state every real
- * user is in and the one the form exists to move them out of. `eligible_services`
- * excludes `native_brain` the way the server does: it is vault-*eligible* and
- * `cli_only`, so the form does not offer it.
+ * Starts unconfigured with no passphrase and one file in the folder, because
+ * that is the state every real user is in and the one the card exists to move
+ * them out of: copy a `.kdbx` in, generate a passphrase, done. Add a second
+ * name to `files` to see the "which of these" question.
  */
 const mockVault: Record<string, unknown> = {
   configured: false,
   editable: true,
-  source: '',
-  vault_path: '',
-  vault_root: '/mnt/shared/Users/alice',
   passphrase_present: false,
-  // The real field sets, taken from `secret_schema`. They are the point of the
-  // row: ticking `ntfy` hands the file five fields, not one, and a field the
-  // file does not hold is deleted from the secrets table.
-  eligible_services: [
-    { service: 'carto', label: 'CARTO basemaps', keys: ['API key'] },
-    { service: 'feeds', label: 'Feeds', keys: ['Tumblr API key (optional)'] },
-    { service: 'karakeep', label: 'Karakeep', keys: ['Base URL', 'API key'] },
-    {
-      service: 'ntfy',
-      label: 'ntfy push',
-      keys: [
-        'Server URL',
-        'Default topic',
-        'Access token (optional)',
-        'Username (optional)',
-        'Password (optional)',
-      ],
-    },
-  ],
-  owned: [],
+  vault_dir: 'Istota/vault',
+  files: ['personal.kdbx'],
+  vault_file: 'personal.kdbx',
   path: '',
   outcome: '',
   reason: '',
@@ -51,6 +31,10 @@ const mockVault: Record<string, unknown> = {
   last_outcome: '',
   last_reason: '',
   parsed: false,
+  unscoped: false,
+  entry_count: 0,
+  entry_names: [],
+  entry_names_truncated: false,
   problem: '',
 };
 
@@ -3742,33 +3726,16 @@ const handlers: MockHandler[] = [
       return { ...mockVault };
     }
     if (url === '/istota/api/settings/vault' && method === 'PUT') {
-      const b = body as { vault_path?: string; vault_services?: string[] };
-      const path = (b?.vault_path ?? '').trim();
-      if (!path) return { error: 'vault path is required' };
-      // The one refusal worth modelling here, because it is the boundary the
-      // form is built around: an absolute path is an operator setting, checked
-      // against the trees a task sandbox can write rather than against one
-      // user's own directory.
-      if (path.startsWith('/')) {
-        return {
-          error:
-            'a vault path set here must be relative to your own workspace; an absolute path is an operator setting in config.toml',
-        };
+      const b = body as { vault_file?: string };
+      const chosen = (b?.vault_file ?? '').trim();
+      // The one refusal worth modelling, because it is the whole of the path
+      // handling: the value is a name out of the listing the server just
+      // produced, so anything else is refused rather than parsed.
+      if (chosen && !(mockVault.files as string[]).includes(chosen)) {
+        return { error: 'that file is not in your vault folder any more' };
       }
-      mockVault.configured = true;
-      mockVault.source = 'db';
-      mockVault.vault_path = path;
-      mockVault.owned = [...(b?.vault_services ?? [])];
-      mockVault.path = `/mnt/shared/Users/${user.username}/${path}`;
-      return { ok: true, vault_path: path, vault_services: mockVault.owned };
-    }
-    if (url === '/istota/api/settings/vault' && method === 'DELETE') {
-      const had = mockVault.source === 'db';
-      mockVault.configured = false;
-      mockVault.source = '';
-      mockVault.vault_path = '';
-      mockVault.owned = [];
-      return { ok: true, cleared: had };
+      mockVault.vault_file = chosen;
+      return { ok: true, vault_file: chosen };
     }
     if (url === '/istota/api/settings/vault/passphrase' && method === 'PUT') {
       const b = body as { generate?: boolean; passphrase?: string; replace?: boolean };

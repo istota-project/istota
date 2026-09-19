@@ -1079,10 +1079,6 @@ export interface ServiceCard {
   custom_ui?: boolean;
   connected?: boolean; // google_workspace OAuth state
   enabled?: boolean; // google_workspace module flag
-  /** The user's credential vault owns this service, so its fields are not
-   *  editable here — the vault file is the authority and a write would be
-   *  refused with a 409. Present on every card, true on few. */
-  vault_managed?: boolean;
 }
 
 export interface ServicesResponse {
@@ -1121,7 +1117,6 @@ export interface VaultStatus {
    *  The settings heading renders nothing at all in that case. */
   configured: boolean;
   path?: string;
-  owned?: string[];
   passphrase_present?: boolean;
   /** What the request itself found. Empty unless the configured path is one the
    *  daemon may not open — the endpoint does not unlock the file. */
@@ -1149,20 +1144,23 @@ export interface VaultStatus {
   /** How many shared credentials istota holds for this user, right now, from
    *  the `secrets` table rather than from the file. */
   entry_count?: number;
+  /** Their names, sorted, capped by the server. Names only — no value reaches
+   *  this payload — and this user's own, which is why the card may show them
+   *  where `doctor` reports counts to every admin. */
+  entry_names?: string[];
+  /** The list above was cut. `entry_count` is uncapped, so a cut list still
+   *  adds up rather than answering "did mine arrive" wrongly. */
+  entry_names_truncated?: boolean;
 
   // --- the form's own half, present whatever `configured` says --------------
   //
   // Present even for a user with no vault, because that user is the one the
   // form exists for.
 
-  /** Whether this surface may store the choice. False when a configured
-   *  `vault_path` outranks it — see the note above: precedence, not
-   *  permission. */
+  /** Whether this surface may store the choice. False when a `vault_path` in
+   *  the deployment's configuration outranks it — see the note above:
+   *  precedence, not permission. */
   editable?: boolean;
-  /** `'db'` (a stored path from the form this replaced), `'toml'` (an
-   *  operator's line), or `''` (nothing configured, which is the case the
-   *  folder serves). */
-  source?: '' | 'db' | 'toml';
   /** The vault folder, for the card's instruction. Where the user puts the
    *  file, in the words of their own file tree. */
   vault_dir?: string;

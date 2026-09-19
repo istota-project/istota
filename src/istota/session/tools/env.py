@@ -102,7 +102,7 @@ class ToolEnv:
       otherwise cover it. Two producers, and only one of them is nested:
       ``.developer`` sits inside ``user_temp_dir``, which containment alone
       cannot express, so without this the model could rewrite
-      ``credential-fetch``; the task control directory is a *sibling* of
+      the forge wrappers it holds; the task control directory is a *sibling* of
       ``user_temp_dir`` and inside no write root at all, which is why
       ``native_fs_roots`` also returns it among the read roots — read it there
       before concluding that either entry is redundant. Unlike the two above,

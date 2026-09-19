@@ -74,7 +74,7 @@ def secret_key(monkeypatch):
     return SECRET_KEY
 
 
-def _vault_config(tmp_path, *, vault_path: str, services: list[str]) -> Config:
+def _vault_config(tmp_path, *, vault_path: str) -> Config:
     """A config with a workspace, one user `alice`, and an initialised DB."""
     from istota import db
 
@@ -87,7 +87,7 @@ def _vault_config(tmp_path, *, vault_path: str, services: list[str]) -> Config:
         temp_dir=tmp_path / "tmp",
         workspace_path=mount,
         users={
-            "alice": UserConfig(vault_path=vault_path, vault_services=services),
+            "alice": UserConfig(vault_path=vault_path),
         },
     )
 
@@ -127,7 +127,7 @@ def _provision_passphrase(config: Config, value: str = PASSPHRASE) -> None:
 def ready(tmp_path, secret_key):
     """A configured user, a real vault at the configured path, a passphrase."""
     config = _vault_config(
-        tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+        tmp_path, vault_path="config/vault.kdbx"
     )
     path = _user_root(config) / "config" / "vault.kdbx"
     _write_vault(path)
@@ -247,7 +247,7 @@ class TestWhichFailuresCacheTheirDigest:
         from istota.secrets_vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,7 +279,7 @@ class TestWhichFailuresCacheTheirDigest:
         from istota.secrets_vault import OUTCOME_OK, VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         _write_vault(path)
@@ -317,7 +317,7 @@ class TestWhichFailuresCacheTheirDigest:
         )
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         _write_vault(path)
@@ -340,7 +340,7 @@ class TestWhichFailuresCacheTheirDigest:
         from istota.secrets_vault import OUTCOME_OK, VaultCorrupt, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -367,7 +367,7 @@ class TestWhichFailuresCacheTheirDigest:
         from istota.secrets_vault import OUTCOME_OK, VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         _write_vault(path)
@@ -423,7 +423,7 @@ class TestTheMasterKeyIsUnusable:
 
     def _configured(self, tmp_path):
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
         return config
@@ -525,7 +525,7 @@ class TestTheSkipCarriesTheSettledClass:
         from istota.secrets_vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -558,7 +558,7 @@ class TestTheTransitionRule:
         from istota.secrets_vault import sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
 
@@ -586,7 +586,7 @@ class TestTheTransitionRule:
         )
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         _write_vault(path)
@@ -601,7 +601,7 @@ class TestTheTransitionRule:
         from istota.secrets_vault import OUTCOME_OK, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
         sync_user(config, "alice")
@@ -730,7 +730,7 @@ class TestARefusedPath:
         """
         from istota.secrets_vault import VaultPathRefused, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=["karakeep"])
+        config = _vault_config(tmp_path, vault_path="")
         bob = Path(config.workspace_path) / "Users" / "bob" / "config"
         bob.mkdir(parents=True, exist_ok=True)
         config.users["alice"].vault_path = str(bob / "vault.kdbx")
@@ -751,7 +751,7 @@ class TestARefusedPath:
         """
         from istota.secrets_vault import VaultPathRefused, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
         config.users["alice"].vault_path = "../bob/vault.kdbx"
 
         first = sync_user(config, "alice")
@@ -762,7 +762,7 @@ class TestARefusedPath:
     def test_an_unconfigured_user_is_not_a_failure(self, tmp_path, secret_key):
         from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
         result = sync_user(config, "alice")
         assert result.outcome == OUTCOME_NOT_CONFIGURED
         assert result.transition is False
@@ -836,7 +836,7 @@ class TestTheDescriptorLifetime:
         from istota.secrets_vault import VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
         _provision_passphrase(config, "the-wrong-passphrase-entirely")
@@ -880,12 +880,8 @@ class TestSyncAll:
             temp_dir=tmp_path / "tmp",
             workspace_path=mount,
             users={
-                "alice": UserConfig(
-                    vault_path="vault.kdbx", vault_services=["karakeep"]
-                ),
-                "bob": UserConfig(
-                    vault_path="vault.kdbx", vault_services=["karakeep"]
-                ),
+                "alice": UserConfig(vault_path="vault.kdbx"),
+                "bob": UserConfig(vault_path="vault.kdbx"),
             },
         )
         # alice's is corrupt; bob's is real.
@@ -954,7 +950,7 @@ class TestTheEnableGate:
         would notify a user who has not finished switching it on."""
         from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
         _write_vault(self._folder(config) / "personal.kdbx")
 
         result = sync_user(config, "alice")
@@ -967,7 +963,7 @@ class TestTheEnableGate:
         """Every user by default, on every tick."""
         from istota import secrets_vault
 
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
 
         def _refuse(*args, **kwargs):  # pragma: no cover - the point is no call
             raise AssertionError("the vault folder was listed")
@@ -983,7 +979,7 @@ class TestTheEnableGate:
         passphrase, and nothing is stored to select anything."""
         from istota.secrets_vault import OUTCOME_OK, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=["karakeep"])
+        config = _vault_config(tmp_path, vault_path="")
         _write_vault(self._folder(config) / "personal.kdbx")
         _provision_passphrase(config)
 
@@ -1005,7 +1001,7 @@ class TestTheEnableGate:
         """The user had a vault and the file went away, which is worth saying."""
         from istota.secrets_vault import VaultMissing, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
         self._folder(config)
         _provision_passphrase(config)
 
@@ -1021,7 +1017,7 @@ class TestTheEnableGate:
         """
         from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
         folder = self._folder(config)
         _write_vault(folder / "personal.kdbx")
         _write_vault(folder / "work.kdbx")
@@ -1036,7 +1032,7 @@ class TestTheEnableGate:
     ):
         from istota.secrets_vault import OUTCOME_OK, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=["karakeep"])
+        config = _vault_config(tmp_path, vault_path="")
         folder = self._folder(config)
         _write_vault(folder / "personal.kdbx", karakeep=False, ntfy=True)
         _write_vault(folder / "work.kdbx")
@@ -1052,7 +1048,7 @@ class TestTheEnableGate:
     ):
         """`any_vault_configured` is what the scheduler's interval gate reads,
         so a folder-configured user has to turn it on without a TOML line."""
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
         assert config.any_vault_configured() is False
         _provision_passphrase(config)
         assert config.any_vault_configured() is True

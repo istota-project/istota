@@ -90,10 +90,9 @@ def env(tmp_path: Path, monkeypatch):
     return cfg, db_path, mount
 
 
-def _with_vault(env, *, vault_path="config/vault.kdbx", services=("karakeep",)):
+def _with_vault(env, *, vault_path="config/vault.kdbx"):
     """Rewrite the config file so alice has a vault, and return the paths."""
     cfg, db_path, mount = env
-    services_toml = ", ".join(f'"{s}"' for s in services)
     cfg.write_text(
         f'db_path = "{db_path}"\n'
         f'temp_dir = "{tmp_dir(cfg)}"\n'
@@ -102,7 +101,6 @@ def _with_vault(env, *, vault_path="config/vault.kdbx", services=("karakeep",)):
         "[users.alice]\n"
         'display_name = "Alice"\n'
         f'vault_path = "{vault_path}"\n'
-        f"vault_services = [{services_toml}]\n"
     )
     return cfg, db_path, mount
 
@@ -478,8 +476,9 @@ class TestEnsureIsNoLongerRefusedByTheVault:
 
     It refused a write on the claim that the next vault sync would overwrite it.
     The vault writes only its own `vault_entries` namespace now, so that claim
-    is false for every typed service and the refusal would be a lie — which is
-    why it goes here rather than with the rest of the `vault_services` surface.
+    is false for every typed service and the refusal would be a lie. What the
+    class keeps is the control: a user who really does have a vault, so a
+    reintroduced refusal would have something to fire on.
     """
 
     def test_a_service_the_vault_used_to_own_is_written(self, env):
@@ -507,7 +506,7 @@ class TestEnsureIsNoLongerRefusedByTheVault:
         """The provisioning path, which a refusal there would have closed."""
         from istota.cli import cmd_secret
 
-        cfg, db_path, mount = _with_vault(env, services=("karakeep",))
+        cfg, db_path, mount = _with_vault(env)
         _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
 
         cmd_secret(

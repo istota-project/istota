@@ -1652,19 +1652,21 @@ def cmd_user_ensure(args):
             + user_profiles.mask_sms_phone_number(profile.sms_phone_number)
         )
 
-    # The vault selection is its own table for the reason that table exists —
-    # `user_profiles` is the general settings overlay and these two fields are a
-    # security control. Only the *clear* is here: setting a path from the CLI
-    # would be a second way to say what `[users.<id>] vault_path` already says,
-    # and the two would then disagree about which wins. Taking a row away is the
-    # thing TOML cannot express, since a stored row outranks it.
+    # What a user's vault selection *is* now is a filename out of their own
+    # `{bot_dir}/vault/` folder, held in the reserved `_vault_file` KV
+    # namespace. Only the *clear* is here: choosing a file from the CLI would be
+    # a second way to say what the settings card already says, against a listing
+    # this process would have to read off a FUSE mount. Taking the stored name
+    # away is the operator's route back to the resolver's own rules — the only
+    # file in the folder, or a question when there are several.
     if getattr(args, "clear_vault_config", False):
-        from . import user_vault_config
+        from . import storage
 
-        if user_vault_config.clear_vault_config(db_path, user_id):
-            print(f"Cleared the stored vault selection for {user_id}.")
+        if storage.stored_vault_file(config, user_id):
+            storage.store_vault_file(config, user_id, "")
+            print(f"Cleared the stored vault file for {user_id}.")
         else:
-            print(f"{user_id} had no stored vault selection.")
+            print(f"{user_id} had no stored vault file.")
 
     # The WhatsApp binding is its own table, written after the profile row so a
     # rejected identity leaves the profile update the operator also asked for
@@ -4617,10 +4619,10 @@ def main():
         "--clear-vault-config",
         action="store_true",
         help=(
-            "Remove the user's stored credential-vault selection, so a "
-            "[users.<id>] vault_path in config.toml becomes live again. The "
-            "operator's escape hatch: a stored row outranks the TOML line, and "
-            "this is the only thing that can take one away."
+            "Forget which file in the user's vault folder their vault is, so "
+            "the folder decides again: the only .kdbx there if there is one, "
+            "or nothing until they choose. The operator's route to a choice "
+            "made in the browser."
         ),
     )
     user_ensure_parser.add_argument(

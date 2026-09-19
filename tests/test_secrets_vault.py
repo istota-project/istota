@@ -2005,63 +2005,34 @@ class TestReadingThroughADescriptor:
 
 
 class TestTheConfigFields:
-    """`vault_path`, `vault_services` and `scheduler.vault_sync_interval`.
+    """`vault_path` and `scheduler.vault_sync_interval`.
 
     Asserted as a round trip through `load_config` rather than against the
     dataclass alone, because "declared, documented, and read by nothing" is a
-    defect class `config_mapper.py` records eleven instances of — and for these
-    three the symptom is a feature the operator configured and the daemon never
-    ran.
+    defect class `config_mapper.py` records eleven instances of — and for both
+    of these the symptom is a feature the operator configured and the daemon
+    never ran.
     """
 
     def test_the_defaults_leave_the_feature_off(self, tmp_path):
         config = _load_config_text(tmp_path, 'bot_name = "Istota"\n')
         assert config.scheduler.vault_sync_interval == 300
-        user = UserConfig()
-        assert user.vault_path == ""
-        assert user.vault_services == []
+        assert UserConfig().vault_path == ""
 
-    def test_both_user_fields_round_trip(self, tmp_path):
+    def test_the_user_field_round_trips(self, tmp_path):
         config = _load_config_text(tmp_path, """
             [users.alice]
-            vault_path = "istota/config/vault.kdbx"
-            vault_services = ["karakeep", "ntfy"]
+            vault_path = "Istota/vault/credentials.kdbx"
         """)
-        assert config.users["alice"].vault_path == "istota/config/vault.kdbx"
-        assert config.users["alice"].vault_services == ["karakeep", "ntfy"]
+        assert (
+            config.users["alice"].vault_path == "Istota/vault/credentials.kdbx"
+        )
 
     def test_the_interval_round_trips(self, tmp_path):
         config = _load_config_text(
             tmp_path, "[scheduler]\nvault_sync_interval = 60\n"
         )
         assert config.scheduler.vault_sync_interval == 60
-
-    def test_a_non_list_vault_services_is_dropped_rather_than_iterated(
-        self, tmp_path, caplog
-    ):
-        """A bare string iterates as characters, so `"karakeep"` would become
-        eight one-letter services.
-
-        **The result is `[]` either way**, which is why this asserts on what was
-        said rather than only on what was kept: the eligibility filter refuses
-        every one of those eight on its own, so a version that iterated the
-        string would leave the list empty and be indistinguishable here — while
-        telling the operator eight times that a service they never wrote is not
-        vault-eligible. Measured: with the string guard removed, the kept list
-        is still `[]` and the warning count goes from one to eight.
-        """
-        with caplog.at_level(logging.WARNING, logger="istota.config"):
-            config = _load_config_text(tmp_path, """
-                [users.alice]
-                vault_services = "karakeep"
-            """)
-        assert config.users["alice"].vault_services == []
-        said = [
-            m for m in (r.getMessage() for r in caplog.records)
-            if "vault_services" in m
-        ]
-        assert len(said) == 1, said
-        assert "not a list of service names" in said[0]
 
     def test_a_non_string_vault_path_is_dropped(self, tmp_path):
         config = _load_config_text(tmp_path, """
@@ -2080,32 +2051,32 @@ class TestTheConfigFields:
 
 
 class TestTheProfileTableGuard:
-    """Neither field may be settable by anything downstream of a task.
+    """`vault_path` may not be settable by anything downstream of a task.
 
     `user_profiles` is writable from the settings UI, and every other per-user
-    scalar is overlaid from it by `_apply_user_profiles`. These two are a
-    security control rather than a preference: `vault_path` selects which file
-    the daemon decrypts with a key it holds, and `vault_services` selects which
-    credentials that file may overwrite and delete.
+    scalar is overlaid from it by `_apply_user_profiles`. This one is a security
+    control rather than a preference: it selects which file the daemon decrypts
+    with a key it holds, and it outranks the folder. What a *user* may set is a
+    filename out of their own folder, which lives in the reserved `_vault_file`
+    KV namespace and is guarded there.
 
     Two halves, and neither covers the other. The column set is read off a real
     initialised database rather than grepped out of `schema.sql`, because
     `_run_migrations` adds columns with `ALTER TABLE` and a grep would not see
     one. The behavioural half drives the overlay itself, because a column is not
     the only way a value could arrive — `merge_into_user_config` sets attributes
-    by name and could set these from anywhere.
+    by name and could set this one from anywhere.
     """
 
-    def test_the_table_carries_neither_column(self, db_path):
+    def test_the_table_carries_no_vault_column(self, db_path):
         with sqlite3.connect(db_path) as conn:
             columns = {
                 row[1] for row in conn.execute("PRAGMA table_info(user_profiles)")
             }
         assert columns, "the table must exist for this assertion to mean anything"
         assert "vault_path" not in columns
-        assert "vault_services" not in columns
 
-    def test_the_overlay_leaves_both_fields_alone(self, db_path):
+    def test_the_overlay_leaves_the_field_alone(self, db_path):
         from istota import user_profiles as up
 
         up.ensure_profile(db_path, "alice", display_name="Alice")
@@ -2113,25 +2084,22 @@ class TestTheProfileTableGuard:
         assert "alice" in rows
 
         user = UserConfig(
-            vault_path="istota/config/vault.kdbx",
-            vault_services=["karakeep"],
+            vault_path="Istota/vault/credentials.kdbx",
             display_name="from-toml",
         )
         up.merge_into_user_config(rows["alice"], user)
 
-        # The control: the overlay demonstrably ran on this object, so the two
-        # assertions below are about what it declined to touch rather than
-        # about a call that did nothing.
+        # The control: the overlay demonstrably ran on this object, so the
+        # assertion below is about what it declined to touch rather than about a
+        # call that did nothing.
         assert user.display_name == "Alice"
-        assert user.vault_path == "istota/config/vault.kdbx"
-        assert user.vault_services == ["karakeep"]
+        assert user.vault_path == "Istota/vault/credentials.kdbx"
 
-    def test_the_profile_dataclass_declares_neither_field(self):
+    def test_the_profile_dataclass_declares_no_vault_field(self):
         from istota.user_profiles import UserProfile
 
         names = {f.name for f in dataclasses.fields(UserProfile)}
         assert "vault_path" not in names
-        assert "vault_services" not in names
 
 
 class TestNoSkillManifestDeclaresThePassphrase:

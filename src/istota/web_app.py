@@ -9965,14 +9965,6 @@ def _build_service_card(
         "hint": schema.get("hint", ""),
         "oauth": bool(schema.get("oauth", False)),
         "custom_ui": bool(schema.get("custom_ui", False)),
-        # Always False now. The vault writes nothing but its own
-        # `vault_entries` namespace, so no typed service is vault-owned and
-        # nothing overwrites a value edited here — which is why the 409 that
-        # used to make such a card read-only went with the eligibility
-        # machinery. The key stays on the payload because
-        # `ServiceCard.svelte` still reads it; both it and this line leave in
-        # stage 6, with the rest of the `vault_services` surface.
-        "vault_managed": False,
     }
     if extra:
         card.update(extra)
@@ -10060,15 +10052,17 @@ def _vault_settings_payload(username: str) -> dict:
     # user this page most needs to serve is the one with no vault yet, and a
     # payload that carried the listing only once a vault existed would make the
     # feature unreachable from the surface that sets it up.
-    #
-    # `editable` is the half worth reading twice. It is False when a configured
-    # `vault_path` outranks the filename this surface writes, and it is not a
-    # permission — it is a statement about which of two places the live value
-    # comes from. Letting the form store a choice an operator's line makes
-    # inert would be a control that does nothing.
     form = {
+        # Whether this surface may store a choice at all. False for a user whose
+        # file is named in `config.toml`, because a stored choice that line
+        # outranks is a control that does nothing — precedence, not permission,
+        # which is why the card says so rather than hiding the dropdown.
+        #
+        # **A boolean rather than the three-state `source` it replaces**, and
+        # the third state is what left: a selection stored by the retired web
+        # form was `db`, and that table is gone, so what remains is an
+        # operator's line or nothing.
         "editable": _vault_is_web_editable(username),
-        "source": _vault_config_source(username),
         # Where the file goes, so the card can name the folder in its
         # instruction. Not a disclosure: it is this user's own directory.
         "vault_dir": storage.vault_dir_display(_config, username) if _config else "",
@@ -10095,11 +10089,11 @@ def _vault_settings_payload(username: str) -> dict:
         # The default for every user. The heading renders nothing for this, and
         # the form renders for it — which is why the two read different keys.
         return {"configured": False, **form}
+    entries = _vault_entries(username)
     return {
         "configured": True,
         **form,
         "path": report.path,
-        "owned": list(report.owned),
         # What this call found now — a refused path is a fact about the
         # configuration rather than about a past cycle, so it must not be read
         # out of the record.
@@ -10123,7 +10117,25 @@ def _vault_settings_payload(username: str) -> dict:
         # table rather than from the file — no parse, no Argon2id, no
         # pykeepass in the web process. It is what makes the unscoped line
         # actionable: "all 412 of them" is a different sentence from "all 3".
-        "entry_count": _vault_entry_count(username),
+        "entry_count": entries.count,
+        # The names themselves, which is the feedback this feature has never
+        # had: after dropping a file in and generating a passphrase, the user
+        # can see which names arrived, and a name they expected and cannot see
+        # is a group they misspelled or an entry the log has a warning about.
+        #
+        # **Showing a user their own labels is deliberately not the rule
+        # `doctor` follows.** `security.vault_contents` reports counts and never
+        # key names, because a `CheckResult` is rendered into the boot log and
+        # into the admin Health pane, where one user's labels are read by every
+        # admin. This is that user's own page, and the read is scoped by
+        # `username`.
+        #
+        # Names, never values: `list_user_services` decrypts nothing.
+        "entry_names": list(entries.names),
+        # Whether the list above was cut. A card silently showing the first
+        # fifty of four hundred names would answer "did mine arrive" wrongly,
+        # and the count beside it is what makes the cut legible.
+        "entry_names_truncated": entries.truncated,
         # False here always, and it is not decoration: it is what tells a
         # renderer that the parse-only fields are empty because nothing
         # looked, rather than because the file holds nothing. A surface wanting
@@ -10204,75 +10216,76 @@ def _vault_passphrase_present(username: str) -> bool:
         return False
 
 
-def _vault_entry_count(username: str) -> int:
-    """How many shared credentials istota holds for this user. Count, no names.
+#: How many shared-credential names the settings card carries. A cap rather
+#: than the whole list, because the namespace is the user's own to fill and a
+#: card rendering four hundred names is a page nobody can read past. The count
+#: beside it is uncapped, so a cut list still adds up.
+VAULT_ENTRY_NAMES_SHOWN = 50
+
+
+@dataclass(frozen=True)
+class _VaultEntries:
+    """What the card says about the shared namespace: a count and some names."""
+
+    count: int
+    names: tuple[str, ...]
+    truncated: bool
+
+
+def _vault_entries(username: str) -> _VaultEntries:
+    """This user's shared credential names, and how many there are.
 
     `list_user_services` rather than `get_service_secrets`, and the difference
     is not an optimisation: the latter decrypts every value to answer, which on
     a settings page load would decrypt the user's whole shared namespace and
     stamp `last_accessed_at` across it. This one returns key names and
-    timestamps and no plaintext at all — and only the length of the list
-    leaves here.
+    timestamps and no plaintext at all, and only the names leave here.
 
-    Zero on any failure, which is the same direction the sibling helpers
+    **The count is of the whole namespace and the list is capped**, which is
+    what makes a cut legible: `truncated` says the list is short and `count`
+    says how short. Sorted, so the card's order does not move with the table's.
+
+    Empty on any failure, which is the same direction the sibling helpers
     degrade in: this is one line on a card whose real content is the status
     beside it.
     """
     if _config is None or not _config.db_path:
-        return 0
+        return _VaultEntries(0, (), False)
     try:
         from . import secrets_store, secrets_vault
         stored = secrets_store.list_user_services(_config.db_path, username)
-        return len(stored.get(secrets_vault.VAULT_ENTRY_SERVICE, []))
+        rows = stored.get(secrets_vault.VAULT_ENTRY_SERVICE, [])
+        names = sorted(str(row["key"]) for row in rows)
     except Exception:  # pragma: no cover - defensive
-        logger.debug("vault entry count lookup failed for %r", username)
-        return 0
-
-
-#: What `_vault_config_source` answers when it could not tell. Distinct from
-#: `""`, which is a real answer meaning nothing is configured — the two used to
-#: collapse, and the collapse made `_vault_is_web_editable` fail *open* while
-#: its own docstring claimed it failed closed.
-VAULT_SOURCE_UNKNOWN = "unknown"
-
-
-def _vault_config_source(username: str) -> str:
-    """Where this user's live vault selection comes from.
-
-    `db`, `toml`, `""` for nothing configured, or `VAULT_SOURCE_UNKNOWN` when
-    the question could not be answered at all.
-
-    `Config`'s answer, not a second one. The question needs both raw halves read
-    apart, and that shape lives next to the fields rather than in whichever
-    surface asks first.
-    """
-    if _config is None:
-        return VAULT_SOURCE_UNKNOWN
-    try:
-        return _config.vault_config_source(username)
-    except Exception:  # pragma: no cover - defensive
-        logger.debug("vault config source lookup failed for %r", username)
-        return VAULT_SOURCE_UNKNOWN
+        logger.debug("vault entry listing failed for %r", username)
+        return _VaultEntries(0, (), False)
+    return _VaultEntries(
+        len(names),
+        tuple(names[:VAULT_ENTRY_NAMES_SHOWN]),
+        len(names) > VAULT_ENTRY_NAMES_SHOWN,
+    )
 
 
 def _vault_is_web_editable(username: str) -> bool:
     """Whether this surface may store this user's choice of file.
 
-    False whenever a configured `vault_path` outranks the filename, and that is
-    the substance of the rule — see `_vault_settings_payload` for why it is
-    about precedence rather than about permission. Both non-empty sources mean
-    that now: `toml` is an operator's line, and `db` is a path stored by the
-    form this one replaced, which nothing writes any more and which still wins
-    until it is dropped.
+    False whenever a `vault_path` in `config.toml` outranks the filename, and
+    that is the substance of the rule — see `_vault_settings_payload` for why it
+    is about precedence rather than about permission.
 
-    It fails **closed**, and that is a property of this function rather than of
-    the one above: an unanswerable source is not one to write over, since the
-    thing it might be is an operator's line. Written as a test for the one
-    value that permits a write, never as `!= TOML` — that spelling reads the
-    same and admits every future value, including the one meaning "I could not
-    look".
+    It fails **closed**: a question that could not be answered is not one to
+    write over, since the thing it might be is an operator's line. That is why
+    the failure arm returns False rather than letting the exception reach the
+    caller, and why the test is for a value that is *empty* rather than for one
+    that is set.
     """
-    return _vault_config_source(username) == ""
+    if _config is None:
+        return False
+    try:
+        return not (_config.vault_path_for(username) or "").strip()
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("vault path lookup failed for %r", username)
+        return False
 
 
 def _select_vault_file(username: str, name: str) -> dict:

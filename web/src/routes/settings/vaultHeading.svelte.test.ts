@@ -48,7 +48,6 @@ const KARAKEEP: ServiceCardData = {
   fields: [{ key: 'api_key', label: 'API key', type: 'password' }],
   configured_keys: ['api_key'],
   last_updated: null,
-  vault_managed: true,
 };
 
 await fillApiDouble(api, {
@@ -114,6 +113,8 @@ function configured(over: Partial<VaultStatus> = {}): VaultStatus {
     configured: true,
     path: '/mnt/shared/Users/alice/config/vault.kdbx',
     entry_count: 2,
+    entry_names: ['github_pat', 'home_assistant_token'],
+    entry_names_truncated: false,
     passphrase_present: true,
     outcome: '',
     reason: '',
@@ -202,11 +203,48 @@ describe('a user with no credential vault', () => {
 });
 
 describe('a user whose vault is working', () => {
+  it('lists the names it holds, which is how a user knows the file worked', async () => {
+    // Names, never values: the payload carries no value at all, and this is the
+    // user's own page rather than `doctor`'s deployment-wide report — which
+    // answers the same question in counts because an admin reads it.
+    api.getVaultStatus.mockResolvedValue(configured());
+    await mount();
+
+    const names = await screen.findByTestId('vault-entry-names');
+    expect(names.textContent).toContain('github_pat');
+    expect(names.textContent).toContain('home_assistant_token');
+    expect(names.textContent).not.toMatch(/and more/i);
+  });
+
+  it('says so when the list was cut', async () => {
+    // The count beside it is uncapped, so a cut list still adds up. Without
+    // this a card showing the first fifty of four hundred would answer "did
+    // mine arrive" wrongly and look complete doing it.
+    api.getVaultStatus.mockResolvedValue(
+      configured({ entry_count: 412, entry_names: ['a_name'], entry_names_truncated: true }),
+    );
+    await mount();
+
+    const names = await screen.findByTestId('vault-entry-names');
+    expect(names.textContent).toMatch(/and more/i);
+  });
+
+  it('renders no name list when there are none', async () => {
+    // The control for both above: each would pass against a heading that had
+    // stopped rendering the list, since `findByTestId` is the only thing
+    // asserting it exists.
+    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 0, entry_names: [] }));
+    await mount();
+    await findHeading();
+
+    expect(screen.queryByTestId('vault-entry-names')).toBeNull();
+  });
+
   it('names the shared count, the path and the last sync', async () => {
     // It used to name the connected services the vault overwrote. It
     // overwrites none of them now, so the sentence is about the namespace the
-    // file *is* the authority for — and the fixture no longer carries an
-    // `owned` list, because the server cannot produce one.
+    // file *is* the authority for — and the payload carries no `owned` list,
+    // because the server no longer produces one.
     api.getVaultStatus.mockResolvedValue(configured());
     await mount();
 

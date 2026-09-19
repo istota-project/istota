@@ -2979,7 +2979,7 @@ _MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
 #: So the proxy triple goes to the skills that call a model and nothing else,
 #: through the same per-skill map ISSUE-409 used — which is the structure for
 #: a value that must reach exactly one subprocess and stay out of the
-#: `credential-fetch` union, and that is what these need. `ANTHROPIC_BASE_URL`
+#: manifest-lookup union, and that is what these need. `ANTHROPIC_BASE_URL`
 #: travels with them because no other skill reads it and a gateway URL can
 #: carry a key in its path.
 #:
@@ -3197,7 +3197,7 @@ def build_stripped_env() -> dict[str, str]:
 # hole of a setup_env hook doing
 # ``env["ISTOTA_SECRET_KEY"] = os.environ["ISTOTA_SECRET_KEY"]``.
 # ``derive_lookup_allowlist`` subtracts this set from its return value so
-# ``credential-fetch ISTOTA_SECRET_KEY`` is rejected by the proxy even if
+# ``istota-credential env ISTOTA_SECRET_KEY`` is rejected by the proxy even if
 # the var sneaks into ``credential_env``.
 #
 # ``SKILL_MODEL_CREDENTIAL_VARS`` joins it for the same reason from the other
@@ -3449,7 +3449,8 @@ def derive_authorized_skills(
       GitLab token OR GitHub token) auto-authorize when one provider is
       configured.
     - No ``meta.cli`` gate. The ``developer`` skill is doc-only but
-      consumes its tokens via ``credential-fetch`` from helper scripts;
+      consumes its tokens through the proxy's ``credential`` request type,
+      from helper scripts its ``setup_env`` hook writes;
       gating on ``cli=true`` would lock it out (regression of e675ed9).
     - ``fallback_var`` does NOT contribute to authorization. An
       operator-set EnvironmentFile fallback is an instance-wide signal
@@ -3518,7 +3519,13 @@ def derive_lookup_allowlist(
     authorized_skills: list[str],
     skill_index: dict,
 ) -> set[str]:
-    """Union of credentials any authorized skill may fetch via credential-fetch.
+    """Union of credentials any authorized skill may fetch by name.
+
+    The proxy's ``credential`` request type, which a task reaches as
+    ``istota-credential env <VAR>``. Deliberately *not* the shared-credential
+    namespace beside it: ``vault_credential`` serves per-user names out of
+    that user's own KDBX and this serves manifest-declared variables, so one
+    name space would mean two things.
 
     Replaces ``_allowed_credentials_for_skills``. Subtracts
     ``_PROXY_LOOKUP_BLOCKED`` as a defense-in-depth hard-reject list

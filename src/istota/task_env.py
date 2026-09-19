@@ -558,19 +558,19 @@ def build_task_runtime(
     # reserved key is the explicit alternative. It is consumed here and
     # never reaches the model.
     # The credential shim's directory goes on first, so the hook's entries
-    # below end up *ahead* of it. That ordering is load-bearing rather than
-    # arbitrary: `build_bwrap_cmd` re-binds `.developer` read-only inside the
-    # sandbox and leaves `.istota` writable, so a shim directory winning the
-    # search would let the model shadow the read-only `gh` / `glab` wrappers
-    # with a file of its own. Same rule the hook states for its own two
-    # entries — `.developer` first, so the forge wrappers win any collision.
+    # below end up *ahead* of it — `.developer` first, so the forge wrappers
+    # win any collision, which is the rule the hook already states for its own
+    # two entries. Both directories are re-bound read-only inside the sandbox
+    # now (`sandbox_plan`'s `developer_dir` and `credential_shim_dir`), so the
+    # ordering no longer decides whether a task can shadow a wrapper; it is
+    # kept because a stated order beats a coincidental one, and because the
+    # unsandboxed shapes bind neither.
     #
-    # `env` is the model's, so a task-writable directory here costs nothing the
-    # boundary was relying on: the proxy is the boundary, not the program.
-    # `proxy_base_env` is the *host-side* skill CLIs', running unsandboxed as
-    # the daemon user, and a directory the model can write on their PATH is a
-    # code-execution path no bind contains. Both prepends happen after that
-    # snapshot was taken, which is what keeps the two apart.
+    # `env` is the model's, and `proxy_base_env` is the *host-side* skill CLIs',
+    # running unsandboxed as the daemon user — a directory under the task's own
+    # temp dir on their PATH is a code-execution path no bind contains. Both
+    # prepends happen after that snapshot was taken, which is what keeps the
+    # two apart.
     if _shim_dir is not None:
         env["PATH"] = os.pathsep.join([str(_shim_dir), env["PATH"]])
 

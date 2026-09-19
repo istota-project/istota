@@ -886,7 +886,8 @@ def _bounded_for_log(value: object) -> str:
     the path out of ``config.toml``. Not shared, because importing
     ``secrets_vault`` here at module scope would pull ``secret_schema`` and
     ``secrets_store`` into a module ``config`` imports — the same cost
-    ``_validate_vault_services`` function-scopes its own import to avoid. What
+    every vault-touching path in ``config`` function-scopes its own import to
+    avoid. What
     holds them in step is that neither has any reason to change: both are "make
     it one line and bound it". ``transport``'s ``_slug`` is a *different* rule
     (an alphabet for a dedup key) and is correctly not what either reuses.

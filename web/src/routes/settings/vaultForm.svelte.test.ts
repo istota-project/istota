@@ -85,7 +85,6 @@ const KARAKEEP: ServiceCardData = {
   fields: [{ key: 'api_key', label: 'API key', type: 'password' }],
   configured_keys: ['api_key'],
   last_updated: null,
-  vault_managed: false,
 };
 
 await fillApiDouble(api, {
@@ -151,7 +150,6 @@ function unconfigured(over: Partial<VaultStatus> = {}): VaultStatus {
   return {
     configured: false,
     editable: true,
-    source: '',
     vault_dir: VAULT_DIR,
     files: [],
     vault_file: '',
@@ -298,9 +296,13 @@ describe('the file in the folder', () => {
 });
 
 describe('a vault whose file is set in configuration', () => {
+  // One case rather than two. `source` carried three values because a stored
+  // path from the retired web form was one of them; that table is gone, so
+  // what is left is an operator's line or nothing, and `editable` says which.
+
   it('is explained rather than shown as a dead form', async () => {
     api.getVaultStatus.mockResolvedValue(
-      configured({ source: 'toml', editable: false, files: ['a.kdbx', 'b.kdbx'] }),
+      configured({ editable: false, files: ['a.kdbx', 'b.kdbx'] }),
     );
     await mount();
 
@@ -315,10 +317,10 @@ describe('a vault whose file is set in configuration', () => {
   it('still offers the passphrase, which belongs to the user either way', async () => {
     // Only the *file* half is somebody else's decision. The passphrase is a
     // credential Istota holds to open the file, not a setting an operator
-    // made — withholding it left a user whose vault came from the older form
-    // with no way to store one at all.
+    // made — withholding it left a user whose file an operator had named with
+    // no way to store one at all.
     api.getVaultStatus.mockResolvedValue(
-      configured({ source: 'toml', editable: false, passphrase_present: false }),
+      configured({ editable: false, passphrase_present: false }),
     );
     await mount();
 
@@ -326,16 +328,16 @@ describe('a vault whose file is set in configuration', () => {
     expect(button(/generate/i)).toBeTruthy();
   });
 
-  it('names the older form rather than the deployment for a stored path', async () => {
-    // `source: 'db'` is a path this user stored themselves, through the form
-    // this card replaces. Telling them an administrator set it is false, and
-    // it hides the one command that gives them the folder back.
-    api.getVaultStatus.mockResolvedValue(configured({ source: 'db', editable: false }));
+  it('offers the folder controls again once nothing outranks them', async () => {
+    // The control for the two above: they would each pass against a card that
+    // had stopped rendering the file half at all.
+    api.getVaultStatus.mockResolvedValue(
+      configured({ editable: true, files: ['a.kdbx', 'b.kdbx'] }),
+    );
     await mount();
 
-    const note = screen.getByTestId('vault-not-selectable');
-    expect(words(note)).toMatch(/istota user ensure --clear-vault-config/);
-    expect(words(note)).not.toMatch(/deployment's configuration/i);
+    expect(screen.queryByTestId('vault-not-selectable')).toBeNull();
+    expect(control('Vault file')).toBeTruthy();
   });
 });
 

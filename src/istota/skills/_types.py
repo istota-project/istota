@@ -43,7 +43,7 @@ class EnvSpec:
     sensitive: bool = False
     # Withhold this var from Claude's subprocess and hand it to the skill proxy
     # instead — same routing as ``sensitive``, but without the credential
-    # semantics (no auto-authorization, no ``credential-fetch`` lookup, no
+    # semantics (no auto-authorization, no manifest lookup, no
     # per-skill scoping). For non-secret values the model still must not have:
     # today that means paths to SQLite files (HEALTH_DB_PATH, LOCATION_DB_PATH).
     # Knowing the path is harmless on its own — the file is masked out of the

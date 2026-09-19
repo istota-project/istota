@@ -2572,13 +2572,13 @@ class TestVaultOwnedServices:
     next vault sync would overwrite it. The vault writes only its own
     `vault_entries` namespace now, so that claim is false for every typed
     service — a refusal that stood would be a lie, and the card's read-only
-    branch would disable a form nothing competes for. Both go here rather than
-    with the rest of the `vault_services` surface, because what made them right
-    stopped being true at the apply rather than at the config.
+    branch disabled a form nothing competes for.
 
-    What the class keeps is the **control**: a user with a vault_path and a
-    vault_services line, driving both routes and both card builders, asserting
-    that every one of them writes and that no card claims otherwise.
+    What the class keeps is the **control**, which is the whole reason it is
+    still here: a user who really does have a vault, driving both routes and
+    both card builders, asserting that every one of them writes and that no card
+    carries an ownership claim at all. A test written against a user with no
+    vault would pass in a tree where the refusal was still there.
     """
 
     @pytest.fixture(autouse=True)
@@ -2589,25 +2589,25 @@ class TestVaultOwnedServices:
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
         self._db_path = db_path
 
-    def _vault_config(self, tmp_path, *, services):
-        """Alice owns `services` through a vault whose path resolves.
+    def _vault_config(self, tmp_path):
+        """Alice has a vault whose configured path resolves.
 
         The directory has to exist — `resolve_user_vault_path` walks the
         components above the leaf with `O_NOFOLLOW | O_DIRECTORY` — but the KDBX
-        itself does not: ownership is "declared **and** the path resolves", and
-        the leaf is never opened to answer that. So this fixture deliberately
-        writes no file, which also keeps the test off `pykeepass`.
+        itself does not: nothing here opens the leaf, so this fixture
+        deliberately writes no file, which also keeps the test off `pykeepass`.
         """
         mount = tmp_path / "vaultmount"
-        (mount / "Users" / "alice" / "config").mkdir(parents=True, exist_ok=True)
+        (mount / "Users" / "alice" / "Istota" / "vault").mkdir(
+            parents=True, exist_ok=True
+        )
         cfg = _make_config(
             tmp_path,
             mount_path=str(mount),
             users={
                 "alice": UserConfig(
                     display_name="Alice",
-                    vault_path="config/vault.kdbx",
-                    vault_services=list(services),
+                    vault_path="Istota/vault/credentials.kdbx",
                 ),
                 "bob": UserConfig(display_name="Bob"),
             },
@@ -2628,7 +2628,7 @@ class TestVaultOwnedServices:
     ):
         from istota import secrets_store
 
-        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
 
         resp = await client.put(
@@ -2657,7 +2657,7 @@ class TestVaultOwnedServices:
         secrets_store.set_secret(
             self._db_path, "alice", "karakeep", "api_key", "already-stored",
         )
-        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
 
         resp = await client.delete(
@@ -2677,7 +2677,7 @@ class TestVaultOwnedServices:
         """The control. Without it the refusal could be refusing everything."""
         from istota import secrets_store
 
-        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
 
         resp = await client.put(
@@ -2701,7 +2701,7 @@ class TestVaultOwnedServices:
         import istota.web_app as mod
         from istota import secrets_store
 
-        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        _patch_app(self._vault_config(tmp_path))
         mod._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={
             "user_id": "bob",
         })
@@ -2731,7 +2731,7 @@ class TestVaultOwnedServices:
         """
         from istota import secrets_store
 
-        cfg = self._vault_config(tmp_path, services=["karakeep"])
+        cfg = self._vault_config(tmp_path)
         cfg.users["alice"].vault_path = "no-such-dir/vault.kdbx"
         _patch_app(cfg)
         cookies = await self._login_alice(client, app)
@@ -2754,7 +2754,7 @@ class TestVaultOwnedServices:
         """The 409 used to sit between the unknown-service 404 and this 400,
         refusing the whole service before the key was looked at. With it gone
         the unknown key is what answers, on both verbs."""
-        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
 
         put = await client.put(
@@ -2775,11 +2775,13 @@ class TestVaultOwnedServices:
     async def test_no_card_claims_the_vault_manages_it(
         self, tmp_path, client, app,
     ):
-        """`vault_managed` is False on every card, whatever `vault_services`
-        says. The key stays on the payload until stage 6 because
-        `ServiceCard.svelte` still reads it; what it may never again be is
-        True, since nothing overwrites a typed service."""
-        _patch_app(self._vault_config(tmp_path, services=["karakeep", "feeds"]))
+        """No card carries an ownership claim in any spelling.
+
+        The key is gone rather than pinned False, so the assertion is about its
+        absence: a `vault_managed` back on the payload is a `ServiceCard`
+        branch back with it, disabling a form nothing overwrites.
+        """
+        _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
 
         services = await client.get(
@@ -2794,17 +2796,17 @@ class TestVaultOwnedServices:
             *feeds.json()["services"],
         ]
         assert cards, "no card was rendered, so the assertion below is vacuous"
-        assert all(c["vault_managed"] is False for c in cards)
+        assert all("vault_managed" not in c for c in cards)
 
     async def test_an_unknown_service_is_still_a_404(self, tmp_path, client, app):
         """Ordering: the service lookup answers before the vault gate.
 
-        A name that is in no schema cannot be vault-owned — `vault_services` is
-        filtered to eligible services at config load, and eligibility starts
-        from the schema — so a 409 here would be answering about a service that
-        does not exist.
+        A name that is in no schema is a service that does not exist, so a
+        refusal here would be answering about one. There is no vault gate left
+        to order against it; what the test holds is that adding one back cannot
+        be put in front of the 404.
         """
-        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
+        _patch_app(self._vault_config(tmp_path))
         cookies = await self._login_alice(client, app)
 
         resp = await client.put(
@@ -2815,16 +2817,6 @@ class TestVaultOwnedServices:
         )
         assert resp.status_code == 404
 
-    async def test_every_card_still_carries_the_key(self, tmp_path, client, app):
-        """A missing key and a False one render identically in Svelte, so the
-        card has to carry it until `ServiceCard`'s branch goes in stage 6."""
-        _patch_app(self._vault_config(tmp_path, services=["karakeep"]))
-        cookies = await self._login_alice(client, app)
-
-        resp = await client.get("/istota/api/settings/services", cookies=cookies)
-        assert resp.status_code == 200
-        cards = {c["service"]: c for c in resp.json()["services"]}
-        assert "vault_managed" in cards["karakeep"]
 
 
 #: The CSRF dependency wants a same-site Origin; the test config's web base
@@ -2862,7 +2854,7 @@ class TestTheVaultWriteEndpoints:
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
         self._db_path = db_path
 
-    def _config(self, tmp_path, *, vault_path="", services=()):
+    def _config(self, tmp_path, *, vault_path=""):
         mount = tmp_path / "vaultmount"
         (mount / "Users" / "alice" / "config").mkdir(parents=True, exist_ok=True)
         cfg = _make_config(
@@ -2872,7 +2864,6 @@ class TestTheVaultWriteEndpoints:
                 "alice": UserConfig(
                     display_name="Alice",
                     vault_path=vault_path,
-                    vault_services=list(services),
                 ),
             },
         )
@@ -2975,8 +2966,11 @@ class TestTheVaultWriteEndpoints:
 
         assert body["unscoped"] is True
         assert body["entry_count"] == 2
-        # Names are the *user's* to see and this payload is not where §8 puts
-        # them yet; what must never appear is a value.
+        # The names are the user's own to see, on the user's own page — which
+        # is deliberately not the rule `doctor` follows, since a `CheckResult`
+        # is read by every admin. What must never appear is a value.
+        assert body["entry_names"] == ["github_pat", "home_assistant_token"]
+        assert body["entry_names_truncated"] is False
         assert "the-value" not in json.dumps(body)
 
     async def test_a_scoped_record_reports_the_scope_as_false(
@@ -3006,6 +3000,42 @@ class TestTheVaultWriteEndpoints:
 
         assert body["unscoped"] is False
         assert body["entry_count"] == 0
+        assert body["entry_names"] == []
+
+    async def test_the_name_list_is_capped_and_says_so(
+        self, tmp_path, client, app,
+    ):
+        """The count is of the whole namespace and the list is cut.
+
+        A card silently showing the first fifty of four hundred names answers
+        "did mine arrive" wrongly, and does it while looking complete — so the
+        flag is what makes the cut legible and the uncapped count beside it is
+        what makes it add up.
+        """
+        import istota.web_app as mod
+        from istota import secrets_store, secrets_vault
+
+        cookies = await self._setup(tmp_path, client, app)
+        self._folder(tmp_path, "personal.kdbx")
+        secrets_store.set_secret(
+            self._db_path, "alice", "vault", "passphrase", "x" * 40,
+        )
+        over = mod.VAULT_ENTRY_NAMES_SHOWN + 3
+        for i in range(over):
+            secrets_store.set_secret(
+                self._db_path, "alice",
+                secrets_vault.VAULT_ENTRY_SERVICE, f"name_{i:03d}", "v",
+            )
+
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+
+        assert body["entry_count"] == over
+        assert len(body["entry_names"]) == mod.VAULT_ENTRY_NAMES_SHOWN
+        assert body["entry_names_truncated"] is True
+        # Sorted, so the card's order does not move with the table's.
+        assert body["entry_names"] == sorted(body["entry_names"])
 
     async def test_clearing_returns_the_user_to_the_question(
         self, tmp_path, client, app,
@@ -3069,7 +3099,6 @@ class TestTheVaultWriteEndpoints:
             "/istota/api/settings/vault", cookies=cookies,
         )).json()
         assert body["editable"] is False
-        assert body["source"] == "toml"
 
         resp = await client.put(
             "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
@@ -3252,25 +3281,25 @@ class TestTheVaultWriteEndpoints:
             self._db_path, "alice", "vault", "passphrase",
         ) == typed
 
-    async def test_an_unanswerable_source_is_not_writable(
+    async def test_an_unanswerable_configuration_is_not_writable(
         self, tmp_path, client, app,
     ):
         """`_vault_is_web_editable` fails closed, and that is a real branch.
 
-        An unknown source might be an operator's line, so writing over it is the
-        one thing that cannot be taken back. Written as a test for the one
-        value that permits a write rather than as `!= 'toml'`, which reads the
-        same and admits every value added later — including the one meaning
-        "I could not look".
+        A question that could not be answered might be an operator's line, so
+        writing over it is the one thing here that cannot be taken back. The
+        arm is reached by making the read itself raise, which is the only way
+        the answer is unknown now that it is a plain config read — and it has
+        to refuse rather than let the exception escape, since an escaping one
+        is a 500 on a settings page rather than a refusal on one control.
         """
         import istota.web_app as mod
 
         cookies = await self._setup(tmp_path, client, app)
         self._folder(tmp_path, "personal.kdbx")
         with patch.object(
-            mod._config, "vault_config_source", side_effect=RuntimeError("boom"),
+            mod._config, "vault_path_for", side_effect=RuntimeError("boom"),
         ):
-            assert mod._vault_config_source("alice") == mod.VAULT_SOURCE_UNKNOWN
             assert mod._vault_is_web_editable("alice") is False
             resp = await client.put(
                 "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
@@ -3321,7 +3350,7 @@ class TestTheVaultSettingsEndpoint:
         monkeypatch.setenv("ISTOTA_SECRET_KEY", "test-key" * 8)
         self._db_path = db_path
 
-    def _config(self, tmp_path, *, vault_path="config/vault.kdbx", services=("karakeep",)):
+    def _config(self, tmp_path, *, vault_path="config/vault.kdbx"):
         mount = tmp_path / "vaultmount"
         (mount / "Users" / "alice" / "config").mkdir(parents=True, exist_ok=True)
         cfg = _make_config(
@@ -3331,7 +3360,6 @@ class TestTheVaultSettingsEndpoint:
                 "alice": UserConfig(
                     display_name="Alice",
                     vault_path=vault_path,
-                    vault_services=list(services),
                 ),
             },
         )
@@ -3387,7 +3415,6 @@ class TestTheVaultSettingsEndpoint:
         # vault existed would make the feature unreachable from the surface
         # that sets it up.
         assert body["editable"] is True
-        assert body["source"] == ""
         assert body["vault_file"] == ""
         assert body["files"] == []
         assert body["vault_dir"].endswith("/istota/vault")
@@ -3399,13 +3426,12 @@ class TestTheVaultSettingsEndpoint:
     async def test_a_configured_user_gets_the_path_and_no_owned_set(
         self, tmp_path, client, app,
     ):
-        """`owned` is empty however `vault_services` is configured.
+        """The path is reported and no ownership key is, in any spelling.
 
-        It used to be the services the vault overwrote. It overwrites none of
-        them now, so `vault_status` stopped filling the field rather than
-        leaving the card to say a vault is the authority for a `karakeep` form
-        that nothing competes for. The key survives until stage 6 takes the
-        whole `vault_services` surface; what it may never again be is non-empty.
+        `owned` used to name the services the vault overwrote. It overwrites
+        none of them now, so the field is gone rather than pinned empty — and
+        the assertion is about its absence, because an empty list is what a
+        reintroduced field would carry on the first render too.
         """
         from istota import secrets_store
 
@@ -3421,7 +3447,9 @@ class TestTheVaultSettingsEndpoint:
 
         assert body["configured"] is True
         assert body["path"].endswith("Users/alice/config/vault.kdbx")
-        assert body["owned"] == []
+        assert "owned" not in body
+        assert "eligible_services" not in body
+        assert "source" not in body
         assert body["passphrase_present"] is True
 
     async def test_it_reports_the_last_successful_sync_from_the_record(
@@ -3587,7 +3615,7 @@ class TestTheVaultSettingsEndpoint:
         passphrase, with nothing typed and nothing stored to select it."""
         from istota import secrets_store
 
-        cfg = self._config(tmp_path, vault_path="", services=())
+        cfg = self._config(tmp_path, vault_path="")
         folder = (
             Path(cfg.workspace_path) / "Users" / "alice" / "istota" / "vault"
         )
@@ -3619,7 +3647,7 @@ class TestTheVaultSettingsEndpoint:
         """
         from istota import secrets_store, storage
 
-        cfg = self._config(tmp_path, vault_path="", services=())
+        cfg = self._config(tmp_path, vault_path="")
         folder = (
             Path(cfg.workspace_path) / "Users" / "alice" / "istota" / "vault"
         )

@@ -2891,11 +2891,12 @@ def _vault_users(config: "Config") -> dict[str, str]:
     ``vault_path = "  "`` is a configured value that resolves to nothing, which
     the sync refuses and logs every cycle.
 
-    **A mapping rather than a list of ids, because the value costs a database
-    read.** ``Config.vault_path_for`` may merge a stored row over the TOML
-    attribute, so asking for it again in each arm turns this check's "a config
-    read per user" into a connection per arm per user — on a check that runs at
-    boot, hourly, behind ``!check`` and on every admin Health pane render.
+    **A mapping rather than a list of ids, so each arm has the value without
+    asking again.** ``Config.vault_path_for`` is a plain read of the TOML field
+    now that no table outranks it, so the cost is no longer a connection per arm
+    per user — but the arms below each want the path, and carrying it is what
+    keeps them from re-deriving it four ways on a check that runs at boot,
+    hourly, behind ``!check`` and on every admin Health pane render.
 
     Never raises: a database that cannot be asked about a passphrase answers
     False for that user, which is the same direction the gate it mirrors
@@ -2959,14 +2960,13 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     because "the extra is not installed" is an operator remedy and everything
     else here is not.
 
-    ``…schedule`` — will a cycle ever run, and what will it own. A
-    ``vault_sync_interval`` of 0 is a documented off-switch rather than a defect,
-    so it ``WARN``s and says which it is; the same predicate
-    (``secrets_vault.sync_is_scheduled``) gates the startup pass and the gate, so
-    a zeroed interval means a configured vault that nothing applies. The owned
-    set rides here because it is the same question — what this is configured to
-    do — and because an empty ``vault_services`` is the documented dry-run state
-    rather than a mistake.
+    ``…schedule`` — will a cycle ever run at all. A ``vault_sync_interval`` of 0
+    is a documented off-switch rather than a defect, so it ``WARN``s and says
+    which it is; the same predicate (``secrets_vault.sync_is_scheduled``) gates
+    the startup pass and the gate, so a zeroed interval means a configured vault
+    that nothing applies. It is one question now rather than two: the owned-set
+    line went with the service mapping, since a vault owns no typed service and
+    writes only its own ``vault_entries`` namespace.
 
     ``…path`` — does each ``vault_path`` resolve, and is there a plain file of a
     sane size behind it. A **refused** path is the one ``FAIL``: the refusal set

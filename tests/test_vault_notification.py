@@ -114,7 +114,7 @@ def sends(monkeypatch):
     return _DeliveryCounter(monkeypatch)
 
 
-def _vault_config(tmp_path, *, vault_path: str, services: list[str]) -> Config:
+def _vault_config(tmp_path, *, vault_path: str) -> Config:
     mount = tmp_path / "mount"
     (mount / "Users" / "alice" / "config").mkdir(parents=True, exist_ok=True)
     db_path = tmp_path / "istota.db"
@@ -123,7 +123,7 @@ def _vault_config(tmp_path, *, vault_path: str, services: list[str]) -> Config:
         db_path=db_path,
         temp_dir=tmp_path / "tmp",
         workspace_path=mount,
-        users={"alice": UserConfig(vault_path=vault_path, vault_services=services)},
+        users={"alice": UserConfig(vault_path=vault_path)},
     )
 
 
@@ -166,7 +166,7 @@ def broken(tmp_path, secret_key):
     from the one it names.
     """
     config = _vault_config(
-        tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+        tmp_path, vault_path="config/vault.kdbx"
     )
     path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
     _corrupt(path)
@@ -273,7 +273,7 @@ class TestOneRaisePerTransition:
         from istota.secrets_vault import OUTCOME_UNCHANGED, VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
         _write_vault(path, password=WRONG_PASSPHRASE)
@@ -313,7 +313,7 @@ class TestOneRaisePerTransition:
         from istota.secrets_vault import VaultCorrupt, VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
         _write_vault(path, password=WRONG_PASSPHRASE)
@@ -459,7 +459,7 @@ class TestTheReasonIsCodeOwned:
         from istota.secrets_vault import sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
         _write_vault(path, password=WRONG_PASSPHRASE)
@@ -930,7 +930,7 @@ def _alert_rows(config: Config, user_id: str = "alice") -> list[dict]:
 def unscoped(tmp_path, secret_key):
     """A configured user whose vault file has no `istota` group."""
     config = _vault_config(
-        tmp_path, vault_path="config/vault.kdbx", services=[]
+        tmp_path, vault_path="config/vault.kdbx"
     )
     path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
     _write_unscoped_vault(path)
@@ -1011,7 +1011,7 @@ class TestTheFirstUnscopedSync:
         from istota.secrets_vault import OUTCOME_OK, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=[]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = (
             Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"

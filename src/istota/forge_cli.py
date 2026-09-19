@@ -625,8 +625,9 @@ def fetch_forge_credentials(
     right place to learn the URL from. The policy still wins where it has one
     (see ``main``), which keeps the sandbox's anchor supreme.
 
-    Sandbox: the skill proxy, same request the generated credential-fetch
-    helper makes. Devbox: the devbox proxy's ``forge_token`` action.
+    Sandbox: the skill proxy's ``credential`` request type, the same one
+    ``istota-credential env`` speaks. Devbox: the devbox proxy's
+    ``forge_token`` action.
 
     Every return is a 2-tuple and the no-proxy case raises, so a caller cannot
     accidentally bind the token to the whole result.

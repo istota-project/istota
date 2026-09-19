@@ -681,26 +681,22 @@ istota_experimental_features: []
 #         path: "/shared/Projects"
 #         name: "Projects"
 #         permissions: "write"
-#     # KDBX credential vault, off unless vault_path is set. These two are the
-#     # only per-user settings config.toml renders: they have no user_profiles
-#     # column, so inventory is the whole surface. The passphrase is a secret —
-#     # put it in istota_user_secrets below as service `vault`, key
-#     # `passphrase`, generated and at least 32 characters.
+#     # KDBX credential vault. Set this only to point at a file somewhere other
+#     # than the user's own `Istota/vault/` folder, which is where the ordinary
+#     # route puts it and which needs no inventory entry at all — the user
+#     # copies the file in and generates a passphrase from the settings page.
+#     # It is the one per-user vault setting config.toml renders: there is no
+#     # user_profiles column, so inventory is the whole surface for it, and it
+#     # outranks whatever is in the folder. The passphrase is a secret — put it
+#     # in istota_user_secrets below as service `vault`, key `passphrase`,
+#     # generated and at least 32 characters; without one nothing is read.
 #     # Full reference: docs/configuration/credentials.md#credential-vault.
-#     vault_path: "istota/config/vault.kdbx"
+#     vault_path: "Istota/vault/credentials.kdbx"
 #                                   # Relative to this user's workspace (they can
 #                                   # edit it from a phone); absolute is a host
 #                                   # path and must resolve outside every tree a
-#                                   # task sandbox can write.
-#     vault_services: ["karakeep", "ntfy"]
-#                                   # Services the file owns, deletions included:
-#                                   # a key its group does not hold is removed on
-#                                   # the first sync, so put everything you
-#                                   # already have into the file first. [] reads
-#                                   # the file and applies nothing — a dry run.
-#                                   # Eligible today: karakeep, ntfy,
-#                                   # native_brain, feeds, carto. Anything else
-#                                   # is dropped with a warning at load.
+#                                   # task sandbox can write, which is the form
+#                                   # that keeps the file out of every sandbox.
 #     default_briefings: false      # opt out of the shared [[default_briefings]] set
 #     briefing_email_html: false    # false = plain text only (default is HTML plus
 #                                   # a plain-text fallback part)

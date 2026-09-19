@@ -122,7 +122,6 @@ def vault_config(make_config, tmp_path):
             "alice": UserConfig(
                 display_name="Alice",
                 vault_path="config/vault.kdbx",
-                vault_services=["karakeep", "ntfy"],
             )
         },
     )
@@ -161,7 +160,7 @@ def _add_mixed_users(config):
         display_name="C", vault_path="config/missing.kdbx"
     )
     config.users["dave"] = UserConfig(
-        display_name="D", vault_path="config/vault.kdbx", vault_services=["ntfy"]
+        display_name="D", vault_path="config/vault.kdbx"
     )
     return config
 
@@ -329,24 +328,6 @@ class TestTheScheduleArm:
         result = _run(config)["security.credential_vault.schedule"]
         assert result.status == OK
         assert "1 vault(s) configured" in result.detail
-
-    def test_a_stale_vault_services_line_reaches_no_finding(self, make_config):
-        """The eligibility backstop this replaced warned about a name a vault
-        may not own. There is no such name and no such question — a line left
-        in a rendered `config.toml` is inert, and the arm says nothing about
-        it."""
-        config = make_config(
-            users={
-                "alice": UserConfig(
-                    display_name="A",
-                    vault_path="v.kdbx",
-                    vault_services=["karakeep", "monarch"],
-                )
-            }
-        )
-        result = _run(config)["security.credential_vault.schedule"]
-        assert result.status == OK
-        assert "monarch" not in result.detail
 
 
 class TestThePathArm:
@@ -990,30 +971,39 @@ class TestTheDatabaseDirectoryComparison:
 
 
 class TestAMalformedFieldDoesNotCostEveryFinding:
-    """No arm reads `vault_services` any more, so a malformed one is inert.
+    """A malformed `vault_path` costs its own user, never every finding.
 
-    The reader this class was written against (`_vault_declared_services`) went
-    with the schedule arm's owned-services line. These stay as the standing
-    guard that a field nothing consumes cannot cost the operator every finding
-    the check had already computed — `run_checks` contains a raise into one
-    synthetic FAIL replacing all four.
+    The class was written against `vault_services`, which is gone. The property
+    it holds is not about that field: `run_checks` turns a raise anywhere in the
+    check into one synthetic FAIL replacing all four findings, so a value the
+    operator can set wrongly must not be able to reach that. `vault_path` is the
+    one such field left, and `Config.vault_path_for` coerces rather than raising
+    — `load_config` would have dropped a non-string, so what this drives is the
+    value arriving by some other route.
     """
 
-    @pytest.mark.parametrize("value", [5, ["karakeep", 7, None], "karakeep"])
-    def test_a_malformed_field_is_not_read_at_all(self, vault_config, value):
-        vault_config.users["alice"].vault_services = value
+    @pytest.mark.parametrize("value", [5, ["v.kdbx"], None])
+    def test_a_malformed_path_is_not_read_at_all(
+        self, vault_config, secret_key_env, value
+    ):
+        # The passphrase is what keeps this user in the checked set: a
+        # malformed path reads as no path at all, and without the other half of
+        # the enable the check would skip and the arms would never run.
+        _provision(vault_config)
+        vault_config.users["alice"].vault_path = value
         results = _run(vault_config, probe=False)
         assert len(results) == 4
-        detail = results["security.credential_vault.schedule"].detail
-        assert "1 vault(s) configured" in detail
-        assert "karakeep" not in detail and "7" not in detail
+        assert not any(
+            "the check itself raised" in r.detail for r in results.values()
+        )
 
     def test_through_the_registry_a_malformed_field_still_yields_four_findings(
-        self, vault_config
+        self, vault_config, secret_key_env
     ):
         """The blast radius, asserted where it actually bites: `run_checks` is
         what turns a raise into the synthetic FAIL."""
-        vault_config.users["alice"].vault_services = 5
+        _provision(vault_config)
+        vault_config.users["alice"].vault_path = 5
         results = doctor.run_checks(
             vault_config, only=("security.credential_vault",), probe=False
         )

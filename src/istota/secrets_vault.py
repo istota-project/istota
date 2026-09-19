@@ -1756,11 +1756,6 @@ class VaultSyncResult:
     transition: bool = False
     reason: str = ""
     path: str = ""
-    #: Left over from the service mapping and populated by nothing since the
-    #: namespace landed. It goes with the rest of `vault_services` in stage 6;
-    #: the field survives this change so the web payload that reads it keeps
-    #: compiling, and it is empty everywhere.
-    owned: frozenset[str] = frozenset()
     apply: VaultApplyResult | None = None
     last_outcome: str = ""
     #: §1: whether a top-level `istota` group narrowed the read. A bool off the
@@ -1799,13 +1794,6 @@ class VaultStatusReport:
     configured: bool
     path: str = ""
     refusal: str = ""
-    #: Left over from the service mapping, and populated by nothing — which is
-    #: a statement about this module rather than a hope: `vault_status` used to
-    #: fill it from `vault_services_for` and stopped, because a vault owns no
-    #: typed service and a surface rendering "this file is the authority for
-    #: karakeep" beside a karakeep form nothing overwrites is the same lie the
-    #: 409 was. It goes in stage 6 with the rest of `vault_services`.
-    owned: tuple[str, ...] = ()
     passphrase_present: bool = False
     outcome: str = ""
     reason: str = ""
@@ -2463,7 +2451,7 @@ def vault_status(
     ``vault/passphrase`` row on every successful decrypt. That is one row, it is
     the vault's own, and it is honest — the passphrase really was used — but it
     is the same column ``apply_vault``'s docstring already warns is not evidence
-    a vault-owned credential is read by anything.
+    a shared credential is read by anything.
 
     It also touches no sync state in either direction: it is not subject to the
     digest cache — the operator is asking *now* — and it does not settle an

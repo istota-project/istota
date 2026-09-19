@@ -471,13 +471,13 @@ def _vault_is_working(
     """
     from .. import secrets_vault
 
-    # Two halves, because either one on its own is a vault. `vault_path_for` is
-    # the accessor rather than the `UserConfig` attribute, since a stored row
-    # outranks the TOML line; the passphrase is what a user who chose a file
-    # out of their vault folder has instead of a path, and they now have no
-    # path at all — so reading the path half alone answered "the vault is
-    # gone" for every one of them and closed the row that had just told them
-    # their vault was broken.
+    # Two halves, because either one on its own is a vault. The passphrase is
+    # what a user who chose a file out of their own vault folder has instead of
+    # a path, and they have no path at all — so reading the path half alone
+    # answered "the vault is gone" for every one of them and closed the row
+    # that had just told them their vault was broken. `vault_path_for` rather
+    # than the `UserConfig` attribute, on the one-accessor rule: nothing
+    # outranks the field, but it is one of four resolution rules.
     #
     # **Raw SQL on `conn`, never `secrets_store.secret_exists`.** That opens a
     # second connection, and this runs underneath the panel's own — the

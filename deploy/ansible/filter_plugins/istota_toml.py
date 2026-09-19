@@ -19,10 +19,11 @@ blocks and sources render as array-of-tables so the shape mirrors the spec's
 authoring example exactly.
 
 ``istota_vault_users_toml(users)`` renders the other per-user TOML the role
-emits: a ``[users.<uid>]`` block carrying ``vault_path`` and ``vault_services``
-for every user who declares one. Those two keys are TOML-only — no
-``user_profiles`` column, so no CLI and no web route — which meant that until
-ISSUE-505 the credential vault could not be configured from inventory at all.
+emits: a ``[users.<uid>]`` block carrying ``vault_path`` for every user who
+declares one. That key is TOML-only — no ``user_profiles`` column, so no CLI
+and no web route — which meant that until ISSUE-505 the credential vault could
+not be pointed at an operator-chosen file from inventory at all. What a *user*
+sets is a filename out of their own vault folder, which is not a config key.
 
 ``istota_toml_escape(value)`` is the other half and is used by the rest of the
 role rather than by anything here: ``config.toml.j2`` interpolates operator
@@ -255,9 +256,9 @@ def istota_vault_users_toml(users) -> str:
     but defaults, and ``merge_into_user_config`` reads an empty DB list as "the
     user emptied it" rather than "not populated yet".
 
-    **Fidelity, not judgement.** A service name a vault may not own is rendered
-    as written and dropped by ``config._validate_vault_services``, which names
-    the line in the boot log. Filtering here would leave the operator with an
+    **Fidelity, not judgement.** A path is rendered as written and refused, if
+    it is going to be, by ``storage.resolve_user_vault_path``, which names the
+    reason in the daemon log. Filtering here would leave the operator with an
     inventory entry that does nothing and no message anywhere naming it. The
     exception is a value of the wrong *type*, which is dropped: there is no
     spelling of it the loader could name back, and stringifying a ``7`` would
@@ -275,37 +276,13 @@ def istota_vault_users_toml(users) -> str:
             continue
         raw_path = user_cfg.get("vault_path")
         path = raw_path if isinstance(raw_path, str) else ""
-        raw_services = user_cfg.get("vault_services") or []
-        # A bare string iterates, so `vault_services: "karakeep"` would become
-        # eight one-letter services — each of them a name the loader then warns
-        # about, none of them written by anybody. `config._vault_services_value`
-        # carries the same guard; this one keeps the file from being written
-        # that way at all.
-        if isinstance(raw_services, str):
-            raw_services = [raw_services]
-        elif not isinstance(raw_services, (list, tuple)):
-            raw_services = []
-        # Dropped rather than stringified: `7` is not a service name under any
-        # reading, and rendering `"7"` hands the loader something to refuse that
-        # the operator never wrote. `.strip()` rather than truthiness so a
-        # whitespace-only entry goes the same way — the loader strips before
-        # matching, so rendering `"  "` produces a boot-log line naming the
-        # empty string, and `toml_string_list` on the Docker side already drops
-        # it.
-        services = [s for s in raw_services if isinstance(s, str) and s.strip()]
-        if not path and not services:
+        if not path:
             continue
         # Quoted for the reason the briefing renderer quotes its own: a user id
         # carrying a dot would otherwise split the table path and file the vault
         # under a user nobody has.
         out.append(f"[users.{_toml_str(str(uid))}]")
-        if path:
-            out.append(f"vault_path = {_toml_value(path)}")
-        # Always rendered once the block exists, even when empty. `[]` is a
-        # usable dry-run state — the file is read and nothing is applied — and
-        # an explicit empty list makes removing the last service from inventory
-        # a visible change rather than a key that vanished.
-        out.append(f"vault_services = {_toml_value(services)}")
+        out.append(f"vault_path = {_toml_value(path)}")
         out.append("")
     return "\n".join(out).rstrip() + ("\n" if out else "")
 
