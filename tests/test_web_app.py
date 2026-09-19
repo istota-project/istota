@@ -5394,24 +5394,24 @@ class TestProfileEndpoints:
             db.ensure_default_web_chat_room(conn, "alice")
             db.register_room(conn, "talk-1", "alice", origin="talk", name="team")
             db.add_room_member(conn, "talk-1", "alice")
-            db.add_room_binding(conn, "talk-1", "talk", "9erk494s")
+            db.add_room_binding(conn, "talk-1", "talk", "p8vt2cnd")
 
         resp = await client.put(
             "/istota/api/settings/profile",
-            json={"routing": {"alert": "talk:9erk494s"}},
+            json={"routing": {"alert": "talk:p8vt2cnd"}},
             cookies=cookies,
             headers={"origin": "https://example.com"},
         )
         assert resp.status_code == 200
         p = user_profiles.get_profile(self._db_path, "alice")
-        assert p.routing == {"alert": "talk:9erk494s"}
+        assert p.routing == {"alert": "talk:p8vt2cnd"}
 
         profile = (await client.get(
             "/istota/api/settings/profile", cookies=cookies,
         )).json()["profile"]
-        assert "9erk494s" in {r["token"] for r in profile["talk_rooms"]}
+        assert "p8vt2cnd" in {r["token"] for r in profile["talk_rooms"]}
         assert profile["web_rooms"]
-        assert "9erk494s" not in {r["token"] for r in profile["web_rooms"]}
+        assert "p8vt2cnd" not in {r["token"] for r in profile["web_rooms"]}
 
     async def test_talk_conversations_are_offered_as_route_targets(
         self, tmp_path, client, app,
