@@ -81,7 +81,7 @@ Which `istota_kv` namespaces the model may not touch. A leading `_` marks framew
 
 ## git_hardening.py
 
-The `-c` overrides that stop a repository's own config running a program (`core.fsmonitor`, `diff.external`, the `gpg.*` programs, plus the output-reshaping keys a parser depends on). Repo-local config is not covered by `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL`, and under `developer.repos_dir` it is model-written. Extracted from `skills/code_review/engine.py`, which paid for the list and still re-exports it, so `worktree_reaper` can reach it without importing `istota.skills` (whose `__init__` star-imports every skill, ~190ms) — same reason `forge_bin.py` exists. stdlib-only leaf; no imports at all
+The `-c` overrides that stop a repository's own config running a program (`core.fsmonitor`, `diff.external`, the `gpg.*` programs, plus the output-reshaping keys a parser depends on). Repo-local config is not covered by `GIT_CONFIG_NOSYSTEM`/`GIT_CONFIG_GLOBAL`, and under `developer.repos_dir` it is model-written. Extracted from `skills/code_review/engine.py`, which paid for the list and still re-exports it, so `worktree_reaper` can reach it without importing `istota.skills` (whose `__init__` star-imports every skill, ~190ms) — same reason `forge_bin.py` exists, and since ISSUE-512 the same reason `untrusted.py` sits at the package root, where the caller paying that cost is the tool server once per task attempt. stdlib-only leaf; no imports at all
 
 ## git_remote_scrub.py
 
