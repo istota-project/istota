@@ -43,7 +43,7 @@ from istota.nextcloud_client import (
 )
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._hostpath import EGRESS, WRITE, host_path
-from istota.skills._untrusted import frame_untrusted
+from istota.untrusted import frame_untrusted
 
 _SHARE_TYPE_MAP = shares_mod.SHARE_TYPES
 _DEFAULT_EXPIRE_DAYS = 14

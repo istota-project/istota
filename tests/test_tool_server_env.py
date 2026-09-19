@@ -5,6 +5,8 @@ The Linux tier measures the consequences; this is where the rules are stated,
 because a rule asserted only through a namespace is a rule nobody can read.
 """
 
+import subprocess
+import sys
 from pathlib import Path
 
 from istota.session.tools import ToolEnv, hello_payload
@@ -173,3 +175,63 @@ class TestMergeProxyEnv:
             {"HTTPS_PROXY": "http://p:1", "SECRET_TOKEN": "nope"},
         )
         assert "SECRET_TOKEN" not in merged
+
+
+class TestTheServerDoesNotImportTheSkillsPackage:
+    """`istota.skills.__init__` star-imports three skills; the server may not.
+
+    Measured at the time of writing: `import istota.tool_server` is ~31ms and
+    loads no `istota.skills` module at all, while `import istota.skills.anything`
+    is ~195ms, because importing any submodule executes the package `__init__`
+    and that star-imports `calendar`, `email` and `files`. The server is spawned
+    once per **task attempt**, inside the sandbox, so that is a sevenfold import
+    cost on a path that pays it every time.
+
+    This is the reason `git_hardening.py` and `forge_bin.py` were lifted out of
+    `skills/` (`.claude/rules/sandbox.md`), and the reason ISSUE-512 lifted the
+    shared untrusted fence to `istota.untrusted` rather than having
+    `session/tools/web_fetch.py` import `istota.skills._untrusted`.
+
+    Asserted as a module set rather than a duration: membership is
+    deterministic where a timing bound is flaky, and a function-scope import
+    added to dodge this would move the same cost into the agent loop instead of
+    removing it — so the probe imports the module *and* builds the tools.
+
+    **`scripts/qt` cannot select this test.** It runs in a subprocess, and
+    testmon sees no source lines through one, so a change reintroducing the
+    `istota.skills` import is caught by the full run rather than by the edit
+    loop. `.claude/rules/testing.md` already names that class; this joins it
+    rather than being a new gap.
+    """
+
+    #: Imported for the tool-construction half below. `build_default_tools`
+    #: only appends WebFetch when a policy is set, so a probe that merely
+    #: imported the module would not reach `make_web_fetch_tool`'s body.
+    PROBE = (
+        "import sys\n"
+        "import istota.tool_server\n"
+        "from pathlib import Path\n"
+        "from istota.session.tools import ToolEnv, WebFetchPolicy, build_default_tools\n"
+        "env = ToolEnv(cwd=Path('.'), web_fetch=WebFetchPolicy(enabled=True))\n"
+        "names = [t.schema.name for t in build_default_tools(env)]\n"
+        "assert 'WebFetch' in names, names\n"
+        "print(','.join(sorted(m for m in sys.modules if m.startswith('istota.skills'))))\n"
+    )
+
+    def test_no_skills_module_is_loaded(self):
+        proc = subprocess.run(
+            [sys.executable, "-c", self.PROBE],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, proc.stderr
+        # The last line only. Taking the whole of stdout would read a banner or
+        # a stray import-time `print` as loaded skill modules, and report "the
+        # tool server now imports the skills package" naming nonsense.
+        tail = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+        loaded = [m for m in tail.split(",") if m]
+        assert loaded == [], (
+            "the tool server now imports the skills package, which star-imports "
+            "every library-only skill: " + ", ".join(loaded)
+        )

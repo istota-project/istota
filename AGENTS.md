@@ -137,6 +137,7 @@ src/istota/
 ├── scheduler_deferred.py # Deferred-op replay (subtasks, KG, KV, health_ops, …)
 ├── shared_file_organizer.py
 ├── commands.py           # surface-agnostic !command dispatch (CommandContext + registry push/stream)
+├── untrusted.py          # One fence around content somebody else wrote, markers redacted from the content → leaf-modules.md
 ├── toml_fence.py         # Where a TOML fence starts and ends, for the four markdown-config parsers → leaf-modules.md
 ├── llm_json.py           # The same, for a fence in *model* output; anchored closer, linear walk → leaf-modules.md
 ├── date_parse.py         # Loose date parsing for text a model or a person typed, validated → leaf-modules.md
