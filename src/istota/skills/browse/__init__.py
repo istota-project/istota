@@ -195,7 +195,12 @@ def cmd_get(args):
 
 
 def cmd_render(args):
-    """Render a page to markdown, keeping headings and links together."""
+    """Render a page to markdown, keeping headings and links together.
+
+    The result carries a `frames` census whatever the flags say, because an
+    iframe's document is a separate frame the markdown has always dropped in
+    silence (ISSUE-516). `--include-frames` is what splices that content in.
+    """
     url = get_api_url()
     if not args.url and not args.session:
         return {
@@ -216,6 +221,8 @@ def cmd_render(args):
         payload["wait_for"] = args.wait_for
     if args.max_chars:
         payload["max_chars"] = args.max_chars
+    if args.include_frames:
+        payload["include_frames"] = True
     if args.skip_behavior:
         payload["skip_behavior"] = True
 
@@ -794,6 +801,9 @@ def build_parser():
     p_render.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
     p_render.add_argument("--wait-for", help="CSS selector to wait for after load")
     p_render.add_argument("--max-chars", type=int, help="Markdown budget (default 100000)")
+    p_render.add_argument("--include-frames", action="store_true",
+                          help="Splice iframe content into the markdown (counts "
+                               "against --max-chars)")
     p_render.add_argument("--skip-behavior", action="store_true",
                           help="Skip simulated mouse/scroll after load")
 

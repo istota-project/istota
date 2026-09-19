@@ -5,6 +5,7 @@ import math
 import os
 import random
 import time
+from urllib.parse import urlparse
 
 from xdotool import xdo, xdo_key
 
@@ -29,6 +30,200 @@ CAPTCHA_FRAME_URLS = [
     "hcaptcha.com",
     "challenges.cloudflare.com",
 ]
+
+# Frames whose document is not this page's content: ad exchanges, consent
+# managers, analytics beacons and social embeds. On a news front page these are
+# most of the frames, so an unfiltered include is worse than dropping them all
+# — which is what makes the list part of the feature rather than a tidy-up.
+# It doubles as surface reduction: an ad frame's text is classic injection real
+# estate, and #516 makes it visible where it was invisible.
+# The captcha hosts come along because that challenge is not page content
+# either, and `detect_captcha` already owns the verdict about it.
+FRAME_NOISE_URLS = CAPTCHA_FRAME_URLS + [
+    "doubleclick.net",
+    "googlesyndication.com",
+    "googletagmanager.com",
+    "googleadservices.com",
+    "google-analytics.com",
+    "googletagservices.com",
+    "adnxs.com",
+    "adsrvr.org",
+    "adform.net",
+    "amazon-adsystem.com",
+    "casalemedia.com",
+    "criteo.com",
+    "indexexchange.com",
+    "moatads.com",
+    "openx.net",
+    "outbrain.com",
+    "pubmatic.com",
+    "quantserve.com",
+    "rubiconproject.com",
+    "scorecardresearch.com",
+    "sharethrough.com",
+    "smartadserver.com",
+    "taboola.com",
+    "teads.tv",
+    "yieldmo.com",
+    "cookielaw.org",
+    "consensu.org",
+    "onetrust.com",
+    "privacy-mgmt.com",
+    "trustarc.com",
+    "connect.facebook.net",
+    "platform.twitter.com",
+]
+
+# A frame smaller than this in either dimension carries nothing a reader wants:
+# tracking pixels, 0x0 beacons, and the passive reCAPTCHA badge. The floor is
+# deliberately well below a banner ad — separating an ad from a widget is the
+# host list's job, and a size rule tight enough to do it would also drop real
+# embedded content. `detect_captcha`'s own 400x200 threshold is the precedent
+# for having one at all, not for its value: that one is asking whether a
+# challenge is blocking the page, which is a different question.
+FRAME_MIN_WIDTH = 100
+FRAME_MIN_HEIGHT = 50
+
+# How many frames the walk will *probe*. Measured on a live news page, an
+# ad-heavy front page carries well past 30 frames, and probing one costs a CDP
+# round trip — so the walk is bounded and the caller is told when the bound bit
+# (a census that silently stops counting is the failure this survey exists to
+# remove, one level up).
+#
+# The budget is spent on probes, not on frames seen: `_url_skip_reason` decides
+# `nested`, `blank` and `noise` from the URL alone and costs nothing, so a page
+# whose first forty frames are ad slots still has its whole budget left for the
+# content frame behind them. Counting every frame seen was the first cut, and
+# measured against a live page with thirty-odd ad frames it returned
+# `found: 0, capped: true` — a correct census of nothing.
+MAX_FRAMES_PROBED = 30
+
+
+def _is_noise_host(url):
+    """Is this URL's *host* one of the noise domains?
+
+    Matched on the parsed host and by suffix, not as a substring of the whole
+    URL. A substring test is what `detect_captcha` does, and it is right there
+    because a false positive costs a captcha warning; here it costs a content
+    frame silently leaving the census — the census being the whole product.
+    `https://widget.example/embed?ref=taboola.com` is a real frame, not an ad.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    for pattern in FRAME_NOISE_URLS:
+        # Entries are written as hosts, some with a path ("google.com/recaptcha")
+        # because they are shared with CAPTCHA_FRAME_URLS, where the path is
+        # what distinguishes a challenge from the rest of the domain.
+        domain, _, path = pattern.partition("/")
+        if host != domain and not host.endswith("." + domain):
+            continue
+        if path and path not in url:
+            continue
+        return True
+    return False
+
+
+def _url_skip_reason(frame, main_frame):
+    """The half of the verdict that needs no round trip. `(skip, url)`."""
+    try:
+        url = frame.url or ""
+    except Exception:
+        return "detached", ""
+
+    # Depth 1 only. `page.frames` is a flat list of the whole tree, so a nested
+    # frame is reachable here — it is counted and named rather than descended
+    # into, because its <iframe> node lives in a parent frame's document and
+    # not in the one being rendered, so there is nowhere to put its content.
+    try:
+        if frame.parent_frame is not main_frame:
+            return "nested", url
+    except Exception:
+        return "detached", url
+
+    # `about:blank` has no content, and `about:srcdoc` has content that no
+    # `<iframe src>` names, so neither can be matched to a node. Counted as
+    # skipped rather than as dropped content, which understates a srcdoc page
+    # by design: the alternative is a count the splice can never satisfy.
+    if not url or url.startswith("about:"):
+        return "blank", url
+
+    if _is_noise_host(url):
+        return "noise", url
+
+    return None, url
+
+
+def _element_skip_reason(frame):
+    """The half that costs a round trip: is this frame on screen and big enough?"""
+    try:
+        element = frame.frame_element()
+        if not element.is_visible():
+            return "hidden"
+        box = element.bounding_box()
+    except Exception:
+        return "detached"
+
+    # A frame the layout has not placed reports no box at all. That is an
+    # unknown size rather than a small one, so it stays a candidate.
+    if box and (box["width"] < FRAME_MIN_WIDTH or box["height"] < FRAME_MIN_HEIGHT):
+        return "small"
+
+    return None
+
+
+def survey_frames(page, limit=MAX_FRAMES_PROBED):
+    """Census of the page's child frames: which carry content, and which don't.
+
+    Returns ``(records, capped)``. Each record is
+    ``{"frame": Frame, "url": str, "skip": str | None}``; ``skip`` is None for
+    the frames whose content a reader would want. ``capped`` says the walk ran
+    out of probe budget, so the count is "N or more" — and the caller has to
+    say so even when it found nothing, since "capped at zero" is precisely the
+    silent short read this census exists to replace.
+
+    The main frame is never a record — it is the document being rendered.
+
+    Read-only, on purpose. `detect_captcha` already walks `page.frames` and
+    takes `frame_element()`; this is the same pattern with a different filter,
+    and it writes nothing into the page. The alternative for matching a frame
+    to its DOM node is a marker attribute, which is a DOM write a
+    MutationObserver sees — see BOT_DETECTION.md for why that is not a trade
+    worth making on the read path.
+
+    Never raises: a frame walk that fails must cost the census, never the
+    render.
+    """
+    records = []
+    try:
+        frames = list(page.frames)
+        main_frame = page.main_frame
+    except Exception as e:
+        log.debug("frame survey unavailable: %s", e)
+        return [], False
+
+    probed = 0
+    for frame in frames:
+        if frame is main_frame:
+            continue
+
+        skip, url = _url_skip_reason(frame, main_frame)
+        if skip is not None:
+            records.append({"frame": frame, "url": url, "skip": skip})
+            continue
+
+        if probed >= limit:
+            log.info("frame survey stopped after probing %d frames", limit)
+            return records, True
+        probed += 1
+        records.append({
+            "frame": frame, "url": url, "skip": _element_skip_reason(frame),
+        })
+
+    return records, False
 
 
 def gauss_clamp(mu, sigma, lo, hi):

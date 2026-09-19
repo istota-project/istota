@@ -611,6 +611,58 @@ def extract():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+# How many frames `include_frames` will actually read. Separate from the
+# survey's probe budget because the costs differ in kind: a probe is one small
+# CDP round trip, while `frame.content()` pulls a whole document into memory and
+# every one of them is then parsed into the same soup. `Frame.content()` takes
+# no timeout argument in patchright, so the number of reads is the only bound
+# available — there is no per-call one to set.
+MAX_FRAME_CONTENT_READS = 10
+
+
+def _collect_frames(page, include_frames):
+    """The page's child frames, as render.to_markdown wants them.
+
+    Returns `(records, capped)`. Every surveyed record is passed through, with
+    its `skip` intact, because `to_markdown` reports the nested ones and counts
+    only the rest — filtering here is what made a nested frame vanish from a
+    census whose own comment said it was counted. `html` is None for a
+    content-bearing frame whose content was not asked for or could not be read.
+
+    The survey runs whatever `include_frames` says, because the count is the
+    half of ISSUE-516 worth having on its own; only the `frame.content()` reads
+    are gated on it, and those are capped again.
+
+    Never raises. A frame walk that fails costs the census, never the render —
+    the endpoint's own `except` would otherwise turn a detached frame into a
+    500 on a page that rendered perfectly well.
+    """
+    try:
+        records, capped = browsing.survey_frames(page)
+    except Exception as e:
+        log.warning("frame survey failed: %s", e)
+        return [], False
+
+    payload = []
+    reads = 0
+    for record in records:
+        skip = record.get("skip")
+        entry = {"url": record.get("url") or "", "skip": skip, "html": None}
+        if include_frames and skip is None:
+            if reads >= MAX_FRAME_CONTENT_READS:
+                log.info("frame content reads capped at %d", MAX_FRAME_CONTENT_READS)
+            else:
+                reads += 1
+                try:
+                    entry["html"] = record["frame"].content()
+                except Exception as e:
+                    log.info(
+                        "frame content unreadable (%s): %s", entry["url"], e,
+                    )
+        payload.append(entry)
+    return payload, capped
+
+
 @app.route("/render", methods=["POST"])
 def render_page():
     """Render the page to markdown — the structure-preserving read path.
@@ -624,6 +676,12 @@ def render_page():
     *is* the content); `mode=article` isolates the main content first (right for
     article bodies) and degrades to full when the page has no article in it.
 
+    An iframe's document is a separate frame, so `render` has always dropped it
+    and said nothing — a page that is mostly iframe came back `ok` and short
+    (ISSUE-516). Every render now carries a `frames` census, and
+    `include_frames` splices each surviving frame's content in at its
+    `<iframe>`'s own position.
+
     Takes `url` (navigate first), `session_id` (render what that tab already
     holds), or both (navigate within an existing session).
     """
@@ -631,6 +689,7 @@ def render_page():
     data = request.get_json()
     url = data.get("url")
     session_id = data.get("session_id")
+    include_frames = bool(data.get("include_frames"))
     mode = data.get("mode", "full")
     timeout = data.get("timeout", 30) * 1000
     wait_for = data.get("wait_for")
@@ -683,8 +742,11 @@ def render_page():
                 })
 
         html = page.content()
+        frame_payload, frames_capped = _collect_frames(page, include_frames)
         rendered = render.to_markdown(
             html, base_url=page.url, mode=mode, max_chars=max_chars,
+            frames=frame_payload, include_frames=include_frames,
+            frames_capped=frames_capped,
         )
         result = {
             "status": "ok",

@@ -147,6 +147,12 @@ class TestBuildParser:
         assert args.url is None
         assert args.session == "abc123"
 
+    def test_include_frames_is_opt_in(self):
+        parser = build_parser()
+        assert parser.parse_args(["render", "https://example.com"]).include_frames is False
+        args = parser.parse_args(["render", "https://example.com", "--include-frames"])
+        assert args.include_frames is True
+
     def test_render_rejects_unknown_mode(self):
         parser = build_parser()
         with pytest.raises(SystemExit):
@@ -335,6 +341,52 @@ class TestCmdRender:
         assert payload["max_chars"] == 250000
         assert payload["wait_for"] == "main"
         assert payload["skip_behavior"] is True
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_include_frames_reaches_the_payload(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "markdown": "body"}
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        cmd_render(parser.parse_args([
+            "render", "https://news.example.com/world", "--include-frames",
+        ]))
+        assert mock_post.call_args[1]["json"]["include_frames"] is True
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_default_asks_for_no_frame_content(self, mock_url, mock_post):
+        # The census is the container's own business and costs the caller
+        # nothing; reading frame content is a round trip per frame, so the
+        # flag has to be absent rather than false-by-default-and-sent.
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "markdown": "body"}
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        cmd_render(parser.parse_args(["render", "https://news.example.com/world"]))
+        assert "include_frames" not in mock_post.call_args[1]["json"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_frame_census_is_passed_through_to_the_model(self, mock_url, mock_post):
+        # The whole point of ISSUE-516 is that the caller can tell a short page
+        # from a page whose content is in a frame, so the count has to survive
+        # the CLI rather than being dropped on the way past.
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "markdown": "## Top stories",
+            "frames": {"found": 3, "included": 0, "capped": False},
+            "notes": ["3 iframes on this page were dropped"],
+        }
+        mock_post.return_value = mock_resp
+
+        parser = build_parser()
+        result = cmd_render(parser.parse_args(["render", "https://news.example.com/world"]))
+        assert result["frames"] == {"found": 3, "included": 0, "capped": False}
 
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
