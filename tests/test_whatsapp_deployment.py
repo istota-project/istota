@@ -11,7 +11,10 @@ has to name all three.
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -30,6 +33,34 @@ from tests.test_render_config import REQUIRED, render as render_docker_config
 
 REPO = Path(__file__).resolve().parent.parent
 COMPOSE = REPO / "docker" / "docker-compose.yml"
+SIDECAR = REPO / "docker" / "whatsapp-baileys" / "index.js"
+
+
+def derive_media_dir(session_dir: str) -> str:
+    """What the sidecar itself would stage into, given only a session path.
+
+    ISSUE-508. The two deployment literals used to be load-bearing — four
+    sites had to agree or the surface was down — and are now the thing that
+    pins this derivation against `media.default_media_dir`. Asking the
+    program rather than restating its rule is the whole point: a restated
+    `dirname` here would agree with a sidecar that had stopped deriving.
+
+    Driven through `node` with no `node_modules`, which the program supports
+    because `loadBaileys` is a lazy dynamic import and the file is CommonJS.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    result = subprocess.run(
+        [
+            node, "-e",
+            f"const m = require({json.dumps(str(SIDECAR))});"
+            f"process.stdout.write(m.deriveMediaDir({json.dumps(session_dir)}));",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
 DOCKER_NGINX = REPO / "docker" / "nginx" / "default.conf.template"
 ENV_EXAMPLE = REPO / "docker" / ".env.example"
 ANSIBLE = REPO / "deploy" / "ansible"
@@ -325,6 +356,22 @@ class TestTheBaileysSidecarService:
         )
         assert environment["ISTOTA_BAILEYS_MEDIA_DIR"] == str(
             default_media_dir(config)
+        )
+
+    def test_the_literal_and_the_sidecars_own_derivation_agree(self):
+        """ISSUE-508. The variable is an override now, so the two answers
+        have to be the same one — otherwise a container started from a
+        compose file that predates it stages somewhere the daemon never
+        reads, which is a quieter version of the outage this replaced.
+
+        This is what the literal is *for* now. It used to be load-bearing
+        (absent, the sidecar exited 2 and the surface went down); it is now
+        the fixed point that pins the derivation.
+        """
+        environment = self._service()["environment"]
+
+        assert derive_media_dir(environment["ISTOTA_BAILEYS_SESSION_DIR"]) == (
+            environment["ISTOTA_BAILEYS_MEDIA_DIR"]
         )
 
     def test_the_media_directory_is_inside_the_volume_both_containers_share(
@@ -887,6 +934,34 @@ class TestTheAnsibleSidecarUnit:
         assert (
             f"Environment=ISTOTA_BAILEYS_MEDIA_DIR={default_media_dir(config)}"
             in rendered
+        )
+
+    def test_the_literal_and_the_sidecars_own_derivation_agree(self, tmp_path):
+        """ISSUE-508, the Ansible half of the same fixed point.
+
+        The rendered unit is the one an upgrade leaves stale — the two-minute
+        update cron ships the program and cannot re-render this file — so the
+        property that matters is that a sidecar given only the session
+        literal lands on the media literal anyway.
+        """
+        home = "/srv/app/istota"
+        rendered = self._unit(istota_home=home)
+        values = {}
+        for line in rendered.splitlines():
+            if line.startswith("Environment=ISTOTA_BAILEYS_"):
+                name, _, value = line[len("Environment="):].partition("=")
+                values[name] = value
+
+        # `partition` would hand back an empty value for a quoted
+        # `Environment="NAME=value"` form, and the comparison below would then
+        # be between two empty strings and pass. Both have to be real paths
+        # before the agreement means anything.
+        session = values["ISTOTA_BAILEYS_SESSION_DIR"]
+        media = values["ISTOTA_BAILEYS_MEDIA_DIR"]
+        assert session.startswith("/") and media.startswith("/")
+
+        assert derive_media_dir(values["ISTOTA_BAILEYS_SESSION_DIR"]) == (
+            values["ISTOTA_BAILEYS_MEDIA_DIR"]
         )
 
     def test_the_media_directory_is_inside_the_write_path_this_unit_grants(
