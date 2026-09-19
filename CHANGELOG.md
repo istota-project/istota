@@ -143,6 +143,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Moving or resizing a place from `istota-skill location update` left its GPS pings attached to the old footprint, where the web UI had always reassigned them. Pass `--backfill` to release the pings the place no longer contains and adopt the ones it now does; both surfaces run the same code for it.
 
+### Security
+
+- Test fixtures no longer carry a conversation identifier copied out of a live deployment. It arrived the ordinary way, pasted from the bug report it came from, and neither pre-commit scan could see it: an opaque room id has no credential shape for the secret scanner, and the private-data scan matches a list of literals it was not on. A fabricated value of the same shape stands in its place.
+
 ## [0.41.1] - 2026-09-09
 
 You can now use the project page as a complete guide to Istota: what the personal system does, how its modules connect, where each deployment shape draws its security boundary, and how to install and develop it. The repository now uses the EUPL v1.2, with the package metadata and full license text in agreement.

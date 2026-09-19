@@ -25,7 +25,7 @@ describe('routeSurface', () => {
     // could put the token back. The alert and log rows can now, so splitting it
     // is what makes the pinned conversation visible instead of raw.
     expect(routeSurface('talk')).toBe('talk');
-    expect(routeSurface('talk:9erk494s')).toBe('talk');
+    expect(routeSurface('talk:p8vt2cnd')).toBe('talk');
   });
 
   it('leaves every other descriptor whole', () => {
@@ -39,7 +39,7 @@ describe('routeSurface', () => {
 describe('routeRoom', () => {
   it('reads the room out of a roomed route, and nothing else', () => {
     expect(routeRoom('web:web-alice-1')).toBe('web-alice-1');
-    expect(routeRoom('talk:9erk494s')).toBe('9erk494s');
+    expect(routeRoom('talk:p8vt2cnd')).toBe('p8vt2cnd');
     expect(routeRoom('web')).toBe('');
     expect(routeRoom('talk')).toBe('');
     expect(routeRoom('ntfy:high')).toBe('');
@@ -64,7 +64,7 @@ describe('joinDescriptor', () => {
   });
 
   it('round-trips what routeSurface and routeRoom read', () => {
-    for (const d of ['web', 'web:web-alice-1', 'talk', 'talk:9erk494s']) {
+    for (const d of ['web', 'web:web-alice-1', 'talk', 'talk:p8vt2cnd']) {
       expect(joinDescriptor(routeSurface(d), routeRoom(d))).toBe(d);
     }
   });
@@ -73,21 +73,21 @@ describe('joinDescriptor', () => {
 describe('withSurface', () => {
   it('keeps the pinned room while the surface stays put', () => {
     expect(withSurface('web:web-alice-1', 'web')).toBe('web:web-alice-1');
-    expect(withSurface('talk:9erk494s', 'talk')).toBe('talk:9erk494s');
+    expect(withSurface('talk:p8vt2cnd', 'talk')).toBe('talk:p8vt2cnd');
   });
 
   it('drops it when the surface moves to one with no room', () => {
     // ntfy has no room, so carrying the token would write `ntfy:web-alice-1` —
     // a channel the surface would try to resolve and fail on.
     expect(withSurface('web:web-alice-1', 'ntfy')).toBe('ntfy');
-    expect(withSurface('talk:9erk494s', 'email')).toBe('email');
+    expect(withSurface('talk:p8vt2cnd', 'email')).toBe('email');
   });
 
   it('drops it when the surface moves between the two roomed ones', () => {
     // A room token addresses one surface: a web room token names nothing on
     // Talk, and a Nextcloud conversation id names no row in the web registry.
     expect(withSurface('web:web-alice-1', 'talk')).toBe('talk');
-    expect(withSurface('talk:9erk494s', 'web')).toBe('web');
+    expect(withSurface('talk:p8vt2cnd', 'web')).toBe('web');
   });
 
   it('takes an unroomed value whole, since the dropdown offers whole descriptors', () => {
@@ -125,7 +125,7 @@ describe('routeOptions', () => {
     // `talk:<token>` from the CLI. Dropping it here would show the control
     // blank and rewrite the route on the next save.
     expect(values(routeOptions(SURFACES, 'web', { omit: ['web'] }))).toContain('web');
-    expect(values(routeOptions(SURFACES, 'talk:9erk494s'))).toContain('talk:9erk494s');
+    expect(values(routeOptions(SURFACES, 'talk:p8vt2cnd'))).toContain('talk:p8vt2cnd');
     expect(values(routeOptions(SURFACES, 'talk,email'))).toContain('talk,email');
   });
 
@@ -386,7 +386,7 @@ describe('talkRoomOptions', () => {
 
 describe('hasRoom', () => {
   it('is true for the surfaces whose descriptor names a room', () => {
-    for (const d of ['web', 'web:tok', 'talk', 'talk:9erk494s']) {
+    for (const d of ['web', 'web:tok', 'talk', 'talk:p8vt2cnd']) {
       expect(hasRoom(d)).toBe(true);
     }
   });
