@@ -1072,86 +1072,6 @@
           <a href="{base}/money/settings">money</a>,
           <a href="{base}/location/settings">location</a>).
         </p>
-        <!--
-          The vault goes on the heading rather than in the list of cards below
-          it, and nothing on it is writable. It is not a connected service —
-          every other entry there is a credential *for* something, and this is
-          the source a *different* set of credentials comes from, so a card
-          among them would read as a peer of things it has nothing to do with.
-          It owns no service card's fields any more and disables none of them.
-
-          Rendered only when there is a vault. Most deployments give nobody one.
-        -->
-        {#if vault}
-          <p class="hint vault" data-testid="vault-status">
-            <strong>Credential vault:</strong>
-            <!--
-              What the vault is the authority for is its own namespace of
-              shared credentials, not a list of connected services. It used to
-              name the services it overwrote; it overwrites none of them now,
-              so that sentence was false on every card that rendered it and its
-              empty-list fallback ("no services are assigned to it yet") was
-              false on the rest.
-            -->
-            {#if (vault.entry_count ?? 0) > 0}
-              istota holds {vaultSharedCount} from this file, and the file is the authority for all of
-              them — removing an entry removes the credential.
-            {:else}
-              nothing has been shared from it yet.
-            {/if}
-            <!--
-              The scope notice. A file with no top-level `istota` group is read
-              in full, which is how it is meant to work for a file put in the
-              vault folder for istota and is not what somebody who copied their
-              everyday password database in wants. It is a notice rather than a
-              refusal, so it says what happened and what to do, and it renders
-              only when a cycle has actually read the file that way.
-            -->
-            {#if vault.unscoped}
-              <span class="vault-problem" data-testid="vault-unscoped">
-                This file has no top-level <code>istota</code> group, so all
-                {vault.entry_count ?? 0} credential{(vault.entry_count ?? 0) === 1 ? '' : 's'} in it are
-                shared with your tasks. If that was not what you meant, move the file out or put what
-                you meant to share under a top-level group named <code>istota</code>.
-              </span>
-            {/if}
-            {#if vault.path}
-              It is read from <code>{vault.path}</code>, never written.
-            {/if}
-            <!--
-              The names, which is the feedback this feature has never had: after
-              dropping a file in and generating a passphrase, a name that
-              arrived is a credential istota holds and one that is missing is a
-              group misspelled or an entry with a warning behind it. Names only
-              — no value reaches this payload at all — and this user's own,
-              which is why it is here and not in `doctor`, whose vault check
-              reports counts to every admin.
-            -->
-            {#if vaultEntryNames.length > 0}
-              <span class="vault-names" data-testid="vault-entry-names">
-                What it holds: {#each vaultEntryNames as name, i}<code>{name}</code>{i <
-                  vaultEntryNames.length - 1
-                    ? ', '
-                    : ''}{/each}{vault.entry_names_truncated ? ', and more' : '.'}
-              </span>
-            {/if}
-            {#if vaultProblem}
-              <span class="vault-problem">Not working: {vaultProblem}</span>
-            {:else if vault.last_success_at}
-              <!--
-                "applied", not "synced". Istota re-reads the file only when its
-                bytes change, so a vault nobody has edited for three weeks
-                reports a three-week-old timestamp and is working perfectly —
-                calling that "last synced" reads as staleness and sends a user
-                looking for a fault that is not there.
-              -->
-              Istota last applied it {formatRelative(vault.last_success_at)}, and re-reads it
-              whenever the file changes.
-            {:else}
-              Nothing has been applied from it yet.
-            {/if}
-          </p>
-        {/if}
       </div>
     {/if}
 
@@ -1200,6 +1120,87 @@
 
         <div class="vault-form" data-testid="vault-form">
           <!--
+            What the vault currently holds, and where it is read from.
+
+            This used to sit on the Connected services heading, and the comment
+            that put it there gave the reason: it was the referent that each
+            vault-managed service card's disabled-field sentence pointed at, so
+            it had to be visible from all of them. The vault owns no service
+            card's fields any more and disables none of them, so that reason
+            went with them and the line was left describing the vault from
+            outside the only card about the vault.
+          -->
+          {#if vault}
+            <p class="hint vault" data-testid="vault-status">
+              <strong>Credential vault:</strong>
+              <!--
+                What the vault is the authority for is its own namespace of
+                shared credentials, not a list of connected services. It used to
+                name the services it overwrote; it overwrites none of them now,
+                so that sentence was false on every card that rendered it and its
+                empty-list fallback ("no services are assigned to it yet") was
+                false on the rest.
+              -->
+              {#if (vault.entry_count ?? 0) > 0}
+                istota holds {vaultSharedCount} from this file, and the file is the authority for all
+                of them — removing an entry removes the credential.
+              {:else}
+                nothing has been shared from it yet.
+              {/if}
+              <!--
+                The scope notice. A file with no top-level `istota` group is read
+                in full, which is how it is meant to work for a file put in the
+                vault folder for istota and is not what somebody who copied their
+                everyday password database in wants. It is a notice rather than a
+                refusal, so it says what happened and what to do, and it renders
+                only when a cycle has actually read the file that way.
+              -->
+              {#if vault.unscoped}
+                <span class="vault-problem" data-testid="vault-unscoped">
+                  This file has no top-level <code>istota</code> group, so all
+                  {vault.entry_count ?? 0} credential{(vault.entry_count ?? 0) === 1 ? '' : 's'} in it
+                  are shared with your tasks. If that was not what you meant, move the file out or put
+                  what you meant to share under a top-level group named <code>istota</code>.
+                </span>
+              {/if}
+              {#if vault.path}
+                It is read from <code>{vault.path}</code>, never written.
+              {/if}
+              <!--
+                The names, which is the feedback this feature has never had: after
+                dropping a file in and generating a passphrase, a name that
+                arrived is a credential istota holds and one that is missing is a
+                group misspelled or an entry with a warning behind it. Names only
+                — no value reaches this payload at all — and this user's own,
+                which is why it is here and not in `doctor`, whose vault check
+                reports counts to every admin.
+              -->
+              {#if vaultEntryNames.length > 0}
+                <span class="vault-names" data-testid="vault-entry-names">
+                  What it holds: {#each vaultEntryNames as name, i}<code>{name}</code>{i <
+                    vaultEntryNames.length - 1
+                      ? ', '
+                      : ''}{/each}{vault.entry_names_truncated ? ', and more' : '.'}
+                </span>
+              {/if}
+              {#if vaultProblem}
+                <span class="vault-problem">Not working: {vaultProblem}</span>
+              {:else if vault.last_success_at}
+                <!--
+                  "applied", not "synced". Istota re-reads the file only when its
+                  bytes change, so a vault nobody has edited for three weeks
+                  reports a three-week-old timestamp and is working perfectly —
+                  calling that "last synced" reads as staleness and sends a user
+                  looking for a fault that is not there.
+                -->
+                Istota last applied it {formatRelative(vault.last_success_at)}, and re-reads it
+                whenever the file changes.
+              {:else}
+                Nothing has been applied from it yet.
+              {/if}
+            </p>
+          {/if}
+          <!--
             Only the *file* half is withheld when something outranks it. The
             passphrase is the user's own either way — it is a credential Istota
             holds to open their file, not a setting an operator made — and
@@ -1220,25 +1221,25 @@
               Ask your administrator if it needs to change.
             </p>
           {/if}
+          <!--
+              The hint is what stops Generate reading as a write to a file the
+              card has just called read-only. Istota reads the *file*; the
+              master password is a credential Istota has to *hold* in order to
+              open it, which is a different thing.
+
+              Behind the "?" rather than inline, matching how Preferences
+              carries the same kind of explanation. It is the one place on this
+              card where that is the right slot: the field's own label already
+              says what to type, and this is the background behind it.
+            -->
           <SecretField
             label="Master password"
+            hint="The password your KeePassXC file is encrypted with. Istota stores it so it can open the file — it is never written back to the file, and cannot be shown to you again. If you have not made the file yet, generate one here and use it as the master password when you create it."
             configured={vaultHasPassphrase}
             value={passphraseInput}
             disabled={vaultBusy}
             onValueChange={(next) => (passphraseInput = next)}
           />
-          <!--
-              The one sentence that stops Generate reading as a write to a file
-              the card has just called read-only. Istota reads the *file*; the
-              master password is a credential Istota has to *hold* in order to
-              open it, which is a different thing.
-            -->
-          <p class="caption">
-            The password your KeePassXC file is encrypted with. Istota stores it so it can open the
-            file — it is never written back to the file, and cannot be shown to you again. If you
-            have not made the file yet, generate one here and use it as the master password when you
-            create it.
-          </p>
           <div class="vault-actions control-row">
             <Button
               variant="secondary"

@@ -65,9 +65,18 @@ async function pick(ariaLabel: string, optionLabel: string) {
  * in the markup carries a newline and a run of indentation. Collapse it: the
  * assertions are about what is said, not about where prettier broke the line.
  */
-/** The passphrase input, found the way every other credential field is. */
+/**
+ * The passphrase input, found the way every other credential field is.
+ *
+ * Anchored rather than a loose substring: the field carries a `hint`, and
+ * `HintPopover` labels its own trigger "About Master password", which an
+ * unanchored match also finds — so `/master password/i` raised "found
+ * multiple elements" rather than reaching either one. Not `exact` either:
+ * the popover's "?" trigger sits inside the same `field-label` span, so
+ * the label's text is not the label prop on its own.
+ */
 function passwordField(): HTMLElement {
-  return screen.getByLabelText(/master password/i);
+  return screen.getByLabelText(/^master password/i);
 }
 
 function words(el: HTMLElement): string {
@@ -447,12 +456,17 @@ describe('the passphrase', () => {
     api.getVaultStatus.mockResolvedValue(configured({ passphrase_present: true }));
     await mount();
 
-    const form = screen.getByTestId('vault-form');
     // `SecretField` says a value is set through its placeholder rather than
     // by rendering anything — which is the whole point of it, and why this
     // assertion is on the attribute and not on the card's text.
     expect((passwordField() as HTMLInputElement).placeholder).toMatch(/stored — enter to replace/i);
-    expect(words(form)).toMatch(/cannot be shown to you again/i);
+
+    // The "cannot be shown again" sentence is the field's `hint`, so it is
+    // behind the "?" and renders into a portal only once that is opened —
+    // asserting on the card's text would pass only while the sentence was
+    // inline, which is what it stopped being.
+    await fireEvent.click(screen.getByLabelText('About Master password'));
+    expect(words(document.body)).toMatch(/cannot be shown to you again/i);
   });
 
   it('reports a refusal from the floor the CLI applies', async () => {

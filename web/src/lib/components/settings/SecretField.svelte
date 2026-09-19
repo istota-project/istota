@@ -5,6 +5,8 @@
 
   interface Props {
     label: string;
+    /** Optional guidance, rendered behind the "?" beside the label. */
+    hint?: string;
     type?: 'text' | 'email' | 'password' | 'url';
     configured: boolean;
     value: string;
@@ -15,6 +17,7 @@
 
   let {
     label,
+    hint,
     type = 'password',
     configured,
     value,
@@ -40,7 +43,7 @@
   no button there is nothing to steal the association, and clicking the caption
   should focus the input as it does in every other field.
 -->
-<Field {label} labelled={!showClear}>
+<Field {label} {hint} labelled={!showClear}>
   <div class="secret-row">
     <Input
       {type}
