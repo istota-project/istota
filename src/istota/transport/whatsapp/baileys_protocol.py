@@ -136,11 +136,17 @@ MAX_MEDIA_MIME_CHARS = 128
 #: Every `media_error` the sidecar may name, and the local sentence each
 #: becomes. `_SEND_REASONS`' rule, for its reason: the sidecar's own words
 #: carry the destination JID and, on a Boom error, the whole request, so the
-#: reason crosses as a key and the prose is written here.
+#: reason crosses as a key and the prose is written down in the daemon.
+#:
+#: **The prose itself lives in `media.py`**, because the Cloud adapter says the
+#: same three things about its own fetch — there the daemon *is* the fetcher,
+#: so `client.fetch_media` raises them directly with no wire to cross. What a
+#: user is told is exactly what two copies would drift on. The keys stay here,
+#: since they are this adapter's wire vocabulary and the sidecar's own.
 _MEDIA_ERRORS: dict[str, str] = {
-    "download_failed": "the image could not be downloaded from WhatsApp",
-    "over_the_cap": "the image was larger than this surface accepts",
-    "write_failed": "the image could not be written to disk",
+    "download_failed": media_rules.MEDIA_FETCH_FAILED,
+    "over_the_cap": media_rules.MEDIA_OVER_CAP,
+    "write_failed": media_rules.MEDIA_WRITE_FAILED,
 }
 _UNKNOWN_MEDIA_ERROR = "the image could not be fetched"
 

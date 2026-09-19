@@ -221,7 +221,17 @@ def _is_pending(event: object) -> bool:
 
 
 def _media_failed(reason: str) -> WhatsAppInboundMedia:
-    """A record naming a failure and no file. `baileys_bridge`'s own helper."""
+    """A record naming a failure and no file.
+
+    The same four fields `baileys_bridge._media_failed` sets, and deliberately
+    a second constructor rather than a shared one: what the record *means* —
+    `error` set, `staged_path` empty — is `WhatsAppInboundMedia`'s own
+    documented contract, so the thing that would drift is already written down
+    where both adapters read it, and `tests/test_whatsapp_cloud_media.py`
+    pins the two against each other. Collapsing them would put a constructor
+    for a `_types` record in the common module on behalf of two callers that
+    each build every other record inline.
+    """
     return WhatsAppInboundMedia(
         staged_path="", mime_type="", byte_count=0, attached_for_user="",
         error=reason,
@@ -269,6 +279,25 @@ async def stage_cloud_media(
     sweep is run. Delivery-status callbacks are the common case on this
     surface, and the Baileys side draws the same line ("an event carrying no
     media never reaches here").
+
+    **Residual: a batch that does not commit is re-staged, and each attempt
+    leaves its own inbox copy.** `precheck`'s claimed-id read closes the
+    redelivery loop for a message whose *acknowledgement* was lost, and its own
+    docstring records that it cannot close the rollback case — a batch that
+    raises rolls its claim back, so Meta's retry finds nothing written and is a
+    new message as far as this read can tell. Here that means a second fetch
+    and a second `stage_to_attachment`, and the inbox name carries
+    `staged_name`'s random half, so the copies accumulate rather than
+    colliding. Bounded by Meta's retry schedule rather than by anything here,
+    and reachable two ways: a deterministic in-transaction failure (the route's
+    own comment names `create_task`'s user-id guard), and a batch whose fetch
+    and upload outlast Meta's callback tolerance, where the retry's pre-check
+    legitimately passes before the first commit. Both are visible —
+    `_report_stranded_media` names the second — and neither is silent data
+    loss: the copies are in the sender's own inbox. Closing it means a stable
+    per-message inbox name, which is a change to a Stage 1 rule that the
+    Baileys adapter shares and whose random half exists to keep two media parts
+    of one message apart.
     """
     from .. import media as media_rules  # noqa: PLC0415
 
@@ -278,8 +307,12 @@ async def stage_cloud_media(
 
     staged = list(events)
     try:
-        media_dir = media_rules.ensure_media_dir(
-            media_rules.default_media_dir(config)
+        # Threaded like the pre-check and the copy below it, on the same
+        # reason: this runs on the loop the receiver and the web UI share, and
+        # a filesystem call is a filesystem call whether or not it is usually
+        # a fast one.
+        media_dir = await asyncio.to_thread(
+            media_rules.ensure_media_dir, media_rules.default_media_dir(config),
         )
     except Exception:
         # The directory is the whole staging story, so nothing can be fetched
@@ -303,9 +336,11 @@ async def stage_cloud_media(
         # After the consume, never before it — `_prune_parked_statuses`'
         # arrangement, and the reason `stage_inbound_media` moved its own sweep
         # into a `finally`: a sweep in front of the fetch puts the 600-second
-        # window ahead of the file this call is about.
+        # window ahead of the file this call is about. Threaded, because it is
+        # a directory scan plus N unlinks and `has_staging_room` already asks
+        # for the same function from a thread.
         with contextlib.suppress(Exception):
-            media_rules.prune_media_dir(media_dir)
+            await asyncio.to_thread(media_rules.prune_media_dir, media_dir)
     return tuple(staged)
 
 

@@ -122,13 +122,6 @@ dropped — dropping it would send a *captioned* image back through the narrowed
 is really a payload this normalizer could not read.
 """
 
-#: A declared media type, bounded because it is a string off the wire that
-#: reaches a log line, and held to printable characters for the same reason
-#: `baileys_protocol.MAX_MEDIA_MIME_CHARS` is: a newline or an ANSI escape
-#: forges a line there. Nothing branches on it — `media.stage_to_attachment`
-#: sniffs the bytes and names the inbox copy from its own answer.
-_MAX_DECLARED_MIME_CHARS = 128
-
 _TEXT_TYPES = frozenset({"text"})
 _CALLBACK_TYPES = frozenset({"interactive", "button"})
 
@@ -460,12 +453,12 @@ def _pending_media(message: Mapping[str, object]) -> WhatsAppInboundMedia:
             staged_path="", mime_type="", byte_count=0, attached_for_user="",
             error=MEDIA_NO_ID_REASON,
         )
-    declared = _optional_text(image.get("mime_type")) or ""
     return WhatsAppInboundMedia(
         staged_path="",
-        mime_type="".join(
-            ch for ch in declared if ch.isprintable()
-        )[:_MAX_DECLARED_MIME_CHARS],
+        # Printable and bounded, in `media.py` because `client.fetch_media`
+        # reads the same field off Meta's media-url answer and the two must
+        # not drift on what a value fit to log is.
+        mime_type=media_rules.bounded_media_type(image.get("mime_type")),
         byte_count=0,
         attached_for_user="",
         error=None,

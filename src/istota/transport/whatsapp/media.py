@@ -127,6 +127,56 @@ the `unsupported_type` reply the surface already had. This one is istota's own
 failure and says so.
 """
 
+MEDIA_FETCH_FAILED = "the image could not be downloaded from WhatsApp"
+MEDIA_OVER_CAP = "the image was larger than this surface accepts"
+MEDIA_WRITE_FAILED = "the image could not be written to disk"
+"""The three ways a *fetch* ends badly, in one place because both adapters
+reach them.
+
+The sidecar names them as keys (`download_failed`, `over_the_cap`,
+`write_failed`, since its own words carry the destination JID and, on a Boom
+error, the whole request) and `baileys_protocol._MEDIA_ERRORS` maps each key
+onto the sentence here; `client.fetch_media` raises them directly, because on
+that adapter the daemon is the fetcher and there is no wire to cross. This
+module is the authoritative copy of the prose and the only one — a second
+spelling drifts, and what a user is told is the thing that would drift.
+
+Neither adapter may build a reason from an exception: Meta's prose, PyWa's
+exception text and an httpx repr all carry the request URL, which carries the
+recipient and the access token's path segment.
+"""
+
+MAX_DECLARED_MIME_CHARS = 128
+"""How much of a declared media type is kept, and there is a second half.
+
+The value is what the *sender* said their file was, echoed back by the adapter,
+so it reaches a log line and must not be able to forge one — the length bound
+is half the rule and `bounded_media_type` is the other. Nothing branches on the
+value either way: `stage_to_attachment` sniffs the bytes and names the inbox
+copy from its own answer.
+"""
+
+
+def bounded_media_type(value: object) -> str:
+    """A declared media type fit to log: printable, bounded, never trusted.
+
+    Both *daemon-side* producers take this one — `webhook._pending_media` off
+    Meta's callback and `client.fetch_media` off Meta's media-url answer — so a
+    newline or an ANSI escape cannot forge a log line from either.
+
+    `baileys_protocol` deliberately does **not**: it *refuses* a frame whose
+    `media_mime` is not printable rather than repairing it, because a value
+    arriving over the sidecar socket that fails a bounds test is evidence about
+    the frame rather than a string to tidy, and that module's rule is to drop
+    what it cannot read. Here there is no frame to refuse — the value came back
+    from a call this process made — so the useful answer is a bounded string.
+
+    Takes `object`, because both callers read it out of somebody else's JSON.
+    """
+    text = value if isinstance(value, str) else ""
+    return "".join(ch for ch in text if ch.isprintable())[:MAX_DECLARED_MIME_CHARS]
+
+
 NO_MESSAGE_ID = "nomessageid"
 """The fingerprint half of a staged name for a message with no id."""
 
@@ -664,14 +714,19 @@ def discard_staged(staged: Path) -> None:
 
 __all__ = [
     "INBOX_NAME_PREFIX",
+    "MAX_DECLARED_MIME_CHARS",
     "MAX_MEDIA_BYTES",
     "MEDIA_DIR_NAME",
+    "MEDIA_FETCH_FAILED",
     "MEDIA_NOT_PLACED",
+    "MEDIA_OVER_CAP",
+    "MEDIA_WRITE_FAILED",
     "MEDIA_ORPHAN_SECONDS",
     "MEDIA_STAGING_CEILING_BYTES",
     "MEDIA_UNATTRIBUTED",
     "NO_MESSAGE_ID",
     "STAGED_NAME_RE",
+    "bounded_media_type",
     "default_media_dir",
     "discard_staged",
     "ensure_media_dir",

@@ -34,6 +34,7 @@ the cap has no enforcement point left.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -43,6 +44,7 @@ from typing import TYPE_CHECKING
 import httpx
 from pywa import utils as pywa_utils
 
+from . import media as media_rules
 from ._types import WhatsAppSendFailure, WhatsAppSendRequest, WhatsAppSendResult
 
 if TYPE_CHECKING:
@@ -69,9 +71,15 @@ SIGNATURE_HEADER = pywa_utils.HUB_SIG
 #: request URL, and a *media* URL carries the recipient's identifiers and the
 #: access token's path segment besides. Every failure below is one of these
 #: three, chosen by classification and never built from an exception.
-MEDIA_FETCH_FAILED_REASON = "the image could not be downloaded from WhatsApp"
-MEDIA_OVER_CAP_REASON = "the image was larger than this surface accepts"
-MEDIA_WRITE_FAILED_REASON = "the image could not be written to disk"
+#:
+#: **Read from `media.py` rather than spelled here**, because the Baileys
+#: adapter says the same three things about its own fetch — its sidecar names
+#: them as keys and `baileys_protocol._MEDIA_ERRORS` maps each onto the same
+#: sentence. What a user is told is exactly the thing two copies would drift
+#: on, so there is one copy and it is the common module's.
+MEDIA_FETCH_FAILED_REASON = media_rules.MEDIA_FETCH_FAILED
+MEDIA_OVER_CAP_REASON = media_rules.MEDIA_OVER_CAP
+MEDIA_WRITE_FAILED_REASON = media_rules.MEDIA_WRITE_FAILED
 
 #: The Meta media id, held to one ordinary URL path segment.
 #:
@@ -83,15 +91,19 @@ MEDIA_WRITE_FAILED_REASON = "the image could not be written to disk"
 #: boundary — and the join is still where containment is decided.
 _MEDIA_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:=-]{0,254}")
 
-#: A declared media type, bounded for the reason `baileys_protocol` bounds its
-#: own: it is a string that reaches a log line, so a newline or an ANSI escape
-#: in it forges one there. Nothing branches on the value — the sniff in
-#: `media.stage_to_attachment` is what decides what the bytes are.
-_MAX_DECLARED_MIME_CHARS = 128
-
 #: How much of Meta's answer is read at a time. 64 KiB is PyWa's own default
 #: and the size its generator yields.
 _MEDIA_CHUNK_BYTES = 64 * 1024
+
+#: A whole-transfer bound on the download, which the session's own timeout is
+#: not: `httpx.Timeout` is per operation, so each chunk read restarts it and a
+#: peer trickling a byte at a time holds the *webhook request Meta is waiting
+#: on* open indefinitely. `max_bytes` bounds the volume and this bounds the
+#: time; neither substitutes for the other. The number is a bound rather than a
+#: budget — what a callback may actually cost is Meta's tolerance, which
+#: nothing here can measure — so it is set well below any plausible hang and
+#: well above a 16 MiB transfer on a slow link.
+_MEDIA_FETCH_DEADLINE_SECONDS = 60.0
 
 
 class WhatsAppMediaError(Exception):
@@ -298,6 +310,12 @@ class WhatsAppClient:
         actually arrive are counted too, and the chunk that would take the
         total past the cap is never written.
 
+        **And the transfer is bounded in time as well as in bytes**, because
+        the session's `httpx.Timeout` is per operation: each chunk read
+        restarts it, so a peer trickling bytes holds open the webhook request
+        Meta is waiting on. `_MEDIA_FETCH_DEADLINE_SECONDS` is the whole-
+        transfer bound, and a breach is a fetch failure like any other.
+
         **Nothing here logs the URL, the error body or the filename.** A media
         URL carries the recipient's identifiers and the token's path segment,
         which is why the send path already turns `exc_info` off on its
@@ -316,10 +334,12 @@ class WhatsAppClient:
             # prose and the response, and an httpx repr carries the Graph URL.
             logger.warning("whatsapp.media.fetch_failed reason=media_url")
             raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON) from None
-        declared = getattr(located, "mime_type", "")
-        declared = (
-            declared[:_MAX_DECLARED_MIME_CHARS] if isinstance(declared, str) else ""
-        )
+        # Printable and bounded, not merely bounded: the value is what the
+        # *uploader* declared, echoed back by Graph, and it reaches the log
+        # line below — so an ANSI escape or a newline in it would forge one
+        # there. One rule, in `media.py`, shared with the webhook normalizer,
+        # which reads the same field off the callback.
+        declared = media_rules.bounded_media_type(getattr(located, "mime_type", ""))
         size = _as_byte_count(getattr(located, "file_size", None))
         if size is not None and size > max_bytes:
             logger.warning(
@@ -339,19 +359,28 @@ class WhatsAppClient:
         # connection pool does.
         stream = self._client.stream_media(url, chunk_size=_MEDIA_CHUNK_BYTES)
         try:
-            async with contextlib.aclosing(stream):
-                async for chunk in stream:
-                    if written + len(chunk) > max_bytes:
-                        logger.warning(
-                            "whatsapp.media.refused reason=stream_cap "
-                            "bytes=%d cap=%d",
-                            written + len(chunk), max_bytes,
-                        )
-                        raise WhatsAppMediaError(MEDIA_OVER_CAP_REASON)
-                    _write_all(dest_fd, chunk)
-                    written += len(chunk)
+            async with asyncio.timeout(_MEDIA_FETCH_DEADLINE_SECONDS):
+                async with contextlib.aclosing(stream):
+                    async for chunk in stream:
+                        if written + len(chunk) > max_bytes:
+                            logger.warning(
+                                "whatsapp.media.refused reason=stream_cap "
+                                "bytes=%d cap=%d",
+                                written + len(chunk), max_bytes,
+                            )
+                            raise WhatsAppMediaError(MEDIA_OVER_CAP_REASON)
+                        _write_all(dest_fd, chunk)
+                        written += len(chunk)
         except WhatsAppMediaError:
             raise
+        except TimeoutError:
+            # `asyncio.timeout` converts its own cancellation into this, so it
+            # is the deadline above rather than a socket read timeout — which
+            # arrives as an `httpx.ReadTimeout` and takes the generic arm.
+            logger.warning(
+                "whatsapp.media.fetch_failed reason=deadline bytes=%d", written,
+            )
+            raise WhatsAppMediaError(MEDIA_FETCH_FAILED_REASON) from None
         except OSError:
             logger.warning("whatsapp.media.fetch_failed reason=write")
             raise WhatsAppMediaError(MEDIA_WRITE_FAILED_REASON) from None

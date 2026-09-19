@@ -47,6 +47,7 @@ from istota.transport.whatsapp.webhook import (
     normalize_payload,
 )
 
+from .support.drift import source_of
 from .support.graph_media import (
     MEDIA_ID,
     MEDIA_URL,
@@ -277,19 +278,30 @@ class TestTheGraphFetch:
         self, tmp_path,
     ):
         """A declared size is a claim. The cap is enforced again against the
-        bytes that actually arrive, and the overage chunk is never written."""
+        bytes that actually arrive, and the overage chunk is never written.
+
+        The body is deliberately several chunks long and the cap falls between
+        two of them: a body under one chunk makes `written` zero when the cap
+        fires, and "nothing was written" then satisfies a bound that is meant
+        to be about *stopping*, which is the vacuous shape
+        `.claude/rules/testbed.md` catalogues.
+        """
         config = _config(tmp_path)
-        graph = Graph(body=b"\x89PNG" + b"\x00" * 4096, declared_size=16)
+        chunk = 64 * 1024
+        graph = Graph(body=b"\x89PNG" + b"\x00" * (4 * chunk), declared_size=16)
         path, fd = self._dest(tmp_path)
         try:
             with pytest.raises(WhatsAppMediaError) as caught:
-                self._fetch(config, graph, dest=fd, max_bytes=1024)
+                self._fetch(config, graph, dest=fd, max_bytes=2 * chunk + 1)
         finally:
             os.close(fd)
 
         assert caught.value.reason == MEDIA_OVER_CAP_REASON
         assert graph.downloads == [MEDIA_URL]
-        assert len(path.read_bytes()) <= 1024
+        written = len(path.read_bytes())
+        # Cut off, rather than never started: two whole chunks landed and the
+        # third, which would have passed the cap, did not.
+        assert written == 2 * chunk
 
     def test_a_graph_refusal_is_a_fetch_failure(self, tmp_path):
         config = _config(tmp_path)
@@ -340,6 +352,109 @@ class TestTheGraphFetch:
         assert caught.value.reason == MEDIA_FETCH_FAILED_REASON
         assert graph.requests == []
 
+    def test_a_descriptor_that_cannot_be_written_is_its_own_reason(
+        self, tmp_path,
+    ):
+        """One of the three reasons the module publishes, and the only one no
+        other case reaches: the bytes arrived and the disk refused them."""
+        from istota.transport.whatsapp.client import MEDIA_WRITE_FAILED_REASON
+
+        config = _config(tmp_path)
+        graph = Graph()
+        path = tmp_path / "staged.bin"
+        path.write_bytes(b"")
+        # Opened read-only, so `os.write` fails with EBADF — a stand-in for the
+        # full disk or the revoked mount this arm is really about.
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            with pytest.raises(WhatsAppMediaError) as caught:
+                self._fetch(config, graph, dest=fd)
+        finally:
+            os.close(fd)
+
+        assert caught.value.reason == MEDIA_WRITE_FAILED_REASON
+
+    def test_a_transfer_that_never_ends_is_bounded_in_time(
+        self, tmp_path, monkeypatch,
+    ):
+        """`httpx.Timeout` is per operation, so each chunk read restarts it and
+        a trickling peer would hold open the request Meta is waiting on. The
+        deadline is the whole-transfer bound; `max_bytes` cannot be, since a
+        peer that sends nothing never reaches it."""
+        from istota.transport.whatsapp import client as client_module
+
+        config = _config(tmp_path)
+        client = build_client(config, Graph())
+        path, fd = self._dest(tmp_path)
+
+        async def never_ends(*_args, **_kwargs):
+            await asyncio.sleep(3600)
+            yield b""  # pragma: no cover - unreachable
+
+        # The stall is in PyWa's generator rather than in the transport,
+        # because a `MockTransport` answers instantly by construction and what
+        # is under test is the loop around it.
+        monkeypatch.setattr(client._client, "stream_media", never_ends)
+        monkeypatch.setattr(
+            client_module, "_MEDIA_FETCH_DEADLINE_SECONDS", 0.05,
+        )
+
+        async def run():
+            try:
+                return await client.fetch_media(
+                    MEDIA_ID, fd, max_bytes=media.MAX_MEDIA_BYTES,
+                )
+            finally:
+                await client.aclose()
+
+        try:
+            with pytest.raises(WhatsAppMediaError) as caught:
+                asyncio.run(run())
+        finally:
+            os.close(fd)
+
+        assert caught.value.reason == MEDIA_FETCH_FAILED_REASON
+        assert path.read_bytes() == b""
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            (61901, 61901),
+            ("61901", 61901),
+            ("  61901  ", 61901),
+            (True, None),
+            (-1, None),
+            ("-1", None),
+            ("abc", None),
+            (None, None),
+            (1.5, None),
+        ],
+    )
+    def test_metas_declared_size_is_read_or_disbelieved(self, value, expected):
+        """`None` means Meta said nothing about the size, which the in-stream
+        cap covers — reading an unparseable value as zero would silently retire
+        the cheaper gate, and reading `True` as 1 is the coercion that makes a
+        gate pass on a value nobody sent."""
+        from istota.transport.whatsapp.client import _as_byte_count
+
+        assert _as_byte_count(value) == expected
+
+    def test_the_declared_type_cannot_forge_a_log_line(self, tmp_path):
+        """The value is the uploader's, echoed back by Graph, and it reaches a
+        log line. One rule for it, in `media.py`, shared with the normalizer
+        that reads the same field off the callback."""
+        config = _config(tmp_path)
+        graph = Graph(mime="image/jpeg\nWARNING forged " + "x" * 400)
+        path, fd = self._dest(tmp_path)
+        try:
+            declared, _written = self._fetch(config, graph, dest=fd)
+        finally:
+            os.close(fd)
+
+        assert "\n" not in declared
+        assert len(declared) <= media.MAX_DECLARED_MIME_CHARS
+        assert path.read_bytes() == PNG
+
     def test_nothing_on_this_path_calls_download_media(self):
         """A source assertion, because the point is filename provenance.
 
@@ -347,18 +462,45 @@ class TestTheGraphFetch:
         from a hash of the URL — both server-chosen. The daemon names its own
         files, so the only two Graph calls this module may make are
         `get_media_url` and `stream_media`.
+
+        Read through `source_of`, per AGENTS.md: a guard that reads lines
+        rather than running them is invisible to testmon, so `scripts/qt` would
+        never re-select it after the very edit it exists to catch.
         """
         from istota.transport.whatsapp import client as client_module
         from istota.transport.whatsapp.providers import whatsapp_cloud
 
         for module in (client_module, whatsapp_cloud):
-            source = Path(module.__file__).read_text()
             body = "\n".join(
-                line for line in source.splitlines()
+                line for line in source_of(module).splitlines()
                 if not line.strip().startswith("#")
             )
             assert "download_media(" not in body
             assert "get_media_bytes" not in body
+
+    def test_the_two_adapters_describe_a_failed_fetch_in_the_same_words(self):
+        """The failure record is built once per adapter, so what must not drift
+        is what it *says*: the same four fields and the same prose.
+
+        The reasons themselves have one home (`media.py`) and this is the other
+        half — that both constructors produce the same record, since
+        `WhatsAppInboundMedia` gained a field in this very stage and a second
+        constructor is how the two answers separate.
+        """
+        from istota.transport.whatsapp.baileys_bridge import _media_failed as baileys
+        from istota.transport.whatsapp.providers.whatsapp_cloud import (
+            _media_failed as cloud,
+        )
+
+        assert cloud(media.MEDIA_NOT_PLACED) == baileys(media.MEDIA_NOT_PLACED)
+        # And the prose is the common module's, not each adapter's own.
+        from istota.transport.whatsapp import baileys_protocol
+
+        assert set(baileys_protocol._MEDIA_ERRORS.values()) == {
+            media.MEDIA_FETCH_FAILED,
+            media.MEDIA_OVER_CAP,
+            media.MEDIA_WRITE_FAILED,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -623,9 +765,20 @@ class TestABindingThatChangedUnderneathThePreCheck:
         assert inbox_path in logged
 
 
-class TestTheRouteStagesBeforeItOpensTheTransaction:
-    """The wiring itself: the route calls the staging step, and it calls it
-    between `parse_webhook` and `handle_whatsapp_batch`."""
+class TestTheSignedRouteStagesAndAnswers:
+    """The wiring itself, driven through the real FastAPI route with real bytes.
+
+    What it pins is that `receive_whatsapp` calls the staging step at all — a
+    route that skipped it would answer 200 with a `media_failed` disposition
+    and no task, which is exactly what this refuses.
+
+    It deliberately does **not** pin the *ordering*, and a route-level version
+    could not: `handle_whatsapp_batch` legitimately takes the write lock, so a
+    second thread holding one makes this request wait however the call is
+    arranged. The ordering property is
+    `tests/test_whatsapp_media_precheck.py::TestNothingStagesUnderTheWriteLock`,
+    which drives the staging step directly for that reason.
+    """
 
     def test_the_signed_route_answers_200_and_creates_the_task(
         self, tmp_path, monkeypatch,
