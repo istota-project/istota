@@ -282,31 +282,39 @@ class TestTheBaileysSidecarService:
         assert "whatsapp-baileys" not in webhooks["profiles"]
         assert "whatsapp" not in service["profiles"]
 
-    def test_it_is_given_both_variables_the_program_requires(self):
-        """With either missing the sidecar exits 2 and logs nowhere.
+    def test_it_is_given_every_variable_the_program_requires(self):
+        """With any one missing the sidecar exits 2 and logs nowhere.
 
         Its only log destination is a file inside the session directory, which
-        is one of the two values — so a service that withholds them produces a
-        container that restarts for ever with an empty `docker logs`.
+        is one of the three values — so a service that withholds them produces
+        a container that restarts for ever with an empty `docker logs`.
+
+        The media directory joined the pair once the sidecar started staging
+        inbound photos, and it is the one that could be forgotten quietly: a
+        deployment that upgrades to this image without the variable loses the
+        whole WhatsApp surface, text included, rather than losing images.
         """
         environment = self._service()["environment"]
 
         assert environment["ISTOTA_BAILEYS_SOCKET"]
         assert environment["ISTOTA_BAILEYS_SESSION_DIR"]
+        assert environment["ISTOTA_BAILEYS_MEDIA_DIR"]
 
     def test_the_paths_it_is_given_are_where_the_daemon_puts_them(self, tmp_path):
         """Asked of the product rather than restated.
 
-        The socket has no config override at all and the session directory
+        The socket has no config override at all, the session directory
         resolves itself when `session_dir` is empty, which is what the render
-        leaves it as — so both paths are derived from `db_path`, and a compose
-        literal that drifts from that derivation is a sidecar dialling a socket
-        nobody is listening on, with no error on either side.
+        leaves it as, and the media directory has no override in any shape — so
+        all three paths are derived from `db_path`, and a compose literal that
+        drifts from that derivation is a sidecar writing where the daemon never
+        reads, with no error on either side.
         """
         from istota.config import load_config
         from istota.transport.whatsapp.baileys_bridge import (
             default_session_dir, default_socket_path,
         )
+        from istota.transport.whatsapp.media import default_media_dir
 
         config = load_config(render_docker_config(tmp_path, **REQUIRED))
         environment = self._service()["environment"]
@@ -315,6 +323,30 @@ class TestTheBaileysSidecarService:
         assert environment["ISTOTA_BAILEYS_SESSION_DIR"] == str(
             default_session_dir(config)
         )
+        assert environment["ISTOTA_BAILEYS_MEDIA_DIR"] == str(
+            default_media_dir(config)
+        )
+
+    def test_the_media_directory_is_inside_the_volume_both_containers_share(
+        self, tmp_path,
+    ):
+        """The staging directory's second reason, asserted rather than assumed.
+
+        A photo is written by this container and read by the daemon in the
+        other one, so the two must see the same inodes. `istota_data:/data` is
+        already mounted for the socket and the session directory; this asserts
+        that the media directory falls inside it rather than needing a volume
+        of its own, which is the property that let the directory be added with
+        no compose change beyond one line.
+        """
+        from istota.config import load_config
+        from istota.transport.whatsapp.media import default_media_dir
+
+        config = load_config(render_docker_config(tmp_path, **REQUIRED))
+        service = self._service()
+
+        assert "istota_data:/data" in service["volumes"]
+        assert str(default_media_dir(config)).startswith("/data/")
 
     def test_it_shares_the_data_volume_and_publishes_nothing(self):
         service = self._service()
@@ -799,7 +831,7 @@ class TestTheAnsibleSidecarUnit:
             rendered = template.render({**defaults, **overrides}).strip()
             assert rendered == expected, f"{label} -> {rendered!r}"
 
-    def test_the_unit_is_given_both_variables_the_program_requires(self):
+    def test_the_unit_is_given_every_variable_the_program_requires(self):
         rendered = self._unit()
 
         assert (
@@ -810,19 +842,29 @@ class TestTheAnsibleSidecarUnit:
             "Environment=ISTOTA_BAILEYS_SESSION_DIR="
             "/srv/app/istota/data/whatsapp-baileys-session" in rendered
         )
+        # The third, and the one whose absence is loudest out of proportion to
+        # what it is for: the sidecar exits 2 without it, `Restart=always`
+        # brings it straight back, and a deployment that stages no photos
+        # loses text messages too.
+        assert (
+            "Environment=ISTOTA_BAILEYS_MEDIA_DIR="
+            "/srv/app/istota/data/whatsapp-media" in rendered
+        )
 
     def test_the_paths_it_is_given_are_where_the_daemon_puts_them(self, tmp_path):
         """Asked of the product, against this role's own rendered config.
 
-        The socket name has no config override and `session_dir` is left unset
-        in the render, so both resolve from db_path. A unit that drifts from
-        that derivation is a sidecar dialling a socket nobody is listening on,
-        with no error on either side.
+        The socket name has no config override, `session_dir` is left unset in
+        the render, and the media directory has no override in any shape, so
+        all three resolve from db_path. A unit that drifts from that derivation
+        is a sidecar writing where the daemon never reads, with no error on
+        either side.
         """
         from istota.config import load_config
         from istota.transport.whatsapp.baileys_bridge import (
             default_session_dir, default_socket_path,
         )
+        from istota.transport.whatsapp.media import default_media_dir
 
         home = "/srv/app/istota"
         path = tmp_path / "config.toml"
@@ -835,6 +877,54 @@ class TestTheAnsibleSidecarUnit:
             f"Environment=ISTOTA_BAILEYS_SESSION_DIR={default_session_dir(config)}"
             in rendered
         )
+        assert (
+            f"Environment=ISTOTA_BAILEYS_MEDIA_DIR={default_media_dir(config)}"
+            in rendered
+        )
+
+    def test_the_media_directory_is_inside_the_write_path_this_unit_grants(
+        self, tmp_path,
+    ):
+        """The staging directory's first reason, asserted against the unit.
+
+        `ProtectSystem=strict` makes the whole filesystem read-only bar what
+        `ReadWritePaths=` names, and this unit's write path is deliberately
+        narrower than its siblings' because it runs a third-party dependency
+        tree while holding a full WhatsApp account. So the staging directory
+        had to land inside that path or the sidecar could not write a photo —
+        and the alternative location, a sibling of the task control directory
+        under `temp_dir`, is refused twice over: `PrivateTmp=true` gives this
+        unit its own `/tmp`, and widening `ReadWritePaths` to reach the real
+        one would hand the sidecar every user's task temp directory.
+
+        Read as a **verification rather than an assumption**: the unit is
+        parsed for its own directive and the directory is asked of the product,
+        so a later narrowing of either fails here rather than in production.
+        """
+        from istota.config import load_config
+        from istota.transport.whatsapp.media import default_media_dir
+
+        home = "/srv/app/istota"
+        path = tmp_path / "config.toml"
+        path.write_text(render_ansible_config(istota_home=home))
+        config = load_config(path)
+        rendered = self._unit(istota_home=home)
+
+        granted = [
+            line.split("=", 1)[1].strip()
+            for line in rendered.splitlines()
+            if line.startswith("ReadWritePaths=")
+        ]
+        assert granted, "the unit grants no write path at all"
+
+        media_dir = default_media_dir(config)
+        assert any(
+            media_dir.is_relative_to(Path(root)) for root in granted
+        ), f"{media_dir} is outside {granted}; the sidecar cannot stage a photo"
+        # The control against a repair that widens the unit instead of keeping
+        # the directory where it belongs: the write path must still not reach
+        # the deployment root or the temp directory.
+        assert granted == [f"{home}/data"]
 
     def test_it_restarts_a_sidecar_that_exited_on_a_dead_session(self):
         """`Restart=always` is the recovery path, not a default copied across.

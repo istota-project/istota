@@ -52,13 +52,23 @@ ExecStart={{ istota_whatsapp_baileys_node_bin }} {{ istota_repo_dir }}/docker/wh
 Restart=always
 RestartSec={{ istota_whatsapp_baileys_restart_sec }}
 
-# Both are required and the program exits 2 without either — the session
-# directory is where its own log lives, so there is no channel left to complain
-# on. The socket name has no config override at all, and session_dir is left
-# unset in config.toml so it resolves to exactly this path; both are derived
-# from db_path, which config.toml.j2 renders as {{ istota_home }}/data/istota.db.
+# All three are required and the program exits 2 without any one of them — the
+# session directory is where its own log lives, so there is no channel left to
+# complain on. The socket name has no config override at all, and session_dir
+# is left unset in config.toml so it resolves to exactly this path; all three
+# derive from db_path, which config.toml.j2 renders as
+# {{ istota_home }}/data/istota.db.
+#
+# The media directory is where an inbound photo is staged between the sidecar's
+# download and the daemon's copy into the sender's workspace. It has no config
+# override either, by decision: it is a property of the surface rather than of
+# this adapter, and `media.default_media_dir` is the one rule that picks it. It
+# also needs no ReadWritePaths change — it is under {{ istota_home }}/data,
+# which this unit already grants, and that is why it is beside db_path rather
+# than under temp_dir, where PrivateTmp and the write path would both refuse.
 Environment=ISTOTA_BAILEYS_SOCKET={{ istota_home }}/data/whatsapp-baileys.sock
 Environment=ISTOTA_BAILEYS_SESSION_DIR={{ istota_home }}/data/whatsapp-baileys-session
+Environment=ISTOTA_BAILEYS_MEDIA_DIR={{ istota_home }}/data/whatsapp-media
 Environment=ISTOTA_BAILEYS_LOG_LEVEL={{ istota_whatsapp_baileys_log_level }}
 Environment=HOME={{ istota_home }}
 Environment=NODE_ENV=production

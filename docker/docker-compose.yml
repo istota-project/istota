@@ -933,9 +933,15 @@ services:
     environment:
       # Derived from db_path above rather than configured: the socket name has
       # no config override at all, and session_dir is left unset in the render
-      # so it resolves to exactly this path.
+      # so it resolves to exactly this path. The media directory is the same
+      # kind of value — where an inbound photo is staged between this
+      # container's download and the daemon's copy into the sender's workspace
+      # — and it has no override at all, by decision. All three are fixed
+      # literals rather than `${...}` interpolations because none of them is an
+      # operator's to choose, and the program exits 2 without any one of them.
       ISTOTA_BAILEYS_SOCKET: /data/db/whatsapp-baileys.sock
       ISTOTA_BAILEYS_SESSION_DIR: /data/db/whatsapp-baileys-session
+      ISTOTA_BAILEYS_MEDIA_DIR: /data/db/whatsapp-media
       ISTOTA_BAILEYS_LOG_LEVEL: ${ISTOTA_BAILEYS_LOG_LEVEL:-info}
     # No ports and no expose: it speaks to the daemon over the volume's socket
     # and to WhatsApp outbound, and nothing ever dials it.
