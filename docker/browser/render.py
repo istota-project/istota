@@ -149,9 +149,10 @@ def _absolutize(soup, base_url):
 # **This is provenance, not a security boundary, and the difference is worth
 # being exact about** — an earlier version of this comment claimed the frame
 # body "rides inside the caller's existing untrusted-content fence", and that
-# was simply false: `istota.skills._untrusted.frame_untrusted` is applied by the
-# `nextcloud` and `tasks` skills and by nothing on the browse path, so a
-# rendered page — frames or no frames — reaches the model unfenced. Frame
+# was simply false: `istota.untrusted.frame_untrusted` is applied by the
+# `nextcloud`, `tasks`, `rooms` and `email` skills, by the native WebFetch tool
+# and by image attachments — and by nothing on the browse path, so a rendered
+# page, frames or no frames, reaches the model unfenced. Frame
 # content is no more dangerous than the page body beside it, which has never
 # been fenced either; what it is, is *somebody else's*, and that is the fact the
 # marking carries.
@@ -162,8 +163,8 @@ def _absolutize(soup, base_url):
 # paragraph does not, and that is exactly how `--mode article` used to hand back
 # frame content with its marker dropped. It is opened *and* closed, so the
 # page's own text visibly resumes. And both spellings are redacted out of the
-# frame body first, on the rule `_untrusted._redaction_patterns` states: a fence
-# the content can close is not a fence.
+# frame body first, on the rule `istota.untrusted._redaction_patterns` states:
+# a fence the content can close is not a fence.
 #
 # The stated bound: redaction runs over the frame's text nodes, so a marker
 # split across tags (`[fra<span>me]`) is rebuilt by the conversion and survives.
