@@ -257,11 +257,11 @@ ENV_SESSION_DIR = "ISTOTA_BAILEYS_SESSION_DIR"
 #: and a deployment that sets `sidecar_command`. On both shipped shapes the
 #: sidecar is a unit or a compose service of its own and the daemon spawns
 #: nothing, so what it reads is the literal in that unit or service — and the
-#: sidecar exits 2 without it. Those two literals, and the drift guard that
-#: compares each against `media.default_media_dir` for its shape, are Stage 5
-#: of `whatsapp-inbound-images`; until they land the deployed shapes cannot
-#: run a sidecar at all, which is why that stage has to land in the same
-#: round as this one.
+#: sidecar exits 2 without it. Both literals are set, and
+#: `tests/test_whatsapp_deployment.py` compares each against
+#: `media.default_media_dir` for its shape: a drift there is a sidecar writing
+#: where the daemon never reads, and an absence is the whole WhatsApp surface
+#: down rather than images down.
 ENV_MEDIA_DIR = "ISTOTA_BAILEYS_MEDIA_DIR"
 
 
