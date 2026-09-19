@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-09-19
+
 You can now reach Istota from a phone's messaging apps. SMS goes through Twilio or Telnyx: a number is bound to one user, and each answer comes back as one message inside a segment budget you set. WhatsApp goes through either of two adapters — `baileys`, the default, pairs with a phone by QR scan and costs nothing, and `whatsapp_cloud` is Meta's hosted API, which is metered and is the path WhatsApp sanctions. Either way the exchange is private and stays outside Talk and web rooms, and it has a memory now, so a follow-up like "what about tomorrow?" is read as one. You can photograph a receipt, a letter or a whiteboard and send it: the picture reaches the model as pixels and as the text read out of it, whatever you type under the photograph is the request, and a copy lands in your own `inbox/` folder. A Baileys session that WhatsApp has unlinked is re-paired from Admin, Connections, with the code drawn in the page and scanned from the phone's Linked Devices screen — what that replaces is an SSH session and two stopped services.
 
 You can also share credentials with Istota out of a KeePass file instead of typing each one into the settings page. Copy a `.kdbx` into the `vault` folder inside your own Istota folder and generate a passphrase, and every entry under a top-level `istota` group becomes a named credential a task can use — `istota-credential run TOKEN=home_assistant_token -- curl …` hands the value to one command, and it appears in no prompt and no transcript. Read the settings card's note on what that widens before you point it at your everyday password database. Asking for a weekly digest "in this room" no longer creates a second, empty room: Istota names the room a task is in, in the task's own prompt, and `istota-skill rooms list` is the listing that was missing. You can name a place you have already left and backfill the pings inside it, `browse render` says when a page's content was in an iframe, `browse interact` runs clicks where you wrote them among the fills, and `!stop` cancels the task in the room you typed it in rather than your newest one anywhere. This release is 203 commits, against 982 in 0.41.0 and 14 in the 0.41.1 patch, and most of the rest is WhatsApp delivery hardening plus closing the quotation Istota wraps untrusted text in, which an email body, a fetched web page and a room name could each end from the inside.
@@ -2779,7 +2781,8 @@ Breaking changes this release:
 - Hybrid context selection: recent N messages always included, older messages triaged by Haiku/Sonnet.
 - Native `imap-tools` + `smtplib` email backend with RFC 5322 References-header threading (replacing the pre-fork himalaya CLI).
 
-[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.41.1...main
+[Unreleased]: https://gitlab.com/cynium/istota/-/compare/v0.42.0...main
+[0.42.0]: https://gitlab.com/cynium/istota/-/releases/v0.42.0
 [0.41.1]: https://gitlab.com/cynium/istota/-/releases/v0.41.1
 [0.41.0]: https://gitlab.com/cynium/istota/-/releases/v0.41.0
 [0.40.1]: https://gitlab.com/cynium/istota/-/releases/v0.40.1
