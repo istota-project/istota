@@ -754,7 +754,12 @@ class TestVaultStatus:
         out = capsys.readouterr().out
 
         assert "VaultLocked" in out
-        assert "does not match the file" in out
+        # The product's own sentence rather than a restatement of it: this
+        # asserts that the recorded class resolves to its reason and that the
+        # reason reaches stdout, which is what `vault-status` is for. A literal
+        # pins the wording instead, and went red the day the sentence stopped
+        # naming a cause pykeepass cannot distinguish.
+        assert secrets_vault.notification_reason("VaultLocked") in out
 
     def test_a_healthy_record_reports_a_sync_time_and_no_error(self, env, capsys):
         """The control, and the reason `last error` is conditional.

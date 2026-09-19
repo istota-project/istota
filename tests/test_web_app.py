@@ -3547,13 +3547,19 @@ class TestTheVaultSettingsEndpoint:
         )).json()
 
         assert body["last_outcome"] == "VaultLocked"
-        assert "passphrase does not match" in body["last_reason"]
+        # Against the product's own table rather than a restatement of its
+        # prose: this asserts the wiring — that the recorded class resolves to
+        # its sentence and reaches the payload — which is what the endpoint is
+        # responsible for. A literal here pins the wording instead, and went
+        # red the day the sentence was corrected for naming a cause pykeepass
+        # cannot actually distinguish.
+        assert body["last_reason"] == secrets_vault.NOTIFICATION_REASONS["VaultLocked"]
         assert body["last_success_at"] == "2026-09-17T10:00:00Z"
         assert body["last_sync_at"] == "2026-09-17T11:00:00Z"
         # The rendered verdict, resolved here rather than in the browser: the
         # precedence between a live finding and a recorded one is a rule, and a
         # rule restated in TypeScript is a second copy of it.
-        assert "passphrase does not match" in body["problem"]
+        assert body["problem"] == secrets_vault.NOTIFICATION_REASONS["VaultLocked"]
 
     async def test_a_refused_path_is_reported_live_rather_than_from_the_record(
         self, tmp_path, client, app,

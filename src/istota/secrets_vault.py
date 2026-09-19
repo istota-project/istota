@@ -249,11 +249,21 @@ class VaultCorrupt(VaultError):
 
 
 class VaultLocked(VaultError):
-    """The stored passphrase does not open the file.
+    """The stored credentials do not open the file.
 
-    Distinct from ``VaultCorrupt`` because the remedy is a re-provision and
-    touches no byte of the vault — so a cycle that cached this digest would make
-    that remedy inert.
+    Distinct from ``VaultCorrupt`` because the remedy touches no byte of the
+    vault — so a cycle that cached this digest would make that remedy inert.
+
+    **It does not mean the passphrase is wrong, and saying so was a real cost.**
+    ``pykeepass`` raises one ``CredentialsError`` for every way a credential set
+    can fail to open a database, and measured against pykeepass 4.2 a correct
+    password on a database that also requires a **key file** is byte-for-byte
+    the same exception as a wrong password on one that does not. A hardware
+    challenge-response secret is a third. istota passes ``password`` alone, so
+    a key-file-protected database can never open here — and the old message
+    ("the stored passphrase does not match the file") asserted the one cause it
+    could not distinguish, sending a user to re-provision a password that was
+    correct all along. Found in production by somebody doing exactly that.
     """
 
 
@@ -507,7 +517,14 @@ def parse_vault(data: bytes, passphrase: str) -> VaultRead:
         kp = PyKeePass(io.BytesIO(data), password=passphrase)
         return _map_groups(kp, _digest(data))
     except CredentialsError as exc:
-        raise VaultLocked("the stored passphrase does not open this vault") from exc
+        # Deliberately does not name the passphrase as the cause: see
+        # VaultLocked. The key file is named because it is the one cause the
+        # user can check in a few seconds and the one istota cannot support.
+        raise VaultLocked(
+            "the stored credentials do not open this vault — the passphrase may "
+            "be wrong, or the file may also need a key file or a hardware key, "
+            "which istota cannot supply"
+        ) from exc
     except (HeaderChecksumError, PayloadChecksumError) as exc:
         raise VaultCorrupt("the file is not a readable KeePass database") from exc
     except Exception as exc:
@@ -1456,8 +1473,12 @@ VAULT_NOTIFICATION_SERVICE = "vault"
 #: than trusting either list.
 NOTIFICATION_REASONS: dict[str, str] = {
     VaultLocked.__name__: (
-        "the stored passphrase does not match the file — re-provision it with "
-        "`istota secret ensure` and then run `istota secret vault-sync`"
+        "the stored credentials do not open the file — either the passphrase is "
+        "wrong, or the file also needs a key file or a hardware key, which "
+        "istota cannot supply. Check KeePassXC's Database Credentials: if a key "
+        "file is set, remove it or use a different file here. If it is password "
+        "only, re-provision with `istota secret ensure` and run "
+        "`istota secret vault-sync`"
     ),
     VaultCorrupt.__name__: (
         "the file is not a readable KeePass database, which is also what a sync "
