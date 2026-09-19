@@ -107,6 +107,26 @@ a frame that never arrived, a daemon killed between the write and the copy.
 INBOX_NAME_PREFIX = "whatsapp"
 """What an inbox copy is called, so a user can see where it came from."""
 
+MEDIA_UNATTRIBUTED = "the image was not attributed to a user"
+"""What a staged file the pre-check would not name a user for becomes.
+
+Both adapters reach it and each reaches it for its own reasons: an unknown
+sender, a message id already claimed, a sender who has opted out, or a read
+that could not be answered. It is a `WhatsAppInboundMedia.error` rather than a
+dropped record, because dropping one would send an image *with a caption* into
+the `unsupported_type` gate — and a caption is a message, so `START` typed on a
+photograph has to keep working for exactly the opted-out sender this reason is
+most often about.
+"""
+
+MEDIA_NOT_PLACED = "the image could not be placed in the user's workspace"
+"""What a decodable image nothing could copy into an inbox becomes.
+
+Distinct from a file the sniff refused, which is not an image at all and takes
+the `unsupported_type` reply the surface already had. This one is istota's own
+failure and says so.
+"""
+
 NO_MESSAGE_ID = "nomessageid"
 """The fingerprint half of a staged name for a message with no id."""
 
@@ -562,7 +582,7 @@ def stage_to_attachment(
             "staged bytes matched no signature the image pipeline can open",
             staged.stem,
         )
-        _discard(staged)
+        discard_staged(staged)
         return None
 
     byte_count = _size(staged)
@@ -572,7 +592,7 @@ def stage_to_attachment(
             "bytes=%d cap=%d",
             staged.stem, byte_count, MAX_MEDIA_BYTES,
         )
-        _discard(staged)
+        discard_staged(staged)
         return None
 
     extension = image_sniff.EXTENSION_BY_MEDIA_TYPE[media_type]
@@ -581,7 +601,7 @@ def stage_to_attachment(
         ensure_user_directories_v2(config, user_id)
         remote_path = upload_file_to_inbox_v2(config, user_id, staged, inbox_name)
         if remote_path:
-            _discard(staged)
+            discard_staged(staged)
             logger.info(
                 "whatsapp.media.attached type=%s bytes=%d file=%s",
                 media_type, byte_count, staged.stem,
@@ -607,7 +627,7 @@ def stage_to_attachment(
             "could not be placed in the inbox",
             media_type, staged.stem,
         )
-        _discard(staged)
+        discard_staged(staged)
         return None
 
 
@@ -619,8 +639,18 @@ def _size(staged: Path) -> int:
         return -1
 
 
-def _discard(staged: Path) -> None:
-    """Unlink a staged file, tolerating one that is already gone."""
+def discard_staged(staged: Path) -> None:
+    """Unlink a staged file, tolerating one that is already gone.
+
+    Public because the file this module unlinks on its own refusals is the
+    same file a *caller* has to unlink on theirs — a pre-check that named
+    nobody, a message the transaction dropped — and a second `unlink` written
+    at each adapter would have to relearn the never-raises rule and the
+    already-gone case. The sweep is the backstop for both, not the mechanism:
+    every staged file istota consumes **and** every one it drops is unlinked
+    when it is decided, which is what bounds the Baileys path in the absence
+    of a staging ceiling the daemon can enforce there.
+    """
     try:
         staged.unlink()
     except FileNotFoundError:
@@ -636,11 +666,14 @@ __all__ = [
     "INBOX_NAME_PREFIX",
     "MAX_MEDIA_BYTES",
     "MEDIA_DIR_NAME",
+    "MEDIA_NOT_PLACED",
     "MEDIA_ORPHAN_SECONDS",
     "MEDIA_STAGING_CEILING_BYTES",
+    "MEDIA_UNATTRIBUTED",
     "NO_MESSAGE_ID",
     "STAGED_NAME_RE",
     "default_media_dir",
+    "discard_staged",
     "ensure_media_dir",
     "has_staging_room",
     "is_staged_name",

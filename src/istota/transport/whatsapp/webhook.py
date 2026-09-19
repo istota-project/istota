@@ -49,6 +49,7 @@ from ..ingest import ingest_message
 from . import (
     bsuid_fingerprint,
     identity as identity_rules,
+    media as media_rules,
     message_fingerprint,
     whatsapp_conversation_token,
 )
@@ -89,6 +90,27 @@ HELP_REPLY = (
 )
 STOP_REPLY = "You will get no further WhatsApp messages. Send START to resume."
 START_REPLY = "WhatsApp messages are on again."
+MEDIA_FAILED_REPLY = (
+    "That image could not be fetched. Please send it again."
+)
+"""What a message whose file never made it earns, instead of `UNSUPPORTED_REPLY`.
+
+The two are deliberately distinguishable, and that is the whole point of
+`WhatsAppInboundMedia.error`: "not supported yet" tells somebody to stop
+sending photographs, which is the wrong instruction for a download that failed,
+a file past the per-file cap, or a pre-check that could not be answered. This
+one asks for the thing they already did.
+"""
+
+MEDIA_ONLY_PROMPT = "The user sent an image with no caption."
+"""The prompt an uncaptioned image becomes.
+
+Fixed English, not a format string and not model output. The attachments
+section `executor.build_prompt` appends names the file, and
+`prepare_image_attachments` supplies the pixels and the OCR block, so the model
+has everything it needs — this sentence is there so the prompt is not empty and
+so the turn reads correctly in task history.
+"""
 
 _TEXT_TYPES = frozenset({"text"})
 _CALLBACK_TYPES = frozenset({"interactive", "button"})
@@ -726,7 +748,9 @@ def _handle_inbound(
         ),
     )
 
-    result = _dispatch_inbound(conn, config, event, user_id, binding)
+    result = _dispatch_inbound(
+        conn, config, _media_for_user(event, user_id), user_id, binding,
+    )
     # An alert the *resolution* raised on its way to succeeding — today the
     # cross-adapter one, where a principal was re-established from the phone
     # number alone after an adapter switch. The refusal path returns above
@@ -753,6 +777,62 @@ def _handle_inbound(
     return result
 
 
+def _media_for_user(
+    event: InboundWhatsAppEvent, user_id: str
+) -> InboundWhatsAppEvent:
+    """Keep this message's file only if it was staged for *this* user.
+
+    The pre-check that named a user ran outside the transaction, on a
+    deliberately stale read, and the file was copied on the strength of its
+    answer. A binding can change in the window — a re-enrollment, a cleared
+    identity, a bootstrap latch, a latch that lost its race — and without this
+    comparison one user's photograph would be attached to another user's task.
+    The window is milliseconds and the case is rare, which is exactly why it
+    needs a rule rather than a reader's assumption.
+
+    What it cannot do is un-copy the file, so a mismatch is reported at
+    warning naming the stranded copy: nothing downstream will ever mention it
+    again, and the bytes are in somebody's workspace.
+
+    **It also catches a record nothing staged at all**, which is the more
+    likely way to reach here — the decoder fills `attached_for_user` with `""`
+    and only the staging step replaces it, so a caller that skipped that step
+    fails this comparison against a user id that is never empty. That is the
+    guard rather than an accident of it: a staged path put on a task with no
+    inbox copy behind it names a file the sweep deletes ten minutes later.
+
+    A record already carrying an `error` is left alone. It names no copy, so
+    there is nothing to compare and nothing stranded, and the honest reading
+    of an opted-out sender's refusal is not "a binding changed".
+    """
+    media = event.media
+    if media is None or media.error is not None:
+        return event
+    if media.attached_for_user == user_id and media.staged_path:
+        return event
+    if media.staged_path:
+        logger.warning(
+            "whatsapp.inbound.media_misattached message=%s staged_for=%s "
+            "resolved=%s path=%s: the binding changed after the copy was "
+            "made, so the file stays in the first user's workspace",
+            message_fingerprint(event.message_id), media.attached_for_user,
+            user_id, media.staged_path,
+        )
+    else:
+        logger.warning(
+            "whatsapp.inbound.media_unstaged message=%s: a media record "
+            "reached the transaction with no inbox copy behind it",
+            message_fingerprint(event.message_id),
+        )
+    return replace(
+        event,
+        media=replace(
+            media, staged_path="", mime_type="", byte_count=0,
+            error=media_rules.MEDIA_UNATTRIBUTED,
+        ),
+    )
+
+
 def _dispatch_inbound(
     conn, config: Config, event: InboundWhatsAppEvent, user_id: str, binding,
 ) -> WhatsAppEventResult:
@@ -767,7 +847,13 @@ def _dispatch_inbound(
     if event.callback_data is not None:
         return _handle_callback(conn, config, event, user_id, token)
 
-    if event.message_type not in _TEXT_TYPES:
+    if event.message_type not in _TEXT_TYPES and event.media is None:
+        # **Narrowed at the gate rather than by widening `_TEXT_TYPES`**, whose
+        # name would then be a lie: an image is not a text type, it is a type
+        # this surface can now read *because a file came with it*. A message
+        # whose bytes were staged before the lock was taken falls through to
+        # the text path, where its caption is an ordinary message and every
+        # gate below applies to it with no new code.
         if opted_out:
             return WhatsAppEventResult("opted_out", user_id=user_id)
         return WhatsAppEventResult(
@@ -815,11 +901,16 @@ def _dispatch_inbound(
                 response_logical_key=f"confirmation-answer:{event.message_id}",
             )
 
-    if not text:
+    if not text and event.media is None:
         # Above the opt-out gate, because the spec's step 4 sits above its step
         # 5 and `## Behaviour > Edge cases` names `empty` unconditionally. It
         # also reads better in the dedup row: nothing was withheld from this
         # message, there was nothing in it.
+        #
+        # An uncaptioned image is not that. Somebody sent a photograph and said
+        # nothing about it, which is the most ordinary thing this surface
+        # receives — it earns `MEDIA_ONLY_PROMPT` below rather than a
+        # disposition meaning the message was blank.
         return WhatsAppEventResult("empty", user_id=user_id)
 
     if opted_out:
@@ -834,12 +925,36 @@ def _dispatch_inbound(
             response_logical_key=f"command:{event.message_id}",
         )
 
+    if event.media is not None and event.media.error is not None:
+        # **Below everything a caption can mean, and above the task.** A
+        # caption is a message: `STOP` with a failed image still opts out,
+        # `!usage` still runs, an answer still answers — each of those is
+        # complete without the file, so none of them may be turned into this
+        # reply. What is left is a request whose whole subject was the image,
+        # which cannot be answered honestly, so it is refused in words that
+        # ask for the thing again rather than in words that say photographs
+        # are not supported.
+        logger.info(
+            "whatsapp.inbound.media_failed message=%s reason=%s",
+            message_fingerprint(event.message_id), event.media.error,
+        )
+        return WhatsAppEventResult(
+            "media_failed", user_id=user_id,
+            response_text=MEDIA_FAILED_REPLY,
+            response_logical_key=f"media-failed:{event.message_id}",
+        )
+
+    attachments = (
+        [event.media.staged_path] if event.media is not None else []
+    )
     confirmations.cancel_for_conversation(conn, token, user_id, by="whatsapp")
     task_id = ingest_message(
         conn, config,
         IncomingMessage(
-            user_id=user_id, text=text, source_type="whatsapp",
+            user_id=user_id, text=text or MEDIA_ONLY_PROMPT,
+            source_type="whatsapp",
             surface="whatsapp", channel_token=token, output_target="whatsapp",
+            attachments=attachments,
             mirror_to_room=False, queue="foreground",
         ),
     )

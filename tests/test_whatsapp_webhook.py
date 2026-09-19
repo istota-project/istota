@@ -33,9 +33,18 @@ from istota import db
 from istota.config import Config, UserConfig
 
 from .support.whatsapp_config import build_whatsapp_config
-from istota.transport.whatsapp import whatsapp_conversation_token
+from istota.transport.whatsapp import media, whatsapp_conversation_token
+from istota.transport.whatsapp._types import (
+    InboundWhatsAppEvent,
+    WhatsAppInboundMedia,
+    WhatsAppUserIdentity,
+)
 from istota.transport.whatsapp.webhook import (
     MAX_WEBHOOK_BODY,
+    MEDIA_FAILED_REPLY,
+    MEDIA_ONLY_PROMPT,
+    STOP_REPLY,
+    UNSUPPORTED_REPLY,
     WhatsAppWebhookError,
     handle_whatsapp_batch,
     normalize_payload,
@@ -1864,3 +1873,288 @@ class TestTheSurfaceStaysOutsideTheRoomModel:
         assert seen[0].source_type == "whatsapp"
         assert seen[0].queue == "foreground"
         assert seen[0].is_group_chat is False
+
+
+# ---------------------------------------------------------------------------
+# An image, staged before the lock and dispatched inside it
+# ---------------------------------------------------------------------------
+
+
+def _media(
+    *, path="/Users/alice/inbox/whatsapp_ab12-cd34.jpg", for_user="alice",
+    error=None, mime="image/jpeg", byte_count=2048,
+):
+    """A media record as the staging step leaves it, before the transaction.
+
+    `attached_for_user` is filled, because everything in this file runs past
+    the staging step: the pre-check has answered and the inbox copy has been
+    made. The decoder's `""` is what an unstaged record carries, and a case
+    below drives that one deliberately.
+    """
+    return WhatsAppInboundMedia(
+        staged_path="" if error else path,
+        mime_type="" if error else mime,
+        byte_count=0 if error else byte_count,
+        attached_for_user=for_user,
+        error=error,
+    )
+
+
+#: `media=None` on `_image_event` would be ambiguous — most cases want the
+#: ordinary staged record and one wants a message that reached the transaction
+#: carrying nothing. This names the second.
+_NO_MEDIA = object()
+
+
+def _image_event(
+    *, message_id="wamid.img", caption=None, media=None, sender=USER_BSUID,
+):
+    return InboundWhatsAppEvent(
+        message_id=message_id,
+        waba_id=WABA_ID,
+        phone_number_id=PHONE_NUMBER_ID,
+        from_user=WhatsAppUserIdentity(
+            bsuid=sender, wa_id=USER_WA_ID, username=None,
+        ),
+        message_type="image",
+        text=caption,
+        callback_data=None,
+        reply_to_message_id=None,
+        sent_at=datetime.now(timezone.utc),
+        media=None if media is _NO_MEDIA else (media or _media()),
+    )
+
+
+def _dispatch(config, event):
+    with db.get_db(config.db_path) as conn:
+        return handle_whatsapp_batch(conn, config, [event])
+
+
+class TestAnImageBecomesATaskCarryingIt:
+    """The whole point of the spec, at the gate that used to refuse it.
+
+    An `image` fell to the `unsupported_type` branch and earned "that WhatsApp
+    message type is not supported yet", whatever it carried. The gate narrows
+    to "a type this surface does not read **and** no file came with it", so a
+    message whose bytes are already staged falls through to the text path.
+    """
+
+    def test_a_captioned_image_creates_a_task_carrying_the_attachment(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _dispatch(config, _image_event(caption="what is this?"))
+
+        assert _dispositions(results) == ["task"]
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, results[0].task_id)
+        assert task.prompt == "what is this?"
+        assert task.attachments == ["/Users/alice/inbox/whatsapp_ab12-cd34.jpg"]
+
+    def test_an_uncaptioned_image_is_a_task_rather_than_an_empty_message(
+        self, tmp_path,
+    ):
+        """`empty` means nothing was sent, and a photo is not nothing."""
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _dispatch(config, _image_event(caption=None))
+
+        assert _dispositions(results) == ["task"]
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, results[0].task_id)
+        assert task.prompt == MEDIA_ONLY_PROMPT
+        assert task.attachments == ["/Users/alice/inbox/whatsapp_ab12-cd34.jpg"]
+
+    def test_an_image_nothing_staged_still_gets_the_unsupported_reply(
+        self, tmp_path,
+    ):
+        """The control for the narrowing, and the sniff-refused row.
+
+        A file the sniff would not call a decodable image is unlinked by the
+        staging step and the record is dropped, so the event that reaches here
+        carries nothing — and lands on exactly the branch it always did. If
+        this went green as a task, the gate would be reading the message type
+        and not the file.
+        """
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _dispatch(config, _image_event(caption="what is this?",
+                                                 media=_NO_MEDIA))
+
+        assert _dispositions(results) == ["unsupported_type"]
+        assert _counts(config, "tasks") == [0]
+
+
+class TestACaptionIsAMessage:
+    """Every text gate applies to a caption, with no new code behind it.
+
+    The caption rides `InboundWhatsAppEvent.text`, so `STOP`, `!usage` and a
+    confirmation answer mean on a photograph exactly what they mean typed on
+    their own. A separate `caption` field would have needed each of these gates
+    written a second time, and would have let `STOP` mean two different things
+    depending on whether a file came with it.
+    """
+
+    def test_stop_typed_as_a_caption_opts_out(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _dispatch(config, _image_event(caption="STOP"))
+
+        assert _dispositions(results) == ["stop"]
+        assert results[0].response_text == STOP_REPLY
+        assert _counts(config, "tasks") == [0]
+        with db.get_db(config.db_path) as conn:
+            assert db.get_whatsapp_binding(conn, "alice").opted_out_at
+
+    def test_a_command_typed_as_a_caption_is_dispatched(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _dispatch(config, _image_event(caption="!usage"))
+
+        assert _dispositions(results) == ["command"]
+        assert results[0].command_text == "!usage"
+        assert _counts(config, "tasks") == [0]
+
+    def test_a_caption_that_answers_a_parked_confirmation_answers_it(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        token = whatsapp_conversation_token("alice")
+        with db.get_db(config.db_path) as conn:
+            held = db.create_task(
+                conn, prompt="delete it", user_id="alice",
+                source_type="whatsapp", conversation_token=token,
+                output_target="whatsapp",
+            )
+            db.set_task_confirmation(conn, held, "May I delete it?")
+
+        results = _dispatch(config, _image_event(caption="YES"))
+
+        assert _dispositions(results) == ["confirmation_answer"]
+        with db.get_db(config.db_path) as conn:
+            assert db.get_task(conn, held).status == "pending"
+
+    def test_start_typed_as_a_caption_works_for_the_sender_it_refused(
+        self, tmp_path,
+    ):
+        """The opt-out ruling's second half, and the reason a refusal keeps a
+        record rather than dropping one.
+
+        `precheck` answers nobody for an opted-out sender, so the photograph is
+        never copied — but the *message* is untouched, and the one message an
+        opted-out person is most likely to send is the one that undoes it.
+        Dropping the record would put this event back through the narrowed gate
+        and return `opted_out` without ever reading the word.
+        """
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        _handle(config, _text_payload(message_id="wamid.stop", text="STOP"))
+
+        results = _dispatch(config, _image_event(
+            caption="START", media=_media(error=media.MEDIA_UNATTRIBUTED),
+        ))
+
+        assert _dispositions(results) == ["start"]
+        with db.get_db(config.db_path) as conn:
+            assert db.get_whatsapp_binding(conn, "alice").opted_out_at is None
+
+    def test_an_opted_out_sender_gets_no_task_and_no_reply(self, tmp_path):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+        _handle(config, _text_payload(message_id="wamid.stop", text="STOP"))
+
+        results = _dispatch(config, _image_event(
+            caption=None, media=_media(error=media.MEDIA_UNATTRIBUTED),
+        ))
+
+        assert _dispositions(results) == ["opted_out"]
+        assert results[0].response_text is None
+        assert _counts(config, "tasks") == [0]
+
+
+class TestAFileThatNeverArrivedIsSaidSo:
+    """`MEDIA_FAILED_REPLY`, and why it is not `UNSUPPORTED_REPLY`.
+
+    "That message type is not supported yet" tells somebody to stop sending
+    photographs, which is the wrong instruction for a download that failed or a
+    file past the cap. The distinction is the whole point of
+    `WhatsAppInboundMedia.error`.
+    """
+
+    @pytest.mark.parametrize("caption", ["read this receipt", None])
+    def test_a_failed_fetch_earns_its_own_reply_and_no_task(
+        self, tmp_path, caption,
+    ):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _dispatch(config, _image_event(
+            caption=caption,
+            media=_media(error="the image could not be downloaded"),
+        ))
+
+        assert _dispositions(results) == ["media_failed"]
+        assert results[0].response_text == MEDIA_FAILED_REPLY
+        assert results[0].response_text != UNSUPPORTED_REPLY
+        assert results[0].response_logical_key == "media-failed:wamid.img"
+        assert _counts(config, "tasks") == [0]
+
+
+class TestTheCopyMustHaveBeenMadeForThisUser:
+    """The pre-check is allowed to be stale; this is what pays for that.
+
+    Its answer is carried on the record and compared against the authoritative
+    resolution inside the transaction. Without the comparison a binding change
+    in the window puts one user's photograph on another user's task.
+    """
+
+    def test_a_file_staged_for_another_user_is_never_attached(
+        self, tmp_path, caplog,
+    ):
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        with caplog.at_level("WARNING"):
+            results = _dispatch(config, _image_event(
+                caption="what is this?",
+                media=_media(for_user="bob",
+                             path="/Users/bob/inbox/whatsapp_ab12-cd34.jpg"),
+            ))
+
+        assert _dispositions(results) == ["media_failed"]
+        assert _counts(config, "tasks") == [0]
+        logged = _istota_log(caplog)
+        assert "media_misattached" in logged
+        # The stranded copy is named, because nothing downstream will ever
+        # mention it again and the bytes are in somebody's workspace.
+        assert "/Users/bob/inbox/whatsapp_ab12-cd34.jpg" in logged
+
+    def test_a_record_nothing_staged_is_refused_rather_than_attached(
+        self, tmp_path, caplog,
+    ):
+        """`attached_for_user` is `""` until the staging step fills it, so a
+        caller that skipped that step fails the same comparison — and a staged
+        name on a task would be a path the sweep deletes ten minutes later."""
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        with caplog.at_level("WARNING"):
+            results = _dispatch(config, _image_event(
+                caption="what is this?",
+                media=WhatsAppInboundMedia(
+                    staged_path="ab12cd34-0011223344556677.jpg",
+                    mime_type="image/jpeg", byte_count=2048,
+                    attached_for_user="", error=None,
+                ),
+            ))
+
+        assert _dispositions(results) == ["media_failed"]
+        assert _counts(config, "tasks") == [0]
+        assert "media_misattached" in _istota_log(caplog)
