@@ -7,7 +7,11 @@
  * story for a link that carries no HMAC. `ISTOTA_BAILEYS_SOCKET` says where,
  * `ISTOTA_BAILEYS_SESSION_DIR` says where the paired credential lives; both
  * come from the environment rather than argv so neither shows up in `ps`, and
- * the argv stays the operator's to spell.
+ * the argv stays the operator's to spell. Those two are required and the
+ * program exits 2 without either. `ISTOTA_BAILEYS_MEDIA_DIR` is a third and
+ * is *not* required: it is a fixed name beside the session directory, so
+ * `deriveMediaDir` computes it when nobody said, and the variable is an
+ * override. See that function for why the exception is only for this one.
  *
  * The wire format is `src/istota/transport/whatsapp/baileys_protocol.py`. This
  * is a reimplementation of it rather than a copy — the other end is Python, so
@@ -153,10 +157,73 @@ const MAX_INBOUND_QUEUE = 64;
 
 const SOCKET_PATH = process.env.ISTOTA_BAILEYS_SOCKET || '';
 const SESSION_DIR = process.env.ISTOTA_BAILEYS_SESSION_DIR || '';
-// Where a staged image is written, and required at startup beside the two
-// above. `media.default_media_dir` is the rule that picks it; the daemon
-// resolves it and hands it over, so this side never derives a path of its own.
-const MEDIA_DIR = process.env.ISTOTA_BAILEYS_MEDIA_DIR || '';
+
+// The fixed name `media.MEDIA_DIR_NAME` carries on the daemon's side.
+const MEDIA_DIR_NAME = 'whatsapp-media';
+
+/*
+ * Where a staged image goes when nobody said, derived from where the session
+ * lives.
+ *
+ * **The one variable of the three this side derives, and the exception is
+ * argued rather than assumed** (ISSUE-508). The socket and the session
+ * directory are genuinely the daemon's to choose — each has a config override
+ * and no sibling to compute from — so for those the rule stands: the daemon
+ * resolves it and hands it over. The media directory has neither. It is
+ * `media.default_media_dir`, which is `{db_path.parent}/whatsapp-media`, and
+ * the session directory's own default is `{db_path.parent}/whatsapp-baileys-session`,
+ * so the second names the first outright.
+ *
+ * Requiring it anyway cost a whole-surface outage. The two-minute update cron
+ * ships `docker/whatsapp-baileys/` and restarts this unit, but it is a shell
+ * script and cannot re-render `istota-whatsapp-baileys.service.j2` — so the
+ * new program met the old unit, exited 2 on every start, `Restart=always`
+ * brought it straight back, and the journal was empty because `log` writes
+ * inside the session directory and swallows its own failure. Messages sat on
+ * one checkmark. Text as well as images, for a directory none of them needed.
+ *
+ * Sibling, **never** child, even though the session directory is the one path
+ * this program holds outright: it carries a full-account credential,
+ * `harden_session_files` narrows everything in it to 0600, and
+ * `dir_holds_a_session` counts any file it does not recognise — so a staged
+ * photo in there would make a media-only directory read as a paired session
+ * and break `restore-session`'s newest-good rule.
+ *
+ * **The sibling rule is enforced here rather than asserted.** `path.dirname`
+ * alone does not give it, which two reviewers established by running this:
+ * `/a/b/.` has dirname `/a/b` and *is* `/a/b`, so the join lands inside the
+ * session directory; `/a/b/..` does the same one level up; and a session
+ * directory already named `whatsapp-media` derives to itself. So the path is
+ * resolved first and the result is refused when it is the session directory
+ * or underneath it.
+ *
+ * A relative value is refused outright. `path.dirname('sess')` is `'.'`, so
+ * the join would stage into the process cwd — which under the Ansible unit is
+ * `WorkingDirectory={{ istota_repo_dir }}/docker/whatsapp-baileys`, the
+ * checkout the update cron `git reset --hard`s. Staging somebody's
+ * photographs there is worse than not staging at all. The filesystem root is
+ * refused for the same reason it has no sibling: everything is inside it.
+ *
+ * Empty is the answer to all of those, and `main()` turns it into a refusal
+ * with a reason. See the note there for why that is not the refusal ISSUE-508
+ * removed.
+ */
+function deriveMediaDir(sessionDir) {
+  if (typeof sessionDir !== 'string' || !sessionDir) return '';
+  if (!path.isAbsolute(sessionDir)) return '';
+  const session = path.resolve(sessionDir);
+  const parent = path.dirname(session);
+  if (parent === session) return '';
+  const derived = path.join(parent, MEDIA_DIR_NAME);
+  if (derived === session || derived.startsWith(session + path.sep)) return '';
+  return derived;
+}
+
+// Where a staged image is written. `media.default_media_dir` is the rule that
+// picks it, and the daemon still hands it over on the spawned shape and in
+// both deployment literals — this stays an override, so an operator who wants
+// the directory elsewhere keeps that, and the daemon's spawn env is unchanged.
+const MEDIA_DIR = process.env.ISTOTA_BAILEYS_MEDIA_DIR || deriveMediaDir(SESSION_DIR);
 
 // --- diagnostics -----------------------------------------------------------
 
@@ -1675,22 +1742,27 @@ function main() {
     // No log destination either — the session directory is where the log
     // lives. Exiting non-zero is the only channel left, and the daemon's
     // supervisor reports it as a spawn that did not stay up.
+    //
     process.exit(2);
   }
   if (!MEDIA_DIR) {
-    // Refusing to run rather than refusing each image, which is the same
-    // answer the two above get and is chosen for the same reason: a sidecar
-    // that starts without somewhere to stage would type every photo `image`
-    // and send a frame naming no file, so a deployment fault would arrive as
-    // a per-message one and the reason would be nowhere.
+    // **Not the refusal ISSUE-508 removed, and the difference is what it is
+    // keyed on.** That one fired whenever `ISTOTA_BAILEYS_MEDIA_DIR` was
+    // absent, which is every unit rendered before the variable existed — so
+    // an update cron that ships this program and cannot re-render the unit
+    // took the whole surface down. This fires only when the variable is
+    // absent *and* `SESSION_DIR` is one `deriveMediaDir` refuses to work
+    // from: relative, the filesystem root, or the media directory itself.
+    // Both shipped shapes pass an absolute canonical literal and every stale
+    // unit passes the same one it always did, so no deployment reaches this;
+    // it takes a hand-edited value, and naming the variable is the fix.
     //
-    // This one says so first, where the pair above cannot. It is still not a
-    // guarantee — `log` writes inside the session directory and swallows a
-    // failure, so on a first install where nothing has created that directory
-    // yet the sentence goes nowhere and the exit code is all there is. On an
-    // upgraded deployment, which is the shape that meets this, the session
-    // directory holds a paired credential and the line lands.
-    log('error', 'no media staging directory is configured; refusing to run', {
+    // Refusing rather than staging somewhere wrong is the right direction
+    // here: the alternatives `deriveMediaDir` rejected are the process cwd
+    // (the checkout the cron resets) and a directory inside the session
+    // directory, where `dir_holds_a_session` would read staged photographs as
+    // a paired session and break `restore-session`'s newest-good rule.
+    log('error', 'the session directory yields no media directory beside it', {
       variable: 'ISTOTA_BAILEYS_MEDIA_DIR',
     });
     process.exit(2);
@@ -1775,6 +1847,7 @@ module.exports = {
   MEDIA_EXTENSIONS,
   chatAddress,
   collectMediaChunk,
+  deriveMediaDir,
   encode,
   hasReadableContent,
   mediaExtension,

@@ -398,22 +398,30 @@ class TestTheAutoUpdateCron:
         assert "ERROR" in line and "full play" in line
 
 
-class TestTheCronRefusesToRestartIntoAStaleUnit:
+class TestTheCronReportsAStaleUnit:
     """The same shape as the interpreter guard, for the unit's environment.
 
     **This script delivers the program and only a full play delivers the
     unit**, which is the asymmetry that makes it a hazard rather than a
-    nicety. The sidecar requires three environment variables and exits 2
-    without any one of them, so a commit adding a fourth reaches a
-    cron-updated host as a new `index.js` against the unit file the last full
-    play rendered. `Restart=always` then loops it, and the refusal has nowhere
-    to go: `StandardOutput=null`, and the program's only log destination is a
+    nicety. The sidecar exits 2 without the socket or the session directory,
+    so a commit that makes a further variable mandatory reaches a cron-updated
+    host as a new `index.js` against the unit file the last full play
+    rendered. `Restart=always` then loops it, and the refusal has nowhere to
+    go: `StandardOutput=null`, and the program's only log destination is a
     file inside the 0700 session directory. What an operator sees is an empty
     `journalctl` and `doctor` reporting no sidecar connected, which names the
     wrong cause.
 
-    `ISTOTA_BAILEYS_MEDIA_DIR` is the variable that has been added, so it is
-    the one the guard names.
+    `ISTOTA_BAILEYS_MEDIA_DIR` is the variable it greps for, and since
+    ISSUE-508 that is a proxy for the unit's *age* rather than a variable the
+    program needs — the sidecar derives that path from the session directory
+    beside it. **So this reports and does not refuse**, which is the class's
+    own correction: it refused briefly, and that refusal sat as an `elif`
+    ahead of both the restart and the start arms, so on a stale-unit host any
+    lockfile-touching commit hit the install arm that stops the unit for
+    `npm ci` and was then declined a start. WhatsApp down until a full play,
+    on exactly the class of host ISSUE-508 exists for. A guard against a loop
+    that can no longer happen must not be able to cause an outage that can.
     """
 
     @pytest.fixture(scope="module")
@@ -432,30 +440,55 @@ class TestTheCronRefusesToRestartIntoAStaleUnit:
     def test_the_variable_it_greps_for_is_one_the_unit_actually_sets(
         self, cron, unit,
     ):
-        """A guard naming a variable the unit never sets refuses for ever.
+        """A check naming a variable the unit never sets warns for ever.
 
-        This is the arm that inverts the failure: the check is a `grep` over a
-        file this repository also renders, so the two have to agree or every
-        cron run on a correctly-deployed host skips the restart and says the
-        unit is stale.
+        The check is a `grep` over a file this repository also renders, so the
+        two have to agree or every cron run on a correctly-deployed host calls
+        its own unit stale.
         """
         assert "ISTOTA_BAILEYS_MEDIA_DIR" in cron
         assert "Environment=ISTOTA_BAILEYS_MEDIA_DIR=" in unit
 
-    def test_it_guards_both_arms_that_touch_the_unit(self, cron):
-        """`restart` and `start` alike.
+    def test_it_gates_neither_arm_that_touches_the_unit(self, cron):
+        """ISSUE-508. The inversion of what this class used to assert.
 
-        A stale unit refuses the program whichever verb is used, so guarding
-        only the restart arm would leave the ordinary no-change tick starting
-        it into the same loop every two minutes.
+        A stale unit is now a thing to report, not a reason to leave the
+        sidecar stopped: the derived path is the one the old unit set and is
+        inside the `ReadWritePaths` the old unit already granted, so the
+        restart it used to decline is safe. The install arm above stops the
+        unit for `npm ci` and depends on a later arm bringing it back, so
+        anything sitting between the two is a down-surface path.
+
+        Asserted structurally rather than by reading the message: the check
+        must close its own `fi` before the dispatch chain begins, and
+        `BAILEYS_UNIT_STALE` — the variable that carried the refusal into the
+        `elif` — must be gone rather than merely unused.
         """
+        assert "BAILEYS_UNIT_STALE" not in cron
+
+        check = cron.index('grep -q "ISTOTA_BAILEYS_MEDIA_DIR" "$BAILEYS_UNIT"')
         start = cron.index('systemctl start "${NAMESPACE}-whatsapp-baileys"')
         restart = cron.index('systemctl restart "${NAMESPACE}-whatsapp-baileys"')
-        preceding = cron[: min(start, restart)]
-        guard = preceding.rindex("BAILEYS_UNIT_STALE")
-        assert "\nfi\n" not in preceding[guard:], (
-            "the stale-unit check does not guard the arms that start the unit"
+        between = cron[check: min(start, restart)]
+
+        assert "\nfi\n" in between, (
+            "the stale-unit check still gates an arm that starts the unit"
         )
+
+    def test_a_stale_unit_still_reaches_a_verb_that_starts_the_sidecar(
+        self, cron,
+    ):
+        """The positive half, so the test above cannot pass by deleting both.
+
+        Whatever the check says, the dispatch chain below it has to end in a
+        `systemctl start` on the no-change path — that is what brings the unit
+        back after the install arm stopped it.
+        """
+        check = cron.index('grep -q "ISTOTA_BAILEYS_MEDIA_DIR" "$BAILEYS_UNIT"')
+        after = cron[check:]
+
+        assert 'systemctl start "${NAMESPACE}-whatsapp-baileys"' in after
+        assert 'systemctl restart "${NAMESPACE}-whatsapp-baileys"' in after
 
     def test_it_reads_the_unit_on_disk_rather_than_systemd_s_loaded_copy(
         self, cron,
@@ -485,11 +518,16 @@ class TestTheCronRefusesToRestartIntoAStaleUnit:
             for ln in cron.splitlines()
             if "predates ISTOTA_BAILEYS_MEDIA_DIR" in ln
         )
-        assert "ERROR" in line and "full play" in line
-        assert "exit 2" in line, (
-            "the message does not say what would happen, which is the thing "
-            "an operator reading an empty journal needs"
-        )
+        assert "full play" in line and "stale" in line
+        # It used to say `ERROR` and name `exit 2`, because that was the
+        # consequence an operator reading an empty journal needed named. Since
+        # ISSUE-508 the sidecar derives that path when the variable is absent,
+        # so a stale unit produces neither — and a message still promising a
+        # loop would send an operator looking for a failure that is not
+        # happening, while `ERROR` would say a tick had gone wrong when the
+        # sidecar was restarted normally.
+        assert "exit 2" not in line
+        assert "WARNING" in line and "ERROR" not in line
 
     def test_a_unit_file_that_is_absent_is_not_treated_as_stale(self, cron):
         """A host with the unit not yet installed at all is a different case.
