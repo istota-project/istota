@@ -938,7 +938,11 @@ services:
       # container's download and the daemon's copy into the sender's workspace
       # — and it has no override at all, by decision. All three are fixed
       # literals rather than `${...}` interpolations because none of them is an
-      # operator's to choose, and the program exits 2 without any one of them.
+      # operator's to choose. The program exits 2 without either of the first
+      # two; the media directory is an override it derives from the session
+      # directory when absent (ISSUE-508), and the literal is pinned against
+      # that derivation rather than being what the program cannot start
+      # without.
       ISTOTA_BAILEYS_SOCKET: /data/db/whatsapp-baileys.sock
       ISTOTA_BAILEYS_SESSION_DIR: /data/db/whatsapp-baileys-session
       ISTOTA_BAILEYS_MEDIA_DIR: /data/db/whatsapp-media

@@ -45,7 +45,9 @@ import os
 import re
 import shutil
 import subprocess
-from pathlib import Path
+import time
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -245,7 +247,14 @@ class TestTheSidecarSpeaksTheSameProtocol:
 
     def test_it_reads_the_media_directory_the_bridge_sets(self):
         """Where a staged image is written, handed over the same way the
-        other two are. A rename on either side is a sidecar that exits 2."""
+        other two are.
+
+        A rename on either side used to be a sidecar that exits 2. Since
+        ISSUE-508 it is a sidecar that silently derives its own path and
+        stages where the daemon never reads — quieter, and still a whole
+        surface's worth of photographs going nowhere, since the daemon joins
+        the staged name onto its own `_media_dir`.
+        """
         from istota.transport.whatsapp.baileys_bridge import ENV_MEDIA_DIR
 
         assert f"process.env.{ENV_MEDIA_DIR}" in PROGRAM.read_text()
@@ -1122,6 +1131,117 @@ class TestTheSidecarsInboundMedia:
 
         assert threw is True
 
+    # --- where an unset media directory comes from ------------------------
+
+    @pytest.mark.parametrize(
+        "session_dir,expected",
+        [
+            ("/srv/app/istota/data/whatsapp-baileys-session",
+             "/srv/app/istota/data/whatsapp-media"),
+            ("/data/db/whatsapp-baileys-session", "/data/db/whatsapp-media"),
+            # A trailing separator is `dirname`'s classic trap in the
+            # shell utility, where it answers the grandparent. Node's
+            # `path.dirname` strips it first, so this is a pin on that
+            # rather than on anything the program does about it.
+            ("/data/db/whatsapp-baileys-session/", "/data/db/whatsapp-media"),
+        ],
+    )
+    def test_the_derivation_is_the_sibling_of_the_session_directory(
+        self, session_dir, expected,
+    ):
+        """ISSUE-508. `media.default_media_dir` and
+        `baileys_bridge.default_session_dir` are both `db_path.parent`
+        joined with a fixed name, so one is derivable from the other and the
+        variable naming it is an override rather than a requirement."""
+        got = self._call(f"m.deriveMediaDir({json.dumps(session_dir)})")
+
+        assert got == expected
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "", None, 0, ["/data/db/s"],
+            # Relative, in four spellings. `path.dirname('sess')` is `'.'`, so
+            # an unguarded derivation stages into the process cwd — which for
+            # the Ansible unit is `WorkingDirectory={{ istota_repo_dir }}/
+            # docker/whatsapp-baileys`, the checkout the update cron
+            # `git reset --hard`s. Somebody's photographs would be deleted by
+            # the next tick.
+            "sess", ".", "..", "  ",
+            # The filesystem root has no sibling: everything is inside it, so
+            # `/whatsapp-media` would be a child of the session directory.
+            "/",
+            # A session directory already named `whatsapp-media` derives to
+            # itself, which is the same violation with MEDIA_DIR == SESSION_DIR.
+            "/data/db/whatsapp-media",
+        ],
+    )
+    def test_nothing_is_derived_from_an_unusable_session_directory(self, value):
+        """Empty rather than a guess, and `main()` turns it into a refusal.
+
+        Every case here is one where a derived path would be wrong rather
+        than merely unusual, so the answer has to be no answer. Both shipped
+        shapes pass an absolute canonical literal, so none of these is
+        reachable without a hand-edited unit.
+        """
+        got = self._call(f"m.deriveMediaDir({json.dumps(value)})")
+
+        assert got == ""
+
+    @pytest.mark.parametrize(
+        "session_dir",
+        ["/data/db/sess", "/data/db/.", "/data/db/sess/..", "/data/db/sess/"],
+    )
+    def test_the_derived_path_is_never_inside_the_session_directory(
+        self, session_dir,
+    ):
+        """Sibling, never child — asserted against what the program returned.
+
+        `path.dirname` alone does not give this and both reviewers proved it
+        by running the program: `/data/db/.` has dirname `/data/db` and *is*
+        `/data/db`, so the naive join landed inside the session directory.
+        That matters because the session directory carries a full-account
+        credential — `harden_session_files` narrows everything in it to 0600
+        and `dir_holds_a_session` counts any file it does not recognise, so
+        staged photographs there would make a media-only directory read as a
+        paired session and break `restore-session`'s newest-good rule.
+
+        The comparison is against `path.resolve(sessionDir)` rather than the
+        raw string, since that is the directory the bytes actually land in.
+        """
+        got, resolved = self._call(
+            f"[m.deriveMediaDir({json.dumps(session_dir)}),"
+            f" require('path').resolve({json.dumps(session_dir)})]"
+        )
+
+        assert got, "a canonical absolute session directory must derive"
+        assert got != resolved
+        assert not got.startswith(resolved.rstrip("/") + "/")
+        # And it really is the sibling, not merely somewhere else.
+        assert got == f"{PurePosixPath(resolved).parent}/whatsapp-media"
+
+    def test_the_derivation_agrees_with_what_the_daemon_would_have_sent(
+        self, tmp_path,
+    ):
+        """The pin the deployment literals stop being. They asserted that
+        four configuration sites agreed or the surface was down; now they
+        pin the derivation against the product's own rule, which is worth
+        more. Asked of `media.default_media_dir` and
+        `baileys_bridge.default_session_dir` together, because the claim is
+        that the two are siblings rather than that either is a given path.
+        """
+        from istota.transport.whatsapp.baileys_bridge import default_session_dir
+
+        config = SimpleNamespace(
+            db_path=str(tmp_path / "db" / "istota.db"),
+            whatsapp=SimpleNamespace(baileys=SimpleNamespace(session_dir="")),
+        )
+        session_dir = default_session_dir(config)
+
+        got = self._call(f"m.deriveMediaDir({json.dumps(str(session_dir))})")
+
+        assert got == str(media.default_media_dir(config))
+
 
 class TestTheSidecarsControlFlow:
     """Properties the static pin reaches only as source shape, and says so.
@@ -1203,49 +1323,92 @@ class TestTheSidecarsControlFlow:
         body = _js_body("async downloadMedia(message)")
         assert (body.index("overCap") < body.index("writeStaged("))
 
-    def test_the_media_directory_is_required_at_startup(self):
-        """Beside the socket and the session directory. A sidecar with
-        nowhere to stage would type an image `image` and send a frame naming
-        no file, which the daemon reads as media it cannot place — a
-        deployment fault arriving as a per-message one.
+    def test_an_unset_media_directory_is_derived_from_the_session_directory(
+        self, tmp_path,
+    ):
+        """ISSUE-508. The sidecar must start against a unit that predates
+        `ISTOTA_BAILEYS_MEDIA_DIR` and stage into the sibling of the session
+        directory, which is exactly where the variable would have pointed it.
 
-        **Driven, because the obvious source assertion cannot fail.**
-        `process.exit(2)` was already in `main()` before this change, for the
-        socket and session-directory refusal, so `"process.exit(2)" in body`
-        is pre-satisfied and stays green for a `main()` that reads the
-        variable and carries on — the exact defect this is about.
+        This was `test_the_media_directory_is_required_at_startup`, which
+        asserted the refusal. The refusal was the outage: the two-minute
+        update cron ships `docker/whatsapp-baileys/` but cannot re-render the
+        unit, so the new program met the old unit, exited 2 on every start,
+        and `Restart=always` turned that into a loop with an empty journal —
+        the log destination is inside the session directory and `log` swallows
+        its own failure. A guard delivered by a deploy cannot protect the
+        deploy that delivers it.
+
+        **Driven rather than read**, for the reason the refusal test was:
+        `main()` already contained `process.exit(2)` for the socket and the
+        session directory, so no source assertion about that string can tell a
+        program that derives from one that refuses.
+
+        The assertion is the directory, not the exit status. With no
+        `node_modules` in the checkout `loadBaileys` rejects `MODULE_NOT_FOUND`
+        and the program exits 3; with one installed it stays up retrying a
+        socket nothing is listening on. `mkdirSync` runs before either, so the
+        directory is the one answer both environments give — and the exit
+        status is asserted only as *not* 2, which is the refusal this removes.
         """
         node = shutil.which("node")
         if node is None:
             pytest.skip("node is not installed")
+
+        # A stand-in for `{istota_home}/data`, which is what `dirname` of the
+        # unit's own session literal resolves to.
+        state = tmp_path / "data"
+        state.mkdir()
         env = dict(os.environ)
-        env["ISTOTA_BAILEYS_SOCKET"] = "/nonexistent/sock"
-        env["ISTOTA_BAILEYS_SESSION_DIR"] = "/nonexistent/session"
+        env["ISTOTA_BAILEYS_SOCKET"] = str(state / "whatsapp-baileys.sock")
+        env["ISTOTA_BAILEYS_SESSION_DIR"] = str(state / "whatsapp-baileys-session")
         env.pop("ISTOTA_BAILEYS_MEDIA_DIR", None)
+        expected = state / media.MEDIA_DIR_NAME
 
-        # Short, because the expected behaviour is an immediate exit. A
-        # program that does *not* refuse stays up retrying its socket for
-        # ever, so the bound is what turns that into a red rather than a
-        # hang — and a long one spends itself on every run of the failing
-        # case for no extra confidence.
+        proc = subprocess.Popen(
+            [node, str(PROGRAM)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
         try:
-            result = subprocess.run(
-                [node, str(PROGRAM)], capture_output=True, text=True,
-                timeout=10, env=env,
-            )
-        except subprocess.TimeoutExpired:
-            pytest.fail(
-                "the sidecar started without ISTOTA_BAILEYS_MEDIA_DIR; it "
-                "would type every photo `image` and name no file"
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if expected.is_dir() or proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+
+            # The discriminating assertion, and the only one that separates
+            # the old refusal from the new derivation: the refusal exited
+            # before `mkdirSync` and left nothing here.
+            assert expected.is_dir(), (
+                f"nothing staged at {expected}; the sidecar refused to run "
+                "without ISTOTA_BAILEYS_MEDIA_DIR, and an old unit then takes "
+                "the whole WhatsApp surface down"
             )
 
-        # The socket and session-directory variables are both set, so a 2
-        # here is about the third one. With all three absent every version of
-        # this program exits 2 and the case would say nothing at all.
-        assert result.returncode == 2
-        # Rule 1 holds even on the refusal path: the reason goes to the log
-        # inside the session directory, never to stdio.
-        assert result.stdout == "" and result.stderr == ""
+            # Read *after* the directory check rather than instead of it. The
+            # loop breaks on the first disjunct, so `poll()` is almost always
+            # still `None` here and `None != 2` would pass on its own — a
+            # regression that made the directory and then exit-looped would go
+            # green. Settling first is what gives the status a chance to be
+            # the refusal.
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            assert proc.returncode != 2, (
+                "the sidecar made the directory and then refused anyway"
+            )
+        finally:
+            proc.kill()
+            # `communicate` rather than `wait`: both pipes are open, and a
+            # child that filled one would block on the write instead of
+            # exiting, which surfaces as a timeout blaming the derivation.
+            out, err = proc.communicate(timeout=15)
+
+        # Rule 1, driven. The source scan in `test_it_writes_to_no_standard
+        # _stream` cannot see a warning node itself emits, and this is the
+        # only case in the file that runs the whole program.
+        assert out == "" and err == ""
 
     def test_the_socket_is_given_a_way_to_answer_a_retry(self):
         """The cache is inert unless Baileys is handed it. `getMessage`

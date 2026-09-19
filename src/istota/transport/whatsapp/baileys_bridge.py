@@ -256,12 +256,26 @@ ENV_SESSION_DIR = "ISTOTA_BAILEYS_SESSION_DIR"
 #: **This reaches the spawned shape alone**, which is `istota whatsapp pair`
 #: and a deployment that sets `sidecar_command`. On both shipped shapes the
 #: sidecar is a unit or a compose service of its own and the daemon spawns
-#: nothing, so what it reads is the literal in that unit or service — and the
-#: sidecar exits 2 without it. Both literals are set, and
-#: `tests/test_whatsapp_deployment.py` compares each against
-#: `media.default_media_dir` for its shape: a drift there is a sidecar writing
-#: where the daemon never reads, and an absence is the whole WhatsApp surface
-#: down rather than images down.
+#: nothing, so what it reads is the literal in that unit or service. Both
+#: literals are set, and `tests/test_whatsapp_deployment.py` compares each
+#: against `media.default_media_dir` for its shape: a drift there is a sidecar
+#: writing where the daemon never reads.
+#:
+#: **An override, not a requirement** (ISSUE-508). Absent, the sidecar derives
+#: the same path from `ISTOTA_BAILEYS_SESSION_DIR` beside it — the two are
+#: fixed names under `db_path.parent`, so one names the other. It was required,
+#: and that took the whole WhatsApp surface down on the deploy that introduced
+#: it: the update cron ships `docker/whatsapp-baileys/` and cannot re-render
+#: the unit, so the new program met a unit that predated the variable and
+#: exit-looped under `Restart=always` with an empty journal. A variable whose
+#: value is already determined by another in the same process must not be
+#: something the program refuses to start without.
+#:
+#: The daemon still sends it on every spawn, which is what keeps a configured
+#: `session_dir` from mattering here: that arm exists on `default_session_dir`
+#: and not on `media.default_media_dir`, so the two are siblings only when it
+#: is unset — and every shape that could set it names the media directory
+#: explicitly, so the derivation never has to answer for that case.
 ENV_MEDIA_DIR = "ISTOTA_BAILEYS_MEDIA_DIR"
 
 
@@ -2110,9 +2124,10 @@ class BaileysBridge:
         before the listener existed would fail its first connect and burn a
         respawn, one that started before the session directory was private
         would pair into a world-readable one, and one that started before the
-        staging directory existed would exit 2 — that path is a requirement
-        on its side rather than something it creates, so that a directory the
-        daemon cannot reach is a loud failure instead of a silent one.
+        staging directory existed would make it itself, at whatever mode its
+        own `mkdirSync` chose — this call is what makes the daemon
+        authoritative for the mode rather than whichever process got there
+        first.
         """
         self._stopping = False
         ensure_session_dir(self._session_dir)

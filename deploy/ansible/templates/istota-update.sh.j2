@@ -323,24 +323,43 @@ systemctl restart "${NAMESPACE}-webhooks"
 BAILEYS_NODE_BIN="{{ istota_whatsapp_baileys_node_bin }}"
 # The same guard shape for the unit's own environment, and it exists because
 # this script delivers the *program* while only a full play delivers the
-# *unit*. The sidecar requires three variables and exits 2 without any one of
-# them, so a commit that adds a fourth arrives here as a new index.js against
-# an old unit file -- and the refusal has nowhere to go: StandardOutput=null,
-# and the program's only log destination is a file inside the 0700 session
-# directory. The result is a restart loop with an empty journal, whose only
-# surface signal is doctor reporting no sidecar connected, which names the
-# wrong cause. ISTOTA_BAILEYS_MEDIA_DIR is the one that has been added; the
-# check is on the installed unit rather than on `systemctl show`, because the
-# latter reports what systemd last loaded rather than what is on disk.
+# *unit*. The sidecar exits 2 without the socket or the session directory, so
+# a commit that makes a further variable mandatory arrives here as a new
+# index.js against an old unit file -- and the refusal has nowhere to go:
+# StandardOutput=null, and the program's only log destination is a file inside
+# the 0700 session directory. The result is a restart loop with an empty
+# journal, whose only surface signal is doctor reporting no sidecar connected,
+# which names the wrong cause. The check is on the installed unit rather than
+# on `systemctl show`, because the latter reports what systemd last loaded
+# rather than what is on disk.
+#
+# ISTOTA_BAILEYS_MEDIA_DIR is the variable it watches for, and since ISSUE-508
+# that is a *proxy for the unit's age* rather than a variable the program
+# needs: the sidecar derives that path from the session directory when it is
+# unset, and the derived path is the one the old unit set and falls inside the
+# ReadWritePaths the old unit already granted. So a stale unit no longer
+# produces the loop above, and this reports rather than refuses.
+#
+# It refused, briefly, and that was wrong in two ways worth writing down. It
+# could never fire for the case it was kept for -- a future mandatory
+# ISTOTA_BAILEYS_FOO ships against units that *do* contain MEDIA_DIR, so the
+# grep passes and the guard is silent; detecting that needs a grep for FOO
+# that the commit adding FOO has to write anyway. And it sat as an `elif`
+# ahead of both arms below, so on a stale-unit host any lockfile-touching
+# commit hit the install arm above, which stops the unit before `npm ci`, and
+# then declined to start it again -- WhatsApp down until a full play, on
+# exactly the class of host ISSUE-508 exists for. A guard against a loop that
+# can no longer happen must not be able to cause an outage that can.
+#
+# The detection stays because the signal is worth having: a stale unit is
+# still stale, and an operator reading this log should be told to run a full
+# play. It just no longer gates the restart.
 BAILEYS_UNIT="/etc/systemd/system/${NAMESPACE}-whatsapp-baileys.service"
-BAILEYS_UNIT_STALE=""
 if [ -f "$BAILEYS_UNIT" ] && ! grep -q "ISTOTA_BAILEYS_MEDIA_DIR" "$BAILEYS_UNIT"; then
-    BAILEYS_UNIT_STALE="yes"
+    log "WARNING: ${BAILEYS_UNIT} predates ISTOTA_BAILEYS_MEDIA_DIR and is stale; the sidecar derives that path so this is not fatal (run a full play to re-render it)"
 fi
 if [ ! -x "$BAILEYS_NODE_BIN" ]; then
     log "ERROR: ${BAILEYS_NODE_BIN} is missing or not executable; not starting ${NAMESPACE}-whatsapp-baileys (run a full play)"
-elif [ -n "$BAILEYS_UNIT_STALE" ]; then
-    log "ERROR: ${BAILEYS_UNIT} predates ISTOTA_BAILEYS_MEDIA_DIR; not restarting ${NAMESPACE}-whatsapp-baileys, which would exit 2 in a loop (run a full play)"
 elif [ -n "$BAILEYS_CHANGED" ]; then
     log "Restarting ${NAMESPACE}-whatsapp-baileys"
     systemctl restart "${NAMESPACE}-whatsapp-baileys"
