@@ -19,13 +19,13 @@ Reminders are one-shot scheduled jobs in CRON.md. There is no separate reminder 
    name = "reminder-{unix_timestamp}"
    cron = "{minute} {hour} {day} {month} *"
    prompt = "Reply with ONLY this text, nothing else:\n\n@{user_id} Reminder: {message}"
-   target = "talk"
-   room = "{current_conversation_token}"
+   target = "{room_target}"
+   room = "{room_token}"
    once = true
    ```
    - `name`: Use `reminder-` prefix + unix timestamp for uniqueness
    - `prompt`: MUST use "Reply with ONLY this text, nothing else:" followed by the message starting with `@{user_id}`. The `@` mention notifies the user on the chat surface so they actually get alerted. Without the `@` mention, the reminder fires silently. Do NOT use phrasing like "Send this exact message" — it causes the bot to output reasoning before the message
-   - `room`: Use the conversation token from the current task context
+   - `target` and `room`: **copy both from the prompt header's `Room:` line**, which gives the descriptor for the room this task is in. A room is one conversation bound to several surfaces, so the descriptor is `talk:<token>` for a Talk room, `web:<token>` for a web chat room, and `web:<token>,talk:<talk_token>` for a web room that is also open in Talk. `istota-skill rooms list` answers the same for any other room. **`target = "talk"` with a web room's token posts nowhere** — the Talk API is handed a token naming no conversation, the job reports success and the reminder never arrives. Do not write `room:<token>` either; it delivers nothing from a scheduled job
    - `once = true`: The job is automatically removed from DB and CRON.md after it fires successfully. No manual cleanup needed
    - For email delivery, use `target = "email"` instead
 5. **Write the updated CRON.md.**

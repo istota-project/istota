@@ -29,6 +29,7 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | `calendar` | calendar, event, meeting, schedule, appointment | yes -- list (alias `agenda`), create, update, delete |
 | `todos` | todo, task, checklist, reminder, done, complete | doc-only |
 | `reminders` | remind, reminder, alert me, notify me | doc-only |
+| `rooms` | room, rooms, this room, which room, channel, post to | yes -- list (every room you are in, with the `target` descriptor that delivers into it) |
 | `schedules` | schedule, recurring, cron, daily, weekly | doc-only |
 | `tasks` | subtask, queue, background, later | yes -- status, recent, transcript (admin-only; read your own task state and finished transcripts, queue subtasks) |
 | `bookmarks` | bookmark, bookmarks, karakeep, saved, reading list, favourited, favorite | yes -- search, list, add, tags, etc. |

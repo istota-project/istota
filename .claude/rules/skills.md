@@ -185,6 +185,53 @@ Returns sorted list of skill names (the eager set).
 
 **Selection observability**: `select_skills` emits a single INFO log per task with each eager skill annotated by the rule that fired (`pass1_selection count=N: foo(always_include), bar(source_type=briefing), …`); the executor emits `skills: eager=N menu=M`. Use these to reconcile selection misses against runtime proxy rejections (see executor.md).
 
+### `_untrusted.py` — one fence, shared
+
+A skill CLI's output lands in a running agent's context, so a field carrying
+third-party text is an injection surface. Four modules had each written a
+`_frame_untrusted` of their own — `skills/nextcloud`, `skills/tasks`,
+`skills/email`, `session/tools/web_fetch` — and **they did not agree on the part
+that matters**: `skills/tasks` redacts a marker appearing *inside* the content,
+`skills/nextcloud` did not, so a Talk conversation renamed to
+`[END UNTRUSTED NEXTCLOUD CONTENT]` closed the fence from the inside and
+everything after it read as the daemon's own words. A fence the content can
+close is not a fence, which is why the redaction lives here rather than being a
+property one copy happens to have; the match is case-insensitive, because the
+markers are read by a *reader* and a lowercased copy of the closing line reads
+just as convincingly. `label` names the source in both markers and is stripped
+of everything but letters, digits and spaces, so it cannot forge one either.
+
+Converted: `skills/nextcloud` and `skills/rooms`, the two surfaces that list
+rooms. They keep **different labels** — `NEXTCLOUD CONTENT` and `ROOM NAME` —
+because the sources differ: one returns Talk's `displayName`, the other returns
+a registry name a user may have typed into web chat, which is not Nextcloud
+content at all. What they share is the fence, which is where the behaviour
+lives. `tests/test_storage_identity.py` is the reason that distinction had to be
+made rather than assumed: a skill body may not carry the literal "Nextcloud"
+unless it is `files` or `nextcloud`, so quoting the marker in `rooms/skill.md`
+failed the storage-neutrality guard — and the guard was right, for a reason the
+first cut had not noticed.
+
+**Two of the three remaining copies are still escapable, and the hole is closed
+on the room listings only.** `skills/tasks` redacts and is fine.
+`skills/email._frame_untrusted` and `session/tools/web_fetch._frame_untrusted_web`
+do not, and what they wrap — an email body, a fetched web page — is far more
+attacker-controlled than a room name. Converting them is a separate change with
+its own tests rather than a rename, since each frames a different kind of
+content inside its own surrounding notice. Recorded here because a reader of
+the paragraph above would otherwise conclude the class was finished.
+
+The redaction is deliberately **looser than the markers the module emits**: a
+byte-exact match is a spelling test, not a guard. The marker is read by a person
+or a model, so `[END UNTRUSTED ROOM NAME ]`, a double space inside it, or an
+ASCII `-` where the opener carries an em dash all read as the fence closing and
+none matches `re.escape`. `_redaction_patterns` joins the label's words with
+`\s+` and lets the opener carry any tail to its bracket, still anchored on the
+literal words so ordinary prose with a bracket in it is untouched. stdlib-only
+leaf, imports nothing, never raises — and `text` is typed `object` and coerced,
+because every caller hands it a `dict.get(...)` off somebody else's JSON and the
+f-strings this replaced coerced by accident.
+
 ### Skill Metadata (YAML frontmatter)
 All metadata lives in YAML frontmatter at the top of each `skill.md` file:
 - `name`, `triggers` (keyword list — `!skills` documentation only, not a selector), `description` (shown in the menu catalogue and `!skills`)
@@ -238,6 +285,7 @@ For the same ordering reason, the overlay is appended inside `load_skills` and t
 | `reminders` | — | remind, reminder, remind me, alert me, notify me, don't forget, ... | — | — |
 | `schedules` | — | schedule, recurring, cron, daily, weekly, ... | — | — |
 | `nextcloud` | — | share, sharing, nextcloud, permission, access | — | — |
+| `rooms` (cli) | — | room, rooms, this room, which room, channel, post to | — | — |
 | `browse` | — | browse, website, scrape, screenshot, url, http, ... | — | — |
 | `briefing` | — | — | — | briefing |
 | `briefings_config` | — | briefing config, briefing schedule, ... | — | — |

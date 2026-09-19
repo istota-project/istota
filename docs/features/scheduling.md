@@ -68,8 +68,8 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `prompt` | for prompt jobs | The prompt to send to Claude |
 | `prompt_file` | for prompt_file jobs | Path to prompt file (relative to workspace root) |
 | `command` | for command jobs | Shell command to execute |
-| `room` | no | Talk room token for output |
-| `target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor |
+| `room` | no | The room the job runs in, as its canonical token. A room made in web chat has a `web-…` token, not a Talk one — see "Delivering into a room" below |
+| `target` | no | `talk`, `email`, `ntfy`, `both`, `all`, or a `surface:channel` / comma-list descriptor. See "Delivering into a room" below |
 | `enabled` | no | `false` parks a job without deleting it (default `true`) |
 | `once` | no | Auto-delete after successful execution |
 | `silent_unless_action` | no | Suppress output unless response has `ACTION:` prefix |
@@ -81,6 +81,33 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `publish_shared_kv_trusted` | no | Mark the published value trusted, so consuming briefings splice it without the untrusted-content wrapper |
 
 The five flags — `enabled`, `once`, `silent_unless_action`, `skip_log_channel` and `publish_shared_kv_trusted` — take a bare TOML boolean, `true` or `false`. A quoted `"false"` is a string and a bare `1` is an integer; either one logs a warning and the field takes its default rather than being read for truthiness. `enabled = "false"` used to leave the job running, and `once = "false"` used to delete it after one run.
+
+## Delivering into a room
+
+A room is one conversation bound to several surfaces, not a Talk conversation. A room made in web chat has a `web-…` token and may never have been opened in Talk at all, so `target = "talk"` with that token posts nowhere: the Talk API is handed a token naming no conversation, the job records success, and nobody sees anything. Before ISSUE-509 nothing said so, and the room a web-chat user was sitting in appeared in no listing a task could reach — so a task asked to schedule something "in this room" created a Talk conversation of the same name instead, bound to no room and watched by nobody.
+
+The descriptor comes from the room rather than being written by hand. `istota-skill rooms list` names every room a user is in, and the model's task prompt already names the one it is in; both hand back a ready-made `target`:
+
+| The room | `target` |
+|---|---|
+| Made in Talk | `talk:<token>` |
+| Made in web chat | `web:<token>` |
+| Web chat, also open in Talk | `web:<token>,talk:<talk_token>` |
+
+The last one is two legs because the web leg writes the room's own transcript and pushes nothing to Talk, so naming only the web half leaves the room's Talk members with nothing.
+
+Set `room` to the same canonical token. `target` decides where the result goes; `room` decides which conversation the job runs in, and it is what makes the result render as a reply in the room rather than as a standalone system note.
+
+```toml
+[[jobs]]
+name = "weekly-digest"
+cron = "0 9 * * 1"
+prompt = "Summarise this week's activity"
+target = "web:web-alice-3f21c4d90ab7"
+room = "web-alice-3f21c4d90ab7"
+```
+
+Two spellings that do not do what they look like. Bare `web` is the user's default `general` room, not the job's `room` field. And `room:<token>` — which reads as "this room, every surface" and is a real descriptor elsewhere — delivers nothing from a scheduled job: the expansion it goes through assumes the task originated on one of the room's own surfaces, and a scheduled task originates on none, so the plan comes out empty and the only trace is one line in the daemon log.
 
 ## Choosing a brain per job
 

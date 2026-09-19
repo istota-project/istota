@@ -399,6 +399,21 @@ class Case:
     #: `base_nextcloud` is the empty-namespace half of the pair, so the diff
     #: between the two goldens is exactly the two lines this buys.
     shared_credentials: bool = False
+    #: Registers `conversation_token` in the room registry, which is what the
+    #: header's `Room:` line is gated on (ISSUE-509). Off everywhere else, and
+    #: that absence is itself the control: `source_web` carries a `web-room`
+    #: token with no registry row, so the two goldens together show the line
+    #: appearing only for a token that names a room. A `(name, origin)` pair
+    #: rather than a bool because `origin` selects the descriptor shape — and
+    #: the *name* is here to show it is **not** rendered: it is third-party text
+    #: on a shared room, so the header carries the descriptor and leaves the
+    #: name to `istota-skill rooms list`, which fences it.
+    room: tuple[str, str] | None = None
+    #: A `talk` binding on that room, i.e. a *promoted* web room. Its whole
+    #: point is the descriptor: `web:<token>` alone writes the canonical row
+    #: and pushes nothing to Talk, so a promoted room's target carries both
+    #: legs and the golden is where that is visible.
+    room_talk_ref: str | None = None
 
 
 CASES: tuple[Case, ...] = (
@@ -430,6 +445,21 @@ CASES: tuple[Case, ...] = (
     # and drags `untrusted_input` in, leaving `developer` and `nextcloud` in
     # the menu.
     Case("source_web", source_type="web", conversation_token="web-room"),
+    # The ISSUE-509 header line, in its two interesting shapes. `source_web` is
+    # the control: same surface, same token shape, no registry row, no line.
+    Case(
+        "room_web",
+        source_type="web",
+        conversation_token="web-room",
+        room=("#weekly", "web"),
+    ),
+    Case(
+        "room_promoted",
+        source_type="web",
+        conversation_token="web-room",
+        room=("#general", "web"),
+        room_talk_ref="k3mq7wza",
+    ),
     # The other half of the confirmation gate. An untrusted sender parks the
     # task; what reaches assembly on the re-execution is the confirmation
     # context. `source_email` is the trusted counterpart.
@@ -701,6 +731,29 @@ def _seed_shared_credentials(config: Config, case: Case, monkeypatch) -> None:
         conn.commit()
 
 
+def _seed_room(config: Config, case: Case) -> None:
+    """One registry room for `conversation_token`, and optionally its `talk`
+    binding.
+
+    Through `db` rather than raw SQL, unlike the seeds above: `register_room`
+    also writes the `room_members` row, and the header's lookup resolves a
+    promoted room through its binding — so a hand-written `rooms` INSERT would
+    seed a shape the product never produces.
+    """
+    if not case.room or not case.conversation_token:
+        return
+    name, origin = case.room
+    with db.get_db(config.db_path) as conn:
+        db.register_room(
+            conn, case.conversation_token, USER, origin=origin, name=name,
+        )
+        if case.room_talk_ref:
+            db.add_room_binding(
+                conn, case.conversation_token, "talk", case.room_talk_ref,
+            )
+        conn.commit()
+
+
 def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     """Run one case to the normalized, two-part dry-run rendering.
 
@@ -725,6 +778,7 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_overlay(config, case)
     _seed_history(config, case)
     _seed_shared_credentials(config, case, monkeypatch)
+    _seed_room(config, case)
     task = _build_task(case)
 
     success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
