@@ -587,6 +587,15 @@ def resolve_for_precheck(
     """
     arm = _PRECHECK_ARMS.get(provider)
     if arm is None:
+        # Logged for the reason the authoritative resolver logs it: reaching
+        # here means a caller passed a name the registry could not have
+        # produced. Silent, the same caller bug reads as every attachment on
+        # that adapter vanishing while the messages still arrive.
+        logger.warning(
+            "whatsapp.media.precheck_unknown_provider provider=%s: no "
+            "identity arm, so no media is attributed",
+            provider,
+        )
         return None
     return arm(conn, identity)
 

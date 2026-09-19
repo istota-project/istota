@@ -121,6 +121,17 @@ class TestABoundIdentityResolves:
             message_id="wamid.001", provider=BAILEYS,
         ) is None
 
+    def test_the_pre_check_covers_every_adapter_the_authoritative_arms_do(self):
+        """Two hand-maintained dicts keyed on the same provider constants.
+
+        A third adapter added to `_ARMS` alone makes `resolve_for_precheck`
+        answer `None` for every message on it — every attachment dropped while
+        the messages still arrive, so nothing goes red and nothing surfaces.
+        """
+        from istota.transport.whatsapp import identity as identity_rules
+
+        assert set(identity_rules._PRECHECK_ARMS) == set(identity_rules._ARMS)
+
     def test_an_unrecognised_provider_resolves_nobody(self, db_path):
         with db.get_db(db_path) as conn:
             db.set_whatsapp_binding(

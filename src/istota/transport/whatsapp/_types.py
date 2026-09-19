@@ -94,8 +94,16 @@ class WhatsAppInboundMedia:
     one.** The unlocked pre-check resolves the sender so the file has an inbox
     to go to; the authoritative resolution happens inside the transaction, and
     a binding can change in between — a re-enrollment, a cleared identity, a
-    bootstrap latch. The transaction compares the two and drops the media on a
-    mismatch, which is what stops one user's photo reaching another's task.
+    bootstrap latch, or a latch that loses its race and comes back
+    `identity_conflict`. The transaction compares the two and drops the media
+    from the event on a mismatch, so it reaches no task and no prompt.
+
+    What that comparison cannot do is un-copy the file: the inbox copy happens
+    before the lock is taken, so on a mismatch the bytes are already in the
+    first user's workspace and stay there. The spec states the same residual
+    and answers it with a warning naming the stranded copy, which is what
+    makes it an operator's problem rather than a silent one.
+
     It lives here rather than on the event because it describes this file's
     destination and means nothing for a message that carried none.
 

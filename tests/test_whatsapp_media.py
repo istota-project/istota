@@ -10,6 +10,7 @@ that sniff, and what the sweep does with one nobody consumed.
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 from unittest import mock
@@ -115,12 +116,28 @@ class TestTheNameIsASinglePathComponent:
     def test_an_ordinary_name_is_accepted(self):
         assert media.is_staged_name("a1b2c3d4e5f6-0011223344556677.jpg") is True
 
-    def test_the_names_this_module_mints_pass_its_own_validator(self):
+    @pytest.mark.parametrize(
+        "message_id", ["wamid.001", "BAE5F00D", "", None],
+        ids=["cloud", "baileys", "empty", "none"],
+    )
+    def test_the_names_this_module_mints_pass_its_own_validator(self, message_id):
         """The sidecar cannot compute `message_fingerprint` — the salt is the
         daemon's — so the validator is the component test plus a bound rather
-        than a match of this format. It still has to admit this format."""
-        for ext in ("jpg", "png", "heic", "bin"):
-            assert media.is_staged_name(media.staged_name("wamid.001", ext)) is True
+        than a match of this format. It still has to admit this format.
+
+        The empty and absent ids are the ones this used to miss:
+        `short_fingerprint` answers `""` for a falsy value, and a name with an
+        empty leading half starts with `-`, which the charset refuses — so
+        this function minted names `open_staged_write` then raised on.
+        """
+        for ext in ("jpg", "png", "heic", "bin", "", None):
+            name = media.staged_name(message_id, ext)
+            assert media.is_staged_name(name) is True
+
+    def test_a_name_with_no_message_id_carries_a_fixed_token(self):
+        assert media.staged_name(None, "jpg").startswith(media.NO_MESSAGE_ID + "-")
+        # And two of them are still distinct, which is the random half's job.
+        assert media.staged_name("", "jpg") != media.staged_name("", "jpg")
 
     def test_a_refused_name_never_reaches_the_filesystem(self, tmp_path):
         staging = media.ensure_media_dir(tmp_path / "whatsapp-media")
@@ -134,17 +151,40 @@ class TestTheNameIsASinglePathComponent:
 
 
 class TestTheStagedWriteDoesNotFollowASymlink:
-    def test_a_symlink_planted_at_the_name_is_refused(self, tmp_path):
+    def test_a_symlink_planted_at_the_name_never_reaches_its_target(self, tmp_path):
+        """What is pinned is the refusal, not which flag produced it.
+
+        `O_EXCL` answers this one on its own — an existing symlink is an
+        existing name, so the open is `EEXIST` whether or not `O_NOFOLLOW` is
+        set, and removing that flag leaves this green. The docstring on
+        `open_staged_write` says the two overlap deliberately; the errno is
+        asserted so the case says which of them is doing the work.
+        """
         staging = media.ensure_media_dir(tmp_path / "whatsapp-media")
         victim = tmp_path / "victim.txt"
         victim.write_text("do not overwrite me")
         name = media.staged_name("wamid.001", "jpg")
         os.symlink(victim, staging / name)
 
+        with pytest.raises(OSError) as caught:
+            media.open_staged_write(staging, name)
+
+        assert caught.value.errno == errno.EEXIST
+        assert victim.read_text() == "do not overwrite me"
+
+    def test_a_dangling_symlink_at_the_name_is_refused_too(self, tmp_path):
+        """The case where following the link would *create* the target rather
+        than truncate one — `O_CREAT` through a dangling link writes at the
+        link's destination, which is somewhere this module never chose."""
+        staging = media.ensure_media_dir(tmp_path / "whatsapp-media")
+        target = tmp_path / "not-there-yet.txt"
+        name = media.staged_name("wamid.001", "jpg")
+        os.symlink(target, staging / name)
+
         with pytest.raises(OSError):
             media.open_staged_write(staging, name)
 
-        assert victim.read_text() == "do not overwrite me"
+        assert not target.exists()
 
     def test_an_existing_regular_file_at_the_name_is_refused(self, tmp_path):
         """`O_EXCL`, so a name is claimed once. Two messages never collide on
@@ -233,6 +273,67 @@ class TestTheStagingDirectory:
             media.ensure_media_dir(staging)
 
 
+class TestTheTwoPrivateDirectoryGuardsAgree:
+    """`ensure_media_dir` is a deliberate second copy of
+    `baileys_bridge.ensure_session_dir`, which is the authoritative one. This
+    is what holds them in step, since nothing else does: both guard the same
+    privacy property over a directory holding somebody's private data, and a
+    fix landing in one copy and not the other is what duplication costs.
+    """
+
+    def _both(self):
+        from istota.transport.whatsapp.baileys_bridge import ensure_session_dir
+
+        return (media.ensure_media_dir, ensure_session_dir)
+
+    def test_both_create_at_0700(self, tmp_path):
+        for index, guard in enumerate(self._both()):
+            path = guard(tmp_path / f"fresh{index}")
+            assert mode_of(path) == 0o700
+
+    def test_both_narrow_a_wide_directory(self, tmp_path):
+        for index, guard in enumerate(self._both()):
+            path = tmp_path / f"wide{index}"
+            path.mkdir(mode=0o755)
+            os.chmod(path, 0o755)
+            guard(path)
+            assert mode_of(path) == 0o700
+
+    def test_both_refuse_a_symlink_at_the_name(self, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        for index, guard in enumerate(self._both()):
+            path = tmp_path / f"link{index}"
+            path.symlink_to(elsewhere)
+            with pytest.raises(OSError):
+                guard(path)
+
+    def test_both_refuse_a_file_at_the_name(self, tmp_path):
+        for index, guard in enumerate(self._both()):
+            path = tmp_path / f"file{index}"
+            path.write_text("not a directory")
+            with pytest.raises(NotADirectoryError):
+                guard(path)
+
+    def test_both_refuse_a_directory_owned_by_another_account(self, tmp_path):
+        real_fstat = os.fstat
+
+        def foreign(fd):
+            info = real_fstat(fd)
+            return os.stat_result(
+                (info.st_mode, info.st_ino, info.st_dev, info.st_nlink,
+                 os.geteuid() + 1, info.st_gid, info.st_size,
+                 int(info.st_atime), int(info.st_mtime), int(info.st_ctime))
+            )
+
+        for index, guard in enumerate(self._both()):
+            path = tmp_path / f"foreign{index}"
+            path.mkdir(mode=0o700)
+            with mock.patch.object(os, "fstat", foreign):
+                with pytest.raises(PermissionError):
+                    guard(path)
+
+
 class TestTheSniffIsTheOnlyTypeAuthority:
     @pytest.mark.parametrize(
         "kind,expected",
@@ -267,10 +368,12 @@ class TestTheSniffIsTheOnlyTypeAuthority:
         """A second sniffer is exactly the duplication `image_sniff` exists to
         prevent, so the delegation is asserted rather than assumed."""
         text = source_of(media.sniff_staged)
-        assert "sniff_decodable" in text
-        # The docstring names the formats it is about, so the scan is over the
-        # code below it.
+        # The docstring names the formats it is about *and* names the function
+        # it delegates to, so both halves of the scan are over the code below
+        # it — asserting the delegation against the whole source would pass
+        # against a body that never calls it.
         body = text.split('"""')[-1]
+        assert "sniff_decodable" in body
         for signature in ("ftyp", "PNG", "RIFF", "GIF8", "xff\\xd8"):
             assert signature not in body
 
@@ -332,7 +435,7 @@ class TestTheInboxCopyTakesItsSuffixFromTheSniff:
         assert media.stage_to_attachment(config, "alice", staged) is None
         assert not staged.exists()
 
-    def test_a_failed_upload_falls_back_to_the_local_path(self, tmp_path, monkeypatch):
+    def test_a_failed_upload_falls_back_to_a_local_path(self, tmp_path, monkeypatch):
         """`transport/email/inbound.py`'s shipped behaviour for the same
         situation — and the re-derived suffix goes on the fallback too, since
         it is handed to the same screen."""
@@ -348,6 +451,59 @@ class TestTheInboxCopyTakesItsSuffixFromTheSniff:
         assert attachment.endswith(".heic")
         assert Path(attachment).exists()
         assert not staged.exists()
+
+    def test_the_fallback_leaves_the_directory_this_module_sweeps(
+        self, tmp_path, monkeypatch
+    ):
+        """The half the email precedent turns on.
+
+        A fallback left where it was staged is deleted by this module's own
+        sweep 600 seconds later, and a task can sit well past that behind
+        queue pressure, the retry ladder or a parked confirmation — which is
+        the race the spec rejects naming a swept path in `task.attachments`
+        for. The staging directory is also inside the tmpfs the sandbox
+        builder masks, so a path there is unreadable from inside the task.
+        """
+        config = _config(tmp_path)
+        staging = media.default_media_dir(config)
+        staged = self._stage(tmp_path, PNG, "png")
+        monkeypatch.setattr(
+            "istota.storage.upload_file_to_inbox_v2", lambda *a, **k: None,
+        )
+
+        attachment = Path(media.stage_to_attachment(config, "alice", staged))
+
+        assert staging not in attachment.parents
+        assert config.temp_dir in attachment.parents
+        # And the sweep cannot reach it, at any age.
+        media.prune_media_dir(staging, now=attachment.stat().st_mtime + 86_400)
+        assert attachment.exists()
+
+    def test_a_file_over_the_per_file_cap_is_refused(self, tmp_path, monkeypatch):
+        """The cap belongs to the fetcher, which is the sidecar on one path
+        and the daemon on the other — and this is the one funnel both reach,
+        so a fetcher that mis-enforced would otherwise land an oversized file
+        in somebody's inbox for `image_attachments` to skip at its own cap."""
+        monkeypatch.setattr(media, "MAX_MEDIA_BYTES", 1024)
+        config = _config(tmp_path)
+        staged = self._stage(tmp_path, PNG + b"\x00" * 4096, "png")
+
+        assert media.stage_to_attachment(config, "alice", staged) is None
+        assert not staged.exists()
+
+    def test_a_path_this_module_did_not_name_is_refused(self, tmp_path):
+        """The stem is interpolated into the inbox filename, so the name is
+        held to the same rule at the consume as at the write — the two callers
+        are different modules and only one of them opened the file here."""
+        config = _config(tmp_path)
+        staging = media.ensure_media_dir(media.default_media_dir(config))
+        foreign = staging / "not a staged name.png"
+        foreign.write_bytes(PNG)
+
+        assert media.stage_to_attachment(config, "alice", foreign) is None
+        # Refused, not consumed: this module did not write it and does not
+        # know what it is.
+        assert foreign.exists()
 
     def test_a_raising_upload_costs_the_media_and_not_the_caller(
         self, tmp_path, monkeypatch
@@ -390,14 +546,34 @@ class TestTheSweep:
         staging = media.ensure_media_dir(tmp_path / "whatsapp-media")
         assert media.prune_media_dir(staging) == 0
 
-    def test_a_directory_at_the_ceiling_prunes_first_and_then_answers(self, tmp_path):
+    def test_a_directory_at_the_ceiling_prunes_first_and_then_answers(
+        self, tmp_path, monkeypatch
+    ):
+        """The order is the whole of what this function adds, so the ceiling
+        is lowered until the boolean discriminates it: against a 256 MiB
+        ceiling a 4 KiB orphan fits either way, and the answer would be True
+        whether the prune ran before the measurement, after it, or never."""
+        monkeypatch.setattr(media, "MEDIA_STAGING_CEILING_BYTES", 8192)
         staging = media.ensure_media_dir(tmp_path / "whatsapp-media")
         old = staging / media.staged_name("wamid.old", "jpg")
-        old.write_bytes(b"x" * 4096)
+        old.write_bytes(b"x" * 8192)
         now = old.stat().st_mtime + media.MEDIA_ORPHAN_SECONDS + 1
 
+        # Measured before the prune this is over; the answer is only True
+        # because the orphan went first.
         assert media.has_staging_room(staging, incoming_bytes=4096, now=now) is True
         assert not old.exists()
+
+    def test_what_the_ceiling_measures_is_what_the_sweep_can_reclaim(self, tmp_path):
+        """A recursive measurement counts bytes the sweep skips, and those are
+        permanent ceiling debt: nothing unlinks them and a large enough one
+        refuses every later fetch on the surface."""
+        staging = media.ensure_media_dir(tmp_path / "whatsapp-media")
+        nested = staging / "sub"
+        nested.mkdir()
+        (nested / "payload.bin").write_bytes(b"x" * 100_000)
+
+        assert media.staging_bytes(staging) == 0
 
     def test_a_write_that_would_pass_the_ceiling_is_refused(self, tmp_path):
         staging = media.ensure_media_dir(tmp_path / "whatsapp-media")

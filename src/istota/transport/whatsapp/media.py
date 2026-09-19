@@ -22,13 +22,19 @@ daemon gates on Meta's declared `file_size` and again during the stream. The
 staging ceiling and the orphan sweep are the daemon's, because only the daemon
 knows the whole directory and which files were consumed.
 
-**Module-level imports are stdlib plus `image_sniff`; `db`, `identity` and
-`storage` are imported inside the two functions that need them.** That is not
-style: `baileys_protocol` imports `._types` and nothing else from the package,
-deliberately, and it is the module that has to validate a name off the wire
-with `is_staged_name`. A module-level `storage` import here would put the
-whole graph behind that. `message_fingerprint`'s own function-scope import is
-the in-tree precedent.
+`db`, `identity` and `storage` are imported inside the two functions that
+need them, which keeps the import-time surface to `du`, `image_sniff` and the
+package — **and is not a leaf boundary, which an earlier version of this
+paragraph claimed it was.** That claim was that a module-level `storage`
+import would put the whole graph behind `baileys_protocol`, which has to
+validate a name off the wire with `is_staged_name`. Measured, it is false in
+both directions: `from . import message_fingerprint` reaches
+`transport/whatsapp/__init__.py`, which imports `transport._types`, which
+already pulls `db`, `storage` and `config` — and `baileys_protocol` pulls the
+same graph through the same package `__init__` on its own. Nothing here is
+load-bearing and nothing pins it; a real boundary would mean a stdlib leaf
+plus a transitive-import guard, the way `tests/native/test_session_log.py`
+pins one.
 
 Nothing here raises into `handle_whatsapp_batch`: the batch's contract is that
 an exception rolls back to a 503 the provider retries against, and a media
@@ -43,6 +49,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import stat
 import time
 from pathlib import Path
@@ -73,12 +80,19 @@ an import, since a cap is not a reason for this module to pull in Pillow's.
 """
 
 MEDIA_STAGING_CEILING_BYTES = 256 * 1024 * 1024
-"""What the whole staging directory may weigh before a write is refused.
+"""What the whole staging directory may occupy before a write is refused.
 
 The backpressure behind the untrusted-sender case: the fetch happens before
 identity is authoritatively resolved, so a stranger who knows the number can
 make bytes land on disk. The per-file cap bounds one message and this bounds
 the directory.
+
+Compared against `staging_bytes`, which measures blocks rather than apparent
+size, so on a filesystem of 4 KiB blocks a directory of small files reaches
+this figure sooner than their sizes would suggest. The error is toward
+refusing a fetch, and `has_staging_room` is a check before a write rather than
+a reservation — two processes can each pass it and jointly pass the ceiling,
+which is what a check-then-write costs and is bounded by the per-file cap.
 """
 
 MEDIA_ORPHAN_SECONDS = 600
@@ -93,7 +107,10 @@ a frame that never arrived, a daemon killed between the write and the copy.
 INBOX_NAME_PREFIX = "whatsapp"
 """What an inbox copy is called, so a user can see where it came from."""
 
-#: 64 characters all told, against the 34 :func:`staged_name` produces.
+NO_MESSAGE_ID = "nomessageid"
+"""The fingerprint half of a staged name for a message with no id."""
+
+#: 64 characters all told, against the 33 :func:`staged_name` produces.
 STAGED_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 """The charset and length a staged name is held to, beside the component test.
 
@@ -143,9 +160,17 @@ def ensure_media_dir(path: Path) -> Path:
     directory already at 0700 skips the `fchmod` and with it the `EPERM` that
     would otherwise be the only sign another uid owns it.
 
-    A separate function rather than a call to that one: it also refuses a
+    **A deliberate second copy, and `ensure_session_dir` is the authoritative
+    one.** The spec's reason for the split — that the original also refuses a
     directory holding a foreign session and logs against the credential
-    vocabulary, neither of which is true here.
+    vocabulary — is not true of it: that function is this one line for line
+    apart from two error strings. What holds the two in step is
+    `tests/test_whatsapp_media.py::TestTheTwoPrivateDirectoryGuardsAgree`,
+    which drives both over the same four cases, rather than a comment asking
+    the next reader to remember. Collapsing them into one implementation is
+    the better answer and is left for whoever next has reason to touch both:
+    it inverts the import direction between this module and a 180 KB one, for
+    a gain this stage does not need.
 
     Raises rather than degrading. A staging directory that cannot be made
     private is every user's inbound photo readable by every account on the
@@ -189,11 +214,19 @@ def staged_name(message_id: str | None, ext: object) -> str:
     `stage_to_attachment` re-derives the suffix from its own sniff when it
     names the inbox copy. What the staged name is load-bearing for is
     uniqueness and containment, not type.
+
+    **A message id it cannot fingerprint gets a fixed token instead.**
+    `short_fingerprint` answers `""` for a falsy value, and an empty leading
+    half produces a name starting with `-` — which `is_staged_name` refuses,
+    so this function would mint a name `open_staged_write` then raises on. The
+    signature admits `None`, so that is a contract this module owes rather
+    than a caller's mistake; the random half still keeps such names apart.
     """
     cleaned = "".join(
         ch for ch in str(ext or "").lower() if ch.isascii() and ch.isalnum()
     )[:8]
-    return f"{message_fingerprint(message_id)}-{secrets.token_hex(8)}.{cleaned or 'bin'}"
+    fingerprint = message_fingerprint(message_id) or NO_MESSAGE_ID
+    return f"{fingerprint}-{secrets.token_hex(8)}.{cleaned or 'bin'}"
 
 
 def is_staged_name(value: object) -> bool:
@@ -266,8 +299,37 @@ def sniff_staged(path: Path) -> str | None:
 
 
 def staging_bytes(media_dir: Path) -> int:
-    """What the staging directory occupies, du-style. Never raises."""
-    return du.tree_bytes(media_dir)
+    """What the staging directory occupies, du-style. Never raises.
+
+    **Measures exactly what the sweep can reclaim**, which is why it is a flat
+    scan of regular files rather than `du.tree_bytes`' recursive walk: the two
+    have to share a domain or the difference is permanent ceiling debt. Under
+    a recursive measurement, anything the sweep skips — a subdirectory's
+    contents, a fifo, a socket — counts toward the ceiling and is unlinked by
+    nothing, so a large enough one refuses every later fetch on the surface
+    with no way to clear it. Nothing in this module can create such an entry
+    (`open_staged_write` refuses a name with a separator in it), so this is a
+    domain agreeing with itself rather than a reachable defect.
+
+    Blocks rather than apparent size, `du.entry_bytes`' arithmetic and its
+    reason: a volume is filled by blocks. So a directory of small files
+    measures above the sum of their sizes while the incoming figure the
+    ceiling is compared against is nominal — a conservative mismatch, and the
+    ceiling's own docstring says which unit it is in.
+    """
+    total = 0
+    try:
+        entries = sorted(Path(media_dir).iterdir())
+    except (OSError, ValueError):
+        return 0
+    for entry in entries:
+        try:
+            info = entry.lstat()
+            if stat.S_ISREG(info.st_mode):
+                total += du.entry_bytes(info)
+        except (OSError, ValueError):
+            continue
+    return total
 
 
 def prune_media_dir(media_dir: Path, *, now: float | None = None) -> int:
@@ -365,10 +427,15 @@ def precheck(
     It is common to both adapters rather than Cloud's, and that is
     load-bearing: `stage_to_attachment` copies into *a user's* inbox, so it
     needs a `user_id`, and the authoritative one does not exist until the
-    transaction, which is after the copy. The claimed-id half also closes the
-    redelivery loop on both — Meta retries a callback it got no 200 for and
-    the Baileys inbound worker has a bounded retry of its own, and without it
-    each replay would re-fetch or make a second inbox copy.
+    transaction, which is after the copy.
+
+    The claimed-id half closes the redelivery loop for a **delivered** message
+    whose acknowledgement was lost — Meta retries a callback it got no 200
+    for, and the Baileys inbound worker has a bounded retry of its own — where
+    without it each replay would re-fetch or make a second inbox copy. It does
+    not close the rollback case, and cannot: a batch that raises rolls its
+    claim back with everything else, so the retry finds nothing written and is
+    a genuinely new message as far as this read can tell.
 
     **A pre-filter and not a boundary.** The authoritative resolution and the
     authoritative claim still happen inside the transaction, where they always
@@ -377,8 +444,19 @@ def precheck(
 
     `provider` is required, and the rule is `WhatsAppUserIdentity`'s own:
     which field is read is decided by the adapter the event came from, never
-    by which happens to be populated. Never raises — a failure here costs the
-    attachment, and the message goes on without it.
+    by which happens to be populated.
+
+    **It takes ownership of the connection the factory returns**: the row
+    factory is set on it, because the binding lookups index rows by column
+    name, and it is closed on every path. A caller handing over a connection
+    it means to keep would lose it on the first call. The factory is the
+    caller's choice of connector rather than this module's — the spec names
+    `sqlite_util.connect_read_only`, whose read-write branch can checkpoint a
+    WAL on last close, so a caller putting this on a per-message path should
+    know that is what it picked.
+
+    Never raises — a failure here costs the attachment, and the message goes
+    on without it.
     """
     import sqlite3
 
@@ -440,9 +518,26 @@ def stage_to_attachment(
     named the file in the first place and there is no user-chosen name to
     preserve.
 
-    Falls back to the local path when the upload fails, which is that module's
-    shipped behaviour for the same situation. The re-derived suffix goes on
-    the fallback too, since it is handed to the same screen.
+    Falls back to a local path when the upload fails, which is
+    `transport/email/inbound.py`'s shipped behaviour for the same situation —
+    and **the fallback leaves the staging directory**, which is the half that
+    precedent turns on. Email's local copy lands under `temp_dir`, swept by
+    `cleanup_old_temp_files` on a `retention_days` window; a fallback left
+    where it was staged would instead be deleted by this module's own sweep
+    600 seconds later, and the spec rejects naming a swept path in
+    `task.attachments` for exactly that reason: a task can sit well past ten
+    minutes behind queue pressure, the retry ladder or a parked confirmation.
+    The staging directory is also inside the tmpfs `build_bwrap_cmd` masks, so
+    a path there is unreadable from inside the task's own sandbox. It goes to
+    `{temp_dir}/whatsapp-media/` instead, and the re-derived suffix goes with
+    it, since it is handed to the same screen.
+
+    **The staged file is refused above `MAX_MEDIA_BYTES`.** The per-file cap
+    belongs to the fetcher, which is the sidecar on one path and the daemon on
+    the other, and this is the one funnel both reach — an oversized file that
+    got past a fetcher would otherwise be copied into somebody's inbox and
+    then skipped by `image_attachments` at its own source cap, which is the
+    silent shape the suffix rule above exists to avoid.
 
     Catches `OSError` and `ValueError` and returns `None` rather than raising,
     because the caller is about to open `BEGIN IMMEDIATE` and a media failure
@@ -451,46 +546,66 @@ def stage_to_attachment(
     from ...storage import ensure_user_directories_v2, upload_file_to_inbox_v2
 
     staged = Path(staged)
+    if not is_staged_name(staged.name):
+        # The stem is interpolated into a filename below, so the name is held
+        # to the same rule at the consume as at the write — the two callers
+        # are different modules and only one of them opened the file here.
+        logger.warning(
+            "whatsapp.media.rejected reason=not_a_staged_name: the consume "
+            "step was handed a path this module did not name",
+        )
+        return None
     media_type = sniff_staged(staged)
     if media_type is None:
         logger.info(
-            "whatsapp.media.rejected reason=not_a_decodable_image: staged "
-            "bytes matched no signature the image pipeline can open",
+            "whatsapp.media.rejected reason=not_a_decodable_image file=%s: "
+            "staged bytes matched no signature the image pipeline can open",
+            staged.stem,
+        )
+        _discard(staged)
+        return None
+
+    byte_count = _size(staged)
+    if byte_count > MAX_MEDIA_BYTES:
+        logger.warning(
+            "whatsapp.media.rejected reason=over_the_file_cap file=%s "
+            "bytes=%d cap=%d",
+            staged.stem, byte_count, MAX_MEDIA_BYTES,
         )
         _discard(staged)
         return None
 
     extension = image_sniff.EXTENSION_BY_MEDIA_TYPE[media_type]
     inbox_name = f"{INBOX_NAME_PREFIX}_{staged.stem}.{extension}"
-    byte_count = _size(staged)
     try:
         ensure_user_directories_v2(config, user_id)
         remote_path = upload_file_to_inbox_v2(config, user_id, staged, inbox_name)
         if remote_path:
             _discard(staged)
             logger.info(
-                "whatsapp.media.attached type=%s bytes=%d", media_type, byte_count,
+                "whatsapp.media.attached type=%s bytes=%d file=%s",
+                media_type, byte_count, staged.stem,
             )
             return remote_path
-        # The upload failed and the bytes are still the only copy, so they are
-        # kept — renamed in place, because the fallback path is handed to the
-        # same suffix screen the inbox copy would have been.
-        # `os.rename`, the spelling `baileys_bridge`'s archive move uses: this
-        # publishes nothing and is not a temp-file writer, so it is neither a
-        # copy of `atomic_write` nor a place that wants replace semantics.
-        local = staged.with_name(inbox_name)
-        os.rename(staged, local)
+        # The upload failed and these bytes are the only copy, so they are
+        # kept — moved out of the sweep's reach rather than renamed in place.
+        # `shutil.move` rather than `os.rename` because the two directories
+        # need not share a filesystem; it is not a temp-file writer and so is
+        # not a second copy of `atomic_write`.
+        fallback_dir = ensure_media_dir(Path(config.temp_dir) / MEDIA_DIR_NAME)
+        local = fallback_dir / inbox_name
+        shutil.move(str(staged), str(local))
         logger.warning(
-            "whatsapp.media.inbox_upload_failed type=%s: attaching the local "
-            "staged copy instead",
-            media_type,
+            "whatsapp.media.inbox_upload_failed type=%s file=%s: attaching a "
+            "local copy outside the staging directory instead",
+            media_type, staged.stem,
         )
         return str(local)
     except (OSError, ValueError):
         logger.warning(
-            "whatsapp.media.stage_failed type=%s: the staged file could not "
-            "be placed in the inbox",
-            media_type,
+            "whatsapp.media.stage_failed type=%s file=%s: the staged file "
+            "could not be placed in the inbox",
+            media_type, staged.stem,
         )
         _discard(staged)
         return None
@@ -523,6 +638,7 @@ __all__ = [
     "MEDIA_DIR_NAME",
     "MEDIA_ORPHAN_SECONDS",
     "MEDIA_STAGING_CEILING_BYTES",
+    "NO_MESSAGE_ID",
     "STAGED_NAME_RE",
     "default_media_dir",
     "ensure_media_dir",
