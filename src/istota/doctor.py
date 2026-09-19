@@ -7867,6 +7867,191 @@ def check_whatsapp_billing(config: "Config", probe: bool) -> CheckResult:
     )
 
 
+def check_whatsapp_media_staging(config: "Config", probe: bool) -> CheckResult:
+    """Whether the inbound-image staging directory is private, and empty.
+
+    An inbound photo lands here between the fetch and the copy into the
+    sender's own workspace, and the steady state is an **empty** directory:
+    every staged file is unlinked the moment it has been consumed or dropped,
+    and the sweep runs whenever either adapter touches the directory. So what
+    this reports is two different things at once — that the directory is one
+    only this account can read, and that nothing has been left standing in it.
+
+    **Gated on `[whatsapp] enabled` alone, and not on the provider**, which is
+    where it departs from the three checks below it. Both adapters stage: the
+    sidecar downloads on the Baileys path because it holds the decryption
+    keys, and the daemon downloads in the webhook route on the Cloud path
+    because Meta's media endpoint needs the access token. A
+    `_baileys_precondition` here would report nothing at all about a Cloud
+    deployment that fetches attacker-supplied bytes onto this filesystem.
+
+    **An absent directory is `OK`, which is the other departure.**
+    `whatsapp.baileys_session` WARNs on one because a deployment with no
+    paired session cannot work; this one is made on the first image and its
+    absence means only that none has arrived yet.
+
+    Orphans are a **loss rather than clutter**, which is why they are reported
+    at all: a staged file nothing consumed is a photograph somebody sent that
+    nobody answered. The window is `media.MEDIA_ORPHAN_SECONDS` read from the
+    module rather than restated, on `whatsapp.pairing_relay`'s rule — a second
+    copy here would let this pass while the sweep disagreed.
+
+    **Survey only, never repair**, which is `whatsapp.baileys_session`'s rule
+    and matters more here than there: the repair available on this directory
+    is `prune_media_dir`, which *deletes*. A diagnostic that swept would clear
+    the orphans it is reporting, so the hourly sweep would observe each loss
+    exactly once and the next run would say the directory was clean. It does
+    not call `ensure_media_dir` either, for the reason the session check does
+    not: a check must not make the thing it reports on.
+
+    It `lstat`s and lists, and **opens nothing**. The contents are other
+    people's photographs, and no arm here needs a byte of one.
+
+    Spawns nothing, so it is safe under `probe=False`, and it writes nothing.
+    """
+    name = "whatsapp.media_staging"
+    if not config.whatsapp.enabled:
+        return CheckResult(
+            name, SKIP, "[whatsapp] enabled = false", scope=DEPLOYMENT,
+        )
+
+    from .transport.whatsapp import media as media_rules
+
+    try:
+        path = media_rules.default_media_dir(config)
+    except (OSError, ValueError, RuntimeError) as exc:
+        # The same three the sibling checks catch off a config-derived path:
+        # `expanduser` answers `RuntimeError` for a `~unknownuser` value and an
+        # embedded null byte answers `ValueError`, neither an `OSError`.
+        return CheckResult(
+            name, WARN,
+            f"the WhatsApp media staging directory could not be resolved "
+            f"({type(exc).__name__}), so it was not examined",
+            remedy=(
+                "Correct `db_path`; the staging directory is derived from its "
+                "parent and has no setting of its own."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return CheckResult(
+            name, OK,
+            f"no WhatsApp image is staged ({path} does not exist, which is "
+            "where an inbound photo lands before it is copied into the "
+            "sender's workspace)",
+            scope=DEPLOYMENT,
+        )
+    except (OSError, ValueError) as exc:
+        return CheckResult(
+            name, WARN,
+            f"{path} could not be read ({type(exc).__name__}), so the WhatsApp "
+            "media staging directory's permissions were not established",
+            remedy=f"Check the ownership and mode of {path}.",
+            scope=DEPLOYMENT,
+        )
+
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        # A symlink is the one that matters, and `lstat` is what sees it: the
+        # staged writes are `O_NOFOLLOW`, so a link standing here is not what
+        # either adapter writes to — it is something else wearing the name,
+        # and every image is refused while it stands.
+        return CheckResult(
+            name, FAIL,
+            f"{path} is not a directory, so no inbound WhatsApp image can be "
+            "staged",
+            remedy=(
+                f"Remove {path}. Both adapters create it on their next "
+                "start, 0700."
+            ),
+            scope=DEPLOYMENT,
+        )
+    # Root is exempt for `whatsapp.baileys_session`'s reason: `sudo istota
+    # doctor` is an ordinary invocation, and there `geteuid()` is 0 while the
+    # directory belongs to the daemon's account.
+    if os.geteuid() != 0 and info.st_uid != os.geteuid():
+        return CheckResult(
+            name, FAIL,
+            f"{path} is owned by uid {info.st_uid} and this process runs as "
+            f"{os.geteuid()}; inbound WhatsApp photographs are staged into "
+            "another account's directory",
+            remedy=(
+                f"Give {path} back to the account the istota daemon runs as, "
+                "or remove it and let the next start recreate it."
+            ),
+            scope=DEPLOYMENT,
+        )
+    mode = stat.S_IMODE(info.st_mode)
+    if mode != media_rules.MEDIA_DIR_MODE:
+        return CheckResult(
+            name, FAIL,
+            f"{path} is {mode:04o}, not "
+            f"{media_rules.MEDIA_DIR_MODE:04o}; inbound WhatsApp photographs "
+            "are readable by another account while they are staged",
+            remedy=f"Run `chmod {media_rules.MEDIA_DIR_MODE:04o} {path}`.",
+            scope=DEPLOYMENT,
+        )
+
+    now = time.time()
+    staged = 0
+    orphans = 0
+    oldest = 0.0
+    try:
+        entries = list(path.iterdir())
+    except (OSError, ValueError) as exc:
+        return CheckResult(
+            name, WARN,
+            f"{path} is 0700 and private to this account, but its contents "
+            f"could not be listed ({type(exc).__name__}), so nothing is known "
+            "about what is staged in it",
+            remedy=f"Check the mode and ownership of {path}.",
+            scope=DEPLOYMENT,
+        )
+    for entry in entries:
+        try:
+            entry_info = entry.lstat()
+        except (OSError, ValueError):
+            continue
+        if not stat.S_ISREG(entry_info.st_mode):
+            continue
+        staged += 1
+        age = now - entry_info.st_mtime
+        if age > media_rules.MEDIA_ORPHAN_SECONDS:
+            orphans += 1
+            oldest = max(oldest, age)
+
+    if orphans:
+        return CheckResult(
+            name, WARN,
+            f"{orphans} staged WhatsApp image(s) in {path} are older than "
+            f"{_duration(media_rules.MEDIA_ORPHAN_SECONDS)}, the oldest by "
+            f"{_duration(oldest)}; each one is a photograph somebody sent that "
+            "nobody answered",
+            remedy=(
+                "Both adapters sweep the directory whenever they touch it, so "
+                "these clear themselves on the next inbound image. Standing "
+                "orphans mean messages are failing after the fetch — read the "
+                "log for `whatsapp.media`."
+            ),
+            scope=DEPLOYMENT,
+        )
+    if staged:
+        return CheckResult(
+            name, OK,
+            f"{path} is {mode:04o}, and {staged} WhatsApp image(s) are staged "
+            "in it and still inside the consume window",
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(
+        name, OK,
+        f"{path} is {mode:04o} and empty, which is where an inbound WhatsApp "
+        "photograph lands before it is copied into the sender's workspace",
+        scope=DEPLOYMENT,
+    )
+
+
 def _baileys_precondition(name: str, config: "Config") -> "CheckResult | None":
     """The two skips both Baileys checks share, or ``None`` to carry on."""
     if not config.whatsapp.enabled:
@@ -8682,6 +8867,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("sms.telnyx", check_sms_telnyx),
     ("whatsapp.common", check_whatsapp_common),
     ("whatsapp.billing", check_whatsapp_billing),
+    ("whatsapp.media_staging", check_whatsapp_media_staging),
     ("whatsapp.baileys_bridge", check_whatsapp_baileys_bridge),
     ("whatsapp.baileys_session", check_whatsapp_baileys_session),
     ("whatsapp.pairing_relay", check_whatsapp_pairing_relay),
@@ -8797,6 +8983,10 @@ CHECK_SCOPES: dict[str, str] = {
     "sms.telnyx": DEPLOYMENT,
     "whatsapp.common": DEPLOYMENT,
     "whatsapp.billing": DEPLOYMENT,
+    # Deployment, and not gated on the provider: both adapters stage an
+    # inbound photo into a directory derived from `db_path`, which a bare
+    # `docker run` has neither of.
+    "whatsapp.media_staging": DEPLOYMENT,
     # Deployment: one reads in-process counters that only the daemon has,
     # the other a paired credential on disk. A bare `docker run` has
     # neither.

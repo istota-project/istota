@@ -14,6 +14,7 @@ ERROR in the log, a definite refusal on every send, and nobody told.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import pathlib
 import stat
@@ -25,6 +26,7 @@ import pytest
 from istota import doctor
 from istota.config import Config, UserConfig
 from istota.transport.whatsapp import baileys_bridge, pairing_relay
+from istota.transport.whatsapp import media as media_rules
 
 from .support.drift import source_of
 from .support.whatsapp_config import build_whatsapp_config
@@ -1009,6 +1011,261 @@ class TestTheSessionArchives:
         ) == [earlier, later]
         assert result.status == doctor.FAIL
         assert "2 archived" in result.detail
+
+
+
+class TestTheMediaStagingCheck:
+    """`whatsapp.media_staging`: the mode, the owner and the census of the
+    directory an inbound photograph is staged in.
+
+    **It is the one check in this file that is not about Baileys**, which is
+    the property most likely to be broken by somebody tidying it: both
+    adapters stage, because the sidecar holds the decryption keys on one path
+    and the daemon holds Meta's access token on the other. So the gate is
+    `[whatsapp] enabled` alone, and a Cloud deployment — which fetches
+    attacker-supplied bytes onto this filesystem from inside the webhook
+    request — must be answered rather than skipped.
+    """
+
+    def _staging(self, cfg, *, mode=0o700):
+        path = media_rules.default_media_dir(cfg)
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, mode)
+        return path
+
+    def _stage_file(self, path, name="abc123-deadbeef.jpg", *, age=0.0):
+        staged = path / name
+        staged.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        os.chmod(staged, 0o600)
+        if age:
+            when = time.time() - age
+            os.utime(staged, (when, when))
+        return staged
+
+    def test_a_disabled_surface_skips(self, tmp_path):
+        cfg = _config(tmp_path, enabled=False)
+
+        assert _run(cfg, "whatsapp.media_staging").status == doctor.SKIP
+
+    def test_a_cloud_deployment_is_answered_rather_than_skipped(self, tmp_path):
+        """The departure from its three neighbours, and the reason it exists.
+
+        `_baileys_precondition` would skip this on Cloud, where the *daemon*
+        performs the fetch inside Meta's own webhook request — so the arm that
+        reports a world-readable directory of other people's photographs would
+        be switched off on the adapter whose fetch runs with a credential.
+        """
+        cfg = _config(tmp_path, provider="whatsapp_cloud")
+        self._staging(cfg, mode=0o755)
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.FAIL
+        assert "0755" in result.detail
+
+    def test_no_directory_is_the_healthy_state(self, tmp_path):
+        """Unlike the session directory, whose absence is a WARN.
+
+        Nothing creates this until an image arrives or an adapter starts, and
+        a deployment nobody has photographed anything at is working.
+        """
+        result = _run(_config(tmp_path), "whatsapp.media_staging")
+
+        assert result.status == doctor.OK
+        assert "does not exist" in result.detail
+
+    def test_an_empty_directory_is_the_steady_state(self, tmp_path):
+        cfg = _config(tmp_path)
+        self._staging(cfg)
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.OK
+        assert "empty" in result.detail
+
+    def test_a_world_readable_directory_fails(self, tmp_path):
+        cfg = _config(tmp_path)
+        self._staging(cfg, mode=0o755)
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.FAIL
+        assert "0755" in result.detail
+        assert f"{media_rules.MEDIA_DIR_MODE:04o}" in (result.remedy or "")
+
+    def test_something_other_than_a_directory_fails(self, tmp_path):
+        """`lstat`, so a symlink is seen rather than followed.
+
+        Both staged writes are `O_NOFOLLOW`, so while a link stands here every
+        inbound image is refused — which is a WhatsApp surface that answers
+        text and drops photographs, with the reason only in the log.
+        """
+        cfg = _config(tmp_path)
+        path = media_rules.default_media_dir(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        path.symlink_to(elsewhere)
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.FAIL
+        assert "not a directory" in result.detail
+
+    def test_a_directory_owned_by_another_account_fails(self, tmp_path, monkeypatch):
+        """No `requires_dac`: the mismatch is produced by moving *this*
+        process's answer for `geteuid`, so nothing has to be chowned."""
+        cfg = _config(tmp_path)
+        self._staging(cfg)
+        real = os.geteuid()
+        monkeypatch.setattr(doctor.os, "geteuid", lambda: real + 1)
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.FAIL
+        assert "another account" in result.detail
+
+    def test_a_file_inside_the_window_is_not_an_orphan(self, tmp_path):
+        """A staged file is ordinary for the few hundred milliseconds between
+        the fetch and the copy, so a census that counted every file would
+        report a working deployment as losing messages."""
+        cfg = _config(tmp_path)
+        self._stage_file(self._staging(cfg))
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.OK
+        assert "1 WhatsApp image(s) are staged" in result.detail
+
+    def test_a_file_past_the_window_is_reported_as_a_lost_message(self, tmp_path):
+        cfg = _config(tmp_path)
+        self._stage_file(
+            self._staging(cfg), age=media_rules.MEDIA_ORPHAN_SECONDS + 120,
+        )
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.WARN
+        assert "nobody answered" in result.detail
+
+    def test_the_window_is_the_modules_own_rather_than_a_second_copy(
+        self, tmp_path,
+    ):
+        """`whatsapp.pairing_relay`'s rule, and the case that discriminates.
+
+        A file just inside the sweep's own window must not be reported, and
+        one just outside it must — so a check carrying its own constant would
+        pass here only while the two agreed, which is exactly the drift being
+        refused.
+        """
+        cfg = _config(tmp_path)
+        path = self._staging(cfg)
+        self._stage_file(
+            path, "aaa-1.jpg", age=media_rules.MEDIA_ORPHAN_SECONDS - 60,
+        )
+
+        assert _run(cfg, "whatsapp.media_staging").status == doctor.OK
+
+        self._stage_file(
+            path, "bbb-2.jpg", age=media_rules.MEDIA_ORPHAN_SECONDS + 60,
+        )
+
+        assert _run(cfg, "whatsapp.media_staging").status == doctor.WARN
+
+    def test_it_narrows_no_mode_it_reported(self, tmp_path):
+        """Survey only, the posture `whatsapp.baileys_session` established.
+
+        A check that narrowed the mode could not report it: the second run
+        says the directory is private, so the hourly sweep's transition
+        alerting sees the exposure once and an operator rerunning the command
+        to confirm sees nothing.
+        """
+        cfg = _config(tmp_path)
+        path = self._staging(cfg, mode=0o755)
+
+        first = _run(cfg, "whatsapp.media_staging")
+        second = _run(cfg, "whatsapp.media_staging")
+
+        # The mode, in both details, for the reason the relay check gives: a
+        # check that raised on its first line would leave the mode alone too.
+        assert first.status == doctor.FAIL
+        assert "0755" in first.detail
+        assert second.status == doctor.FAIL
+        assert "0755" in second.detail
+        assert stat.S_IMODE(path.stat().st_mode) == 0o755
+
+    def test_it_sweeps_no_orphan_it_reported(self, tmp_path):
+        """The half that matters more here than on either neighbour.
+
+        The repair available on *this* directory is `prune_media_dir`, which
+        **deletes**. A check that swept would clear the very orphans it is
+        reporting, so each lost message would be alerted on exactly once and
+        the confirming run would say the directory was clean.
+
+        **The directory is 0700 here on purpose.** Every mode arm returns
+        before the census, so the sibling above — which needs a wide mode to
+        have something to report — cannot reach this property at all: run
+        against a swept version of the check it stays green. Measured, not
+        assumed.
+        """
+        cfg = _config(tmp_path)
+        path = self._staging(cfg)
+        staged = self._stage_file(
+            path, age=media_rules.MEDIA_ORPHAN_SECONDS + 600,
+        )
+
+        first = _run(cfg, "whatsapp.media_staging")
+        second = _run(cfg, "whatsapp.media_staging")
+
+        assert first.status == doctor.WARN
+        assert staged.exists(), "the check swept the orphan it is reporting"
+        assert second.status == doctor.WARN, (
+            "the second run no longer sees the orphan the first one named"
+        )
+
+    def test_it_creates_no_directory_it_could_then_report_on(self, tmp_path):
+        """`whatsapp.baileys_session`'s rule in the other direction: a check
+        must not make the thing it reports on."""
+        cfg = _config(tmp_path)
+
+        _run(cfg, "whatsapp.media_staging")
+
+        assert not media_rules.default_media_dir(cfg).exists()
+
+    def test_it_opens_nothing(self, tmp_path):
+        """The contents are other people's photographs, and no arm needs one.
+
+        A source assertion because the property is an absence: every arm
+        passes against a readable file whether or not the bytes were read, so
+        what discriminates is that the function names no way to read them.
+        Read through `source_of` so testmon can re-select it after an edit.
+        """
+        text = source_of(doctor.check_whatsapp_media_staging)
+
+        assert "open(" not in text
+        assert "read_bytes" not in text
+        assert "read_text" not in text
+
+    def test_a_null_byte_in_the_path_is_not_a_raise(self, tmp_path):
+        """Runs on the daemon's boot path, so it may not raise.
+
+        An embedded null byte answers `ValueError` rather than `OSError` out
+        of `lstat`, which is the case that gets past the obvious handler — the
+        neighbouring checks each met it first.
+        """
+        cfg = dataclasses.replace(
+            _config(tmp_path), db_path=tmp_path / "no\x00pe" / "istota.db",
+        )
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        # WARN by name rather than "not a FAIL": `run_checks` reports a raising
+        # check as a FAIL carrying the exception text, so the two are
+        # distinguishable, and naming the arm is what says the `ValueError`
+        # was caught where it was meant to be.
+        assert result.status == doctor.WARN
+        assert "ValueError" in result.detail
+        assert "Traceback" not in result.detail
 
 
 class TestTheNeverRaisesContract:

@@ -69,6 +69,17 @@ logger = logging.getLogger("istota.transport.whatsapp.media")
 
 MEDIA_DIR_NAME = "whatsapp-media"
 
+MEDIA_DIR_MODE = 0o700
+"""What the staging directory is held to, named so a reader can ask.
+
+`ensure_media_dir` narrows to it and `doctor.whatsapp.media_staging` reports
+against it, which is the whole reason it is a constant: a diagnostic carrying
+its own copy of a mode could pass while the thing that sets it disagreed.
+"""
+
+MEDIA_FILE_MODE = 0o600
+"""What one staged file is created at, for the same reason."""
+
 MAX_MEDIA_BYTES = 16 * 1024 * 1024
 """What one inbound file may weigh. WhatsApp's own image ceiling.
 
@@ -249,7 +260,7 @@ def ensure_media_dir(path: Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.mkdir(mode=0o700, exist_ok=True)
+        path.mkdir(mode=MEDIA_DIR_MODE, exist_ok=True)
     except FileExistsError:
         # `exist_ok=True` still raises this for a non-directory at the name.
         raise NotADirectoryError(
@@ -263,8 +274,8 @@ def ensure_media_dir(path: Path) -> Path:
                 f"whatsapp media staging directory belongs to uid "
                 f"{info.st_uid}, not to this process: {path}"
             )
-        if stat.S_IMODE(info.st_mode) != 0o700:
-            os.fchmod(fd, 0o700)
+        if stat.S_IMODE(info.st_mode) != MEDIA_DIR_MODE:
+            os.fchmod(fd, MEDIA_DIR_MODE)
     finally:
         os.close(fd)
     return path
@@ -340,7 +351,7 @@ def open_staged_write(media_dir: Path, name: str) -> int:
     return os.open(
         Path(media_dir) / name,
         os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
-        0o600,
+        MEDIA_FILE_MODE,
     )
 
 
@@ -716,7 +727,9 @@ __all__ = [
     "INBOX_NAME_PREFIX",
     "MAX_DECLARED_MIME_CHARS",
     "MAX_MEDIA_BYTES",
+    "MEDIA_DIR_MODE",
     "MEDIA_DIR_NAME",
+    "MEDIA_FILE_MODE",
     "MEDIA_FETCH_FAILED",
     "MEDIA_NOT_PLACED",
     "MEDIA_OVER_CAP",
