@@ -120,15 +120,26 @@ class WhatsAppInboundMedia:
     `error` carries a fixed local reason for a fetch that failed, so a caller
     can answer honestly instead of degrading to "that message type is not
     supported yet". It is **required rather than defaulted**, this module's
-    rule for a new record: only `InboundWhatsAppEvent.media` gets a default,
-    because only it has existing constructions to leave unchanged. When
-    `error` is set, `staged_path` is `""`.
+    rule for a record's original fields. When `error` is set, `staged_path` is
+    `""`.
+
+    **`remote_id` is the one defaulted field, and the rule it follows is
+    `waba_id`'s rather than `error`'s.** It names bytes the daemon has *not*
+    fetched yet — Meta's media id, read off the callback and handed to
+    `client.fetch_media` — so it is Cloud-shaped, and `""` is Baileys' honest
+    value: the sidecar holds the decryption keys and has already written the
+    file by the time the frame arrives, so there is nothing left to fetch. The
+    silent-omission argument that keeps the other fields required does not
+    reach it, because a Cloud normalizer that failed to set it produces a
+    record nothing can stage, which `webhook._media_for_user` answers with
+    `media_failed` — loud, and in front of the user.
     """
     staged_path: str
     mime_type: str
     byte_count: int
     attached_for_user: str
     error: str | None
+    remote_id: str = ""
 
 
 @dataclass(frozen=True)

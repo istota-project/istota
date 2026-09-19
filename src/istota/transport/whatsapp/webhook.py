@@ -58,6 +58,7 @@ from ._types import (
     WhatsAppDeliveryEvent,
     WhatsAppDeliveryStatus,
     WhatsAppEvent,
+    WhatsAppInboundMedia,
     WhatsAppUserIdentity,
 )
 from .client import SIGNATURE_HEADER, verify_signature
@@ -111,6 +112,22 @@ section `executor.build_prompt` appends names the file, and
 has everything it needs — this sentence is there so the prompt is not empty and
 so the turn reads correctly in task history.
 """
+
+MEDIA_NO_ID_REASON = "the image named no media id"
+"""What an `image` message Meta sent without a readable media id becomes.
+
+There is nothing to fetch, so the record carries an `error` rather than being
+dropped — dropping it would send a *captioned* image back through the narrowed
+`unsupported_type` gate, which answers "photographs are not supported" for what
+is really a payload this normalizer could not read.
+"""
+
+#: A declared media type, bounded because it is a string off the wire that
+#: reaches a log line, and held to printable characters for the same reason
+#: `baileys_protocol.MAX_MEDIA_MIME_CHARS` is: a newline or an ANSI escape
+#: forges a line there. Nothing branches on it — `media.stage_to_attachment`
+#: sniffs the bytes and names the inbox copy from its own answer.
+_MAX_DECLARED_MIME_CHARS = 128
 
 _TEXT_TYPES = frozenset({"text"})
 _CALLBACK_TYPES = frozenset({"interactive", "button"})
@@ -348,6 +365,15 @@ def _message_shape(message: Mapping[str, object]) -> tuple[str, str | None, str 
         body = message.get("text")
         body = body.get("body") if isinstance(body, Mapping) else None
         return "text", body if isinstance(body, str) else "", None
+    if declared == "image":
+        # **The caption rides `text`**, which is what makes every gate in
+        # `_dispatch_inbound` apply to it with no new code: `STOP` on a
+        # photograph opts out, `!usage` runs, a `YES` answers the parked
+        # confirmation. A caption is a message, and there is no reason for it
+        # to mean something different because a file came with it.
+        image = message.get("image")
+        image = image if isinstance(image, Mapping) else {}
+        return "image", _optional_text(image.get("caption")), None
     if declared == "interactive":
         interactive = message.get("interactive")
         interactive = interactive if isinstance(interactive, Mapping) else {}
@@ -381,6 +407,13 @@ def _inbound_event(
         message_type = "group"
         text = None
         callback_data = None
+    # **After the group arm, and that ordering is the guard.** The group gate
+    # in `_dispatch_inbound` runs inside the transaction, while the fetch this
+    # record authorizes happens before it — so a group image must carry no
+    # record at all, which the reset above arranges by taking `image` off the
+    # type. Baileys refuses a group message in the sidecar, before anything is
+    # downloaded; this is the same refusal one module over.
+    media = _pending_media(message) if message_type == "image" else None
     return InboundWhatsAppEvent(
         message_id=_required_text(message, "id", "message id"),
         waba_id=waba_id,
@@ -391,6 +424,52 @@ def _inbound_event(
         callback_data=callback_data,
         reply_to_message_id=_optional_text(context.get("id")),
         sent_at=_event_time(message),
+        media=media,
+    )
+
+
+def _pending_media(message: Mapping[str, object]) -> WhatsAppInboundMedia:
+    """The media record for a Cloud `image`, naming bytes still to be fetched.
+
+    Meta's callback carries a media id rather than the file, so what this
+    builds is a record with an empty `staged_path` and a `remote_id`:
+    `providers.whatsapp_cloud.stage_cloud_media` is what turns one into the
+    other, before the route opens its transaction.
+
+    A record with neither — one this normalizer built and nothing staged — is
+    refused by `_media_for_user` rather than attached, so the wiring being
+    absent is a `media_failed` reply and not a staged path on a task.
+
+    `mime_type` is the declared type and decides nothing; the sniff in
+    `media.stage_to_attachment` is authoritative, because a sender controls
+    what they upload and the file is about to be decoded by Pillow and copied
+    into somebody's workspace.
+    """
+    image = message.get("image")
+    image = image if isinstance(image, Mapping) else {}
+    remote_id = _optional_text(image.get("id"))
+    if not remote_id:
+        # No value off the wire in the log line: the id is what could not be
+        # read, and a message id is already a fingerprint by the time anything
+        # here logs one.
+        logger.warning(
+            "whatsapp.inbound.media_unreadable: an image message named no "
+            "media id",
+        )
+        return WhatsAppInboundMedia(
+            staged_path="", mime_type="", byte_count=0, attached_for_user="",
+            error=MEDIA_NO_ID_REASON,
+        )
+    declared = _optional_text(image.get("mime_type")) or ""
+    return WhatsAppInboundMedia(
+        staged_path="",
+        mime_type="".join(
+            ch for ch in declared if ch.isprintable()
+        )[:_MAX_DECLARED_MIME_CHARS],
+        byte_count=0,
+        attached_for_user="",
+        error=None,
+        remote_id=remote_id,
     )
 
 

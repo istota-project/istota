@@ -962,6 +962,75 @@ class TestPayloadNormalization:
 
         assert [e.message_id for e in events] == ["wamid.sent"]
 
+    def _image(self, config, **image):
+        message = {
+            "id": "wamid.img", "from": USER_BSUID,
+            "timestamp": str(int(datetime.now(timezone.utc).timestamp())),
+            "type": "image", "image": image,
+        }
+        return normalize_payload(config, _payload(_value(
+            contacts=[_contact()], messages=[message],
+        )))[0]
+
+    def test_an_image_carries_its_caption_as_text_and_its_id_as_media(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+
+        event = self._image(
+            config, id="media-1", mime_type="image/jpeg", caption="what is this?",
+        )
+
+        assert event.message_type == "image"
+        # The caption rides `text`, which is what makes every gate in
+        # `_dispatch_inbound` apply to it with no new code.
+        assert event.text == "what is this?"
+        assert event.media.remote_id == "media-1"
+        assert event.media.staged_path == ""
+        assert event.media.error is None
+
+    def test_an_uncaptioned_image_carries_no_text_and_still_carries_media(
+        self, tmp_path,
+    ):
+        config = _config(tmp_path)
+
+        event = self._image(config, id="media-1", mime_type="image/jpeg")
+
+        assert event.text is None
+        assert event.media.remote_id == "media-1"
+
+    def test_a_declared_type_is_bounded_and_kept_off_a_forged_log_line(
+        self, tmp_path,
+    ):
+        """The declared type reaches a log line and decides nothing — the
+        sniff is what says what the bytes are."""
+        config = _config(tmp_path)
+
+        event = self._image(
+            config, id="media-1", mime_type="image/jpeg\nWARNING forged " + "x" * 400,
+        )
+
+        assert "\n" not in event.media.mime_type
+        assert len(event.media.mime_type) <= 128
+
+    def test_a_group_image_carries_no_media_record_at_all(self, tmp_path):
+        """Above everything: the fetch happens before the transaction's own
+        group gate, so the record must not exist for a group message."""
+        config = _config(tmp_path)
+        message = {
+            "id": "wamid.img", "from": USER_BSUID,
+            "timestamp": str(int(datetime.now(timezone.utc).timestamp())),
+            "type": "image", "image": {"id": "media-1"},
+            "group_id": "120363000000000000@g.us",
+        }
+
+        events = normalize_payload(config, _payload(_value(
+            contacts=[_contact()], messages=[message],
+        )))
+
+        assert events[0].message_type == "group"
+        assert events[0].media is None
+
 
 def _status(*, message_id="wamid.out", status="sent", recipient_id=USER_WA_ID,
             timestamp=None, pricing=None, errors=None):
@@ -1569,7 +1638,10 @@ class TestInboundDispositions:
     @pytest.mark.parametrize(
         "message_type, body",
         [
-            ("image", {"image": {"id": "media-1", "caption": "do this"}}),
+            # `image` is no longer here: it is the one media type this surface
+            # reads, and a Cloud image that reached the transaction with
+            # nothing staged earns the media-failed reply instead — which is
+            # the case below. Everything else keeps the reply it had.
             ("document", {"document": {"id": "media-2", "caption": "and this"}}),
             ("audio", {"audio": {"id": "media-3"}}),
             ("location", {"location": {"latitude": 1.0, "longitude": 2.0}}),
@@ -1600,7 +1672,17 @@ class TestInboundDispositions:
         assert results[0].response_logical_key == f"unsupported:wamid.{message_type}"
         assert _counts(config, "tasks") == [0]
 
-    def test_a_caption_is_never_processed_as_a_request(self, tmp_path):
+    def test_a_caption_whose_image_never_staged_is_never_processed(
+        self, tmp_path,
+    ):
+        """An image that reached the transaction with nothing staged.
+
+        The route stages before it opens the transaction, so this is the
+        wiring being absent — a normalized event with a `remote_id` and no
+        file. `_media_for_user` refuses it, so the caption is not run as a
+        request and the reply asks for the image again rather than saying
+        photographs are unsupported.
+        """
         config = _config(tmp_path)
         _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
 
@@ -1614,9 +1696,32 @@ class TestInboundDispositions:
             }],
         )))
 
-        assert results[0].disposition == "unsupported_type"
+        assert results[0].disposition == "media_failed"
+        assert results[0].response_text == MEDIA_FAILED_REPLY
         with db.get_db(config.db_path) as conn:
             assert conn.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+
+    def test_an_image_naming_no_media_id_is_refused_rather_than_unsupported(
+        self, tmp_path,
+    ):
+        """Nothing to fetch, so the record carries the failure. Dropping it
+        would send a captioned image back through the narrowed gate and answer
+        "photographs are not supported" for a payload we could not read."""
+        config = _config(tmp_path)
+        _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+
+        results = _handle(config, _payload(_value(
+            contacts=[_contact()],
+            messages=[{
+                "id": "wamid.noid", "from": USER_BSUID,
+                "timestamp": str(int(datetime.now(timezone.utc).timestamp())),
+                "type": "image",
+                "image": {"caption": "what is this?"},
+            }],
+        )))
+
+        assert results[0].disposition == "media_failed"
+        assert _counts(config, "tasks") == [0]
 
     @pytest.mark.parametrize(
         "message, disposition",
