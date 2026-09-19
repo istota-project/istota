@@ -1,5 +1,6 @@
 """Tests for the browse skill CLI client."""
 
+import argparse
 import json
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +8,10 @@ import httpx
 import pytest
 
 from istota.skills.browse import (
+    ACTION_EMITTERS,
+    ACTION_ORDER_DEST,
+    OrderedAppend,
+    _interact_actions,
     _links_from_extract,
     build_parser,
     cmd_close,
@@ -538,6 +543,153 @@ class TestCmdInteract:
 
         payload = mock_post.call_args[1]["json"]
         assert payload["actions"] == [{"type": "scroll", "direction": "down", "amount": 1000}]
+
+
+def _interact_parser():
+    """The `interact` subparser out of the real `build_parser()`."""
+    for action in build_parser()._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict) and "interact" in choices:
+            return choices["interact"]
+    raise AssertionError("build_parser() declares no interact subcommand")
+
+
+def _interact_namespace(**values):
+    """A hand-built `interact` namespace, the shape `cmd_interact` reads."""
+    args = argparse.Namespace(
+        session_id="s1",
+        click=[],
+        fill=[],
+        fill_credential=[],
+        scroll=None,
+        scroll_amount=500,
+    )
+    for dest, value in values.items():
+        setattr(args, dest, value)
+    return args
+
+
+class TestTheActionOrderRecord:
+    """The replay `cmd_interact` runs, at the seam rather than through argv.
+
+    The command-line cases live in `TestFillCredential`, which has the proxy
+    the credential stamp needs. These are the paths argv cannot reach: a
+    namespace somebody built by hand, and a dest the replay does not know.
+    """
+
+    def test_every_argument_declared_with_ordered_append_has_an_emitter(self):
+        """The declarations and the replay table, read off the real parser.
+
+        This is the drift that matters: a fourth `--hover` declared with
+        `OrderedAppend` and not added to `ACTION_EMITTERS` records a position
+        nothing can replay. Asserting `ORDERED_ACTION_DESTS ==
+        tuple(ACTION_EMITTERS)` instead would be `x == x`, since one is
+        derived from the other — it is the parser that can disagree with them.
+        """
+        interact = _interact_parser()
+        declared = {
+            action.dest
+            for action in interact._actions
+            if isinstance(action, OrderedAppend)
+        }
+        assert declared, "no argument is declared with OrderedAppend any more"
+        assert declared <= set(ACTION_EMITTERS), (
+            f"declared with OrderedAppend but not replayable: "
+            f"{sorted(declared - set(ACTION_EMITTERS))}"
+        )
+        # And the table carries nothing the parser stopped declaring, which
+        # would leave a dest in the fallback order that can never be populated.
+        assert set(ACTION_EMITTERS) <= declared, (
+            f"replayable but declared on no argument: "
+            f"{sorted(set(ACTION_EMITTERS) - declared)}"
+        )
+
+    def test_a_namespace_with_no_order_record_keeps_the_old_shape(self):
+        """Clicks, then literal fills, then credentials.
+
+        Reachable only from a namespace built by hand: `OrderedAppend` is the
+        argparse action, so it fires under a plain `parse_args` too and an
+        argv caller always has a record. Clicks lead here because that is
+        what such a caller saw before ISSUE-507, not because it is the right
+        order for a login.
+        """
+        args = _interact_namespace(
+            click=[".btn"], fill=["#email=me@example.com"],
+        )
+        assert _interact_actions(args) == [
+            {"type": "click", "selector": ".btn"},
+            {"type": "fill", "selector": "#email", "value": "me@example.com"},
+        ]
+
+    def test_an_order_record_naming_an_unknown_dest_is_refused(self):
+        """A dest declared nowhere — the only drift the table above allows."""
+        args = _interact_namespace()
+        setattr(args, ACTION_ORDER_DEST, [("hover", 0)])
+        with pytest.raises(ValueError, match="no interact action is defined for hover"):
+            _interact_actions(args)
+
+    def test_an_order_record_past_the_end_of_its_values_is_named(self):
+        """Named rather than left to `IndexError`, which reads as a browser failure."""
+        args = _interact_namespace(click=[".btn"])
+        setattr(args, ACTION_ORDER_DEST, [("click", 5)])
+        with pytest.raises(ValueError, match="the click order record"):
+            _interact_actions(args)
+
+    def test_an_order_record_shorter_than_its_values_is_refused(self):
+        """Dropping the unnamed values silently is the reported failure again.
+
+        A record naming the click but not the fills emits the click alone, so
+        the form is submitted empty and every action reports `ok` — ISSUE-507
+        reached from a hand-built namespace instead of from argv.
+        """
+        args = _interact_namespace(
+            click=[".btn"], fill=["#a=1", "#b=2"],
+        )
+        setattr(args, ACTION_ORDER_DEST, [("click", 0)])
+        with pytest.raises(ValueError, match="action order record"):
+            _interact_actions(args)
+
+
+class TestAFillWithNoSeparator:
+    """`--fill "#email"` — a selector with no value.
+
+    It used to be dropped in silence while the clicks around it ran, which is
+    the reported failure by a second route: submit fires against a form that
+    was never filled and the envelope is `status: ok` throughout. The sibling
+    `--fill-credential` has always refused the same shape before dispatch.
+    """
+
+    def test_it_is_refused_rather_than_skipped(self):
+        args = _interact_namespace(fill=["#email"])
+        with pytest.raises(ValueError, match="expected SELECTOR=VALUE"):
+            _interact_actions(args)
+
+    def test_the_click_beside_it_never_runs(self):
+        args = _interact_namespace(
+            fill=["#email"], click=["button[type=submit]"],
+        )
+        with pytest.raises(ValueError, match="expected SELECTOR=VALUE"):
+            _interact_actions(args)
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_no_request_is_sent(self, mock_url, mock_post):
+        """The refusal lands before the browser is asked to do anything."""
+        parser = build_parser()
+        args = parser.parse_args(
+            ["interact", "s1", "--fill", "#email", "--click", "button[type=submit]"],
+        )
+        with pytest.raises(ValueError, match="expected SELECTOR=VALUE"):
+            cmd_interact(args)
+        mock_post.assert_not_called()
+
+    def test_a_value_containing_a_separator_is_unaffected(self):
+        """The control: an empty value is a value, and `=` may recur."""
+        args = _interact_namespace(fill=["#email=", "#q=a=b"])
+        assert _interact_actions(args) == [
+            {"type": "fill", "selector": "#email", "value": ""},
+            {"type": "fill", "selector": "#q", "value": "a=b"},
+        ]
 
 
 class TestCmdClose:
@@ -1497,8 +1649,16 @@ class TestFillCredential:
 
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
-    def test_clicks_still_lead(self, mock_url, mock_post, proxy):
-        """Unchanged: clicks are emitted before the fills, as they always were."""
+    def test_a_click_runs_where_it_was_written(self, mock_url, mock_post, proxy):
+        """A login written as one call fills the form and then submits it.
+
+        Clicks used to be emitted ahead of every fill whatever the caller
+        wrote, so this argv clicked submit against an empty form and reported
+        `ok` for all three actions (ISSUE-507). The whole array is asserted
+        rather than the relative order, because a click emitted twice — once
+        from the replay and once from a leftover loop — keeps the order and
+        is still wrong.
+        """
         proxy()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -1508,11 +1668,83 @@ class TestFillCredential:
 
         main([
             "interact", "s1",
+            "--fill", "#email=me@example.com",
             "--fill-credential", "#password=acme_password",
-            "--click", ".btn",
+            "--click", "button[type=submit]",
         ])
         payload = mock_post.call_args[1]["json"]
-        assert [a["type"] for a in payload["actions"]] == ["click", "fill"]
+        assert payload["actions"] == [
+            {"type": "fill", "selector": "#email", "value": "me@example.com"},
+            {
+                "type": "fill",
+                "selector": "#password",
+                "value": self.VAULT["acme_password"],
+            },
+            {"type": "click", "selector": "button[type=submit]"},
+        ]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_click_before_a_fill_still_leads(self, mock_url, mock_post, proxy):
+        """The other direction, which worked before and has to keep working.
+
+        Positional ordering is strictly more expressive than the click-first
+        rule it replaces: a caller who wants the click first — opening a login
+        modal, dismissing a cookie banner — writes it first and gets it first.
+        """
+        proxy()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok", "session_id": "s1", "actions": [],
+        }
+        mock_post.return_value = mock_resp
+
+        main([
+            "interact", "s1",
+            "--click", ".show-login",
+            "--fill-credential", "#password=acme_password",
+        ])
+        payload = mock_post.call_args[1]["json"]
+        assert payload["actions"] == [
+            {"type": "click", "selector": ".show-login"},
+            {
+                "type": "fill",
+                "selector": "#password",
+                "value": self.VAULT["acme_password"],
+            },
+        ]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_several_clicks_keep_their_order_among_the_fills(
+        self, mock_url, mock_post, proxy,
+    ):
+        """Clicks interleave with fills rather than clustering at either end."""
+        proxy()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok", "session_id": "s1", "actions": [],
+        }
+        mock_post.return_value = mock_resp
+
+        main([
+            "interact", "s1",
+            "--click", ".accept-cookies",
+            "--fill", "#email=me@example.com",
+            "--click", ".next",
+            "--fill-credential", "#password=acme_password",
+            "--click", "button[type=submit]",
+        ])
+        payload = mock_post.call_args[1]["json"]
+        assert [
+            (a["type"], a["selector"]) for a in payload["actions"]
+        ] == [
+            ("click", ".accept-cookies"),
+            ("fill", "#email"),
+            ("click", ".next"),
+            ("fill", "#password"),
+            ("click", "button[type=submit]"),
+        ]
 
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
