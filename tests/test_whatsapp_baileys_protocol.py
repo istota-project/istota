@@ -354,14 +354,33 @@ class TestHello:
 
 
 class TestTheModuleBoundary:
-    def test_it_imports_only_plain_data_from_the_package(self):
-        """The leaf rule, asserted transitively.
+    def test_it_imports_only_plain_data_and_the_containment_rule(self):
+        """What this module may name, and what the pin is now worth.
 
-        `session/session_log.py` draws the same line around `istota.llm.types`:
-        a module of plain data importing nothing itself costs no import graph.
-        Checking only this module's own imports would pass for a `._types` that
-        had since grown a `config` import and brought the whole package in
-        through a name the guard had already approved.
+        It used to be `._types` alone, asserted transitively on
+        `session/session_log.py`'s line around `istota.llm.types`: a module of
+        plain data importing nothing itself costs no import graph, and
+        checking only the direct imports would pass for a `._types` that had
+        since grown a `config` import.
+
+        **`.media` breaks the transitive half and the claim behind it was
+        already false.** Measured: importing this module executes
+        `transport/whatsapp/__init__.py`, which imports `transport._types`,
+        which pulls `db`, `storage` and `config` — so the graph arrives
+        through the package whatever this file names, and `media.py`'s own
+        docstring carries the same measurement in the other direction. What
+        the pin actually buys, and still buys, is that the *named* set is
+        small enough that a third entry is a decision somebody makes rather
+        than an accident: a normalizer reaching for a brain, a transport or a
+        database is the thing to catch.
+
+        `.media` earns its place because `is_staged_name` is the rule for
+        whether a value off the wire may be joined under the staging root, and
+        this is the module that reads that value. The alternative was a second
+        copy of a containment test, which is a worse trade than a name here.
+
+        The `._types` half is unchanged and still transitive: that module must
+        import nothing from the package at all.
         """
         import ast
         from pathlib import Path
@@ -374,7 +393,16 @@ class TestTheModuleBoundary:
             names = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.level:
-                    names.add(node.module or "")
+                    # A relative import naming no module — `from . import x` —
+                    # contributes the *names* it binds. Collapsing it to `""`
+                    # made `from . import media` and
+                    # `from . import media, outbound` the identical set, so the
+                    # guard stopped discriminating at exactly the moment it was
+                    # widened to allow one sibling.
+                    if node.module:
+                        names.add(node.module)
+                    else:
+                        names.update(alias.name for alias in node.names)
                 elif isinstance(node, ast.Import):
                     names.update(
                         alias.name for alias in node.names
@@ -382,5 +410,23 @@ class TestTheModuleBoundary:
                     )
             return names
 
-        assert package_imports(protocol_module) == {"_types"}
+        assert package_imports(protocol_module) == {"_types", "media"}
         assert package_imports(types_module) == set()
+
+        # The control for the widening: a second sibling on the same
+        # `from . import` line has to move the set, or allowing one sibling
+        # quietly allowed every sibling.
+        import textwrap
+
+        widened = ast.parse(textwrap.dedent('''
+            from . import media, outbound
+            from ._types import InboundWhatsAppEvent
+        '''))
+        names = set()
+        for node in ast.walk(widened):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                if node.module:
+                    names.add(node.module)
+                else:
+                    names.update(alias.name for alias in node.names)
+        assert names == {"_types", "media", "outbound"}

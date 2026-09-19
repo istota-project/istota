@@ -2296,14 +2296,18 @@ class TestTheAfterCommitReplies:
         config = _config(tmp_path)
         _bind(config)
         client = _FakeClient()
-        image = {
-            "id": "wamid.img",
+        # A document rather than an image: an image is the one media type this
+        # surface reads, and one whose file never staged earns the
+        # media-failed reply instead — a different sentence, tested in
+        # `tests/test_whatsapp_cloud_media.py`.
+        document = {
+            "id": "wamid.doc",
             "from": USER_BSUID,
             "timestamp": str(int(datetime.now(timezone.utc).timestamp())),
-            "type": "image",
-            "image": {"id": "media-1", "caption": "what is this"},
+            "type": "document",
+            "document": {"id": "media-1", "caption": "what is this"},
         }
-        payload = _payload(_value(contacts=[_contact()], messages=[image]))
+        payload = _payload(_value(contacts=[_contact()], messages=[document]))
 
         _results, pending = self._run(config, payload, client, monkeypatch)
         await pending

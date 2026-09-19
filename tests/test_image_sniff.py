@@ -4,11 +4,24 @@ The predicate is the whole of the security argument behind serving a workspace
 file `inline` instead of `attachment`, so the cases that matter most are the
 misses: an SVG, an HTML document and anything that only *looks* like an image
 because of where it sits in a filename.
+
+The second half of the file is about the module's *other* question — what the
+image pipeline can decode — and the two predicates are held apart deliberately:
+`sniff_raster` must keep refusing HEIC, because that answer is what keeps
+`/chat/files` narrow.
 """
 
 import pytest
 
-from istota.image_sniff import INLINE_MEDIA_TYPES, SNIFF_BYTES, sniff_raster
+from istota.image_attachments import IMAGE_EXTENSIONS
+from istota.image_sniff import (
+    DECODABLE_MEDIA_TYPES,
+    EXTENSION_BY_MEDIA_TYPE,
+    INLINE_MEDIA_TYPES,
+    SNIFF_BYTES,
+    sniff_decodable,
+    sniff_raster,
+)
 
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01"
@@ -135,3 +148,133 @@ def test_a_non_contiguous_memoryview_is_refused():
     strided = memoryview(bytearray(PNG + PNG))[::2]
     assert not strided.c_contiguous
     assert sniff_raster(strided) is None
+
+
+# --------------------------------------------------------------------------
+# The decodable question
+# --------------------------------------------------------------------------
+
+HEIC_HEADER = b"\x00\x00\x00\x1cftypheic\x00\x00\x00\x00mif1heic"
+HEIF_HEADER = b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00mif1heic"
+MP4_HEADER = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41"
+QUICKTIME_HEADER = b"\x00\x00\x00\x14ftypqt  \x00\x00\x02\x00qt  "
+THREE_GP_HEADER = b"\x00\x00\x00\x18ftyp3gp5\x00\x00\x00\x00"
+
+
+def _encoded_heic() -> bytes:
+    """A real HEIC, generated rather than committed.
+
+    A committed binary would be an opaque blob in a public repository, and
+    producing one needs `pillow-heif` either way — which is a core dependency,
+    so it is in the lean `--extra test` install this suite runs against.
+
+    **It is not a substitute for a device file.** What it pins is that the
+    brand allowlist matches what the encoder in this tree produces; nobody here
+    has inspected an iPhone photo, which is why the allowlist covers eight
+    brands rather than the one this fixture exercises.
+    """
+    import io
+
+    pillow_heif = pytest.importorskip("pillow_heif", reason="HEIF encoder absent")
+    from PIL import Image
+
+    pillow_heif.register_heif_opener()
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (10, 20, 30)).save(buf, format="HEIF")
+    return buf.getvalue()
+
+
+DECODABLE_HITS = [
+    ("png", PNG, "image/png"),
+    ("jpeg", JPEG, "image/jpeg"),
+    ("gif87a", GIF87, "image/gif"),
+    ("gif89a", GIF89, "image/gif"),
+    ("webp", WEBP, "image/webp"),
+    ("heic", HEIC_HEADER, "image/heic"),
+    ("heif", HEIF_HEADER, "image/heif"),
+]
+
+
+@pytest.mark.parametrize(
+    "name,head,expected", DECODABLE_HITS, ids=[c[0] for c in DECODABLE_HITS]
+)
+def test_the_pipeline_can_decode_these(name, head, expected):
+    assert sniff_decodable(head) == expected
+
+
+def test_an_encoder_produced_heic_is_admitted():
+    """The library case, end to end: what `pillow-heif` writes here is what
+    `image_attachments` opens, so the allowlist has to admit it."""
+    assert sniff_decodable(_encoded_heic()) == "image/heic"
+
+
+@pytest.mark.parametrize(
+    "name,head",
+    [
+        ("mp4", MP4_HEADER),
+        ("quicktime", QUICKTIME_HEADER),
+        ("3gp", THREE_GP_HEADER),
+        ("svg", b'<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>'),
+        ("pdf", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3"),
+        ("bare ftyp with no brand", b"\x00\x00\x00\x0cftyp"),
+        ("ftyp at the wrong offset", b"xftypheic\x00\x00\x00\x00"),
+        ("empty", b""),
+    ],
+    ids=[
+        "mp4", "quicktime", "3gp", "svg", "pdf", "bare-ftyp", "wrong-offset",
+        "empty",
+    ],
+)
+def test_everything_else_is_not_decodable(name, head):
+    """MP4, 3GP and QuickTime are the same ISO-BMFF container as HEIC, so a
+    bare `ftyp` test would have typed a video as an image and spent a Pillow
+    decode on it. Only the major brand at offset 8 admits a file."""
+    assert sniff_decodable(head) is None
+
+
+def test_the_inline_answer_still_refuses_heic():
+    """The control for the two-predicate split. `/chat/files` must keep the
+    narrow answer — browser support for HEIF is not universal, and an inline
+    type that does not draw is worse than an attachment that does. If both
+    predicates admitted a HEIC, one function would do and the split bought
+    nothing."""
+    assert sniff_raster(HEIC_HEADER) is None
+    assert sniff_raster(HEIF_HEADER) is None
+    assert sniff_raster(_encoded_heic()) is None
+    assert "image/heic" not in INLINE_MEDIA_TYPES.values()
+    assert "image/heif" not in INLINE_MEDIA_TYPES.values()
+
+
+def test_the_decodable_set_is_the_inline_four_plus_the_heif_pair():
+    assert set(DECODABLE_MEDIA_TYPES.values()) == set(
+        INLINE_MEDIA_TYPES.values()
+    ) | {"image/heic", "image/heif"}
+
+
+def test_every_extension_it_names_survives_the_downstream_screen():
+    """`prepare_image_attachments` screens candidates by suffix, so a staged
+    file named from this table and not in that set is skipped in silence —
+    the model answers without the image and without knowing one was sent.
+    Pinned here rather than in the module, which imports nothing."""
+    assert set(EXTENSION_BY_MEDIA_TYPE) == set(DECODABLE_MEDIA_TYPES.values())
+    assert set(EXTENSION_BY_MEDIA_TYPE.values()) <= IMAGE_EXTENSIONS
+
+
+def test_sniff_bytes_covers_the_major_brand():
+    """A brand sits at 8..12, inside the 32 the existing comment anticipated."""
+    assert SNIFF_BYTES >= 12
+    for _name, head, expected in DECODABLE_HITS:
+        assert sniff_decodable(head[:SNIFF_BYTES]) == expected
+
+
+@pytest.mark.parametrize(
+    "bad", [None, "\x89PNG\r\n\x1a\n", 42, [], {}],
+    ids=["none", "str", "int", "list", "dict"],
+)
+def test_the_decodable_predicate_never_raises_either(bad):
+    assert sniff_decodable(bad) is None
+
+
+def test_the_decodable_predicate_takes_the_same_buffer_types():
+    assert sniff_decodable(bytearray(HEIC_HEADER)) == "image/heic"
+    assert sniff_decodable(memoryview(HEIC_HEADER)) == "image/heic"

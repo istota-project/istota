@@ -321,8 +321,26 @@ systemctl restart "${NAMESPACE}-webhooks"
 # ExecStart is rendered from, so the guard cannot check one path while systemd
 # execs another.
 BAILEYS_NODE_BIN="{{ istota_whatsapp_baileys_node_bin }}"
+# The same guard shape for the unit's own environment, and it exists because
+# this script delivers the *program* while only a full play delivers the
+# *unit*. The sidecar requires three variables and exits 2 without any one of
+# them, so a commit that adds a fourth arrives here as a new index.js against
+# an old unit file -- and the refusal has nowhere to go: StandardOutput=null,
+# and the program's only log destination is a file inside the 0700 session
+# directory. The result is a restart loop with an empty journal, whose only
+# surface signal is doctor reporting no sidecar connected, which names the
+# wrong cause. ISTOTA_BAILEYS_MEDIA_DIR is the one that has been added; the
+# check is on the installed unit rather than on `systemctl show`, because the
+# latter reports what systemd last loaded rather than what is on disk.
+BAILEYS_UNIT="/etc/systemd/system/${NAMESPACE}-whatsapp-baileys.service"
+BAILEYS_UNIT_STALE=""
+if [ -f "$BAILEYS_UNIT" ] && ! grep -q "ISTOTA_BAILEYS_MEDIA_DIR" "$BAILEYS_UNIT"; then
+    BAILEYS_UNIT_STALE="yes"
+fi
 if [ ! -x "$BAILEYS_NODE_BIN" ]; then
     log "ERROR: ${BAILEYS_NODE_BIN} is missing or not executable; not starting ${NAMESPACE}-whatsapp-baileys (run a full play)"
+elif [ -n "$BAILEYS_UNIT_STALE" ]; then
+    log "ERROR: ${BAILEYS_UNIT} predates ISTOTA_BAILEYS_MEDIA_DIR; not restarting ${NAMESPACE}-whatsapp-baileys, which would exit 2 in a loop (run a full play)"
 elif [ -n "$BAILEYS_CHANGED" ]; then
     log "Restarting ${NAMESPACE}-whatsapp-baileys"
     systemctl restart "${NAMESPACE}-whatsapp-baileys"

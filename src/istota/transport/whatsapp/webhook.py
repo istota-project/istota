@@ -49,6 +49,7 @@ from ..ingest import ingest_message
 from . import (
     bsuid_fingerprint,
     identity as identity_rules,
+    media as media_rules,
     message_fingerprint,
     whatsapp_conversation_token,
 )
@@ -57,6 +58,7 @@ from ._types import (
     WhatsAppDeliveryEvent,
     WhatsAppDeliveryStatus,
     WhatsAppEvent,
+    WhatsAppInboundMedia,
     WhatsAppUserIdentity,
 )
 from .client import SIGNATURE_HEADER, verify_signature
@@ -89,6 +91,36 @@ HELP_REPLY = (
 )
 STOP_REPLY = "You will get no further WhatsApp messages. Send START to resume."
 START_REPLY = "WhatsApp messages are on again."
+MEDIA_FAILED_REPLY = (
+    "That image could not be fetched. Please send it again."
+)
+"""What a message whose file never made it earns, instead of `UNSUPPORTED_REPLY`.
+
+The two are deliberately distinguishable, and that is the whole point of
+`WhatsAppInboundMedia.error`: "not supported yet" tells somebody to stop
+sending photographs, which is the wrong instruction for a download that failed,
+a file past the per-file cap, or a pre-check that could not be answered. This
+one asks for the thing they already did.
+"""
+
+MEDIA_ONLY_PROMPT = "The user sent an image with no caption."
+"""The prompt an uncaptioned image becomes.
+
+Fixed English, not a format string and not model output. The attachments
+section `executor.build_prompt` appends names the file, and
+`prepare_image_attachments` supplies the pixels and the OCR block, so the model
+has everything it needs — this sentence is there so the prompt is not empty and
+so the turn reads correctly in task history.
+"""
+
+MEDIA_NO_ID_REASON = "the image named no media id"
+"""What an `image` message Meta sent without a readable media id becomes.
+
+There is nothing to fetch, so the record carries an `error` rather than being
+dropped — dropping it would send a *captioned* image back through the narrowed
+`unsupported_type` gate, which answers "photographs are not supported" for what
+is really a payload this normalizer could not read.
+"""
 
 _TEXT_TYPES = frozenset({"text"})
 _CALLBACK_TYPES = frozenset({"interactive", "button"})
@@ -326,6 +358,15 @@ def _message_shape(message: Mapping[str, object]) -> tuple[str, str | None, str 
         body = message.get("text")
         body = body.get("body") if isinstance(body, Mapping) else None
         return "text", body if isinstance(body, str) else "", None
+    if declared == "image":
+        # **The caption rides `text`**, which is what makes every gate in
+        # `_dispatch_inbound` apply to it with no new code: `STOP` on a
+        # photograph opts out, `!usage` runs, a `YES` answers the parked
+        # confirmation. A caption is a message, and there is no reason for it
+        # to mean something different because a file came with it.
+        image = message.get("image")
+        image = image if isinstance(image, Mapping) else {}
+        return "image", _optional_text(image.get("caption")), None
     if declared == "interactive":
         interactive = message.get("interactive")
         interactive = interactive if isinstance(interactive, Mapping) else {}
@@ -359,6 +400,13 @@ def _inbound_event(
         message_type = "group"
         text = None
         callback_data = None
+    # **After the group arm, and that ordering is the guard.** The group gate
+    # in `_dispatch_inbound` runs inside the transaction, while the fetch this
+    # record authorizes happens before it — so a group image must carry no
+    # record at all, which the reset above arranges by taking `image` off the
+    # type. Baileys refuses a group message in the sidecar, before anything is
+    # downloaded; this is the same refusal one module over.
+    media = _pending_media(message) if message_type == "image" else None
     return InboundWhatsAppEvent(
         message_id=_required_text(message, "id", "message id"),
         waba_id=waba_id,
@@ -369,6 +417,52 @@ def _inbound_event(
         callback_data=callback_data,
         reply_to_message_id=_optional_text(context.get("id")),
         sent_at=_event_time(message),
+        media=media,
+    )
+
+
+def _pending_media(message: Mapping[str, object]) -> WhatsAppInboundMedia:
+    """The media record for a Cloud `image`, naming bytes still to be fetched.
+
+    Meta's callback carries a media id rather than the file, so what this
+    builds is a record with an empty `staged_path` and a `remote_id`:
+    `providers.whatsapp_cloud.stage_cloud_media` is what turns one into the
+    other, before the route opens its transaction.
+
+    A record with neither — one this normalizer built and nothing staged — is
+    refused by `_media_for_user` rather than attached, so the wiring being
+    absent is a `media_failed` reply and not a staged path on a task.
+
+    `mime_type` is the declared type and decides nothing; the sniff in
+    `media.stage_to_attachment` is authoritative, because a sender controls
+    what they upload and the file is about to be decoded by Pillow and copied
+    into somebody's workspace.
+    """
+    image = message.get("image")
+    image = image if isinstance(image, Mapping) else {}
+    remote_id = _optional_text(image.get("id"))
+    if not remote_id:
+        # No value off the wire in the log line: the id is what could not be
+        # read, and a message id is already a fingerprint by the time anything
+        # here logs one.
+        logger.warning(
+            "whatsapp.inbound.media_unreadable: an image message named no "
+            "media id",
+        )
+        return WhatsAppInboundMedia(
+            staged_path="", mime_type="", byte_count=0, attached_for_user="",
+            error=MEDIA_NO_ID_REASON,
+        )
+    return WhatsAppInboundMedia(
+        staged_path="",
+        # Printable and bounded, in `media.py` because `client.fetch_media`
+        # reads the same field off Meta's media-url answer and the two must
+        # not drift on what a value fit to log is.
+        mime_type=media_rules.bounded_media_type(image.get("mime_type")),
+        byte_count=0,
+        attached_for_user="",
+        error=None,
+        remote_id=remote_id,
     )
 
 
@@ -693,6 +787,7 @@ def _handle_inbound(
             message_fingerprint(event.message_id),
             identity_rules.identity_fingerprint(event.from_user, provider=provider),
         )
+        _report_stranded_media(event, resolution.disposition or "unknown_sender")
         return WhatsAppEventResult(
             resolution.disposition or "unknown_sender",
             pending_alerts=_alerts(resolution.pending_alert),
@@ -707,6 +802,7 @@ def _handle_inbound(
             "whatsapp.inbound.duplicate message=%s",
             message_fingerprint(event.message_id),
         )
+        _report_stranded_media(event, "duplicate")
         return WhatsAppEventResult("duplicate", user_id=user_id)
 
     binding = db.get_whatsapp_binding(conn, user_id)
@@ -726,7 +822,9 @@ def _handle_inbound(
         ),
     )
 
-    result = _dispatch_inbound(conn, config, event, user_id, binding)
+    result = _dispatch_inbound(
+        conn, config, _media_for_user(event, user_id), user_id, binding,
+    )
     # An alert the *resolution* raised on its way to succeeding — today the
     # cross-adapter one, where a principal was re-established from the phone
     # number alone after an adapter switch. The refusal path returns above
@@ -753,6 +851,89 @@ def _handle_inbound(
     return result
 
 
+def _report_stranded_media(event: InboundWhatsAppEvent, reason: str) -> None:
+    """Name an inbox copy the transaction is about to walk away from.
+
+    The copy is made outside the lock, on the pre-check's answer, and three
+    returns in `_handle_inbound` sit between that and the dispatch: the
+    authoritative resolution refusing where the pre-check named somebody (a
+    recycled line, a latch that lost its race), and the claim finding the
+    message id already taken by a concurrent batch. Nothing downstream will
+    mention the file again, and nothing can un-copy it — which is the same
+    rule `_media_for_user` follows for the mismatch case, applied to the
+    returns that never reach it.
+
+    Never raises and never runs for a record that names no copy: a media
+    failure carries no path, and a message that carried nothing has nothing
+    stranded.
+    """
+    media = event.media
+    if media is None or media.error is not None or not media.staged_path:
+        return
+    logger.warning(
+        "whatsapp.inbound.media_stranded message=%s reason=%s staged_for=%s "
+        "path=%s: the message was refused after its file had been copied",
+        message_fingerprint(event.message_id), reason,
+        media.attached_for_user, media.staged_path,
+    )
+
+
+def _media_for_user(
+    event: InboundWhatsAppEvent, user_id: str
+) -> InboundWhatsAppEvent:
+    """Keep this message's file only if it was staged for *this* user.
+
+    The pre-check that named a user ran outside the transaction, on a
+    deliberately stale read, and the file was copied on the strength of its
+    answer. A binding can change in the window — a re-enrollment, a cleared
+    identity, a bootstrap latch, a latch that lost its race — and without this
+    comparison one user's photograph would be attached to another user's task.
+    The window is milliseconds and the case is rare, which is exactly why it
+    needs a rule rather than a reader's assumption.
+
+    What it cannot do is un-copy the file, so a mismatch is reported at
+    warning naming the stranded copy: nothing downstream will ever mention it
+    again, and the bytes are in somebody's workspace.
+
+    **It also catches a record nothing staged at all**, which is the more
+    likely way to reach here — the decoder fills `attached_for_user` with `""`
+    and only the staging step replaces it, so a caller that skipped that step
+    fails this comparison against a user id that is never empty. That is the
+    guard rather than an accident of it: a staged path put on a task with no
+    inbox copy behind it names a file the sweep deletes ten minutes later.
+
+    A record already carrying an `error` is left alone. It names no copy, so
+    there is nothing to compare and nothing stranded, and the honest reading
+    of an opted-out sender's refusal is not "a binding changed".
+    """
+    media = event.media
+    if media is None or media.error is not None:
+        return event
+    if media.attached_for_user == user_id and media.staged_path:
+        return event
+    if media.staged_path:
+        logger.warning(
+            "whatsapp.inbound.media_misattached message=%s staged_for=%s "
+            "resolved=%s path=%s: the binding changed after the copy was "
+            "made, so the file stays in the first user's workspace",
+            message_fingerprint(event.message_id), media.attached_for_user,
+            user_id, media.staged_path,
+        )
+    else:
+        logger.warning(
+            "whatsapp.inbound.media_unstaged message=%s: a media record "
+            "reached the transaction with no inbox copy behind it",
+            message_fingerprint(event.message_id),
+        )
+    return replace(
+        event,
+        media=replace(
+            media, staged_path="", mime_type="", byte_count=0,
+            error=media_rules.MEDIA_UNATTRIBUTED,
+        ),
+    )
+
+
 def _dispatch_inbound(
     conn, config: Config, event: InboundWhatsAppEvent, user_id: str, binding,
 ) -> WhatsAppEventResult:
@@ -767,7 +948,13 @@ def _dispatch_inbound(
     if event.callback_data is not None:
         return _handle_callback(conn, config, event, user_id, token)
 
-    if event.message_type not in _TEXT_TYPES:
+    if event.message_type not in _TEXT_TYPES and event.media is None:
+        # **Narrowed at the gate rather than by widening `_TEXT_TYPES`**, whose
+        # name would then be a lie: an image is not a text type, it is a type
+        # this surface can now read *because a file came with it*. A message
+        # whose bytes were staged before the lock was taken falls through to
+        # the text path, where its caption is an ordinary message and every
+        # gate below applies to it with no new code.
         if opted_out:
             return WhatsAppEventResult("opted_out", user_id=user_id)
         return WhatsAppEventResult(
@@ -815,11 +1002,16 @@ def _dispatch_inbound(
                 response_logical_key=f"confirmation-answer:{event.message_id}",
             )
 
-    if not text:
+    if not text and event.media is None:
         # Above the opt-out gate, because the spec's step 4 sits above its step
         # 5 and `## Behaviour > Edge cases` names `empty` unconditionally. It
         # also reads better in the dedup row: nothing was withheld from this
         # message, there was nothing in it.
+        #
+        # An uncaptioned image is not that. Somebody sent a photograph and said
+        # nothing about it, which is the most ordinary thing this surface
+        # receives — it earns `MEDIA_ONLY_PROMPT` below rather than a
+        # disposition meaning the message was blank.
         return WhatsAppEventResult("empty", user_id=user_id)
 
     if opted_out:
@@ -834,12 +1026,36 @@ def _dispatch_inbound(
             response_logical_key=f"command:{event.message_id}",
         )
 
+    if event.media is not None and event.media.error is not None:
+        # **Below everything a caption can mean, and above the task.** A
+        # caption is a message: `STOP` with a failed image still opts out,
+        # `!usage` still runs, an answer still answers — each of those is
+        # complete without the file, so none of them may be turned into this
+        # reply. What is left is a request whose whole subject was the image,
+        # which cannot be answered honestly, so it is refused in words that
+        # ask for the thing again rather than in words that say photographs
+        # are not supported.
+        logger.info(
+            "whatsapp.inbound.media_failed message=%s reason=%s",
+            message_fingerprint(event.message_id), event.media.error,
+        )
+        return WhatsAppEventResult(
+            "media_failed", user_id=user_id,
+            response_text=MEDIA_FAILED_REPLY,
+            response_logical_key=f"media-failed:{event.message_id}",
+        )
+
+    attachments = (
+        [event.media.staged_path] if event.media is not None else []
+    )
     confirmations.cancel_for_conversation(conn, token, user_id, by="whatsapp")
     task_id = ingest_message(
         conn, config,
         IncomingMessage(
-            user_id=user_id, text=text, source_type="whatsapp",
+            user_id=user_id, text=text or MEDIA_ONLY_PROMPT,
+            source_type="whatsapp",
             surface="whatsapp", channel_token=token, output_target="whatsapp",
+            attachments=attachments,
             mirror_to_room=False, queue="foreground",
         ),
     )

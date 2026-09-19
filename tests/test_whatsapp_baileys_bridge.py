@@ -454,12 +454,14 @@ class TestTheChildEnvironment:
         monkeypatch.setenv("PATH", "/usr/bin")
         instance = BaileysBridge(
             config, socket_path=sockets.socket, session_dir=sockets.session,
+            media_dir=sockets.session.parent / "whatsapp-media",
         )
 
         env = instance._child_env()
 
         assert set(env) == {
             "PATH", bridge_module.ENV_SOCKET, bridge_module.ENV_SESSION_DIR,
+            bridge_module.ENV_MEDIA_DIR,
         } | ({"HOME"} if "HOME" in os.environ else set()) | (
             {"LANG"} if "LANG" in os.environ else set()
         ) | ({"LC_ALL"} if "LC_ALL" in os.environ else set()) | (
@@ -467,6 +469,11 @@ class TestTheChildEnvironment:
         ) | ({"NODE_ENV"} if "NODE_ENV" in os.environ else set())
         assert env[bridge_module.ENV_SOCKET] == str(sockets.socket)
         assert env[bridge_module.ENV_SESSION_DIR] == str(sockets.session)
+        # The sidecar exits 2 without this one, so a bridge that spawns a
+        # sidecar has to hand it over — the three are one requirement.
+        assert env[bridge_module.ENV_MEDIA_DIR] == str(
+            sockets.session.parent / "whatsapp-media"
+        )
 
 
 # ---------------------------------------------------------------------------

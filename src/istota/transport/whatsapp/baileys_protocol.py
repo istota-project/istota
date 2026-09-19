@@ -13,14 +13,31 @@ line is what a Node `readline` on the other side already produces. What is
 kept is the discipline: the cap is enforced on **both** ends, a decoder raises
 rather than guessing, and no field is inferred from another.
 
-**It imports `._types` and nothing else from the package**, which is the same
-boundary `session/session_log.py` draws around `istota.llm.types`: that module
-is plain data importing nothing itself, so naming it costs no import graph and
-buys the one thing a bare framing module could not have — the normalizers.
-Those are the whole test surface of a wire format, and putting them in
-`baileys_bridge.py` would mix them with an accept loop and a subprocess
-supervisor. The Cloud half is arranged the same way: `webhook.py` holds
-`parse_webhook` and `normalize_payload` together.
+**It imports `._types` and `.media`, and nothing else from the package.** The
+first is the same boundary `session/session_log.py` draws around
+`istota.llm.types`: that module is plain data importing nothing itself, so
+naming it costs no import graph and buys the one thing a bare framing module
+could not have — the normalizers. Those are the whole test surface of a wire
+format, and putting them in `baileys_bridge.py` would mix them with an accept
+loop and a subprocess supervisor. The Cloud half is arranged the same way:
+`webhook.py` holds `parse_webhook` and `normalize_payload` together.
+
+The second used to be forbidden by this paragraph, which said `._types` and
+nothing else. `media.is_staged_name` is the rule for whether a value off the
+wire may be joined under the staging root, and this is the module that reads
+that value — so the alternative was a second copy of a containment test, which
+is the duplication class the tree spends most of its guards on. `media.py`'s
+own docstring carries the measurement that the boundary was never real in
+either direction: this module already pulls `db`, `storage` and `config`
+through the package `__init__` on its own.
+
+**Nothing here logs a value off the wire**, which is narrower than the "nothing
+here logs" this file used to claim and is what that claim was protecting: a
+`qr` payload is a pairing credential for the whole WhatsApp account, and an
+`inbound` message carries the sender's number and their words. A media field
+this side refuses is named by *field*, never by value — the spec's own wording,
+"naming the failure and not the value" — because a value it refused is exactly
+the one most worth not writing down.
 
 **The other side is TypeScript, so there is no vendored Python copy of this
 file and no byte pin for one.** `docker/devbox/lib/istota_forge_cli.py` and its
@@ -29,27 +46,29 @@ reimplementation, which `.claude/rules/devbox.md` already has a precedent for
 in `istota_devbox_client.py` — pinned behaviourally rather than by bytes.
 Stage 6 owns that pin.
 
-Nothing here logs, and nothing here may be made to log: a `qr` payload is a
-pairing credential for the whole WhatsApp account, and an `inbound` message
-carries the sender's number and their words.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from . import media as media_rules
 from ._types import (
     InboundWhatsAppEvent,
     WhatsAppDeliveryEvent,
     WhatsAppDeliveryStatus,
+    WhatsAppInboundMedia,
     WhatsAppSendFailure,
     WhatsAppSendOutcome,
     WhatsAppSendRequest,
     WhatsAppSendResult,
     WhatsAppUserIdentity,
 )
+
+logger = logging.getLogger("istota.transport.whatsapp.baileys_protocol")
 
 #: Bumped whenever a field changes meaning. The sidecar states its version in
 #: the `hello` frame and the bridge refuses a version it does not know, rather
@@ -103,6 +122,33 @@ MAX_INBOUND_TEXT_CHARS = 65536
 #: A display name, bounded for the same reason one field over. It reaches
 #: `db.touch_whatsapp_binding`'s `username` column and no further.
 MAX_USERNAME_CHARS = 256
+
+#: A declared media type, bounded because it is a string off the wire that
+#: reaches a log line. It is **advisory** and nothing branches on it:
+#: `media.stage_to_attachment` sniffs the bytes and names the inbox copy from
+#: its own answer, because the sender chose what they uploaded. 128 is well
+#: past any real `type/subtype; parameters` and short enough to log whole —
+#: which is also why the value is held to printable characters beside the
+#: length: a log line is where it goes, and a newline or an ANSI escape off
+#: the wire forges one there.
+MAX_MEDIA_MIME_CHARS = 128
+
+#: Every `media_error` the sidecar may name, and the local sentence each
+#: becomes. `_SEND_REASONS`' rule, for its reason: the sidecar's own words
+#: carry the destination JID and, on a Boom error, the whole request, so the
+#: reason crosses as a key and the prose is written down in the daemon.
+#:
+#: **The prose itself lives in `media.py`**, because the Cloud adapter says the
+#: same three things about its own fetch — there the daemon *is* the fetcher,
+#: so `client.fetch_media` raises them directly with no wire to cross. What a
+#: user is told is exactly what two copies would drift on. The keys stay here,
+#: since they are this adapter's wire vocabulary and the sidecar's own.
+_MEDIA_ERRORS: dict[str, str] = {
+    "download_failed": media_rules.MEDIA_FETCH_FAILED,
+    "over_the_cap": media_rules.MEDIA_OVER_CAP,
+    "write_failed": media_rules.MEDIA_WRITE_FAILED,
+}
+_UNKNOWN_MEDIA_ERROR = "the image could not be fetched"
 
 #: Baileys' receipt vocabulary mapped onto the ledger's. A status this surface
 #: does not model yields `None` and the caller drops the receipt — inventing a
@@ -273,6 +319,123 @@ def _event_time(values: dict[str, Any]) -> datetime:
         raise BaileysProtocolError("invalid event timestamp") from None
 
 
+def _dropped_media(field: str) -> WhatsAppInboundMedia:
+    """Say a media field was refused, by field name and never by value.
+
+    The value is a string a sidecar chose and this side just decided it could
+    not read, which makes it the one most worth keeping out of the log.
+
+    **It answers a failed record rather than `None`, and that is what keeps
+    the log line's own claim true.** `None` means "this message carried no
+    file", which `_dispatch_inbound`'s narrowed gate reads together with the
+    message type: an `image` with no record is a type the surface cannot read
+    with nothing attached, so it takes the unsupported reply and the caption
+    is never looked at. Dropping the record would therefore cost the whole
+    message — `STOP` typed on a photograph included — where this module's
+    rule, stated one function down, is that a malformed field costs the media
+    and never the message.
+
+    The staged file is **not** unlinked here, and cannot be: this module
+    refuses to turn a value off the wire into a path at all, which is the
+    whole of `staged_path`'s containment story, and on the arms below the name
+    is exactly what could not be read. The sweep takes it.
+    """
+    logger.warning(
+        "whatsapp.baileys.media_dropped field=%s: the message is kept and its "
+        "image is not",
+        field,
+    )
+    return WhatsAppInboundMedia(
+        staged_path="", mime_type="", byte_count=0,
+        attached_for_user="", error=_UNKNOWN_MEDIA_ERROR,
+    )
+
+
+def _inbound_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:
+    """The four media fields as a record, or `None` for a message without one.
+
+    **A malformed field costs the media and never the message.** That is
+    `webhook.handle_whatsapp_batch`'s own rule — a media failure must cost the
+    media, never the batch — restated at the decoder, and it is why nothing
+    here raises `BaileysProtocolError`: a caption somebody typed must not be
+    thrown away over a field no authoritative reader consults.
+
+    **`staged_path` is the bare name the sidecar minted, not a path**, and
+    that is a boundary rather than a convenience. A frame is an untrusted
+    string, so this module refuses to turn one into a path at all: it
+    validates the value as one ordinary component with `media.is_staged_name`
+    and hands the component on. `baileys_runtime` joins it under the staging
+    directory it resolved from config, which is the only place a path is
+    built — so no value off the wire can name a file outside it however this
+    decoder is later edited. The Cloud path has no such problem and fills an
+    absolute path, because there the daemon opened the file itself.
+
+    **`attached_for_user` is `""` here** on `NO_CLOUD_ACCOUNT`'s convention:
+    the unlocked pre-check has not run at decode time and the field has no
+    honest value yet. `baileys_runtime` fills it from `media.precheck`, and
+    the transaction compares it against the authoritative resolution.
+
+    `mime_type` and `byte_count` are the sidecar's declared values and are
+    both advisory: `stage_to_attachment` sniffs the bytes for the type and
+    re-measures the file for the size. They are carried for the log line, so
+    a disagreement is a debug matter rather than a decision.
+
+    An `error` outranks a name. The two never arrive together from our own
+    sidecar, and reading the name first would put a path on a record whose
+    contract says `staged_path` is `""` when `error` is set.
+    """
+    error_raw = payload.get("media_error")
+    if error_raw is not None:
+        if not isinstance(error_raw, str) or not error_raw:
+            return _dropped_media("media_error")
+        return WhatsAppInboundMedia(
+            staged_path="",
+            mime_type="",
+            byte_count=0,
+            attached_for_user="",
+            error=_MEDIA_ERRORS.get(error_raw.strip().lower(),
+                                    _UNKNOWN_MEDIA_ERROR),
+        )
+
+    name = payload.get("media_name")
+    if name is None:
+        return None
+    if not media_rules.is_staged_name(name):
+        return _dropped_media("media_name")
+
+    mime_raw = payload.get("media_mime")
+    if mime_raw is None:
+        mime = ""
+    elif (
+        isinstance(mime_raw, str)
+        and len(mime_raw) <= MAX_MEDIA_MIME_CHARS
+        and mime_raw.isprintable()
+    ):
+        mime = mime_raw
+    else:
+        return _dropped_media("media_mime")
+
+    # Absent reads as nought, matching the mime arm above: both are advisory,
+    # so losing an image over a missing log label would be the strictness
+    # landing on the wrong field. A value of the wrong *type* or a negative
+    # one still drops, because that is a sidecar this side cannot read.
+    byte_count = payload.get("media_bytes", 0)
+    if byte_count is None:
+        byte_count = 0
+    if isinstance(byte_count, bool) or not isinstance(byte_count, int):
+        return _dropped_media("media_bytes")
+    if byte_count < 0:
+        return _dropped_media("media_bytes")
+
+    return WhatsAppInboundMedia(
+        staged_path=name,
+        mime_type=mime,
+        byte_count=byte_count,
+        attached_for_user="",
+        error=None,
+    )
+
+
 def _message_id(values: dict[str, Any], name: str = "message_id") -> str:
     value = _text(values, name)
     if len(value) > MAX_MESSAGE_ID_CHARS:
@@ -317,17 +480,32 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
     read off the line rather than off the JID's domain: the sidecar knows which
     chat a message arrived in, and inferring it from a string is how a
     `@g.us` spelling change becomes a third party's text in somebody's task
-    history.
+    history. **The media goes with the text on that branch**, because nothing
+    will ever consume a file for a message refused above every identity
+    lookup; the staged file orphans and the sweep takes it.
+
+    An image's caption rides `text` rather than a field of its own, so that
+    every gate in `_dispatch_inbound` can apply to it with no new code —
+    `STOP` typed as a caption opting out, a caption starting with `!` being a
+    command, a caption that parses as a confirmation answer answering one.
+    **None of that is live in this tree yet**: `_dispatch_inbound` returns for
+    any `message_type` outside `_TEXT_TYPES` well above the STOP/START/HELP
+    block, so today an image's caption reaches none of them. Narrowing that
+    gate is the stage that makes the sentence true; carrying the caption on
+    `text` is what makes it cost no new code when it does. `_inbound_media`
+    owns the four media fields.
     """
     message_type = _optional_text(payload.get("message_type")) or "unknown"
     text = _bounded_text(payload.get("text"), "text", MAX_INBOUND_TEXT_CHARS)
     callback_data = _bounded_text(
         payload.get("callback_data"), "callback_data", MAX_MESSAGE_ID_CHARS,
     )
+    inbound_media = _inbound_media(payload)
     if payload.get("group") is True:
         message_type = "group"
         text = None
         callback_data = None
+        inbound_media = None
     return InboundWhatsAppEvent(
         message_id=_message_id(payload),
         waba_id=NO_CLOUD_ACCOUNT,
@@ -345,6 +523,7 @@ def inbound_event(payload: dict[str, Any]) -> InboundWhatsAppEvent:
         callback_data=callback_data,
         reply_to_message_id=_optional_text(payload.get("reply_to_message_id")),
         sent_at=_event_time(payload),
+        media=inbound_media,
     )
 
 
@@ -446,6 +625,7 @@ __all__ = [
     "DOWN_MESSAGES",
     "MAX_INBOUND_TEXT_CHARS",
     "MAX_LINE_BYTES",
+    "MAX_MEDIA_MIME_CHARS",
     "MAX_MESSAGE_ID_CHARS",
     "MAX_USERNAME_CHARS",
     "MSG_FATAL",

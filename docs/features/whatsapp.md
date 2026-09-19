@@ -1,6 +1,6 @@
 # WhatsApp
 
-Istota can receive requests and send final replies over WhatsApp, through one of two adapters. One WhatsApp number, text only.
+Istota can receive requests and send final replies over WhatsApp, through one of two adapters. One WhatsApp number. You can send text and photographs; replies come back as text.
 
 **`baileys`** is the default. It holds a WhatsApp Web session paired to a phone, the way a linked desktop client does, so there is no Meta account, no per-message charge, no 24-hour window and no template. It runs a small Node sidecar beside Istota and is paired by scanning a QR code. WhatsApp does not sanction this outside its Business API, so it carries risks the Cloud adapter does not — see "The trade Baileys carries" below.
 
@@ -8,7 +8,7 @@ Istota can receive requests and send final replies over WhatsApp, through one of
 
 A WhatsApp exchange is outside the room model on either adapter. It never creates or joins a Talk or web room, never copies a message into a room transcript, and never appears in a web composer. The task and its result stay available in the task history and the admin task views like any other task.
 
-Both adapters handle private text messages and the STOP, START and HELP keywords. Images, documents, audio, video, stickers, contacts, locations, reactions, edits, deletions, calls, Flows and payments are not handled: an unsupported message gets one fixed reply asking for text, and nothing is downloaded. Confirmation questions carry Yes and No buttons on Cloud and arrive as plain text on Baileys; either way a typed `YES` or `NO` answers them, and so does `!confirm <id> yes|no`.
+Both adapters handle private text messages, photographs, and the STOP, START and HELP keywords. Documents, audio, video, stickers, contacts, locations, reactions, edits, deletions, calls, Flows and payments are not handled: an unsupported message gets one fixed reply asking for text, and nothing is downloaded. Confirmation questions carry Yes and No buttons on Cloud and arrive as plain text on Baileys; either way a typed `YES` or `NO` answers them, and so does `!confirm <id> yes|no`.
 
 ## Choosing an adapter
 
@@ -258,6 +258,20 @@ Acceptance is not delivery on either adapter. Task and operator views distinguis
 
 STOP opts the binding out after one acknowledgement, START re-enables it, and HELP sends one fixed explanation. An opt-out survives an adapter switch.
 
+## Sending a photograph
+
+Take a photograph of a receipt, a letter, a whiteboard or a screenshot, send it to the number, and Istota sees it. The image reaches the model as pixels and as text read out of it, which is the same pipeline a Talk attachment goes through, so asking "what does this say" or "file this" works the way it does anywhere else.
+
+The caption is the request. Whatever you type under the photograph is the prompt, and it is ordinary text in every other respect: `STOP` as a caption opts you out, a caption starting with `!` runs the command, and a caption of `YES` answers a confirmation question that is waiting on you. Send a photograph with no caption and Istota looks at it and answers.
+
+A copy lands in your own Istota folder, under `inbox/`, the way an email attachment does. That is where the task reads it from, and it is the receipt you photographed kept where you can find it again.
+
+JPEG, PNG, GIF, WebP and HEIC are read. An iPhone photograph works: HEIC is converted before the model sees it. What decides the format is the file's own bytes rather than its name or the type the sender's phone declared, so a file that is not really an image is refused rather than decoded. One image may be up to 16 MB; a larger one, or a download that fails, gets a reply asking you to send it again, which is deliberately a different sentence from the one an unsupported message type gets.
+
+One image per message. Video, voice notes, documents and stickers are still refused — a photograph sent as a *document* rather than as a photo is refused with them, because Istota reads the message type before it reads the file.
+
+Nothing is downloaded for a sender Istota does not recognise, for a message it has already handled, or for somebody who has sent STOP. On Meta's Cloud adapter that means no request is made at all; on Baileys the sidecar has already fetched the file by then, and Istota deletes it without copying it anywhere.
+
 ## Operations
 
 ```bash
@@ -270,7 +284,7 @@ istota whatsapp billing-status          # Cloud: read the circuit breaker withou
 istota whatsapp billing-unblock         # Cloud: clear it, after checking Meta billing
 ```
 
-`whatsapp.common` reports which fields are missing or invalid for the active adapter, never their values. `whatsapp.billing` reports the Cloud circuit breaker, the service attempts used against the cap, and the template attempts, which nothing local bounds; it skips itself under Baileys. `whatsapp.baileys_session` reports the paired session's permissions and ownership — and those of every session a re-pair has moved aside, since each archive is a full-account credential too and nothing deletes one. It does not repair any of them: if it says a file is readable by other accounts, fix it and run it again. `whatsapp.pairing_relay` asks the same question about the file a pairing code crosses processes in; on a deployment that is not pairing there is no such file, and that is what it says. `whatsapp.baileys_bridge` reports the link to the sidecar, names an open pairing window and says when no sidecar has come back to receive one; it only answers inside the process holding the bridge, so read it from the admin Health pane, `!check`, or the boot log rather than from a shell.
+`whatsapp.common` reports which fields are missing or invalid for the active adapter, never their values. `whatsapp.billing` reports the Cloud circuit breaker, the service attempts used against the cap, and the template attempts, which nothing local bounds; it skips itself under Baileys. `whatsapp.baileys_session` reports the paired session's permissions and ownership — and those of every session a re-pair has moved aside, since each archive is a full-account credential too and nothing deletes one. It does not repair any of them: if it says a file is readable by other accounts, fix it and run it again. `whatsapp.pairing_relay` asks the same question about the file a pairing code crosses processes in; on a deployment that is not pairing there is no such file, and that is what it says. `whatsapp.baileys_bridge` reports the link to the sidecar, names an open pairing window and says when no sidecar has come back to receive one; it only answers inside the process holding the bridge, so read it from the admin Health pane, `!check`, or the boot log rather than from a shell. `whatsapp.media_staging` reports the permissions and ownership of the directory an inbound photograph is staged in, and how many staged files have been left standing in it — one that has been there ten minutes is a photograph somebody sent that nobody answered. It is the one check here that answers under both adapters, since both stage, and it repairs nothing either: the repair available on that directory is deletion.
 
 The Cloud circuit breaker is persistent and deployment-wide. In `free_guard`, the first authenticated delivery status carrying `billable = true` trips it and every later send is refused. The message that revealed the charge may already have been billed; what the breaker buys is that the next one is not. Check Meta billing first, then `billing-unblock`. Switching to `allow_paid` also clears it.
 
@@ -332,7 +346,7 @@ istota_whatsapp_app_secret: "{{ vault_whatsapp_app_secret }}"
 istota_whatsapp_verify_token: "{{ vault_whatsapp_verify_token }}"
 ```
 
-Under Baileys the role installs Node, installs the sidecar's dependencies from its lockfile, creates the session directory 0700 owned by the daemon's account, and runs the sidecar as its own systemd unit. Setting both `istota_whatsapp_baileys_sidecar_unit` and a non-empty `istota_whatsapp_baileys_sidecar_command` is refused: that pairing arranges two Baileys clients against one session directory, and neither process can detect the other. Enabling the sidecar on a host needs one full play first — the update-only mode does not install Node.
+Under Baileys the role installs Node, installs the sidecar's dependencies from its lockfile, creates the session directory 0700 owned by the daemon's account, and runs the sidecar as its own systemd unit. An inbound photograph is staged at `<istota_home>/data/whatsapp-media`, 0700, and deleted as soon as it has been copied into the sender's own folder — so the steady state is an empty directory, and `istota doctor` reports anything left standing in it under `whatsapp.media_staging`. There is no setting for that location on either deployment shape: both the sidecar and the daemon derive it from `db_path`. Setting both `istota_whatsapp_baileys_sidecar_unit` and a non-empty `istota_whatsapp_baileys_sidecar_command` is refused: that pairing arranges two Baileys clients against one session directory, and neither process can detect the other. Enabling the sidecar on a host needs one full play first — the update-only mode does not install Node.
 
 Bind a user inside `istota_users`:
 

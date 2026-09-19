@@ -999,6 +999,40 @@ class TestHeif:
         assert len(prep.images) == 1
         assert prep.images[0].media_type == "image/jpeg"
 
+    def test_a_staged_whatsapp_name_survives_the_suffix_screen(
+        self, tmp_path, ocr_calls
+    ):
+        """The other end of the WhatsApp staging contract.
+
+        `media.stage_to_attachment` names its inbox copy from its own sniff, so
+        a HEIC arrives here as `{prefix}_{fingerprint}-{hex}.heic`. The screen
+        above is a plain `Path(candidate).suffix` test, so a name it does not
+        recognise is skipped in silence — the model answers without the image
+        and without knowing one was sent. This pins the extension contract
+        from the consumer's side rather than only at the sniff.
+        """
+        from istota.image_sniff import EXTENSION_BY_MEDIA_TYPE
+        from istota.transport.whatsapp.media import (
+            INBOX_NAME_PREFIX, staged_name,
+        )
+
+        pillow_heif = pytest.importorskip(
+            "pillow_heif", reason="HEIF decoder not installed"
+        )
+        pillow_heif.register_heif_opener()
+        stem = Path(staged_name("wamid.001", "bin")).stem
+        extension = EXTENSION_BY_MEDIA_TYPE["image/heic"]
+        src = tmp_path / f"{INBOX_NAME_PREFIX}_{stem}.{extension}"
+        try:
+            _noise((1200, 900)).save(src, format="HEIF")
+        except Exception as exc:  # pragma: no cover - encoder-dependent
+            pytest.skip(f"no HEIF encoder available: {exc}")
+
+        prep = _prep([src], tmp_path)
+
+        assert len(prep.images) == 1
+        assert prep.images[0].media_type == "image/jpeg"
+
 
 # --------------------------------------------------------------------------
 # capacity budgets

@@ -48,6 +48,7 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
@@ -84,8 +85,78 @@ const SEND_REASONS = new Set([
 const FATAL_LOGGED_OUT = 'logged_out';
 const FATAL_BAD_SESSION = 'bad_session';
 
+// --- inbound media ---------------------------------------------------------
+
+/*
+ * What one inbound file may weigh, and **the fetcher owns this bound** — the
+ * daemon only ever sees a file that already exists, so on this path the cap
+ * has to be enforced here or nowhere. `collectMediaChunk` is where it lives,
+ * so the download aborts partway rather than measuring a buffer that is
+ * already in memory.
+ *
+ * It is `media.MAX_MEDIA_BYTES` and the vendoring guard executes both sides
+ * to say so. `stage_to_attachment` re-checks the staged file against the same
+ * number, which is the funnel both adapters reach; a drift there makes the
+ * daemon refuse what this accepted, which is an image fetched, written and
+ * then discarded with nobody told.
+ */
+const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
+
+/*
+ * Every `media_error` the daemon's fixed table knows. Rule 3 applies here as
+ * it does to `SEND_REASONS`, and for a sharper reason: a download failure
+ * carries the media URL, which carries the recipient's identifiers, and a
+ * Boom error carries the whole request. So the key crosses and the sentence
+ * is the daemon's.
+ */
+const MEDIA_ERRORS = new Set([
+  'download_failed',
+  'over_the_cap',
+  'write_failed',
+]);
+
+/*
+ * The suffix a staged file wears, from the *declared* mimetype.
+ *
+ * **Advisory, and trusted by nothing.** `stage_to_attachment` sniffs the
+ * bytes and names the inbox copy from its own answer, because the sender
+ * chose what they uploaded and the declared type is theirs to spell. What
+ * this is for is that the staged stem in `sidecar.log` and the inbox copy
+ * agree in the ordinary case, so the two logs read side by side — and that a
+ * declared type cannot become a path component, which is why anything
+ * unrecognised is `bin` rather than something derived from the string.
+ */
+const MEDIA_EXTENSIONS = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+};
+const MEDIA_EXTENSION_FALLBACK = 'bin';
+
+// How long one media download may take before it is abandoned. The inbound
+// path is serialized — order within a conversation is meaning — so an
+// unbounded fetch holds every message behind it, which is a surface that has
+// gone quiet rather than one message that failed.
+const MEDIA_DOWNLOAD_TIMEOUT_MS = 60_000;
+
+// How many `messages.upsert` batches may wait on the serialized inbound
+// chain. Bounded and dropped loudly rather than allowed to grow, which is the
+// rule the daemon's own inbound worker follows: with a per-download bound of
+// a minute, an unbounded chain turns a burst of photos into head-of-line
+// delay measured in hours, and the messages at the back are stale by the time
+// they are read. Dropping the newest is the honest half of that trade and is
+// the one thing a counter can report.
+const MAX_INBOUND_QUEUE = 64;
+
 const SOCKET_PATH = process.env.ISTOTA_BAILEYS_SOCKET || '';
 const SESSION_DIR = process.env.ISTOTA_BAILEYS_SESSION_DIR || '';
+// Where a staged image is written, and required at startup beside the two
+// above. `media.default_media_dir` is the rule that picks it; the daemon
+// resolves it and hands it over, so this side never derives a path of its own.
+const MEDIA_DIR = process.env.ISTOTA_BAILEYS_MEDIA_DIR || '';
 
 // --- diagnostics -----------------------------------------------------------
 
@@ -351,6 +422,45 @@ function hasReadableContent(message) {
   return Object.keys(content).some((key) => !NON_CONTENT_KEYS.has(key));
 }
 
+/*
+ * The media node this surface will fetch, or null.
+ *
+ * **`imageMessage` and nothing else.** Audio, video, documents and stickers
+ * each keep the unsupported reply they have now, and a sticker is the case
+ * that says why the gate is here rather than at the sniff: a sticker is WebP,
+ * so it would pass a signature test cleanly. What excludes it is its message
+ * type, which is a thing WhatsApp said rather than a thing the bytes say.
+ *
+ * Top level only, matching `messageText` — a wrapper (a disappearing or an
+ * edited message) carries its real content one level down and is left for
+ * whoever has a reason to walk it. `messageShape` already reports the
+ * wrapper in the log line, so such a message is explicable rather than
+ * silent.
+ *
+ * A content object holding a second media key is not a shape WhatsApp sends;
+ * if one ever appears this returns the image and the rest is ignored, which
+ * is the singular answer the daemon's record is shaped for.
+ */
+function mediaPart(message) {
+  const content = message && message.message;
+  if (!content || typeof content !== 'object') return null;
+  const part = content.imageMessage;
+  return part && typeof part === 'object' ? part : null;
+}
+
+/*
+ * The words a user typed, including the caption on a photo.
+ *
+ * The caption rides the same field as any other message, deliberately: every
+ * text gate on the daemon's side then applies to it with no new code, so
+ * `STOP` means the same thing whether it was typed alone or under a picture.
+ * A separate `caption` field would have needed each of those gates written
+ * twice.
+ *
+ * `videoMessage` and `documentMessage` carry captions too and are **not**
+ * read: those types keep the unsupported reply, and a caption without the
+ * bytes is a message the model answers about an image nobody can see.
+ */
 function messageText(message) {
   const content = message && message.message;
   if (!content) return null;
@@ -358,8 +468,118 @@ function messageText(message) {
   if (content.extendedTextMessage && typeof content.extendedTextMessage.text === 'string') {
     return content.extendedTextMessage.text;
   }
+  const media = mediaPart(message);
+  if (media && typeof media.caption === 'string') return media.caption;
   return null;
 }
+
+/*
+ * A bounded, advisory suffix for a declared mimetype.
+ *
+ * The parameters after `;` are dropped and the lookup is exact, so nothing a
+ * sender writes reaches the filename: an unrecognised or hostile value is
+ * `bin`, never a slice of the string. See `MEDIA_EXTENSIONS` for why this is
+ * advisory at all.
+ */
+function mediaExtension(mimetype) {
+  if (typeof mimetype !== 'string') return MEDIA_EXTENSION_FALLBACK;
+  const bare = mimetype.split(';')[0].trim().toLowerCase();
+  return MEDIA_EXTENSIONS[bare] || MEDIA_EXTENSION_FALLBACK;
+}
+
+/*
+ * What a staged file is called.
+ *
+ * **Nothing off the wire is a path component**, so this is random and the
+ * suffix above is the only part anything declared. The daemon's own
+ * `media.staged_name` puts a message fingerprint in front of the random half
+ * and this cannot: the fingerprint's salt is the daemon's, which is exactly
+ * why `media.is_staged_name` validates a *component* rather than that format.
+ * Correlating a staged file with a log line is done on the stem, which both
+ * sides print.
+ *
+ * 32 hex characters plus a dot plus at most four is well inside the 64 the
+ * daemon's validator allows, and the leading character is a hex digit, which
+ * its charset requires.
+ */
+function stagedMediaName(ext) {
+  return `${crypto.randomBytes(16).toString('hex')}.${ext}`;
+}
+
+/*
+ * A collector for a media download, bounded by `MAX_MEDIA_BYTES`.
+ *
+ * **This is where the per-file cap lives, and the cap is read from the module
+ * constant rather than taken as a parameter.** A parameter with a default is
+ * a second place for the number to sit, and it lets a test pass while the
+ * download loop passes something else entirely.
+ *
+ * Past the cap it drops what it was holding as well as refusing the rest: a
+ * collector that flags and keeps is still a 16 MiB buffer the caller may
+ * concatenate, so the refusal would cost the memory it exists to bound.
+ */
+function newMediaCollector() {
+  return { chunks: [], received: 0, overCap: false };
+}
+
+function collectMediaChunk(collector, chunk) {
+  if (!collector || collector.overCap) return false;
+  const length = chunk && chunk.length ? chunk.length : 0;
+  if (collector.received + length > MAX_MEDIA_BYTES) {
+    collector.chunks = [];
+    collector.received = 0;
+    collector.overCap = true;
+    return false;
+  }
+  collector.chunks.push(chunk);
+  collector.received += length;
+  return true;
+}
+
+/*
+ * Write one staged file, 0600, under `MEDIA_DIR`. Throws on anything else.
+ *
+ * `O_EXCL` so the name is claimed rather than written through — which also
+ * refuses a symlink planted at it, since `O_CREAT | O_EXCL` fails on an
+ * existing symlink rather than following it — and `O_NOFOLLOW` beside it
+ * because both are free. The mode argument applies only to a file the call
+ * creates, which with `O_EXCL` is every file this writes.
+ *
+ * The name is held to one ordinary component here as well as on the daemon's
+ * side. Validating only at the reader would mean a bug in this file could put
+ * bytes outside the staging directory before any frame was built, and the
+ * daemon's later refusal would be about a file that already escaped.
+ */
+function writeStaged(name, buffer) {
+  if (!MEDIA_DIR) throw new Error('no media directory is configured');
+  if (typeof name !== 'string' || !name || name === '.' || name === '..' ||
+      name !== path.basename(name) || name.includes('\0')) {
+    throw new Error('staged media name is not a single ordinary component');
+  }
+  const fd = fs.openSync(
+    path.join(MEDIA_DIR, name),
+    fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY |
+      fs.constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    // `writeFileSync` on a descriptor loops until the buffer is gone.
+    // `writeSync` issues one `write(2)` and *returns* the count, so a partial
+    // write is not an error — and a truncated image still sniffs correctly off
+    // its header, so it would be copied into somebody's inbox and fail the
+    // decode with the model told the fetch succeeded.
+    fs.writeFileSync(fd, buffer);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// What an `inbound` frame carries when the message had no media at all. One
+// object rather than four literals at the send site, so the shape of "no
+// media" cannot drift between the two branches that produce it.
+const NO_MEDIA = Object.freeze({
+  media_name: null, media_mime: null, media_bytes: 0, media_error: null,
+});
 
 /*
  * The **shape** of a message this side could find no text in — the protobuf
@@ -790,6 +1010,12 @@ class Session {
     // during the wait would otherwise re-learn the logout and not that the
     // backoff behind it is running on a guess.
     this.runUnrecorded = false;
+    // The tail of the serialized inbound chain. See `onMessages`: a batch is
+    // appended to it rather than handled where it arrives, so a photo's
+    // download cannot be overtaken by the text message behind it.
+    this.inbound = Promise.resolve();
+    this.inboundDepth = 0;
+    this.inboundDropped = 0;
   }
 
   announceReady() {
@@ -1028,8 +1254,43 @@ class Session {
     this.link.send(MSG_FATAL, { reason: FATAL_BAD_SESSION, permanent: true });
   }
 
+  /*
+   * Hand a batch to the serialized inbound chain.
+   *
+   * **Serialized because fetching an image is an `await` and reading a text
+   * message is not.** Handling batches concurrently would let a short text
+   * message overtake the photo sent before it, which reorders a conversation
+   * at the source — and the daemon's own inbound worker is serial precisely
+   * because order within a conversation is meaning. Doing it here rather than
+   * there is the only place it can be done: the daemon sees whatever order
+   * the socket delivers.
+   *
+   * The `catch` is not tidiness. Without it one rejected batch becomes the
+   * chain's tail and every later message is dropped for the life of the
+   * process, silently, which is the whole-surface failure this file's filters
+   * are written to avoid one message at a time.
+   */
   onMessages(event) {
     if (!event || !Array.isArray(event.messages)) return;
+    if (this.inboundDepth >= MAX_INBOUND_QUEUE) {
+      this.inboundDropped += 1;
+      log('warn', 'inbound batch dropped', {
+        why: 'queue_full', dropped: this.inboundDropped,
+      });
+      return;
+    }
+    this.inboundDepth += 1;
+    this.inbound = this.inbound
+      .then(() => this.handleMessages(event))
+      .catch((err) => {
+        log('error', 'an inbound batch escaped', { kind: err && err.name });
+      })
+      // After the catch, so it runs on both paths: a depth that only
+      // decremented on success would ratchet to the bound and stay there.
+      .then(() => { this.inboundDepth -= 1; });
+  }
+
+  async handleMessages(event) {
     // Both filters below drop a message and return nothing, so a surface that
     // is receiving and discarding everything is indistinguishable from one
     // receiving nothing at all — on either side of the socket. The arrival
@@ -1067,26 +1328,164 @@ class Session {
       }
       const group = isGroupJid(jid);
       const text = group ? null : messageText(message);
-      if (!group && text === null) {
+      // A group message is refused above every identity lookup on the
+      // daemon's side, so fetching its media would be bytes on disk for a
+      // message nothing will ever consume.
+      const part = group ? null : mediaPart(message);
+      if (!group && !part && text === null) {
         log('info', 'inbound has no text this side can read', {
           shape: messageShape(message),
         });
       }
+      const media = part ? await this.downloadMedia(message) : NO_MEDIA;
       // The `group` flag is read off the chat rather than inferred from the
       // JID's spelling on the daemon's side, which is why it is sent: the
       // daemon refuses a group message before any identity lookup.
-      this.link.send(MSG_INBOUND, {
+      //
+      // An image is typed `image` whether or not the fetch worked: a failed
+      // one carries `media_error` and the daemon answers "that image could
+      // not be fetched", which is a different and better answer from "that
+      // message type is not supported yet".
+      const delivered = this.link.send(MSG_INBOUND, {
         message_id: message.key.id,
         jid,
         username: group ? null : message.pushName || null,
-        message_type: text === null ? 'unsupported' : 'text',
+        message_type: part ? 'image' : (text === null ? 'unsupported' : 'text'),
         text,
         callback_data: null,
         reply_to_message_id: group ? null : quotedId(message),
         group,
         timestamp: Number(message.messageTimestamp) || Math.floor(Date.now() / 1000),
+        media_name: media.media_name,
+        media_mime: media.media_mime,
+        media_bytes: media.media_bytes,
+        media_error: media.media_error,
       });
+      if (!delivered) {
+        // `Link.send` answers false for a destroyed socket and says nothing.
+        // Before the chain existed the send happened inside the event
+        // handler, so this could only lose a message to an encode failure;
+        // now a download can outlive the daemon link and the loss is silent.
+        log('warn', 'an inbound message reached nobody', {
+          why: 'link_unavailable', staged: Boolean(media.media_name),
+        });
+      }
     }
+  }
+
+  /*
+   * Fetch one image onto disk and describe it, or say why not.
+   *
+   * **No media bytes cross the socket.** The frame names a file the daemon
+   * can open; the daemon sniffs it, copies it into the sender's workspace and
+   * unlinks the staged copy. This side downloads because it already holds the
+   * decryption keys and nothing else does.
+   *
+   * Streamed rather than buffered, which is what makes the cap an abort:
+   * `collectMediaChunk` refuses partway through and the stream is destroyed,
+   * where `'buffer'` would hand back a file of any size already in memory.
+   *
+   * `reuploadRequest` is what lets WhatsApp re-serve media whose URL has
+   * expired instead of the download simply failing — the spec's "expired
+   * Baileys media" case landing on the happier branch where it can.
+   *
+   * Every failure is a key out of `MEDIA_ERRORS` and nothing more: a download
+   * error carries the media URL, which carries the recipient's identifiers,
+   * and a Boom error carries the whole request.
+   */
+  async downloadMedia(message) {
+    const failure = (raw) => {
+      // The same guard `answer` puts in front of `SEND_REASONS`, and for the
+      // same reason: a key outside the daemon's table renders as the generic
+      // sentence for ever, so a typo at a call site below would cost the
+      // diagnostic silently. This is the only producer of a `media_error`.
+      const key = MEDIA_ERRORS.has(raw) ? raw : 'download_failed';
+      log('warn', 'inbound media was not staged', { why: key });
+      return {
+        media_name: null, media_mime: null, media_bytes: 0, media_error: key,
+      };
+    };
+    const part = mediaPart(message);
+    const mime = typeof part.mimetype === 'string' ? part.mimetype : null;
+    const collector = newMediaCollector();
+    let stream = null;
+    // The connect, the `reuploadRequest` round trip and the body all sit
+    // inside one deadline. An earlier shape armed the timer *after*
+    // `downloadMediaMessage` resolved, which left the CDN connect and the
+    // reupload — the two slowest things here, and the ones that hang —
+    // bounded by nothing at all.
+    const fetchAll = async () => {
+      const baileys = await loadBaileys();
+      stream = await baileys.downloadMediaMessage(
+        message,
+        'stream',
+        {},
+        {
+          logger: silentLogger(),
+          // Wrapped rather than passed as a bare property reference: a method
+          // read off the socket is called by Baileys with no receiver. The
+          // wrapper is correct whether or not the library happens to close
+          // over its own state, and `undefined` is what its own guard expects
+          // when there is no socket — after a logout `this.sock` is null.
+          reuploadRequest: this.sock
+            ? (media) => this.sock.updateMediaMessage(media)
+            : undefined,
+        },
+      );
+      await new Promise((resolve, reject) => {
+        const settle = (err) => { if (err) reject(err); else resolve(); };
+        stream.on('data', (chunk) => {
+          if (!collectMediaChunk(collector, chunk)) settle(null);
+        });
+        stream.on('end', () => settle(null));
+        stream.on('error', (err) => settle(err));
+      });
+    };
+    let deadline = null;
+    try {
+      // Bounded, because the inbound chain is serial: a hung fetch holds
+      // every message behind it, which is a surface gone quiet rather than
+      // one message lost. Racing releases the chain; it cannot cancel a fetch
+      // already inside the library, so `destroy` below is what stops the
+      // bytes still arriving.
+      await Promise.race([
+        fetchAll(),
+        new Promise((resolve, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error('media download timed out')),
+            MEDIA_DOWNLOAD_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } catch (err) {
+      return failure('download_failed');
+    } finally {
+      clearTimeout(deadline);
+      // Whether the cap fired, the deadline did, or the stream ended: the
+      // reader is detached either way and a stream abandoned mid-body would
+      // otherwise keep its socket.
+      try { if (stream && stream.destroy) stream.destroy(); } catch (err) {}
+    }
+    if (collector.overCap) return failure('over_the_cap');
+    // A fetch that yielded nothing is a failure rather than a zero-byte
+    // image: staging one costs a file the daemon sniffs, refuses and sweeps,
+    // and reports success on the frame while doing it.
+    if (collector.received === 0) return failure('download_failed');
+    const name = stagedMediaName(mediaExtension(mime));
+    try {
+      writeStaged(name, Buffer.concat(collector.chunks));
+    } catch (err) {
+      return failure('write_failed');
+    }
+    log('info', 'inbound media staged', {
+      file: name, bytes: collector.received,
+    });
+    return {
+      media_name: name,
+      media_mime: mime,
+      media_bytes: collector.received,
+      media_error: null,
+    };
   }
 
   onReceipts(updates) {
@@ -1278,6 +1677,39 @@ function main() {
     // supervisor reports it as a spawn that did not stay up.
     process.exit(2);
   }
+  if (!MEDIA_DIR) {
+    // Refusing to run rather than refusing each image, which is the same
+    // answer the two above get and is chosen for the same reason: a sidecar
+    // that starts without somewhere to stage would type every photo `image`
+    // and send a frame naming no file, so a deployment fault would arrive as
+    // a per-message one and the reason would be nowhere.
+    //
+    // This one says so first, where the pair above cannot. It is still not a
+    // guarantee — `log` writes inside the session directory and swallows a
+    // failure, so on a first install where nothing has created that directory
+    // yet the sentence goes nowhere and the exit code is all there is. On an
+    // upgraded deployment, which is the shape that meets this, the session
+    // directory holds a paired credential and the line lands.
+    log('error', 'no media staging directory is configured; refusing to run', {
+      variable: 'ISTOTA_BAILEYS_MEDIA_DIR',
+    });
+    process.exit(2);
+  }
+  try {
+    // The daemon's `media.ensure_media_dir` is authoritative for the mode and
+    // runs when the bridge starts; this only has to make the directory exist.
+    // On Ansible and compose the sidecar is a unit of its own with no ordering
+    // guarantee against the daemon, so without this a boot in the other order
+    // answers `write_failed` for every image until the daemon catches up —
+    // and `recursive: true` makes an existing directory a no-op, so the
+    // daemon stays the only thing that ever narrows one.
+    fs.mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    log('error', 'the media staging directory could not be created', {
+      kind: err && err.code,
+    });
+    process.exit(2);
+  }
   const link = new Link(SOCKET_PATH);
   const session = new Session(link);
 
@@ -1338,9 +1770,19 @@ module.exports = {
   MSG_SEND,
   MSG_SHUTDOWN,
   SEND_REASONS,
+  MAX_MEDIA_BYTES,
+  MEDIA_ERRORS,
+  MEDIA_EXTENSIONS,
   chatAddress,
+  collectMediaChunk,
   encode,
   hasReadableContent,
+  mediaExtension,
+  mediaPart,
+  messageText,
+  newMediaCollector,
+  stagedMediaName,
+  writeStaged,
   rememberSent,
   recallSent,
   SENT_CACHE_LIMIT,

@@ -75,6 +75,74 @@ class WhatsAppUserIdentity:
 
 
 @dataclass(frozen=True)
+class WhatsAppInboundMedia:
+    """A file this message carried, already on disk before any lock is taken.
+
+    The bytes are staged before the transaction opens and the transaction sees
+    a path, because a media fetch is a network round trip and one under
+    `BEGIN IMMEDIATE` stalls the receiver — and, under `istota serve`, the web
+    UI with it. So this record describes a file that already exists rather
+    than something still to be fetched.
+
+    **`mime_type` is the *declared* type, and nothing decides anything on
+    it.** An earlier version of this paragraph said it was the sniff's answer,
+    which no producer can honour: the record is built at decode, before the
+    daemon has opened the file, so the only type in hand is the one the
+    adapter declared. The sniff is still what is authoritative —
+    `media.stage_to_attachment` reads the bytes and names the inbox copy from
+    its own answer, because a sender controls what they upload and the file is
+    about to be decoded by Pillow and copied into somebody's workspace. This
+    field is carried for the log line, so a disagreement between the two is a
+    debug matter rather than a decision.
+
+    One consequence, left open deliberately: `stage_to_attachment` returns a
+    path and discards the media type it sniffed, so nothing downstream can
+    compare the two and the debug line has no site to run at. Giving it a
+    `(path, media_type)` return is the change that would close it.
+
+    **`attached_for_user` is the pre-check's answer, not the authoritative
+    one.** The unlocked pre-check resolves the sender so the file has an inbox
+    to go to; the authoritative resolution happens inside the transaction, and
+    a binding can change in between — a re-enrollment, a cleared identity, a
+    bootstrap latch, or a latch that loses its race and comes back
+    `identity_conflict`. The transaction compares the two and drops the media
+    from the event on a mismatch, so it reaches no task and no prompt.
+
+    What that comparison cannot do is un-copy the file: the inbox copy happens
+    before the lock is taken, so on a mismatch the bytes are already in the
+    first user's workspace and stay there. The spec states the same residual
+    and answers it with a warning naming the stranded copy, which is what
+    makes it an operator's problem rather than a silent one.
+
+    It lives here rather than on the event because it describes this file's
+    destination and means nothing for a message that carried none.
+
+    `error` carries a fixed local reason for a fetch that failed, so a caller
+    can answer honestly instead of degrading to "that message type is not
+    supported yet". It is **required rather than defaulted**, this module's
+    rule for a record's original fields. When `error` is set, `staged_path` is
+    `""`.
+
+    **`remote_id` is the one defaulted field, and the rule it follows is
+    `waba_id`'s rather than `error`'s.** It names bytes the daemon has *not*
+    fetched yet — Meta's media id, read off the callback and handed to
+    `client.fetch_media` — so it is Cloud-shaped, and `""` is Baileys' honest
+    value: the sidecar holds the decryption keys and has already written the
+    file by the time the frame arrives, so there is nothing left to fetch. The
+    silent-omission argument that keeps the other fields required does not
+    reach it, because a Cloud normalizer that failed to set it produces a
+    record nothing can stage, which `webhook._media_for_user` answers with
+    `media_failed` — loud, and in front of the user.
+    """
+    staged_path: str
+    mime_type: str
+    byte_count: int
+    attached_for_user: str
+    error: str | None
+    remote_id: str = ""
+
+
+@dataclass(frozen=True)
 class InboundWhatsAppEvent:
     """One inbound message, in whichever adapter's terms it arrived.
 
@@ -101,6 +169,14 @@ class InboundWhatsAppEvent:
     callback_data: str | None
     reply_to_message_id: str | None
     sent_at: datetime
+    #: The file this message carried, or `None` for one that carried none.
+    #:
+    #: Defaulted so every existing construction — the webhook normalizer's,
+    #: the protocol decoder's and the dozens in the suite — is unchanged by
+    #: the field's arrival, which is the `jid: str | None = None` precedent
+    #: one record up. A caption rides `text` rather than a field of its own,
+    #: so every text gate applies to it with no new code.
+    media: WhatsAppInboundMedia | None = None
 
 
 @dataclass(frozen=True)
