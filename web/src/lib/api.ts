@@ -10,6 +10,47 @@ class AuthError extends Error {
   }
 }
 
+/**
+ * What a non-2xx actually said, falling back to the status alone.
+ *
+ * This used to be `API error: ${status}` unconditionally, which discarded the
+ * body — and on a FastAPI route the body is where the reason lives. Three
+ * call sites had already dropped out of `apiFetch` to get it back
+ * (`generateIngestToken`, `draftAction`, `putAvatar`), each with a comment
+ * saying why, which is three copies of a fix that belongs here. The vault's
+ * master-password field is what made it worth doing: its 400 and its 409 are
+ * both entirely message — the passphrase floor, and the refusal to mint a
+ * second one over a file already encrypted under the first — and the user was
+ * shown `API error: 400` for both.
+ *
+ * `detail` is FastAPI's spelling; `error` is what this app's hand-rolled JSON
+ * refusals use. Structured details (`{code, message}`) are unwrapped to their
+ * message, which is the only half a person can read.
+ *
+ * Never throws and never blocks on a body that will not arrive: the status is
+ * always an answer, so a body that is HTML, empty, or still in flight simply
+ * leaves the old message in place. The read is bounded by the caller's own
+ * timeout because it happens inside the same `try`.
+ */
+async function errorMessage(resp: Response): Promise<string> {
+  const fallback = `API error: ${resp.status}`;
+  let body: unknown;
+  try {
+    body = await resp.json();
+  } catch {
+    return fallback;
+  }
+  const raw = (body as { detail?: unknown; error?: unknown } | null) ?? null;
+  const detail = raw?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (detail && typeof detail === 'object') {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  if (typeof raw?.error === 'string' && raw.error.trim()) return raw.error;
+  return fallback;
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Promise<T> {
   // `fetch` has no timeout of its own: a stalled connection (a mobile handover,
   // a proxy holding the socket) hangs until the OS gives up, which can be
@@ -52,7 +93,7 @@ async function apiFetch<T>(path: string, init?: RequestInit, timeoutMs = 0): Pro
     // Reported before the status branches, since a status is an answer.
     noteTransport(true);
     if (resp.status === 401) throw new AuthError();
-    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    if (!resp.ok) throw new Error(await errorMessage(resp));
     try {
       // **Awaited**, so the read happens inside this `try` and ahead of the
       // `finally` below. `return resp.json()` cleared the timer on the headers

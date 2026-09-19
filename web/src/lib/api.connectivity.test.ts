@@ -206,3 +206,74 @@ describe('the probe', () => {
     await expect(connectivity.probe()).resolves.toBe(true);
   });
 });
+
+/**
+ * What a failed request tells the *user*, which is a different question from
+ * what it tells the connectivity store above.
+ *
+ * `apiFetch` threw `API error: <status>` unconditionally and never read the
+ * body, so every FastAPI `detail` in the app was discarded. Three call sites
+ * had already dropped out of `apiFetch` to recover it. The case that made it
+ * worth fixing at the seam: the vault's master password is refused with a 400
+ * whose message is the whole content of the refusal — the passphrase floor —
+ * and a user who typed one got `API error: 400` and no way to know why.
+ *
+ * Driven through a real exported caller rather than by reaching for the
+ * private helper, so what is asserted is what a page would actually show.
+ */
+describe('what a failed request says', () => {
+  it('surfaces a FastAPI detail rather than the bare status', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(400, {
+        detail: 'a vault passphrase must be at least 32 characters, and should be generated',
+      }),
+    );
+
+    await expect(api.setVaultPassphrase({ passphrase: 'short' })).rejects.toThrow(
+      /at least 32 characters/,
+    );
+  });
+
+  it('unwraps a structured detail to its message', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(409, {
+        detail: { code: 'already_set', message: 'a passphrase is already stored' },
+      }),
+    );
+
+    await expect(api.setVaultPassphrase({ generate: true })).rejects.toThrow(/already stored/);
+  });
+
+  it("reads this app's own `error` spelling too", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(400, { error: 'that file is not in your vault folder' }),
+    );
+
+    await expect(api.selectVaultFile('gone.kdbx')).rejects.toThrow(/not in your vault folder/);
+  });
+
+  it('falls back to the status when the body carries no reason', async () => {
+    // An HTML error page, an empty body, a proxy's own 502: the status is the
+    // only thing that was said, so it stays the message. `json()` rejecting
+    // must not escape as a different error than the request failing.
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 502,
+      headers: new Headers(),
+      json: async () => {
+        throw new SyntaxError('Unexpected token <');
+      },
+    } as unknown as Response);
+
+    await expect(api.getVaultStatus()).rejects.toThrow('API error: 502');
+  });
+
+  it('leaves a 401 as an AuthError, which is not a message at all', async () => {
+    // The status branch above it, and the one case where the body must not be
+    // consulted: the session is gone and the app redirects rather than
+    // rendering whatever the server said about it.
+    fetchMock.mockResolvedValue(jsonResponse(401, { detail: 'Not authenticated' }));
+
+    await expect(api.getVaultStatus()).rejects.toBeInstanceOf(api.AuthError);
+  });
+});
