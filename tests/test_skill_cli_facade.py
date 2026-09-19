@@ -415,4 +415,4 @@ class TestEveryMainModuleIsOneShape:
         # A skill CLI that loses its `__main__.py` stops being reachable at all:
         # both `skill_client._run_direct` and `skill_proxy` spawn
         # `python -m istota.skills.<name>`.
-        assert len(list(SKILLS_DIR.glob("*/__main__.py"))) == 22
+        assert len(list(SKILLS_DIR.glob("*/__main__.py"))) == 23

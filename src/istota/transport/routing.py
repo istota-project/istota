@@ -427,6 +427,69 @@ def is_canonical_room_view(
     return _room_view(config, registry, surface) == "canonical"
 
 
+def canonical_room_token(conn, token: str, surface: str = "") -> str | None:
+    """The canonical room token a raw ``token`` names, or None if it names no
+    room. The public form of ``_canonical_room_token``'s cross-surface reading.
+
+    For callers holding a token and no reliable surface for it — the ``rooms``
+    skill, which has only ``ISTOTA_CONVERSATION_TOKEN``, and the prompt header —
+    a surface-scoped lookup can only ever miss on a promoted room reached from
+    Talk, where the task's token is the Talk ref and the room's id is the
+    ``web-…`` one. Both callers are *describing* a room rather than choosing a
+    delivery channel, so the collision risk the delivery path refuses (a ref
+    that happens to be another surface's ref for a different room) costs a wrong
+    label here rather than an answer posted into the wrong conversation.
+
+    Never raises: both callers sit on a path where an exception means no task at
+    all, so an unreadable registry is "names no room".
+    """
+    if not token:
+        return None
+    try:
+        return _canonical_room_token(conn, surface, token, cross_surface=True)
+    except Exception:  # pragma: no cover - best-effort labelling
+        return None
+
+
+def room_target_descriptor(
+    token: str, origin: str, talk_ref: str | None = None,
+) -> str:
+    """The ``output_target`` a *scheduled* job should carry to deliver into this
+    room — the string `istota-skill rooms list` hands the model and the
+    `talk create` guard's refusal points at (ISSUE-509).
+
+    Deliberately **not** ``room:<token>``, which reads as the obvious answer and
+    delivers nowhere from a cron job. ``_expand_room_destinations`` starts from
+    ``_infer_default_plan``, which has no arm for ``scheduled``, and then skips
+    the room's own bindings twice over: the ``talk`` one because
+    ``_surface_for_source_type("scheduled")`` answers ``"talk"`` and it reads as
+    the origin leg, the ``web`` one because its view is canonical and an origin
+    leg is assumed to have written the row. Nothing wrote it, the plan comes out
+    empty, and ``scheduled`` is not in ``_INTERACTIVE_SOURCE_TYPES`` so there is
+    no fallback either. The only signal is one load-time WARNING from
+    ``cron_loader._validate_target`` about a surface it does not recognise.
+
+    So the descriptor names the surfaces explicitly:
+
+    - a Talk-origin room is ``talk:<token>`` — its token *is* the conversation.
+    - a web room is ``web:<token>``, which ``_resolve_one`` sends down the
+      foreign-push branch (a scheduled task's origin surface is ``talk``, so the
+      web destination is never short-circuited to a stream no-op).
+    - a **promoted** web room is ``web:<token>,talk:<talk_ref>``, because the
+      web leg writes the canonical row and pushes nothing to Talk. Naming only
+      the web half is the ISSUE-400 shape: correct on the surface the author was
+      looking at, invisible to everyone reading the room from the other one.
+
+    Pure — the caller supplies the binding it already read.
+    """
+    if origin == "talk":
+        return f"talk:{token}"
+    descriptor = f"web:{token}"
+    if talk_ref:
+        descriptor += f",talk:{talk_ref}"
+    return descriptor
+
+
 def _expand_room_destinations(
     config: "Config", task: "db.Task",
     registry: "TransportRegistry | None" = None,

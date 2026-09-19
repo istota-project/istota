@@ -4297,6 +4297,7 @@ def list_room_members(conn: sqlite3.Connection, room_token: str) -> list[str]:
 
 def list_member_rooms(
     conn: sqlite3.Connection, user_id: str, include_archived: bool = False,
+    include_dismissed: bool = False,
 ) -> list[Room]:
     """Rooms `user_id` is a member of, **most recently active first**. This is
     the visibility query for the web room list (ISSUE-134) — it replaces the
@@ -4314,7 +4315,15 @@ def list_member_rooms(
 
     A room the user has hidden (`room_dismissals` tombstone) is excluded even
     while they remain a member — the poll-time backfill re-adds membership, so
-    membership alone can't keep a hidden room hidden."""
+    membership alone can't keep a hidden room hidden.
+
+    `include_dismissed` lifts that last exclusion, and it exists for a caller
+    asking a different question from the sidebar's: **does a room of this name
+    already exist**, which the `nextcloud talk create` guard asks before it
+    refuses a duplicate (ISSUE-509). A hidden room is hidden, not gone — it
+    keeps its bindings and delivery into it still works — so answering "no" for
+    one is how the duplicate-room incident reproduces itself one user action
+    over. Every visibility caller wants the default."""
     sql = (
         "SELECT r.*, COALESCE(("
         "  SELECT msg.created_at FROM messages msg "
@@ -4322,12 +4331,15 @@ def list_member_rooms(
         "), r.created_at) AS last_activity "
         "FROM rooms r "
         "JOIN room_members m ON m.room_token = r.token "
-        "WHERE m.user_id = ? "
-        "AND NOT EXISTS ("
-        "  SELECT 1 FROM room_dismissals d "
-        "  WHERE d.room_token = r.token AND d.user_id = m.user_id"
-        ")"
+        "WHERE m.user_id = ?"
     )
+    if not include_dismissed:
+        sql += (
+            " AND NOT EXISTS ("
+            "  SELECT 1 FROM room_dismissals d "
+            "  WHERE d.room_token = r.token AND d.user_id = m.user_id"
+            ")"
+        )
     params: list = [user_id]
     if not include_archived:
         sql += " AND r.archived = 0"

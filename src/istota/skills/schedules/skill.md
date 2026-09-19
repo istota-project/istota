@@ -53,8 +53,8 @@ These are TOML basic strings: a backslash or a double quote inside one must be e
 - `prompt`: The full prompt text that will be executed as a task (via Claude Code). Mutually exclusive with `command` and `prompt_file`
 - `prompt_file`: Path to a file containing the prompt text (relative to your workspace root, `$NEXTCLOUD_MOUNT_PATH`, e.g. `/Users/alice/scripts/prompts/my-job.txt`). The file contents are read at load time and used as the prompt. Mutually exclusive with `prompt` and `command`. Useful for long prompts that would clutter CRON.md
 - `command`: A shell command to run directly via subprocess (not Claude Code). Mutually exclusive with `prompt` and `prompt_file`. Each job must have exactly one of `prompt`, `prompt_file`, or `command`
-- `target`: Where to deliver results — `"talk"` (post to room), `"email"` (send to user's email), or omit for no delivery
-- `room`: Talk conversation token (required when `target` is `"talk"`)
+- `target`: Where to deliver results. See "Delivering into a room" below — `"email"`, `"ntfy"`, a room descriptor, a comma-separated list of those, or omit for no delivery
+- `room`: The conversation the job runs in. See "Delivering into a room" — it is a *room* token and not always a Talk one
 - `enabled`: Set to `false` to pause the job (default: true). Use `!cron disable/enable` for runtime control
 - `once`: When `true`, the job auto-deletes from both the DB and CRON.md after successful execution. Failed jobs are kept for retry. Used by the reminders skill for one-shot fire-and-forget entries
 - `silent_unless_action`: When `true`, only posts output if response starts with `ACTION:`. Useful for monitoring jobs
@@ -64,6 +64,61 @@ These are TOML basic strings: a backslash or a double quote inside one must be e
 - `brain`: Per-job brain kind (`claude_code`/`native`/`tmux_claude`). Empty = whatever the deployment routes this job to. **Admin-only**, and the operator has to have allowlisted the kind — for a non-admin the field is dropped on every sync and the job runs the configured brain, so do not write it unless the user is an admin and asked for it. A job that pins a brain gets no failover: if that brain is unavailable the run fails rather than being answered by another one
 - `publish_shared_kv`: Publish this job's result text into shared curated content that every user's briefings can read (see "Publishing shared briefing content" below). **Admin-only.**
 - `publish_shared_kv_trusted`: When `true`, the published content is marked trusted (rendered un-wrapped, not treated as untrusted web content). Only use for injection-safe content such as pure numeric tables — never for free-text/web-derived content. Default `false`
+
+## Delivering into a room
+
+A room is **one conversation bound to several surfaces**, not a Talk
+conversation. A room created in web chat has a `web-…` token and may not be on
+Talk at all. `target = "talk"` with such a token posts nowhere: the Talk API is
+handed a token naming no conversation, the job reports success, and the user
+sees nothing. That is the most common way a scheduled job silently fails.
+
+**Get the descriptor from the room, don't guess it.** The prompt header names
+the room this task is in, and `istota-skill rooms list` names every other one.
+Both hand back a ready-made `target`:
+
+| the room | `target` |
+|---|---|
+| created in Talk | `talk:<token>` |
+| created in web chat | `web:<token>` |
+| web chat, also open in Talk | `web:<token>,talk:<talk_token>` |
+
+The third row is two legs on purpose. The web leg writes the room's own
+transcript and pushes nothing to Talk, so naming only the web half leaves the
+room's Talk members seeing nothing.
+
+**Set `room` to the same canonical token.** `target` is where the result goes;
+`room` is which conversation the job runs in, and it is what makes the result
+render as a reply in the room rather than as a standalone system note. It also
+gives the job the room's conversation history as context.
+
+```toml
+[[jobs]]
+name = "weekly-digest"
+cron = "0 9 * * 1"
+prompt = "Summarise this week's activity"
+target = "web:web-alice-3f21c4d90ab7"
+room = "web-alice-3f21c4d90ab7"
+```
+
+Other values `target` accepts: `"email"`, `"ntfy"`, bare `"web"` (the user's
+default `general` room — **not** the job's `room` field), bare `"talk"` (the
+room named by `room`, or the user's resolved notification channel), `"none"`,
+and a comma-separated list of any of these.
+
+**Do not write `room:<token>`.** It reads as the obvious spelling for "this
+room, all its surfaces" and it delivers nowhere from a scheduled job — the
+result is dropped and the only signal is one line in the daemon log.
+
+**Never create a Talk conversation to post into a room.** A conversation made
+with `istota-skill nextcloud talk create` is bound to nothing: it is not the
+room, it will not carry the room's transcript, and nobody is watching it. If a
+web-only room should also be on Talk, that is the "Also open in Talk" control in
+the room's settings in web chat — tell the user where it is.
+
+One caveat: a job with `silent_unless_action = true` delivers to Talk only. A
+`web:` target on such a job posts nothing even when the result starts with
+`ACTION:`.
 
 ## Publishing shared briefing content
 
@@ -102,4 +157,4 @@ To remove a job: delete its `[[jobs]]` entry from the file.
 To modify a job: edit the relevant fields in the file.
 To temporarily disable: set `enabled = false` in the file, or use the `!cron disable <name>` command.
 
-When creating a job with Talk output, use the conversation token from the current task context for the `room` field.
+To deliver into the room this task is in, copy the `target` and `room` values the prompt header gives you. See "Delivering into a room" above — the conversation token alone is not a `target`, and `target = "talk"` with a web room's token posts nowhere.

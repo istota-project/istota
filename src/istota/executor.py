@@ -5582,6 +5582,120 @@ def _one_line(value: str) -> str:
     return value.replace("\r", " ").replace("\n", " ")
 
 
+#: Ceiling on each scalar this line interpolates. A room token is minted by us
+#: at ~24 characters and a Talk ref is Nextcloud's at ~8, so this bounds a value
+#: that has gone wrong rather than trimming a legitimate one. Without it a
+#: single row could make the system header arbitrarily long.
+_ROOM_SCALAR_MAX_CHARS = 120
+
+
+def _header_scalar(value: object) -> str:
+    """One interpolated value, safe to put in a system header line.
+
+    `.claude/rules/prompts.md`: every scalar interpolated into a system header
+    goes through `_one_line()`, because the header's structure is carried by
+    line breaks and a value holding one forges a header. `str()` first, since
+    `rooms.name` and `room_bindings.surface_ref` are SQLite `TEXT` columns and
+    SQLite is dynamically typed — a row written as an INTEGER by a migration or
+    a future caller comes back as `int`, and `_one_line` would raise on it.
+    """
+    return _one_line(str(value or "")).strip()[:_ROOM_SCALAR_MAX_CHARS]
+
+
+def room_identity_line(config: Config, task: "db.Task", conn=None) -> str:
+    """``Room:`` for the header — that this conversation is a registered room,
+    which surface it lives on, and the descriptor that delivers into it
+    (ISSUE-509).
+
+    The header already carried ``Conversation token``, and that was not enough:
+    nothing said the token named a *registered room* or how to address it in
+    ``CRON.md``. "Post a weekly digest to this room" was therefore unresolvable
+    without a lookup, and no CLI could answer it — so a task created a fresh
+    Talk conversation of the room's name instead, bound to nothing.
+
+    **The room's name is deliberately not here**, though ISSUE-509 asked for it.
+    A name is third-party text — on a shared Talk room any participant can set
+    it — and this line is in the *system* half, where `istota-skill rooms list`
+    fences the same string inside untrusted-content markers. Two surfaces
+    disagreeing about whether a field is attacker-controlled is the weaker
+    answer, and the name was the half that was not needed: the descriptor is
+    what resolves "post here", and `rooms list` answers "which room is
+    #weekly" with `is_current` and a fenced name. What is left is a token, a
+    descriptor built from it, and a surface word from a closed set.
+
+    Every interpolated scalar still goes through `_header_scalar`, because the
+    descriptor carries ``room_bindings.surface_ref`` — a string Nextcloud
+    supplies, not one we mint — and a newline in it forges a header line just as
+    a newline in the name would have. Covering only the name was the first cut's
+    mistake, and its test passed for the wrong reason.
+
+    Opens its own connection when handed none, the way every other optional-conn
+    reader here does. ``execute_task``'s ``conn`` parameter defaults to None and
+    only the scheduler passes one, so a `conn is None` early return would leave
+    the line missing from every entry point but that — silently, which is
+    exactly what the first cut did: the two golden cases came back
+    byte-identical to their control. The nested open is safe under an outer
+    write transaction — ``execute_task_interactive`` holds one across its call,
+    having just run ``db.create_task`` — because it only reads and the framework
+    database is WAL, where a reader is not blocked by a writer's RESERVED lock;
+    the hazard `.claude/rules/notifications.md` records is a nested *writer*.
+
+    Empty for a task whose token names no room: a DM, a synthetic email-thread
+    hash, a cron job with no ``room``. Never raises — this runs on the
+    prompt-assembly path, where an exception means no task at all, so the whole
+    body is inside the guard rather than only the database reads.
+
+    One residual, recorded rather than closed: the sentence naming
+    ``istota-skill rooms list`` is not gated on that skill being enabled for
+    this deployment. It is the same gap `.claude/rules/skills.md` records for
+    ``format_cli_skills``, which applies neither the capability gate nor the
+    effective disabled set — an operator who disables `rooms` gets one prompt
+    line naming a verb the proxy refuses.
+    """
+    if not task.conversation_token or not config.db_path:
+        return ""
+    try:
+        from .transport.routing import canonical_room_token, room_target_descriptor
+
+        def _lookup(c):
+            tok = canonical_room_token(c, task.conversation_token)
+            if not tok:
+                return None, None, None
+            found = db.get_room(c, tok)
+            if found is None:
+                return None, None, None
+            binding = db.get_room_binding(c, tok, "talk")
+            return tok, found, (binding.surface_ref if binding else None)
+
+        if conn is not None:
+            token, room, talk_ref = _lookup(conn)
+        else:
+            with db.get_db(config.db_path) as temp_conn:
+                token, room, talk_ref = _lookup(temp_conn)
+        if room is None:
+            return ""
+        # "Talk", never "Nextcloud Talk": `tests/test_storage_identity.py`
+        # requires the assembled prompt to carry no "Nextcloud" literal on the
+        # storage-neutral backend, and a local-backend deployment can hold
+        # migrated `origin='talk'` rows.
+        where = "Talk" if room.origin == "talk" else "web chat"
+        if talk_ref and room.origin != "talk":
+            where = "web chat, also open in Talk"
+        descriptor = _header_scalar(
+            room_target_descriptor(token, room.origin, talk_ref)
+        )
+        safe_token = _header_scalar(token)
+        return (
+            f"\nRoom: this conversation is a registered room on {where}. To "
+            "deliver into it from a scheduled job or a reminder, write "
+            f'target = "{descriptor}" and room = "{safe_token}". '
+            "`istota-skill rooms list` names every room you are in; never "
+            "create a Talk conversation in order to post into one."
+        )
+    except Exception:  # pragma: no cover - best-effort labelling
+        return ""
+
+
 def build_rules_section(
     *,
     is_admin: bool,
@@ -6227,6 +6341,10 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     display_source = _one_line(source_type or task.source_type or "unknown")
     display_output_target = _one_line(output_target or "text")
     display_token = _one_line(task.conversation_token or "none")
+    # Deliberately in the system half, beside the token it qualifies: it points
+    # at nothing in the user half, and a task that has been compacted still
+    # needs to know which room it is in to answer "post this here".
+    room_line = room_identity_line(config, task, conn)
 
     # The shared-credential namespace, named but never enumerated. The names are
     # the user's own labels, they change with no task running, and putting them
@@ -6273,7 +6391,7 @@ Today's date: {user_date_str}
 User timezone: {user_tz_str}
 Current UTC: {utc_now_str}
 Current task ID: {task.id}
-Conversation token: {display_token}{group_chat_line}
+Conversation token: {display_token}{room_line}{group_chat_line}
 Source: {display_source}
 Output target: {display_output_target}{per_user_email_line}
 {db_path_line}
