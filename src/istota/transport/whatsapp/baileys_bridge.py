@@ -72,8 +72,18 @@ from pathlib import Path
 
 from ... import du
 from ...config import Config
-from . import baileys_protocol as proto, message_fingerprint, pairing_relay
-from ._types import WhatsAppSendOutcome, WhatsAppSendRequest
+from . import (
+    baileys_protocol as proto,
+    media as media_rules,
+    message_fingerprint,
+    pairing_relay,
+)
+from ._types import (
+    InboundWhatsAppEvent,
+    WhatsAppInboundMedia,
+    WhatsAppSendOutcome,
+    WhatsAppSendRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +246,16 @@ _CHILD_ENV_PASSTHROUGH = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "NODE_ENV")
 #: and so neither value shows up in `ps` output.
 ENV_SOCKET = "ISTOTA_BAILEYS_SOCKET"
 ENV_SESSION_DIR = "ISTOTA_BAILEYS_SESSION_DIR"
+
+#: Where the sidecar writes an inbound file, for the daemon to pick up after.
+#: Beside the two above and set the same way, which is what keeps it out of
+#: `_CHILD_ENV_PASSTHROUGH`: that is an allowlist of what the *daemon's*
+#: environment may hand on, and this value is computed from config rather than
+#: inherited. The sidecar exits 2 without it, so the two literals the
+#: deployment shapes spell are compared against `media.default_media_dir` by
+#: test — a drift there is a sidecar writing where the daemon never reads, with
+#: no error on either side.
+ENV_MEDIA_DIR = "ISTOTA_BAILEYS_MEDIA_DIR"
 
 
 # ---------------------------------------------------------------------------
@@ -1202,6 +1222,136 @@ class BridgeStatus:
 
 
 # ---------------------------------------------------------------------------
+# Inbound media, staged before the lock
+# ---------------------------------------------------------------------------
+
+
+def _media_failed(reason: str) -> WhatsAppInboundMedia:
+    """The record a message whose file went nowhere carries into the batch.
+
+    A record with an `error` rather than no record at all, and the difference
+    is not cosmetic: `_dispatch_inbound`'s narrowed gate reads "a type this
+    surface does not know **and** no file came with it", so dropping the
+    record sends a *captioned* image back to the unsupported branch — and
+    `START` typed on a photograph by the opted-out sender this reason is most
+    often about would never be read.
+    """
+    return WhatsAppInboundMedia(
+        staged_path="", mime_type="", byte_count=0,
+        attached_for_user="", error=reason,
+    )
+
+
+def stage_inbound_media(
+    config: Config, media_dir: Path, event: InboundWhatsAppEvent
+) -> InboundWhatsAppEvent:
+    """Put this message's file in its user's inbox, before any lock is taken.
+
+    The Baileys half of the ordering this whole area exists for. The sidecar
+    has already fetched the bytes — it holds the decryption keys and the
+    daemon does not — so what is left here is the part that must not happen
+    under `BEGIN IMMEDIATE`: a read-only identity lookup and a copy into
+    Nextcloud, either of which under the write lock would stall the receiver
+    and, on the `istota serve` shape, the web UI with it.
+
+    Runs on a worker thread, once per event, **above** the retry ladder. A
+    failed transaction rolls its claim back, so a re-staged message would find
+    its pre-check passing again and its staged file already consumed — the
+    media would be lost on the attempt that finally succeeded, which is the
+    one that matters.
+
+    The order is the same two calls the Cloud route makes, with the fetch that
+    sits between them on that side already done here:
+
+    1. **Prune.** A touch of the directory is where the sweep runs, per
+       `outbound._prune_parked_statuses`' arrangement. On this adapter the
+       daemon cannot refuse a fetch the sidecar already made, so what bounds
+       the directory is the per-file cap and the fact that every staged file
+       is unlinked when it is decided — consumed *or* dropped.
+    2. **Pre-check.** Unlocked, read-only, and allowed to be stale. `None`
+       means the file goes no further: an unknown sender, a message id already
+       claimed (which is what closes the redelivery re-copy), a sender who has
+       opted out, or a read that could not be answered.
+    3. **Sniff, then consume.** The sniff is asked here rather than left to
+       `stage_to_attachment` because that function answers `None` for two
+       situations the surface owes different replies for: a file that is not a
+       decodable image is not an image at all and takes the `unsupported_type`
+       reply the surface already had, while an image that could not be placed
+       is istota's own failure and says so. One extra 32-byte read buys the
+       distinction.
+
+    Never raises, and that is wider than `stage_to_attachment`'s own contract:
+    that one catches `OSError` and `ValueError`, and anything else out of the
+    storage layer would reach `_drain_inbound`'s handler and cost the **whole
+    message** — a media failure costing what the caption said, which is the
+    rule this path is built around inverted.
+    """
+    # Function-scope, matching `_apply_batch_to_db` one class down: this
+    # module is imported by the pairing CLI and by `doctor`, and neither has
+    # any reason to pay for the database graph.
+    from ... import db, sqlite_util  # noqa: PLC0415
+
+    incoming = event.media
+    if incoming is None or incoming.error is not None:
+        return event
+    try:
+        media_rules.prune_media_dir(media_dir)
+        if not media_rules.is_staged_name(incoming.staged_path):
+            # The decoder validated it and this joins it, and the two are
+            # different modules — the join is the containment story, so it is
+            # asked here rather than assumed from there.
+            logger.warning(
+                "whatsapp.baileys.media_name_refused message=%s: the staged "
+                "name is not a single ordinary component",
+                message_fingerprint(event.message_id),
+            )
+            return dataclasses.replace(
+                event, media=_media_failed(media_rules.MEDIA_UNATTRIBUTED),
+            )
+        staged = Path(media_dir) / incoming.staged_path
+        user_id = media_rules.precheck(
+            lambda: sqlite_util.connect_read_only(config.db_path),
+            identity=event.from_user,
+            message_id=event.message_id,
+            provider=db.WHATSAPP_BAILEYS_PROVIDER,
+        )
+        if user_id is None:
+            logger.info(
+                "whatsapp.baileys.media_unattributed message=%s: the "
+                "pre-check named no user, so the staged file is removed",
+                message_fingerprint(event.message_id),
+            )
+            media_rules.discard_staged(staged)
+            return dataclasses.replace(
+                event, media=_media_failed(media_rules.MEDIA_UNATTRIBUTED),
+            )
+        if media_rules.sniff_staged(staged) is None:
+            media_rules.discard_staged(staged)
+            return dataclasses.replace(event, media=None)
+        attachment = media_rules.stage_to_attachment(config, user_id, staged)
+        if attachment is None:
+            return dataclasses.replace(
+                event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+            )
+        return dataclasses.replace(
+            event,
+            media=dataclasses.replace(
+                incoming, staged_path=attachment, attached_for_user=user_id,
+            ),
+        )
+    except Exception:  # noqa: BLE001 — a media failure must not cost the message
+        # No `exc_info` and no path: the caption is in the event and the
+        # filename is a string the sidecar chose.
+        logger.warning(
+            "whatsapp.baileys.media_staging_failed message=%s",
+            message_fingerprint(event.message_id),
+        )
+        return dataclasses.replace(
+            event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+        )
+
+
+# ---------------------------------------------------------------------------
 # The bridge
 # ---------------------------------------------------------------------------
 
@@ -1225,6 +1375,7 @@ class BaileysBridge:
         sidecar_argv: tuple[str, ...] = (),
         socket_path: Path | None = None,
         session_dir: Path | None = None,
+        media_dir: Path | None = None,
         send_timeout: float = SEND_TIMEOUT_SECONDS,
         pairing_relay_path: Path | None = None,
         pairing_window_seconds: float = PAIRING_WINDOW_SECONDS,
@@ -1239,6 +1390,11 @@ class BaileysBridge:
         self._sidecar_argv = tuple(sidecar_argv)
         self._socket_path = Path(socket_path or default_socket_path(config))
         self._session_dir = Path(session_dir or default_session_dir(config))
+        # A constructor parameter like the two beside it, and for the same
+        # reason: the sidecar is told this path and the daemon reads files out
+        # of it, so a test that cannot move it would have to write into the
+        # deployment's own directory.
+        self._media_dir = Path(media_dir or media_rules.default_media_dir(config))
         self._send_timeout = send_timeout
         self._on_qr = on_qr
         # The pairing window and its relay. Every one of these is a
@@ -1886,15 +2042,26 @@ class BaileysBridge:
                 )
 
     async def start(self) -> None:
-        """Make the session directory, open the socket, start the sidecar.
+        """Make the two directories, open the socket, start the sidecar.
 
         In that order, and the order is the contract: a sidecar that dialled
         before the listener existed would fail its first connect and burn a
-        respawn, and one that started before the session directory was private
-        would pair into a world-readable one.
+        respawn, one that started before the session directory was private
+        would pair into a world-readable one, and one that started before the
+        staging directory existed would exit 2 — that path is a requirement
+        on its side rather than something it creates, so that a directory the
+        daemon cannot reach is a loud failure instead of a silent one.
         """
         self._stopping = False
         ensure_session_dir(self._session_dir)
+        media_rules.ensure_media_dir(self._media_dir)
+        # A sweep at the one moment nothing can be mid-consume: this process
+        # holds no staged file yet and the sidecar has not started. Everything
+        # standing here is an orphan from a previous run — a daemon killed
+        # between the write and the copy, a frame that never arrived — and the
+        # count is logged at warning, because each one is a message somebody
+        # sent that nobody answered.
+        media_rules.prune_media_dir(self._media_dir)
         (
             self._status.session_files_hardened,
             self._status.session_files_unfixed,
@@ -2872,6 +3039,7 @@ class BaileysBridge:
         }
         env[ENV_SOCKET] = str(self._socket_path)
         env[ENV_SESSION_DIR] = str(self._session_dir)
+        env[ENV_MEDIA_DIR] = str(self._media_dir)
         return env
 
     async def _supervise(self) -> None:
@@ -3483,6 +3651,15 @@ class BaileysBridge:
             # A receipt status this surface does not model.
             logger.debug("whatsapp.baileys.receipt_ignored")
             return
+        if isinstance(event, InboundWhatsAppEvent) and event.media is not None:
+            # **Here rather than inside `_apply_batch_to_db`**, on both of the
+            # axes that matter: off the event loop, because the copy is a
+            # Nextcloud round trip and a SQLite read; and above the retry
+            # ladder, because a rolled-back batch would otherwise re-stage a
+            # file the first attempt already consumed.
+            event = await asyncio.to_thread(
+                stage_inbound_media, self._config, self._media_dir, event,
+            )
         await self._apply_with_retry(event)
 
     async def _apply_with_retry(self, event) -> None:
@@ -3733,6 +3910,7 @@ class BaileysBridge:
 __all__ = [
     "BaileysBridge",
     "BridgeStatus",
+    "ENV_MEDIA_DIR",
     "ENV_SESSION_DIR",
     "ENV_SOCKET",
     "INBOUND_ATTEMPTS",
@@ -3773,5 +3951,6 @@ __all__ = [
     "read_status",
     "set_active_bridge",
     "shipped_library_version",
+    "stage_inbound_media",
     "survey_session_files",
 ]

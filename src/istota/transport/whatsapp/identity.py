@@ -523,6 +523,27 @@ def resolve_inbound_identity(
     return arm(conn, identity)
 
 
+def _media_recipient(binding) -> str | None:
+    """The user a staged file may be copied to, or `None` for one it may not.
+
+    **The opt-out column, read one call earlier than the transaction reads
+    it.** The inbox copy happens before `BEGIN IMMEDIATE`, so by the time
+    `_dispatch_inbound` sees `opted_out_at` the photograph is already in that
+    user's workspace — which makes "the image is not retained for somebody who
+    asked not to be messaged" unsatisfiable anywhere downstream. It is one
+    more field on a row both arms already fetch.
+
+    **It gates the media alone and never the message.** `precheck`'s answer
+    decides where a *file* goes; the text path is untouched, so `STOP` typed as
+    a caption still opts out and `START` typed as a caption still resumes. That
+    is why a refusal here becomes a `WhatsAppInboundMedia.error` rather than a
+    dropped record — see `media.MEDIA_UNATTRIBUTED`.
+    """
+    if binding is None or binding.opted_out_at is not None:
+        return None
+    return binding.user_id
+
+
 def _precheck_cloud(conn, identity: WhatsAppUserIdentity) -> str | None:
     """`_resolve_cloud`'s reads, with nothing written."""
     bsuid = identity.bsuid
@@ -530,14 +551,14 @@ def _precheck_cloud(conn, identity: WhatsAppUserIdentity) -> str | None:
         return None
     bound = db.get_whatsapp_binding_by_bsuid(conn, bsuid)
     if bound is not None:
-        return bound.user_id
+        return _media_recipient(bound)
     number = _e164_from_wa_id(identity.wa_id)
     candidate = db.get_whatsapp_binding_by_phone(conn, number) if number else None
     if candidate is None or candidate.bsuid:
         # A candidate already carrying a *different* BSUID is the recycled
         # line, which the arm above refuses and so does this.
         return None
-    return candidate.user_id
+    return _media_recipient(candidate)
 
 
 def _precheck_baileys(conn, identity: WhatsAppUserIdentity) -> str | None:
@@ -547,12 +568,12 @@ def _precheck_baileys(conn, identity: WhatsAppUserIdentity) -> str | None:
         return None
     bound = db.get_whatsapp_binding_by_jid(conn, jid)
     if bound is not None:
-        return bound.user_id
+        return _media_recipient(bound)
     number = jid_number(jid)
     candidate = db.get_whatsapp_binding_by_phone(conn, number) if number else None
     if candidate is None or candidate.jid:
         return None
-    return candidate.user_id
+    return _media_recipient(candidate)
 
 
 _PRECHECK_ARMS = {
@@ -567,7 +588,11 @@ def resolve_for_precheck(
     """Which user this sender *probably* is, read-only and non-authoritative.
 
     The read half of the two arms above and nothing else: no latch, no alert,
-    no disposition. `media.precheck` is the caller, on a connection opened
+    no disposition — plus one question those arms do not ask, because it is
+    asked later on their path and too late on this one: whether that user has
+    opted out. See `_media_recipient`.
+
+    `media.precheck` is the caller, on a connection opened
     `sqlite_util.connect_read_only` outside any transaction, because the file
     it is about has to be copied into *a user's* inbox before the write lock
     is taken and the authoritative answer does not exist until after it. The

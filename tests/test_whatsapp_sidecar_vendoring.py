@@ -243,18 +243,12 @@ class TestTheSidecarSpeaksTheSameProtocol:
         assert f"process.env.{ENV_SOCKET}" in source
         assert f"process.env.{ENV_SESSION_DIR}" in source
 
-    def test_it_reads_the_media_directory_the_bridge_will_set(self):
+    def test_it_reads_the_media_directory_the_bridge_sets(self):
         """Where a staged image is written, handed over the same way the
-        other two are. A rename on either side is a sidecar that exits 2.
+        other two are. A rename on either side is a sidecar that exits 2."""
+        from istota.transport.whatsapp.baileys_bridge import ENV_MEDIA_DIR
 
-        **The literal is spelled here rather than imported**, and that is a
-        gap rather than a style: `baileys_bridge` grows `ENV_MEDIA_DIR` in
-        Stage 3 along with the spawn env that sets it, and this assertion
-        becomes the imported-constant form its two siblings above already
-        have. Until then nothing holds the two spellings in step, because
-        only one of them exists.
-        """
-        assert "process.env.ISTOTA_BAILEYS_MEDIA_DIR" in PROGRAM.read_text()
+        assert f"process.env.{ENV_MEDIA_DIR}" in PROGRAM.read_text()
 
     def test_the_entry_point_is_the_one_the_bridge_resolves(self):
         from istota.transport.whatsapp.baileys_bridge import SIDECAR_ENTRY
