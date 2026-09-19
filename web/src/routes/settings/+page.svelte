@@ -311,7 +311,6 @@
   let vaultHasPassphrase = $derived.by(() => vaultForm?.passphrase_present ?? false);
   // Off `vault` rather than `vaultForm`: the names ride on the configured half
   // of the payload, which is also the half the status line renders from.
-  let vaultEntryNames = $derived.by(() => vault?.entry_names ?? []);
   let vaultDir = $derived.by(() => vaultForm?.vault_dir ?? '');
   let vaultFiles = $derived.by(() => vaultForm?.files ?? []);
   let vaultFile = $derived.by(() => vaultForm?.vault_file ?? '');
@@ -1148,12 +1147,14 @@
                 empty-list fallback ("no services are assigned to it yet") was
                 false on the rest.
               -->
-              {#if (vault.entry_count ?? 0) > 0}
-                istota holds {vaultSharedCount} from this file, and the file is the authority for all
-                of them — removing an entry removes the credential.
-              {:else}
-                nothing has been shared from it yet.
-              {/if}
+              <p class="vault-line">
+                {#if (vault.entry_count ?? 0) > 0}
+                  istota holds {vaultSharedCount} from this file, and the file is the authority for all
+                  of them — removing an entry removes the credential.
+                {:else}
+                  Nothing has been shared from this file yet.
+                {/if}
+              </p>
               <!--
                 The scope notice. A file with no top-level `istota` group is read
                 in full, which is how it is meant to work for a file put in the
@@ -1163,43 +1164,15 @@
                 only when a cycle has actually read the file that way.
               -->
               {#if vault.unscoped}
-                <span class="vault-problem" data-testid="vault-unscoped">
+                <p class="vault-line vault-problem" data-testid="vault-unscoped">
                   This file has no top-level <code>istota</code> group, so all
                   {vault.entry_count ?? 0} credential{(vault.entry_count ?? 0) === 1 ? '' : 's'} in it
                   are shared with your tasks. If that was not what you meant, move the file out or put
                   what you meant to share under a top-level group named <code>istota</code>.
-                </span>
-              {/if}
-              {#if vault.path}
-                It is read from <code>{vault.path}</code>, never written.
-              {/if}
-              <!--
-                The names, which is the feedback this feature has never had: after
-                dropping a file in and generating a passphrase, a name that
-                arrived is a credential istota holds and one that is missing is a
-                group misspelled or an entry with a warning behind it. Names only
-                — no value reaches this payload at all — and this user's own,
-                which is why it is here and not in `doctor`, whose vault check
-                reports counts to every admin.
-              -->
-              {#if vaultEntryNames.length > 0}
-                <details class="vault-names" data-testid="vault-entry-names">
-                  <summary>Names</summary>
-                  <ul class="vault-name-list">
-                    {#each vaultEntryNames as name}
-                      <li><code>{name}</code></li>
-                    {/each}
-                  </ul>
-                  {#if vault.entry_names_truncated}
-                    <p class="caption">
-                      The first {vaultEntryNames.length} of {vault.entry_count}. Ask
-                      <code>istota secret vault-status</code> for the rest.
-                    </p>
-                  {/if}
-                </details>
+                </p>
               {/if}
               {#if vaultProblem}
-                <span class="vault-problem">Not working: {vaultProblem}</span>
+                <p class="vault-line vault-problem">Not working: {vaultProblem}</p>
               {:else if vault.last_success_at}
                 <!--
                   "applied", not "synced". Istota re-reads the file only when its
@@ -1208,10 +1181,12 @@
                   calling that "last synced" reads as staleness and sends a user
                   looking for a fault that is not there.
                 -->
-                Istota last applied it {formatRelative(vault.last_success_at)}, and re-reads it
-                whenever the file changes.
+                <p class="vault-line">
+                  Istota last applied it {formatRelative(vault.last_success_at)}, and re-reads it
+                  whenever the file changes.
+                </p>
               {:else}
-                Nothing has been applied from it yet.
+                <p class="vault-line">Nothing has been applied from it yet.</p>
               {/if}
             </div>
           {/if}
@@ -1473,32 +1448,23 @@
     overflow-wrap: anywhere;
   }
 
-  /* The one part of this paragraph that is not neutral prose. Colour alone
-     would not carry it — the sentence says "Not working" in words. */
+  /* Three separate claims, not one paragraph: what is shared, whether the
+     whole file is shared, and when it last applied. Run together they read as
+     a wall with a coloured clause in the middle of it, which is what the
+     scope notice looked like. One block each, and the gap is what separates
+     the notice from the prose around it. */
+  .vault-line {
+    margin: 0;
+  }
+
+  .vault-line + .vault-line {
+    margin-top: var(--space-2);
+  }
+
+  /* The one part of this block that is not neutral prose. Colour alone would
+     not carry it — the sentence says what happened in words. */
   .vault-problem {
     color: var(--status-warn-fg);
-  }
-
-  /* The names, folded away. A vault is allowed to hold fifty credentials and
-     the card is not the place to recite them: the summary answers "how many
-     arrived", which is the question this list exists for, and opening it
-     answers "did mine". Rendered as a wrapping row rather than a column,
-     because these are short labels and fifty of them stacked is a page. */
-  .vault-names summary {
-    cursor: pointer;
-  }
-
-  .vault-name-list {
-    list-style: none;
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1) var(--space-2);
-    margin: var(--space-2) 0 0;
-    padding: 0;
-  }
-
-  .vault-name-list code {
-    overflow-wrap: anywhere;
   }
 
   .vault-form :global(.micro-label) {

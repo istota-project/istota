@@ -203,34 +203,6 @@ describe('a user with no credential vault', () => {
 });
 
 describe('a user whose vault is working', () => {
-  it('lists the names it holds, which is how a user knows the file worked', async () => {
-    // Names, never values: the payload carries no value at all, and this is the
-    // user's own page rather than `doctor`'s deployment-wide report — which
-    // answers the same question in counts because an admin reads it.
-    api.getVaultStatus.mockResolvedValue(configured());
-    await mount();
-
-    const names = await screen.findByTestId('vault-entry-names');
-    expect(names.textContent).toContain('github_pat');
-    expect(names.textContent).toContain('home_assistant_token');
-    expect(names.textContent).not.toMatch(/and more/i);
-  });
-
-  it('says so when the list was cut', async () => {
-    // The count beside it is uncapped, so a cut list still adds up. Without
-    // this a card showing the first fifty of four hundred would answer "did
-    // mine arrive" wrongly and look complete doing it.
-    api.getVaultStatus.mockResolvedValue(
-      configured({ entry_count: 412, entry_names: ['a_name'], entry_names_truncated: true }),
-    );
-    await mount();
-
-    const names = await screen.findByTestId('vault-entry-names');
-    // Both halves of the cut, since either alone is the wrong answer: how many
-    // names are shown, and how many there are. "and more" said neither.
-    expect(names.textContent).toMatch(/first 1 of 412/i);
-  });
-
   it('renders no name list when there are none', async () => {
     // The control for both above: each would pass against a heading that had
     // stopped rendering the list, since `findByTestId` is the only thing
@@ -242,7 +214,7 @@ describe('a user whose vault is working', () => {
     expect(screen.queryByTestId('vault-entry-names')).toBeNull();
   });
 
-  it('names the shared count, the path and the last sync', async () => {
+  it('names the shared count and the last sync, and not the path', async () => {
     // It used to name the connected services the vault overwrote. It
     // overwrites none of them now, so the sentence is about the namespace the
     // file *is* the authority for — and the payload carries no `owned` list,
@@ -253,7 +225,9 @@ describe('a user whose vault is working', () => {
     const line = await findHeading();
     expect(line.textContent).toContain('2 shared credentials');
     expect(line.textContent).not.toContain('karakeep');
-    expect(line.textContent).toContain('/mnt/shared/Users/alice/config/vault.kdbx');
+    // Deliberately NOT the path: the card's file section names the file, and
+    // this block repeating it was the redundancy that got it removed.
+    expect(line.textContent).not.toContain('/mnt/shared/Users/alice/config/vault.kdbx');
     // A relative reading, which is what the question "is it keeping up" wants.
     // The exact words are `formatRelative`'s; what this pins is that the value
     // went through it.
@@ -261,9 +235,11 @@ describe('a user whose vault is working', () => {
     // Not the raw wire value: it is UTC to millisecond precision and belongs to
     // nobody reading this page.
     expect(line.textContent).not.toContain(SYNC_AT);
-    // It says it is read and never written, which is the property a user has to
-    // know before they go looking for a Save button that does not exist.
-    expect(line.textContent).toContain('never written');
+    // Read-and-never-written is the property a user has to know before they go
+    // looking for a Save button that does not exist. It is stated once, in the
+    // card's description — the status block's own copy of it went with the
+    // path sentence it was attached to.
+    expect(document.body.textContent).toMatch(/never writes to it/i);
   });
 
   it('shows no passphrase and no credential value', async () => {
@@ -341,7 +317,7 @@ describe('a user whose vault is working', () => {
     await mount();
 
     const line = await findHeading();
-    expect(line.textContent).toContain('nothing has been shared');
+    expect(line.textContent).toMatch(/nothing has been shared/i);
   });
 
   it('renders the singular for one shared credential', async () => {
