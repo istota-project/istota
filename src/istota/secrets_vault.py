@@ -1305,8 +1305,36 @@ def passphrase_refusal(value: str) -> str | None:
     a floor that could refuse ``--generate`` itself would break the remedy it was
     built to serve. It reads the module global at call time rather than binding
     it, so a caller cannot import the number and drift from the rule.
+
+    **Two arms, and the whitespace one is the one that has actually bitten.**
+    The length is measured on the value as it will be stored rather than on its
+    stripped form, which is what the arm above guarantees: every caller stores
+    what it passed here, so measuring a *different* string from the one that
+    gets stored is how a passphrase can satisfy the floor and still not be the
+    one the file was keyed with. ``generate_passphrase`` produces neither
+    shape, so nothing here can refuse the generated path.
     """
-    if len(value.strip()) < VAULT_PASSPHRASE_MIN_CHARS:
+    if value != value.strip():
+        # Refused rather than stripped, because this is a credential and the
+        # two answers are not equally safe. The floor below has always measured
+        # `value.strip()` while every caller stored `value` unstripped, so a
+        # passphrase pasted with a trailing newline — which is what copying out
+        # of a password manager, a terminal or a file gives you — passed the
+        # check, went into the row with the newline on it, and then opened
+        # nothing. What the user saw was `VaultLocked`: "the stored passphrase
+        # does not match the file", about a password that was correct.
+        #
+        # Stripping silently would fix that case and quietly alter a
+        # credential in the one place a user cannot read it back to check, and
+        # would be wrong for a passphrase that really does end in a space. So
+        # the ambiguity is handed back rather than resolved.
+        return (
+            "a vault passphrase must not start or end with a space or a line "
+            "break — check for a stray newline if you pasted it; if the "
+            "padding really is part of your password, re-key the file without "
+            "it"
+        )
+    if len(value) < VAULT_PASSPHRASE_MIN_CHARS:
         return (
             f"a vault passphrase must be at least {VAULT_PASSPHRASE_MIN_CHARS} "
             "characters, and should be generated rather than chosen"

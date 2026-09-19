@@ -2184,3 +2184,58 @@ class TestNoSkillManifestDeclaresThePassphrase:
             "a secret-sourced spec parsed with an empty service or key, so the "
             "pair the guard matches on is not what the manifests carry"
         )
+
+
+class TestThePassphraseFloor:
+    """What `passphrase_refusal` accepts, and the asymmetry that broke a vault.
+
+    The floor used to measure `value.strip()` while every caller stored `value`
+    itself. A passphrase pasted with a trailing newline — what copying out of a
+    password manager, a terminal or a file gives you — therefore satisfied a
+    check about one string and was stored as a different one, after which the
+    unlock failed for the life of the deployment and reported `VaultLocked`:
+    "the stored passphrase does not match the file", about a password that was
+    correct. Found in production, not by a test.
+    """
+
+    def test_a_long_enough_passphrase_is_accepted(self):
+        assert secrets_vault_module.passphrase_refusal("x" * 32) is None
+
+    def test_a_short_passphrase_is_refused_by_length(self):
+        refusal = secrets_vault_module.passphrase_refusal("x" * 31)
+        assert refusal is not None
+        assert "at least" in refusal
+
+    def test_a_trailing_newline_is_refused_rather_than_stripped(self):
+        refusal = secrets_vault_module.passphrase_refusal("x" * 32 + "\n")
+        assert refusal is not None
+        assert "line break" in refusal
+
+    def test_a_trailing_space_is_refused(self):
+        assert secrets_vault_module.passphrase_refusal("x" * 32 + " ") is not None
+
+    def test_a_leading_space_is_refused(self):
+        assert secrets_vault_module.passphrase_refusal(" " + "x" * 32) is not None
+
+    def test_the_length_is_measured_on_what_will_be_stored(self):
+        """The discriminating case, and the whole point of the change.
+
+        Thirty-two characters of padding and one of password: the old floor
+        measured the stripped form and so refused this, which was right — but
+        it measured the stripped form of an *acceptable* value too, which is
+        what let a padded 32-character passphrase through. Both arms have to
+        agree that the value stored is the value judged.
+        """
+        padded = " " * 32 + "x"
+        assert secrets_vault_module.passphrase_refusal(padded) is not None
+
+    def test_a_generated_passphrase_is_never_refused(self):
+        """The remedy the floor exists to steer people towards must survive it."""
+        for _ in range(20):
+            assert secrets_vault_module.passphrase_refusal(
+                secrets_vault_module.generate_passphrase()
+            ) is None
+
+    def test_whitespace_inside_a_passphrase_is_untouched(self):
+        """Only the ends are ambiguous. A passphrase of words is ordinary."""
+        assert secrets_vault_module.passphrase_refusal("correct horse battery staple xyz") is None
