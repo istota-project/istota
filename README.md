@@ -220,7 +220,7 @@ Scheduled jobs and heartbeat checks are task sources rather than transports; the
 | **Web chat** | Requests, attachments, voice notes | Streamed, with offline queueing | Canonical room view |
 | **Nextcloud Talk** | Requests and attachments in any room the agent is in | Progress acknowledgements, edited in place | External room view, mirrored with web chat |
 | **Email** | Mail sent to the agent's own address, including replies in a thread | Reply in the same thread | Joins an existing room's transcript, never creates one |
-| **WhatsApp** | Text messages to one number, through a paired session or Meta's Cloud API | Final reply, with buttons for confirmations where the adapter has them | Outside the room model |
+| **WhatsApp** | Text and photographs to one number, through a paired session or Meta's Cloud API | Final reply, with buttons for confirmations where the adapter has them | Outside the room model |
 | **SMS** | Text messages to one number, through Twilio or Telnyx | Final reply, sized to the segment budget | Outside the room model |
 | **ntfy** | None; delivery only | Push notification to the user's own topic | Outside the room model |
 | **TASKS.md** | Lines added to a watched file | Written back to the line it came from | Outside the room model |

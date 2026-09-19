@@ -78,7 +78,13 @@ its own copy of a mode could pass while the thing that sets it disagreed.
 """
 
 MEDIA_FILE_MODE = 0o600
-"""What one staged file is created at, for the same reason."""
+"""What one staged file is created at, named beside the directory's mode so the
+pair reads as one rule.
+
+Read by `open_staged_write` alone. `doctor.whatsapp.media_staging` deliberately
+has no per-file mode arm: it reports the directory, which is what decides
+whether another account can reach a staged photograph at all.
+"""
 
 MAX_MEDIA_BYTES = 16 * 1024 * 1024
 """What one inbound file may weigh. WhatsApp's own image ceiling.

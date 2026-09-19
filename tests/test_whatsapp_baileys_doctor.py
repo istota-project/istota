@@ -10,6 +10,15 @@ The other two are the spec's, and one of them is the second half of an edge
 case that shipped one-third implemented: the unlink case asks for a task alert
 *and* a doctor failure, and until now a device WhatsApp had unlinked was an
 ERROR in the log, a definite refusal on every send, and nobody told.
+
+**One class here is not about a paired session at all**, and it is filed here
+because this module is the tree's one home for the WhatsApp doctor checks
+rather than for Baileys' — `TestTheBillingCheckUnderAnotherAdapter` is already
+about a Cloud-only check. `TestTheMediaStagingCheck` covers
+`whatsapp.media_staging`, which answers under **both** adapters because both
+stage an inbound photograph, and whose gate is therefore `[whatsapp] enabled`
+alone. Anyone tidying this file toward `_baileys_precondition` should read that
+class's docstring first.
 """
 
 from __future__ import annotations
@@ -20,6 +29,7 @@ import pathlib
 import stat
 import time
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 import pytest
 
@@ -1222,6 +1232,50 @@ class TestTheMediaStagingCheck:
         assert second.status == doctor.WARN, (
             "the second run no longer sees the orphan the first one named"
         )
+
+    def test_only_regular_files_are_counted_as_staged(self, tmp_path):
+        """The census skips a directory rather than counting it as an image.
+
+        `prune_media_dir` draws the same line with the same `S_ISREG` test, so
+        a check that counted one would report an orphan the sweep will never
+        remove — a WARN nothing can clear, on the surface whose whole point is
+        that its steady state is empty.
+        """
+        cfg = _config(tmp_path)
+        path = self._staging(cfg)
+        stale = path / "not-a-file"
+        stale.mkdir()
+        when = time.time() - (media_rules.MEDIA_ORPHAN_SECONDS + 600)
+        os.utime(stale, (when, when))
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.OK
+        assert "empty" in result.detail
+
+    def test_a_directory_that_cannot_be_listed_is_a_warning(self, tmp_path):
+        """The arm between "the mode is right" and "here is what is in it".
+
+        Reachable because the mode gate and the listing are two separate
+        questions: a directory can be 0700 and owned by this account and still
+        refuse `iterdir`, which is what a lost read permission looks like. The
+        check must say it could not look rather than report an empty
+        directory, since those are opposite facts.
+        """
+        cfg = _config(tmp_path)
+        self._staging(cfg)
+
+        def _refuse(self, *args, **kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        with mock.patch.object(pathlib.Path, "iterdir", _refuse):
+            result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.WARN
+        assert "could not be listed" in result.detail
+        # The mode is still reported, because it was established before the
+        # listing failed and a check may say what it did observe.
+        assert "0700" in result.detail
 
     def test_it_creates_no_directory_it_could_then_report_on(self, tmp_path):
         """`whatsapp.baileys_session`'s rule in the other direction: a check

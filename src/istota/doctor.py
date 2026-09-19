@@ -7920,9 +7920,14 @@ def check_whatsapp_media_staging(config: "Config", probe: bool) -> CheckResult:
     try:
         path = media_rules.default_media_dir(config)
     except (OSError, ValueError, RuntimeError) as exc:
-        # The same three the sibling checks catch off a config-derived path:
-        # `expanduser` answers `RuntimeError` for a `~unknownuser` value and an
-        # embedded null byte answers `ValueError`, neither an `OSError`.
+        # **Defensive, and today unreachable.** `default_media_dir` is a pure
+        # join with no `expanduser` and no `resolve`, unlike
+        # `default_session_dir`, which has a configured-path arm and can raise
+        # all three. What actually carries a bad `db_path` here is the `lstat`
+        # handler below, which is where the null-byte case lands. The guard
+        # stays because this runs on the daemon's boot path and the callee is
+        # one config key away from growing the same arm its sibling has; the
+        # comment says so rather than claiming a mechanism that is absent.
         return CheckResult(
             name, WARN,
             f"the WhatsApp media staging directory could not be resolved "
@@ -7963,8 +7968,8 @@ def check_whatsapp_media_staging(config: "Config", probe: bool) -> CheckResult:
             f"{path} is not a directory, so no inbound WhatsApp image can be "
             "staged",
             remedy=(
-                f"Remove {path}. Both adapters create it on their next "
-                "start, 0700."
+                f"Remove {path}. The Baileys bridge recreates it at its next "
+                "start and the Cloud route at the next inbound image, 0700."
             ),
             scope=DEPLOYMENT,
         )
