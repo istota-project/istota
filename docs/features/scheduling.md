@@ -107,7 +107,11 @@ target = "web:web-alice-3f21c4d90ab7"
 room = "web-alice-3f21c4d90ab7"
 ```
 
-Two spellings that do not do what they look like. Bare `web` is the user's default `general` room, not the job's `room` field. And `room:<token>` — which reads as "this room, every surface" and is a real descriptor elsewhere — delivers nothing from a scheduled job: the expansion it goes through assumes the task originated on one of the room's own surfaces, and a scheduled task originates on none, so the plan comes out empty and the only trace is one line in the daemon log.
+One spelling that does not do what it looks like: bare `web` is the user's default `general` room, not the job's `room` field.
+
+`room:<token>` is the third form, and it means "this room, whichever surfaces it is on when the job runs" — the bindings are re-read at every delivery rather than baked into the descriptor. The token must be the room's canonical one — the value `istota-skill rooms list` reports as `token`, and the same string you put in the job's `room` field — rather than a per-surface reference such as a promoted room's Talk conversation id. That is what the form is for: a web-only room later opened in Talk starts reaching the room's Talk members with no edit to the job, where `web:<token>` written months earlier goes on reaching the web leg alone. The surface-qualified forms in the table are still the better default, because they say which surfaces the job was written for, so a room that loses a binding is legible instead of quietly narrowing.
+
+Until ISSUE-511 this form delivered nothing at all from a scheduled job. The expansion assumed the task had originated on one of the room's own surfaces and skipped both of its bindings as legs that origin had already covered; a scheduled task originates on none, so the plan came out empty, the job reported success and the only trace was one line in the daemon log. A deployment running an older release should keep to the surface-qualified forms.
 
 ## Choosing a brain per job
 

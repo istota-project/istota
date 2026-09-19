@@ -223,9 +223,48 @@ def _validate_brain(name: str, user_id: str, brain: str) -> None:
 # (matrix) are intentionally absent so a `target = "matrix:…"` warns instead of
 # validating clean and then silently dropping at delivery. Unknown leaves
 # warn-and-drop; this is warn-only.
+#
+# `room` is not a surface at all — it is the meta-destination
+# `routing._expand_room_destinations` replaces at resolve time with the room's
+# live bindings — and it is here because this check is about what a descriptor
+# *delivers*, not about what the registry can name. It was correctly absent
+# while the expansion answered nothing for a scheduled job: the warning was the
+# only signal anywhere that such a job was broken, so calling it an unknown
+# surface was wrong about the cause and right about the outcome. Since
+# ISSUE-511 the descriptor delivers, and a working one that warns on every sync
+# is worse than no warning at all.
 _KNOWN_TARGET_SURFACES = frozenset({
-    "talk", "email", "ntfy", "istota_file", "stream", "web",
+    "talk", "email", "ntfy", "istota_file", "stream", "web", "room",
 })
+
+
+def _validate_room_pairing(name: str, user_id: str, target: str, room: str) -> None:
+    """Warn when a ``room:`` target and the job's ``room`` field name different
+    rooms; never reject.
+
+    ``room`` is the job's ``conversation_token``, and it is what
+    ``transcript_room_for_task`` resolves — so a job that targets a room and
+    does not name it here still delivers, and the answer arrives as an
+    unsolicited ``role='system'`` note rather than as a turn in the room
+    (ISSUE-511). That is a job which half works, and the half that is missing is
+    invisible from the file. The skill docs already say to pair them; this is
+    what says so when they are not.
+    """
+    from .transport import parse_output_target
+
+    for dest in parse_output_target(target):
+        if dest.surface != "room" or not dest.channel:
+            continue
+        if room.strip() == dest.channel:
+            continue
+        logger.warning(
+            "Job '%s' (user %s): target names room %r but `room` is %s, so the "
+            "result will arrive as a standalone note rather than as a turn in "
+            "the room. Set room = \"%s\".",
+            name, user_id, dest.channel,
+            f"{room.strip()!r}" if room.strip() else "unset",
+            dest.channel,
+        )
 
 
 def _validate_target(name: str, user_id: str, target: str) -> None:
@@ -587,6 +626,10 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
         target = _str_field(name, user_id, "target", j.get("target", ""))
         if target:
             _validate_target(name, user_id, target)
+            _validate_room_pairing(
+                name, user_id, target,
+                _str_field(name, user_id, "room", j.get("room", "")),
+            )
         jobs.append(CronJob(
             name=name,
             cron=cron,

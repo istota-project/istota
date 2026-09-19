@@ -3,7 +3,8 @@
 ## 2026-09-19
 - New `rooms` skill: `istota-skill rooms list` names every room you are in — its token, its name, which surface it lives on, whether it is also open in Talk, and the `target` descriptor to deliver into it. `nextcloud talk rooms` lists *Nextcloud Talk conversations*, so a web chat room was absent from it and read as a room that did not exist
 - The prompt header now names the room a task is in, with the `target` and `room` values to write in `CRON.md`. "Post this here" no longer needs a lookup
-- `schedules` and `reminders` document the room descriptors. `target = "talk"` with a web room's token posts nowhere, and `room:<token>` — the spelling that reads as "this room, every surface" — delivers nothing at all from a scheduled job
+- `schedules` and `reminders` document the room descriptors. `target = "talk"` with a web room's token posts nowhere
+- `room:<token>` delivers into every surface a room is bound to, re-read at each run, so a room later opened in Talk reaches its Talk members with no edit to the job. It delivered nothing at all from a scheduled job before today. Prefer the surface-qualified descriptor `rooms list` hands back, which says which surfaces the job was written for
 - `nextcloud talk create` refuses a name your room registry already holds, and says what to write instead. A conversation created that way is bound to no room: it never carries the room's transcript and nobody is watching it. `--force` creates one anyway
 
 ## 2026-09-07
