@@ -49,8 +49,9 @@ from pathlib import Path
 
 import pytest
 
+from istota import image_sniff
 from istota.transport.whatsapp import baileys_protocol as proto
-from istota.transport.whatsapp import identity
+from istota.transport.whatsapp import identity, media
 
 REPO = Path(__file__).resolve().parents[1]
 SIDECAR_DIR = REPO / "docker" / "whatsapp-baileys"
@@ -205,6 +206,20 @@ class TestTheSidecarSpeaksTheSameProtocol:
 
         assert js_reasons == set(proto._SEND_REASONS)
 
+    def test_the_media_error_keys_are_the_daemons_own_keys(self):
+        """`SEND_REASONS`' rule one frame over. A `media_error` outside the
+        daemon's table renders as the generic sentence, so a user is told the
+        image could not be fetched and nobody can say why — the diagnostic
+        lost rather than the message."""
+        match = re.search(
+            r"const MEDIA_ERRORS = new Set\(\[(.*?)\]\);",
+            PROGRAM.read_text(), re.DOTALL,
+        )
+        assert match is not None
+        js_errors = set(re.findall(r"'([^']+)'", match.group(1)))
+
+        assert js_errors == set(proto._MEDIA_ERRORS)
+
     def test_the_permanent_fatals_are_ones_the_bridge_latches(self):
         """A `fatal` reason the bridge does not recognise is only permanent if
         the sidecar also sets `permanent: true`; these are the two it sends,
@@ -227,6 +242,19 @@ class TestTheSidecarSpeaksTheSameProtocol:
 
         assert f"process.env.{ENV_SOCKET}" in source
         assert f"process.env.{ENV_SESSION_DIR}" in source
+
+    def test_it_reads_the_media_directory_the_bridge_will_set(self):
+        """Where a staged image is written, handed over the same way the
+        other two are. A rename on either side is a sidecar that exits 2.
+
+        **The literal is spelled here rather than imported**, and that is a
+        gap rather than a style: `baileys_bridge` grows `ENV_MEDIA_DIR` in
+        Stage 3 along with the spawn env that sets it, and this assertion
+        becomes the imported-constant form its two siblings above already
+        have. Until then nothing holds the two spellings in step, because
+        only one of them exists.
+        """
+        assert "process.env.ISTOTA_BAILEYS_MEDIA_DIR" in PROGRAM.read_text()
 
     def test_the_entry_point_is_the_one_the_bridge_resolves(self):
         from istota.transport.whatsapp.baileys_bridge import SIDECAR_ENTRY
@@ -354,24 +382,36 @@ class TestTheSidecarsPayloadsAreReadable:
         )
         return {key: values[key] for key in keys}
 
+    #: A text message's filler for every key the one `inbound` send site
+    #: emits. One dict rather than four copies, because the four media keys
+    #: ride the same send site as the text ones — `_js_send_keys` asserts
+    #: there is exactly one — so every inbound case has to fill them whether
+    #: or not it is about media.
+    _INBOUND_TEXT = {
+        "message_id": "BAE5F00D",
+        "jid": "15551234567@s.whatsapp.net",
+        "username": "Alice",
+        "message_type": "text",
+        "text": "check the backup",
+        "callback_data": None,
+        "reply_to_message_id": None,
+        "group": False,
+        "timestamp": 1757000000,
+        "media_name": None,
+        "media_mime": None,
+        "media_bytes": 0,
+        "media_error": None,
+    }
+
     def test_an_inbound_payload_normalizes(self):
         keys = _js_send_keys("MSG_INBOUND")
-        payload = self._filled(keys, {
-            "message_id": "BAE5F00D",
-            "jid": "15551234567@s.whatsapp.net",
-            "username": "Alice",
-            "message_type": "text",
-            "text": "check the backup",
-            "callback_data": None,
-            "reply_to_message_id": None,
-            "group": False,
-            "timestamp": 1757000000,
-        })
+        payload = self._filled(keys, dict(self._INBOUND_TEXT))
 
         event = proto.inbound_event(payload)
 
         assert event.from_user.jid == "15551234567@s.whatsapp.net"
         assert event.text == "check the backup"
+        assert event.media is None
 
     def test_the_group_flag_is_read_from_the_key_the_sidecar_sends(self):
         """The one inbound field with a *behavioural* reader rather than a
@@ -380,19 +420,131 @@ class TestTheSidecarsPayloadsAreReadable:
         keys = _js_send_keys("MSG_INBOUND")
         assert "group" in keys
 
-        payload = self._filled(keys, {
-            "message_id": "BAE5F00D",
-            "jid": "15551234567@s.whatsapp.net",
-            "username": None,
-            "message_type": "text",
-            "text": "hello",
-            "callback_data": None,
-            "reply_to_message_id": None,
-            "group": True,
-            "timestamp": 1757000000,
-        })
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT, username=None, text="hello", group=True,
+        ))
 
         assert proto.inbound_event(payload).message_type == "group"
+
+    def test_an_inbound_payload_carrying_an_image_normalizes(self):
+        """The caption rides `text`, so every gate in `_dispatch_inbound`
+        applies to it with no new code — and the media record is what the
+        narrowed `unsupported_type` gate reads."""
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT,
+            message_type="image",
+            text="what is this?",
+            media_name="0123456789abcdef0123456789abcdef.jpg",
+            media_mime="image/jpeg",
+            media_bytes=8192,
+        ))
+
+        event = proto.inbound_event(payload)
+
+        assert event.message_type == "image"
+        assert event.text == "what is this?"
+        assert event.media is not None
+        assert event.media.staged_path == "0123456789abcdef0123456789abcdef.jpg"
+        assert event.media.mime_type == "image/jpeg"
+        assert event.media.byte_count == 8192
+        assert event.media.error is None
+        # The pre-check has not run at decode; the runtime fills it.
+        assert event.media.attached_for_user == ""
+
+    def test_an_uncaptioned_image_still_carries_its_media(self):
+        """`text` is null and the message is not empty — the whole reason
+        `_dispatch_inbound`'s empty branch has to check media first."""
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT,
+            message_type="image",
+            text=None,
+            media_name="0123456789abcdef0123456789abcdef.heic",
+            media_mime="image/heic",
+            media_bytes=4096,
+        ))
+
+        event = proto.inbound_event(payload)
+
+        assert event.text is None
+        assert event.media is not None
+
+    def test_a_media_error_normalizes_to_a_reason_the_daemon_wrote(self):
+        """The sidecar's key, the daemon's sentence — `_SEND_REASONS`' rule,
+        and what lets the reply be "that image could not be fetched" rather
+        than "that message type is not supported yet"."""
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT,
+            message_type="image",
+            text=None,
+            media_error="over_the_cap",
+        ))
+
+        media = proto.inbound_event(payload).media
+
+        assert media is not None
+        assert media.error == proto._MEDIA_ERRORS["over_the_cap"]
+        assert media.staged_path == ""
+
+    @pytest.mark.parametrize(
+        "name",
+        ["", ".", "..", "a/b", "/abs", "../escape", "x\x00y", "nul\x00", 7],
+    )
+    def test_a_name_that_is_not_one_component_is_dropped(self, name):
+        """`media.is_staged_name`, applied to a value a sidecar chose. The
+        message survives and loses its image, because a frame this side
+        cannot place must not be answered by guessing where it goes."""
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT, message_type="image", media_name=name,
+        ))
+
+        assert proto.inbound_event(payload).media is None
+
+    def test_a_group_message_carrying_media_drops_it(self):
+        """A group message is refused before any identity lookup, so nothing
+        will ever consume the file; the sweep takes it."""
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT,
+            group=True,
+            message_type="image",
+            media_name="0123456789abcdef0123456789abcdef.jpg",
+        ))
+
+        assert proto.inbound_event(payload).media is None
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [
+            ("media_mime", 7),
+            ("media_mime", "x" * (proto.MAX_MEDIA_MIME_CHARS + 1)),
+            ("media_bytes", "8192"),
+            ("media_bytes", True),
+            ("media_bytes", -1),
+            ("media_error", 7),
+        ],
+    )
+    def test_a_malformed_media_field_costs_the_media_and_not_the_message(
+        self, field, value
+    ):
+        """The batch rule one layer up, restated at the decoder: a media
+        failure costs the media, never the message. Raising here would drop a
+        caption somebody typed over a field nothing authoritative reads."""
+        keys = _js_send_keys("MSG_INBOUND")
+        payload = self._filled(keys, dict(
+            self._INBOUND_TEXT,
+            message_type="image",
+            media_name="0123456789abcdef0123456789abcdef.jpg",
+            **{field: value},
+        ))
+
+        event = proto.inbound_event(payload)
+
+        assert event.media is None
+        assert event.text == "check the backup"
 
     def test_a_receipt_payload_normalizes(self):
         keys = _js_send_keys("MSG_RECEIPT")
@@ -650,6 +802,292 @@ class TestTheSidecarsPureFunctions:
         assert threw is True
 
 
+class TestTheSidecarsInboundMedia:
+    """The image half, executed rather than read wherever it can be.
+
+    Everything that decides what reaches the daemon is a pure function and is
+    exported for that reason: which node counts as media, what the staged
+    file is called, what suffix it wears, and — the one that matters most —
+    the per-file cap, which is the *fetcher's* bound because the daemon only
+    ever sees a file that already exists. `downloadMediaMessage` itself needs
+    Baileys and a live account, so what is driven here is the collector the
+    download feeds, and `TestTheSidecarsControlFlow` carries the source
+    assertion that the download actually feeds it.
+    """
+
+    @staticmethod
+    def _node() -> str:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        return node
+
+    @classmethod
+    def _run(cls, script: str, media_dir=None, timeout: int = 30):
+        """Run a script against the program and parse what it wrote.
+
+        `env=` replaces the whole environment, so the copy is not optional —
+        without `PATH` the child cannot resolve its own interpreter's
+        neighbours. The umask is forced wide for `TestTheLoggedOutBackoff`'s
+        reason: `main()` does not run under `require`, so `applyPrivateUmask`
+        has not, and a mode assertion in a child that inherited this suite's
+        own 077 would be asserting the ambient umask rather than the program.
+        """
+        env = dict(os.environ)
+        if media_dir is not None:
+            env["ISTOTA_BAILEYS_MEDIA_DIR"] = str(media_dir)
+        result = subprocess.run(
+            [cls._node(), "-e", f"process.umask(0o022);{script}"],
+            capture_output=True, text=True, timeout=timeout, env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    @classmethod
+    def _call(cls, expression: str, media_dir=None):
+        return cls._run(
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            f"process.stdout.write(JSON.stringify({expression}));",
+            media_dir,
+        )
+
+    # --- what counts as media ---------------------------------------------
+
+    @pytest.mark.parametrize(
+        "content,expected",
+        [
+            ({"imageMessage": {"mimetype": "image/jpeg"}}, True),
+            ({"imageMessage": {"mimetype": "image/jpeg"}, "x": 1}, True),
+            ({"conversation": "hello"}, False),
+            # Every one of these is a Non-goal, and each keeps the
+            # `unsupported_type` reply it has now. A sticker is WebP and would
+            # pass the sniff, which is exactly why it is excluded by message
+            # type up here rather than by the sniff down there.
+            ({"videoMessage": {"mimetype": "video/mp4"}}, False),
+            ({"documentMessage": {"mimetype": "image/jpeg"}}, False),
+            ({"stickerMessage": {"mimetype": "image/webp"}}, False),
+            ({"audioMessage": {"mimetype": "audio/ogg"}}, False),
+            ({}, False),
+        ],
+    )
+    def test_only_an_image_message_is_media(self, content, expected):
+        found = self._call(
+            f"Boolean(m.mediaPart({{message: {json.dumps(content)}}}))"
+        )
+
+        assert found is expected
+
+    def test_a_message_that_is_not_one_yields_nothing(self):
+        for expression in ("null", "{}", "{message: null}", "{message: 7}"):
+            assert self._call(f"m.mediaPart({expression})") is None
+
+    @pytest.mark.parametrize(
+        "content,expected",
+        [
+            ({"imageMessage": {"caption": "what is this?"}}, "what is this?"),
+            ({"imageMessage": {}}, None),
+            ({"imageMessage": {"caption": 7}}, None),
+            ({"conversation": "plain"}, "plain"),
+            # Deliberately not read: those types keep the unsupported reply,
+            # and a caption without the bytes is a message answered about an
+            # image nobody can see.
+            ({"videoMessage": {"caption": "clip"}}, None),
+            ({"documentMessage": {"caption": "doc"}}, None),
+        ],
+    )
+    def test_the_caption_is_read_for_an_image_and_for_nothing_else(
+        self, content, expected
+    ):
+        assert self._call(
+            f"m.messageText({{message: {json.dumps(content)}}})"
+        ) == expected
+
+    # --- the per-file cap --------------------------------------------------
+
+    def test_the_cap_is_the_one_the_daemon_enforces_at_the_funnel(self):
+        """Two enforcement points for one number: the sidecar aborts past it
+        and `stage_to_attachment` refuses a staged file above it. A drift
+        makes the second refuse what the first accepted, which is an image
+        fetched, written and then silently discarded."""
+        assert self._call("m.MAX_MEDIA_BYTES") == media.MAX_MEDIA_BYTES
+
+    def test_a_download_inside_the_cap_is_collected(self):
+        assert self._call(
+            "(() => { const c = m.newMediaCollector();"
+            " const kept = m.collectMediaChunk(c, Buffer.alloc(1024));"
+            " return [kept, c.received, c.overCap]; })()"
+        ) == [True, 1024, False]
+
+    def test_a_download_past_the_cap_is_refused_and_what_it_held_dropped(self):
+        """**The control for the whole fetcher-owns-the-cap rule.** Removing
+        the check inside `collectMediaChunk` turns this red.
+
+        One buffer fed repeatedly rather than a fresh one each time: the
+        collector holds references, so the child's memory stays at a megabyte
+        whatever the cap is.
+
+        `overCap` and an emptied `chunks` are asserted together because
+        either alone is the defect wearing a label — a collector that flags
+        and keeps is a 16 MiB buffer the caller may still concatenate.
+        """
+        chunk_bytes = 1024 * 1024
+        chunks = media.MAX_MEDIA_BYTES // chunk_bytes + 1
+
+        assert self._call(
+            f"(() => {{ const c = m.newMediaCollector();"
+            f" const buf = Buffer.alloc({chunk_bytes});"
+            f" let kept = true;"
+            f" for (let i = 0; i < {chunks}; i++)"
+            f"   kept = m.collectMediaChunk(c, buf) && kept;"
+            f" return [kept, c.overCap, c.chunks.length]; }})()"
+        ) == [False, True, 0]
+
+    def test_the_boundary_byte_is_accepted_and_the_one_past_it_is_not(self):
+        """A cap spelled `>=` refuses a file of exactly the permitted size,
+        which is a silent refusal nobody would look for."""
+        at_cap, past_cap = self._call(
+            f"(() => {{ const a = m.newMediaCollector();"
+            f" const b = m.newMediaCollector();"
+            f" const exact = Buffer.alloc({media.MAX_MEDIA_BYTES});"
+            f" const over = Buffer.alloc({media.MAX_MEDIA_BYTES + 1});"
+            f" return [m.collectMediaChunk(a, exact),"
+            f"         m.collectMediaChunk(b, over)]; }})()"
+        )
+
+        assert (at_cap, past_cap) == (True, False)
+
+    # --- naming ------------------------------------------------------------
+
+    def test_a_name_it_mints_is_one_the_daemon_will_join(self):
+        """The two sides of the component rule, driven across the language
+        boundary. The sidecar cannot compute `media.staged_name`'s
+        fingerprint — the salt is the daemon's — so the validator is
+        deliberately wider than that format, and the thing that has to hold
+        is that what this mints passes it."""
+        for ext in ("jpg", "png", "heic", "bin"):
+            name = self._call(f"m.stagedMediaName({json.dumps(ext)})")
+
+            assert media.is_staged_name(name), name
+            assert name.endswith(f".{ext}")
+
+    def test_two_names_for_one_message_do_not_collide(self):
+        names = {self._call("m.stagedMediaName('jpg')") for _ in range(3)}
+
+        assert len(names) == 3
+
+    @pytest.mark.parametrize(
+        "declared,expected",
+        [
+            ("image/jpeg", "jpg"),
+            ("image/png", "png"),
+            ("image/heic", "heic"),
+            ("image/JPEG", "jpg"),
+            ("image/jpeg; codecs=x", "jpg"),
+            ("application/pdf", "bin"),
+            ("../../etc/passwd", "bin"),
+            ("", "bin"),
+            (None, "bin"),
+            (7, "bin"),
+        ],
+    )
+    def test_the_staged_suffix_is_bounded_whatever_was_declared(
+        self, declared, expected
+    ):
+        """The declared mimetype is attacker-influenced and the suffix is
+        **advisory** — `stage_to_attachment` re-derives the inbox copy's
+        suffix from its own sniff. What it still must not be is a path."""
+        assert self._call(
+            f"m.mediaExtension({json.dumps(declared)})"
+        ) == expected
+
+    def test_the_advisory_suffixes_are_ones_the_daemon_would_also_choose(self):
+        """A subset check, and **not** a claim that the sidecar's answer is
+        trusted: nothing downstream reads it. What agreeing buys is that the
+        staged stem in `sidecar.log` and the inbox copy's suffix match in the
+        ordinary case, so the two logs can be read side by side."""
+        produced = set(self._call(
+            "Object.values(m.MEDIA_EXTENSIONS).concat("
+            "[m.mediaExtension('application/pdf')])"
+        ))
+
+        assert produced <= set(image_sniff.EXTENSION_BY_MEDIA_TYPE.values()) | {"bin"}
+
+    # --- the staged write --------------------------------------------------
+
+    def test_a_staged_file_is_private_to_the_account_that_wrote_it(self, tmp_path):
+        """0600 under a 0700 directory the daemon made. The child's umask is
+        forced to 0022 above, so this is the program's own mode argument and
+        not the ambient one — the control below says the wide mode really is
+        reachable in that child."""
+        written = self._call(
+            "(() => { const n = m.stagedMediaName('jpg');"
+            " m.writeStaged(n, Buffer.from('hello'));"
+            " return n; })()",
+            media_dir=tmp_path,
+        )
+
+        assert (tmp_path / written).read_bytes() == b"hello"
+        assert oct((tmp_path / written).stat().st_mode & 0o777) == "0o600"
+
+    def test_the_control_says_the_wide_mode_is_reachable(self, tmp_path):
+        """Without this the assertion above passes in a child whose umask
+        already forbids the wide mode, which is a test of the harness."""
+        self._run(
+            f"require('fs').writeFileSync({json.dumps(str(tmp_path / 'wide'))},"
+            " 'x');process.stdout.write('null');",
+        )
+
+        assert oct((tmp_path / "wide").stat().st_mode & 0o777) == "0o644"
+
+    def test_a_name_already_standing_is_refused_rather_than_written_through(
+        self, tmp_path
+    ):
+        """`O_EXCL`, which also refuses a symlink planted at the name: with
+        `O_CREAT | O_EXCL` the kernel fails on an existing symlink rather
+        than following it."""
+        (tmp_path / "taken.jpg").write_text("mine")
+        threw = self._call(
+            "(() => { try { m.writeStaged('taken.jpg', Buffer.from('x'));"
+            " return false; } catch (e) { return true; } })()",
+            media_dir=tmp_path,
+        )
+
+        assert threw is True
+        assert (tmp_path / "taken.jpg").read_text() == "mine"
+
+    def test_a_symlink_planted_at_the_name_is_not_followed(self, tmp_path):
+        outside = tmp_path / "outside"
+        outside.write_text("untouched")
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / "bait.jpg").symlink_to(outside)
+
+        threw = self._call(
+            "(() => { try { m.writeStaged('bait.jpg', Buffer.from('x'));"
+            " return false; } catch (e) { return true; } })()",
+            media_dir=staging,
+        )
+
+        assert threw is True
+        assert outside.read_text() == "untouched"
+
+    @pytest.mark.parametrize("name", ["../escape.jpg", "a/b.jpg", "", "."])
+    def test_a_name_that_is_not_one_component_is_refused_at_the_write(
+        self, tmp_path, name
+    ):
+        """The daemon validates the name it is *sent*; this is the other end
+        of the same rule, so a bug here cannot put bytes outside the staging
+        directory even before the frame is built."""
+        threw = self._call(
+            f"(() => {{ try {{ m.writeStaged({json.dumps(name)},"
+            f" Buffer.from('x')); return false; }}"
+            f" catch (e) {{ return true; }} }})()",
+            media_dir=tmp_path,
+        )
+
+        assert threw is True
+
+
 class TestTheSidecarsControlFlow:
     """Properties the static pin reaches only as source shape, and says so.
 
@@ -683,7 +1121,7 @@ class TestTheSidecarsControlFlow:
         pinned here and `TestTheChatAddressUnderLid` that drives what it
         answers.
         """
-        body = _js_method("onMessages")
+        body = _js_body("async handleMessages(event)")
 
         assert "chatAddress(message.key)" in body
         assert "if (!jid)" in body
@@ -694,6 +1132,51 @@ class TestTheSidecarsControlFlow:
         assert "isForwardableJid" in _js_function("chatAddress")
         assert "@s.whatsapp.net" in _js_const("USER_JID_DOMAIN")
         assert "@lid" in _js_const("LID_JID_DOMAIN")
+
+    def test_inbound_batches_are_handled_one_at_a_time(self):
+        """Fetching an image is an `await`, so handling messages
+        concurrently reorders a conversation at the source — and the daemon's
+        inbound worker is serial precisely because order within a
+        conversation is meaning.
+
+        The `catch` is the other half and is not tidiness: without it one
+        failed batch leaves a rejected promise as the chain's tail and every
+        later message is dropped for the life of the process.
+        """
+        body = _js_method("onMessages")
+
+        assert "this.inbound" in body
+        assert ".then(() => this.handleMessages(event))" in body
+        assert ".catch(" in body
+
+    def test_the_download_is_bounded_by_the_collector_it_feeds(self):
+        """The pure-function class drives the cap; this is what says the
+        download path is what drives it in the program. A collector tested in
+        isolation while the real loop concatenates a stream is the
+        "success indistinguishable from a no-op" shape."""
+        body = _js_body("async downloadMedia(message)")
+
+        assert "newMediaCollector()" in body
+        assert "collectMediaChunk(collector, chunk)" in body
+        # Streamed rather than buffered, which is what makes the cap an abort
+        # instead of a measurement taken after the bytes are already here.
+        assert "'stream'" in body
+
+    def test_nothing_is_staged_once_the_cap_is_passed(self):
+        """Ordering: `writeStaged` must sit behind the not-over-cap branch,
+        or the cap reports a refusal about a file that is on disk."""
+        body = _js_body("async downloadMedia(message)")
+        assert (body.index("overCap") < body.index("writeStaged("))
+
+    def test_the_media_directory_is_required_at_startup(self):
+        """Beside the socket and the session directory. A sidecar with
+        nowhere to stage would type an image `image` and send a frame naming
+        no file, which the daemon reads as media it cannot place — a
+        deployment fault arriving as a per-message one."""
+        body = _js_function("main")
+
+        assert "MEDIA_DIR" in body
+        assert "process.exit(2)" in body
 
     def test_the_socket_is_given_a_way_to_answer_a_retry(self):
         """The cache is inert unless Baileys is handed it. `getMessage`
