@@ -1,14 +1,18 @@
-"""The shared untrusted fence (`skills/_untrusted.py`).
+"""The shared untrusted fence (`istota/untrusted.py`).
 
 Four modules had written their own and they did not agree on the part that
 matters: `skills/tasks` redacts a marker appearing inside the content,
 `skills/nextcloud` did not. A fence the content can close is not a fence, and a
 Talk room's display name is settable by every participant in a shared room.
+
+The per-caller escape tests live with their callers —
+`tests/test_skills_email_client.py` and `tests/test_native_web_fetch.py`, whose
+content is far more attacker-controlled than a room name (ISSUE-512).
 """
 
 import pytest
 
-from istota.skills._untrusted import MARKER_REDACTION, frame_untrusted
+from istota.untrusted import MARKER_REDACTION, frame_untrusted
 
 
 class TestTheFence:

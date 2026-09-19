@@ -332,11 +332,18 @@ def cmd_recent(args):
 def _frame_untrusted(text: str) -> str:
     """Put one string inside the delimiter pair, and keep it there.
 
-    Framed **unconditionally**, including an empty string. The email and
-    nextcloud skills return a falsy body unchanged, which is right for them and
-    wrong here: the property this verb has to hold is that every tool result it
-    returns is inside the pair, and a rule with an exception in it is a rule a
-    test cannot state.
+    Framed **unconditionally**, including an empty string. The shared fence
+    (`istota.untrusted`) returns `""` for a falsy body, which is right for the
+    skills built on it — a fence around nothing is noise in every row of a
+    listing — and wrong here: the property this verb has to hold is that every
+    tool result it returns is inside the pair, and a rule with an exception in
+    it is a rule a test cannot state. That difference is why this copy survived
+    ISSUE-512's conversion of `email` and `web_fetch`; it is a contract this
+    verb needs rather than drift. What it does *not* have is that module's
+    near-miss matching — the two `str.replace` calls below are byte-exact, so a
+    transcript carrying `[END UNTRUSTED TRANSCRIPT CONTENT ]` with a trailing
+    space is redacted by neither. Converting it means reconciling the empty-body
+    contract first.
 
     **Either marker occurring inside the content is replaced first**, and this
     verb is the one place in the codebase where that is not paranoia. Everywhere

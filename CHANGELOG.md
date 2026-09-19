@@ -73,6 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An email body or a fetched web page can no longer close the quotation Istota wraps it in. Both are handed to the model between markers saying not to follow instructions inside them, and neither marker is secret — so a message or a page containing the closing one ended the quotation there, and everything after it read as Istota's own words. Both markers are now removed from the content first, in the near-miss spellings too, which is what the room and task listings already did.
+
+- A page can no longer forge a line in the provenance lines the web-fetch tool writes above what it returns. Those report the URL the fetch ended at and the content type, both of which the site chooses, and a `Location` or `Content-Type` header carrying U+0085 split one in two — the second half reading as something Istota said rather than as part of an address. Line breaks in both are collapsed to a space and both are length-capped, on the line above a page and on the one that reports a file Istota did not read as text. The address is still reported in full otherwise.
+
+- A page the web-fetch tool could read but found no text in now says so, instead of returning the address on its own. A page whose content is entirely script extracts to nothing, and the result was indistinguishable from a fetch that brought nothing back.
+
 - `browse interact` now runs clicks where you wrote them among the fills, so a login sent as one call fills the form and then submits it. Every `--click` used to be emitted ahead of every `--fill`, whatever the order on the command line, so that call clicked submit against an empty form — and reported success for all of it, since clicking a button on an unfilled form works and the site re-renders the login page without an error. Any fill-then-click sequence was affected, a search box as much as a login. `--scroll` still runs last and the skill doc says so.
 
 - A `--fill` value with no `=` is now refused instead of being dropped in silence. It named a field and no value, so the fill did nothing while the clicks beside it still ran — the same empty-form submission, reported as a success. Nothing that used to fill a field behaves differently; only a call that was already doing nothing now says so.

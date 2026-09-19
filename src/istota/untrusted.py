@@ -1,11 +1,12 @@
-"""One fence around content somebody else wrote, for the skill CLIs that return it.
+"""One fence around content somebody else wrote, for everything that returns it.
 
 A skill CLI's output lands in a running agent's context, so a field carrying
 third-party text — a Talk room's display name, set by any participant in a
-shared room; a conversation description — is an injection surface. The
-established answer in this tree is a delimiter pair naming the source, and
-four modules had each written their own: ``skills/nextcloud``, ``skills/tasks``,
-``skills/email`` and ``session/tools/web_fetch``.
+shared room; a conversation description — is an injection surface. So does a
+fetched web page and an email body. The established answer in this tree is a
+delimiter pair naming the source, and four modules had each written their own:
+``skills/nextcloud``, ``skills/tasks``, ``skills/email`` and
+``session/tools/web_fetch``.
 
 **They did not agree on the part that matters.** ``skills/tasks`` redacts a
 marker appearing *inside* the content; ``skills/nextcloud`` does not, so a room
@@ -14,25 +15,31 @@ the inside and everything after it reads as the daemon's own words. A fence the
 content can close is not a fence, which is why the redaction is here rather than
 being a property one copy happens to have.
 
-``label`` names the source in both markers, because the two copies converted so
-far say different things (``NEXTCLOUD CONTENT``, ``TRANSCRIPT CONTENT``) and the
-wording is what tells a reader which subsystem the bytes came from. It is
+``label`` names the source in both markers, because the converted copies say
+different things (``NEXTCLOUD CONTENT``, ``EMAIL CONTENT``, ``WEB CONTENT``) and
+the wording is what tells a reader which subsystem the bytes came from. It is
 written into the marker, so it is bounded and normalized rather than
-interpolated raw.
+interpolated raw. ``skills/nextcloud`` and ``skills/rooms`` both list rooms and
+still keep different labels — one returns Talk's ``displayName``, the other a
+registry name a user may have typed into web chat, which is not Nextcloud
+content. Sharing the mechanism is the point; sharing the wording would be wrong.
 
-Converted so far: ``skills/nextcloud`` and ``skills/rooms``, the two surfaces
-that list rooms. Their labels deliberately differ — one returns Talk's
-``displayName``, the other a registry name a user may have typed into web chat,
-which is not Nextcloud content. Sharing the mechanism is the point; sharing the
-wording would be wrong.
+Converted: ``skills/nextcloud``, ``skills/rooms``, ``skills/email`` and
+``session/tools/web_fetch``. ``skills/tasks`` keeps a copy of its own, which
+redacts and is therefore not escapable; it is a fifth conversion rather than an
+outstanding hole.
 
-**Three copies remain and two of them are still escapable**, which is stated
-here rather than implied because the rest of this docstring reads like the hole
-is closed. ``skills/tasks`` redacts and is fine. ``skills/email`` and
-``session/tools/web_fetch`` do not, and they wrap an email body and a fetched
-web page — content far more attacker-controlled than a room name. Converting
-them is a separate change with its own tests, not a rename: each frames a
-different kind of content inside its own surrounding notice.
+**It lives at the package root rather than under ``skills/`` because one of its
+callers may not pay for that package.** Importing any ``istota.skills``
+submodule executes the package ``__init__``, which star-imports ``calendar``,
+``email`` and ``files``: measured at ~195ms against ~31ms for
+``import istota.tool_server``, which spawns once per task attempt inside the
+sandbox and reaches this module through ``session/tools/web_fetch``. That is
+the same cost ``git_hardening.py`` and ``forge_bin.py`` were lifted out of
+``skills/`` to avoid (``.claude/rules/sandbox.md``), and a function-scope import
+would only move it into the agent loop.
+``tests/test_tool_server_env.py::TestTheServerDoesNotImportTheSkillsPackage``
+holds it, as a module set rather than a duration.
 
 stdlib-only leaf: imports nothing, never raises.
 """
