@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from istota import db
+from istota import credential_shim, db
 from istota.config import (
     Config,
     DeveloperConfig,
@@ -380,7 +380,22 @@ class TestForgeCliPathPrepend:
         assert "ISTOTA_PATH_PREPEND" not in _proxy_base_env(proxy_call)
 
     def test_no_prepend_without_the_developer_skill(self, env_config):
-        """A deployment with no developer tokens gets an untouched PATH."""
+        """No *developer* prepend, and the shim directory is the only one.
+
+        The second assertion used to be that the two PATHs are identical,
+        which conflated "the developer hook added nothing" with "nothing was
+        added at all". The credential shim is prepended to the model's PATH
+        unconditionally and deliberately never to `proxy_base_env`'s, so the
+        two now differ by exactly that directory — asserting the difference
+        rather than the absence is what pins the boundary, since a shim
+        directory that leaked into the proxy's PATH would be a task-writable
+        directory in front of every host-side skill CLI.
+        """
         claude_env, proxy_call = _run_task(env_config)
+        proxy_path = _proxy_base_env(proxy_call)["PATH"]
         assert "ISTOTA_PATH_PREPEND" not in claude_env
-        assert claude_env["PATH"] == _proxy_base_env(proxy_call)["PATH"]
+
+        shim_dir = claude_env["PATH"].split(os.pathsep)[0]
+        assert shim_dir.endswith(credential_shim.SHIM_DIR_NAME)
+        assert claude_env["PATH"] == f"{shim_dir}{os.pathsep}{proxy_path}"
+        assert shim_dir not in proxy_path.split(os.pathsep)

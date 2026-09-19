@@ -59,16 +59,18 @@ from tests.test_sandbox_argv_golden import (
     _RW,
 )
 
-# --------------------------------------------------------- the two divergences
+# ------------------------------------------------------- the three divergences
 
 #: Where the roots deliberately do not follow the plain reading of the plan,
-#: keyed by ``Mount.reason``. Both entries are behaviours ``native_fs_roots``
-#: had before the projection existed and that a mechanical walk loses.
+#: keyed by ``Mount.reason``. Each is a behaviour a mechanical walk of the
+#: plan loses: the first two predate the projection, and the third arrived
+#: with the credential shim on the same terms as the first.
 #:
 #: A literal dict, never a predicate. The whole value of naming them is that a
-#: *third* divergence fails this file rather than being absorbed, and a
-#: predicate broad enough to describe these two is broad enough to describe the
-#: next one nobody looked at.
+#: *further* divergence fails this file rather than being absorbed, and a
+#: predicate broad enough to describe these is broad enough to describe the
+#: next one nobody looked at. It caught `credential_shim_dir` exactly that
+#: way, in the round's full pass rather than in the stage that added it.
 DIVERGENCES: dict[str, str] = {
     "developer_dir": (
         "the .developer carve-out is a write-deny root whether or not the "
@@ -77,6 +79,17 @@ DIVERGENCES: dict[str, str] = {
         "these roots are built once per task, so an existence gate here leaves "
         "a .developer created mid-run read-only for Bash and writable for the "
         "file tools"
+    ),
+    "credential_shim_dir": (
+        "the .istota shim directory is a write-deny root on exactly the terms "
+        ".developer is, and for the same reason one level along: the git "
+        "credential helper execs istota-credential by absolute path, so PATH "
+        "ordering never reaches that call and the directory rather than the "
+        "PATH entry is what has to be protected. Denied whether or not it "
+        "exists and at the path as written, because build_bwrap_cmd re-reads "
+        "the filesystem per invocation while these roots are built once per "
+        "task. The shim itself is deliberately model-writable (spec 4c) — what "
+        "this denies is replacing the program the helper execs"
     ),
     "package_cache": (
         "the package cache is user data on the fallback branch and not on the "
@@ -333,6 +346,27 @@ def test_the_developer_carve_out_is_denied_whatever_the_directory_is(built: Buil
 
 
 @_parametrize
+def test_the_credential_shim_carve_out_is_denied_whatever_the_directory_is(
+    built: Built,
+):
+    """The third divergence, asserted rather than merely exempted.
+
+    An entry in `DIVERGENCES` is an exemption from the parity walk, so without
+    a test of its own it is a guard switched off rather than a behaviour
+    described. This is `.developer`'s assertion one directory along, and it
+    fails the same way: the entry is emitted unconditionally, is a write-deny
+    root, and is never a write root.
+    """
+    shim = [m for m in built.plan.mounts if m.reason == "credential_shim_dir"]
+    assert len(shim) == 1, "the .istota entry is emitted unconditionally"
+    entry = shim[0]
+    _, write, denied = built.roots
+
+    assert entry.source in denied, DIVERGENCES["credential_shim_dir"]
+    assert entry.source not in write, DIVERGENCES["credential_shim_dir"]
+
+
+@_parametrize
 def test_the_package_cache_is_a_root_only_on_the_fallback_branch(built: Built):
     """The second divergence, asserted rather than merely exempted.
 
@@ -513,6 +547,11 @@ def _divergent_reasons(built: Built) -> set[str]:
 def test_the_divergence_list_is_exactly_what_diverges(tmp_path, monkeypatch):
     """Two detectors over the whole matrix, and their union must be the dict.
 
+    Three entries now: `credential_shim_dir` joined by the root detector, and
+    it arrived exactly the way this test's last paragraph predicts — added by
+    the stage that built the credential shim, caught by the round's full pass
+    rather than by that stage's own tests.
+
     They find different things and neither subsumes the other. The first is
     per-root: a reason whose contribution to the three lists is not what the
     plain reading predicts, which is how `.developer` shows up — carried when
@@ -557,10 +596,15 @@ def test_the_divergence_list_is_exactly_what_diverges(tmp_path, monkeypatch):
         f"  documented:               {sorted(DIVERGENCES)}\n"
         + "\n".join(f"  {r}: {why}" for r, why in sorted(DIVERGENCES.items()))
     )
-    # Each detector must still be the one that finds its own entry, so a
-    # change that made both fire on one reason could not hide the loss of the
-    # other.
-    assert by_root == {"developer_dir"}, DIVERGENCES["developer_dir"]
+    # Each detector must still find exactly its own entries, so a change that
+    # made both fire on one reason could not hide the loss of the other. The
+    # root detector finds the two unconditional write-deny carve-outs, which
+    # are the same shape as each other; the flag detector finds the one reason
+    # whose `user_data` answer is not constant, which no root comparison can
+    # see.
+    assert by_root == {"developer_dir", "credential_shim_dir"}, (
+        DIVERGENCES["developer_dir"] + " / " + DIVERGENCES["credential_shim_dir"]
+    )
     assert by_flag == {"package_cache"}, DIVERGENCES["package_cache"]
 
 
