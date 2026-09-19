@@ -226,7 +226,9 @@ describe('a user whose vault is working', () => {
     await mount();
 
     const names = await screen.findByTestId('vault-entry-names');
-    expect(names.textContent).toMatch(/and more/i);
+    // Both halves of the cut, since either alone is the wrong answer: how many
+    // names are shown, and how many there are. "and more" said neither.
+    expect(names.textContent).toMatch(/first 1 of 412/i);
   });
 
   it('renders no name list when there are none', async () => {
@@ -387,7 +389,11 @@ describe('the scope notice', () => {
 
     const line = await findHeading();
     expect(screen.queryByTestId('vault-unscoped')).toBeNull();
-    expect(line.textContent).toContain('Credential vault');
+    // The block still renders — the point is that it says nothing about scope,
+    // not that it is absent. Asserted on a sentence it always carries; the
+    // "Credential vault:" label it used to look for was dropped as a
+    // restatement of the card title it now sits inside.
+    expect(line.textContent).toMatch(/shared credentials from this file/i);
   });
 
   it('renders the singular for one shared credential', async () => {

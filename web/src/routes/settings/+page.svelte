@@ -1104,7 +1104,7 @@
     {#if vaultForm}
       <SettingsCard
         title="Credential vault"
-        description="Keep your credentials in a KeePassXC file instead of typing each one in here. Istota reads the file and never writes to it, so it stays yours to edit on any device."
+        description="Credentials you want your own tasks to be able to use — a token for a service istota has no integration with, a device password, anything a script needs. Keep them in a KeePassXC file: istota reads it and never writes to it, so it stays yours to edit on any device."
       >
         {#snippet status()}
           <!--
@@ -1131,8 +1131,15 @@
             outside the only card about the vault.
           -->
           {#if vault}
-            <p class="hint vault" data-testid="vault-status">
-              <strong>Credential vault:</strong>
+            <!--
+              A `div`, not a `p`. This began as one sentence of prose and is
+              now several statements plus a disclosure holding a list, and a
+              `ul` or a `p` inside a `p` is closed by the parser before it —
+              which SSR then reports as a hydration mismatch rather than as
+              the markup error it is. `.hint` is typography only, so it
+              carries over unchanged.
+            -->
+            <div class="hint vault" data-testid="vault-status">
               <!--
                 What the vault is the authority for is its own namespace of
                 shared credentials, not a list of connected services. It used to
@@ -1176,12 +1183,20 @@
                 reports counts to every admin.
               -->
               {#if vaultEntryNames.length > 0}
-                <span class="vault-names" data-testid="vault-entry-names">
-                  What it holds: {#each vaultEntryNames as name, i}<code>{name}</code>{i <
-                    vaultEntryNames.length - 1
-                      ? ', '
-                      : ''}{/each}{vault.entry_names_truncated ? ', and more' : '.'}
-                </span>
+                <details class="vault-names" data-testid="vault-entry-names">
+                  <summary>Names</summary>
+                  <ul class="vault-name-list">
+                    {#each vaultEntryNames as name}
+                      <li><code>{name}</code></li>
+                    {/each}
+                  </ul>
+                  {#if vault.entry_names_truncated}
+                    <p class="caption">
+                      The first {vaultEntryNames.length} of {vault.entry_count}. Ask
+                      <code>istota secret vault-status</code> for the rest.
+                    </p>
+                  {/if}
+                </details>
               {/if}
               {#if vaultProblem}
                 <span class="vault-problem">Not working: {vaultProblem}</span>
@@ -1198,7 +1213,7 @@
               {:else}
                 Nothing has been applied from it yet.
               {/if}
-            </p>
+            </div>
           {/if}
           <!--
             Only the *file* half is withheld when something outranks it. The
@@ -1462,6 +1477,28 @@
      would not carry it — the sentence says "Not working" in words. */
   .vault-problem {
     color: var(--status-warn-fg);
+  }
+
+  /* The names, folded away. A vault is allowed to hold fifty credentials and
+     the card is not the place to recite them: the summary answers "how many
+     arrived", which is the question this list exists for, and opening it
+     answers "did mine". Rendered as a wrapping row rather than a column,
+     because these are short labels and fifty of them stacked is a page. */
+  .vault-names summary {
+    cursor: pointer;
+  }
+
+  .vault-name-list {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-2);
+    margin: var(--space-2) 0 0;
+    padding: 0;
+  }
+
+  .vault-name-list code {
+    overflow-wrap: anywhere;
   }
 
   .vault-form :global(.micro-label) {
