@@ -99,7 +99,7 @@ import logging
 import os
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -245,8 +245,9 @@ def normalize(text: str, *, tmp_path: Path) -> str:
 
 # ------------------------------------------------------------------- the skills
 
-# name -> (frontmatter lines, body). Six skills, each present to exercise one
-# gate that decides eager-vs-menu-vs-absent.
+# name -> (frontmatter lines, body). Each entry is present to exercise one gate
+# that decides eager-vs-menu-vs-absent; no count here, because the last one went
+# stale twice without anything noticing.
 SKILLS: dict[str, tuple[list[str], str]] = {
     # Eager on every case, and the one body carrying the storage placeholders.
     "notes": (
@@ -258,6 +259,13 @@ SKILLS: dict[str, tuple[list[str], str]] = {
     "developer": ([], "DEVELOPER BODY"),
     # The capability gate: absent from menu and CLI list on the local backend.
     "nextcloud": (["requires_capability: [nextcloud]"], "NEXTCLOUD BODY"),
+    # Here for the `Room:` line alone. That line names `istota-skill rooms
+    # list`, and since ISSUE-513 it does so only where `rooms` is in the
+    # effective index — so without a `rooms` skill in this catalogue the
+    # `room_*` goldens would snapshot the gated form and stop covering the
+    # sentence ISSUE-509 wrote them for. The gated form is covered by
+    # `tests/test_prompt_room_identity.py::TestTheRoomsCliClause`.
+    "rooms": ([], "ROOMS BODY"),
     # The admin gate: absent for a non-admin.
     "operator": (["admin_only: true"], "OPERATOR BODY"),
     # Source-selected eager on `web`, and it drags a companion in with it.
@@ -361,6 +369,13 @@ class Case:
     skills_changelog: bool = False
     #: The re-executed half of the untrusted-sender confirmation gate.
     confirmed: bool = False
+    #: Operator-disabled skills, folded into `effective_disabled_skills` by the
+    #: executor exactly as an instance-wide `[skills] disabled_skills` entry is.
+    #: No golden sets it — it exists so `TestTheCliAdvertisingWiring` can drive
+    #: the ISSUE-513 gate through `execute_task` rather than through
+    #: `room_identity_line` directly, which is the only way the wiring between
+    #: them is pinned at all.
+    disabled_skills: tuple[str, ...] = ()
     #: Two settings, not one: it pins `security.sandbox_enabled` *and* the
     #: `_bwrap_available()` host probe (a real kernel with bubblewrap answers
     #: differently from a laptop), because `executor` selects the rule-3
@@ -566,6 +581,7 @@ def _build_config(case: Case, tmp_path: Path) -> Config:
         # golden. See the module docstring.
         sleep_cycle=SleepCycleConfig(auto_load_dated_days=0),
         security=SecurityConfig(sandbox_enabled=case.sandboxed),
+        disabled_skills=list(case.disabled_skills),
         # `kind` stays the shipped default: the point of the routed case is
         # that a room reaches a brain the deployment does not run by default.
         # `room_selectable` is the operator gate `resolve_brain_kind` checks,
@@ -1286,25 +1302,100 @@ class TestTheStorageBackendDimension:
         assert "  - nextcloud: the nextcloud skill" not in local
         assert "NEXTCLOUD BODY" not in nextcloud + local
 
-    def test_the_cli_tool_list_does_not_apply_the_capability_gate(
+    def test_the_cli_tool_list_applies_the_capability_gate(
         self, tmp_path, monkeypatch
     ):
-        """Recorded, not endorsed.
+        """ISSUE-513: both sections apply the same effective disabled set.
 
-        `format_cli_skills` is built straight off `meta.cli` plus the
-        `admin_only` flag; it consults neither `effective_disabled_skills` nor
-        `available_capabilities()`. So on the Nextcloud-free install the model
-        is still told `istota-skill nextcloud` exists, having been told it is
-        not a skill it may load. The same holds for an operator-disabled skill.
+        `format_cli_skills` renders `advertised_cli_skills`, which applies the
+        `effective_disabled_skills` the executor already computed — the
+        capability gate included, which is what this case turns. It asserted
+        the opposite until ISSUE-513, deliberately, so the fix would arrive as
+        a reviewed golden diff.
 
-        Found while writing the backend dimension of these goldens, left alone
-        as a product change this stage did not scope. `base_local.txt` carries
-        the line, so a fix shows up as a reviewed golden diff and turns this
-        test red rather than passing silently.
+        Stated as the shared *disabled set* rather than as "the menu omits it,
+        so the list does": the menu is built with `exclude=selected`, so every
+        eager skill is missing from it by construction while staying in the CLI
+        list — `base_local.txt` names `istota-skill notes` with no menu entry
+        for `notes`, correctly, because its body is already in the prompt.
+        `advertised_cli_skills` also does not apply the menu's experimental and
+        dependency gates; its docstring records that residual.
+
+        The pair is the assertion rather than either half: `local` alone going
+        quiet is equally what a renamed skill or a broken fixture looks like,
+        and `nextcloud` has to stay advertised where its capability is present.
         """
-        _nextcloud, local = self._pair(tmp_path, monkeypatch)
+        nextcloud, local = self._pair(tmp_path, monkeypatch)
 
-        assert "`istota-skill nextcloud` — the nextcloud skill" in local
+        assert "`istota-skill nextcloud` — the nextcloud skill" in nextcloud
+        assert "`istota-skill nextcloud` — the nextcloud skill" not in local
+
+
+class TestTheCliAdvertisingWiring:
+    """The ISSUE-513 gate driven through `execute_task`, not around it.
+
+    Both producers are reachable from a unit test that calls them directly, and
+    both are covered that way — `TestTheRoomsCliClause` for the `Room:` clause,
+    `TestAdvertisedCliSkills` for the list. Neither sees the **wiring**: the
+    `Room:` clause is gated by `build_prompt`'s `cli_skill_names`, whose
+    `None` default is permissive, and every golden case has `rooms` enabled.
+    So deleting `cli_skill_names=cli_skill_names` from the `build_prompt` call
+    left the entire suite green — the repo's own "success indistinguishable
+    from a no-op" class (`.claude/rules/testbed.md`) landing on this fix.
+
+    The list half was already pinned end-to-end by `base_local.txt` losing its
+    `istota-skill nextcloud` line. This is the other leg, and it drives the
+    *operator-disabled* route rather than the capability gate, since that is
+    the route the chosen option added and no golden exercises.
+    """
+
+    def _assemble(self, tmp_path, monkeypatch, disabled):
+        return assemble(
+            replace(
+                CASES_BY_NAME["room_web"],
+                name="wiring",
+                disabled_skills=disabled,
+            ),
+            tmp_path,
+            monkeypatch,
+        )
+
+    def test_disabling_rooms_reaches_both_producers(self, tmp_path, monkeypatch):
+        """One assembly, both halves, because they share one derivation.
+
+        Asserted against the ungated control rather than alone: every one of
+        these absences is also what a broken fixture produces.
+        """
+        gated = self._assemble(tmp_path / "gated", monkeypatch, ("rooms",))
+        ungated = self._assemble(tmp_path / "ungated", monkeypatch, ())
+
+        # The list half.
+        assert "`istota-skill rooms` — the rooms skill" in ungated
+        assert "`istota-skill rooms` — the rooms skill" not in gated
+
+        # The `Room:` clause — the leg the wiring carries.
+        assert "`istota-skill rooms list` names every room you are in" in ungated
+        assert "istota-skill rooms list" not in gated
+
+        # The menu, which already applied this gate and must still agree.
+        assert "  - rooms: the rooms skill" in ungated
+        assert "  - rooms: the rooms skill" not in gated
+
+    def test_the_rest_of_the_room_line_survives(self, tmp_path, monkeypatch):
+        """The descriptor and the never-create rule are not the CLI's.
+
+        `TestTheRoomsCliClause` asserts this of `room_identity_line`; asserting
+        it again here is what says the assembled prompt carries it, rather than
+        the function doing so in isolation.
+        """
+        gated = self._assemble(tmp_path, monkeypatch, ("rooms",))
+
+        assert "Room: this conversation is a registered room on web chat." in gated
+        assert 'target = "web:web-room" and room = "web-room".' in gated
+        assert (
+            "Never create a Talk conversation in order to post into a room "
+            "you are already in." in gated
+        )
 
 
 def test_a_custom_system_prompt_does_not_change_the_assembled_prompt(

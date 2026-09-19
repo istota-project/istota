@@ -40,7 +40,7 @@ def _config(db_path):
     return cfg
 
 
-def _line(db_path, token, **task_kw):
+def _line(db_path, token, *, rooms_cli=True, **task_kw):
     """Both call shapes, asserted equal.
 
     `execute_task`'s `conn` defaults to None and only the scheduler passes one,
@@ -50,9 +50,11 @@ def _line(db_path, token, **task_kw):
     """
     task = _task(token, **task_kw)
     cfg = _config(db_path)
-    without = room_identity_line(cfg, task)
+    without = room_identity_line(cfg, task, rooms_cli_available=rooms_cli)
     with db.get_db(db_path) as conn:
-        with_conn = room_identity_line(cfg, task, conn)
+        with_conn = room_identity_line(
+            cfg, task, conn, rooms_cli_available=rooms_cli,
+        )
     assert without == with_conn
     return without
 
@@ -130,7 +132,9 @@ class TestWhenThereIsNoLine:
     def test_no_database_path_is_silent(self):
         cfg = Config()
         cfg.db_path = None
-        assert room_identity_line(cfg, _task("web-alice-1")) == ""
+        assert room_identity_line(
+            cfg, _task("web-alice-1"), rooms_cli_available=True,
+        ) == ""
 
     def test_a_broken_registry_read_is_silent_rather_than_a_failed_task(
         self, db_path, monkeypatch,
@@ -140,6 +144,71 @@ class TestWhenThereIsNoLine:
             db, "get_room", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         assert _line(db_path, "web-alice-1") == ""
+
+
+class TestTheRoomsCliClause:
+    """ISSUE-513: only the clause naming the CLI is gated.
+
+    The sentence carries two clauses with different reasons to exist.
+    ``istota-skill rooms list`` depends on that CLI being in the effective
+    index, and naming it where the proxy would refuse it is the defect. "Never
+    create a Talk conversation in order to post into one" depends on nothing —
+    it is the behavioural rule the line was written for (ISSUE-509), and it
+    matters *more* once the lookup verb is gone, since a model that cannot list
+    its rooms is exactly the one tempted to mint a conversation instead.
+
+    The descriptor half is never gated: `target` and `room` resolve "post here"
+    with no CLI involved.
+    """
+
+    ROOM = "web-alice-3f21c4d90ab7"
+
+    def _both(self, db_path):
+        _room(db_path, self.ROOM, origin="web", name="#weekly")
+        return (
+            _line(db_path, self.ROOM, rooms_cli=True),
+            _line(db_path, self.ROOM, rooms_cli=False),
+        )
+
+    def test_the_cli_sentence_goes_when_rooms_is_gated(self, db_path):
+        with_cli, without_cli = self._both(db_path)
+        assert "istota-skill rooms list" in with_cli
+        assert "istota-skill" not in without_cli
+
+    def test_the_never_create_rule_survives_the_gate(self, db_path):
+        with_cli, without_cli = self._both(db_path)
+        for line in (with_cli, without_cli):
+            # Case-insensitive: the clause leads the sentence when the CLI is
+            # gated and follows a semicolon when it is not.
+            assert "never create a talk conversation" in line.lower()
+
+    def test_the_descriptor_half_is_never_gated(self, db_path):
+        with_cli, without_cli = self._both(db_path)
+        for line in (with_cli, without_cli):
+            assert "registered room" in line
+            assert 'target = "' in line
+            assert 'room = "' in line
+
+    def test_the_gated_line_is_still_one_line(self, db_path):
+        """The system-half rule holds on the branch too.
+
+        A gated line is assembled by a different join, so it is a second place
+        a stray newline could forge a header.
+        """
+        _, without_cli = self._both(db_path)
+        assert without_cli.startswith("\n")
+        assert "\n" not in without_cli[1:]
+
+    def test_rooms_cli_available_is_required(self):
+        """Keyword-only, no default, matching `format_cli_skills`.
+
+        A default would decide the question for every caller that forgot it,
+        and the permissive default is the pre-fix behaviour this closed.
+        """
+        cfg = Config()
+        cfg.db_path = None
+        with pytest.raises(TypeError):
+            room_identity_line(cfg, _task("web-alice-1"))
 
 
 class TestTheSystemHalfRules:

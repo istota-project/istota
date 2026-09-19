@@ -40,6 +40,23 @@ select_skills(prompt, source_type, user_resource_types, skill_index,
               is_admin=True, attachments=None, disabled_skills=None,
               sticky_skills=None,
               enabled_experimental_features=frozenset()) -> list[str]
+advertised_cli_skills(skill_index, *, is_admin, disabled_skills) -> list[str]
+    # The skill CLIs the prompt may name, sorted. One derivation behind two producers —
+    # the "Skill CLI tools" list and executor.room_identity_line's `istota-skill rooms
+    # list` clause — so the prompt cannot name a verb in one sentence that it withholds
+    # from a list three lines above (ISSUE-513). Two filters drift; one cannot.
+    # Advertised is a SUBSET of executable, deliberately: the proxy's allowed_skills is
+    # every cli:true skill and gates on neither flag, so a disabled CLI still runs if the
+    # model guesses the name. That asymmetry predates this — admin_only always worked the
+    # same way — and the alternative is advertising a CLI the menu omits in one prompt.
+    # Both gates keyword-only with no default: a caller who forgets one silently widens
+    # the prompt back and nothing downstream can tell.
+    # NOT the menu's gate. eligible_skill_names additionally drops an experimental skill
+    # whose skill_<name> feature is unset and anything failing _check_dependencies, so on
+    # an install without the extras `istota-skill whisper` / `markets` / `transcribe` are
+    # still advertised while the menu omits them — the ISSUE-513 symptom surviving for a
+    # class its chosen option did not cover. Folding those in needs
+    # enabled_experimental_features threaded to the call site; recorded, not closed.
 eligible_skill_names(skill_index, exclude, disabled_skills=None, is_admin=True,
                      enabled_experimental_features=frozenset()) -> list[str]
     # Shared membership gate for the menu catalogue: sorted names excluding
@@ -330,7 +347,7 @@ Note: `money` is the sole accounting skill. It runs in-process via the vendored 
 **`admin_only` does not gate execution.** It filters eager selection, companion expansion, the menu and `skills show` — all documentation surfaces. Three paths reach a CLI without consulting it:
 
 1. The skill proxy's `allowed_skills` is *every* `cli: true` skill in the index (`executor.py:3336-3338`) — deliberately wide, so a menu-pulled skill works without a re-plumb.
-2. `format_cli_skills` built the prompt's "Skill CLI tools" list off `meta.cli` alone, so the first `admin_only: true` + `cli: true` skill would have been advertised to every non-admin *and* executable. Fixed: `format_cli_skills(skill_index, *, is_admin)` takes the flag keyword-only with no default.
+2. `format_cli_skills` built the prompt's "Skill CLI tools" list off `meta.cli` alone, so the first `admin_only: true` + `cli: true` skill would have been advertised to every non-admin *and* executable. Fixed: it renders `advertised_cli_skills(skill_index, *, is_admin, disabled_skills)`, both gates keyword-only with no default.
 3. A CRON.md `command: istota-skill tasks recent …` row is promoted to a skill-task by `cron_loader._parse_skill_command` and run by `scheduler._execute_skill_task`, which is explicitly not admin-gated and sets `ISTOTA_DB_PATH` unconditionally. A non-admin reaches the CLI this way — as they now do on the LLM path too, since `ISTOTA_DB_PATH` goes to the proxy for every user rather than admins only.
 
 So `admin_only` is a documentation gate, and a CLI that needs a real boundary must carry its own. `tasks` scopes every query by `ISTOTA_USER_ID`, which holds on all three paths — path 3 in particular leaves no cross-user leak, only a non-admin reading their own tasks.

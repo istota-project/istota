@@ -566,25 +566,86 @@ def select_skills(
     return result
 
 
-def format_cli_skills(skill_index: dict[str, SkillMeta], *, is_admin: bool) -> str:
+def advertised_cli_skills(
+    skill_index: dict[str, SkillMeta],
+    *,
+    is_admin: bool,
+    disabled_skills: "set[str] | frozenset[str]",
+) -> list[str]:
+    """The skill CLIs the prompt may name, sorted.
+
+    One derivation behind two producers — the "Skill CLI tools" list and
+    ``executor.room_identity_line``'s ``istota-skill rooms list`` clause — so
+    those two cannot disagree with each other about a verb in one prompt
+    (ISSUE-513). Two filters drift; one cannot.
+
+    Read the relationship to the menu as *the same disabled set*, never as "the
+    menu omits it, so this does". The menu is built with ``exclude=selected``,
+    so every eager skill is missing from it by construction while staying in
+    this list — an ``always_include`` CLI such as ``kv`` or ``skills`` is
+    advertised with no menu entry, correctly, because its body is already in
+    the prompt.
+
+    **It is not the menu's gate, and the difference is a stated residual.**
+    ``eligible_skill_names`` additionally drops an ``experimental`` skill whose
+    ``skill_<name>`` feature is unset and anything failing
+    ``_check_dependencies``. Three shipped ``cli: true`` skills declare
+    dependencies — ``markets`` (yfinance), ``transcribe`` (pytesseract) and
+    ``whisper`` (faster-whisper) — so on an install without those extras this
+    list still names ``istota-skill whisper`` in a prompt whose menu omits it.
+    That is the ISSUE-513 symptom surviving for a class the issue's chosen
+    option did not cover; folding the two gates in needs
+    ``enabled_experimental_features`` threaded to this call site and is its own
+    change. What is closed is the disabled set, which is what the issue filed.
+
+    **Advertised is a subset of executable, deliberately.** The skill proxy's
+    ``allowed_skills`` is every ``cli: true`` skill in the index, gated by
+    neither flag here, so an operator-disabled CLI still runs if the model
+    guesses its name. That asymmetry predates this function: ``admin_only`` has
+    always worked the same way, and the alternative — advertising a CLI the
+    on-demand menu omits in the same prompt — is what ISSUE-513 filed. An
+    operator who disabled a skill meant it unused, and the menu already honours
+    that.
+
+    Both gates are keyword-only with no default, for the reason ``is_admin``
+    already carried: a caller who forgets one silently widens the prompt back
+    to where it was, and nothing downstream can tell.
+    """
+    return sorted(
+        name
+        for name, meta in skill_index.items()
+        if meta.cli
+        and (is_admin or not meta.admin_only)
+        and name not in disabled_skills
+    )
+
+
+def format_cli_skills(
+    skill_index: dict[str, SkillMeta],
+    *,
+    is_admin: bool,
+    disabled_skills: "set[str] | frozenset[str]",
+) -> str:
     """Generate a prompt-ready list of skills that have CLI tools.
 
     Returns a formatted string listing each CLI skill with its command
     and description, suitable for inclusion in the tools section of a prompt.
-    Returns empty string if no CLI skills exist.
+    Returns empty string if no CLI skill survives the gates.
 
-    ``is_admin`` is keyword-only and has no default on purpose. This list is
-    built straight off ``meta.cli``, and the skill proxy's ``allowed_skills``
-    is likewise every ``cli: true`` skill — so an ``admin_only`` CLI omitted
-    here is simply never mentioned to a non-admin, while one left in would be
-    both advertised and executable. The other ``admin_only`` gates (eager
-    selection, companion expansion, the on-demand menu) don't cover this path.
+    Pure rendering over :func:`advertised_cli_skills` — it must carry no filter
+    of its own, since a second copy of the membership rule is exactly what let
+    this list disagree with the on-demand menu. ``disabled_skills`` is the
+    caller's ``effective_disabled_skills`` (capability gate + instance-wide +
+    per-user); see that function for why each gate is in it, and
+    :func:`advertised_cli_skills` for the two menu gates this deliberately
+    does not apply.
     """
-    lines = []
-    for name in sorted(skill_index):
-        meta = skill_index[name]
-        if meta.cli and (is_admin or not meta.admin_only):
-            lines.append(f"  - `istota-skill {name}` — {meta.description}")
+    lines = [
+        f"  - `istota-skill {name}` — {skill_index[name].description}"
+        for name in advertised_cli_skills(
+            skill_index, is_admin=is_admin, disabled_skills=disabled_skills,
+        )
+    ]
     if not lines:
         return ""
     header = (
