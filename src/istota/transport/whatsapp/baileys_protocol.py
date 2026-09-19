@@ -313,18 +313,36 @@ def _event_time(values: dict[str, Any]) -> datetime:
         raise BaileysProtocolError("invalid event timestamp") from None
 
 
-def _dropped_media(field: str) -> None:
+def _dropped_media(field: str) -> WhatsAppInboundMedia:
     """Say a media field was refused, by field name and never by value.
 
     The value is a string a sidecar chose and this side just decided it could
     not read, which makes it the one most worth keeping out of the log.
+
+    **It answers a failed record rather than `None`, and that is what keeps
+    the log line's own claim true.** `None` means "this message carried no
+    file", which `_dispatch_inbound`'s narrowed gate reads together with the
+    message type: an `image` with no record is a type the surface cannot read
+    with nothing attached, so it takes the unsupported reply and the caption
+    is never looked at. Dropping the record would therefore cost the whole
+    message — `STOP` typed on a photograph included — where this module's
+    rule, stated one function down, is that a malformed field costs the media
+    and never the message.
+
+    The staged file is **not** unlinked here, and cannot be: this module
+    refuses to turn a value off the wire into a path at all, which is the
+    whole of `staged_path`'s containment story, and on the arms below the name
+    is exactly what could not be read. The sweep takes it.
     """
     logger.warning(
         "whatsapp.baileys.media_dropped field=%s: the message is kept and its "
         "image is not",
         field,
     )
-    return None
+    return WhatsAppInboundMedia(
+        staged_path="", mime_type="", byte_count=0,
+        attached_for_user="", error=_UNKNOWN_MEDIA_ERROR,
+    )
 
 
 def _inbound_media(payload: dict[str, Any]) -> WhatsAppInboundMedia | None:

@@ -538,6 +538,14 @@ def _media_recipient(binding) -> str | None:
     a caption still opts out and `START` typed as a caption still resumes. That
     is why a refusal here becomes a `WhatsAppInboundMedia.error` rather than a
     dropped record — see `media.MEDIA_UNATTRIBUTED`.
+
+    **One message wide, and the exception is the message that opts out.** The
+    read happens a transaction earlier than `_dispatch_inbound`'s `STOP`
+    branch, so a photograph sent *with* the caption `STOP` is copied and then
+    the opt-out is applied — the one image this rule does not keep out is the
+    one attached to the request itself. Closing that means discarding the copy
+    from the `stop` branch, which is the only place the two facts are in hand
+    at once; every later image is refused here.
     """
     if binding is None or binding.opted_out_at is not None:
         return None

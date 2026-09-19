@@ -596,6 +596,44 @@ class TestTheBaileysStagingStep:
         assert staged.media is None
         assert not (_media_dir(config) / name).exists()
 
+    def test_a_staged_file_that_is_gone_is_a_failure_and_not_a_refusal(
+        self, tmp_path,
+    ):
+        """`sniff_staged` answers `None` for a file it could not open exactly
+        as it does for one whose bytes are not an image, and the two owe
+        different replies: a missing file is istota's own failure, while "not
+        an image" is the unsupported answer that also throws the caption away.
+
+        Reachable rather than theoretical — a worker far enough behind used to
+        meet its own file's orphan window, which is why the sweep moved to a
+        `finally` after the consume.
+        """
+        config = _config(tmp_path)
+        _bind_identity(config.db_path, jid=USER_JID)
+        name = media.staged_name("BAE5F00D", "jpg")
+
+        staged = stage_inbound_media(config, _media_dir(config),
+                                     _image_event(name))
+
+        assert staged.media.error == media.MEDIA_NOT_PLACED
+        assert staged.text == "what is this?"
+
+    def test_the_sweep_never_takes_the_file_this_call_is_about(self, tmp_path):
+        """The prune runs after the consume, not before it. Staged 600 seconds
+        ago and still the subject of this event, the file must be attached
+        rather than swept."""
+        config = _config(tmp_path)
+        _bind_identity(config.db_path, jid=USER_JID)
+        name = _stage_a_file(config)
+        old = time.time() - media.MEDIA_ORPHAN_SECONDS - 60
+        os.utime(_media_dir(config) / name, (old, old))
+
+        staged = stage_inbound_media(config, _media_dir(config),
+                                     _image_event(name))
+
+        assert staged.media.error is None
+        assert staged.media.staged_path.startswith("/Users/alice/inbox/")
+
     def test_a_name_that_is_not_one_component_is_never_joined(self, tmp_path):
         config = _config(tmp_path)
         _bind_identity(config.db_path, jid=USER_JID)

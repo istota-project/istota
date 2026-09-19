@@ -2136,6 +2136,32 @@ class TestTheCopyMustHaveBeenMadeForThisUser:
         # mention it again and the bytes are in somebody's workspace.
         assert "/Users/bob/inbox/whatsapp_ab12-cd34.jpg" in logged
 
+    @pytest.mark.parametrize("case", ["refused", "duplicate"])
+    def test_a_copy_the_transaction_walks_away_from_is_named(
+        self, tmp_path, caplog, case,
+    ):
+        """Two returns sit above the comparison and neither reaches it.
+
+        The authoritative resolution can refuse a sender the pre-check named —
+        a recycled line, a latch that lost its race — and the claim can find
+        the id already taken by a concurrent batch. The copy was made before
+        either ran, nothing downstream mentions it again, and nothing can
+        un-copy it, so it is named at warning exactly as a mismatch is.
+        """
+        config = _config(tmp_path)
+        if case == "duplicate":
+            _bind(config, bootstrap_phone_number=USER_NUMBER, bsuid=USER_BSUID)
+            _dispatch(config, _image_event(caption="the first one"))
+        # else: no binding at all, so the sender resolves to nobody.
+
+        with caplog.at_level("WARNING"):
+            results = _dispatch(config, _image_event(caption="what is this?"))
+
+        assert _dispositions(results) != ["task"]
+        logged = _istota_log(caplog)
+        assert "media_stranded" in logged
+        assert "/Users/alice/inbox/whatsapp_ab12-cd34.jpg" in logged
+
     def test_a_record_nothing_staged_is_refused_rather_than_attached(
         self, tmp_path, caplog,
     ):

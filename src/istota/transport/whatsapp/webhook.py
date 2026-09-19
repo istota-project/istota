@@ -715,6 +715,7 @@ def _handle_inbound(
             message_fingerprint(event.message_id),
             identity_rules.identity_fingerprint(event.from_user, provider=provider),
         )
+        _report_stranded_media(event, resolution.disposition or "unknown_sender")
         return WhatsAppEventResult(
             resolution.disposition or "unknown_sender",
             pending_alerts=_alerts(resolution.pending_alert),
@@ -729,6 +730,7 @@ def _handle_inbound(
             "whatsapp.inbound.duplicate message=%s",
             message_fingerprint(event.message_id),
         )
+        _report_stranded_media(event, "duplicate")
         return WhatsAppEventResult("duplicate", user_id=user_id)
 
     binding = db.get_whatsapp_binding(conn, user_id)
@@ -775,6 +777,33 @@ def _handle_inbound(
         result.disposition, message_fingerprint(event.message_id), result.task_id,
     )
     return result
+
+
+def _report_stranded_media(event: InboundWhatsAppEvent, reason: str) -> None:
+    """Name an inbox copy the transaction is about to walk away from.
+
+    The copy is made outside the lock, on the pre-check's answer, and three
+    returns in `_handle_inbound` sit between that and the dispatch: the
+    authoritative resolution refusing where the pre-check named somebody (a
+    recycled line, a latch that lost its race), and the claim finding the
+    message id already taken by a concurrent batch. Nothing downstream will
+    mention the file again, and nothing can un-copy it — which is the same
+    rule `_media_for_user` follows for the mismatch case, applied to the
+    returns that never reach it.
+
+    Never raises and never runs for a record that names no copy: a media
+    failure carries no path, and a message that carried nothing has nothing
+    stranded.
+    """
+    media = event.media
+    if media is None or media.error is not None or not media.staged_path:
+        return
+    logger.warning(
+        "whatsapp.inbound.media_stranded message=%s reason=%s staged_for=%s "
+        "path=%s: the message was refused after its file had been copied",
+        message_fingerprint(event.message_id), reason,
+        media.attached_for_user, media.staged_path,
+    )
 
 
 def _media_for_user(

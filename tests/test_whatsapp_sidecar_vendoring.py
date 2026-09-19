@@ -489,13 +489,25 @@ class TestTheSidecarsPayloadsAreReadable:
     def test_a_name_that_is_not_one_component_is_dropped(self, name):
         """`media.is_staged_name`, applied to a value a sidecar chose. The
         message survives and loses its image, because a frame this side
-        cannot place must not be answered by guessing where it goes."""
+        cannot place must not be answered by guessing where it goes.
+
+        **The record survives carrying a reason**, rather than going away.
+        `_dispatch_inbound` reads "no record" together with the message type,
+        so an `image` with none takes the unsupported reply and its caption is
+        never looked at — which would make this case cost the message it says
+        it keeps.
+        """
         keys = _js_send_keys("MSG_INBOUND")
         payload = self._filled(keys, dict(
             self._INBOUND_TEXT, message_type="image", media_name=name,
         ))
 
-        assert proto.inbound_event(payload).media is None
+        event = proto.inbound_event(payload)
+
+        assert event.media is not None
+        assert event.media.error == proto._UNKNOWN_MEDIA_ERROR
+        assert event.media.staged_path == ""
+        assert event.text == "check the backup"
 
     @pytest.mark.parametrize("absent", ["media_mime", "media_bytes"])
     def test_an_absent_advisory_field_does_not_cost_the_image(self, absent):
@@ -549,7 +561,10 @@ class TestTheSidecarsPayloadsAreReadable:
     ):
         """The batch rule one layer up, restated at the decoder: a media
         failure costs the media, never the message. Raising here would drop a
-        caption somebody typed over a field nothing authoritative reads."""
+        caption somebody typed over a field nothing authoritative reads — and
+        so, since the `unsupported_type` gate narrowed, would answering with
+        no record at all: `_dispatch_inbound` reads an `image` carrying none
+        as a type it cannot read with nothing attached."""
         keys = _js_send_keys("MSG_INBOUND")
         payload = self._filled(keys, dict(
             self._INBOUND_TEXT,
@@ -560,7 +575,9 @@ class TestTheSidecarsPayloadsAreReadable:
 
         event = proto.inbound_event(payload)
 
-        assert event.media is None
+        assert event.media is not None
+        assert event.media.error == proto._UNKNOWN_MEDIA_ERROR
+        assert event.media.staged_path == ""
         assert event.text == "check the backup"
 
     def test_a_receipt_payload_normalizes(self):

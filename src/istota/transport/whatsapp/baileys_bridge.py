@@ -251,10 +251,17 @@ ENV_SESSION_DIR = "ISTOTA_BAILEYS_SESSION_DIR"
 #: Beside the two above and set the same way, which is what keeps it out of
 #: `_CHILD_ENV_PASSTHROUGH`: that is an allowlist of what the *daemon's*
 #: environment may hand on, and this value is computed from config rather than
-#: inherited. The sidecar exits 2 without it, so the two literals the
-#: deployment shapes spell are compared against `media.default_media_dir` by
-#: test — a drift there is a sidecar writing where the daemon never reads, with
-#: no error on either side.
+#: inherited.
+#:
+#: **This reaches the spawned shape alone**, which is `istota whatsapp pair`
+#: and a deployment that sets `sidecar_command`. On both shipped shapes the
+#: sidecar is a unit or a compose service of its own and the daemon spawns
+#: nothing, so what it reads is the literal in that unit or service — and the
+#: sidecar exits 2 without it. Those two literals, and the drift guard that
+#: compares each against `media.default_media_dir` for its shape, are Stage 5
+#: of `whatsapp-inbound-images`; until they land the deployed shapes cannot
+#: run a sidecar at all, which is why that stage has to land in the same
+#: round as this one.
 ENV_MEDIA_DIR = "ISTOTA_BAILEYS_MEDIA_DIR"
 
 
@@ -1242,6 +1249,29 @@ def _media_failed(reason: str) -> WhatsAppInboundMedia:
     )
 
 
+def _staged_file_is_readable(staged: Path) -> bool:
+    """Whether the staged bytes can be opened at all. Never raises.
+
+    Asked before the sniff because `media.sniff_staged` collapses "could not
+    open it" into the same `None` it answers for "these bytes are not an
+    image", and the two owe the sender different replies. Reachable rather
+    than theoretical: a worker far enough behind can meet its own file's
+    orphan window, a sidecar running as another uid writes something this
+    process cannot read, and a disk that filled mid-write leaves a name with
+    nothing behind it.
+
+    `O_NOFOLLOW`, like every other open in this area: the directory is
+    0700 and the name was minted by the sidecar, so a symlink at it is not a
+    file this side is willing to follow.
+    """
+    try:
+        fd = os.open(staged, os.O_RDONLY | os.O_NOFOLLOW)
+    except (OSError, ValueError):
+        return False
+    os.close(fd)
+    return True
+
+
 def stage_inbound_media(
     config: Config, media_dir: Path, event: InboundWhatsAppEvent
 ) -> InboundWhatsAppEvent:
@@ -1263,22 +1293,31 @@ def stage_inbound_media(
     The order is the same two calls the Cloud route makes, with the fetch that
     sits between them on that side already done here:
 
-    1. **Prune.** A touch of the directory is where the sweep runs, per
-       `outbound._prune_parked_statuses`' arrangement. On this adapter the
-       daemon cannot refuse a fetch the sidecar already made, so what bounds
-       the directory is the per-file cap and the fact that every staged file
-       is unlinked when it is decided — consumed *or* dropped.
-    2. **Pre-check.** Unlocked, read-only, and allowed to be stale. `None`
+    1. **Pre-check.** Unlocked, read-only, and allowed to be stale. `None`
        means the file goes no further: an unknown sender, a message id already
        claimed (which is what closes the redelivery re-copy), a sender who has
        opted out, or a read that could not be answered.
-    3. **Sniff, then consume.** The sniff is asked here rather than left to
+    2. **Sniff, then consume.** The sniff is asked here rather than left to
        `stage_to_attachment` because that function answers `None` for two
        situations the surface owes different replies for: a file that is not a
        decodable image is not an image at all and takes the `unsupported_type`
        reply the surface already had, while an image that could not be placed
        is istota's own failure and says so. One extra 32-byte read buys the
-       distinction.
+       distinction — and the file's own existence is asked first, because
+       `sniff_staged` answers `None` for a file it could not open just as it
+       does for one whose bytes match nothing, and only the second of those
+       means "not an image".
+    3. **Prune**, in a `finally` and therefore *after* the consume rather than
+       before it. `outbound._prune_parked_statuses`' arrangement says a touch
+       of the thing is where the sweep runs, and this is a consume: sweeping
+       first puts the 600-second window in front of the file this call is
+       about, which a worker far enough behind would delete out from under
+       itself. On this adapter the daemon cannot refuse a fetch the sidecar
+       already made, so what bounds the directory is the per-file cap and the
+       fact that every staged file is unlinked when it is decided — consumed
+       *or* dropped. An event carrying no media never reaches here, so a
+       message somebody sent with nothing attached is not a touch; the
+       bridge-start sweep is the backstop for an orphan nothing consumes.
 
     Never raises, and that is wider than `stage_to_attachment`'s own contract:
     that one catches `OSError` and `ValueError`, and anything else out of the
@@ -1295,7 +1334,6 @@ def stage_inbound_media(
     if incoming is None or incoming.error is not None:
         return event
     try:
-        media_rules.prune_media_dir(media_dir)
         if not media_rules.is_staged_name(incoming.staged_path):
             # The decoder validated it and this joins it, and the two are
             # different modules — the join is the containment story, so it is
@@ -1325,6 +1363,23 @@ def stage_inbound_media(
             return dataclasses.replace(
                 event, media=_media_failed(media_rules.MEDIA_UNATTRIBUTED),
             )
+        if not _staged_file_is_readable(staged):
+            # **Not the same answer as "this is not an image", and the
+            # difference is a caption.** `sniff_staged` answers `None` for a
+            # file it could not open exactly as it does for one whose bytes
+            # match no signature, so reading the two as one tells somebody
+            # whose file went missing that photographs are not supported — and
+            # throws their caption away with it, since a dropped record sends
+            # the message back through the narrowed gate. A file that is gone
+            # is istota's own failure and takes the media-failed path.
+            logger.warning(
+                "whatsapp.baileys.media_unreadable message=%s: the staged "
+                "file could not be opened",
+                message_fingerprint(event.message_id),
+            )
+            return dataclasses.replace(
+                event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
+            )
         if media_rules.sniff_staged(staged) is None:
             media_rules.discard_staged(staged)
             return dataclasses.replace(event, media=None)
@@ -1349,6 +1404,13 @@ def stage_inbound_media(
         return dataclasses.replace(
             event, media=_media_failed(media_rules.MEDIA_NOT_PLACED),
         )
+    finally:
+        # After the consume, never before it — see step 3. `prune_media_dir`
+        # never raises by its own contract, and a sweep that somehow did must
+        # not turn a staged attachment into a lost message on its way out of a
+        # `finally`.
+        with contextlib.suppress(Exception):
+            media_rules.prune_media_dir(media_dir)
 
 
 # ---------------------------------------------------------------------------
