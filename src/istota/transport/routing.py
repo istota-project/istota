@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 # The static room-model table. A stdlib-only leaf that imports nothing, so a
 # module-level import here costs nothing and introduces no cycle — unlike
 # `db`, which this module deliberately imports per function.
-from ..surfaces import is_room_member
+from ..surfaces import is_room_member, origin_surface_for_source_type
 
 if TYPE_CHECKING:
     from .. import db
@@ -458,16 +458,22 @@ def room_target_descriptor(
     room — the string `istota-skill rooms list` hands the model and the
     `talk create` guard's refusal points at (ISSUE-509).
 
-    Deliberately **not** ``room:<token>``, which reads as the obvious answer and
-    delivers nowhere from a cron job. ``_expand_room_destinations`` starts from
-    ``_infer_default_plan``, which has no arm for ``scheduled``, and then skips
-    the room's own bindings twice over: the ``talk`` one because
-    ``_surface_for_source_type("scheduled")`` answers ``"talk"`` and it reads as
-    the origin leg, the ``web`` one because its view is canonical and an origin
-    leg is assumed to have written the row. Nothing wrote it, the plan comes out
-    empty, and ``scheduled`` is not in ``_INTERACTIVE_SOURCE_TYPES`` so there is
-    no fallback either. The only signal is one load-time WARNING from
-    ``cron_loader._validate_target`` about a surface it does not recognise.
+    Deliberately **not** ``room:<token>``, and the reason changed with
+    ISSUE-511. That spelling used to deliver nowhere from a cron job — the
+    expansion skipped both of the room's bindings as legs an origin that does
+    not exist was assumed to have covered — and it now delivers correctly, so
+    what remains is a preference rather than a defect. Two reasons to keep
+    naming the surfaces here. The descriptor is *read* as well as written: it
+    goes into `istota-skill rooms list`, the prompt header's `Room:` line and
+    the `talk create` refusal, where naming the surfaces tells a reader which
+    ones a room is on. And it degrades legibly — a job whose room is later
+    unbound from a surface still shows which legs it was written for, where
+    ``room:`` shows nothing and silently narrows.
+
+    What ``room:<token>`` buys that this does not is re-expansion by *live*
+    bindings, so a room promoted to Talk after the job was written picks the
+    Talk leg up on its own. Prefer it where that matters; prefer this where the
+    descriptor is something a person reads.
 
     So the descriptor names the surfaces explicitly:
 
@@ -513,33 +519,110 @@ def _expand_room_destinations(
     be both the only canonical-transcript room view and the only stream room
     surface.
 
+    **Both skips are compensations for an origin leg, so a task that originated
+    on no surface takes neither** (ISSUE-511). The origin surface is
+    ``surfaces.origin_surface_for_source_type`` and never
+    ``registry._surface_for_source_type``: that one answers "where do I deliver
+    this result" and maps everything it does not recognise to ``"talk"``, so a
+    scheduled job carrying ``room:<token>`` had the room's Talk binding skipped
+    as an origin leg that does not exist, and its web binding skipped as a
+    canonical row an origin leg was assumed to have written. Rooms bind only
+    ``talk`` and ``web``, so the plan came out empty — and ``scheduled`` is not
+    in ``_INTERACTIVE_SOURCE_TYPES``, so nothing caught it and the answer went
+    nowhere while the job reported success. ``None`` reads as "no origin leg
+    delivered anything", which is the correct reading for `briefing`, `cli`,
+    `doctor`, `heartbeat`, `scheduled` and `subtask`, and every binding is
+    emitted.
+
+    Emitting the *canonical* binding is the half that is easy to leave out and
+    is what the transcript depends on. `scheduler._room_turn_belongs_here`'s
+    first rung reads `own_room_canonical_dests`, which is empty unless the web
+    binding is in the plan; its second rung is the room already holding the
+    question, and a cron task deposits no ``role='user'`` row. So on a web-only
+    room that leg is the only thing that can produce an assistant turn — and it
+    produces a turn rather than an unsolicited ``role='system'`` note precisely
+    because the scheduler recognises it as the task's own room and suppresses
+    the push in favour of the row (ISSUE-164). On a Talk-bound room it is
+    harmless: the same partition puts it in ``own_room_canonical_dests`` beside
+    the Talk leg's own ``_talk_lands_here``, so there is still one row and no
+    note.
+
+    **The token is resolved through a binding only when there is a surface to
+    scope the lookup by.** A ref is unique only within its surface, so the
+    unscoped lookup `_canonical_room_token(..., cross_surface=True)` performs is
+    refused on this path for the reason that function's own docstring gives: a
+    wrong *descriptor* is re-resolved by live bindings at delivery, a wrong
+    *channel* posts the answer into somebody else's conversation. Nothing is
+    lost by it. `origin_descriptor` is the only shipped producer of a ``room:``
+    descriptor and it stamps a canonical token — `_room_descriptor` confirms the
+    room with `db.get_room` before returning — and the token a person copies out
+    of `istota-skill rooms list` is canonical too. A canonical token needs no
+    resolution.
+
+    **The seed still emits a source-type default for `briefing`, which reads as
+    a contradiction of the paragraph above and is a knowingly-kept one.**
+    `_infer_default_plan` answers `[]` for five of the six originless source
+    types; `briefing` is the exception, and there the bare `talk` leg is not an
+    origin delivery but the default the task would have had anyway. Dropping it
+    is not free in either available spelling: the missing-room and archived
+    arms below hand `dests` back precisely so a briefing whose room went away
+    still falls through to the user's notification channel, and an email
+    continuation's stored `room:<token>` descriptor leans on the same prepend
+    for its own email leg. So a briefing targeting a room other than its own
+    channel reaches both, which is one leg more than asked for and one more
+    than it reached before — closer to correct rather than further, since the
+    named room is the one that was missing. Pinned by test; narrowing it is its
+    own change (ISSUE-511 review).
+
     ``token`` names the room explicitly — the ``room:<token>`` destination form.
+    **It must be the room's canonical token**, which is what
+    `istota-skill rooms list` reports as `token` and what the prompt header's
+    `Room:` line carries — not a per-surface ref. With no origin surface there
+    is nothing to scope a binding lookup by, so a promoted room's Talk ref
+    written here resolves to no room; the missing-room arm logs that rather
+    than dropping it in silence.
     It matters when the room is not the task's own channel: an inbound email
     reply carries a stored ``room:`` origin descriptor while its own
     ``conversation_token`` may still be the synthetic thread hash. Omitting it
     falls back to the task's channel, which is the bare ``room`` form, unchanged.
     """
     from .. import db
-    from .registry import _surface_for_source_type
 
     dests = list(_infer_default_plan(task))  # origin delivery
     token = token or task.conversation_token
     if not token or not config.db_path:
         return dests
-    origin_surface = _surface_for_source_type(task.source_type)
+    origin_surface = origin_surface_for_source_type(task.source_type)
     try:
         with db.get_db(config.db_path) as conn:
             # Resolve through the binding before listing them. A promoted room's
             # per-surface ref is not its canonical token, and looking bindings up
             # by the raw value is the mistake this whole spec is cleaning up. A
             # token that is already canonical resolves to itself.
-            canonical = db.resolve_room_token(conn, origin_surface, token) or token
+            canonical = token
+            if origin_surface is not None:
+                canonical = (
+                    db.resolve_room_token(conn, origin_surface, token) or token
+                )
             # A room that went away between the send and the reply mirrors
             # nowhere — the bot has left it, or it never was one. The origin
             # delivery still stands, which is what keeps a reply from being
             # dropped because its room was archived underneath it.
             room = db.get_room(conn, canonical)
             if room is None:
+                # Logged for the reason the archived arm below is, and more
+                # urgently since ISSUE-511: for a task that originates nowhere
+                # `dests` is empty, nothing downstream fills it, and `room` is
+                # no longer an unknown surface at cron-load time — so a
+                # mistyped or non-canonical token now reproduces the exact
+                # symptom this issue was filed about with no signal at all.
+                logger.warning(
+                    "Task %s targets room %r, which names no registered room; "
+                    "nothing will be delivered to it. The token must be the "
+                    "room's canonical one, which `istota-skill rooms list` "
+                    "reports as `token`.",
+                    getattr(task, "id", "?"), canonical,
+                )
                 return dests  # names no room; listing bindings would be empty
             if getattr(room, "archived", 0):
                 # Logged, never silent. `archive_orphaned_talk_rooms` archives
@@ -560,11 +643,25 @@ def _expand_room_destinations(
                        getattr(task, "id", "?"), e)
         return dests
     for b in bindings:
-        if b.surface == origin_surface:
-            continue
-        if _room_view(config, registry, b.surface) == "canonical":
-            continue
-        dests.append(Destination(b.surface, b.surface_ref, mirror=True))
+        # Both skips compensate for what an origin leg already delivered, so
+        # neither applies to a task that has no origin leg. See above.
+        if origin_surface is not None:
+            if b.surface == origin_surface:
+                continue
+            if _room_view(config, registry, b.surface) == "canonical":
+                continue
+        # `mirror` is a *relation to an origin leg*, so a task with no origin
+        # has no mirror legs — it is not a synonym for "produced by the
+        # fan-out". All three readers treat the flag as "this duplicates a
+        # delivery that happened somewhere else", and the one that bites is
+        # `scheduler.py`'s undelivered-result arm: it suppresses the inbox row
+        # and the alert for a Talk post that came back `None`, which is right
+        # for a web-origin task whose answer already streamed, and drops the
+        # only copy of the answer for an originless `room:` expansion where the
+        # Talk leg is the whole plan.
+        dests.append(Destination(
+            b.surface, b.surface_ref, mirror=origin_surface is not None,
+        ))
     return dests
 
 

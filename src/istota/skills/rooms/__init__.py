@@ -11,8 +11,10 @@ name bound to nothing. Every affordance pushed it there.
 So this answers the two questions that incident needed and nothing else: which
 rooms does this user have, and what do I write in ``CRON.md`` to deliver into
 one. The ``target`` field is the whole point — see
-``transport.routing.room_target_descriptor`` for why it is not ``room:<token>``,
-which reads as the obvious answer and silently delivers nowhere from a cron job.
+``transport.routing.room_target_descriptor`` for why it names the surfaces
+rather than the room. ``room:<token>`` works too since ISSUE-511, and it
+delivered nowhere from a cron job before that; what the surface-qualified form
+buys is legibility, since it says which surfaces the job was written for.
 
 Not part of the ``nextcloud`` skill, deliberately: that one declares
 ``requires_capability: [nextcloud]`` and drops out of the menu on a

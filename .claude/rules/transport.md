@@ -851,33 +851,62 @@ messages are re-polled rather than silently lost.
   Making the expiry loud and specific is the recoverable version of the same
   concern.
 
-  **`room:<token>` is the right descriptor for a *task* and the wrong one for a
-  scheduled job, and nothing said so until ISSUE-509.** `_expand_room_destinations`
-  starts from `_infer_default_plan` — the task's own origin delivery — and then
-  skips every binding that leg is assumed to have covered. For `source_type =
-  "scheduled"` the default plan is empty, and both skips still fire: the `talk`
-  binding because `registry._surface_for_source_type("scheduled")` answers
-  `"talk"` and it therefore reads as the origin surface, the `web` binding
-  because its `room_view` is canonical and an origin leg is assumed to have
-  written the row. The plan comes out empty, `scheduled` is not in
-  `_INTERACTIVE_SOURCE_TYPES` so there is no fallback, and nothing is written to
-  the transcript either — `_room_turn_belongs_here` fails both rungs. The only
-  signal is one load-time WARNING from `cron_loader._validate_target`, about a
-  surface it does not recognise rather than about the delivery. This is the
-  hazard the "two source-type mappings" paragraph above names, in the one place
-  it has a consequence: the origin *skip* asks the delivery map, while the
-  origin *delivery* it is compensating for comes from somewhere that answers
-  nothing. `surfaces.origin_surface_for_source_type` answers `None` here, which
-  is the correct reading — a cron task originates on no surface, so neither the
-  origin delivery nor the origin skip is meaningful. Left alone deliberately:
-  changing it changes delivery for every room-targeted task, and the fix ISSUE-509
-  needed was a descriptor that works rather than a planner that is right.
-  `routing.room_target_descriptor` is that descriptor — `talk:<token>` for a
-  Talk-origin room, `web:<token>` for a web one, `web:<token>,talk:<ref>` for a
-  promoted one, both legs because the web leg writes the canonical row and
-  pushes nothing to Talk. `istota-skill rooms list`, the `nextcloud talk create`
-  refusal and the prompt header's `Room:` line all hand back that one string, so
-  no surface teaches the model a spelling another surface refuses.
+  **`room:<token>` delivered nowhere from a scheduled job, and it was the two
+  source-type mappings above in the one place the confusion had a consequence
+  (ISSUE-511).** `_expand_room_destinations` starts from `_infer_default_plan` —
+  the task's own origin delivery — and then skips every binding that leg is
+  assumed to have covered. For `source_type = "scheduled"` the default plan is
+  empty and both skips fired anyway: the `talk` binding because
+  `registry._surface_for_source_type("scheduled")` answers `"talk"` and it
+  therefore read as the origin surface, the `web` binding because its
+  `room_view` is canonical and an origin leg was assumed to have written the
+  row. Rooms bind only `talk` and `web`, so the plan came out empty; `scheduled`
+  is not in `_INTERACTIVE_SOURCE_TYPES`, so there was no fallback; and nothing
+  reached the transcript either, since `_room_turn_belongs_here` fails both
+  rungs. The only signal was one load-time WARNING from
+  `cron_loader._validate_target`, about a surface it did not recognise rather
+  than about the delivery — a message that reads as a typo for a descriptor that
+  is real everywhere else. The origin *skip* was asking the delivery map while
+  the origin *delivery* it compensates for comes from a map that answers
+  nothing.
+
+  The expansion now asks `surfaces.origin_surface_for_source_type`, which
+  answers `None` for the six source types that name no surface, and reads that
+  as "no origin leg delivered anything": **both** skips are gated on there being
+  an origin surface at all, so every binding is emitted, the canonical one
+  included. Emitting the canonical leg is the half that looks optional and is
+  not — `_room_turn_belongs_here`'s first rung reads
+  `own_room_canonical_dests`, its second rung is the room already holding the
+  question, and a cron task deposits no `role='user'` row, so on a web-only room
+  that leg is the only thing that can produce an assistant turn. It produces a
+  turn rather than a `role='system'` note because the scheduler's own partition
+  recognises a canonical push aimed at the task's own room and writes the row
+  instead of pushing (ISSUE-164); on a Talk-bound room the same partition puts
+  it beside `_talk_lands_here`, so there is still one row and no note. The
+  origin-bearing source types are untouched — `email`, `talk`, `web`, `repl`,
+  `sms` and `whatsapp` answer the same under both maps — and `istota_file` is
+  the one that moves without becoming `None`, gaining the room's Talk mirror it
+  was wrongly skipping as its own origin leg. **The token is resolved through a
+  binding only when there is a surface to scope the lookup by**, because a ref
+  is unique only within its surface and an unscoped match on the delivery path
+  posts into another conversation; nothing is lost, since every shipped producer
+  of a `room:` descriptor emits a canonical token. `room` joined
+  `cron_loader._KNOWN_TARGET_SURFACES` in the same change: it was correctly
+  absent only while the warning was the sole signal the job was broken.
+
+  `routing.room_target_descriptor` stays the recommended spelling and its reason
+  changed with the fix. It is `talk:<token>` for a Talk-origin room,
+  `web:<token>` for a web one, `web:<token>,talk:<ref>` for a promoted one —
+  both legs, because the web leg writes the canonical row and pushes nothing to
+  Talk. `istota-skill rooms list`, the `nextcloud talk create` refusal and the
+  prompt header's `Room:` line all hand back that one string, so no surface
+  teaches the model a spelling another surface refuses. What it buys over
+  `room:<token>` is legibility rather than correctness: it names the surfaces
+  the job was written for, so a room later unbound from one of them shows it,
+  where `room:` narrows in silence. What `room:<token>` buys back is
+  re-expansion by *live* bindings, so a room promoted to Talk after the job was
+  written picks the new leg up unedited — which is the thing the surface-qualified
+  form structurally cannot do.
   `routing.canonical_room_token` is `_canonical_room_token`'s cross-surface
   reading made public for those callers: they are *describing* a room rather
   than choosing a channel, so the ref collision the delivery path refuses costs

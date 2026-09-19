@@ -106,9 +106,13 @@ default `general` room — **not** the job's `room` field), bare `"talk"` (the
 room named by `room`, or the user's resolved notification channel), `"none"`,
 and a comma-separated list of any of these.
 
-**Do not write `room:<token>`.** It reads as the obvious spelling for "this
-room, all its surfaces" and it delivers nowhere from a scheduled job — the
-result is dropped and the only signal is one line in the daemon log.
+`room:<token>` also works, and means "this room, whichever surfaces it is on at
+the time the job runs". The token must be the room's **canonical** one — the
+`room` value in the table above, which is what `rooms list` and the prompt
+header give you — and not a Talk conversation id copied out of a URL. Prefer the table above: it says which surfaces the job
+was written for, so a room later unbound from one of them is legible rather
+than silently narrowed. Reach for `room:<token>` when the room may gain a Talk
+leg later and you want the job to pick it up without being edited.
 
 **Never create a Talk conversation to post into a room.** A conversation made
 with `istota-skill nextcloud talk create` is bound to nothing: it is not the

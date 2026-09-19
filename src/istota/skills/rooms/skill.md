@@ -65,8 +65,9 @@ assembly:
   nothing to Talk. Dropping the Talk half means the room's Talk members never
   see it.
 
-Do not write `room:<token>`. It reads as the obvious spelling and delivers
-nowhere from a scheduled job.
+`room:<token>` also works, and means "this room, whichever surfaces it is on
+at the time". Use the canonical `token` above, not `talk_token`. Prefer the descriptor above: it names the surfaces, so a room
+later unbound from one of them is legible rather than silently narrowed.
 
 In `CRON.md`, pair it with `room` set to the same canonical token:
 
