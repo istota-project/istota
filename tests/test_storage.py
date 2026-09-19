@@ -111,16 +111,25 @@ class TestMountOperations:
         return Config(workspace_path=mount)
 
     def test_ensure_dirs_creates_all(self, mount_config):
+        from istota.storage import BOT_SUBDIRS
+
         result = ensure_user_directories_v2(mount_config, "alice")
         assert result is True
 
         base = mount_config.workspace_path / "Users" / "alice"
         for subdir in ["inbox", "memories", "istota", "shared"]:
             assert (base / subdir).is_dir()
-        # istota subdirectories
-        assert (base / "istota" / "config").is_dir()
-        assert (base / "istota" / "exports").is_dir()
-        assert (base / "istota" / "scripts").is_dir()
+        # Every bot subdirectory, off the constant both passes read rather than
+        # a second list that would go stale against it.
+        for sub in BOT_SUBDIRS:
+            assert (base / "istota" / sub).is_dir(), sub
+
+    def test_the_vault_folder_is_provisioned(self, mount_config):
+        """The whole of the instruction the settings card gives is "put the
+        file in this folder", so the folder has to be there for everybody."""
+        ensure_user_directories_v2(mount_config, "alice")
+        base = mount_config.workspace_path / "Users" / "alice"
+        assert (base / "istota" / "vault").is_dir()
 
     def test_ensure_dirs_idempotent(self, mount_config):
         ensure_user_directories_v2(mount_config, "alice")
@@ -427,14 +436,23 @@ class TestRcloneOperations:
 
     @patch("istota.rclone_client.subprocess.run")
     def test_ensure_dirs_via_rclone(self, mock_run):
-        """ensure_user_directories calls rclone mkdir for each subdir + istota/exports."""
+        """One mkdir per top-level subdir and one per bot subdirectory.
+
+        The bot half is `BOT_SUBDIRS`, the same constant the mount pass reads:
+        the two used to spell the list separately, which is how `config/` came
+        to be created on one shape and not the other.
+        """
+        from istota.storage import BOT_SUBDIRS
+
         mock_run.return_value = self._mock_run(returncode=0)
         Config(workspace_path=None, rclone_remote="nc")
 
         result = ensure_user_directories("nc", "alice", "istota")
         assert result is True
-        # 4 top-level subdirs + 3 bot subdirs (exports, scripts, notes) = 7 mkdir calls
-        assert mock_run.call_count == 7
+        assert mock_run.call_count == 4 + len(BOT_SUBDIRS)
+        asked = {call.args[0][-1] for call in mock_run.call_args_list}
+        for sub in BOT_SUBDIRS:
+            assert f"nc:/Users/alice/istota/{sub}" in asked, sub
 
     @patch("istota.rclone_client.subprocess.run")
     def test_read_memory_via_rclone(self, mock_run):

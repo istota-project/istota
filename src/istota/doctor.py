@@ -2868,30 +2868,60 @@ def _secret_key_remedy(config: "Config") -> str:
 _VAULT_LABEL_CHARS = 64
 
 
-def _vault_paths(config: "Config") -> dict[str, str]:
-    """Each configured user's ``vault_path``, resolved once, in a stable order.
+def _vault_users(config: "Config") -> dict[str, str]:
+    """Each user who has a vault, mapped to their configured ``vault_path``.
 
-    ``resolve_user_vault_path``'s own gate, restated rather than tightened: a
-    non-empty string is configured, and **a blank-but-present one counts**. That
-    is the resolver's line and the reason for it is the same here — an empty
-    value is the feature being off for this user, while ``vault_path = "  "`` is
-    a configured value that resolves to nothing, which the sync refuses and logs
-    every cycle. Skipping it here would leave the one surface the operator reads
-    silent about a line the daemon is complaining about hourly.
+    **What "has a vault" means changed with §7 and this is where it is
+    stated.** The enable is a file in the vault folder plus a ``vault/passphrase``
+    row, so iterating the users with a ``vault_path`` — which is what this did —
+    now misses every user who chose their file from the settings card, which is
+    the ordinary shape. It iterates the users with a passphrase row **plus** any
+    user with a TOML ``vault_path``, which is `secrets_vault._vault_is_enabled`
+    read out one level: the operator's line is a misconfiguration worth
+    reporting even with no passphrase behind it, and the passphrase is the half
+    that cannot become true by accident.
 
-    **A mapping rather than a list of ids, because the value now costs a
-    database read.** ``Config.vault_path_for`` merges a ``user_vault_config``
-    row over the TOML attribute, so asking for it again in each arm turns this
-    check's "a config read per user" into a connection per arm per user — on a
-    check that runs at boot, hourly, behind ``!check`` and on every admin Health
-    pane render. Every arm below takes the value from here.
+    The value is the configured path, empty for a folder-convention user. It is
+    what the path arm hands back to the resolver as ``candidate=``, and `""`
+    there means "resolve however you normally would".
+
+    ``resolve_user_vault_path``'s own gate is restated rather than tightened for
+    the TOML half: a non-empty string is configured, and **a blank-but-present
+    one counts**. An empty value is the feature being off for this user, while
+    ``vault_path = "  "`` is a configured value that resolves to nothing, which
+    the sync refuses and logs every cycle.
+
+    **A mapping rather than a list of ids, so each arm has the value without
+    asking again.** ``Config.vault_path_for`` is a plain read of the TOML field
+    now that no table outranks it, so the cost is no longer a connection per arm
+    per user — but the arms below each want the path, and carrying it is what
+    keeps them from re-deriving it four ways on a check that runs at boot,
+    hourly, behind ``!check`` and on every admin Health pane render.
+
+    Never raises: a database that cannot be asked about a passphrase answers
+    False for that user, which is the same direction the gate it mirrors
+    degrades in.
     """
+    from . import secrets_store, secrets_vault  # noqa: PLC0415
+
     users = getattr(config, "users", None) or {}
     found: dict[str, str] = {}
     for user_id in sorted(users):
         path = config.vault_path_for(user_id)
         if isinstance(path, str) and path:
             found[user_id] = path
+            continue
+        try:
+            present = secrets_store.secret_exists(
+                config.db_path,
+                user_id,
+                secrets_vault.VAULT_PASSPHRASE_SERVICE,
+                secrets_vault.VAULT_PASSPHRASE_KEY,
+            )
+        except Exception:  # noqa: BLE001 - a check never raises
+            continue
+        if present:
+            found[user_id] = ""
     return found
 
 
@@ -2915,8 +2945,12 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     the only surface that answers for every configured user at once.
 
     Four findings, because they fail independently and are fixed in four
-    different places. A deployment where no user has a ``vault_path`` — which is
-    every deployment by default — gets one ``SKIP`` instead. The fifth question
+    different places. A deployment where no user holds a ``vault/passphrase`` row
+    and none has a TOML ``vault_path`` — which is every deployment by default —
+    gets one ``SKIP`` instead. That pair is the enable, so it is the pair
+    ``_vault_users`` iterates: a file in the folder with no passphrase can be
+    read by nothing, and a configured path with no passphrase is still a
+    misconfiguration worth naming. The fifth question
     §10 asks — what each file turns out to hold — is :func:`check_vault_contents`
     under a registry name of its own, and that split is a cost decision stated
     there rather than a tidiness one.
@@ -2930,14 +2964,13 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     because "the extra is not installed" is an operator remedy and everything
     else here is not.
 
-    ``…schedule`` — will a cycle ever run, and what will it own. A
-    ``vault_sync_interval`` of 0 is a documented off-switch rather than a defect,
-    so it ``WARN``s and says which it is; the same predicate
-    (``secrets_vault.sync_is_scheduled``) gates the startup pass and the gate, so
-    a zeroed interval means a configured vault that nothing applies. The owned
-    set rides here because it is the same question — what this is configured to
-    do — and because an empty ``vault_services`` is the documented dry-run state
-    rather than a mistake.
+    ``…schedule`` — will a cycle ever run at all. A ``vault_sync_interval`` of 0
+    is a documented off-switch rather than a defect, so it ``WARN``s and says
+    which it is; the same predicate (``secrets_vault.sync_is_scheduled``) gates
+    the startup pass and the gate, so a zeroed interval means a configured vault
+    that nothing applies. It is one question now rather than two: the owned-set
+    line went with the service mapping, since a vault owns no typed service and
+    writes only its own ``vault_entries`` namespace.
 
     ``…path`` — does each ``vault_path`` resolve, and is there a plain file of a
     sane size behind it. A **refused** path is the one ``FAIL``: the refusal set
@@ -2964,14 +2997,14 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     function.
     """
     prefix = "security.credential_vault"
-    paths = _vault_paths(config)
+    paths = _vault_users(config)
     users = list(paths)
     if not users:
         return [
             CheckResult(
                 prefix,
                 SKIP,
-                "no user has a vault_path configured, which is the default",
+                "no user has a credential vault, which is the default",
             )
         ]
 
@@ -3032,10 +3065,10 @@ def check_vault_contents(config: "Config", probe: bool) -> CheckResult:
     ``config.skill_overlays``, already walking the same mount on the same sweep.
     """
     name = "security.vault_contents"
-    users = list(_vault_paths(config))
+    users = list(_vault_users(config))
     if not users:
         return CheckResult(
-            name, SKIP, "no user has a vault_path configured, which is the default"
+            name, SKIP, "no user has a credential vault, which is the default"
         )
     if not probe:
         return CheckResult(name, SKIP, "probing is disabled; no vault file was opened")
@@ -3085,61 +3118,19 @@ def _vault_library_result(prefix: str) -> CheckResult:
     )
 
 
-def _vault_declared_services(config, user_id: str) -> list[str]:
-    """One user's ``vault_services``, as a list of strings whatever it holds.
-
-    ``list(x or ())`` is the obvious spelling and raises ``TypeError`` on a
-    non-iterable — and a raise anywhere in this check is contained by
-    ``run_checks`` into one synthetic ``FAIL`` that replaces all five findings,
-    so a single malformed field costs the operator every answer this check had
-    already computed. Unreachable through ``load_config``, which coerces the
-    field to ``list[str]`` before the loader's own eligibility filter sees it,
-    and guarded anyway for the same reason ``_vault_paths`` guards the type of
-    ``vault_path`` two functions up: the cost of being wrong is out of all
-    proportion to the cost of asking.
-    """
-    raw = config.vault_services_for(user_id)
-    if isinstance(raw, str) or not isinstance(raw, (list, tuple, set, frozenset)):
-        return []
-    return [service for service in raw if isinstance(service, str)]
-
-
 def _vault_schedule_result(config, secrets_vault, prefix: str, users) -> CheckResult:
-    """Whether a cycle will run, and what each configured vault is set to own."""
+    """Whether a cycle will run at all.
+
+    The owned-services line went with the service mapping: a vault owns no
+    typed service now, so there was nothing left for it to report, and the
+    ineligibility arm beside it had lost its predicate. What is left is the
+    off-switch, which is the question this arm was always really about — a
+    `vault_sync_interval` of 0 is documented and deliberate, so it WARNs and
+    says which it is rather than failing.
+    """
     name = f"{prefix}.schedule"
     interval = getattr(config.scheduler, "vault_sync_interval", 0)
-    owned: list[str] = []
-    ineligible: list[str] = []
-    for user_id in users:
-        services = _vault_declared_services(config, user_id)
-        owned.append(
-            f"{_vault_label(user_id)} owns "
-            + (", ".join(sorted(_vault_label(s) for s in services)) if services else "nothing")
-        )
-        for service in services:
-            # Defence in depth rather than a case with a remedy behind it.
-            # `config._validate_vault_services` drops an ineligible name at load
-            # with its own warning, so nothing reachable through `load_config`
-            # arrives here — the same disposition `storage` gives its
-            # unreachable `realpath` guard. It is here because the filter is
-            # what the operator is being told, and a filter that stopped
-            # running would otherwise show up as a deletion nobody explained.
-            if secrets_vault.service_refusal(service):
-                ineligible.append(f"{_vault_label(user_id)}: {_vault_label(service)}")
-
-    summary = "; ".join(owned)
-    if ineligible:
-        return CheckResult(
-            name,
-            WARN,
-            "a vault_services entry names a service a vault may not own, which "
-            "the config loader should have dropped: " + "; ".join(ineligible),
-            remedy=(
-                "Remove the entry from [users.<id>] vault_services. A service "
-                "whose credentials the daemon mints for itself can never be "
-                "vault-owned."
-            ),
-        )
+    summary = f"{len(users)} vault(s) configured"
     if not secrets_vault.sync_is_scheduled(config):
         return CheckResult(
             name,
@@ -3180,6 +3171,12 @@ _VAULT_PATH_REMEDIES = {
         "that are not a KeePass database and reports a corrupt vault — but the "
         "notification will describe the wrong problem."
     ),
+    "folder": (
+        "Put a .kdbx file in the user's vault folder, or — where there are "
+        "several — choose one from Settings, Connected services. Neither state "
+        "is broken and neither is an operator's to fix; the user's own card "
+        "asks for exactly this."
+    ),
 }
 
 
@@ -3206,6 +3203,24 @@ def _vault_path_result(config, secrets_vault, storage, prefix: str, paths) -> Ch
     is carried verbatim so an operator can grep the daemon log for the same
     word. Everything else the file can be is the user's own file being wrong,
     which their notification already reaches them about.
+
+    **A user with no configured path asks ``vault_location_for``**, which is
+    §7's whole point: most users now reach their file through the folder
+    convention and have no ``vault_path`` at all, so a resolver that only knows
+    about that field would report every one of them as unconfigured. That
+    brings two refusal ids in that are **not** faults — an empty folder and a
+    folder holding several files with none chosen — and both WARN with the
+    folder named rather than FAILing, since each is the user's own to answer
+    and the card is one dropdown away from doing it.
+
+    **A user who does have one keeps the ``candidate=`` call**, and that is a
+    cost rather than a style: ``vault_location_for``'s first rule is a
+    configured path, which it asks ``Config.vault_path_for`` for — a database
+    read, per user, on a check that runs at boot, hourly, behind ``!check`` and
+    on every admin Health pane render. ``_vault_users`` is holding that exact
+    value already, and ``candidate`` is the resolver's own "validate this"
+    entry point rather than a second rule, so the two answer identically and
+    only one of them opens a connection.
     """
     name = f"{prefix}.path"
     findings: list[str] = []
@@ -3216,13 +3231,10 @@ def _vault_path_result(config, secrets_vault, storage, prefix: str, paths) -> Ch
     for user_id, written in paths.items():
         label = _vault_label(user_id)
         try:
-            # `candidate=` is the value `_vault_paths` already read, handed back
-            # rather than re-read: the resolver would otherwise open the
-            # database again per user to fetch a string this function is
-            # holding. Same value, same code path — `candidate` is the
-            # resolver's own "validate this" entry point, not a second rule.
-            resolution = storage.resolve_user_vault_path(
-                config, user_id, candidate=written
+            resolution = (
+                storage.resolve_user_vault_path(config, user_id, candidate=written)
+                if written
+                else storage.vault_location_for(config, user_id)
             )
         except Exception as exc:  # noqa: BLE001 - the resolver never raises
             findings.append(f"{label}: the resolver raised ({type(exc).__name__})")
@@ -3230,7 +3242,18 @@ def _vault_path_result(config, secrets_vault, storage, prefix: str, paths) -> Ch
             continue
         location = resolution.location
         if location is None:
-            findings.append(f"{label}: refused, {resolution.refusal or 'no reason'}")
+            refusal = resolution.refusal or ""
+            if refusal in (storage.VAULT_DIR_EMPTY, storage.VAULT_DIR_UNCHOSEN):
+                # Configured and waiting on the user, not broken. Named with
+                # the folder so the operator can say where to put the file.
+                folder = _vault_folder_label(storage, config, user_id)
+                findings.append(
+                    f"{label}: {refusal}"
+                    + (f" ({folder})" if folder else "")
+                )
+                classes.add("folder")
+                continue
+            findings.append(f"{label}: refused, {refusal or 'no reason'}")
             classes.add("refused")
             continue
 
@@ -3264,13 +3287,13 @@ def _vault_path_result(config, secrets_vault, storage, prefix: str, paths) -> Ch
 
     if not findings:
         return CheckResult(
-            name, OK, f"{ok} configured vault path(s) resolve to a readable file"
+            name, OK, f"{ok} configured vault(s) resolve to a readable file"
         )
     status = FAIL if "refused" in classes else WARN
     lead = (
         "a configured vault_path is one the daemon may not open"
         if status == FAIL
-        else "a configured vault_path resolves but is not usable as written"
+        else "a configured vault does not resolve to a usable file"
     )
     counted = f" ({ok} other(s) are fine)" if ok else ""
     return CheckResult(
@@ -3279,10 +3302,18 @@ def _vault_path_result(config, secrets_vault, storage, prefix: str, paths) -> Ch
         f"{lead}{counted}: " + "; ".join(findings),
         remedy=" ".join(
             _VAULT_PATH_REMEDIES[cls]
-            for cls in ("refused", "file", "aimed")
+            for cls in ("refused", "file", "aimed", "folder")
             if cls in classes
         ),
     )
+
+
+def _vault_folder_label(storage, config, user_id: str) -> str:
+    """Where this user's vault folder is, bounded, for a finding. Never raises."""
+    try:
+        return _vault_label(storage.vault_dir_display(config, user_id))
+    except Exception:  # noqa: BLE001 - a check never raises
+        return ""
 
 
 def _vault_aims_at_the_database(location, db_dir: Path | None) -> bool:
@@ -3451,25 +3482,22 @@ def _vault_contents_result(config, secrets_vault, name: str, users) -> CheckResu
             # carries a remedy aimed at the user rather than at the operator.
             failures.append(f"{label}: {report.outcome or 'no answer'}")
             continue
-        present = [service for service in report.owned if service in report.groups]
-        keys = sum(report.key_counts.get(service, 0) for service in present)
         # Counts, never names: this line reaches the boot log and the admin
-        # Health pane, where one user's credential key names are read by every
-        # admin. Which services a vault owns is operator config and is reported
-        # by `security.credential_vault.schedule`; what the file turned out to
-        # hold is not.
+        # Health pane, where one user's credential names are read by every
+        # admin. The user's own names are on their own settings card and in
+        # `istota secret vault-status`, which is a terminal they are at.
         #
-        # Half of that is structural rather than a rule kept here, which is
-        # worth knowing before somebody widens it: `VaultStatusReport` carries
-        # no key names and no values at all — `key_counts` is a count per
-        # service — so there is nothing in reach to print. What *is* in reach is
-        # `groups`, whose keys and values are group names written into the
-        # **file**, and §12 records that a task in that user's own sandbox can
-        # write them. That is the member the no-leak test discriminates on.
-        counts.append(
-            f"{label}: {len(present)} of {len(report.owned)} owned group(s) "
-            f"present, {keys} key(s)"
-        )
+        # That rule is no longer structural, which is worth knowing before
+        # somebody widens it: `VaultStatusReport.names` now carries the whole
+        # namespace, written into the **file** by somebody a task in that
+        # user's own sandbox can be. Only its length leaves here, and the
+        # no-leak test discriminates on exactly that member.
+        #
+        # `scoped` is reported because it is an operator-visible security
+        # posture rather than a user preference: a vault reading its whole
+        # file shares everything in it.
+        scope = "" if report.scoped else ", whole file shared (no istota group)"
+        counts.append(f"{label}: {len(report.names)} credential(s){scope}")
 
     if failures:
         return CheckResult(

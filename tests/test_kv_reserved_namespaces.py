@@ -195,3 +195,55 @@ class TestDeferredApplierRefuses:
         assert count == 1
         with db.get_db(db_path) as conn:
             assert db.kv_get(conn, "alice", "warsaw", "k") is not None
+
+
+class TestTheVaultFileNamespace:
+    """`_vault_file` holds which KDBX the daemon decrypts for this user.
+
+    Reserved for `_provisioned_rooms`' reason rather than for tidiness: a task
+    that could write it would choose the file the daemon opens with a
+    passphrase it holds, and the folder that value names is bound read-write
+    into that same task's sandbox. Both enforcement points, because neither
+    covers the other's path.
+    """
+
+    def test_it_is_reserved(self):
+        from istota.storage import VAULT_FILE_NAMESPACE
+
+        assert is_reserved_namespace(VAULT_FILE_NAMESPACE)
+
+    def test_the_skill_cli_refuses_it(self, db_path, tmp_path, monkeypatch, capsys):
+        from istota.storage import VAULT_FILE_KEY, VAULT_FILE_NAMESPACE
+
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
+        with db.get_db(db_path) as conn:
+            db.kv_set(conn, "alice", VAULT_FILE_NAMESPACE, VAULT_FILE_KEY, "mine.kdbx")
+
+        with pytest.raises(SystemExit) as exc:
+            kv_main(["set", VAULT_FILE_NAMESPACE, VAULT_FILE_KEY, '"theirs.kdbx"'])
+        assert exc.value.code == 1
+        with db.get_db(db_path) as conn:
+            row = db.kv_get(conn, "alice", VAULT_FILE_NAMESPACE, VAULT_FILE_KEY)
+        assert row["value"] == "mine.kdbx"
+
+    def test_the_deferred_replay_refuses_it(self, db_path, tmp_path):
+        from istota.storage import VAULT_FILE_KEY, VAULT_FILE_NAMESPACE
+
+        config = _make_config(db_path, tmp_path)
+        user_temp = tmp_path / "temp" / "alice"
+        user_temp.mkdir(parents=True)
+        with db.get_db(db_path) as conn:
+            db.kv_set(conn, "alice", VAULT_FILE_NAMESPACE, VAULT_FILE_KEY, "mine.kdbx")
+            task_id = db.create_task(conn, prompt="t", user_id="alice")
+            task = db.get_task(conn, task_id)
+        (user_temp / f"task_{task.id}_kv_ops.json").write_text(json.dumps([
+            {"op": "set", "namespace": VAULT_FILE_NAMESPACE,
+             "key": VAULT_FILE_KEY, "value": '"theirs.kdbx"'},
+        ]))
+
+        assert _process_deferred_kv_ops(config, task, user_temp) == 0
+        with db.get_db(db_path) as conn:
+            row = db.kv_get(conn, "alice", VAULT_FILE_NAMESPACE, VAULT_FILE_KEY)
+        assert row["value"] == "mine.kdbx"

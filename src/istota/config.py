@@ -732,40 +732,34 @@ class UserConfig:
     default_briefings: bool = True  # seed the shared [[default_briefings]] set into this user
     briefing_email_html: bool = True  # briefing email as multipart/alternative (HTML + plain)
     timezone_follow_location: bool = False  # follow the GPS timezone on travel (opt-in; ISSUE-096)
-    # The KDBX credential vault. Empty `vault_path` means the feature is off for
-    # this user, which is every user by default; a relative path resolves under
+    # The KDBX credential vault, operator-set. Empty means this user's vault is
+    # whatever their `{bot_dir}/vault/` folder holds, which is the ordinary
+    # route and is every user by default; a relative path resolves under
     # `{workspace}/Users/{user_id}` and an absolute one must resolve outside
     # `workspace_path` entirely (`storage.resolve_user_vault_path`).
-    # `vault_services` is the services the file owns — empty is a usable dry-run
-    # state, since the vault is then read and nothing is applied.
     #
-    # **These two are the TOML half of the answer, not the answer.** A
-    # `user_vault_config` row outranks them, so read the merged value through
-    # `Config.vault_path_for` / `vault_services_for` and never off this object —
-    # a consumer left on the attribute ignores what the user set in the browser
-    # while reading a real value, which is the failure that looks like nothing
-    # is wrong. `tests/test_user_vault_config.py` sweeps `src/` for the
+    # **It is the first of `storage.vault_location_for`'s four rules and it
+    # wins**, so read it through `Config.vault_path_for` rather than off this
+    # object — one accessor is what lets the resolution order change in one
+    # place, and `tests/test_vault_removal.py` sweeps `src/` for the
     # attribute and permits it in this module alone.
     #
     # **Not in `user_profiles`, and that is a security control rather than a
     # placement.** Every other per-user scalar above is overlaid from that table
     # by `_apply_user_profiles`, and it is writable by anything that grows a
-    # profile-writing verb. `vault_path` selects which file the daemon decrypts
-    # with a key it holds and `vault_services` selects which credentials that
-    # file may overwrite and delete, so neither may be settable by anything
-    # downstream of a task. `user_vault_config` is a table of its own for
-    # exactly that reason, written by the settings endpoint and `istota user
-    # ensure` and by nothing else;
-    # `tests/test_secrets_vault.py::TestTheProfileTableGuard` still holds the
-    # absence from `user_profiles`' column set and from the overlay.
+    # profile-writing verb. This one selects which file the daemon decrypts with
+    # a key it holds, so it may not be settable by anything downstream of a
+    # task; `tests/test_secrets_vault.py::TestTheProfileTableGuard` holds the
+    # absence from `user_profiles`' column set and from the overlay. What a
+    # *user* may set is a filename out of their own folder, which is a name in
+    # the reserved `_vault_file` KV namespace and cannot be a path at all.
     #
-    # The **absolute** form of `vault_path` is settable here and nowhere else:
-    # it is checked against the trees a sandbox binds read-write rather than
-    # against one user's own directory, which is the right question for a path
-    # an operator wrote and not a line a user may put themselves on the far side
-    # of. The web form refuses one.
+    # The **absolute** form is settable here and nowhere else: it is checked
+    # against the trees a sandbox binds read-write rather than against one
+    # user's own directory, which is the right question for a path an operator
+    # wrote and not a line a user may put themselves on the far side of. The
+    # settings card offers no path field, so the question is unaskable there.
     vault_path: str = ""
-    vault_services: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1424,6 +1418,18 @@ class SecurityConfig:
     # derives its ceiling from this field directly, never from that export,
     # which the model can rewrite.
     skill_client_wait_seconds: int = 600
+    # How many shared-credential fetches (`vault_entries`, the user's own KDBX
+    # namespace) one task *attempt* may make over the proxy socket. `0` is
+    # unlimited and is the only spelling of unlimited — an absent key is this
+    # default, never "off", because a key missing from a rendered config.toml
+    # must not silently remove the bound.
+    #
+    # Read by `SkillProxy` alone, and enforced there rather than in the shim
+    # the model calls: that program sits in a directory the model can
+    # overwrite, and the socket answers a hand-rolled client just as readily.
+    # Counted per request whether or not the name resolves, so probing for
+    # absent names is not free; `vault_list` is not counted.
+    vault_fetch_limit_per_task: int = 10
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])
@@ -2492,83 +2498,42 @@ class Config:
         return tz_str
 
     # ------------------------------------------------------------------
-    # The credential vault's two selecting fields
+    # The credential vault's operator-set path
     # ------------------------------------------------------------------
     #
-    # Read through these, never off the `UserConfig` attribute. The attribute
-    # is the *TOML* half of the answer and a `user_vault_config` row outranks
-    # it, so a consumer left on `getattr(user, "vault_path", "")` silently
-    # ignores what the user set in the browser — and does so by reading a real
-    # value, which is the failure class that looks like nothing is wrong.
-    # `tests/test_user_vault_config.py::TestConfigIsTheOnlyReaderOfTheRawFields`
+    # Read through the accessor, never off the `UserConfig` attribute. Not
+    # because anything outranks it any more — nothing does, the table that used
+    # to is gone — but because it is *one of four* rules and the only one
+    # written in TOML: `storage.vault_location_for` asks this first and then
+    # falls through to the stored filename, the only file in the folder, and a
+    # refusal. A consumer that reads the attribute is a consumer that sees a
+    # folder vault as no vault at all, which is the failure class that looks
+    # like nothing is wrong.
+    # `tests/test_vault_removal.py::TestConfigIsTheOnlyReaderOfTheRawField`
     # sweeps `src/` for the attribute rather than naming the consumers.
-    #
-    # Live rather than load-time, unlike `_apply_user_profiles`: the scheduler
-    # holds one `Config` for its whole life and the vault gate runs on a
-    # five-minute interval, so an overlay applied at load would mean a change
-    # made in the browser did nothing until a restart.
 
-    def _vault_row(
-        self, user_id: str, conn: "sqlite3.Connection | None" = None
-    ) -> "object | None":
-        """This user's `user_vault_config` row, or None.
+    def vault_path_for(self, user_id: str) -> str:
+        """The KDBX path an operator configured for this user, or `""`.
 
-        None covers three cases a caller must not tell apart: no row, no
-        database, and a read that failed. Each falls back to TOML, which is the
-        only safe direction — the alternative is one unreadable row switching a
-        configured vault off deployment-wide.
+        Empty is the ordinary answer and means the folder decides — see
+        `storage.vault_location_for`, whose first rule this is. The value is
+        returned **as written**: resolving it, and refusing it, is
+        `storage.resolve_user_vault_path`'s job, and a second opinion here
+        would be a second copy of a containment rule. In particular a
+        blank-but-present value is returned as written and is a *configured*
+        path that resolves to nothing, which is why no caller may `.strip()`
+        it into "unconfigured".
+
+        The `conn` parameter went with the database read: this used to merge a
+        stored row over the TOML field, and callers inside an open transaction
+        passed their own connection to avoid the 30s busy-timeout hazard. The
+        table is dropped, so the argument had no caller left — removed rather
+        than kept as a no-op, since a connection parameter on a function that
+        opens nothing is a claim about the function that is no longer true.
         """
-        if self.db_path is None or not Path(self.db_path).exists():
-            return None
-        try:
-            from . import user_vault_config as _uvc  # noqa: PLC0415 - import cost
-            return _uvc.get_vault_config(Path(self.db_path), user_id, conn=conn)
-        except Exception as e:  # pragma: no cover - defensive
-            logger.debug("vault config DB read failed for %r: %s", user_id, e)
-            return None
-
-    def vault_path_for(
-        self, user_id: str, conn: "sqlite3.Connection | None" = None
-    ) -> str:
-        """The KDBX path configured for this user, DB row over TOML.
-
-        Empty means the feature is off for this user, which is every user by
-        default. The value is returned **as written** — resolving it, and
-        refusing it, is `storage.resolve_user_vault_path`'s job, and a second
-        opinion here would be a second copy of a containment rule.
-        """
-        row = self._vault_row(user_id, conn)
-        if row is not None and getattr(row, "vault_path", ""):
-            return row.vault_path
         user = self.users.get(user_id)
         raw = getattr(user, "vault_path", "") if user is not None else ""
         return raw if isinstance(raw, str) else ""
-
-    #: Where a user's live vault selection comes from.
-    VAULT_SOURCE_DB = "db"
-    VAULT_SOURCE_TOML = "toml"
-
-    def vault_config_source(
-        self, user_id: str, conn: "sqlite3.Connection | None" = None
-    ) -> str:
-        """`"db"`, `"toml"`, or `""` when nothing is configured.
-
-        Three states rather than a boolean, because a surface has to say three
-        different things: this is yours to change, this was set for you by an
-        operator, and there is nothing here.
-
-        It lives beside the two places rather than in the surface that asks,
-        because answering it means reading both raw halves *apart* — the one
-        shape `tests/test_user_vault_config.py` refuses everywhere else, since a
-        reader who copies it is one edit away from using the TOML half as the
-        merged value.
-        """
-        row = self._vault_row(user_id, conn)
-        if row is not None and getattr(row, "vault_path", ""):
-            return self.VAULT_SOURCE_DB
-        user = self.users.get(user_id)
-        raw = getattr(user, "vault_path", "") if user is not None else ""
-        return self.VAULT_SOURCE_TOML if raw else ""
 
     def any_vault_configured(self) -> bool:
         """Does **any** user on this deployment have a vault, in one read.
@@ -2577,13 +2542,18 @@ class Config:
         `any(self.vault_path_for(u) for u in self.users)` is the wrong shape for
         that: `any` short-circuits on the first truthy value, so it is cheap
         exactly when somebody has a vault and costs one database open *per user*
-        when nobody does — which is every deployment by default, for ever. The
-        TOML half needs no database at all and is asked first; the row half is
-        one listing rather than one lookup per user.
+        when nobody does — which is every deployment by default, for ever.
 
-        `list_vault_configs` never raises and answers `{}` for a missing table,
-        so this degrades to the TOML answer rather than switching a configured
-        vault off — the safe direction, since the other one is a deployment that
+        **The question it asks is now "is there a stored vault passphrase"**,
+        and that is the enable rather than a proxy for it: a vault is a file in
+        the folder *and* a passphrase, the passphrase is the half that cannot
+        become true by accident, and a file with no passphrase can be read by
+        nothing. It is one read of a small table where the path half would be a
+        directory listing per user. An operator's `[users.<id>] vault_path` is
+        still asked first, because it needs no database at all.
+
+        Degrades to the TOML answer rather than switching a configured vault
+        off — the safe direction, since the other one is a deployment that
         silently stops applying a file the user is still editing.
         """
         for user in self.users.values():
@@ -2593,66 +2563,18 @@ class Config:
         if self.db_path is None or not Path(self.db_path).exists():
             return False
         try:
-            from . import user_vault_config as _uvc  # noqa: PLC0415 - import cost
-            rows = _uvc.list_vault_configs(Path(self.db_path))
-        except Exception as e:  # pragma: no cover - defensive
-            logger.debug("vault config listing failed: %s", e)
-            return False
-        return any(row.vault_path for row in rows.values())
-
-    def vault_services_for(
-        self, user_id: str, conn: "sqlite3.Connection | None" = None
-    ) -> list[str]:
-        """Which services this user's vault owns, DB row over TOML.
-
-        **Both halves go through the eligibility filter and they get there
-        differently**, which is the part to keep in view. A TOML list has
-        already been filtered in place by `_validate_vault_services` at load,
-        and re-filtering it costs a schema walk on a path with no new
-        information. A row written afterwards has been filtered by nothing that
-        load-time pass could see, and eligibility can change under a stored row
-        besides — an operator disabling a module makes a name that was fine when
-        it was saved ineligible now. So the row is filtered here, on the way
-        out, with `secrets_vault.service_refusal`: the same predicate
-        `apply_vault` applies, asked rather than restated.
-
-        The whole list is dropped if the filter cannot run, rather than passed
-        through: `apply_vault` refuses each name again on its own terms, so the
-        cost of being wrong here is a credential not written rather than one
-        written that should not have been.
-        """
-        row = self._vault_row(user_id, conn)
-        if row is None or not getattr(row, "vault_path", ""):
-            user = self.users.get(user_id)
-            raw = getattr(user, "vault_services", None) if user is not None else None
-            return list(raw) if isinstance(raw, list) else []
-        declared = list(getattr(row, "vault_services", None) or ())
-        if not declared:
-            return []
-        try:
+            from . import secrets_store  # noqa: PLC0415 - import cost
             from .secrets_vault import (  # noqa: PLC0415 - import cost
-                eligible_services,
-                service_refusal,
+                VAULT_PASSPHRASE_KEY,
+                VAULT_PASSPHRASE_SERVICE,
             )
-            eligible = eligible_services()
-        except Exception:  # pragma: no cover - defensive
-            logger.warning(
-                "vault service eligibility could not be checked for %r; the "
-                "stored entries are dropped and refused again at sync time",
-                user_id, exc_info=True,
+            return secrets_store.any_user_has_secret(
+                Path(self.db_path), VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
             )
-            return []
-        kept: list[str] = []
-        for service in declared:
-            reason = service_refusal(service, eligible)
-            if reason is None:
-                kept.append(service)
-                continue
-            logger.warning(
-                "stored vault_services entry %r dropped for %s: %s",
-                service, user_id, reason,
-            )
-        return kept
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("vault passphrase lookup failed: %s", e)
+            return False
+
 
     def available_capabilities(self) -> set[str]:
         """Backing-service capabilities currently available in this deployment.
@@ -2944,9 +2866,6 @@ def _parse_user_data(user_data: dict, user_id: str) -> UserConfig:
             user_data.get("timezone_follow_location", False)
         ),
         vault_path=_vault_path_value(user_id, user_data.get("vault_path", "")),
-        vault_services=_vault_services_value(
-            user_id, user_data.get("vault_services", [])
-        ),
     )
 
 
@@ -2970,37 +2889,6 @@ def _vault_path_value(user_id: str, raw: object) -> str:
     )
     return ""
 
-
-def _vault_services_value(user_id: str, raw: object) -> list[str]:
-    """``vault_services`` as a list of stripped names, or ``[]`` with a warning.
-
-    A bare string is the case worth the guard: ``vault_services = "karakeep"``
-    is TOML somebody will write, and it *iterates*, so without this it becomes
-    eight one-letter services — each of them a name the eligibility filter then
-    refuses on its own line, about a service nobody wrote.
-
-    Eligibility is a separate pass (:func:`_validate_vault_services`), which
-    runs after the user table is assembled. This one is only about the shape.
-    """
-    log = logging.getLogger("istota.config")
-    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-        if raw not in (None, [], ()):
-            log.warning(
-                "[users.%s] vault_services is not a list of service names (%s); "
-                "the vault owns nothing for this user",
-                user_id, type(raw).__name__,
-            )
-        return []
-    names: list[str] = []
-    for entry in raw:
-        if not isinstance(entry, str):
-            log.warning(
-                "[users.%s] vault_services entry is not a service name (%s), "
-                "dropped", user_id, type(entry).__name__,
-            )
-            continue
-        names.append(entry.strip())
-    return names
 
 
 #: What a `shim_commands` entry may look like. A shim's name becomes a filename
@@ -4056,6 +3944,10 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # 0 means unlimited here, so a negative value cannot be clamped to 0 -- that
     # reads as the opposite of what someone typing one meant.
     "health.max_document_bytes": _non_negative_int,
+    # Same rule, and here the wrong direction is a security one: 0 is unlimited,
+    # so clamping a negative value to it would remove the cap on shared-credential
+    # fetches rather than tighten it. `_non_negative_int` keeps the shipped 10.
+    "security.vault_fetch_limit_per_task": _non_negative_int,
     # A brain name is compared literally downstream, so surrounding whitespace
     # in a rendered config is a name that matches nothing.
     "brain.fallback": lambda raw, key: (
@@ -4523,83 +4415,9 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_sms(config)
     _validate_whatsapp(config)
     _validate_forge_clis(config)
-    _validate_vault_services(config)
 
     return config
 
-
-def _validate_vault_services(config: "Config") -> None:
-    """Drop every ``vault_services`` name a vault may not own, with a warning.
-
-    Dropped rather than raised. §4's rule is that a config refusing to boot
-    because a module was disabled is worse than one telling the operator which
-    line is inert, and it holds with more force here than usual: ``load_config``
-    runs in the scheduler, the web app, the webhook receiver and every
-    host-side skill CLI the proxy spawns per call, so a name that stopped being
-    eligible would stop all of them.
-
-    **Not the boundary.** ``apply_vault`` refuses the same names again on its
-    own terms, against the set it is handed, and that is what actually stops a
-    write. This is what makes the refusal visible at the moment somebody could
-    act on it — a name dropped here is a line in the boot log, where a name
-    dropped only at apply time is a ``skipped`` triple inside a background gate
-    on a five-minute interval.
-
-    One predicate, asked rather than restated: ``secrets_vault.service_refusal``
-    is the same rule ``apply_vault`` applies, so the two cannot drift into
-    telling the operator a line is live and then refusing it. The import is
-    function-scoped — ``secrets_vault`` pulls ``secret_schema`` and
-    ``secrets_store``, and this module is imported by everything — and the loop
-    skips a user with nothing configured, so a deployment with no vault pays
-    neither the import nor the schema walk.
-    """
-    configured = [
-        (user_id, user)
-        for user_id, user in config.users.items()
-        if getattr(user, "vault_services", None)
-    ]
-    if not configured:
-        return
-    try:
-        from .secrets_vault import (  # noqa: PLC0415 - import cost
-            eligible_services,
-            service_refusal,
-        )
-        # Hoisted out of the loop below: it is a walk over the whole secret
-        # schema, and `service_refusal`'s own docstring says a caller asking
-        # about several names should pass it rather than rebuild it per name.
-        eligible = eligible_services()
-    except Exception:  # pragma: no cover - defensive; never fail config load
-        logger.warning(
-            "vault service eligibility could not be checked; the entries load "
-            "as written and are refused at sync time", exc_info=True,
-        )
-        return
-
-    for user_id, user in configured:
-        kept: list[str] = []
-        for service in user.vault_services:
-            # `_vault_services_value` guarantees `list[str]` on the TOML path
-            # and nothing else writes this field, so the type test is defence
-            # behind that rather than a case with a producer. It earns its line
-            # anyway: `_service_refusal` calls `.startswith`, and an
-            # `AttributeError` escaping here fails `load_config` in the
-            # scheduler, the web app, the webhook receiver and every host-side
-            # skill CLI the proxy spawns — the blast radius this function drops
-            # rather than raises to avoid. Past it the call cannot raise: a
-            # prefix test and a set membership over in-tree constants.
-            if not isinstance(service, str) or not service:
-                reason = "not a service name"
-            else:
-                reason = service_refusal(service, eligible)
-            if reason is None:
-                kept.append(service)
-                continue
-            logger.warning(
-                "[users.%s] vault_services entry %r dropped: %s",
-                user_id, service, reason,
-            )
-        user.vault_services = kept
 
 
 SMS_PROVIDER_NAMES = ("twilio", "telnyx")

@@ -74,6 +74,95 @@ class TaskRuntime:
     authorized_skills: frozenset[str]
 
 
+def _vault_credentials(config: Config, user_id: str) -> dict[str, str]:
+    """The user's shared-credential namespace, or an empty mapping.
+
+    One ``get_service_secrets`` call, which is what makes this one read rather
+    than a scan plus a read per name. It cannot return the vault passphrase:
+    that row is in the ``vault`` service and this asks for
+    ``vault_entries``, which is the structural half of why the two are separate
+    services rather than one with an exemption.
+
+    Never raises. A task must not fail to start because a user's credentials
+    could not be read, and an empty namespace is a feature that is absent
+    rather than a feature that is broken.
+    """
+    if not config.db_path or not user_id:
+        return {}
+    try:
+        from . import secrets_store
+        from .secrets_vault import VAULT_ENTRY_SERVICE
+
+        return secrets_store.get_service_secrets(
+            Path(config.db_path), user_id, VAULT_ENTRY_SERVICE,
+        )
+    except Exception as exc:
+        logger.warning(
+            "could not read shared credentials for %s: %s", user_id, exc,
+        )
+        return {}
+
+
+def _write_credential_shim(user_temp_dir: Path) -> Path | None:
+    """Copy ``credential_shim.py`` to where the model can run it by name.
+
+    A per-task file rather than a console script because the directory has to
+    go on the *model's* PATH and on nothing else, and because it is placed and
+    removed with the task rather than with the installed package. That module's
+    own docstring carries the argument; it is not about reachability, since
+    ``istota-skill`` is an entry point and runs in the sandbox quite happily.
+
+    Atomic, because tasks for one user run as threads in one process and share
+    ``user_temp_dir``; a plain truncate-then-write can be read half-finished by
+    a wrapper another task is running right now (``skills/developer._atomic_write``
+    is where that was paid for).
+
+    **The directory's mode is asserted on an ``O_NOFOLLOW`` descriptor rather
+    than passed to ``mkdir``.** ``mkdir(mode=…)`` applies only to a directory
+    the call creates, and ``user_temp_dir`` persists across tasks — so a
+    pre-existing one keeps whatever mode it had, which is the rule
+    ``.claude/rules/whatsapp.md`` states for the Baileys session directory and
+    ``setup_wizard`` states for the env file. The same open is what refuses a
+    symlink standing at that name: the read-only re-bind in ``sandbox_plan``
+    stops a task planting one, and this is what covers a deployment that
+    already had one when the bind arrived.
+
+    Returns the directory to prepend to the model's PATH, or ``None`` where
+    nothing could be written — in which case the model simply has no such
+    program, which is a degraded feature rather than a failed task.
+
+    **The read is pinned to UTF-8 and the handler catches ``ValueError`` beside
+    ``OSError``**, which is what makes that contract structural rather than
+    hopeful. ``Path.read_text()`` with no encoding resolves to the locale's,
+    the module carries non-ASCII prose, and a non-UTF-8 locale would therefore
+    raise ``UnicodeDecodeError`` — a ``ValueError``, straight past an
+    ``OSError`` handler and out of ``build_task_runtime``, which
+    ``execute_task`` does not guard. ``write_text_atomic`` already defaults to
+    UTF-8 on the way out, so only the read side was locale-dependent.
+    """
+    from .atomic_write import write_text_atomic
+    from .credential_shim import SHIM_MODE, shim_path
+
+    dest = shim_path(user_temp_dir)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True, mode=SHIM_MODE)
+        fd = os.open(
+            dest.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        try:
+            os.fchmod(fd, SHIM_MODE)
+        finally:
+            os.close(fd)
+        source = Path(__file__).resolve().parent / "credential_shim.py"
+        write_text_atomic(
+            dest, source.read_text(encoding="utf-8"), mode=SHIM_MODE,
+        )
+    except (OSError, ValueError) as exc:
+        logger.error("could not install the credential shim: %s", exc)
+        return None
+    return dest.parent
+
+
 def build_task_runtime(
     config: Config,
     task: db.Task,
@@ -243,6 +332,7 @@ def build_task_runtime(
     # and run skill CLIs through a Unix socket proxy that injects them.
     _proxy_ctx = None
     _proxy_sock = None
+    _shim_dir: Path | None = None
     # Third bucket alongside credentials and the clean env: non-secret
     # values (database paths) that belong to the host-side CLI and not to
     # the model. Split *outside* the proxy branch — an operator who turns
@@ -371,6 +461,15 @@ def build_task_runtime(
                 skill_cred_map.setdefault(skill_name, set()).update(
                     scoped_for_model
                 )
+        # The user's shared-credential namespace, resolved once here and held
+        # by the proxy, which serves it by name over the socket it already
+        # owns. **Nothing goes into any environment** — not the model's, not
+        # `proxy_base_env`, not a skill subprocess's — which is the whole
+        # reason the values are fetched rather than exported.
+        #
+        # Empty where the user has no vault, which is every user by default;
+        # the feature is then absent rather than refused differently.
+        vault_credentials = _vault_credentials(config, task.user_id)
         _proxy_ctx = SkillProxy(
             _proxy_sock, credential_env, proxy_base_env,
             timeout=config.security.skill_proxy_timeout,
@@ -381,7 +480,15 @@ def build_task_runtime(
             allowed_skills=cli_skills,
             authorized_skills=frozenset(authorized_skills),
             task_id=task.id,
+            vault_credentials=vault_credentials,
+            vault_fetch_limit=config.security.vault_fetch_limit_per_task,
         )
+        # The program that reaches that socket, written whether or not the
+        # namespace has anything in it: writing it is cheaper than deciding not
+        # to, and its verbs answer honestly against an empty namespace. With
+        # the proxy off it is not written at all, and a leftover copy from an
+        # earlier task exits 2 for want of a socket path.
+        _shim_dir = _write_credential_shim(Path(user_temp_dir))
 
     # Marks the env as one that will run under bwrap, so `istota-skill`
     # refuses to execute a skill module in-process rather than silently
@@ -450,6 +557,23 @@ def build_task_runtime(
     # would be silently dropped by the ``if k not in env`` merge; this
     # reserved key is the explicit alternative. It is consumed here and
     # never reaches the model.
+    # The credential shim's directory goes on first, so the hook's entries
+    # below end up *ahead* of it — `.developer` first, so the forge wrappers
+    # win any collision, which is the rule the hook already states for its own
+    # two entries. Both directories are re-bound read-only inside the sandbox
+    # now (`sandbox_plan`'s `developer_dir` and `credential_shim_dir`), so the
+    # ordering no longer decides whether a task can shadow a wrapper; it is
+    # kept because a stated order beats a coincidental one, and because the
+    # unsandboxed shapes bind neither.
+    #
+    # `env` is the model's, and `proxy_base_env` is the *host-side* skill CLIs',
+    # running unsandboxed as the daemon user — a directory under the task's own
+    # temp dir on their PATH is a code-execution path no bind contains. Both
+    # prepends happen after that snapshot was taken, which is what keeps the
+    # two apart.
+    if _shim_dir is not None:
+        env["PATH"] = os.pathsep.join([str(_shim_dir), env["PATH"]])
+
     _path_prepend = hook_env.get(HOOK_PATH_PREPEND_KEY, "")
     if _path_prepend:
         _entries = [p for p in _path_prepend.split(os.pathsep) if p]

@@ -38,6 +38,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from . import credential_shim
 from .user_scope import is_within, scoped_user_dir
 
 if TYPE_CHECKING:
@@ -570,9 +571,9 @@ def build_mount_plan(
         workspace_resolved = executor._validate_workspace_dir(config, workspace_dir)
         _rw(workspace_resolved, "repl_workspace", user_data=True, protected=True)
 
-    # .developer/ scripts (credential-fetch, git helpers) must be read-only
-    # to prevent a compromised subprocess from replacing them to intercept
-    # credentials.  A later --ro-bind on a subdir overrides the parent --bind.
+    # .developer/ scripts (the git credential helpers, the forge wrappers)
+    # must be read-only to prevent a compromised subprocess from replacing them
+    # to intercept credentials.  A later --ro-bind on a subdir overrides the parent --bind.
     #
     # **Emitted whether or not the directory is there**, which is the one
     # entry where that matters. `build_bwrap_cmd` is called per Bash
@@ -585,6 +586,29 @@ def build_mount_plan(
     # render's own skip is `exists()` and this site's used to be `is_dir()`.
     dev_dir = user_temp_dir.resolve() / ".developer"
     _ro(dev_dir, "developer_dir", user_data=True, always_deny=True, require_dir=True)
+
+    # The framework credential shim's directory, on exactly the rule above.
+    #
+    # The shim is *not* a boundary and the spec says so — the proxy enforces
+    # every rule and a hand-rolled five-line client speaks the same protocol, so
+    # a model that overwrites the program has gained nothing it did not have.
+    # What earns this entry is the second consumer: the developer skill's git
+    # credential helper execs the shim by **absolute path** to fetch the forge
+    # token, so PATH ordering does not reach it, and the program it replaced
+    # (`.developer/credential-fetch`) was covered by the bind above. Leaving
+    # `.istota` writable would therefore have let a task replace the program
+    # that hands git a token whose whole design is that the model never holds
+    # it — a regression in protection rather than a gap in a new one.
+    #
+    # It also closes the planting route the daemon-side write would otherwise
+    # have: a mount point cannot be unlinked from inside the namespace, so no
+    # task can leave a symlink at this name for the next task's
+    # `_write_credential_shim` to follow.
+    #
+    # Same `always_deny` / `require_dir` pair, for the reasons stated above.
+    shim_dir = user_temp_dir.resolve() / credential_shim.SHIM_DIR_NAME
+    _ro(shim_dir, "credential_shim_dir", user_data=True, always_deny=True,
+        require_dir=True)
 
     # --- Skill proxy socket (RO inside sandbox) ---
     if proxy_sock and proxy_sock.exists():

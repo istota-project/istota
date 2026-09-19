@@ -48,7 +48,6 @@ const KARAKEEP: ServiceCardData = {
   fields: [{ key: 'api_key', label: 'API key', type: 'password' }],
   configured_keys: ['api_key'],
   last_updated: null,
-  vault_managed: true,
 };
 
 await fillApiDouble(api, {
@@ -113,7 +112,9 @@ function configured(over: Partial<VaultStatus> = {}): VaultStatus {
   return {
     configured: true,
     path: '/mnt/shared/Users/alice/config/vault.kdbx',
-    owned: ['karakeep'],
+    entry_count: 2,
+    entry_names: ['github_pat', 'home_assistant_token'],
+    entry_names_truncated: false,
     passphrase_present: true,
     outcome: '',
     reason: '',
@@ -201,13 +202,55 @@ describe('a user with no credential vault', () => {
   });
 });
 
-describe('a user whose vault owns a service', () => {
-  it('names the owned service, the path and the last sync', async () => {
+describe('a user whose vault is working', () => {
+  it('lists the names it holds, which is how a user knows the file worked', async () => {
+    // Names, never values: the payload carries no value at all, and this is the
+    // user's own page rather than `doctor`'s deployment-wide report — which
+    // answers the same question in counts because an admin reads it.
+    api.getVaultStatus.mockResolvedValue(configured());
+    await mount();
+
+    const names = await screen.findByTestId('vault-entry-names');
+    expect(names.textContent).toContain('github_pat');
+    expect(names.textContent).toContain('home_assistant_token');
+    expect(names.textContent).not.toMatch(/and more/i);
+  });
+
+  it('says so when the list was cut', async () => {
+    // The count beside it is uncapped, so a cut list still adds up. Without
+    // this a card showing the first fifty of four hundred would answer "did
+    // mine arrive" wrongly and look complete doing it.
+    api.getVaultStatus.mockResolvedValue(
+      configured({ entry_count: 412, entry_names: ['a_name'], entry_names_truncated: true }),
+    );
+    await mount();
+
+    const names = await screen.findByTestId('vault-entry-names');
+    expect(names.textContent).toMatch(/and more/i);
+  });
+
+  it('renders no name list when there are none', async () => {
+    // The control for both above: each would pass against a heading that had
+    // stopped rendering the list, since `findByTestId` is the only thing
+    // asserting it exists.
+    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 0, entry_names: [] }));
+    await mount();
+    await findHeading();
+
+    expect(screen.queryByTestId('vault-entry-names')).toBeNull();
+  });
+
+  it('names the shared count, the path and the last sync', async () => {
+    // It used to name the connected services the vault overwrote. It
+    // overwrites none of them now, so the sentence is about the namespace the
+    // file *is* the authority for — and the payload carries no `owned` list,
+    // because the server no longer produces one.
     api.getVaultStatus.mockResolvedValue(configured());
     await mount();
 
     const line = await findHeading();
-    expect(line.textContent).toContain('karakeep');
+    expect(line.textContent).toContain('2 shared credentials');
+    expect(line.textContent).not.toContain('karakeep');
     expect(line.textContent).toContain('/mnt/shared/Users/alice/config/vault.kdbx');
     // A relative reading, which is what the question "is it keeping up" wants.
     // The exact words are `formatRelative`'s; what this pins is that the value
@@ -288,14 +331,70 @@ describe('a user whose vault owns a service', () => {
     expect(line.textContent).not.toContain('Not working');
   });
 
-  it('says so when the vault owns nothing yet', async () => {
-    // `vault_services = []` is a usable dry-run state: the file is read and
-    // nothing is applied. A line claiming it is the authority for an empty list
-    // would be the wrong sentence for it.
-    api.getVaultStatus.mockResolvedValue(configured({ owned: [] }));
+  it('says so when nothing has been shared from it yet', async () => {
+    // A file in the folder with a passphrase behind it and no entries under
+    // the narrowing is a usable state, not a fault. A line claiming istota
+    // holds credentials from it would be the wrong sentence.
+    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 0 }));
     await mount();
 
     const line = await findHeading();
-    expect(line.textContent).toContain('no services are assigned');
+    expect(line.textContent).toContain('nothing has been shared');
+  });
+
+  it('renders the singular for one shared credential', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ entry_count: 1 }));
+    await mount();
+
+    const line = await findHeading();
+    expect(line.textContent).toContain('1 shared credential from this file');
+  });
+});
+
+describe('the scope notice', () => {
+  it('says the whole file is shared when the last read was unscoped', async () => {
+    // A file with no top-level `istota` group is read in full. That is how it
+    // is meant to work for a file put in the vault folder *for* istota, and it
+    // is also what "I copied my everyday password database in" looks like — so
+    // the card says which it did and how many credentials that came to, within
+    // one sync interval rather than never.
+    api.getVaultStatus.mockResolvedValue(configured({ unscoped: true, entry_count: 412 }));
+    await mount();
+
+    const line = await findHeading();
+    expect(line.textContent).toContain('no top-level');
+    expect(line.textContent).toContain('412 credentials');
+    expect(screen.getByTestId('vault-unscoped')).toBeTruthy();
+  });
+
+  it('says nothing about scope on an ordinary scoped vault', async () => {
+    // The control. Without it the notice could be rendering for everyone, and a
+    // warning every user reads past is a warning nobody reads.
+    api.getVaultStatus.mockResolvedValue(configured({ unscoped: false, entry_count: 3 }));
+    await mount();
+
+    const line = await findHeading();
+    expect(line.textContent).not.toContain('no top-level');
+    expect(screen.queryByTestId('vault-unscoped')).toBeNull();
+  });
+
+  it('says nothing about scope before a cycle has read the file', async () => {
+    // `unscoped` comes off the durable sync record, so it is absent until a
+    // cycle has run. An absent field reads as "not yet known" rather than as
+    // the reassuring answer or the alarming one.
+    api.getVaultStatus.mockResolvedValue(configured({ unscoped: undefined }));
+    await mount();
+
+    const line = await findHeading();
+    expect(screen.queryByTestId('vault-unscoped')).toBeNull();
+    expect(line.textContent).toContain('Credential vault');
+  });
+
+  it('renders the singular for one shared credential', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ unscoped: true, entry_count: 1 }));
+    await mount();
+
+    const line = await findHeading();
+    expect(line.textContent).toContain('1 credential in it');
   });
 });

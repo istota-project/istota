@@ -114,7 +114,7 @@ def sends(monkeypatch):
     return _DeliveryCounter(monkeypatch)
 
 
-def _vault_config(tmp_path, *, vault_path: str, services: list[str]) -> Config:
+def _vault_config(tmp_path, *, vault_path: str) -> Config:
     mount = tmp_path / "mount"
     (mount / "Users" / "alice" / "config").mkdir(parents=True, exist_ok=True)
     db_path = tmp_path / "istota.db"
@@ -123,7 +123,7 @@ def _vault_config(tmp_path, *, vault_path: str, services: list[str]) -> Config:
         db_path=db_path,
         temp_dir=tmp_path / "tmp",
         workspace_path=mount,
-        users={"alice": UserConfig(vault_path=vault_path, vault_services=services)},
+        users={"alice": UserConfig(vault_path=vault_path)},
     )
 
 
@@ -166,7 +166,7 @@ def broken(tmp_path, secret_key):
     from the one it names.
     """
     config = _vault_config(
-        tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+        tmp_path, vault_path="config/vault.kdbx"
     )
     path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
     _corrupt(path)
@@ -273,7 +273,7 @@ class TestOneRaisePerTransition:
         from istota.secrets_vault import OUTCOME_UNCHANGED, VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
         _write_vault(path, password=WRONG_PASSPHRASE)
@@ -313,7 +313,7 @@ class TestOneRaisePerTransition:
         from istota.secrets_vault import VaultCorrupt, VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
         _write_vault(path, password=WRONG_PASSPHRASE)
@@ -459,7 +459,7 @@ class TestTheReasonIsCodeOwned:
         from istota.secrets_vault import sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
         _write_vault(path, password=WRONG_PASSPHRASE)
@@ -723,10 +723,42 @@ class TestTheResolver:
     def test_a_vault_the_operator_has_unconfigured_is_gone(self, broken, sends):
         """The orphaned-row case, answered by the resolver rather than by a sweep.
 
-        Nothing settles an outcome for a user with no `vault_path`, so removing
-        the line from `config.toml` leaves any open row with nothing that would
-        ever close it. A resolver answering `None` is what `list_open` reads as
-        "the object is gone", which is the whole anti-staleness story.
+        Nothing settles an outcome for a user with no vault at all, so switching
+        one off leaves any open row with nothing that would ever close it. A
+        resolver answering `None` is what `list_open` reads as "the object is
+        gone", which is the whole anti-staleness story.
+
+        **Both halves have to go**, which is what the second removal below is
+        for: a vault is a path *or* a stored passphrase now, since a user who
+        chose their file out of the folder has no path anywhere.
+        """
+        from istota import secrets_store
+        from istota.secrets_vault import (
+            VAULT_PASSPHRASE_KEY,
+            VAULT_PASSPHRASE_SERVICE,
+            sync_user,
+        )
+
+        config, _path = broken
+        sync_user(config, "alice")
+        row = self._row(config)
+
+        config.users["alice"].vault_path = ""
+        secrets_store.delete_secret(
+            config.db_path, "alice", VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY,
+        )
+        with db.get_db(config.db_path) as conn:
+            view = connected_service.RESOLVER.resolve(config, conn, row)
+        assert view is None
+
+    def test_a_folder_vault_is_not_read_as_gone(self, broken, sends):
+        """The regression this arm was written against.
+
+        A user who chose their file out of `{bot_dir}/vault/` stores no path
+        anywhere `vault_path_for` reads, so a path-only test answered "the vault
+        is gone" for every one of them — closing, on the next panel render, the
+        row that had just told them their vault was broken. `sync_user` raises
+        only on a class *transition*, so nothing would raise it again.
         """
         config, _path = broken
         from istota.secrets_vault import sync_user
@@ -734,10 +766,13 @@ class TestTheResolver:
         sync_user(config, "alice")
         row = self._row(config)
 
+        # The passphrase the fixture provisioned stays; only the path goes,
+        # which is exactly the folder-configured user's shape.
         config.users["alice"].vault_path = ""
         with db.get_db(config.db_path) as conn:
             view = connected_service.RESOLVER.resolve(config, conn, row)
-        assert view is None
+        assert view is not None
+        assert "Credential vault" in view.title
 
     def test_a_row_with_no_record_behind_it_still_renders(self, broken, sends):
         """The safe direction, and the one an absent record has to take.
@@ -858,3 +893,168 @@ class TestTheResolver:
         with db.get_db(config.db_path) as conn:
             view = connected_service.RESOLVER.resolve(config, conn, row)
         assert view is None
+
+
+# ---------------------------------------------------------------------------
+# §1: the first unscoped sync
+# ---------------------------------------------------------------------------
+
+
+def _write_unscoped_vault(path: Path, *, password: str = PASSPHRASE) -> None:
+    """A real KDBX with **no** top-level `istota` group, so the read is unscoped."""
+    from pykeepass import create_database
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kp = create_database(str(path), password=password)
+    group = kp.add_group(kp.root_group, "karakeep")
+    kp.add_entry(group, "base_url", "", BASE_URL_VALUE)
+    kp.add_entry(group, "api_key", "", API_KEY_VALUE)
+    kp.save()
+
+
+def _alert_rows(config: Config, user_id: str = "alice") -> list[dict]:
+    from istota.notification_resolvers import task_alert
+
+    with db.get_db(config.db_path) as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM notifications WHERE user_id = ? AND source = ? "
+                "ORDER BY id",
+                (user_id, task_alert.SOURCE),
+            ).fetchall()
+        ]
+
+
+@pytest.fixture
+def unscoped(tmp_path, secret_key):
+    """A configured user whose vault file has no `istota` group."""
+    config = _vault_config(
+        tmp_path, vault_path="config/vault.kdbx"
+    )
+    path = Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
+    _write_unscoped_vault(path)
+    secrets_store.set_secret(config.db_path, "alice", "vault", "passphrase", PASSPHRASE)
+    return config, path
+
+
+class TestTheFirstUnscopedSync:
+    """§1's notice: said once, and never on the ordinary scoped read.
+
+    It is the thing that catches "I pointed at my real password database"
+    within one sync interval instead of never. A notice rather than a refusal —
+    istota does not second-guess a file the user deliberately placed in their
+    own vault folder — but the two failure modes are not equally reversible,
+    and this is what pays for the difference.
+    """
+
+    def test_the_first_unscoped_sync_raises_once_and_pushes_it(self, unscoped, sends):
+        """The **positive** half, and it is the one a row count cannot give.
+
+        `deliver_pending` reads `RaiseResult.deliver`, so a notice that was
+        written and never sent leaves exactly the row this test would otherwise
+        assert on — and the `deliver=False` case below would stay green beside
+        it. Two tests agreeing that nothing was pushed is not evidence either
+        way; one of them has to observe a push.
+        """
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config, path = unscoped
+
+        assert sync_user(config, "alice").outcome == OUTCOME_OK
+        rows = _alert_rows(config)
+        assert len(rows) == 1
+        assert rows[0]["dedup_key"] == "vault-unscoped"
+        assert [user for user, _text in sends.calls] == ["alice"]
+
+    def test_a_second_unscoped_sync_does_not_raise_again(self, unscoped, sends):
+        """Gated on the **durable** record rather than on in-process state: an
+        in-memory latch would re-notify on every daemon restart, which for a
+        deployment that updates every few minutes is a push every few minutes.
+        """
+        from istota.secrets_vault import reset_sync_state, sync_user
+
+        config, path = unscoped
+        sync_user(config, "alice")
+        # A fresh process, as far as the in-memory cache is concerned: the
+        # digest cache and the settled outcome are both dropped, so only the
+        # durable record can stop the second raise.
+        reset_sync_state()
+        path.write_bytes(path.read_bytes())
+        _write_unscoped_vault(path)
+
+        sync_user(config, "alice")
+
+        assert len(_alert_rows(config)) == 1
+
+    def test_the_body_carries_a_count_and_no_name_and_no_value(
+        self, unscoped, sends
+    ):
+        from istota.secrets_vault import sync_user
+
+        config, _path = unscoped
+        sync_user(config, "alice")
+
+        row = _alert_rows(config)[0]
+        rendered = f"{row['title']} {row['body']}"
+        assert "2" in rendered
+        assert API_KEY_VALUE not in rendered
+        assert BASE_URL_VALUE not in rendered
+        assert "karakeep_api_key" not in rendered
+        # The group name survives the body flattener, which maps backticks to a
+        # space — so a body that quoted it with them would deliver
+        # `named  istota .` and lose the one word the remedy needs copied.
+        assert '"istota"' in row["body"]
+
+    def test_a_scoped_vault_raises_nothing(self, tmp_path, secret_key, sends):
+        """The control: without it the notice could be firing on every sync."""
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config = _vault_config(
+            tmp_path, vault_path="config/vault.kdbx"
+        )
+        path = (
+            Path(config.workspace_path) / "Users" / "alice" / "config" / "vault.kdbx"
+        )
+        _write_vault(path)
+        secrets_store.set_secret(
+            config.db_path, "alice", "vault", "passphrase", PASSPHRASE
+        )
+
+        assert sync_user(config, "alice").outcome == OUTCOME_OK
+        assert _alert_rows(config) == []
+
+    def test_a_failing_cycle_in_between_does_not_re_arm_the_notice(
+        self, unscoped, sends
+    ):
+        """`unscoped` is carried forward on a cycle that never opened the file,
+        for the reason `ok_at` is: a failed read is not evidence the file grew
+        an `istota` group. Without the carry the latch would be re-armed by any
+        transient failure and the push would repeat."""
+        from istota.secrets_vault import reset_sync_state, sync_user
+
+        config, path = unscoped
+        sync_user(config, "alice")
+        assert len(_alert_rows(config)) == 1
+
+        _corrupt(path)
+        reset_sync_state()
+        sync_user(config, "alice")
+        _write_unscoped_vault(path)
+        reset_sync_state()
+        sync_user(config, "alice")
+
+        assert len(_alert_rows(config)) == 1
+
+    def test_the_cli_fork_writes_the_row_and_pushes_nothing(self, unscoped, sends):
+        """`deliver=False` is what `istota secret vault-sync` passes: the
+        operator is reading the warning off their own terminal as it prints,
+        and a push out of a one-shot CLI means standing an `AsyncRuntime` up."""
+        from istota.secrets_vault import sync_user
+
+        config, _path = unscoped
+
+        sync_user(config, "alice", deliver=False)
+
+        assert len(_alert_rows(config)) == 1
+        assert sends.calls == []

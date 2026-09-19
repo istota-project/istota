@@ -6,6 +6,7 @@ Usage:
     python -m istota.skills.browse screenshot "https://example.com" [--output <workspace path>]
     python -m istota.skills.browse extract "https://example.com" --selector "article"
     python -m istota.skills.browse interact <session_id> --click ".button" --fill "#input=value"
+    python -m istota.skills.browse interact <session_id> --fill-credential "#password=acme_password"
     python -m istota.skills.browse links "https://example.com" [--selector "nav a"]
     python -m istota.skills.browse close <session_id>
 
@@ -27,6 +28,7 @@ from istota.skill_host_paths import (
     write_resolved,
 )
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
+from istota.skills._credref import PAIR, CredentialPair, credential_ref
 from istota.skills._hostpath import WRITE, host_path
 from istota.user_scope import scoped_user_dir
 
@@ -36,6 +38,10 @@ DEFAULT_API_URL = "http://localhost:9223"
 # rather than the bot dir itself, so a task taking twenty captures does not
 # bury the config, exports and notes directories the user reads.
 SCREENSHOT_SUBDIR = "screenshots"
+# Where `OrderedAppend` records the command-line order of the two fill
+# arguments. Not an argument of its own, so nothing parses it and no caller
+# sets it; `interact` is the only reader.
+FILL_ORDER_DEST = "fill_order"
 # How many derived names one capture will try before giving up. Only reached
 # when that many captures land in the same UTC second, so it is a bound on a
 # loop rather than a capacity.
@@ -474,6 +480,118 @@ def cmd_extract(args):
     return _decode(resp)
 
 
+class OrderedAppend(argparse.Action):
+    """`append`, plus a note of where this value sat on the command line.
+
+    `--fill` and `--fill-credential` are separate arguments — a marker inside
+    `--fill`'s value would be ambiguous against a literal beginning with it,
+    and the declaration is what the coverage walk reads — but a login form is
+    filled field by field, so the two have to interleave in the order the
+    caller wrote them. Argparse keeps no cross-argument order, so each value
+    records `(dest, index)` in `FILL_ORDER_DEST` as it lands and
+    `cmd_interact` replays that list.
+
+    Not a shared dest, which is the shape this replaces: the credential stamp
+    resolves whatever sits on its own dest, so a mixed list would send every
+    literal `--fill` value to the proxy as a credential name.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = list(getattr(namespace, self.dest, None) or [])
+        items.append(values)
+        setattr(namespace, self.dest, items)
+        order = list(getattr(namespace, FILL_ORDER_DEST, None) or [])
+        order.append((self.dest, len(items) - 1))
+        setattr(namespace, FILL_ORDER_DEST, order)
+
+
+def _fill_actions(args):
+    """The fill actions for one `interact`, in the order they were written.
+
+    A `--fill-credential` value arrives here already resolved by the stamp, as
+    a `CredentialPair`, and `reveal()` is the one call that unwraps it — the
+    value goes into the request body and nowhere else. An *unresolved* string
+    on that dest means the argument reached a handler without going through
+    `parse_and_resolve`, which is the one thing the pre-dispatch refusal exists
+    to prevent; it raises rather than filling the field with the credential's
+    name, since typing a name into a password box is a failed login whose cause
+    is invisible from the result.
+    """
+    literals = list(getattr(args, "fill", None) or [])
+    credentials = list(getattr(args, "fill_credential", None) or [])
+    order = list(getattr(args, FILL_ORDER_DEST, None) or [])
+    if not order:
+        # A caller that built the namespace itself (or parsed with plain
+        # `parse_args`) has no order record. Literals then credentials, which
+        # is the order the flags were read in before this existed.
+        order = [("fill", i) for i in range(len(literals))]
+        order += [("fill_credential", i) for i in range(len(credentials))]
+
+    actions = []
+    for dest, index in order:
+        source = literals if dest == "fill" else credentials
+        if index >= len(source):
+            # Only reachable from a hand-built namespace whose order record and
+            # value lists disagree. Named rather than left to `IndexError`,
+            # which `run_skill_cli` would report as a browser failure.
+            raise ValueError(
+                f"the {dest} order record does not match the values parsed"
+            )
+        if dest == "fill":
+            spec = literals[index]
+            if "=" in spec:
+                selector, value = spec.split("=", 1)
+                actions.append(
+                    {"type": "fill", "selector": selector, "value": value},
+                )
+            continue
+        pair = credentials[index]
+        if not isinstance(pair, CredentialPair):
+            raise ValueError(
+                "--fill-credential was not resolved; the shared-credential "
+                "lookup did not run for this call"
+            )
+        actions.append(
+            {"type": "fill", "selector": pair.label, "value": pair.value.reveal()},
+        )
+    return actions
+
+
+#: What a credential that came back in a response is replaced with.
+CREDENTIAL_REDACTION = "[credential]"
+
+
+def _scrub(payload, secrets):
+    """The response with any of `secrets` replaced, wherever a string holds one.
+
+    The container does not echo a filled value — `/interact` reports the
+    selector and `ok` — but three things it returns are not under that rule and
+    are read by the model: `page.url`, which carries the value outright when a
+    submit navigates a **GET** form; the page text, when the page itself echoes
+    what was typed into a confirmation or a validation message; and the `error`
+    string on the container's 500 branch, which is a third-party library's
+    exception text this repository does not control. So the one place that
+    knows which strings are credentials takes them back out, rather than the
+    claim resting on what three other programs happen to print.
+
+    It is a backstop and not a boundary: a page can encode, split or re-case a
+    value, and none of those is matched. What it removes is the plain case,
+    which is the one that actually happens.
+    """
+    if not secrets:
+        return payload
+    if isinstance(payload, str):
+        for secret in secrets:
+            if secret:
+                payload = payload.replace(secret, CREDENTIAL_REDACTION)
+        return payload
+    if isinstance(payload, dict):
+        return {key: _scrub(value, secrets) for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [_scrub(item, secrets) for item in payload]
+    return payload
+
+
 def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
@@ -482,11 +600,7 @@ def cmd_interact(args):
     if args.click:
         for selector in args.click:
             actions.append({"type": "click", "selector": selector})
-    if args.fill:
-        for fill_spec in args.fill:
-            if "=" in fill_spec:
-                selector, value = fill_spec.split("=", 1)
-                actions.append({"type": "fill", "selector": selector, "value": value})
+    actions.extend(_fill_actions(args))
     if args.scroll:
         actions.append({"type": "scroll", "direction": args.scroll, "amount": args.scroll_amount})
 
@@ -496,7 +610,12 @@ def cmd_interact(args):
     }
 
     resp = httpx.post(f"{url}/interact", json=payload, timeout=REQUEST_TIMEOUT)
-    return _decode(resp)
+    secrets = [
+        pair.value.reveal()
+        for pair in (getattr(args, "fill_credential", None) or [])
+        if isinstance(pair, CredentialPair)
+    ]
+    return _scrub(_decode(resp), secrets)
 
 
 def _links_from_extract(data):
@@ -663,7 +782,20 @@ def build_parser():
     p_int = sub.add_parser("interact", help="Interact with existing session")
     p_int.add_argument("session_id", help="Session ID")
     p_int.add_argument("--click", action="append", help="CSS selector to click")
-    p_int.add_argument("--fill", action="append", help="selector=value to fill")
+    p_int.add_argument(
+        "--fill", action=OrderedAppend, help="selector=value to fill",
+    )
+    credential_ref(
+        p_int, "--fill-credential", form=PAIR, action=OrderedAppend,
+        metavar="SELECTOR=NAME",
+        help=(
+            "Fill a form field with one of your shared credentials, named "
+            "rather than typed: SELECTOR=NAME, split at the last =. Prefer "
+            "this to --fill for a password or a token — the value is looked "
+            "up outside the sandbox and never enters your command line or "
+            "your argv. `istota-credential list` names what is available."
+        ),
+    )
     p_int.add_argument("--scroll", choices=["up", "down"], help="Scroll direction")
     p_int.add_argument("--scroll-amount", type=int, default=500, help="Scroll pixels")
 

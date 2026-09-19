@@ -342,8 +342,15 @@ def _children(
     yield from action.choices.items()
 
 
-def stamped(parser: argparse.ArgumentParser) -> list[tuple[str, str, str]]:
+def stamped(
+    parser: argparse.ArgumentParser, *, attr: str = STAMP,
+) -> list[tuple[str, str, str]]:
     """Every stamped argument in the tree, as `(dotted command, dest, mode)`.
+
+    `attr` is what `_credref` reads its own stamp back with: the enumeration
+    shape and the dotted key are what the two coverage walks compare against
+    each other, so they are one function taking the attribute name rather than
+    two walks that have to be kept spelling their keys alike.
 
     The dotted command is the coverage walk's spelling — `""` for an argument
     on the top-level parser, `"files.upload"` for one two levels down — so the
@@ -366,7 +373,7 @@ def stamped(parser: argparse.ArgumentParser) -> list[tuple[str, str, str]]:
     def walk(current: argparse.ArgumentParser, trail: list[str]) -> None:
         dotted = ".".join(trail)
         for action in current._actions:
-            mode = getattr(action, STAMP, None)
+            mode = getattr(action, attr, None)
             if mode is not None:
                 out.append((dotted, action.dest, mode))
         for name, child in _children(current):
@@ -602,7 +609,7 @@ def _resolve_value(
     return _resolve_one(value, mode, operation)
 
 
-def _actions_on_path(
+def actions_on_path(
     parser: argparse.ArgumentParser, args: argparse.Namespace,
 ) -> Iterator[tuple[str, argparse.Action]]:
     """Every argument on the parsers this invocation actually descended.
@@ -611,6 +618,13 @@ def _actions_on_path(
     a stamp under a verb that was not taken is never applied — which matters
     because a sibling verb may hold the same dest with a different mode, and
     because a `set_defaults` can leave that dest on the namespace regardless.
+
+    Public because `_credref` resolves its own stamp over the same walk. That
+    module is a *sibling* rather than an extension — a credential is not a
+    seventh host-path mode and is checked against a different authority — but
+    the question "which arguments did this invocation actually take" has one
+    answer, and a second copy of it would be the duplication this walk exists
+    to keep out of the tree.
     """
     trail: list[str] = []
     current = parser
@@ -648,7 +662,7 @@ def resolve_parsed(
     strings and the rest are as parsed, with nothing on the namespace saying
     which is which. `parse_and_resolve` exits, so no handler ever sees that.
     """
-    for dotted, action in _actions_on_path(parser, args):
+    for dotted, action in actions_on_path(parser, args):
         mode = getattr(action, STAMP, None)
         if mode not in RESOLVING:
             continue
@@ -678,6 +692,7 @@ __all__: Sequence[str] = (
     "RESOLVING",
     "STAMP",
     "WRITE",
+    "actions_on_path",
     "click_commands",
     "click_host_path",
     "click_stamped",

@@ -856,8 +856,8 @@ shim_commands = {{ istota_developer_container_shim_commands | to_json }}
 # config.toml does not render that per-user data.
 #
 # Two exceptions, both per-user settings with no DB column to reach: the
-# credential vault's `vault_path` / `vault_services`, and config-authored
-# briefing content blocks. Set both in `istota_users`; see defaults/main.yml.
+# credential vault's `vault_path`, and config-authored briefing content blocks.
+# Set both in `istota_users`; see defaults/main.yml.
 # To apply one briefing definition across users, loop it over `istota_users` in
 # the playbook.
 {% set _vault_users_toml = istota_users | istota_vault_users_toml %}

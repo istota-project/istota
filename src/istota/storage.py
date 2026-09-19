@@ -29,6 +29,26 @@ logger = logging.getLogger("istota.storage")
 BOT_USER_BASE = "/Users"
 CHANNEL_BASE = "/Channels"
 
+#: The directories provisioned inside a user's bot directory, in one place.
+#:
+#: Both provisioning passes read this. They used to spell it twice — a list in
+#: the rclone pass and hand-written ``mkdir`` calls in the mount one — which is
+#: how ``config/`` came to be created on one shape and not on the other, and a
+#: third spelling is what adding ``vault/`` would otherwise have been. The
+#: mount pass still resolves ``config/`` through its own containment check
+#: before it touches anything (ISSUE-339); this supplies the names, never the
+#: rule.
+#:
+#: ``vault`` is where a user drops their KDBX credential vault. It is
+#: provisioned for everybody whether or not they use one, because the whole of
+#: the instruction the settings card gives is "put the file in this folder",
+#: and a folder that has to be created first is an instruction with a step
+#: missing.
+BOT_SUBDIRS = ("config", "exports", "scripts", "notes", "vault")
+
+#: The one folder a user's vault file may be chosen from.
+VAULT_DIR_NAME = "vault"
+
 WORKSPACE_README = """\
 # Istota
 
@@ -866,7 +886,8 @@ def _bounded_for_log(value: object) -> str:
     the path out of ``config.toml``. Not shared, because importing
     ``secrets_vault`` here at module scope would pull ``secret_schema`` and
     ``secrets_store`` into a module ``config`` imports — the same cost
-    ``_validate_vault_services`` function-scopes its own import to avoid. What
+    every vault-touching path in ``config`` function-scopes its own import to
+    avoid. What
     holds them in step is that neither has any reason to change: both are "make
     it one line and bound it". ``transport``'s ``_slug`` is a *different* rule
     (an alphabet for a dedup key) and is correctly not what either reuses.
@@ -881,6 +902,274 @@ def _bounded_for_log(value: object) -> str:
         ch if ch.isprintable() else " " for ch in raw[:_VAULT_PATH_LOG_MAX_CHARS]
     )
     return head + ("…" if len(raw) > _VAULT_PATH_LOG_MAX_CHARS else "")
+
+
+#: Why the vault *folder* settled on no file. Two ids, both of them states the
+#: user fixes and neither of them a failure: the folder is empty, or it holds
+#: several and none of them has been chosen. They sit in the same
+#: ``VaultResolution.refusal`` field as the ``VAULT_PATH_*`` ids above and are
+#: stable words for the same reason.
+VAULT_DIR_EMPTY = "no_vault_file_in_the_folder"
+VAULT_DIR_UNCHOSEN = "several_vault_files_and_none_chosen"
+
+#: Case-insensitive suffix a candidate must carry. Only the suffix is matched;
+#: whether the bytes are really a KeePass database is the parse's question.
+VAULT_FILE_SUFFIX = ".kdbx"
+
+#: How many names a listing may carry. A folder holding more than this is a
+#: user who has put something else there, and the card cannot render a
+#: thousand-entry dropdown usefully either. Applied **after** sorting, so which
+#: names survive is a property of the names rather than of directory order —
+#: capping first let a `.kdbx` a task created push the user's own file out of
+#: both the listing and the membership test the stored choice is checked by.
+VAULT_DIR_MAX_FILES = 50
+
+#: How many directory entries the scan will look at, matching or not.
+#:
+#: A separate ceiling because the one above bounds the *result*: a folder
+#: holding a million files that are not `.kdbx` matches nothing and was walked
+#: in full, on a FUSE mount, on every settings load and every sync tick. The
+#: folder is bound read-write into that user's own sandbox, so its entry count
+#: is not theirs alone to decide.
+VAULT_DIR_MAX_SCAN = 5000
+
+#: Where the chosen filename is remembered. A reserved per-user KV namespace,
+#: beside ``_vault_sync``: the value selects which file the daemon decrypts, so
+#: a task writing it would choose that file — which is exactly what the
+#: reserved prefix stops (`kv_namespaces`).
+VAULT_FILE_NAMESPACE = "_vault_file"
+VAULT_FILE_KEY = "name"
+
+
+def _open_vault_dir(config: "Config", user_id: str) -> int | None:
+    """A descriptor on ``{bot_dir}/vault/``, or None where there is not one.
+
+    ``open_overlay_dir``'s walk, so a symlinked component anywhere above the
+    folder is refused exactly as ``resolve_user_vault_path`` refuses one — and
+    the caller ends up holding a descriptor rather than a name, which is what
+    makes the listing and the later read see the same directory.
+
+    **The caller closes it.** Never raises: every cause — no workspace, a user
+    id that does not scope, a missing folder, a permission failure — is None.
+    """
+    if not config.has_workspace:
+        return None
+    if not is_scopable_user_id(user_id):
+        return None
+    user_root = config.workspace_root(user_id)
+    if user_root is None:
+        return None
+    from .skills._loader import open_overlay_dir  # noqa: PLC0415 - import cycle
+
+    return open_overlay_dir(user_root, config.bot_dir_name, VAULT_DIR_NAME)
+
+
+def list_vault_files(config: "Config", user_id: str) -> list[str]:
+    """The ``.kdbx`` files in this user's vault folder, sorted.
+
+    One ``os.scandir`` on the descriptor above: regular files only,
+    ``follow_symlinks=False`` at every test, no recursion, capped.
+
+    **Symlinks are skipped rather than resolved**, and that is the same rule
+    the leaf of ``resolve_user_vault_path`` is subject to one layer down: the
+    folder is inside the tree bound read-write into this user's own sandbox, so
+    a name in it is model-writable, and a link there names a file the folder's
+    own containment says nothing about. Skipping is what keeps "a file in this
+    folder" and "a file the user put in this folder" the same set.
+
+    **Never raises**, per the resolver above it: a missing folder, a
+    ``PermissionError``, a user id that will not scope and an ``OSError``
+    mid-scan are all an empty list. An unreadable folder and an empty one are
+    therefore the same answer, which is accepted — both mean "put a file where
+    I can see it".
+    """
+    fd = _open_vault_dir(config, user_id)
+    if fd is None:
+        return []
+    names: list[str] = []
+    scanned = 0
+    try:
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                scanned += 1
+                if scanned > VAULT_DIR_MAX_SCAN:
+                    logger.warning(
+                        "vault folder scan for %s stopped at %d entries",
+                        _bounded_for_log(user_id), VAULT_DIR_MAX_SCAN,
+                    )
+                    break
+                try:
+                    if not entry.name.lower().endswith(VAULT_FILE_SUFFIX):
+                        continue
+                    # A name `os.scandir` decoded with surrogates is skipped
+                    # here rather than carried: it rides the settings payload,
+                    # and `json.dumps(..., ensure_ascii=False).encode("utf-8")`
+                    # — what starlette renders with — raises on a lone
+                    # surrogate. The folder is model-writable, so one
+                    # `touch $'\xff.kdbx'` would otherwise 500 the card.
+                    entry.name.encode("utf-8")
+                    # One test, and `follow_symlinks=False` is what makes it
+                    # two rules: a symlink to a real file in the same folder
+                    # answers True to a *following* `is_file` and must not be a
+                    # candidate, and a directory or a FIFO named `x.kdbx` is
+                    # not one either. Deliberately not paired with a separate
+                    # `entry.is_symlink()` — a second guard covering the same
+                    # case would make flipping this flag a change nothing goes
+                    # red for, which is the one property the skip has to keep.
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                except (OSError, UnicodeEncodeError):
+                    # A stat that raced a delete, or a name that will not
+                    # travel. Both are one entry's problem, not the listing's.
+                    continue
+                names.append(entry.name)
+    except (OSError, ValueError):
+        logger.debug("vault folder could not be listed for %r", user_id)
+        return []
+    finally:
+        os.close(fd)
+    # Sorted **before** the cap: which names survive has to be a property of
+    # the names, not of the order the filesystem happened to hand them over.
+    names.sort()
+    if len(names) > VAULT_DIR_MAX_FILES:
+        logger.warning(
+            "vault folder listing for %s carries %d of %d files",
+            _bounded_for_log(user_id), VAULT_DIR_MAX_FILES, len(names),
+        )
+    return names[:VAULT_DIR_MAX_FILES]
+
+
+def stored_vault_file(config: "Config", user_id: str) -> str:
+    """The filename this user chose, or ``""``. Never raises.
+
+    A *value*, never a path: the only thing done with it is a membership test
+    against the listing, which is why a stored ``../../etc/passwd`` resolves to
+    nothing rather than to a file.
+    """
+    if config.db_path is None:
+        return ""
+    from . import db  # noqa: PLC0415 - `db` imports `config`, which imports this
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            row = db.kv_get(conn, user_id, VAULT_FILE_NAMESPACE, VAULT_FILE_KEY)
+    except Exception:  # noqa: BLE001 - a selection, never the work
+        logger.debug("vault file selection could not be read for %r", user_id)
+        return ""
+    value = (row or {}).get("value")
+    return value if isinstance(value, str) else ""
+
+
+def store_vault_file(config: "Config", user_id: str, name: str) -> None:
+    """Remember ``name`` as this user's choice, or forget it when it is empty.
+
+    Deleted rather than blanked, so "nothing chosen" is one state rather than
+    two: the resolver's rules 3 and 4 then apply as they do for a user who has
+    never chosen.
+
+    **Raises what the database raises**, and the two callers want that
+    differently. `web_app._select_vault_file` must not report a save it did not
+    make, so the raise becomes a 500 rather than an `{"ok": true}`.
+    `cli.cmd_user_ensure`'s `--clear-vault-config` does not wrap it either, so a
+    database failure there is a traceback rather than the "cleared" line — which
+    is the right direction for an operator at a terminal, since the alternative
+    is telling them a selection is gone when it is not.
+    """
+    from . import db  # noqa: PLC0415 - see `stored_vault_file`
+
+    with db.get_db(config.db_path) as conn:
+        if name:
+            db.kv_set(conn, user_id, VAULT_FILE_NAMESPACE, VAULT_FILE_KEY, name)
+        else:
+            db.kv_delete(conn, user_id, VAULT_FILE_NAMESPACE, VAULT_FILE_KEY)
+
+
+def vault_location_for(config: "Config", user_id: str) -> VaultResolution:
+    """Which KDBX file this user's vault is, by the folder convention.
+
+    The order, and each rule earns its place ahead of the next:
+
+    1. A configured ``vault_path``. Operator-set, still the route for the
+       absolute form that keeps the file out of every sandbox, and it wins —
+       which is why a stored filename under it is refused by the endpoint
+       rather than silently ignored here.
+    2. The stored filename, **if it is still one of the names the folder
+       holds**. Consulted, never trusted: the value is matched against a
+       listing taken now, so a file that has been deleted or renamed falls
+       through to rule 3 or 4 and a stored value that never named a file in the
+       folder is inert rather than an error.
+    3. The only file in the folder. The ordinary case, and the reason a user
+       with one vault stores nothing at all.
+    4. Otherwise a refusal — ``VAULT_DIR_EMPTY`` or ``VAULT_DIR_UNCHOSEN``.
+       Neither is a failure; they are the two things the settings card asks the
+       user to fix.
+
+    Returns the same :class:`VaultResolution` the path resolver returns, with
+    ``location.dir_fd`` open on the **folder** and the caller closing it.
+    Never raises, for its callers' sake: a background sync gate and a settings
+    endpoint both need an answer rather than an exception.
+    """
+    configured = resolve_user_vault_path(config, user_id)
+    if configured.location is not None or configured.refusal is not None:
+        return configured
+
+    names = list_vault_files(config, user_id)
+    if not names:
+        return VaultResolution(location=None, refusal=VAULT_DIR_EMPTY)
+
+    # Rule 2 before rule 3, in that order, because that is the order the rules
+    # are written in. The two answer alike in every case a folder can be in —
+    # a stored name that is still there wins either way, and one that is gone
+    # falls through — so the ordering is about the code reading as the rule
+    # rather than about behaviour.
+    stored = stored_vault_file(config, user_id)
+    chosen = stored if stored in names else ""
+    if not chosen and len(names) == 1:
+        chosen = names[0]
+    if not chosen:
+        return VaultResolution(location=None, refusal=VAULT_DIR_UNCHOSEN)
+
+    # A second walk rather than one held across the listing: the listing is a
+    # question and this is the answer, and holding a descriptor open across a
+    # database read for the stored name would pin a directory on a FUSE mount
+    # for the length of it. The name came out of a listing of this same folder,
+    # so the worst a swap in between can do is turn the read into
+    # `VaultMissing`.
+    fd = _open_vault_dir(config, user_id)
+    if fd is None:
+        return VaultResolution(location=None, refusal=VAULT_DIR_EMPTY)
+    user_root = config.workspace_root(user_id)
+    try:
+        root = Path(os.path.realpath(user_root)) if user_root else Path()
+    except (OSError, ValueError):  # pragma: no cover - the components are plain
+        os.close(fd)
+        return VaultResolution(location=None, refusal=VAULT_DIR_EMPTY)
+    return VaultResolution(
+        location=VaultLocation(
+            path=root / config.bot_dir_name / VAULT_DIR_NAME / chosen, dir_fd=fd
+        ),
+        refusal=None,
+    )
+
+
+def vault_dir_display(config: "Config", user_id: str) -> str:
+    """Where the folder is, for the card's instruction. Display only.
+
+    The daemon-side path, composed rather than resolved — the same string the
+    form's ``vault_root`` carried before it, and the same one the refusal log
+    lines name, so an operator reading a support question sees what the user
+    was shown. It is **not** the path the user navigates to: they reach these
+    files through their own file client, where the deployment's mount point is
+    not a thing they can type.
+
+    ``""`` without a workspace, where the folder cannot exist at all.
+    """
+    if not config.has_workspace or not is_scopable_user_id(user_id):
+        return ""
+    user_root = config.workspace_root(user_id)
+    if user_root is None:
+        return ""
+    return str(user_root / config.bot_dir_name / VAULT_DIR_NAME)
 
 
 #: Ceiling on any single file read out of a user's ``config/`` directory.
@@ -1453,7 +1742,7 @@ def ensure_user_directories(remote: str, user_id: str, bot_dir: str) -> bool:
                 success = False
 
     # Create bot_dir subdirectories
-    for sub in ["exports", "scripts", "notes"]:
+    for sub in BOT_SUBDIRS:
         sub_path = f"{base}/{bot_dir}/{sub}"
         if not _rclone_mkdir(remote, sub_path):
             if not _rclone_path_exists(remote, sub_path):
@@ -1720,13 +2009,15 @@ def ensure_user_directories_v2(config: "Config", user_id: str) -> bool:
             path.mkdir(parents=True, exist_ok=True)
         logger.debug("Ensured user directories for %s via mount", user_id)
 
+        # `config_dir` first and by name: it is the containment-checked path
+        # above, and the loop's own `config` entry is then a no-op on the same
+        # directory. The loop is what keeps this pass and the rclone one
+        # reading one list.
         config_dir.mkdir(exist_ok=True)
+        for sub in BOT_SUBDIRS:
+            (bot_dir_path / sub).mkdir(exist_ok=True)
         exports_dir = bot_dir_path / "exports"
-        exports_dir.mkdir(exist_ok=True)
         scripts_dir = bot_dir_path / "scripts"
-        scripts_dir.mkdir(exist_ok=True)
-        notes_dir = bot_dir_path / "notes"
-        notes_dir.mkdir(exist_ok=True)
 
         # Migrate scripts/ from user root into bot dir
         old_scripts = base / "scripts"

@@ -389,6 +389,16 @@ class Case:
     #: eagerly and a native route reaches `_build_native_completer`. No case
     #: does that today; the `_no_sockets` guard is what would catch it.
     brain: str | None = None
+    #: Seeds one `vault_entries` row for the user, which is what the prompt's
+    #: shared-credential lines are gated on, and sets `ISTOTA_SECRET_KEY` for
+    #: the duration — the gate refuses without one, because the read the proxy
+    #: serves from returns nothing without one. A raw INSERT rather than
+    #: `upsert_secret`: the gate goes through `list_user_services` and never
+    #: decrypts, so the ciphertext column can hold anything.
+    #:
+    #: `base_nextcloud` is the empty-namespace half of the pair, so the diff
+    #: between the two goldens is exactly the two lines this buys.
+    shared_credentials: bool = False
 
 
 CASES: tuple[Case, ...] = (
@@ -461,6 +471,12 @@ CASES: tuple[Case, ...] = (
         conversation_token="room-token",
         brain="native",
     ),
+    # A user with something in the shared-credential namespace. Against
+    # `base_nextcloud`, which it differs from in nothing else, so the diff
+    # between the two goldens is exactly the two lines the namespace buys —
+    # that it exists, and the quoting the injection form needs. Names and
+    # values are in neither golden, because they are in neither prompt.
+    Case("shared_credentials", shared_credentials=True),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -658,6 +674,33 @@ def _seed_history(config: Config, case: Case) -> None:
         conn.commit()
 
 
+def _seed_shared_credentials(config: Config, case: Case, monkeypatch) -> None:
+    """One `vault_entries` row, written past the encryption layer.
+
+    The prompt gate reads `list_user_services`, which returns key names and
+    never opens a Fernet — so the ciphertext column can hold anything, and a
+    row written through `upsert_secret` would be the same answer at the cost of
+    a real encrypt.
+
+    `ISTOTA_SECRET_KEY` is set anyway, and that is the *gate's* requirement
+    rather than this fixture's: `has_shared_credentials` refuses without one,
+    because the read the proxy serves from returns nothing without one and a
+    prompt promising credentials nothing can return is worse than no line.
+    Scoped to the case that needs it, so no other golden depends on the
+    variable.
+    """
+    if not case.shared_credentials:
+        return
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "0" * 64)
+    with db.get_db(config.db_path) as conn:
+        conn.execute(
+            "INSERT INTO secrets (user_id, service, key, encrypted_value) "
+            "VALUES (?, ?, ?, ?)",
+            (USER, "vault_entries", "home_assistant_token", b"ciphertext"),
+        )
+        conn.commit()
+
+
 def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     """Run one case to the normalized, two-part dry-run rendering.
 
@@ -681,6 +724,7 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_memory(config, case)
     _seed_overlay(config, case)
     _seed_history(config, case)
+    _seed_shared_credentials(config, case, monkeypatch)
     task = _build_task(case)
 
     success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)

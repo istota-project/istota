@@ -92,67 +92,68 @@ Users connect their Google account through the web dashboard at `/istota/` (the 
 
 ## Credential vault
 
-A user who keeps their credentials in a password manager otherwise maintains two copies of every key, and the copy Istota reads is the one they cannot see, search or back up. The credential vault removes the second edit: a KeePass (KDBX) file the user maintains on their own devices, which Istota reads on a schedule and copies into the `secrets` table. Off for every user until an operator turns it on.
+A user who keeps their credentials in a password manager otherwise maintains two copies of every key, and the copy Istota reads is the one they cannot see, search or back up. The credential vault removes the second edit: a KeePass (KDBX) file the user maintains on their own devices, which Istota reads on a schedule and copies into the `secrets` table. Off for every user until somebody puts a file in the folder and generates a passphrase.
 
 It is **provisioning input, not a storage backend**. The table stays the live store, `resolve_secret`'s order is unchanged, and a vault that is missing, half-synced or locked leaves every credential working. Istota never writes the file.
 
+What it holds is **shared credentials**: a flat namespace of name-to-value pairs the user chooses, stored under the `vault_entries` service and readable by that user's own tasks by name. It does not provision the typed services above — those are edited in the settings page and nothing here overwrites them.
+
 ### Turning it on
 
-Two ways, and which one is right depends on who is deciding.
+Two halves, both deliberate, and neither happens by accident.
 
-**From the web UI**, under Settings, Connected services. The user names a file in their own workspace, ticks the services it owns, and generates a passphrase. This is the ordinary route and needs no operator. The form takes a **relative path only** — a path under that user's own files — and that restriction is the point of it rather than a simplification: see [what a vault costs](#what-a-vault-costs) below.
+**Put the file in the folder.** Every user gets a `vault` folder inside their own bot directory, made for them whether or not they use it — `istota/vault/` on a default deployment, since that directory is named from `bot_name` lowercased. Copy a `.kdbx` there. Settings, Connected services lists what it found: one file is read on sight, and with several there the card asks which. What is stored is that **filename**, not a path, so there is nothing to spell wrongly and nowhere else for it to point. Deleting or renaming the chosen file brings the question back rather than leaving Istota reading nothing.
 
-**From `config.toml`**, per user, when an operator wants to decide it for them or wants the absolute form:
+**Generate the passphrase**, from the same card or from a host shell. A file with no passphrase behind it is not a vault and nothing reads it, which is why the card says "Not set up" until both halves are there. Turning a vault off is removing either one.
+
+An operator can name the file instead, per user in `config.toml`, when they want to decide it or want the absolute form:
 
 ```toml
 [users.alice]
-vault_path = "istota/config/vault.kdbx"
-vault_services = ["karakeep", "ntfy"]
+vault_path = "istota/vault/credentials.kdbx"
 ```
 
-A relative `vault_path` resolves under that user's own workspace directory, which is where a phone or a laptop can reach it. An absolute one is a host path and must resolve outside every tree a task sandbox can write; that form keeps the file away from a task entirely, at the cost of the user no longer being able to edit it from a phone. Empty — the default — means the feature is off for that user.
+A relative `vault_path` resolves under that user's own workspace directory, which is where a phone or a laptop can reach it. An absolute one is a host path and must resolve outside every tree a task sandbox can write; that form keeps the file away from a task entirely, at the cost of the user no longer being able to edit it from a phone. Empty — the default — means the folder decides.
 
-**The absolute form is operator-only, deliberately.** It is checked against the list of trees a sandbox binds read-write, which is the right question for a path an operator wrote and is not a line a user may put themselves on the far side of: an absolute path chosen by a user would read any file the daemon can read, as the daemon, and decrypt the result into that user's own credential rows. The web form refuses one and says so.
+**A path is operator-only, deliberately** — and the absolute form is the reason. It is checked against the list of trees a sandbox binds read-write, which is the right question for a path an operator wrote and is not a line a user may put themselves on the far side of: an absolute path chosen by a user would read any file the daemon can read, as the daemon, and decrypt the result into that user's own credential rows. The card offers no path at all, which is what makes the question unaskable there rather than refused.
 
-**A vault set in `config.toml` is not editable from the web UI**, and that is about precedence rather than permission. A stored selection outranks the TOML line, so letting the form overwrite one would make the operator's file silently inert. The page says where the setting came from instead. `istota user ensure --clear-vault-config --user alice` removes a stored selection and gives the TOML line back, which is the escape hatch for an operator who wants to take the decision over.
-
-`vault_services` is the list of services the file owns. Empty reads the file and applies nothing, which is a usable dry run. A service whose credentials the daemon mints for itself can never be vault-owned (Monarch, Overland, Garmin, Google Workspace), and a name like that is dropped with a warning when the config loads. Today's eligible set is `karakeep`, `ntfy`, `native_brain`, `feeds` and `carto`.
+**A `vault_path` outranks the folder**, and that is about precedence rather than permission. The card says so instead of offering a choice the line would override. `istota user ensure --clear-vault-config --user alice` forgets a filename a user chose, which returns them to the folder's own rules: the only file there if there is one, a question if there are several.
 
 Install the `vault` extra on the host. `pykeepass` and its six dependencies are optional because two of them carry compiled extensions, and a deployment with no vault should not pay for them. Both shipped deployment shapes install it already: the Ansible role runs `uv sync --extra all`, and the Docker image bundles it.
 
-Neither shape lets you hand-edit that `config.toml`, because both rewrite it — the role's template task on every converge, the entrypoint on every boot. Write the two keys where the generator reads them.
+Neither shape lets you hand-edit that `config.toml`, because both rewrite it — the role's template task on every converge, the entrypoint on every boot. Write the key where the generator reads it.
 
 **Ansible**, per user in `istota_users`:
 
 ```yaml
 istota_users:
   alice:
-    vault_path: "istota/config/vault.kdbx"
-    vault_services: ["karakeep", "ntfy"]
+    vault_path: "istota/vault/credentials.kdbx"
 ```
 
-A user who declares neither key gets no `[users.<id>]` block at all, which is the unchanged default for everybody else. `istota_scheduler_vault_sync_interval` sets the cadence.
+A user who declares no path gets no `[users.<id>]` block at all, which is the unchanged default for everybody else and is what the folder route needs. `istota_scheduler_vault_sync_interval` sets the cadence.
 
-**Docker**, in `docker/.env` — single-user, so the keys are unprefixed:
+**Docker**, in `docker/.env` — single-user, so the key is unprefixed:
 
 ```
-USER_VAULT_PATH=istota/config/vault.kdbx
-USER_VAULT_SERVICES=karakeep,ntfy
+USER_VAULT_PATH=istota/vault/credentials.kdbx
 ```
 
 with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
 ### The passphrase
 
-The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault section of Settings, Connected services — **Generate a new passphrase** — or from a host shell:
+The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault card in Settings, Connected services — **Generate a new passphrase** — or from a host shell:
 
 ```bash
 istota secret ensure -u alice --service vault --key passphrase --generate
 ```
 
-**It must be generated rather than chosen, and that rule is the whole security argument for this feature.** The vault file sits in a tree bound read-write into that user's own task sandbox, so a prompt-injected task can read the ciphertext of every credential the vault holds and carry it out. Argon2id makes that useless against 256 random bits. It does not make it useless against a memorable phrase. Everything else here is a boundary against a mistake; this is the only one standing in front of an adversary.
+**It must be generated rather than chosen.** The vault file sits in a tree bound read-write into that user's own task sandbox, so a prompt-injected task can read the ciphertext of the whole file and carry it out. Argon2id makes that useless against 256 random bits. It does not make it useless against a memorable phrase.
 
-On Ansible you can provision it from inventory instead, alongside the other per-user secrets — the loop is service- and key-generic, and the vault's own service is never vault-owned, so nothing refuses it:
+Read that as bounding the *offline* case, and be exact about what it does not bound. It protects everything in the file that is not shared — the rest of the user's password database, if they pointed at a copy of it — and it protects a copy of the file carried out of the sandbox. It does not protect the shared credentials themselves from a task, because a task can ask for those by name; see [what a task can read](#what-a-task-can-read).
+
+On Ansible you can provision it from inventory instead, alongside the other per-user secrets:
 
 ```yaml
 istota_user_secrets:
@@ -170,40 +171,65 @@ The web form takes a typed passphrase too, at the same 32-character floor, and p
 
 ### The file
 
-Group path `istota/<service>`, one subgroup per service. The **entry title** is the secret key and the **password field** is the value. Everything else is ignored — username, URL, notes, attachments, custom string fields, and anything in the recycle bin.
+Put what you want to share under a top-level group named `istota`. Everything under it is read; nothing outside it is. The group name is matched case-insensitively and with surrounding whitespace stripped, so `Istota`, `ISTOTA` and `istota ` all work.
+
+**A file with no such group is read in full.** That is the right answer for a file you made for Istota and put in its folder, and the wrong one for a copy of your everyday password database — so the card, `istota secret vault-status` and a one-off notification all say when a read was unscoped and how many names it produced.
+
+Each entry contributes one name per field it has filled:
+
+| Field | Name |
+|---|---|
+| Password | the entry's own name |
+| Username | that name with `_username` |
+| URL | that name with `_url` |
+| Any custom string field | that name with `_<field>` |
+
+The name itself is the group path below `istota`, plus the entry title, lowercased and joined with underscores. So an entry titled `GitHub PAT` at the top level is `github_pat`, and an entry titled `Token` in a group `Home Assistant` is `home_assistant_token`. Notes are not read: they are free text and frequently hold something other than a credential.
 
 ```
 istota/
-  karakeep/
-    base_url     (password field: https://karakeep.example.com)
-    api_key      (password field: ak_…)
-  ntfy/
-    topic
+  GitHub PAT            (password)          -> github_pat
+  Home Assistant/
+    Token               (password)          -> home_assistant_token
+    URL                 (password + URL)    -> home_assistant_url
+                                            -> home_assistant_url_url
 ```
 
-Entry titles rather than custom attributes on one per-service entry, because custom attributes are second-class in most mobile clients and several cannot create them at all — and editing from a phone is the point.
+That last pair is the rule being literal rather than clever: an entry titled `URL` whose KeePass URL field is also filled contributes both.
 
-The `<service>` group name is matched case-insensitively, so `Karakeep` owns `karakeep`; a phone keyboard that autocapitalizes it costs nothing. Entry titles are matched exactly, because a key that does not match the schema is reported as a typo rather than silently discarded. Values are stripped of surrounding whitespace and nothing else is normalized. An entry with an empty password is skipped rather than treated as a deletion, and a title that appears twice in one group skips that key with a warning.
+A name must start with a letter and be at most 64 characters after slugging. Values are stripped of surrounding whitespace and nothing else is normalized. What is skipped, each with a warning naming the entry and never the value: an empty field, a value over 8 KiB, a title that slugs to nothing or to a name already produced by another entry. The walk stops at 8 levels deep, 512 entries or 1024 names, warns, and applies what it read — half a namespace is a user with some credentials working, where a refusal is a user with none. Entries in the recycle bin are not read.
 
 ### What a sync does
 
 The daemon reads the file at start-up and every `scheduler.vault_sync_interval` seconds (300 by default; 0 turns both off). Each cycle hashes the file bytes, and stops there when nothing has changed — no unlock, no database write, no log line. `istota secret vault-sync [-u alice]` runs one by hand and ignores the cached hash.
 
-For a service in `vault_services`, the vault is the authority:
+The file is the authority for the whole `vault_entries` namespace and for nothing else:
 
-- A key the file's group holds is written over whatever the table had.
-- **A key the table has, the schema declares, and the group does not hold is deleted.** Deleting a credential through the vault means deleting the entry.
-- A service the file does not mention at all is left alone entirely. That rule is what makes a vault that parses but has lost its contents harmless: a resync that replaced it with an emptier copy removes nothing.
+- Every name the file produces is written over whatever the table had.
+- **Every `vault_entries` row the file does not produce is deleted.** Deleting a credential through the vault means deleting the entry, and emptying the `istota` group revokes the whole namespace at once.
+- No other service is touched. A credential typed into the settings page is not something the vault can overwrite or delete, whatever it is called.
 
-**Adopting a service deletes the keys the vault does not mention, on the first sync.** The group is present the moment you add the service to `vault_services`, so a user with an ntfy topic, token and username in the settings UI, and a vault group holding only `topic`, loses the other two within five minutes. So put every key you already hold into the file *before* adding its service to the list. `istota secret vault-sync` prints the count and names each deleted key, which is where that gets noticed.
+A row whose stored value will not decrypt is held back from deletion rather than removed, and counted. `istota secret vault-sync` prints the count and names each deleted key, which is where a surprise gets noticed.
 
-`istota secret remove` is still the direct route for removing one credential, and `istota secret ensure` refuses to write a vault-owned key unless you pass `--force` — a CLI write there does not touch the file, so the digest never moves and the value would stand indefinitely against the file the user believes is authoritative.
+### What a task can read
+
+Every name in the namespace is fetchable by that user's own tasks, and this is the one place the vault widens what a task can reach. A prompt-injected task can enumerate the namespace and read all of it.
+
+Three things bound that, and the first is the real one:
+
+- **The file is the consent boundary.** A credential is reachable because the user put it under `istota/` — or, on an unscoped file, because they pointed at that file. That is the same decision as typing the credential into the settings page, made in a different editor.
+- **A skill takes a name rather than a value.** `istota-skill browse interact --fill-credential` sends the value from the daemon to the browser container without it crossing into the sandbox at all. Where a skill covers the job, that is the path.
+- **Values stay out of the transcript unless the model puts them there.** Nothing is in the task's environment and the prompt carries no names and no values. `istota-credential run VAR=name -- <command>` hands the value to one child process and prints none of it.
+
+A task holding the socket can still read a value deliberately (`istota-credential get <name>`), and from there it is in the session transcript and in whatever the task then says. So this is a boundary against accident rather than against intent, and `[security] vault_fetch_limit_per_task` (10 by default, `0` unlimited) bounds how many fetches one task attempt may make. The kill switch is that there is no vault: no file in the folder, or no passphrase, which is where every user starts.
 
 ### What the settings UI does
 
-A vault-owned service's fields render disabled, with a sentence saying the vault owns them. `PUT` and `DELETE` on those keys answer 409. The "Connected services" heading carries a status line: the resolved path, the owned services, when Istota last applied the file, and the error class when it is failing.
+The "Connected services" heading carries a status line for a user who has a vault: where the file is read from, how many shared credentials Istota holds and what they are called, when it was last applied, and the error class when it is failing. It also says when the last read was unscoped.
 
-Under it is the form that sets the vault up: the file, the services it owns, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is an absolute path — see [turning it on](#turning-it-on) — and it does not render for a vault an operator set in `config.toml`, which it says instead.
+Under it is the card that sets the vault up: the folder to put the file in, the files found there, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is a path of any kind — see [turning it on](#turning-it-on) — and the file half is withheld for a vault a `vault_path` already names, which it says instead. The passphrase half renders either way: it is a credential the user owns rather than a setting an operator made.
+
+The credential-name list is the feedback this feature exists to give. A name in it is a credential Istota holds; a name you expected and cannot see is a group you misspelled or an entry with a warning in the log. Names only — no value reaches that page — and only that user's own.
 
 **"Last applied" is not a health check, and a healthy vault shows an old stamp.** The record is written only by a cycle that did work, and a cycle over an unchanged file does none — so a vault nobody has edited for three weeks reports a three-week-old timestamp and is working perfectly.
 
@@ -215,16 +241,18 @@ Each of these leaves the credentials in the table alone and raises a notificatio
 |---|---|
 | The stored passphrase does not open the file | Re-provision it, then run `istota secret vault-sync` |
 | The file is not a readable KeePass database | Also what a sync caught mid-write looks like — check the mount before suspecting the file |
-| Nothing at the configured path | Check `vault_path`, and that the file has synced to the server |
+| There is no vault file to read | Check the `vault` folder in your own files, and that the file has synced to the server; or check `vault_path` where an operator set one |
 | The `vault` extra is not installed | An operator remedy, not a user one |
 | No passphrase provisioned | `istota secret ensure … --generate` |
 | `ISTOTA_SECRET_KEY` cannot read the stored passphrase | A deployment problem; see `security.secret_key` in `istota doctor` |
 | The file was refused unread — not a regular file, or over the 8 MiB cap | Check what is actually at the path; a symlink and a FIFO are both refused |
 | `vault_path` is one the daemon may not open | An operator corrects the line in `config.toml` |
 
-`istota secret vault-status -u alice` prints the whole answer for one user: the resolved path, whether a passphrase is provisioned, the groups the file holds, which of them are owned, and which owned services the file does not mention.
+Two more states the card reports and nothing notifies about, because neither is a failure and both are one step from being answered: the folder holds no `.kdbx` at all, and it holds several with none chosen. The second is a dropdown away.
 
-`istota doctor` answers across every configured user instead, in two checks. `security.credential_vault` covers the cheap questions — the extra, the schedule, each path, each passphrase — and runs wherever doctor runs. `security.vault_contents` is the one that opens each file and reports counts rather than key names; opening a vault costs about a second per user, so it is excluded from the hourly sweep and from the `self-check` heartbeat, and answers at boot, from `istota doctor`, from `!check`, and on the admin Health pane.
+`istota secret vault-status -u alice` prints the whole answer for one user: the resolved path, whether a passphrase is provisioned, whether the read was scoped, the names the file produces and the reason beside each one it skipped.
+
+`istota doctor` answers across every configured user instead, in two checks. `security.credential_vault` covers the cheap questions — the extra, the schedule, each path, each passphrase — and runs wherever doctor runs. `security.vault_contents` is the one that opens each file and reports counts rather than names; opening a vault costs about a second per user, so it is excluded from the hourly sweep and from the `self-check` heartbeat, and answers at boot, from `istota doctor`, from `!check`, and on the admin Health pane. Counts rather than names there, deliberately, because a `CheckResult` is read by every admin where the settings card is read only by its own user.
 
 **Rotate the vault's master password in the quiet order**: provision the new passphrase with `istota secret ensure` first, then change it in KeePassXC. The other order raises a notification in between, because the rewritten file no longer opens with the stored value.
 
@@ -232,16 +260,22 @@ Each of these leaves the credentials in the table alone and raises a notificatio
 
 Both are honest and both mislead if read the other way:
 
-- **A sync bumps `last_accessed_at` on every credential it owns**, because writing over a value means comparing it first. Three other things bump it on the `vault/passphrase` row alone, since each has to resolve the passphrase to open the file: `istota secret vault-status`, `istota doctor`'s `security.vault_contents`, and the same check reached through `!check` or the admin Health pane. So that column stops being evidence that a vault-owned credential is read by anything, and on the passphrase row it records a diagnostic as readily as a sync.
+- **A sync bumps `last_accessed_at` on every credential it writes.** Three other things bump it on the `vault/passphrase` row alone, since each has to resolve the passphrase to open the file: `istota secret vault-status`, `istota doctor`'s `security.vault_contents`, and the same check reached through `!check` or the admin Health pane. So that column stops being evidence that a shared credential is read by anything, and on the passphrase row it records a diagnostic as readily as a sync.
 - **A sync runs whenever the file's bytes change, not whenever a credential changes.** KDBX draws a fresh master seed on every save, so saving a database nobody edited produces different bytes and a full apply. That is harmless — every write is idempotent — and it is the one thing that eventually re-asserts the file's version of a value somebody changed in the table directly.
 
 ### What it does not fix
 
 The secrets table still holds a copy of everything. What the vault removes is the second place a user has to *edit*.
 
-The security accounting is that the vault adds no confidentiality and one new exposure. Every credential in it is also a row in the table, and the passphrase that opens it is another row in that same table, so one secret — `ISTOTA_SECRET_KEY` — opens both. What changes is *where* credential ciphertext sits: none of it used to be reachable from inside a sandbox, and now a copy of every owned credential is, in a file a task can read, copy out, delete or overwrite. Deleting or corrupting it is a denial of service that leaves every credential working and raises a notification. Replacing it with an older copy the user keeps in the same tree is a real rollback vector, bounded by `vault_services`.
+The security accounting is that the vault adds no confidentiality and two new exposures. Every credential in it is also a row in the table, and the passphrase that opens it is another row in that same table, so one secret — `ISTOTA_SECRET_KEY` — opens both.
 
-The generated passphrase is the entire mitigation. The absolute `vault_path` form removes the exposure completely by putting the file outside every tree a sandbox can reach, at the cost of the phone; it is not the default because editing from a phone is the feature, and it is the reason the web form takes relative paths only — the form's own users are inside the tree the absolute form exists to escape, so handing them that form would be handing them an arbitrary read as the daemon.
+The first exposure is *where* credential ciphertext sits: none of it used to be reachable from inside a sandbox, and now a copy of the whole file is, where a task can read it, copy it out, delete it or overwrite it. Deleting or corrupting it is a denial of service that leaves every credential working and raises a notification. Replacing it with an older copy the user keeps in the same tree is a real rollback vector, bounded by what the file holds — which, under an unscoped read, is everything in it.
+
+The second is that a task can ask for any shared credential by name, which is [above](#what-a-task-can-read) and is a widening rather than a side effect.
+
+The generated passphrase mitigates the first and not the second. The absolute `vault_path` form removes the first completely by putting the file outside every tree a sandbox can reach, at the cost of the phone; it is not the default because editing from a phone is the feature, and it is the reason the card offers no path of any kind — the card's own users are inside the tree the absolute form exists to escape, so handing them a path field would be handing them an arbitrary read as the daemon.
+
+The folder is inside that tree too, and the consequences are bounded rather than absent. A task can add a `.kdbx` there, which moves a one-file folder to "several, none chosen" until the user picks — a denial of service, and a visible one on the card. It cannot plant a vault that is *read*: the passphrase is a row in a table no sandbox binds, so a planted file fails to open and applies nothing.
 
 ## How credentials flow at runtime
 
@@ -260,7 +294,7 @@ config.toml / env vars / encrypted secrets table
   SkillProxy(credential_env, derive_skill_credential_map(...), derive_lookup_allowlist(...))
         │
         ▼
-  credential-fetch <VAR>      ← skill CLI requests a specific var
+  istota-credential env <VAR> ← skill CLI requests a specific var
         │                        proxy checks the per-skill credential map
         ▼                        and the lookup allowlist (minus _PROXY_LOOKUP_BLOCKED)
   skill subprocess env
@@ -274,11 +308,11 @@ The credential set, per-skill scope, and lookup allowlist are all **derived from
 | `derive_proxy_only_set(skill_index)` | `ISTOTA_DB_PATH` plus manifest `proxy_only: true` vars (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`). Not secrets — paths that route to the proxy so the model never holds them |
 | `derive_authorized_skills(selected, skill_index, ctx, hook_env=None)` | selected skills ∪ skills whose sensitive `EnvSpec`s actually resolve under this task's context. `hook_env` matters: without it a credential produced by a `setup_env` hook — the live `google_workspace` case — can never authorize its own skill |
 | `derive_skill_credential_map(authorized, skill_index)` | per-skill credential map (proxy uses this to scope injection) |
-| `derive_lookup_allowlist(authorized, skill_index)` | vars the proxy will respond to over `credential-fetch`, minus `_PROXY_LOOKUP_BLOCKED` |
+| `derive_lookup_allowlist(authorized, skill_index)` | vars the proxy will respond to over `istota-credential env`, minus `_PROXY_LOOKUP_BLOCKED` |
 
 There is no longer a hand-maintained `_PROXY_CREDENTIAL_VARS` constant or `_CREDENTIAL_SKILL_MAP` in code. Adding a credential is a manifest edit; everything else falls out of `derive_*`.
 
-Authorization is **decoupled from skill selection**. A skill is authorized for credential access whenever its sensitive credentials actually resolve for this user — not when the skill is selected into the prompt. This prevents keyword-miss lockouts: if a user has Karakeep configured, the bookmarks skill can always request `KARAKEEP_API_KEY` at runtime, even if "bookmark" wasn't in the prompt. Doc-only skills like `developer` (no CLI module) are eligible too — they consume credentials via `credential-fetch` from helper scripts the skill's `setup_env` hook bind-mounts into the sandbox.
+Authorization is **decoupled from skill selection**. A skill is authorized for credential access whenever its sensitive credentials actually resolve for this user — not when the skill is selected into the prompt. This prevents keyword-miss lockouts: if a user has Karakeep configured, the bookmarks skill can always request `KARAKEEP_API_KEY` at runtime, even if "bookmark" wasn't in the prompt. Doc-only skills like `developer` (no CLI module) are eligible too — they consume credentials via `istota-credential env` from helper scripts the skill's `setup_env` hook writes into the sandbox.
 
 Auto-authorization passes `fallbacks_disabled=True` to the resolver: an instance-wide `EnvironmentFile` fallback for an operator-set value cannot fan out and auto-authorize every user, defeating the per-user privacy posture.
 
@@ -300,7 +334,7 @@ The proxy strips these env vars from the Claude subprocess and injects them serv
 - `NTFY_TOKEN`, `NTFY_PASSWORD`
 - `TUMBLR_API_KEY`
 - `ISTOTA_BRAIN_NATIVE_API_KEY` — declared by `code_review`, which calls a model itself. It is therefore in this set on a `claude_code` deployment where the native brain is otherwise unused
-- `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses that need to decrypt per-user secrets, but blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED` so `credential-fetch ISTOTA_SECRET_KEY` from inside Claude is rejected
+- `ISTOTA_SECRET_KEY` — routed to module-skill subprocesses that need to decrypt per-user secrets, but blocked at the lookup endpoint via `_PROXY_LOOKUP_BLOCKED` so `istota-credential env ISTOTA_SECRET_KEY` from inside Claude is rejected
 
 See [environment variables](../reference/environment-variables.md) for the complete env var reference.
 

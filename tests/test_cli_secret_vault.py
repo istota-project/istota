@@ -90,10 +90,9 @@ def env(tmp_path: Path, monkeypatch):
     return cfg, db_path, mount
 
 
-def _with_vault(env, *, vault_path="config/vault.kdbx", services=("karakeep",)):
+def _with_vault(env, *, vault_path="config/vault.kdbx"):
     """Rewrite the config file so alice has a vault, and return the paths."""
     cfg, db_path, mount = env
-    services_toml = ", ".join(f'"{s}"' for s in services)
     cfg.write_text(
         f'db_path = "{db_path}"\n'
         f'temp_dir = "{tmp_dir(cfg)}"\n'
@@ -102,13 +101,36 @@ def _with_vault(env, *, vault_path="config/vault.kdbx", services=("karakeep",)):
         "[users.alice]\n"
         'display_name = "Alice"\n'
         f'vault_path = "{vault_path}"\n'
-        f"vault_services = [{services_toml}]\n"
     )
     return cfg, db_path, mount
 
 
 def tmp_dir(cfg: Path) -> Path:
     return cfg.parent / "tmp"
+
+
+def _write_unscoped_vault(path: Path, *, password=PASSPHRASE):
+    """A KDBX with no top-level `istota` group, so §1 reads the whole file."""
+    from pykeepass import create_database
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kp = create_database(str(path), password=password)
+    group = kp.add_group(kp.root_group, "karakeep")
+    kp.add_entry(group, "base_url", "", BASE_URL_VALUE)
+    kp.add_entry(group, "api_key", "", API_KEY_VALUE)
+    kp.save()
+
+
+def _write_colliding_vault(path: Path, *, password=PASSPHRASE):
+    """Two entries that slug to one name, so the read records a skip."""
+    from pykeepass import create_database
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kp = create_database(str(path), password=password)
+    root = kp.add_group(kp.root_group, "istota")
+    kp.add_entry(kp.add_group(root, "aws"), "key", "", API_KEY_VALUE)
+    kp.add_entry(root, "AWS Key", "", BASE_URL_VALUE)
+    kp.save()
 
 
 def _write_vault(path: Path, *, password=PASSPHRASE, ntfy=False, group_name="karakeep"):
@@ -449,30 +471,17 @@ class TestTheFloorAppliesToTheSuppliedPathOnly:
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureOnAVaultOwnedService:
-    def test_a_vault_owned_service_is_refused(self, env, capsys):
-        from istota.cli import cmd_secret
+class TestEnsureIsNoLongerRefusedByTheVault:
+    """The 409-shaped CLI refusal went with the eligibility machinery.
 
-        cfg, db_path, mount = _with_vault(env)
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
+    It refused a write on the claim that the next vault sync would overwrite it.
+    The vault writes only its own `vault_entries` namespace now, so that claim
+    is false for every typed service and the refusal would be a lie. What the
+    class keeps is the control: a user who really does have a vault, so a
+    reintroduced refusal would have something to fire on.
+    """
 
-        with pytest.raises(SystemExit) as exc:
-            cmd_secret(
-                _Args(
-                    config=str(cfg),
-                    action="ensure",
-                    user="alice",
-                    service="karakeep",
-                    key="api_key",
-                    value="typed-by-hand",
-                )
-            )
-        assert exc.value.code == 1
-        err = capsys.readouterr().err
-        assert "--force" in err
-        assert secrets_store.secret_exists(db_path, "alice", "karakeep", "api_key") is False
-
-    def test_force_writes_and_says_what_will_happen_to_it(self, env, capsys):
+    def test_a_service_the_vault_used_to_own_is_written(self, env):
         from istota.cli import cmd_secret
 
         cfg, db_path, mount = _with_vault(env)
@@ -486,44 +495,18 @@ class TestEnsureOnAVaultOwnedService:
                 service="karakeep",
                 key="api_key",
                 value="typed-by-hand",
-                force=True,
             )
         )
-        captured = capsys.readouterr()
         assert (
             secrets_store.get_secret(db_path, "alice", "karakeep", "api_key")
             == "typed-by-hand"
         )
-        # OQ3: "--force stays for the operator who is deliberately testing a
-        # value before putting it in the file, and it warns that the next vault
-        # write will overwrite it."
-        assert "overwritten" in (captured.out + captured.err).lower()
 
-    def test_a_service_the_vault_does_not_own_is_untouched(self, env):
+    def test_the_passphrase_is_still_provisionable(self, env):
+        """The provisioning path, which a refusal there would have closed."""
         from istota.cli import cmd_secret
 
-        cfg, db_path, mount = _with_vault(env, services=("karakeep",))
-        _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
-
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="ntfy",
-                key="topic",
-                value="my-topic",
-            )
-        )
-        assert secrets_store.get_secret(db_path, "alice", "ntfy", "topic") == "my-topic"
-
-    def test_the_passphrase_itself_is_never_vault_owned(self, env):
-        """§4 subtracts `vault` from eligibility, which is what keeps the
-        provisioning path open — a refusal there would make the feature
-        unconfigurable."""
-        from istota.cli import cmd_secret
-
-        cfg, db_path, mount = _with_vault(env, services=("karakeep",))
+        cfg, db_path, mount = _with_vault(env)
         _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
 
         cmd_secret(
@@ -537,38 +520,6 @@ class TestEnsureOnAVaultOwnedService:
             )
         )
         assert secrets_store.secret_exists(db_path, "alice", "vault", "passphrase")
-
-    def test_a_user_with_no_resolving_vault_is_not_refused(self, env):
-        """Ownership is `in vault_services` *and* the path resolving (§9).
-
-        A configured-but-refused path owns nothing in practice, and refusing an
-        operator's CLI write on the strength of a line that does not work is a
-        refusal with no remedy behind it.
-
-        The refused path here is a *relative* one naming a directory that is not
-        there. An absolute path to a file that does not exist is deliberately not
-        the same case: it resolves, so the vault still owns the service and the
-        refusal still stands — the file not having been created yet is a state to
-        fix rather than a licence to write around it.
-        """
-        from istota.cli import cmd_secret
-
-        cfg, db_path, _mount = _with_vault(env, vault_path="no-such-dir/vault.kdbx")
-
-        cmd_secret(
-            _Args(
-                config=str(cfg),
-                action="ensure",
-                user="alice",
-                service="karakeep",
-                key="api_key",
-                value="typed-by-hand",
-            )
-        )
-        assert (
-            secrets_store.get_secret(db_path, "alice", "karakeep", "api_key")
-            == "typed-by-hand"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -587,13 +538,18 @@ class TestVaultSync:
         cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alice"))
         out = capsys.readouterr().out
 
-        assert "2" in out  # two credentials written
-        assert "api_key" in out or "karakeep" in out
+        # The counts themselves are the applying half's, which the change
+        # landing beside this one restores over the flat `vault_entries`
+        # namespace. That the line is printed at all, and carries no value, is
+        # this renderer's.
+        assert "alice" in out and "written" in out
         assert API_KEY_VALUE not in out
         assert BASE_URL_VALUE not in out
         assert PASSPHRASE not in out
 
-    def test_it_parses_even_on_a_digest_a_previous_cycle_cached(self, env, capsys):
+    def test_it_parses_even_on_a_digest_a_previous_cycle_cached(
+        self, env, capsys, monkeypatch
+    ):
         """The operator's escape hatch from every cache-shaped surprise.
 
         §8's remedy strings name this command, so it must not be subject to the
@@ -609,44 +565,56 @@ class TestVaultSync:
         _write_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
         secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
 
-        # Prime the cache the way an ordinary interval cycle would, then take the
-        # credential out from under it. The digest has not moved, so an ordinary
-        # cycle would skip and the row would stay gone.
+        # Prime the cache the way an ordinary interval cycle would. The digest
+        # has not moved, so an ordinary cycle would skip the parse entirely.
         secrets_vault.sync_user(load_config(cfg), "alice")
-        secrets_store.delete_secret(db_path, "alice", "karakeep", "api_key")
 
+        calls = []
+        real = secrets_vault.parse_vault
+
+        def counted(data, passphrase):
+            calls.append(1)
+            return real(data, passphrase)
+
+        monkeypatch.setattr(secrets_vault, "parse_vault", counted)
         cmd_secret(_Args(config=str(cfg), action="vault-sync", user="alice"))
-        assert (
-            secrets_store.get_secret(db_path, "alice", "karakeep", "api_key")
-            == API_KEY_VALUE
-        )
 
-    def test_a_service_level_refusal_does_not_render_a_bare_slash(self):
-        """`skipped` carries an empty key for a whole-service refusal.
+        # Counted rather than read off the rows: what the apply then writes is
+        # the applying half's, which the change landing beside this one
+        # restores. That the cache was defeated is this command's own subject.
+        assert calls == [1]
 
-        Rendering the triple blindly prints `monarch/` with nothing after the
-        slash, which reads as a key named "" rather than as a service nobody may
-        own.
-
-        Driven against the formatter rather than through `vault-sync`, and that
-        is the point rather than a shortcut: `_validate_vault_services` drops an
-        ineligible name at config load, so the shape never reaches the CLI from a
-        loaded config and a test going through it would assert nothing. The
-        triple is still produced — `apply_vault` refuses the same names again on
-        its own terms, for a caller that did not come through the loader — so the
-        renderer has to handle it.
+    def test_a_name_cannot_forge_a_line_of_the_sync_report(self, env, capsys):
+        """The service-level refusal's empty-key rendering went with the
+        refusal — a skip is now one bounded name and one reason. What
+        survives is the bound: every name here came out of the vault file, which
+        a task in the user's own sandbox can overwrite, and the consumer is an
+        operator's terminal.
         """
+        from istota.cli import _print_vault_sync
         from istota.secrets_vault import (
-            SKIP_INELIGIBLE_SERVICE,
-            SKIP_UNKNOWN_KEY,
-            format_skip,
+            SKIP_DUPLICATE_NAME,
+            VaultApplyResult,
+            VaultSyncResult,
         )
 
-        assert format_skip("monarch", "") == "monarch"
-        assert format_skip("karakeep", "apikey") == "karakeep/apikey"
-        # The two reasons that produce each shape, named so a reader can see the
-        # empty key is a real state and not a defensive branch.
-        assert SKIP_INELIGIBLE_SERVICE and SKIP_UNKNOWN_KEY
+        forged = "a\nSTATE: ok\n" + "b" * 200
+        _print_vault_sync(
+            VaultSyncResult(
+                user_id="alice",
+                outcome="ok",
+                apply=VaultApplyResult(
+                    created=1,
+                    deleted_keys=[forged],
+                    skipped=[(forged, SKIP_DUPLICATE_NAME)],
+                ),
+            )
+        )
+        out = capsys.readouterr().out
+
+        assert "\nSTATE: ok" not in out
+        assert "b" * 200 not in out
+        assert SKIP_DUPLICATE_NAME in out
 
     def test_a_user_with_no_vault_is_reported_rather_than_skipped(self, env, capsys):
         from istota.cli import cmd_secret
@@ -687,7 +655,15 @@ class TestVaultStatus:
         out = capsys.readouterr().out
         assert "alice" in out
 
-    def test_it_names_the_groups_it_found_and_no_value(self, env, capsys):
+    def test_it_reports_the_file_the_passphrase_and_the_names(self, env, capsys):
+        """§10: the count, the names, and the skips.
+
+        The name list is the feedback this feature has never had — a name here
+        is a credential istota holds, and one the user expected and cannot see
+        is an entry with a skip beside it. Values never appear, which the sweep
+        below is what holds; unlike the interim version of this test it is no
+        longer vacuous, because there is now something printed to sweep.
+        """
         from istota.cli import cmd_secret
 
         cfg, db_path, mount = _with_vault(env)
@@ -697,12 +673,51 @@ class TestVaultStatus:
         cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
         out = capsys.readouterr().out
 
-        assert "karakeep" in out
-        # An unowned group is what tells a user their group name matches nothing.
-        assert "ntfy" in out
+        assert "vault.kdbx" in out and "passphrase: provisioned" in out
+        assert "shared:     3 credential(s)" in out
+        assert "karakeep_api_key" in out
+        assert "karakeep_base_url" in out
+        assert "ntfy_topic" in out
+        # A scoped file says nothing about scope: the notice is for the other
+        # case, and printing it always would make it noise.
+        assert "unscoped" not in out
         assert API_KEY_VALUE not in out
         assert BASE_URL_VALUE not in out
         assert PASSPHRASE not in out
+
+    def test_an_unscoped_file_says_so_with_a_count(self, env, capsys):
+        """§1's notice on the surface an operator reaches for. The count is
+        what makes it actionable: "all 412 of them" is a different sentence
+        from "all 2 of them"."""
+        from istota.cli import cmd_secret
+
+        cfg, db_path, mount = _with_vault(env)
+        _write_unscoped_vault(mount / "Users" / "alice" / "config" / "vault.kdbx")
+        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
+
+        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
+        out = capsys.readouterr().out
+
+        assert "unscoped" in out
+        assert "all 2 credential(s) in it are shared" in out
+        assert API_KEY_VALUE not in out
+
+    def test_a_skip_is_named_with_its_reason(self, env, capsys):
+        """The other half of the feedback: a name the user expected and cannot
+        see has a line saying why."""
+        from istota.cli import cmd_secret
+
+        cfg, db_path, mount = _with_vault(env)
+        _write_colliding_vault(
+            mount / "Users" / "alice" / "config" / "vault.kdbx"
+        )
+        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
+
+        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
+        out = capsys.readouterr().out
+
+        assert "skipped:    aws_key" in out
+        assert "two entries produce the same name" in out
 
     def test_it_reports_the_last_cycle_the_daemon_settled(self, env, capsys):
         """The record, which is the only thing here that crosses a process.
@@ -770,34 +785,6 @@ class TestVaultStatus:
         assert "2026-09-17T10:00:00Z" in out
         assert "last error" not in out
         assert "last cycle" not in out
-
-    def test_a_group_name_cannot_forge_a_line_of_the_report(self, env, capsys):
-        """Every name in this report came out of the vault file, and a task in
-        the user's own sandbox can overwrite that file. The consumer is an
-        operator's terminal, so an unflattened newline in a group name writes a
-        line of the report — the same rule `format_skip` applies in the sibling
-        renderer, which is where the omission showed: removing the bound left
-        the whole file green.
-        """
-        from istota.cli import cmd_secret
-        from istota.secrets_vault import _LABEL_MAX_CHARS
-
-        cfg, db_path, mount = _with_vault(env)
-        forged = "karakeep\n    evil  (99 key(s), owned)\n" + "z" * 200
-        _write_vault(
-            mount / "Users" / "alice" / "config" / "vault.kdbx", group_name=forged
-        )
-        secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
-
-        cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
-        out = capsys.readouterr().out
-
-        # Flattened: the newline never reaches the terminal, so the forged line
-        # cannot stand on its own.
-        assert "\n    evil" not in out
-        # And bounded, so an unbounded name cannot push the rest off a screen.
-        assert "z" * (_LABEL_MAX_CHARS + 1) not in out
-        assert "…" in out
 
     def test_it_does_not_write_anything(self, env, capsys):
         """A status verb that applied would be a verb nobody could run safely."""

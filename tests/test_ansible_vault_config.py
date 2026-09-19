@@ -1,27 +1,30 @@
-"""The credential vault's two config keys, from inventory through to `load_config`.
+"""The credential vault's config key, from inventory through to `load_config`.
 
-`vault_path` and `vault_services` are TOML-only by design: they are not in
-`user_profiles` (`tests/test_secrets_vault.py::TestTheProfileTableGuard` holds
-that absence), so there is no `istota user ensure` route and no web route. A
-`[users.<id>]` block in `config.toml` is the only way to set them — and until
-ISSUE-505 neither config generator wrote one, so on the two shipped deployment
-shapes the feature could not be turned on at all. The Ansible template rendered
-no `[users.<id>]` block whatsoever, and `docker/istota/render-config.sh` wrote
-one that carried every per-user key except these two. Hand-editing the result
-does not survive either shape: the template task rewrites `config.toml` on every
-converge, and the entrypoint rewrites it on every boot.
+`vault_path` is TOML-only by design: it is not in `user_profiles`
+(`tests/test_secrets_vault.py::TestTheProfileTableGuard` holds that absence), so
+there is no `istota user ensure` route and no web route. A `[users.<id>]` block
+in `config.toml` is the only way to set it — and until ISSUE-505 neither config
+generator wrote one, so on the two shipped deployment shapes an operator could
+not name a vault file at all. The Ansible template rendered no `[users.<id>]`
+block whatsoever, and `docker/istota/render-config.sh` wrote one that carried
+every per-user key except this. Hand-editing the result does not survive either
+shape: the template task rewrites `config.toml` on every converge, and the
+entrypoint rewrites it on every boot.
+
+It is the operator's *override* rather than the ordinary route. A user's own
+vault is a `.kdbx` in their `istota/vault/` folder plus a filename chosen from
+the settings page, and neither of those is a config key — which is why this file
+is much smaller than it was: `vault_services` and everything about eligibility
+went with the service mapping.
 
 This file is the Ansible half. The Docker half lives in
 `tests/test_render_config.py::TestTheCredentialVault`, beside the rest of that
 generator's coverage.
 
 **What the template owes, and what it does not.** Its job is fidelity: emit what
-the operator wrote, escaped so the file parses. Eligibility is the loader's —
-`config._validate_vault_services` drops a name a vault may not own and says so
-in the boot log, which is where an operator can act on it. So the assertion
-about an ineligible service is against the *rendered text* rather than against
-the loaded config, and asserting it the other way round would be asserting the
-loader's behaviour through the template.
+the operator wrote, escaped so the file parses. Judging the path is
+`storage.resolve_user_vault_path`'s, at the point of use, which is why an
+absolute path is asserted to survive verbatim rather than to be normalised here.
 
 **What this cannot see**, inherited from `test_ansible_config_template.py`:
 Ansible is not in the dependency set, so the template is rendered with plain
@@ -54,8 +57,7 @@ def rendered_users(**overrides) -> dict:
 
 ALICE = {
     "display_name": "Alice",
-    "vault_path": "istota/config/vault.kdbx",
-    "vault_services": ["karakeep", "ntfy"],
+    "vault_path": "istota/vault/credentials.kdbx",
 }
 
 
@@ -86,23 +88,28 @@ class TestTheUserWithNoVault:
 
     def test_an_empty_vault_path_renders_no_block(self):
         # Removing the line and blanking it are the same instruction.
+        assert rendered_users(istota_users={"alice": {"vault_path": ""}}) == {}
+
+    def test_a_stale_vault_services_line_renders_no_block_either(self):
+        # An inventory left over from before the key was removed. The renderer
+        # no longer reads it, so a user who declared only that has no vault and
+        # gets no block — rather than an empty `[users.<id>]` table, which is
+        # the shape the class above explains the cost of.
         assert rendered_users(
-            istota_users={"alice": {"vault_path": "", "vault_services": []}}
+            istota_users={"alice": {"vault_services": ["karakeep"]}}
         ) == {}
 
 
 class TestTheUserWithAVault:
-    def test_both_fields_reach_the_rendered_config(self):
+    def test_the_path_reaches_the_rendered_config(self):
         users = rendered_users(istota_users={"alice": ALICE})
-        assert users["alice"]["vault_path"] == "istota/config/vault.kdbx"
-        assert users["alice"]["vault_services"] == ["karakeep", "ntfy"]
+        assert users["alice"]["vault_path"] == "istota/vault/credentials.kdbx"
 
     def test_the_loader_accepts_it(self):
         # The end-to-end claim: inventory in, `UserConfig.vault_path` out.
         # `load_config` is what `storage.resolve_user_vault_path` reads.
         config = load_config_from(render(istota_users={"alice": ALICE}))
-        assert config.users["alice"].vault_path == "istota/config/vault.kdbx"
-        assert config.users["alice"].vault_services == ["karakeep", "ntfy"]
+        assert config.users["alice"].vault_path == "istota/vault/credentials.kdbx"
 
     def test_an_absolute_path_survives_verbatim(self):
         # The form that keeps the file out of every sandbox-writable tree. The
@@ -113,46 +120,12 @@ class TestTheUserWithAVault:
         )
         assert users["alice"]["vault_path"] == "/srv/secure/alice.kdbx"
 
-    def test_a_vault_with_no_services_renders_the_empty_list(self):
-        # The dry run: the file is read and nothing is applied. Rendered
-        # explicitly rather than omitted, so removing the last service from
-        # inventory is a visible `[]` in the file rather than a key that
-        # vanished.
-        users = rendered_users(istota_users={"alice": {"vault_path": "v.kdbx"}})
-        assert users["alice"]["vault_services"] == []
-
-    def test_services_without_a_path_still_render(self):
-        # Inert — the vault is off without a path — but the operator wrote it,
-        # and a block that silently dropped half of what was declared is worse
-        # than one that renders a list nothing reads.
-        users = rendered_users(
-            istota_users={"alice": {"vault_services": ["karakeep"]}}
-        )
-        assert users["alice"]["vault_services"] == ["karakeep"]
-        assert "vault_path" not in users["alice"]
-
-
-class TestTheTemplateDoesNotJudgeTheServiceNames:
-    def test_an_ineligible_service_is_rendered_as_written(self):
-        """Fidelity is the template's job; eligibility is the loader's.
-
-        `garmin` is a service whose credentials the daemon mints for itself, so
-        `_validate_vault_services` drops it with a warning naming the line. That
-        warning is the operator-facing report, and it can only name a line that
-        was rendered — a template that filtered the name first would leave the
-        operator with an inventory entry that does nothing and nothing anywhere
-        saying why.
-        """
-        text = render(
-            istota_users={
-                "alice": {"vault_path": "v.kdbx", "vault_services": ["garmin"]}
-            }
-        )
-        assert '"garmin"' in text
-
-        # And the loader is still the thing that refuses it.
-        config = load_config_from(text)
-        assert config.users["alice"].vault_services == []
+    def test_the_block_carries_the_path_alone(self):
+        # The whole of what this renderer writes. A second key here would be a
+        # per-user setting reaching `config.toml` by a route nothing else in the
+        # role uses, so the assertion is on the key set rather than on absences.
+        users = rendered_users(istota_users={"alice": ALICE})
+        assert set(users["alice"]) == {"vault_path"}
 
 
 class TestTheEscaping:
@@ -180,12 +153,6 @@ class TestTheEscaping:
         assert "first.last" in users
         assert users["first.last"]["vault_path"] == "v.kdbx"
 
-    def test_a_quote_in_a_service_name_does_not_break_the_file(self):
-        users = rendered_users(
-            istota_users={"alice": {"vault_path": "v.kdbx", "vault_services": ['a"b']}}
-        )
-        assert users["alice"]["vault_services"] == ['a"b']
-
 
 class TestTheVaultBlockCoexistsWithBriefingBlocks:
     """Both renderers write under `users.<uid>`, and both must survive.
@@ -210,7 +177,7 @@ class TestTheVaultBlockCoexistsWithBriefingBlocks:
 
     def test_both_sections_reach_the_parsed_config(self):
         users = rendered_users(istota_users={"alice": self.USER})
-        assert users["alice"]["vault_path"] == "istota/config/vault.kdbx"
+        assert users["alice"]["vault_path"] == "istota/vault/credentials.kdbx"
         assert [b["name"] for b in users["alice"]["briefings"]] == ["world"]
 
     def test_the_scalar_keys_come_before_the_subtable(self):
@@ -234,7 +201,7 @@ class TestTheFilterIsTotal:
     Each of these is operator YAML that type-checks as something else, and the
     render is a deploy step: a raise here fails the play with a jinja2
     traceback rather than a config the loader then reports on. The loader's own
-    `_vault_path_value` / `_vault_services_value` are the layer that warns.
+    `_vault_path_value` is the layer that warns.
     """
 
     @pytest.mark.parametrize(
@@ -246,44 +213,18 @@ class TestTheFilterIsTotal:
             {"alice": None},
             {"alice": "vault.kdbx"},
             {"alice": {"vault_path": 7}},
-            {"alice": {"vault_path": "v.kdbx", "vault_services": "karakeep"}},
-            {"alice": {"vault_path": "v.kdbx", "vault_services": [None, 7]}},
+            {"alice": {"vault_path": ["v.kdbx"]}},
+            {"alice": {"vault_services": "karakeep"}},
         ],
     )
     def test_it_returns_a_string_for_anything(self, users):
         assert isinstance(vault_filter()(users), str)
 
-    def test_a_bare_string_service_list_does_not_become_eight_services(self):
-        # `vault_services: "karakeep"` is YAML somebody will write, and a string
-        # iterates. The loader's `_vault_services_value` has the same guard for
-        # the same reason; this one stops the file being written that way at
-        # all.
-        rendered = vault_filter()(
-            {"alice": {"vault_path": "v.kdbx", "vault_services": "karakeep"}}
-        )
-        parsed = tomllib.loads(rendered)
-        assert parsed["users"]["alice"]["vault_services"] == ["karakeep"]
-
-    def test_a_whitespace_only_service_is_dropped_on_both_shapes(self):
-        # The loader strips before matching, so `"  "` reaches
-        # `_validate_vault_services` as `""` and produces a boot-log line
-        # naming nothing. `toml_string_list` on the Docker side already drops
-        # it, so truthiness here would have the two generators disagree about
-        # whether the operator hears anything.
-        rendered = vault_filter()(
-            {"alice": {"vault_path": "v.kdbx", "vault_services": ["karakeep", "  "]}}
-        )
-        parsed = tomllib.loads(rendered)
-        assert parsed["users"]["alice"]["vault_services"] == ["karakeep"]
-
-    def test_a_non_string_service_entry_is_dropped_rather_than_stringified(self):
-        # `7` is not a service name under any reading, and rendering `"7"` would
-        # hand the loader a name to warn about that the operator never wrote.
-        rendered = vault_filter()(
-            {"alice": {"vault_path": "v.kdbx", "vault_services": ["karakeep", 7]}}
-        )
-        parsed = tomllib.loads(rendered)
-        assert parsed["users"]["alice"]["vault_services"] == ["karakeep"]
+    def test_a_non_string_path_renders_no_block_rather_than_stringifying_it(self):
+        # `7` is not a path under any reading, and rendering `"7"` would
+        # configure a vault at that name. Dropped rather than raised, because
+        # the render is a deploy step.
+        assert vault_filter()({"alice": {"vault_path": 7}}) == ""
 
 
 class TestTheSyncInterval:
@@ -314,15 +255,14 @@ def test_the_filter_is_registered():
     assert "istota_vault_users_toml" in _custom_filters()
 
 
-def test_the_defaults_document_the_two_keys():
+def test_the_defaults_document_the_key():
     """`istota_users` is documented by a commented example, not a schema.
 
-    Two keys nothing in `defaults/main.yml` mentions are two keys no operator
-    finds. This is the only place the role can say they exist.
+    A key nothing in `defaults/main.yml` mentions is a key no operator finds.
+    This is the only place the role can say it exists.
     """
     text = (ANSIBLE / "defaults" / "main.yml").read_text()
     assert "vault_path:" in text
-    assert "vault_services:" in text
 
 
 class TestTheInstallerPathReachesBothSettings:
@@ -337,7 +277,7 @@ class TestTheInstallerPathReachesBothSettings:
     Both routes here are generic rather than named — `[users.X]` passes through
     as-is and `[scheduler]` is prefix-mapped — so neither needed a change. That
     is exactly why they need a test: nothing in the converter mentions either
-    key, so nothing would go red if the generic route were narrowed.
+    setting, so nothing would go red if the generic route were narrowed.
     """
 
     def _convert(self, settings: dict) -> dict:
@@ -350,13 +290,9 @@ class TestTheInstallerPathReachesBothSettings:
         spec.loader.exec_module(mod)
         return mod.convert(settings)
 
-    def test_the_two_user_keys_survive_the_converter(self):
+    def test_the_user_key_survives_the_converter(self):
         result = self._convert({"users": {"alice": ALICE}})
         assert result["istota_users"]["alice"]["vault_path"] == ALICE["vault_path"]
-        assert (
-            result["istota_users"]["alice"]["vault_services"]
-            == ALICE["vault_services"]
-        )
 
     def test_the_sync_interval_survives_the_converter(self):
         # And this is why the variable is named `istota_scheduler_*` rather than
@@ -374,5 +310,4 @@ class TestTheInstallerPathReachesBothSettings:
         )
         config = load_config_from(render(**variables))
         assert config.users["alice"].vault_path == ALICE["vault_path"]
-        assert config.users["alice"].vault_services == ALICE["vault_services"]
         assert config.scheduler.vault_sync_interval == 900

@@ -9,19 +9,17 @@
  * Three properties carry the file, and each is a boundary rather than a
  * preference.
  *
- * **No absolute path.** The form takes a path relative to the user's own
- * workspace and says so. An absolute one is checked against the trees a sandbox
- * binds read-write rather than against one user's directory — the right
- * question for a path an operator wrote into `config.toml`, and not a line a
- * user may put themselves on the far side of, since it would read any
- * daemon-readable file as the daemon user and decrypt the result into that
- * user's own credential rows. The server refuses one; what is asserted here is
- * that the form reports the refusal rather than swallowing it.
+ * **No path at all.** The card offers the `.kdbx` files the server found in the
+ * user's vault folder, and what a save carries is one of those names. A
+ * filename is validated by membership in a listing rather than by a parse, so
+ * there is no traversal to refuse, no absolute form to reject and nothing for
+ * this side to restate — which is why the tests below assert on what is offered
+ * rather than on a rule the form applies.
  *
- * **`editable: false` is precedence, not permission.** A vault set in
- * `config.toml` is not writable here because a stored row would outrank that
- * line and make the operator's file silently inert. The form says that in
- * words instead of showing disabled controls with no explanation.
+ * **`editable: false` is precedence, not permission.** A vault whose file is
+ * set in the deployment's configuration is not selectable here because a stored
+ * choice would be a control that does nothing. The form says that in words
+ * instead of showing disabled controls with no explanation.
  *
  * **The minted passphrase is rendered exactly once.** Nothing reads it back —
  * there is no route that could — so the response that mints it is the only
@@ -35,6 +33,31 @@ import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/sv
 /** A `Button` renders its label as its accessible name; there is no test id. */
 function button(name: RegExp) {
   return screen.queryByRole('button', { name });
+}
+
+/** The bits-ui trigger renders as a button carrying the control's aria-label. */
+function control(label: string) {
+  return screen.queryByRole('button', { name: label });
+}
+
+/**
+ * Pick an option out of a `Select`, the way bits-ui actually listens for it.
+ *
+ * A plain `click` on the item opens nothing and selects nothing — the item
+ * commits on pointerup — so a test written with `click` passes while asserting
+ * against a value that never changed. Lifted from
+ * `RoomSettings.svelte.test.ts`, which found that the expensive way.
+ */
+async function pick(ariaLabel: string, optionLabel: string) {
+  const trigger = screen.getByRole('button', { name: ariaLabel });
+  await fireEvent.pointerDown(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.pointerUp(trigger, { pointerType: 'mouse', button: 0 });
+  await fireEvent.click(trigger);
+  const item = screen.getByText(optionLabel).closest('[data-select-item]');
+  if (!item) throw new Error(`no option ${optionLabel} under ${ariaLabel}`);
+  await fireEvent.pointerMove(item, { pointerType: 'mouse' });
+  await fireEvent.pointerDown(item, { pointerType: 'mouse', button: 0 });
+  await fireEvent.pointerUp(item, { pointerType: 'mouse', button: 0 });
 }
 
 /**
@@ -62,7 +85,6 @@ const KARAKEEP: ServiceCardData = {
   fields: [{ key: 'api_key', label: 'API key', type: 'password' }],
   configured_keys: ['api_key'],
   last_updated: null,
-  vault_managed: false,
 };
 
 await fillApiDouble(api, {
@@ -121,33 +143,16 @@ const person: User = {
   },
 };
 
-// The real shapes, which is the point of the fixture: `ntfy` is five fields and
-// `karakeep` two, so a form that names only the service is naming the wrong
-// thing.
-const ELIGIBLE = [
-  { service: 'karakeep', label: 'Karakeep', keys: ['Base URL', 'API key'] },
-  {
-    service: 'ntfy',
-    label: 'ntfy push',
-    keys: [
-      'Server URL',
-      'Default topic',
-      'Access token (optional)',
-      'Username (optional)',
-      'Password (optional)',
-    ],
-  },
-];
+const VAULT_DIR = '/mnt/shared/Users/alice/istota/vault';
 
-/** The unconfigured answer: no vault, and the form's own half beside it. */
+/** The unconfigured answer: no file and no passphrase, which is everybody. */
 function unconfigured(over: Partial<VaultStatus> = {}): VaultStatus {
   return {
     configured: false,
     editable: true,
-    source: '',
-    vault_path: '',
-    vault_root: '/mnt/shared/Users/alice',
-    eligible_services: ELIGIBLE,
+    vault_dir: VAULT_DIR,
+    files: [],
+    vault_file: '',
     passphrase_present: false,
     ...over,
   };
@@ -157,10 +162,9 @@ function configured(over: Partial<VaultStatus> = {}): VaultStatus {
   return {
     ...unconfigured(),
     configured: true,
-    source: 'db',
-    vault_path: 'config/vault.kdbx',
-    path: '/mnt/shared/Users/alice/config/vault.kdbx',
-    owned: ['karakeep'],
+    files: ['personal.kdbx'],
+    vault_file: 'personal.kdbx',
+    path: `${VAULT_DIR}/personal.kdbx`,
     passphrase_present: true,
     outcome: '',
     reason: '',
@@ -183,11 +187,9 @@ async function mount() {
 
 beforeEach(() => {
   api.getVaultStatus.mockReset();
-  api.updateVaultConfig.mockReset();
-  api.clearVaultConfig.mockReset();
+  api.selectVaultFile.mockReset();
   api.setVaultPassphrase.mockReset();
-  api.updateVaultConfig.mockResolvedValue(undefined);
-  api.clearVaultConfig.mockResolvedValue(undefined);
+  api.selectVaultFile.mockResolvedValue(undefined);
 });
 
 afterEach(cleanup);
@@ -203,148 +205,139 @@ describe('a user with no vault yet', () => {
     expect(screen.queryByTestId('vault-status')).toBeNull();
   });
 
-  it('offers only the services a vault may own, with their labels', async () => {
-    // Server-rendered, so the form cannot offer a name the write would refuse.
+  it('names the folder to put the file in, which is the whole instruction', async () => {
     api.getVaultStatus.mockResolvedValue(unconfigured());
     await mount();
 
-    expect(screen.getByLabelText(/Karakeep/)).toBeTruthy();
-    expect(screen.getByLabelText(/ntfy push/)).toBeTruthy();
-    // `vault` itself and the daemon-written services are not eligible and the
-    // server does not send them, so nothing here should invent one.
-    expect(screen.queryByLabelText(/garmin/i)).toBeNull();
+    const folder = screen.getByTestId('vault-folder');
+    expect(words(folder)).toContain(VAULT_DIR);
+    expect(words(folder)).toMatch(/put your keepassxc file in/i);
   });
 
-  it('names the fields each service hands over, not just the service', async () => {
-    // The checkbox label alone reads as "the API key". It is not: ntfy is five
-    // fields and karakeep two, and ownership includes *deletion* — a field the
-    // file does not hold is removed from the secrets table. A user picking from
-    // service names can lose a value they never had in mind.
+  it('offers nothing to type, because a path is not what is asked for', async () => {
     api.getVaultStatus.mockResolvedValue(unconfigured());
     await mount();
 
-    const form = screen.getByTestId('vault-form');
-    expect(words(form)).toContain('Base URL · API key');
-    expect(words(form)).toContain('Password (optional)');
-    // And the warning says deletion out loud, since that is the half a user
-    // cannot undo by unticking the box afterwards.
-    expect(words(form)).toMatch(/removes any the file does not/i);
-    expect(words(form)).toMatch(/put every value you already have into the file first/i);
-  });
-
-  it('says the path is relative and offers no way to write an absolute one', async () => {
-    api.getVaultStatus.mockResolvedValue(unconfigured());
-    await mount();
-
-    const form = screen.getByTestId('vault-form');
-    expect(words(form)).toMatch(/inside your own files/i);
-    expect(words(form)).toMatch(/absolute path is an administrator setting/i);
-  });
-
-  it('says where a relative path lands, as it is typed', async () => {
-    // The example alone is ambiguous: the directory a relative path resolves
-    // under is the same one holding the inbox, memories and shared folders, so
-    // `config/vault.kdbx` reads as though it might be relative to any of them.
-    api.getVaultStatus.mockResolvedValue(unconfigured());
-    await mount();
-
-    // Before anything is typed, the root is still named.
-    expect(words(screen.getByTestId('vault-form'))).toContain('/mnt/shared/Users/alice');
-
-    await fireEvent.input(screen.getByTestId('vault-path-input'), {
-      target: { value: 'shared/vault.kdbx' },
-    });
-    const resolved = await screen.findByTestId('vault-resolved');
-    expect(words(resolved)).toContain('/mnt/shared/Users/alice/shared/vault.kdbx');
-  });
-
-  it('does not build a half path when the server could not name a root', async () => {
-    // A deployment whose root cannot be resolved falls back to naming the
-    // directory in words rather than showing a path with a missing front half,
-    // which would be worse than saying nothing.
-    api.getVaultStatus.mockResolvedValue(unconfigured({ vault_root: '' }));
-    await mount();
-
-    await fireEvent.input(screen.getByTestId('vault-path-input'), {
-      target: { value: 'vault.kdbx' },
-    });
+    // The free-text path input, the resolved-path preview and the service
+    // checkboxes are all gone with the value that needed them.
+    expect(screen.queryByTestId('vault-path-input')).toBeNull();
     expect(screen.queryByTestId('vault-resolved')).toBeNull();
-    // And the rule is still stated, in the field's own warning.
-    expect(words(screen.getByTestId('vault-form'))).toMatch(/inside your own files/i);
+    expect(screen.queryByLabelText(/Karakeep/)).toBeNull();
+    expect(button(/save vault settings/i)).toBeNull();
   });
 
-  it('will not save an empty path', async () => {
-    api.getVaultStatus.mockResolvedValue(unconfigured());
+  it('says so plainly when this deployment cannot reach the files', async () => {
+    // An rclone-backed deployment with no local mount: the folder cannot be
+    // listed, so the file is an operator setting and the card says that rather
+    // than naming a folder that is not there.
+    api.getVaultStatus.mockResolvedValue(unconfigured({ vault_dir: '' }));
     await mount();
 
-    expect((button(/save vault settings/i) as HTMLButtonElement).disabled).toBe(true);
-    expect(api.updateVaultConfig).not.toHaveBeenCalled();
-  });
-
-  it('sends the path and the ticked services', async () => {
-    api.getVaultStatus.mockResolvedValue(unconfigured());
-    await mount();
-
-    await fireEvent.input(screen.getByTestId('vault-path-input'), {
-      target: { value: 'config/v.kdbx' },
-    });
-    await fireEvent.click(screen.getByLabelText(/Karakeep/));
-    await fireEvent.click(button(/save vault settings/i)!);
-
-    await waitFor(() =>
-      expect(api.updateVaultConfig).toHaveBeenCalledWith('config/v.kdbx', ['karakeep']),
+    expect(words(screen.getByTestId('vault-folder'))).toMatch(
+      /cannot reach your files on this deployment/i,
     );
+  });
+});
+
+describe('the file in the folder', () => {
+  it('is read with no dropdown and nothing stored when there is one', async () => {
+    // The ordinary case, and the reason auto-selection is a rule in the
+    // resolver rather than a write this page makes on first render.
+    api.getVaultStatus.mockResolvedValue(configured());
+    await mount();
+
+    expect(words(screen.getByTestId('vault-folder'))).toContain('personal.kdbx');
+    expect(control('Vault file')).toBeNull();
+    expect(api.selectVaultFile).not.toHaveBeenCalled();
+  });
+
+  it('is a question when there are several and none is chosen', async () => {
+    api.getVaultStatus.mockResolvedValue(
+      configured({
+        files: ['personal.kdbx', 'work.kdbx'],
+        vault_file: '',
+        problem: 'there are several vault files in your vault folder',
+      }),
+    );
+    await mount();
+
+    expect(control('Vault file')).toBeTruthy();
+    expect(words(screen.getByTestId('vault-form'))).toMatch(/more than one file/i);
+  });
+
+  it('stores the name when one is chosen', async () => {
+    api.getVaultStatus.mockResolvedValue(
+      configured({ files: ['personal.kdbx', 'work.kdbx'], vault_file: '' }),
+    );
+    await mount();
+
+    await pick('Vault file', 'work.kdbx');
+
+    await waitFor(() => expect(api.selectVaultFile).toHaveBeenCalledWith('work.kdbx'));
   });
 
   it('reports a refusal from the server rather than swallowing it', async () => {
-    // The absolute-path case reaches the user this way: the form has no rule of
-    // its own, because the containment rule belongs to the resolver and a copy
-    // here would be a second opinion about a boundary.
-    api.getVaultStatus.mockResolvedValue(unconfigured());
-    api.updateVaultConfig.mockRejectedValue(
-      new Error('a vault path set here must be relative to your own workspace'),
+    // A file deleted between the page load and the save: the listing is taken
+    // again at request time, so the server refuses a name it no longer holds
+    // and the card has to say so rather than looking as though it saved.
+    api.getVaultStatus.mockResolvedValue(
+      configured({ files: ['personal.kdbx', 'work.kdbx'], vault_file: '' }),
+    );
+    api.selectVaultFile.mockRejectedValue(
+      new Error('that file is not in your vault folder any more'),
     );
     await mount();
 
-    await fireEvent.input(screen.getByTestId('vault-path-input'), {
-      target: { value: '/etc/shadow' },
-    });
-    await fireEvent.click(button(/save vault settings/i)!);
+    await pick('Vault file', 'work.kdbx');
 
     const err = await screen.findByTestId('vault-error');
-    expect(words(err)).toMatch(/must be relative/i);
+    expect(words(err)).toMatch(/not in your vault folder/i);
   });
 });
 
-describe('a vault the operator set in config.toml', () => {
+describe('a vault whose file is set in configuration', () => {
+  // One case rather than two. `source` carried three values because a stored
+  // path from the retired web form was one of them; that table is gone, so
+  // what is left is an operator's line or nothing, and `editable` says which.
+
   it('is explained rather than shown as a dead form', async () => {
-    api.getVaultStatus.mockResolvedValue(configured({ source: 'toml', editable: false }));
+    api.getVaultStatus.mockResolvedValue(
+      configured({ editable: false, files: ['a.kdbx', 'b.kdbx'] }),
+    );
     await mount();
 
     const form = screen.getByTestId('vault-form');
-    expect(words(form)).toMatch(/set in this deployment's configuration file/i);
-    // Not disabled controls with no explanation: the fields are absent, so
-    // there is nothing to wonder about.
-    expect(screen.queryByTestId('vault-path-input')).toBeNull();
-    expect(button(/save vault settings/i)).toBeNull();
-    expect(button(/generate/i)).toBeNull();
-  });
-});
-
-describe('a vault the user set themselves', () => {
-  it('offers a switch-off, which the unconfigured case does not', async () => {
-    api.getVaultStatus.mockResolvedValue(configured());
-    await mount();
-    expect(button(/switch off/i)!).toBeTruthy();
-
-    await fireEvent.click(button(/switch off/i)!);
-    await waitFor(() => expect(api.clearVaultConfig).toHaveBeenCalled());
+    expect(words(form)).toMatch(/set outside this page/i);
+    // Not disabled controls with no explanation: the file controls are absent,
+    // so there is nothing to wonder about.
+    expect(control('Vault file')).toBeNull();
+    expect(screen.queryByTestId('vault-folder')).toBeNull();
   });
 
-  it('shows no switch-off when there is nothing stored to switch off', async () => {
-    api.getVaultStatus.mockResolvedValue(unconfigured());
+  it('still offers the passphrase, which belongs to the user either way', async () => {
+    // Only the *file* half is somebody else's decision. The passphrase is a
+    // credential Istota holds to open the file, not a setting an operator
+    // made — withholding it left a user whose file an operator had named with
+    // no way to store one at all.
+    api.getVaultStatus.mockResolvedValue(
+      configured({ editable: false, passphrase_present: false }),
+    );
     await mount();
-    expect(button(/switch off/i)).toBeNull();
+
+    expect(passwordField()).toBeTruthy();
+    expect(button(/generate/i)).toBeTruthy();
+  });
+
+  it('offers the folder controls again once nothing outranks them', async () => {
+    // The control for the two above: they would each pass against a card that
+    // had stopped rendering the file half at all.
+    api.getVaultStatus.mockResolvedValue(
+      configured({ editable: true, files: ['a.kdbx', 'b.kdbx'] }),
+    );
+    await mount();
+
+    expect(screen.queryByTestId('vault-not-selectable')).toBeNull();
+    expect(control('Vault file')).toBeTruthy();
   });
 });
 

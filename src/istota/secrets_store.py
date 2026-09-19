@@ -270,6 +270,38 @@ def secret_exists(db_path: Path, user_id: str, service: str, key: str) -> bool:
     return row is not None
 
 
+def any_user_has_secret(db_path: Path, service: str, key: str) -> bool:
+    """True if **any** user has a row at ``(service, key)``.
+
+    ``secret_exists`` without the user, in one read rather than one connection
+    per user. The scheduler's vault gate is what wants it: it asks "does
+    anybody on this deployment have a vault passphrase" on every dispatch tick,
+    and the shape it must not have is a lookup per user — which is what a loop
+    costs on every deployment where the answer is no, which is every deployment
+    by default.
+
+    **A bounded scan, not an indexed seek**, and this says so because the
+    difference is measurable. Every index on ``secrets`` is ``user_id``-
+    prefixed, so a predicate naming only ``(service, key)`` plans as
+    ``SCAN … USING COVERING INDEX`` — and on the deployment this shape exists
+    for, where nobody has a vault, the ``LIMIT 1`` never short-circuits and the
+    whole covering index is walked. One pass over a small table against one
+    connection open per user is the trade; an index on ``(service, key)`` would
+    make it a seek and is a schema change this does not take.
+
+    Presence, never a value: no Fernet, so it answers the same with a missing
+    or rotated master key, which is correct — a row that will not decrypt is
+    still a vault somebody configured, and the class that says so is
+    ``VaultNoPassphrase`` rather than silence.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM secrets WHERE service = ? AND key = ? LIMIT 1",
+            (service, key),
+        ).fetchone()
+    return row is not None
+
+
 def get_service_secrets(db_path: Path, user_id: str, service: str) -> dict[str, str]:
     """Return all decrypted (key, value) pairs for ``(user_id, service)``.
 

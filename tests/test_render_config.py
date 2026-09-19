@@ -2668,7 +2668,7 @@ class TestTheDockerDefaultsAgreeWithTheRender:
 
 
 class TestTheCredentialVault:
-    """`vault_path` / `vault_services`, the two per-user keys with no DB column.
+    """`vault_path`, the one per-user vault key with no DB column.
 
     The Docker half of ISSUE-505. `render-config.sh` already wrote a
     `[users.X]` block carrying every other per-user key, and rewrites
@@ -2676,31 +2676,23 @@ class TestTheCredentialVault:
     file lost it at the next restart, and there was no variable that would have
     put it back.
 
+    It is the *operator's* override rather than the ordinary route: a user's own
+    vault is a file in their `istota/vault/` folder and a filename chosen from
+    the settings page, neither of which is a config key at all.
+
     The Ansible half is `tests/test_ansible_vault_config.py`.
     """
 
-    def test_a_deployment_with_no_vault_writes_neither_key(self, tmp_path):
+    def test_a_deployment_with_no_vault_writes_no_key(self, tmp_path):
         """The default, and what nearly every deployment stays on."""
         config = load_config(render(tmp_path, **REQUIRED))
         assert config.users["testuser"].vault_path == ""
-        assert config.users["testuser"].vault_services == []
 
     def test_the_path_reaches_the_loaded_config(self, tmp_path):
         config = load_config(
-            render(tmp_path, **REQUIRED, USER_VAULT_PATH="istota/config/vault.kdbx")
+            render(tmp_path, **REQUIRED, USER_VAULT_PATH="istota/vault/creds.kdbx")
         )
-        assert config.users["testuser"].vault_path == "istota/config/vault.kdbx"
-
-    def test_the_services_reach_the_loaded_config(self, tmp_path):
-        config = load_config(
-            render(
-                tmp_path,
-                **REQUIRED,
-                USER_VAULT_PATH="v.kdbx",
-                USER_VAULT_SERVICES="karakeep,ntfy",
-            )
-        )
-        assert config.users["testuser"].vault_services == ["karakeep", "ntfy"]
+        assert config.users["testuser"].vault_path == "istota/vault/creds.kdbx"
 
     def test_an_absolute_path_survives_verbatim(self, tmp_path):
         # The form that keeps the file outside every sandbox-writable tree.

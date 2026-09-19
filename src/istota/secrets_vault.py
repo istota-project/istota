@@ -1,4 +1,4 @@
-"""A user's KeePass credential vault: the bytes, what they mean, and what they own.
+"""A user's KeePass credential vault: the bytes, and the names they hold.
 
 A user who keeps their credentials in a password manager otherwise maintains two
 copies of every key, and the copy istota reads is the one they cannot see,
@@ -6,13 +6,26 @@ search or back up. This module is the answer's provisioning half: a KDBX file in
 the user's own workspace that istota decrypts and never writes, and the pass
 that copies what it holds into the encrypted ``secrets`` table.
 
+**The file is the consent boundary; the ``istota`` group is an optional
+narrowing inside it.** A top-level group of that name — matched
+case-insensitively, whitespace stripped — scopes the read to itself and
+everything outside is parsed and discarded. With no such group the **whole
+file** is shared, the database root standing in for ``istota/``. So the file a
+user puts in their vault folder is read in full unless they narrow it, and
+pointing at the everyday KDBX they already keep is the one thing not to do
+without creating the group first. An unscoped read is reported and never
+silent: on the settings card, in ``vault-status``, and once per user as a
+notification. Below the starting point the shape is theirs — entries directly
+under it or in subgroups, each contributing one name per field, with the name
+derived from the path rather than typed (:func:`slug_name`).
+
 **It is provisioning input, not a storage backend.** ``resolve_secret``'s order
 is unchanged, the table stays the live store, and a vault that is missing,
 half-synced or locked leaves every credential working. What the pass adds is the
-one direction the table cannot express on its own: a service the vault owns is
-the file's to say, deletions included — which is why the applying half is where
-the destructive rules live and why each of them is stated below rather than
-inferred.
+one direction the table cannot express on its own: the file is authoritative for
+the whole namespace, deletions included — which is why the applying half is
+where the destructive rules live, and why :class:`VaultRead` carries a ``held``
+set rather than letting the apply infer a deletion from an absence.
 
 **Two functions rather than one**, and that split is the design rather than
 tidiness. The sync cycle hashes the file bytes to decide whether to parse at
@@ -29,8 +42,10 @@ here is the last component alone, by way of ``read_overlay_bytes``: its
 ``O_NOFOLLOW``, and the ``dir_fd`` that resolver hands over for the relative
 form so the components *above* the leaf are not walked by name a second time.
 
-**And it never logs a value, at any level.** Counts, service names and key names
-are loggable and are what the warnings below carry. The rule is easy to defeat
+**And it never logs a value, at any level.** Counts and names are loggable and
+are what the warnings below carry — bounded and flattened by ``_label``, since
+the file is writable by a task in that user's own sandbox and every group and
+entry title in it is therefore an attacker-reachable string. The rule is easy to defeat
 by accident, which is why ``VaultRead`` carries a ``__repr__`` of its own: that
 dataclass holds every plaintext the vault carries between parse and apply, and
 pytest's assertion rewriting prints the repr of whatever a failing comparison
@@ -45,10 +60,12 @@ import io
 import json
 import logging
 import os
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import secret_schema, secrets_store
+from . import secrets_store
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +74,93 @@ logger = logging.getLogger(__name__)
 #: database and a bound on what a planted file can make the daemon read.
 VAULT_READ_CAP_BYTES = 8 * 1024 * 1024
 
-#: The one top-level group the reader looks at, matched **exactly**. Only the
-#: service segment below it folds (see ``_map_groups``).
+#: The one top-level group that *narrows* the read, matched with surrounding
+#: whitespace stripped and case folded — so ``Istota``, ``ISTOTA`` and
+#: ``"istota "`` all scope.
+#:
+#: **The file is the consent boundary; this group is an optional narrowing
+#: inside it** (§1). A file with no such group is read in full, with the root
+#: standing in for ``istota/``. That inverts the earlier rule and dissolves its
+#: worst failure: under the old reading a missing or mistyped group was a
+#: successful parse of *nothing*, which the namespace sweep turned into the
+#: deletion of every stored credential, with the file's contents still sitting
+#: there unread. Under this one such a file is read, so the credentials are
+#: rewritten rather than destroyed.
+#:
+#: **What it does not do is make a renamed group harmless, and the honest form
+#: of the claim is narrower than "an empty read means an empty file".** Two
+#: things still produce an empty read — an empty file, and an ``istota`` group
+#: with nothing in it, which is the deliberate revocation §3 names. And a
+#: *renamed* group produces a read that is not empty but is **disjoint**: the
+#: group now contributes a path segment it did not before, so every derived
+#: name changes, the old ones are swept and the new ones are written in the
+#: same pass. That is recoverable — rename it back and one cycle restores every
+#: name — where the old rule's wipe was not, and it is reported rather than
+#: silent, because the read is unscoped and says so on three surfaces. It is
+#: still a surprise worth knowing about before editing this rule.
+#:
+#: **The case-insensitive match is load-bearing rather than a courtesy.**
+#: ``Istota`` is what a person types, and under an exact lowercase match it
+#: falls through to the unscoped read — so the most likely spelling of the
+#: narrowing would silently trigger the widest behaviour. Under the old rule
+#: that was a wipe; under this one it is a disclosure.
 VAULT_ROOT_GROUP = "istota"
+
+#: How deep below the read's root the walk goes — the ``istota`` group where
+#: one narrows the read, and the file root where none does — counted in
+#: subgroup levels, so ``8`` admits ``<root>/a/b/c/d/e/f/g/h/<entry>``. A bound rather than a limit
+#: anyone should meet: the names below flatten the path, so the depth that
+#: produces a usable name is bounded by ``VAULT_NAME_MAX_CHARS`` long before
+#: this. What it is really for is a file a task in that user's own sandbox can
+#: overwrite — a self-referential group would otherwise be walked forever.
+VAULT_MAX_DEPTH = 8
+
+#: How many entries one walk visits, and how many *fields* it considers.
+#: Both stop the walk and warn rather than failing the sync: half a namespace
+#: applied is a user with some credentials working, and a refusal is a user
+#: with none.
+#:
+#: The second is spelled as a bound on names produced and enforced as a bound
+#: on fields examined, which is the same guarantee and a tighter one. A field
+#: that produces *no* name still costs a skip record and a daemon WARNING, and
+#: ``Entry.custom_properties`` is unbounded in cardinality — so counting only
+#: what a field produced left one entry whose custom fields all slug to nothing
+#: emitting one record and one log line each, past every cap, from a file a
+#: task in that user's own sandbox can write.
+VAULT_MAX_ENTRIES = 512
+VAULT_MAX_NAMES = 1024
+
+#: The cap on one value, in UTF-8 bytes. 8 KiB is slack over an RSA private
+#: key, which is a legitimate thing to keep in a password manager.
+VAULT_MAX_VALUE_BYTES = 8192
+
+#: The longest usable name. The bound is in the pattern below too; it is named
+#: separately because the warning that reports a refusal says what the limit
+#: was, and a second spelling of ``64`` in a log string is the drift that makes
+#: the message wrong rather than merely different.
+VAULT_NAME_MAX_CHARS = 64
+
+#: What a usable name looks like. The leading-letter and length rules are there
+#: because the name is what a person types in a shell and what a script may
+#: export as a variable, and because it lands in the ``secrets`` table's ``key``
+#: column and in log lines.
+VAULT_NAME_RE = re.compile(rf"\A[a-z][a-z0-9_]{{0,{VAULT_NAME_MAX_CHARS - 1}}}\Z")
+
+#: Every run of characters a segment may not keep. Each becomes one ``_``.
+_SLUG_DROP_RE = re.compile(r"[^a-z0-9]+")
+
+#: Which of ``_Walk.stopped``'s values mean the read is a prefix of the file.
+#: A set rather than ``bool(walk.stopped)``, so a cap added later has to answer
+#: this question on purpose.
+_TRUNCATING_CAPS = frozenset({"entry", "name"})
+
+#: The suffixes the three standard fields contribute, as a *segment* handed to
+#: :func:`slug_name` rather than as a string appended to its answer — so the
+#: composed name goes through the same validation as every other, and a custom
+#: string field named ``URL`` produces the same name the URL field would (and
+#: therefore collides with it, which is the rule rather than an accident).
+_USERNAME_SEGMENT = "username"
+_URL_SEGMENT = "url"
 
 #: How much of a group or key name a log line may carry (see ``_label``).
 _LABEL_MAX_CHARS = 64
@@ -71,40 +172,50 @@ _LABEL_MAX_CHARS = 64
 #: over on its way out of ``config.toml``.
 _PATH_LABEL_MAX_CHARS = 200
 
-#: The service the vault's own passphrase is stored under. Subtracted from
-#: eligibility: the passphrase cannot live in the file it unlocks.
+#: The service the vault's own passphrase is stored under.
 VAULT_PASSPHRASE_SERVICE = "vault"
 
-#: Services with declared writable keys that the daemon rewrites on its own —
-#: Monarch's cookie pair from ``/api/money/monarch/login``, the Overland ingest
-#: token from its generate endpoint (which also reloads a cache an importer
-#: would have to reproduce), and the two machine-managed OAuth blobs. Vault
-#: ownership of any of them means a window in which a freshly minted credential
-#: is reverted, so they are subtracted whatever the schema says. Two of the four
-#: already fall out for having no writable keys; they are named anyway, because
-#: the reason they must never be vault-owned is this one and not that one.
-DAEMON_WRITTEN_SERVICES = frozenset(
-    {"monarch", "overland", "garmin", "google_workspace"}
-)
+#: The service every shared credential is stored under, one row per derived
+#: name (§3).
+#:
+#: **A separate service from the passphrase's, and the separation is structural
+#: rather than a rule somebody has to remember.** The namespace sweep below
+#: cannot reach ``vault/passphrase`` because it is not in the namespace, and
+#: the task-side read is one ``get_service_secrets(..., "vault_entries")`` that
+#: cannot return it. An entry the user titles ``passphrase`` becomes
+#: ``vault_entries/passphrase`` and is harmless.
+#:
+#: It is deliberately **not** added to ``secret_schema``: the vault owns it, so
+#: nothing may write it through the settings page or ``istota secret ensure``,
+#: and staying out of the registry is what refuses those for free. ``istota
+#: secret list`` still shows the rows, because it reads the table.
+VAULT_ENTRY_SERVICE = "vault_entries"
 
-#: Reserved service namespace: ``connector:<id>`` rows have exactly one writer,
-#: the connector route that validated the key against the resolved provider
-#: manifest. Nothing in the tree declares one yet — the prefix is checked here so
-#: the refusal is this module's own rather than a side effect of the schema walk
-#: finding nothing. ``Specs/Drafts/generic-connectors.md`` owns the namespace and
-#: will bring ``secret_schema.is_reserved_service()`` with it; read it from there
-#: when it lands rather than keeping this spelling.
-_RESERVED_SERVICE_PREFIX = "connector:"
-
-#: The fixed vocabulary ``VaultApplyResult.skipped`` reports with. The service
-#: and key ride in their own slots of the triple, so a reason never interpolates
-#: either: these reach ``vault-status`` output, where a caller wants to group by
-#: reason rather than parse a sentence.
-SKIP_RESERVED_SERVICE = "reserved service namespace"
-SKIP_INELIGIBLE_SERVICE = "not a vault-eligible service"
-SKIP_UNKNOWN_KEY = "not a key this service declares"
+#: The fixed vocabulary the read and the apply report skips with. The name
+#: rides in its own slot of the pair, so a reason never interpolates one: these
+#: reach ``vault-status`` output, where a caller wants to group by reason
+#: rather than parse a sentence.
+SKIP_UNUSABLE_NAME = "the entry name cannot be used"
+SKIP_DUPLICATE_NAME = "two entries produce the same name"
+SKIP_EMPTY_VALUE = "the field is empty"
+SKIP_OVERSIZE_VALUE = "the value is larger than the limit"
 SKIP_UNREADABLE_ROW = "stored value will not decrypt, so it is not deleted"
-SKIP_DELETE_HELD = "a near-miss entry title held this deletion back"
+
+#: The whole of it. ``SKIP_RESERVED_SERVICE``, ``SKIP_INELIGIBLE_SERVICE``,
+#: ``SKIP_UNKNOWN_KEY`` and ``SKIP_DELETE_HELD`` left with the service mapping
+#: and the eligibility machinery that produced them, and a drift guard in
+#: ``tests/test_secrets_vault.py`` refuses their return — a reason with no
+#: producer is worse than absent, because it reads as a condition the apply can
+#: still reach.
+SKIP_REASONS = frozenset(
+    {
+        SKIP_UNUSABLE_NAME,
+        SKIP_DUPLICATE_NAME,
+        SKIP_EMPTY_VALUE,
+        SKIP_OVERSIZE_VALUE,
+        SKIP_UNREADABLE_ROW,
+    }
+)
 
 
 class VaultError(Exception):
@@ -152,40 +263,90 @@ class VaultLibraryMissing(VaultError):
 
 @dataclass(frozen=True)
 class VaultRead:
-    """One parsed vault.
+    """One parsed vault: the names it holds, and what it will not say about.
 
-    ``services`` is the plaintext the file holds, folded service name to key to
-    value, for **every** group found rather than only the owned ones — which
-    service a vault may own is the applying half's question, and ``vault-status``
-    needs the rest to tell a user their group name matches nothing.
+    ``services`` is the namespace itself — a usable name to its value, flat,
+    for everything the walk found under ``istota/``. The field keeps its name
+    from the shape it replaces, which was service to key to value; it holds no
+    services any more and the spec's interface line spells it this way, so it
+    is left alone rather than renamed under a change whose subject is the read.
 
-    ``group_present`` is the same set of names mapped to the spelling as it
-    stands in the file. The folded key is what ``vault_services`` is compared
-    against; the value is what gets printed back, so a user whose group is
-    ``Karakeep`` is shown the name they typed and told it matched, instead of
-    being shown one they never wrote. It is also what the apply step's
-    "the vault has no opinion about a service it does not mention" rule reads,
-    so a group holding no entries is present here with an empty bucket beside
-    it rather than dropped.
+    ``held`` is every name the file *produced* whose value cannot be written:
+    empty after stripping, or over ``VAULT_MAX_VALUE_BYTES``. It is the one
+    piece of state the applying half cannot derive from ``services``, and it
+    exists for §3's rule that an empty value is a skip rather than a deletion.
+    The namespace sweep deletes every stored name the read does not hold, so
+    without this field a blanked password field — the fat-finger case, and the
+    one the old ``entry_titles`` existed for — would delete the credential it
+    was meant to change. Oversize takes the same hold for the same reason:
+    refusing the new value *and* destroying the old one is a combination no
+    rule here intends. A **collided** name is deliberately not held: §2 says a
+    name produced twice is absent, and therefore deleted, because istota cannot
+    say which of the two values it is.
 
-    ``entry_titles`` is every title found in a group **whether or not a value
-    was taken from it**, and it exists because the applying half's deletion rule
-    is about the group's contents rather than about the values the mapping
-    kept. §6 deletes a schema key "the group does not contain", and a group
-    contains an entry whose password field is empty or whose title is
-    duplicated — both of which are skips that leave nothing in ``services``.
-    Computing the deletion set from ``services`` would therefore make §3's "an
-    empty password is skipped, not treated as a deletion" false in exactly the
-    fat-finger case it names, and would turn the duplicate-title hard skip into
-    a credential deletion. Required rather than defaulted for the same reason:
-    a hand-built ``VaultRead`` that omitted it would get the destructive
-    reading silently.
+    Required rather than defaulted, like the field it replaces: a hand-built
+    ``VaultRead`` that omitted it would get the destructive reading silently.
+
+    ``truncated`` names the cap the walk stopped at, and is empty when it did
+    not: this read is then a **prefix** of the file rather than the whole of
+    it. It is the second thing the applying half cannot derive, and the second
+    one a default would get wrong in the destructive direction: the namespace sweep deletes every stored name
+    the read does not hold, and on a truncated read the names past the cap are
+    absent for a reason that has nothing to do with the user removing them. The
+    same never-destroy-what-you-cannot-read rule the unreadable-row hold
+    follows says an incomplete read may not delete at all.
+
+    Only the entry and name caps set it. The depth cap does not, because a
+    group below :data:`VAULT_MAX_DEPTH` is excluded by a rule rather than
+    interrupted by a budget — nothing under it has ever been readable, so there
+    is no row it could have written and none it can strand.
+
+    **A truncated read also weakens the collision rule, and that is accepted
+    rather than unnoticed.** Where a cap falls between two producers of one
+    name, only the first reached ``candidates``, so the name resolves to a
+    single value and is applied — which is exactly the XML-order dependence the
+    rule exists to refuse. Withholding writes as well as deletions would close
+    it and is refused: the whole point of a cap that applies what it read is
+    that a 513-entry vault gives the user 512 working credentials rather than
+    none. Deletions are the half that must be withheld, because they are the
+    half that cannot be undone by fixing the cause.
+
+    Required rather than defaulted, like ``held``: a hand-built
+    :class:`VaultRead` that omitted it would claim a complete read. It carries
+    the cap's name rather than a flag because the applying half reports why it
+    withheld a sweep, and "the vault holds more than istota will read" is a
+    different sentence from "the vault produces more names than it will read".
+
+    ``scoped`` is whether a top-level :data:`VAULT_ROOT_GROUP` narrowed the
+    read. False means the whole file was read with the root standing in for
+    ``istota/`` (§1), which is a **wider** read than the user may have meant —
+    it is what "I pointed at my real password database" looks like from here.
+    Nothing refuses on it: the file is the consent boundary and istota does not
+    second-guess a file the user deliberately placed in their own vault folder.
+    What it drives is reporting — the settings card, ``vault-status``, and a
+    one-shot notification on the first unscoped sync — because the two failure
+    modes are not equally reversible. A wipe is undone by fixing the file and
+    waiting one sync; a whole everyday database copied into the ``secrets``
+    table is fetchable by name by any of that user's tasks and is undone only
+    by rotating all of it.
+
+    Required rather than defaulted for the same reason as the two fields above,
+    and the default that would be wrong is the *reassuring* one: a hand-built
+    :class:`VaultRead` defaulting to ``True`` would claim a narrowing nobody
+    performed, and the notice this field exists to raise would never fire.
+
+    ``skipped`` is ``(name, reason)`` for what the read refused, from the fixed
+    vocabulary above, carried so the applying half can report it beside its own
+    skips. ``name`` is the produced name where there was one and the bounded
+    original path where the refusal is that there is not.
     """
 
     digest: str
-    services: dict[str, dict[str, str]]
-    group_present: dict[str, str]
-    entry_titles: dict[str, frozenset[str]]
+    services: dict[str, str]
+    held: frozenset[str]
+    truncated: str
+    scoped: bool
+    skipped: tuple[tuple[str, str], ...] = ()
 
     def __repr__(self) -> str:
         """Everything but the values.
@@ -199,7 +360,7 @@ class VaultRead:
         on each element, so a ``__str__``-only override would be bypassed by
         every real failure.
 
-        Key names are kept, because they are the thing a reader needs and are
+        Names are kept, because they are the thing a reader needs and are
         loggable by the same rule the warnings below follow.
 
         **It closes the route through this object and not the field itself.**
@@ -209,14 +370,11 @@ class VaultRead:
         object reaching a repr by way of a container, a failing comparison or a
         debug line about the read as a whole.
         """
-        keys = {service: sorted(values) for service, values in self.services.items()}
-        titles = {
-            service: sorted(names) for service, names in self.entry_titles.items()
-        }
         return (
             f"VaultRead(digest={self.digest!r}, "
-            f"group_present={self.group_present!r}, keys={keys!r}, "
-            f"entry_titles={titles!r})"
+            f"names={sorted(self.services)!r}, "
+            f"held={sorted(self.held)!r}, truncated={self.truncated!r}, "
+            f"scoped={self.scoped!r}, skipped={self.skipped!r})"
         )
 
 
@@ -361,81 +519,18 @@ def parse_vault(data: bytes, passphrase: str) -> VaultRead:
         raise VaultCorrupt("the file is not a readable KeePass database") from None
 
 
-def eligible_services() -> frozenset[str]:
-    """Services a vault may own: declared writable keys, minus the exclusions.
-
-    Computed from ``secret_schema`` rather than hand-listed, so a service added
-    there is classified by these rules instead of by somebody remembering this
-    module exists. Three exclusions, each for its own reason:
-
-    - **No writable keys.** ``"fields": []`` means the credential is a
-      machine-managed blob (``google_workspace``, ``garmin``); there is nothing
-      a file could express.
-    - **``DAEMON_WRITTEN_SERVICES``.** The daemon rewrites these rows itself, so
-      vault ownership means a window in which a freshly minted credential is
-      reverted — the one class of writer §6's "no other writer is left" argument
-      could never close.
-    - **The reserved ``connector:`` namespace and ``vault`` itself.**
-
-    **Eligibility is not enablement, and this deliberately does not consult the
-    modules.** Two of the names it yields belong to modules (``feeds`` and
-    ``carto``), and a deployment with those modules off is still offered them.
-    Writing the row anyway is right: the secrets table is not module-scoped,
-    ``istota secret ensure`` does not consult enablement either, and a
-    credential that is present and unread costs nothing while one silently
-    refused because a module was off is a failure with no surface.
-    """
-    return frozenset(
-        service
-        for service, keys in secret_schema.known_service_keys().items()
-        if keys
-        and service not in DAEMON_WRITTEN_SERVICES
-        and service != VAULT_PASSPHRASE_SERVICE
-        and not service.startswith(_RESERVED_SERVICE_PREFIX)
-    )
-
-
-def service_refusal(
-    service: str, eligible: frozenset[str] | None = None
-) -> str | None:
-    """Why this service may not be vault-owned, or None.
-
-    The same predicate ``apply_vault`` applies to every entry of ``owned``, for
-    the caller outside this module — ``config``'s load-time filter, which drops
-    an ineligible ``vault_services`` entry with a warning naming the service and
-    the reason.
-
-    **Delegation rather than a second copy**, and the distinction matters: the
-    load-time filter is what tells the operator a line is inert, and if the two
-    could disagree the operator would be told a line was live and then have it
-    refused hours later inside a background gate. Same reason constants, so
-    ``vault-status`` and the boot log say one word about one condition.
-
-    ``eligible`` is the set to test against, computed when it is not given. A
-    caller asking about several names in a loop passes it, because
-    ``eligible_services`` is a schema walk and building it per name is the cost
-    ``apply_vault`` hoists it out of a loop to avoid. Deliberately not memoized:
-    the schema is monkeypatched in tests, and a cache would make an exclusion
-    pinned there vacuously true on the second call.
-    """
-    return _service_refusal(
-        service, eligible_services() if eligible is None else eligible
-    )
-
-
 @dataclass
 class VaultApplyResult:
     """What one apply did, in the vocabulary the CLI and the panel report.
 
     ``deleted_keys`` names what went rather than counting it, because the
-    deletion rule's documented surprise (§6) is a first sync removing keys the
-    operator did not realise the vault would own — a bare count tells them four
-    credentials are gone and leaves them to work out which four.
+    deletion rule's documented surprise is a sync removing credentials the user
+    did not realise the file was authoritative for — a bare count tells them
+    four are gone and leaves them to work out which four.
 
-    ``skipped`` is ``(service, key, reason)``. A **service-level** refusal
-    carries an empty key: the whole service was refused and no key of it was
-    looked at. Reasons come from the fixed vocabulary above, never a sentence
-    built around a name.
+    ``skipped`` is ``(name, reason)``, from the fixed vocabulary above, never a
+    sentence built around a name. It carries the read's own refusals as well as
+    the apply's, so one list answers "why is this name not here".
 
     ``unreadable_overwrites`` counts the writes that landed on a row which was
     present and would not decrypt. Those are the reason the ``created`` /
@@ -445,6 +540,12 @@ class VaultApplyResult:
     otherwise read as ``created``. The pre-check below corrects the split and
     this counts what it corrected, which is a condition an operator wants named
     — it is the same stale key the deletion side already holds rows back for.
+
+    ``swept`` is whether the namespace sweep ran at all. It is False on a
+    truncated read, where no deletion is licensed because the names past the
+    cap are absent for a reason that has nothing to do with the user removing
+    them — and ``deleted == 0`` alone cannot tell that from a file nobody
+    edited.
     """
 
     created: int = 0
@@ -452,76 +553,72 @@ class VaultApplyResult:
     unchanged: int = 0
     deleted: int = 0
     unreadable_overwrites: int = 0
-    deleted_keys: list[tuple[str, str]] = field(default_factory=list)
-    skipped: list[tuple[str, str, str]] = field(default_factory=list)
+    swept: bool = True
+    deleted_keys: list[str] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
 
 
-def apply_vault(
-    db_path: Path,
-    user_id: str,
-    read: VaultRead,
-    owned: frozenset[str],
-) -> VaultApplyResult:
-    """Write ``read``'s owned services into the secrets table, and delete out of it.
+def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResult:
+    """Write ``read``'s namespace into ``vault_entries``, and sweep out of it.
 
-    Precedence is **vault-wins** for a service the operator has named, which
-    inverts ``secrets_store.import_from_user_configs`` — that one never
-    overwrites, because TOML extras are a legacy source being drained, and this
-    one is the live authority for its declared services or editing the file
-    would change nothing.
+    Two rules, and the second is what makes deleting an entry revoke it:
 
-    Three rules, and the first is the guard against the catastrophic case:
+    1. **Every name in the read is upserted** under
+       :data:`VAULT_ENTRY_SERVICE`, counted by the state ``upsert_secret``
+       returns.
+    2. **Every ``vault_entries`` row for this user whose key is not in the read
+       is deleted.** The file is authoritative for the whole namespace. There is
+       no per-service ownership question left to ask, so there is no ``owned``
+       argument and no service the sweep has an opinion about — one namespace,
+       one sweep.
 
-    1. A service **not** in ``read.group_present`` is left alone entirely. The
-       vault has no opinion about a service it does not mention, so a file that
-       parses and has lost its contents — an older copy put back by a resync, a
-       group deleted by mistake — is silence rather than a wipe.
-    2. Each key in the group that the schema declares is upserted, counted by
-       the state ``upsert_secret`` returns.
-    3. A schema key the group does not contain, and the table has, is deleted.
-       "Contain" is read against ``VaultRead.entry_titles`` rather than against
-       the values, so an entry whose password is empty or whose title is
-       duplicated holds its row — see that field's own note.
+    **Four things hold a deletion back, and every one of them is about a delete
+    being the single action here that cannot be undone by fixing the cause.**
 
-    **Two things hold a deletion back, and both are about a delete being the
-    one action that cannot be undone by fixing the cause.** A row that is
-    present and will not decrypt is never deleted: that is a stale master key
-    rather than a credential the user retired, and the credential comes back
-    when the right key does but not from a delete. And a deletion whose key
-    differs from a title refused in the same group only by case or surrounding
-    whitespace is held, because the alternative is refusing the new value and
-    destroying the old one over one trailing space — a combination §6 licenses
-    only by not having considered it. Both are reported in ``skipped``.
+    - A name in ``read.held``: the file produced it and could not supply a
+      value — an empty field, or one over the byte cap. Blanking a password
+      field is the fat-finger case and must not delete the credential it was
+      meant to change; refusing an oversize value *and* destroying the old one
+      is a combination no rule here intends. Deleting a credential means
+      deleting the entry.
+    - A **truncated** read (``read.truncated``): this read is a prefix of the
+      file, so a stored name's absence from it says nothing about the file. The
+      whole sweep is withheld rather than filtered, because there is no way to
+      tell a name past the cap from one the user removed. Writes still land —
+      the point of a cap that applies what it read is that a 513-entry vault
+      gives the user 512 working credentials rather than none — and deletions
+      are the half that must wait for a read that got to the end.
+    - A row that is present and will not decrypt: that is a stale master key
+      rather than a credential the user retired, and the credential comes back
+      when the right key does but never from a delete.
+    - A name this pass just wrote. Subtracted so the pass can never write a
+      name and delete it in the same call; it follows from the stored set being
+      read before any write, and keeping it explicit makes it a property of
+      this function rather than one inherited from a collaborator.
 
-    **Every write happens before any delete**, across all services rather than
-    within each, so a failure part-way through leaves credentials present rather
-    than absent. That ordering is the reason the deletions are planned into a
-    list and executed at the end instead of inline.
+    **The passphrase is out of reach structurally rather than by exemption.**
+    The sweep enumerates ``VAULT_ENTRY_SERVICE`` alone, and ``vault/passphrase``
+    is in a different service — so there is no filter here that a later edit
+    could get wrong, and an entry the user titles ``passphrase`` lands at
+    ``vault_entries/passphrase`` beside it.
+
+    **Every write happens before any delete**, which is the reason the
+    deletions are planned into a list and executed at the end rather than
+    inline: a failure part-way through leaves credentials present rather than
+    absent.
 
     **A missing master key refuses the whole pass**, in the store's own
-    vocabulary. Every other path raises on its first ``set_secret`` anyway; the
-    one that does not is a present group holding nothing, where the pass would
-    delete every row of a service on a deployment that can neither read what it
-    is removing nor write a replacement. That guard tests presence and a length
-    floor, which is all ``secret_key_available`` can see, so a key that is
-    *wrong* passes it — the per-row readability test above is what covers that,
-    and neither substitutes for the other: an absent key makes every row
-    unreadable and is a deployment fault rather than a per-row one.
+    vocabulary. Without it an empty read on a deployment that can neither read
+    what it is removing nor write a replacement would sweep the namespace flat.
+    That guard tests presence and a length floor, which is all
+    ``secret_key_available`` can see, so a key that is *wrong* passes it — the
+    per-row readability test above is what covers that, and neither substitutes
+    for the other.
 
-    **It bumps ``last_accessed_at`` on every owned credential it reaches**, and
-    that is a cost to the column rather than to this pass: ``upsert_secret``
-    compares against ``get_secret``, the readability test above is another read,
-    and §7 parses on every *save* of the file rather than every change — so a
-    user who opens the vault and saves out of habit marks their whole owned set
-    as used. Nothing here can avoid it, since vault-wins needs the comparison
-    the existing importer avoids by never overwriting; what it means is that
-    ``last_accessed_at`` is not evidence a vault-owned credential is read by
-    anything.
-
-    ``owned`` is matched exactly. §3 folds the *service segment of the file*
-    and nothing else, and ``vault_services`` is operator config rather than
-    something a phone keyboard touched — a name that does not match is refused
-    here and warned about at config load.
+    **It bumps ``last_accessed_at`` on every name it reaches**, because
+    vault-wins needs the comparison ``upsert_secret`` makes against
+    ``get_secret``. What that means is that ``last_accessed_at`` on a
+    ``vault_entries`` row is not evidence anything read it.
     """
     try:
         # The store's own validator rather than `secret_key_available`, which
@@ -541,116 +638,75 @@ def apply_vault(
             f"can neither read nor replace."
         ) from exc
 
-    result = VaultApplyResult()
-    eligible = eligible_services()
-    schema = secret_schema.known_service_keys()
-    pending_deletes: list[tuple[str, str]] = []
+    result = VaultApplyResult(skipped=list(read.skipped))
 
-    for service in sorted(owned):
-        reason = _service_refusal(service, eligible)
-        if reason is not None:
-            result.skipped.append((service, "", reason))
+    # The stored key set, read **before** any write and including rows that
+    # will not decrypt — which is why this is `list_user_services` rather than
+    # `get_service_secrets`: that one silently drops an undecryptable row, and
+    # a sweep built on it would not know such a row exists to hold back.
+    stored = _stored_entry_names(db_path, user_id)
+
+    written: set[str] = set()
+    for name in sorted(read.services):
+        # Asked *before* the upsert, because `upsert_secret` derives its own
+        # answer from `get_secret` and a row that will not decrypt reads there
+        # as absent — so on a deployment with a stale master key every write
+        # reports `created` and the counts an operator reads are exactly
+        # backwards about what happened to their credentials.
+        existed = name in stored
+        state = secrets_store.upsert_secret(
+            db_path, user_id, VAULT_ENTRY_SERVICE, name, read.services[name]
+        )
+        written.add(name)
+        if state == "created" and existed:
+            # Present, overwritten, and unreadable beforehand: the row was
+            # replaced rather than created, and the reason the store could not
+            # tell is a condition worth naming on its own.
+            result.updated += 1
+            result.unreadable_overwrites += 1
             logger.warning(
-                "vault: %s is not a service a vault may own (%s), skipped",
-                _label(service),
-                reason,
+                "vault: %s was stored but would not decrypt, so it has been "
+                "overwritten from the vault; check ISTOTA_SECRET_KEY",
+                _label(name),
+            )
+        elif state == "created":
+            result.created += 1
+        elif state == "updated":
+            result.updated += 1
+        elif state == "noop":
+            result.unchanged += 1
+        else:  # pragma: no cover - the store's contract is three literals
+            raise ValueError(f"unexpected upsert state {state!r}")
+
+    if read.truncated:
+        result.swept = False
+        logger.warning(
+            "vault: %s: the read stopped at the %s cap, so nothing is deleted "
+            "this cycle; %d stored name(s) are left alone",
+            _label(user_id),
+            read.truncated,
+            len(stored - written),
+        )
+        return result
+
+    pending_deletes: list[str] = []
+    for name in sorted(stored - written - read.held):
+        if secrets_store.get_secret(db_path, user_id, VAULT_ENTRY_SERVICE, name) is None:
+            # Present and undecryptable: a stale master key, a half-loaded
+            # `secrets.env`, a rotation applied to the wrong host. The
+            # process-level guard above cannot see this — `_MIN_KEY_LEN` and
+            # presence are all it tests — so without this arm a wrong key turns
+            # a transient misconfiguration into permanent loss: the credential
+            # comes back when the right key does, and does not come back from a
+            # delete. Never destroy what cannot be read.
+            result.skipped.append((name, SKIP_UNREADABLE_ROW))
+            logger.warning(
+                "vault: %s is stored but will not decrypt, so it is not "
+                "deleted; check ISTOTA_SECRET_KEY",
+                _label(name),
             )
             continue
-        if service not in read.group_present:
-            continue
-
-        declared = schema[service]
-        values = read.services.get(service, {})
-        written: set[str] = set()
-        for key in sorted(values):
-            if key not in declared:
-                result.skipped.append((service, key, SKIP_UNKNOWN_KEY))
-                logger.warning(
-                    "vault: %s/%s is not a key this service declares, skipped",
-                    _label(service),
-                    _label(key),
-                )
-                continue
-            # Asked *before* the upsert, because `upsert_secret` derives its
-            # own answer from `get_secret` and a row that will not decrypt reads
-            # there as absent — so on a deployment with a stale master key every
-            # write reports `created` and the counts an operator reads are
-            # exactly backwards about what happened to their credentials.
-            existed = secrets_store.secret_exists(db_path, user_id, service, key)
-            state = secrets_store.upsert_secret(
-                db_path, user_id, service, key, values[key]
-            )
-            written.add(key)
-            if state == "created" and existed:
-                # Present, overwritten, and unreadable beforehand: the row was
-                # replaced rather than created, and the reason the store could
-                # not tell is a condition worth naming on its own.
-                result.updated += 1
-                result.unreadable_overwrites += 1
-                logger.warning(
-                    "vault: %s/%s was stored but would not decrypt, so it has "
-                    "been overwritten from the vault; check ISTOTA_SECRET_KEY",
-                    _label(service),
-                    _label(key),
-                )
-            elif state == "created":
-                result.created += 1
-            elif state == "updated":
-                result.updated += 1
-            elif state == "noop":
-                result.unchanged += 1
-            else:  # pragma: no cover - the store's contract is three literals
-                raise ValueError(f"unexpected upsert state {state!r}")
-
-        # Indexed, not `.get(..., frozenset())`: an absent entry reads as "the
-        # group contains nothing" and plans a delete for every declared key, so
-        # the convenient default is the destructive one — the same reason the
-        # field itself carries no default. `_map_groups` fills it for every
-        # group it reports present, so a KeyError here is a caller that built a
-        # `VaultRead` by hand and got it wrong.
-        titles = read.entry_titles[service]
-        # `written` is subtracted so the pass can never write a key and delete
-        # it in the same call. It follows from `values <= titles` on every
-        # parser path, and this keeps it a property of `apply_vault` rather than
-        # one inherited from a collaborator.
-        for key in sorted(declared - titles - written):
-            if not secrets_store.secret_exists(db_path, user_id, service, key):
-                continue
-            if secrets_store.get_secret(db_path, user_id, service, key) is None:
-                # Present and undecryptable: a stale master key, a half-loaded
-                # `secrets.env`, a rotation applied to the wrong host. The
-                # process-level guard above cannot see this — `_MIN_KEY_LEN` and
-                # presence are all it tests — so without this arm a wrong key
-                # turns a transient misconfiguration into permanent loss: the
-                # credential comes back when the right key does, and does not
-                # come back from a delete. Never destroy what cannot be read.
-                result.skipped.append((service, key, SKIP_UNREADABLE_ROW))
-                logger.warning(
-                    "vault: %s/%s is stored but will not decrypt, so it is not "
-                    "deleted; check ISTOTA_SECRET_KEY",
-                    _label(service),
-                    _label(key),
-                )
-                continue
-            if _near_miss_title(key, titles):
-                # An entry titled `api_key ` or `API_KEY` is refused above as a
-                # key this service does not declare, and would then be followed
-                # by a delete of the very credential it was meant to set —
-                # refuse the new value and destroy the old one, from one
-                # trailing space on a phone keyboard. Neither branch knows about
-                # the other, and §6 rule 3 licenses the delete in the abstract,
-                # but the combination is a state no rule intends. The fuzzy
-                # match only ever *holds* a deletion; nothing is written on it.
-                result.skipped.append((service, key, SKIP_DELETE_HELD))
-                logger.warning(
-                    "vault: %s/%s was not deleted: an entry title in that group "
-                    "differs from it only in case or surrounding whitespace, so "
-                    "the deletion is more likely a typo than an instruction",
-                    _label(service),
-                    _label(key),
-                )
-                continue
-            pending_deletes.append((service, key))
+        pending_deletes.append(name)
 
     if pending_deletes:
         # Named **before** the loop rather than after it. Each `delete_secret`
@@ -660,57 +716,71 @@ def apply_vault(
         # which. Logging the plan over-reports in that case, which is the
         # direction to be wrong in: the operator gets a superset of what went.
         logger.warning(
-            "vault: %s: deleting %d credential(s) absent from the vault: %s",
+            "vault: %s: deleting %d shared credential(s) absent from the "
+            "vault: %s",
             _label(user_id),
             len(pending_deletes),
-            ", ".join(f"{_label(s)}/{_label(k)}" for s, k in pending_deletes),
+            ", ".join(_label(name) for name in pending_deletes),
         )
-    for service, key in pending_deletes:
-        if secrets_store.delete_secret(db_path, user_id, service, key):
+    for name in pending_deletes:
+        if secrets_store.delete_secret(db_path, user_id, VAULT_ENTRY_SERVICE, name):
             result.deleted += 1
-            result.deleted_keys.append((service, key))
+            result.deleted_keys.append(name)
     return result
 
 
-def _near_miss_title(key: str, titles: frozenset[str]) -> bool:
-    """Whether some title in this group was probably meant to be ``key``.
+def _stored_entry_names(db_path: Path, user_id: str) -> set[str]:
+    """Every ``vault_entries`` key this user has, decryptable or not.
 
-    Compares on the two axes a phone keyboard moves: surrounding whitespace and
-    case. §3 matches entry titles exactly and reports a mismatch as a typo,
-    which is the right rule for deciding what to *write*; this is the narrower
-    question of whether a deletion licensed by that same mismatch should go
-    ahead, and there the answer that costs nothing is to hold.
-
-    **Asked of the group's titles rather than of the skips this pass recorded**,
-    which is wider by two shapes and was the first version's gap. An unknown key
-    only reaches ``skipped`` if it carried a value, so a near-miss title with an
-    *empty* password — or a duplicated one — is dropped at parse, lands in no
-    skip list, and its spelling is exactly what keeps the real key out of
-    ``entry_titles``: measured, `API_KEY` with a blank password beside a stored
-    `api_key` deleted the credential and put nothing in ``skipped``, so the user
-    got neither the new value nor a word about losing the old one. The evidence
-    the hold rests on is "the group holds a title that was probably meant to be
-    this key", which is a property of the titles, so that is what it reads.
-
-    A title equal to the key never reaches here: it would be in ``titles``, and
-    a key in ``titles`` is not a deletion candidate at all.
+    ``list_user_services`` rather than ``get_service_secrets``, and the
+    difference is the whole of the unreadable-row hold: the latter drops a row
+    it cannot decrypt, so a sweep built on it would not know the row is there
+    and would not be able to hold it back from deletion. This one returns no
+    plaintext at all, which is also what a delete plan wants.
     """
-    return any(title.strip().casefold() == key.casefold() for title in titles)
+    services = secrets_store.list_user_services(db_path, user_id)
+    return {
+        str(row.get("key"))
+        for row in services.get(VAULT_ENTRY_SERVICE, [])
+        if row.get("key")
+    }
 
 
-def _service_refusal(service: str, eligible: frozenset[str]) -> str | None:
-    """Why this service may not be vault-owned, or None.
+def has_shared_credentials(db_path, user_id: str) -> bool:
+    """Whether this user has anything in the shared-credential namespace.
 
-    The reserved-namespace arm is checked before eligibility although the
-    eligible set already excludes it, so that the refusal names the namespace
-    rather than reading as an ordinary unknown service — and so that it survives
-    a connector service one day appearing in the schema.
+    Presence, never a value: ``_stored_entry_names`` goes through
+    ``list_user_services``, which returns key names and timestamps, opens no
+    Fernet, needs no master key and bumps no ``last_accessed_at``. That matters
+    because the one caller is the prompt gate, which runs on every task
+    assembly including the dry run the goldens take.
+
+    **Gated on the master key as well as on the rows**, so this answers the
+    same question the serving read answers. ``get_service_secrets`` — what
+    ``task_env`` hands the proxy — returns ``{}`` outright with no
+    ``ISTOTA_SECRET_KEY``, which is a real shipped shape (``doctor``'s
+    ``security.secret_key`` exists because the standalone wizard shipped
+    without one). Without this arm the system half would tell the model it has
+    credentials while ``istota-credential list`` returned nothing, with no line
+    anywhere saying why.
+
+    What it still cannot see is a row that will not decrypt under a *wrong*
+    key: this counts it and the serving read drops it. That is the same
+    asymmetry ``apply_vault`` records one screen up, and it is bounded — the
+    prompt over-promises by one name rather than by the namespace.
+
+    Never raises and never reports a vault that is not there: a falsy
+    ``db_path`` and an unreadable database are both False, which is the
+    direction that withholds a prompt line rather than promising a namespace
+    nothing can serve.
     """
-    if service.startswith(_RESERVED_SERVICE_PREFIX):
-        return SKIP_RESERVED_SERVICE
-    if service not in eligible:
-        return SKIP_INELIGIBLE_SERVICE
-    return None
+    if not db_path or not secrets_store.secret_key_available():
+        return False
+    try:
+        return bool(_stored_entry_names(Path(db_path), user_id))
+    except Exception as exc:
+        logger.debug("vault: could not count shared credentials: %s", exc)
+        return False
 
 
 def _digest(data: bytes) -> str:
@@ -720,13 +790,20 @@ def _digest(data: bytes) -> str:
 def _recyclebin_uuid(kp):
     """The recycle bin's UUID, or None where there is not one.
 
-    Defence in depth rather than the boundary. The walk below starts at the root
-    group's own children, and KeePassXC's recycle bin is a root-level group, so
-    both a trashed entry and a trashed ``istota`` group are already outside what
-    is read. What this covers is the layout that is not excluded by
-    construction: any group can be nominated as the recycle bin, including a
-    service group, at which point every entry in it is something the user
-    deleted sitting exactly where the walk looks.
+    **The boundary on the unscoped path, defence in depth only on the scoped
+    one**, and the distinction is new rather than pedantic. It used to be
+    defence in depth outright: the walk started at the *children* of a named
+    ``istota`` group, and KeePassXC's bin is a root-level group, so a trashed
+    entry and a trashed ``istota`` group were both outside what was read by
+    construction. §1's unscoped read starts **at** the file root, where a
+    root-level bin is an ordinary subgroup — so ``_visit_group``'s
+    ``subgroup.uuid == walk.recyclebin`` test is now the only thing keeping a
+    credential the user deleted out of ``vault_entries``, and out of the
+    namespace their own tasks can fetch by name. Do not remove it as redundant.
+
+    It still covers the layout neither path excludes by construction: any group
+    can be nominated as the bin, including one nested inside the read, at which
+    point everything the user deleted sits exactly where the walk looks.
 
     ``recyclebin_group`` reads the Meta element and decodes it, so a database
     whose Meta is absent or malformed raises rather than answering — and a
@@ -739,93 +816,407 @@ def _recyclebin_uuid(kp):
     return getattr(group, "uuid", None) if group is not None else None
 
 
+def slug_name(segments: Sequence[str]) -> str | None:
+    """The one name these path segments produce, or ``None`` for none.
+
+    A name is derived rather than typed, so the user never has to learn
+    istota's spelling rules to fill in the file. Each segment — a group name, an
+    entry title, or the field's own suffix — is casefolded, every character
+    outside ``[a-z0-9]`` becomes ``_``, runs of ``_`` collapse and the ends are
+    stripped; the segments are then joined with ``_`` and the whole must match
+    :data:`VAULT_NAME_RE`.
+
+    **A segment that slugs to nothing refuses the whole name**, and that is a
+    rule rather than a shortcut: the pattern admits a trailing underscore, so
+    joining an empty segment would quietly answer ``aws_`` for
+    ``istota/aws/!!!`` — a name the user never wrote, which a sibling
+    ``istota/aws/???`` produces identically. Collisions are caught a level up,
+    so the pair would at least not be applied; a single such entry would be.
+
+    **Pure, and the caller warns.** The composed name is what a warning has to
+    report and only the caller knows which entry and which field produced it,
+    so this returns ``None`` and every call site names its own subject through
+    :func:`_label`. Nothing here logs, which also makes it safe to call from a
+    test in a loop.
+    """
+    parts: list[str] = []
+    for segment in segments:
+        slug = _SLUG_DROP_RE.sub("_", str(segment).casefold()).strip("_")
+        if not slug:
+            return None
+        parts.append(slug)
+    if not parts:
+        return None
+    name = "_".join(parts)
+    return name if VAULT_NAME_RE.fullmatch(name) else None
+
+
+@dataclass
+class _Walk:
+    """What one walk has found so far. Mutable, single-threaded, per parse."""
+
+    recyclebin: object = None
+    #: name -> every value produced under it, so a second producer is a
+    #: collision rather than an overwrite.
+    candidates: dict[str, list[str]] = field(default_factory=dict)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+    entries_visited: int = 0
+    fields_examined: int = 0
+    untitled: int = 0
+    depth_dropped: int = 0
+    stopped: str = ""
+
+
+def _root_groups(kp, recyclebin) -> tuple[list, list]:
+    """The top-level groups that narrow the read, and the ones to walk.
+
+    Two lists, because they answer different questions. The first is "does
+    anything narrow this read at all", which decides ``VaultRead.scoped`` and
+    therefore whether the file root is walked instead. The second is what to
+    walk, which excludes a group nominated as the recycle bin. They differ by
+    exactly that group, and collapsing them is the widening the second
+    paragraph below is about.
+
+    The match strips surrounding whitespace and folds case, so ``Istota``,
+    ``ISTOTA`` and ``"istota "`` all scope — see :data:`VAULT_ROOT_GROUP` for
+    why that is load-bearing rather than a courtesy. **Top level only**: a
+    group named ``istota`` nested inside another is an ordinary group and
+    contributes a path segment like any other.
+
+    **A group nominated as the recycle bin still counts as one, and that is a
+    narrowing rather than an oversight.** It contributes no entries — the
+    caller drops it — but its *presence* keeps the read scoped, so the answer
+    is "this file narrows to a group that happens to hold only deleted things",
+    which reads nothing. Skipping it outright would leave no root at all, and
+    the caller would then read the **whole file**: a widening arranged by the
+    Meta element of a file a task in that user's own sandbox can write, which
+    is the one direction this module must never move by accident.
+
+    Several matching groups are all read, which is what the old exact match did
+    for duplicates; nothing chooses between them, because choosing would decide
+    by XML order. The casefold makes an `istota` / `Istota` pair newly
+    reachable, and a name they share is then an ordinary collision — held where
+    fewer than two of them supply a value, skipped where more do.
+    """
+    found = []
+    live = []
+    for group in kp.root_group.subgroups:
+        if str(group.name or "").strip().casefold() != VAULT_ROOT_GROUP:
+            continue
+        found.append(group)
+        if recyclebin is None or group.uuid != recyclebin:
+            live.append(group)
+    return found, live
+
+
 def _map_groups(kp, digest: str) -> VaultRead:
-    """``istota/<service>/<key>`` out of an open database.
+    """Every name the file shares, out of an open database.
 
-    The entry **title** is the key and the **password** field is the value.
-    Username, URL, notes, attachments, custom string fields, anything nested
-    deeper than one subgroup, and entries sitting directly under ``istota/`` are
-    all ignored — a title rather than custom attributes because several mobile
-    clients cannot create those at all, and editing from a phone is the point.
+    **The file is the consent boundary and the ``istota`` group is an optional
+    narrowing inside it** (§1). A top-level group matching
+    :data:`VAULT_ROOT_GROUP` scopes the read to it and everything outside is
+    parsed and discarded; with no such group the **whole file** is read, the
+    root standing in for ``istota/``. Either way the shape below the starting
+    point is the user's own — entries directly under it or in subgroups nested
+    to :data:`VAULT_MAX_DEPTH`.
 
-    **The service segment folds and nothing else does.** A phone keyboard
-    autocapitalizes a group name it takes for the start of a sentence, and
-    ``Karakeep`` silently owning nothing is the hardest failure in this design to
-    diagnose from the user's end, because the file looks right. Every service
-    name is lower-case ASCII with no pair that collides when folded. Entry
-    titles are matched exactly, since a key that does not match the schema is
-    reported as a typo at apply time rather than silently discarded, and so is
-    the ``istota`` group itself.
+    An unscoped read is reported rather than refused: ``VaultRead.scoped`` is
+    False, the settings card and ``vault-status`` say so, and the first
+    unscoped sync for a user raises a notification. It is not a refusal because
+    istota does not second-guess a file the user deliberately placed in their
+    own vault folder.
 
-    **Two spellings of one service are one service.** The spec does not name
-    that case; it is the duplicate-title rule's own premise a level up, since
-    ``Karakeep/api_key`` beside ``karakeep/api_key`` is the same choice made by
-    XML order. So entries pool across every group folding to one name, a title
-    seen twice anywhere in the pool is a duplicate skip, and ``group_present``
-    keeps the first spelling found.
+    Each entry contributes one name per field: the password under the entry's
+    own path, the username, the URL and each custom string field under that
+    path plus one more segment. A field that is empty after stripping produces
+    a name with no value, which is *held* rather than dropped — see
+    :class:`VaultRead`. Notes are not read (they are free text and frequently
+    hold something other than a credential), and neither are attachments.
 
-    Neither skip rule is a deletion. A key skipped here is simply absent from
-    the group, and what the apply step does about that is its own rule.
+    **Custom string fields are read where the previous design ignored them.**
+    The reason they were ignored still holds — several mobile clients cannot
+    create them — but it argues against *requiring* them rather than against
+    reading one that is there, and an entry with four values in it is exactly
+    the case that did not fit before.
+
+    **A name produced twice anywhere in the tree is skipped in every place it
+    was produced**, with one warning. The derivation flattens, so
+    ``istota/aws/key``, ``istota/AWS Key`` and an entry ``aws`` with a custom
+    field ``key`` all yield ``aws_key``; choosing one silently would make which
+    credential is live depend on XML order. That is why the collision is
+    resolved over the whole namespace after the walk rather than per group
+    during it.
+
+    **The caps bound the work after decryption**, not the read — the file is
+    already refused unread above :data:`VAULT_READ_CAP_BYTES`. Each of them
+    warns and applies what it read, because half a namespace applied is a user
+    with some credentials working and a refusal is a user with none.
 
     **Depth comes from ``Group.entries`` and ``Group.subgroups`` being direct
     children**, which is a property of pykeepass rather than of anything written
-    here — so the two exclusions that follow from it are pinned by a fixture
-    rather than by a branch: an entry one subgroup deeper is not a key, and an
-    edited entry's ``History`` copies are not duplicates of it. The second is the
-    expensive one if it ever changes, since it would turn every credential the
-    user has ever edited into a duplicate hard-skip.
-
-    A group whose name is only whitespace is dropped rather than becoming a
-    service, because §6's deletion rule fires on presence in ``group_present``
-    and a junk row there is a row that can delete. It is *not* stripped for the
-    purpose of matching, since §3 strips values and normalizes nothing else.
+    here — so an edited entry's ``History`` copies are not entries of the group,
+    and are not duplicates of it. That is the expensive one if it ever changes,
+    since it would turn every credential the user has ever edited into a
+    collision.
     """
-    services: dict[str, dict[str, str]] = {}
-    group_present: dict[str, str] = {}
-    seen: dict[str, set[str]] = {}
-    duplicated: dict[str, set[str]] = {}
-    recyclebin = _recyclebin_uuid(kp)
+    walk = _Walk(recyclebin=_recyclebin_uuid(kp))
+    named, roots = _root_groups(kp, walk.recyclebin)
+    # `named` rather than `roots`: a file whose only `istota` group is the
+    # recycle bin is a *scoped* read of nothing, not an unscoped read of
+    # everything. See `_root_groups`.
+    scoped = bool(named)
+    # The database's own root group is the starting point when nothing narrows
+    # the read, and it contributes **no** path segment — it stands in for
+    # `istota/`, so `<root>/aws/key` produces `aws_key` exactly as
+    # `istota/aws/key` does. Its own entries are read too: a KDBX exported out
+    # of a password manager commonly has entries sitting at the top level.
+    for root in roots if scoped else [kp.root_group]:
+        _visit_group(walk, root, (), 0)
 
-    for root_group in kp.root_group.subgroups:
-        if root_group.name != VAULT_ROOT_GROUP:
-            continue
-        if recyclebin is not None and root_group.uuid == recyclebin:
-            continue
-        for group in root_group.subgroups:
-            if recyclebin is not None and group.uuid == recyclebin:
+    if not scoped:
+        # A notice, never a refusal. One line per parse rather than per name,
+        # and it carries a count rather than any name — the durable half of
+        # this is the notification `_publish` raises on the first unscoped
+        # sync, which is what catches "I pointed at my real password database"
+        # within one interval instead of never.
+        logger.warning(
+            "vault: no top-level %r group, so the whole file is shared "
+            "(%d name(s))",
+            VAULT_ROOT_GROUP,
+            len(walk.candidates),
+        )
+    if walk.untitled:
+        # Counted rather than one line each: an entry with no title has no name
+        # to report, so N lines say exactly what one line says.
+        logger.warning(
+            "vault: %d entr%s had no title, skipped",
+            walk.untitled,
+            "y" if walk.untitled == 1 else "ies",
+        )
+    if walk.depth_dropped:
+        logger.warning(
+            "vault: %d group(s) deeper than %d level(s) below the read's root "
+            "were not read",
+            walk.depth_dropped,
+            VAULT_MAX_DEPTH,
+        )
+    if walk.stopped:
+        logger.warning(
+            "vault: stopped reading at the %s cap; what was read is applied",
+            walk.stopped,
+        )
+
+    services: dict[str, str] = {}
+    held: set[str] = set()
+    for name, produced in walk.candidates.items():
+        if len(produced) > 1:
+            values = sum(1 for value in produced if value)
+            if values < 2:
+                # **Held rather than deleted, and the count is the reason.**
+                # §2 licenses the deletion of a collided name on one premise:
+                # "istota cannot say which of two values it is." With fewer
+                # than two values that premise is simply false — there is
+                # nothing to choose between — so the licence does not apply and
+                # destroying the stored row is a loss with no argument behind
+                # it. The name is still absent from `services`, so nothing is
+                # *written* on ambiguous evidence; only the destruction is
+                # withheld.
+                #
+                # The one-value case is the one that costs a credential, and
+                # the tree had already measured it: `_near_miss_title`, removed
+                # with the service mapping this change replaces, existed for
+                # exactly it and its docstring recorded the observation —
+                # `API_KEY` with a blank password beside a stored `api_key`
+                # deleted the credential. Under the flat namespace both titles
+                # slug to one name, so the hazard survived the mechanism that
+                # used to cover it. Silent at zero values (an entry with no URL
+                # is the ordinary case and two colliding entries collide on
+                # their empty fields too, so warning there names fields the
+                # user never filled in) and warned at one, because at one the
+                # user has a real credential that is not being applied.
+                held.add(name)
+                if values:
+                    walk.skipped.append((name, SKIP_DUPLICATE_NAME))
+                    logger.warning(
+                        "vault: %s is produced by %d entries and only one of "
+                        "them has a value, so none is used and the stored "
+                        "credential is left alone; rename one",
+                        _label(name),
+                        len(produced),
+                    )
                 continue
-            name = group.name or ""
-            if not name.strip():
-                continue
-            folded = name.casefold()
-            group_present.setdefault(folded, name)
-            values = services.setdefault(folded, {})
-            titles = seen.setdefault(folded, set())
-            dupes = duplicated.setdefault(folded, set())
-            untitled = 0
-            for entry in group.entries:
-                if not entry.title:
-                    untitled += 1
-                    continue
-                _take_entry(folded, entry, values, titles, dupes)
-            if untitled:
-                # Counted rather than one line each: an entry with no title has
-                # no name to report, so N lines say exactly what one line says.
-                logger.warning(
-                    "vault: %s has %d entr%s with no title, skipped",
-                    _label(name),
-                    untitled,
-                    "y" if untitled == 1 else "ies",
-                )
+            # Two or more real values. Absent, and therefore deleted if it was
+            # there before — which is correct, since istota cannot say which of
+            # them it is, and keeping whichever is already stored would make
+            # that answer depend on history rather than on the file. Not held
+            # for exactly that reason.
+            walk.skipped.append((name, SKIP_DUPLICATE_NAME))
+            logger.warning(
+                "vault: %s is produced by %d entries with %d different values, "
+                "so none of them is used; rename one",
+                _label(name),
+                len(produced),
+                values,
+            )
+            continue
+        value = produced[0]
+        if not value:
+            # Silent: an entry with no URL is the ordinary case, not a mistake.
+            # It is *held* rather than dropped, which is the whole point —
+            # blanking a password field must not delete the credential.
+            held.add(name)
+            continue
+        # `surrogatepass` is belt-and-braces rather than a live case: lxml
+        # refuses to serialize a lone surrogate, measured against pykeepass
+        # 4.2.0, so no KDBX can hold one. It is kept because the alternative is
+        # this measurement raising, and `secrets_store`'s own encode is strict
+        # — so a value that somehow carried one would abort a pass part-way
+        # rather than being skipped here.
+        size = len(value.encode("utf-8", "surrogatepass"))
+        if size > VAULT_MAX_VALUE_BYTES:
+            walk.skipped.append((name, SKIP_OVERSIZE_VALUE))
+            held.add(name)
+            logger.warning(
+                "vault: %s is %d bytes, over the %d-byte limit, so it is not "
+                "used; the stored value is left alone",
+                _label(name),
+                size,
+                VAULT_MAX_VALUE_BYTES,
+            )
+            continue
+        services[name] = value
 
     return VaultRead(
         digest=digest,
         services=services,
-        group_present=group_present,
-        # `seen` is already "every title in this group", skipped ones included,
-        # which is what the deletion rule needs and what `services` is not.
-        entry_titles={service: frozenset(titles) for service, titles in seen.items()},
+        held=frozenset(held),
+        # The depth cap is deliberately not truncation: see `VaultRead`.
+        truncated=walk.stopped if walk.stopped in _TRUNCATING_CAPS else "",
+        scoped=scoped,
+        skipped=tuple(walk.skipped),
     )
+
+
+def _visit_group(walk: _Walk, group, path: tuple[str, ...], depth: int) -> None:
+    """One group's entries, then its subgroups, into ``walk``.
+
+    ``depth`` is how many subgroup levels below the root group this one sits,
+    so the root itself is ``0``. The recycle bin is tested at **every** level
+    rather than at the top two: any group can be nominated as the bin,
+    including one nested several deep, at which point everything the user
+    deleted sits exactly where the walk looks.
+    """
+    for entry in group.entries:
+        if walk.stopped:
+            return
+        if walk.entries_visited >= VAULT_MAX_ENTRIES:
+            walk.stopped = "entry"
+            return
+        walk.entries_visited += 1
+        _take_entry(walk, entry, path)
+
+    for subgroup in group.subgroups:
+        if walk.stopped:
+            return
+        if walk.recyclebin is not None and subgroup.uuid == walk.recyclebin:
+            continue
+        if depth + 1 > VAULT_MAX_DEPTH:
+            walk.depth_dropped += 1
+            continue
+        name = subgroup.name or ""
+        _visit_group(walk, subgroup, (*path, name), depth + 1)
+
+
+def _take_entry(walk: _Walk, entry, group_path: tuple[str, ...]) -> None:
+    """One entry's fields into ``walk.candidates``, or a warning saying why not.
+
+    Every field is offered whatever its value, including an empty one, because
+    an empty value is a *hold* rather than an absence — a name the file
+    produced and cannot supply a value for is a name the applying half must not
+    delete. Only the walk's own refusals (an unusable name) drop a name
+    entirely.
+    """
+    title = entry.title or ""
+    if not title:
+        walk.untitled += 1
+        return
+
+    path = (*group_path, title)
+    if slug_name(path) is None:
+        walk.skipped.append((_original(path), SKIP_UNUSABLE_NAME))
+        logger.warning(
+            "vault: %s does not produce a usable name (letter first, at most "
+            "%d characters of a-z, 0-9 and _), skipped",
+            _original(path),
+            VAULT_NAME_MAX_CHARS,
+        )
+        return
+
+    fields: list[tuple[tuple[str, ...], object]] = [
+        (path, entry.password),
+        ((*path, _USERNAME_SEGMENT), entry.username),
+        ((*path, _URL_SEGMENT), entry.url),
+    ]
+    # `custom_properties` excludes the reserved fields above, so a custom
+    # field named `URL` is the one shape that can collide with a standard one —
+    # which is the collision rule doing its job rather than a case to special
+    # -case here.
+    for field_name, raw in sorted(
+        entry.custom_properties.items(), key=lambda kv: str(kv[0])
+    ):
+        fields.append(((*path, field_name), raw))
+
+    produced = 0
+    for segments, raw in fields:
+        # Counted **before** the name is derived rather than after: the branch
+        # below that produces no name is not free, and a cap only the
+        # successful branch pays is not a cap.
+        if walk.fields_examined >= VAULT_MAX_NAMES:
+            walk.stopped = "name"
+            return
+        walk.fields_examined += 1
+        value = str(raw or "").strip()
+        name = slug_name(segments)
+        if name is None:
+            # **Silent where the field is empty**, which is the ordinary case
+            # rather than a mistake: every entry has a URL field and most have
+            # no username, so a title at the length cap would otherwise warn
+            # twice about names nobody asked for. An empty field with no usable
+            # name is also nothing to hold — there is no name to hold it under.
+            if value:
+                walk.skipped.append((_original(segments), SKIP_UNUSABLE_NAME))
+                logger.warning(
+                    "vault: the field %s does not produce a usable name, skipped",
+                    _original(segments),
+                )
+            continue
+        walk.candidates.setdefault(name, []).append(value)
+        if value:
+            produced += 1
+
+    if not produced:
+        # Every field empty. One warning, no skip record: the hold is what
+        # matters and it is already recorded, and the user's remedy is the same
+        # sentence the old empty-password warning carried.
+        logger.warning(
+            "vault: %s has no value in any field, so nothing is set from it; "
+            "delete the entry to remove the credential",
+            _original(path),
+        )
+
+
+def _original(segments: Sequence[str]) -> str:
+    """The path as the file spells it, bounded and flattened.
+
+    Bounded **where it is produced** rather than where it is rendered, because
+    this is the one string in a :class:`VaultRead` that is file text rather
+    than a derived name: it is what a skip record carries when the refusal is
+    that no usable name could be derived, and a skip record outlives the log
+    line — it reaches ``vault-status`` and the read's own ``__repr__``. An
+    entry title is unbounded and free to carry a newline, and the file is
+    writable by a task in that user's own sandbox.
+    """
+    return _label("/".join(str(segment) for segment in segments))
 
 
 def _label(name: str, limit: int = _LABEL_MAX_CHARS) -> str:
@@ -852,53 +1243,6 @@ def _label(name: str, limit: int = _LABEL_MAX_CHARS) -> str:
     """
     head = "".join(ch if ch.isprintable() else " " for ch in str(name)[:limit])
     return head + ("…" if len(str(name)) > limit else "")
-
-
-def _take_entry(
-    service: str,
-    entry,
-    values: dict[str, str],
-    titles: set[str],
-    duplicated: set[str],
-) -> None:
-    """One entry into ``values``, or a warning saying why not.
-
-    **The title is recorded as seen before the value is looked at**, which is
-    the ordering the duplicate rule depends on: an empty-password ``api_key``
-    followed by an ``api_key`` holding a value would otherwise resolve to the
-    second, which is the silent XML-order dependence the rule exists to refuse,
-    arrived at from the other direction. A duplicate also removes whatever was
-    already accepted under that title, since the first copy is no more
-    authoritative than the second.
-
-    The caller has already dropped an entry with no title, since that one has no
-    name to report and is counted per group instead. Every name that does reach a
-    log line goes through ``_label``.
-    """
-    title = entry.title
-    if title in titles:
-        values.pop(title, None)
-        if title not in duplicated:
-            duplicated.add(title)
-            logger.warning(
-                "vault: %s/%s appears more than once, so neither copy is used; "
-                "delete one",
-                _label(service),
-                _label(title),
-            )
-        return
-    titles.add(title)
-
-    value = (entry.password or "").strip()
-    if not value:
-        logger.warning(
-            "vault: %s/%s has an empty password field, skipped; delete the entry "
-            "to remove the credential",
-            _label(service),
-            _label(title),
-        )
-        return
-    values[title] = value
 
 
 # ---------------------------------------------------------------------------
@@ -1092,7 +1436,10 @@ NOTIFICATION_REASONS: dict[str, str] = {
         "caught mid-write looks like, so check the mount before suspecting the "
         "file"
     ),
-    VaultMissing.__name__: "there is nothing at the configured path",
+    VaultMissing.__name__: (
+        "there is no vault file to read — put one in your vault folder, or "
+        "check the path an operator configured"
+    ),
     VaultUnreadable.__name__: (
         "the file at the configured path was refused unread — it is not a "
         "regular file, or it is over the size cap"
@@ -1127,6 +1474,29 @@ def notification_reason(outcome: str) -> str:
     return NOTIFICATION_REASONS.get(outcome, _DEFAULT_NOTIFICATION_REASON)
 
 
+def resolution_reason(refusal: str | None) -> str:
+    """The sentence a surface renders for a resolution that found no file.
+
+    Beside :func:`_resolution_outcome` rather than inside it, because the two
+    answer different questions and only one of them is about a failure: an
+    unchosen folder is *not* an outcome — nothing failed and nothing is
+    notified — and it still has something to say on the settings card, which is
+    the surface whose dropdown answers it.
+    """
+    exc = _resolution_outcome(refusal)
+    if exc is not None:
+        return notification_reason(type(exc).__name__)
+
+    from . import storage  # noqa: PLC0415 - see `sync_user`
+
+    if refusal == storage.VAULT_DIR_UNCHOSEN:
+        return (
+            "there are several vault files in your vault folder — choose which "
+            "one Istota should read"
+        )
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # The durable record
 # ---------------------------------------------------------------------------
@@ -1145,7 +1515,12 @@ VAULT_SYNC_STATE_KEY = "last_sync"
 
 
 def encode_sync_state(
-    outcome: str, reason: str, *, now: str, previous: dict | None
+    outcome: str,
+    reason: str,
+    *,
+    now: str,
+    previous: dict | None,
+    unscoped: bool | None = None,
 ) -> str:
     """The row body for the cycle that just settled.
 
@@ -1156,17 +1531,32 @@ def encode_sync_state(
     the sync time would make a vault that has been broken for a week read as
     having synced a moment ago.
 
+    ``unscoped`` is §1's answer for the surfaces that never open the file — the
+    settings card runs ``vault_status(parse=False)`` and so cannot know it any
+    other way. ``None`` means "this cycle did not read the file", and carries
+    the previous answer forward for the same reason ``ok_at`` is carried: a
+    failed cycle is not evidence the file grew a group. That carry is also what
+    keeps the first-unscoped notification a *latch* rather than something a
+    transient failure re-arms.
+
+    An absent key on an older record reads as False, which is the right
+    default: nothing was ever notified for it, so the first cycle after an
+    upgrade raises the notice exactly once.
+
     ``reason`` is the ``NOTIFICATION_REASONS`` sentence rather than the
     exception's, for the reason that table gives: this row is read by the web
     tier and snapshotted by ``db_backup`` onto the mount.
     """
     carried = (previous or {}).get("ok_at")
+    if unscoped is None:
+        unscoped = bool((previous or {}).get("unscoped"))
     return json.dumps(
         {
             "at": now,
             "outcome": outcome,
             "reason": reason,
             "ok_at": now if outcome == OUTCOME_OK else (carried or None),
+            "unscoped": bool(unscoped),
         },
         sort_keys=True,
     )
@@ -1220,8 +1610,21 @@ def read_sync_state(conn, user_id: str) -> dict | None:
 _RECORD_BUSY_TIMEOUT_MS = 2000
 
 
-def _record_sync_state(db_path, user_id: str, outcome: str, reason: str) -> None:
+def _record_sync_state(
+    db_path, user_id: str, outcome: str, reason: str, *, unscoped: bool | None = None
+) -> None:
     """Write down what this cycle settled, for the processes that never see it.
+
+    ``unscoped`` rides along for the surfaces that never open the file — the
+    settings card runs ``vault_status(parse=False)`` and can learn it no other
+    way. **It is state, not a latch**, and the distinction cost a review
+    finding: an earlier shape returned "this is the transition into an unscoped
+    read" from here and had :func:`_publish` raise the notice on it, which
+    commits the latch *before* the notice is written. A notice write that then
+    failed — and that path swallows every exception by contract — left the
+    record saying the user had been told, for ever, about the one condition
+    this feature exists to announce. The latch is the notification row itself
+    now; see :func:`_report_unscoped`.
 
     ``_SYNC_STATE`` is per-process and stays that way — §7's cache is about
     whether the *next cycle in this process* does work, and persisting it would
@@ -1251,14 +1654,19 @@ def _record_sync_state(db_path, user_id: str, outcome: str, reason: str) -> None
                     conn, user_id, VAULT_SYNC_STATE_NAMESPACE, VAULT_SYNC_STATE_KEY
                 )
             )
+            body = encode_sync_state(
+                outcome,
+                reason,
+                now=db.iso_utc_now(),
+                previous=previous,
+                unscoped=unscoped,
+            )
             db.kv_set(
                 conn,
                 user_id,
                 VAULT_SYNC_STATE_NAMESPACE,
                 VAULT_SYNC_STATE_KEY,
-                encode_sync_state(
-                    outcome, reason, now=db.iso_utc_now(), previous=previous
-                ),
+                body,
             )
     except Exception:  # noqa: BLE001 - a record of the work, not the work
         logger.warning(
@@ -1348,9 +1756,16 @@ class VaultSyncResult:
     transition: bool = False
     reason: str = ""
     path: str = ""
-    owned: frozenset[str] = frozenset()
     apply: VaultApplyResult | None = None
     last_outcome: str = ""
+    #: §1: whether a top-level `istota` group narrowed the read. A bool off the
+    #: `VaultRead` rather than the read itself, so the "never carries a
+    #: VaultRead" rule above is untouched. False on a cycle that never parsed,
+    #: which is why the surfaces that must distinguish the two read the durable
+    #: record instead.
+    unscoped: bool = False
+    #: How many names the cycle read, for the notice's count. Names never.
+    names: int = 0
 
 
 @dataclass(frozen=True)
@@ -1361,27 +1776,38 @@ class VaultStatusReport:
     fact with a CLI and a web surface. The CLI formats this; §9's
     ``GET /settings/vault`` will serialise the same fields.
 
-    **Names and counts only, never a value.** ``groups`` maps the folded service
-    name to the spelling as it stands in the file, which is what tells a user
-    whose group is ``Karakeep`` that it matched; ``key_counts`` is how many
-    usable entries each group holds; ``unowned`` and ``absent`` are the two ways
-    a group and ``vault_services`` fail to line up, and between them they answer
-    the hardest failure in this design to diagnose from the user's end.
+    **Names and counts only, never a value.** ``names`` is the namespace the
+    parse produced, sorted, which is the feedback this feature has never had:
+    after dropping a file in and generating a passphrase, the user can see
+    which names arrived. ``skipped`` is why one they expected is not there.
+    ``scoped`` is §1's answer — False means the file has no ``istota`` group
+    and every credential in it is shared.
+
+    Showing a user their own names is deliberately **not** the rule ``doctor``
+    follows: ``security.vault_contents`` reports counts and no names, because a
+    ``CheckResult`` is rendered into the boot log and the admin Health pane
+    where one user's labels are read by every admin. This is the user's own
+    terminal.
     """
 
     user_id: str
     configured: bool
     path: str = ""
     refusal: str = ""
-    owned: tuple[str, ...] = ()
     passphrase_present: bool = False
     outcome: str = ""
     reason: str = ""
-    groups: dict[str, str] = field(default_factory=dict)
-    key_counts: dict[str, int] = field(default_factory=dict)
-    unowned: tuple[str, ...] = ()
-    absent: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    skipped: tuple[tuple[str, str], ...] = ()
+    scoped: bool = True
+    truncated: str = ""
     last_outcome: str = ""
+
+    #: What the durable record says about the last cycle's scope, for the
+    #: surface that never opens the file. `scoped` above is this call's own
+    #: answer and is meaningless on the `parse=False` arm; this one survives
+    #: the process that wrote it.
+    recorded_unscoped: bool = False
 
     #: The durable record of what the *syncing* process last settled, which is
     #: a different question from the four fields above and is the only one a
@@ -1400,26 +1826,14 @@ class VaultStatusReport:
     parsed: bool = False
 
 
-def format_skip(service: str, key: str) -> str:
-    """One ``skipped`` triple's subject, for a human-readable report.
-
-    ``VaultApplyResult.skipped`` carries an **empty key** for a service-level
-    refusal — the whole service was refused and no key of it was looked at — so
-    rendering ``f"{service}/{key}"`` blindly prints ``monarch/`` with nothing
-    after the slash, which reads as a key named ``""`` rather than as a service
-    nobody may own.
-    """
-    return f"{_label(service)}/{_label(key)}" if key else _label(service)
-
-
 def label_for_display(name: str) -> str:
     """One name out of the vault file, bounded and flattened for a human.
 
-    The public spelling of ``_label`` for a renderer outside this module.
-    ``format_skip`` already applies it to the names it composes; a report that
-    prints a group name straight out of ``VaultStatusReport`` needs the same
-    rule, because §12 records that a task in the user's own sandbox can
-    overwrite that file and the consumer is an operator's terminal.
+    The public spelling of ``_label`` for a renderer outside this module. Every
+    name a report prints came out of the vault file, and §12 records that a task
+    in the user's own sandbox can overwrite it — so a name reaching an
+    operator's terminal is attacker-reachable text and takes the same bound the
+    log lines here take.
     """
     return _label(name)
 
@@ -1443,35 +1857,84 @@ def sync_is_scheduled(config) -> bool:
     return getattr(config.scheduler, "vault_sync_interval", 0) > 0
 
 
-def vault_owned_services(config, user_id: str) -> frozenset[str]:
-    """Which of this user's services the vault owns, right now.
+def _vault_is_enabled(config, user_id: str) -> bool:
+    """Has this user turned a vault on at all — the cycle's first question.
 
-    The predicate §9's ``vault_managed`` and open question 3's CLI refusal both
-    read: the service is in ``vault_services`` **and** the user's ``vault_path``
-    resolves. A configured-but-refused path owns nothing in practice, and
-    refusing an operator's write on the strength of a line that does not work is
-    a refusal with no remedy behind it.
+    A vault is a file **and** a passphrase, and the passphrase is the half that
+    cannot become true by accident: nothing can be read without it, so a
+    ``.kdbx`` sitting in the folder of a user who has not provisioned one is
+    not a configured vault and must not be reported as a broken one.
 
-    **The cheap half is asked first**, deliberately. Resolving walks directories
-    and opens a descriptor, and it logs a refusal — so testing the service set
-    afterwards would make every ``istota secret ensure`` for every user pay a
-    directory walk, and would emit ``vault_path_refused`` as a side effect of
-    commands that have nothing to do with the vault.
+    **A configured ``vault_path`` counts too, and that is not the same
+    question.** It is an operator's line rather than the user's own act, so a
+    path with no passphrase behind it is a misconfiguration somebody has to be
+    told about — ``VaultPassphraseMissing`` names the command that fixes it.
+    Gating on the passphrase alone would make that state silent on every
+    surface a user sees. It costs no directory read either: a configured path
+    resolves without the folder being listed.
 
-    Closes the descriptor it opens: this asks a question and opens nothing.
+    Never raises. A database that cannot be opened answers False on the
+    passphrase half, which is the safe direction for a background gate: the
+    next cycle asks again, where the other way round is a resolve and a read on
+    every user of a deployment whose database is gone.
+
+    **Present-but-blank counts as configured**, deliberately, which is why the
+    test is ``raw != ""`` rather than ``raw.strip()``:
+    ``resolve_user_vault_path``'s own contract is that ``vault_path = "  "`` is
+    "a configured value that resolves to nothing, which must not be silence",
+    and it refuses it by name. A gate that stripped would sit upstream of that
+    refusal and make it unreachable.
     """
-    declared = frozenset(config.vault_services_for(user_id))
-    if not declared:
-        return frozenset()
+    raw = config.vault_path_for(user_id)
+    if isinstance(raw, str) and raw != "":
+        return True
+    return _passphrase_present(config, user_id)
 
-    from . import storage  # noqa: PLC0415 - see `sync_user` for why
 
-    location = storage.resolve_user_vault_path(config, user_id).location
-    if location is None:
-        return frozenset()
-    if location.dir_fd is not None:
-        os.close(location.dir_fd)
-    return declared
+def _passphrase_present(config, user_id: str) -> bool:
+    """Does this user have a vault passphrase row. Presence, never a value.
+
+    Presence rather than a successful decrypt: a row that will not decrypt is
+    still a vault somebody configured, and the class that says so is
+    ``VaultKeyUnusable`` from further down the cycle rather than silence here.
+    """
+    if config.db_path is None:
+        return False
+    try:
+        return secrets_store.secret_exists(
+            config.db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
+        )
+    except Exception:  # noqa: BLE001 - a gate, never the work
+        logger.warning(
+            "vault: %s: could not check for a stored passphrase", _label(user_id)
+        )
+        return False
+
+
+def _resolution_outcome(refusal: str | None) -> VaultError | None:
+    """Which failure, if any, a resolution with no location is.
+
+    Three answers from two new refusal ids, and collapsing any pair of them
+    loses something:
+
+    - ``VAULT_DIR_EMPTY`` is :class:`VaultMissing`. This user has a passphrase,
+      so they have configured a vault and the file is not there — the existing
+      class, its existing retry rule and its existing notification, because
+      "the file went away" is worth saying.
+    - ``VAULT_DIR_UNCHOSEN`` is **nothing at all**. Several files and none
+      chosen is a question for the settings card, not a fault: reporting it as
+      a failure would push a notification at a user whose answer is one
+      dropdown away, every cycle until they answer it.
+    - Any ``VAULT_PATH_*`` id is :class:`VaultPathRefused`, unchanged — a
+      configured path the daemon may not open is an operator's to fix.
+    """
+    from . import storage  # noqa: PLC0415 - see `sync_user`
+
+    if refusal is None or refusal == storage.VAULT_DIR_UNCHOSEN:
+        return None
+    if refusal == storage.VAULT_DIR_EMPTY:
+        return VaultMissing("no vault file in the vault folder")
+    return VaultPathRefused(refusal)
 
 
 def sync_user(
@@ -1481,8 +1944,12 @@ def sync_user(
 
     The order is the design and each step earns its place ahead of the next:
 
-    1. **Resolve.** No ``vault_path`` is not a failure and is reported as
-       ``OUTCOME_NOT_CONFIGURED``; a *refused* path is ``VaultPathRefused``.
+    0. **Is a vault switched on at all?** :func:`_vault_is_enabled`, and it is
+       ahead of the resolve because the resolve now lists a directory, which on
+       the deployment shape this runs on is a FUSE mount. A user with neither a
+       passphrase nor a configured path is skipped before any file is touched.
+    1. **Resolve.** No file is not a failure; which of its two shapes *is* one
+       is :func:`_resolution_outcome`.
     2. **Read the bytes and hash them.** Bounded and cheap, and it needs no
        library at all — ``pykeepass`` is not imported on a cycle that stops here.
     3. **Compare the digest.** An unchanged file stops the cycle: no key
@@ -1518,28 +1985,27 @@ def sync_user(
     if force:
         reset_sync_state(user_id)
 
-    resolution = storage.resolve_user_vault_path(config, user_id)
+    if not _vault_is_enabled(config, user_id):
+        # The feature is off for this user, which is every user by default.
+        # Not a state worth remembering, and not one to report a transition
+        # out of.
+        return VaultSyncResult(user_id=user_id, outcome=OUTCOME_NOT_CONFIGURED)
+
+    resolution = storage.vault_location_for(config, user_id)
     if resolution.location is None:
-        if resolution.refusal is None:
-            # The feature is off for this user. Not a state worth remembering,
-            # and not one to report a transition out of.
+        exc = _resolution_outcome(resolution.refusal)
+        if exc is None:
             return VaultSyncResult(user_id=user_id, outcome=OUTCOME_NOT_CONFIGURED)
         return _publish(
             config,
-            _settle(
-                user_id,
-                VaultPathRefused(resolution.refusal),
-                digest=None,
-                path="",
-            ),
+            _settle(user_id, exc, digest=None, path=""),
             deliver=deliver,
         )
 
     location = resolution.location
     path = str(location.path)
-    owned = frozenset(config.vault_services_for(user_id))
     try:
-        result = _sync_resolved(config, user_id, location, path, owned)
+        result = _sync_resolved(config, user_id, location, path)
     finally:
         if location.dir_fd is not None:
             os.close(location.dir_fd)
@@ -1548,7 +2014,7 @@ def sync_user(
     return _publish(config, result, deliver=deliver)
 
 
-def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
+def _sync_resolved(config, user_id, location, path) -> VaultSyncResult:
     """Everything after the path resolved, with the descriptor still open."""
     try:
         # `dir_fd` beside `path`, never one without the other: the descriptor is
@@ -1569,7 +2035,6 @@ def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
             outcome=OUTCOME_UNCHANGED,
             digest=digest,
             path=path,
-            owned=owned,
             # The settled class travels with the skip. Without it `unchanged`
             # is indistinguishable from `unchanged and healthy`, and the only
             # cacheable failure is `VaultCorrupt` — so the shape that would be
@@ -1583,9 +2048,15 @@ def _sync_resolved(config, user_id, location, path, owned) -> VaultSyncResult:
     except VaultError as exc:
         return _settle(user_id, exc, digest=digest, path=path)
 
-    applied = apply_vault(config.db_path, user_id, read, owned)
+    applied = apply_vault(config.db_path, user_id, read)
     return _settle(
-        user_id, None, digest=digest, path=path, owned=owned, applied=applied
+        user_id,
+        None,
+        digest=digest,
+        path=path,
+        applied=applied,
+        unscoped=not read.scoped,
+        names=len(read.services),
     )
 
 
@@ -1733,11 +2204,17 @@ def _publish(config, result: VaultSyncResult, *, deliver: bool) -> VaultSyncResu
         # touch, and the feature being off is not a state to record.
         return result
     # The published sentence, never `result.reason` — see `NOTIFICATION_REASONS`.
+    #
+    # `unscoped=None` on a cycle that never opened the file, which carries the
+    # previous answer forward: a failed read is not evidence the file grew an
+    # `istota` group, and clearing it here would re-arm the one-shot notice for
+    # the next successful cycle.
     _record_sync_state(
         config.db_path,
         result.user_id,
         result.outcome,
         "" if result.outcome == OUTCOME_OK else notification_reason(result.outcome),
+        unscoped=result.unscoped if result.outcome == OUTCOME_OK else None,
     )
     _report(
         config,
@@ -1746,7 +2223,107 @@ def _publish(config, result: VaultSyncResult, *, deliver: bool) -> VaultSyncResu
         transition=result.transition,
         deliver=deliver,
     )
+    if result.unscoped and result.outcome == OUTCOME_OK:
+        # Unconditional on every unscoped cycle, and the once-ness is
+        # `_report_unscoped`'s own: it is the thing that has to observe its
+        # write succeed before anything records that the user was told.
+        _report_unscoped(config, result.user_id, result.names, deliver=deliver)
     return result
+
+
+#: The one-shot notice §1 asks for, on `task_alert` rather than on
+#: `connected_service`. Three reasons, and the first is the one that decides it:
+#: `connected_service`'s dedup key is the service name, so a vault notice
+#: written there would collide with the sync-failure row the same feature
+#: already raises and each would bump the other. Second, §10 says that arm is
+#: unchanged. Third, this is exactly `task_alert`'s shape — a notice with no
+#: object, nothing that will ever close it, and `auto_resolve_on_seen` doing
+#: the closing when the user reads it.
+_UNSCOPED_DEDUP_KEY = "vault-unscoped"
+_UNSCOPED_TITLE = "Your credential vault shares its whole file"
+
+
+def _unscoped_body(names: int) -> str:
+    """What the notice says. A count, never a name and never a value.
+
+    **No backticks**, and not as a style choice: ``task_alert.write`` puts every
+    body through ``flatten_body``, whose ``_BODY_MARKUP_CHARS`` maps ``` ` ``` to
+    a space — so a quoted name arrives as ``named  istota .`` The group name is
+    the one word this sentence needs a reader to copy exactly, so it is quoted
+    with characters that survive.
+    """
+    return (
+        f'The KDBX file in your vault folder has no top-level group named '
+        f'"istota", so every credential in it is shared with your own tasks — '
+        f"{names} so far. That is how it is meant to work if you put a file "
+        f"there for istota. If you copied in your everyday password database, "
+        f"move it out, or put the credentials you meant to share under a "
+        f'top-level group named "istota".'
+    )
+
+
+def _report_unscoped(config, user_id: str, names: int, *, deliver: bool) -> None:
+    """Raise the unscoped-read notice for this user, once ever.
+
+    **The notification row is the latch, and that is the correction rather than
+    the obvious shape.** The obvious shape reads the durable sync record for a
+    False-to-True transition and raises on it — which commits "this user has
+    been told" *before* anything writes the telling. This function swallows
+    every exception by contract, so a write that failed there left the record
+    latched for good and the user never learned that their whole password
+    database was shared. Asking the notifications table instead makes the two
+    the same fact: a row exists only because a write succeeded, so a failure
+    leaves no row and the next cycle tries again.
+
+    It asks for a row in **any** state rather than an open one.
+    ``task_alert`` is ``auto_resolve_on_seen``, so the row closes the moment
+    the user opens the panel with it visible — an open-row test would re-raise
+    on the next cycle after they read it, which is a notice per sync interval
+    for as long as the file stays that way.
+
+    The check and the write share one connection, so nothing can interleave
+    between them that this function would then act on.
+
+    ``deliver`` is the row-versus-push fork :func:`_report` already draws, for
+    the same reason: ``istota secret vault-sync`` writes the row and pushes
+    nothing, because the operator running it is reading the warning off their
+    own terminal as it prints. That does consume the latch, so a vault first
+    synced by hand reaches the bell and not a push; accepted, and the same
+    property ``connected_service``'s fork has.
+
+    Never raises, and never carries a name or a value.
+    """
+    import asyncio  # noqa: PLC0415 - for the exception type alone
+
+    from . import db  # noqa: PLC0415
+    from .notification_resolvers import task_alert  # noqa: PLC0415
+    from .notification_store import deliver_pending  # noqa: PLC0415
+
+    try:
+        with db.get_db(config.db_path) as conn:
+            told = conn.execute(
+                "SELECT 1 FROM notifications "
+                "WHERE user_id = ? AND source = ? AND dedup_key = ? LIMIT 1",
+                (user_id, task_alert.SOURCE, _UNSCOPED_DEDUP_KEY),
+            ).fetchone()
+            if told is not None:
+                return
+            raised = task_alert.write(
+                conn,
+                user_id,
+                dedup_key=_UNSCOPED_DEDUP_KEY,
+                title=_UNSCOPED_TITLE,
+                body=_unscoped_body(names),
+                params={"task_id": None, "status": "vault_unscoped"},
+            )
+        if deliver and raised is not None:
+            deliver_pending(config, [raised])
+    except (Exception, asyncio.CancelledError):  # noqa: BLE001 - see `_report`
+        logger.warning(
+            "vault: %s: the unscoped-read notice was not written",
+            _label(user_id),
+            exc_info=True,
+        )
 
 
 def _settle(
@@ -1755,8 +2332,9 @@ def _settle(
     *,
     digest: str | None,
     path: str,
-    owned: frozenset[str] = frozenset(),
     applied: VaultApplyResult | None = None,
+    unscoped: bool = False,
+    names: int = 0,
 ) -> VaultSyncResult:
     """Record the outcome, decide whether it is a transition, and say so once.
 
@@ -1810,9 +2388,10 @@ def _settle(
         transition=transition,
         reason=reason,
         path=path,
-        owned=owned,
         apply=applied,
         last_outcome=previous,
+        unscoped=unscoped,
+        names=names,
     )
 
 
@@ -1872,28 +2451,29 @@ def vault_status(
     ``vault/passphrase`` row on every successful decrypt. That is one row, it is
     the vault's own, and it is honest — the passphrase really was used — but it
     is the same column ``apply_vault``'s docstring already warns is not evidence
-    a vault-owned credential is read by anything.
+    a shared credential is read by anything.
 
     It also touches no sync state in either direction: it is not subject to the
     digest cache — the operator is asking *now* — and it does not settle an
     outcome, since an outcome nobody applied would suppress the next real
     cycle's report.
 
-    Parsing is what earns the command its keep. §3 records every
-    ``istota/<service>`` group found, owned or not, precisely so this can tell a
-    user their group name matches nothing — the hardest failure in this design to
-    diagnose from their end, because the file looks right.
+    Parsing is what earns the command its keep: it is the only way to see the
+    names the file produces, the skips that say why one is missing, and whether
+    the read was scoped (§1). A name in the list is a credential istota holds;
+    one the user expected and cannot see is an entry with a skip beside it.
 
     **``parse=False`` is §9's endpoint, and it is not an optimisation.** An
     Argon2id unlock is tuned to about a second, and a settings page that spent
     one per load would spend it inside a FastAPI handler — where, on the event
     loop, it stalls every other request in the web process, and where a wedged
     ``fuse.rclone`` mount stalls them indefinitely. The endpoint does not need
-    the parse either: §9's heading asks for the path, the owned services, the
-    last successful sync and the failing class, and every one of those is either
-    config, a resolve, or the durable record below. So this stays one function
+    the parse either: §8's card asks for the path, the last successful sync and
+    the failing class, and every one of those is either config, a resolve, or
+    the durable record below — including the unscoped verdict, which is why it
+    is written into that record in the first place. So this stays one function
     returning one shape — ``usage_render``'s rule for a fact with a CLI and a web
-    surface — with the four parse-only fields empty and ``parsed`` False to say
+    surface — with the parse-only fields empty and ``parsed`` False to say
     so. What ``parse=False`` still does is *resolve*, because a refused path is
     the one failing state that is true of the configuration rather than of a
     past cycle, and reporting a stale ``VaultPathRefused`` — or missing a fresh
@@ -1908,11 +2488,20 @@ def vault_status(
     from . import db  # noqa: PLC0415 - see `sync_user`
     from . import storage  # noqa: PLC0415
 
-    raw = config.vault_path_for(user_id)
-    owned = tuple(sorted(config.vault_services_for(user_id)))
     last = _SYNC_STATE.get(user_id, (None, ""))[1]
-    if not raw:
-        return VaultStatusReport(user_id=user_id, configured=False, owned=owned)
+    # `configured` is the enable itself — `_vault_is_enabled`, the predicate
+    # the cycle gates on — rather than a second opinion beside it. A file in
+    # the folder with no passphrase is deliberately *not* configured: nothing
+    # can open it, the cycle skips that user, and a report saying otherwise
+    # would have the card claim a read that never happens. Read off
+    # `vault_path_for` alone it would answer False for every folder user, and
+    # the card would have no sync record to render.
+    present = _passphrase_present(config, user_id)
+    if not _vault_is_enabled(config, user_id):
+        return VaultStatusReport(
+            user_id=user_id, configured=False, passphrase_present=present,
+        )
+    resolution = storage.vault_location_for(config, user_id)
 
     recorded: dict | None = None
     try:
@@ -1929,38 +2518,33 @@ def vault_status(
             last_success_at=str(recorded.get("ok_at") or ""),
             recorded_outcome=str(recorded.get("outcome") or ""),
             recorded_reason=str(recorded.get("reason") or ""),
+            recorded_unscoped=bool(recorded.get("unscoped")),
         )
 
-    resolution = storage.resolve_user_vault_path(config, user_id)
     if resolution.location is None:
+        # The two folder ids reach here beside the `VAULT_PATH_*` ones, and
+        # they do not all name a failure: an unchosen folder has a sentence for
+        # the card and no outcome at all, because nothing about it is broken.
+        exc = _resolution_outcome(resolution.refusal)
         return _with_record(
             VaultStatusReport(
                 user_id=user_id,
                 configured=True,
                 refusal=resolution.refusal or "",
-                owned=owned,
-                outcome=VaultPathRefused.__name__,
-                reason=notification_reason(VaultPathRefused.__name__),
+                passphrase_present=present,
+                outcome=type(exc).__name__ if exc is not None else "",
+                reason=resolution_reason(resolution.refusal),
                 last_outcome=last,
             )
         )
 
     location = resolution.location
-    # Everything from here to the close is inside the guard, including the
-    # presence lookup. That opens a SQLite connection and can raise on a locked
-    # or missing database, and it used to sit above the `try` — which leaks the
-    # descriptor. Harmless from a one-shot CLI process and not harmless from
-    # §9's long-lived web endpoint, which is one leaked fd per failed request.
     try:
-        present = secrets_store.secret_exists(
-            config.db_path, user_id, VAULT_PASSPHRASE_SERVICE, VAULT_PASSPHRASE_KEY
-        )
         report = _with_record(
             VaultStatusReport(
                 user_id=user_id,
                 configured=True,
                 path=str(location.path),
-                owned=owned,
                 passphrase_present=present,
                 last_outcome=last,
             )
@@ -1987,15 +2571,36 @@ def vault_status(
         if location.dir_fd is not None:
             os.close(location.dir_fd)
 
-    owned_set = set(owned)
-    return dataclasses.replace(
+    # Names and the reasons a name is missing — never a value. `read.services`
+    # holds every plaintext this function ever sees and only its keys leave
+    # here; `VaultRead.__repr__` states the same rule one object over.
+    #
+    # `held` names are deliberately absent from `names`: the file produced them
+    # and could not supply a value, so istota does not hold a credential under
+    # them from this read. They are what the apply declines to delete rather
+    # than something to report as present.
+    out = dataclasses.replace(
         report,
         outcome=OUTCOME_OK,
         parsed=True,
-        groups=dict(read.group_present),
-        key_counts={
-            service: len(values) for service, values in read.services.items()
-        },
-        unowned=tuple(sorted(set(read.group_present) - owned_set)),
-        absent=tuple(sorted(owned_set - set(read.group_present))),
+        names=tuple(sorted(read.services)),
+        skipped=read.skipped,
+        scoped=read.scoped,
+        truncated=read.truncated,
     )
+    # Lifetime, and kept from the shape this replaced: `read` is the only
+    # object in this process holding the user's whole decrypted namespace, and
+    # a local outlives its last use — into a traceback a caller renders, and
+    # into whatever a debugger or a profiler is holding. Dropping it on the
+    # line the names are taken is the narrowest window this function can give
+    # it.
+    #
+    # It briefly had a second justification — `doctor`'s leak check went red
+    # without it — and that was a measurement of the check rather than of this
+    # function. The parse allocates tens of thousands of objects, so where the
+    # interpreter's generational threshold fell decided whether a few
+    # already-finished sqlite and lxml handles were still listed in `/dev/fd`
+    # when the check sampled. The check collects before sampling now, so this
+    # `del` stands on the reason above alone.
+    del read
+    return out

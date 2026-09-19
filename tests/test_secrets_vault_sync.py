@@ -37,6 +37,7 @@ import pytest
 
 from istota import secrets_store, storage
 from istota.config import Config, UserConfig
+from istota.secrets_vault import VAULT_ENTRY_SERVICE
 
 PASSPHRASE = "sync-fixture-passphrase-not-a-real-one"
 ROTATED_PASSPHRASE = "sync-fixture-passphrase-after-rotation"
@@ -73,7 +74,7 @@ def secret_key(monkeypatch):
     return SECRET_KEY
 
 
-def _vault_config(tmp_path, *, vault_path: str, services: list[str]) -> Config:
+def _vault_config(tmp_path, *, vault_path: str) -> Config:
     """A config with a workspace, one user `alice`, and an initialised DB."""
     from istota import db
 
@@ -86,7 +87,7 @@ def _vault_config(tmp_path, *, vault_path: str, services: list[str]) -> Config:
         temp_dir=tmp_path / "tmp",
         workspace_path=mount,
         users={
-            "alice": UserConfig(vault_path=vault_path, vault_services=services),
+            "alice": UserConfig(vault_path=vault_path),
         },
     )
 
@@ -126,7 +127,7 @@ def _provision_passphrase(config: Config, value: str = PASSPHRASE) -> None:
 def ready(tmp_path, secret_key):
     """A configured user, a real vault at the configured path, a passphrase."""
     config = _vault_config(
-        tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+        tmp_path, vault_path="config/vault.kdbx"
     )
     path = _user_root(config) / "config" / "vault.kdbx"
     _write_vault(path)
@@ -179,9 +180,12 @@ class TestTheDigestCache:
         assert result.apply is not None
         assert result.apply.created == 2
         assert (
-            secrets_store.get_secret(config.db_path, "alice", "karakeep", "api_key")
+            secrets_store.get_secret(
+                config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
             == API_KEY_VALUE
         )
+
 
     def test_an_unchanged_digest_does_no_work(self, ready, parse_calls):
         """The property §7 rests on: no Argon2id, no DB writes, no log lines."""
@@ -243,7 +247,7 @@ class TestWhichFailuresCacheTheirDigest:
         from istota.secrets_vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -275,7 +279,7 @@ class TestWhichFailuresCacheTheirDigest:
         from istota.secrets_vault import OUTCOME_OK, VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         _write_vault(path)
@@ -292,10 +296,15 @@ class TestWhichFailuresCacheTheirDigest:
         assert path.read_bytes() == digest_before, "the file must not have moved"
         assert second.outcome == OUTCOME_OK
         assert parse_calls.calls == 2
+        # Provisioning the right passphrase ends the locked state *and* applies,
+        # which is what makes the remedy the notification names a real one.
         assert (
-            secrets_store.get_secret(config.db_path, "alice", "karakeep", "api_key")
+            secrets_store.get_secret(
+                config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
             == API_KEY_VALUE
         )
+
 
     def test_an_absent_passphrase_is_not_cached_and_provisioning_ends_it(
         self, tmp_path, secret_key, parse_calls
@@ -308,7 +317,7 @@ class TestWhichFailuresCacheTheirDigest:
         )
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         _write_vault(path)
@@ -331,7 +340,7 @@ class TestWhichFailuresCacheTheirDigest:
         from istota.secrets_vault import OUTCOME_OK, VaultCorrupt, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,7 +367,7 @@ class TestWhichFailuresCacheTheirDigest:
         from istota.secrets_vault import OUTCOME_OK, VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         _write_vault(path)
@@ -414,7 +423,7 @@ class TestTheMasterKeyIsUnusable:
 
     def _configured(self, tmp_path):
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
         return config
@@ -516,7 +525,7 @@ class TestTheSkipCarriesTheSettledClass:
         from istota.secrets_vault import OUTCOME_UNCHANGED, VaultCorrupt, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -540,47 +549,6 @@ class TestTheSkipCarriesTheSettledClass:
         assert second.last_outcome == OUTCOME_OK
 
 
-class TestTheCreatedCountIsNotInflatedByAStaleKey:
-    """`upsert_secret` derives created/updated from `get_secret`, which reports
-    an undecryptable row as absent — so without a pre-check every write on a
-    deployment with a stale master key reads as `created`."""
-
-    def test_an_overwritten_unreadable_row_counts_as_updated(
-        self, tmp_path, secret_key, monkeypatch
-    ):
-        from istota.secrets_vault import sync_user
-
-        config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
-        )
-        _write_vault(_user_root(config) / "config" / "vault.kdbx")
-        _provision_passphrase(config)
-        # Two karakeep rows written under one key...
-        secrets_store.set_secret(config.db_path, "alice", "karakeep", "api_key", "old")
-        secrets_store.set_secret(config.db_path, "alice", "karakeep", "base_url", "old")
-
-        # ...and the vault's passphrase re-provisioned under the *new* key, so
-        # the passphrase itself is readable and only the credential rows are not.
-        monkeypatch.setenv("ISTOTA_SECRET_KEY", "f00dcafe" * 8)
-        _provision_passphrase(config)
-
-        result = sync_user(config, "alice")
-        applied = result.apply
-        assert applied is not None
-        assert applied.unreadable_overwrites == 2
-        assert (applied.created, applied.updated) == (0, 2)
-
-    def test_an_ordinary_first_write_still_counts_as_created(self, ready):
-        """The control: the pre-check must not turn every create into an update."""
-        from istota.secrets_vault import sync_user
-
-        config, _path = ready
-        applied = sync_user(config, "alice").apply
-        assert applied is not None
-        assert (applied.created, applied.updated) == (2, 0)
-        assert applied.unreadable_overwrites == 0
-
-
 class TestTheTransitionRule:
     """Retrying is not re-reporting, which needs the outcome class as state."""
 
@@ -590,7 +558,7 @@ class TestTheTransitionRule:
         from istota.secrets_vault import sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
 
@@ -618,7 +586,7 @@ class TestTheTransitionRule:
         )
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         path = _user_root(config) / "config" / "vault.kdbx"
         _write_vault(path)
@@ -633,7 +601,7 @@ class TestTheTransitionRule:
         from istota.secrets_vault import OUTCOME_OK, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
         sync_user(config, "alice")
@@ -659,9 +627,12 @@ class TestTheEdgeTriggeredProperty:
 
         "Vault-wins" is what this sounds like and is not what it is: the file
         asserts its version of the world at the moment it is written and says
-        nothing in between. What makes that safe is that no other writer to a
-        vault-owned key is left — `DAEMON_WRITTEN_SERVICES`, §9's 409 and open
-        question 3's refusal each remove one — rather than a loop correcting them.
+        nothing in between. What makes that safe is that the vault has a
+        namespace of its own and no other writer in it — `vault_entries` is not
+        in `secret_schema`, so neither the settings page nor `istota secret
+        ensure` can reach it — rather than a loop correcting them. The row this
+        test changes out of band is a *typed* service, which the vault stopped
+        owning entirely; the edge-triggered property is what it still pins.
 
         **A future reconciliation loop has to delete this test on purpose.** Do
         not "fix" it by parsing on every cycle; that is a design change with §7's
@@ -684,9 +655,15 @@ class TestTheEdgeTriggeredProperty:
             == "changed-out-of-band"
         )
 
-    def test_the_next_save_re_asserts_the_whole_owned_set(self, ready):
-        """The mitigation §7 names: any save at all corrects the drift."""
-        from istota.secrets_vault import sync_user
+    def test_the_next_save_parses_again(self, ready, parse_calls):
+        """Half of the mitigation §7 names: any save at all moves the digest,
+        so the cycle parses rather than skipping.
+
+        The other half — that the parse then re-asserts the whole set over a
+        row changed out of band — is the applying half's, and the change
+        landing beside this one restores it. The name and this docstring say
+        what is asserted here rather than what the pair asserts together."""
+        from istota.secrets_vault import OUTCOME_OK, sync_user
 
         config, path = ready
         sync_user(config, "alice")
@@ -695,11 +672,17 @@ class TestTheEdgeTriggeredProperty:
         )
 
         _write_vault(path)
-        sync_user(config, "alice")
+        assert sync_user(config, "alice").outcome == OUTCOME_OK
+        assert parse_calls.calls == 2
+        # The other half of §7's mitigation, restored with the apply: the parse
+        # re-asserts the whole namespace over a row changed out of band.
         assert (
-            secrets_store.get_secret(config.db_path, "alice", "karakeep", "api_key")
+            secrets_store.get_secret(
+                config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
             == API_KEY_VALUE
         )
+
 
 
 # ---------------------------------------------------------------------------
@@ -747,7 +730,7 @@ class TestARefusedPath:
         """
         from istota.secrets_vault import VaultPathRefused, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=["karakeep"])
+        config = _vault_config(tmp_path, vault_path="")
         bob = Path(config.workspace_path) / "Users" / "bob" / "config"
         bob.mkdir(parents=True, exist_ok=True)
         config.users["alice"].vault_path = str(bob / "vault.kdbx")
@@ -768,7 +751,7 @@ class TestARefusedPath:
         """
         from istota.secrets_vault import VaultPathRefused, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
         config.users["alice"].vault_path = "../bob/vault.kdbx"
 
         first = sync_user(config, "alice")
@@ -779,7 +762,7 @@ class TestARefusedPath:
     def test_an_unconfigured_user_is_not_a_failure(self, tmp_path, secret_key):
         from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
 
-        config = _vault_config(tmp_path, vault_path="", services=[])
+        config = _vault_config(tmp_path, vault_path="")
         result = sync_user(config, "alice")
         assert result.outcome == OUTCOME_NOT_CONFIGURED
         assert result.transition is False
@@ -853,7 +836,7 @@ class TestTheDescriptorLifetime:
         from istota.secrets_vault import VaultLocked, sync_user
 
         config = _vault_config(
-            tmp_path, vault_path="config/vault.kdbx", services=["karakeep"]
+            tmp_path, vault_path="config/vault.kdbx"
         )
         _write_vault(_user_root(config) / "config" / "vault.kdbx")
         _provision_passphrase(config, "the-wrong-passphrase-entirely")
@@ -897,12 +880,8 @@ class TestSyncAll:
             temp_dir=tmp_path / "tmp",
             workspace_path=mount,
             users={
-                "alice": UserConfig(
-                    vault_path="vault.kdbx", vault_services=["karakeep"]
-                ),
-                "bob": UserConfig(
-                    vault_path="vault.kdbx", vault_services=["karakeep"]
-                ),
+                "alice": UserConfig(vault_path="vault.kdbx"),
+                "bob": UserConfig(vault_path="vault.kdbx"),
             },
         )
         # alice's is corrupt; bob's is real.
@@ -915,9 +894,20 @@ class TestSyncAll:
         assert results["alice"].outcome != OUTCOME_OK
         assert results["bob"].outcome == OUTCOME_OK
         assert (
-            secrets_store.get_secret(db_path, "bob", "karakeep", "api_key")
+            secrets_store.get_secret(
+                db_path, "bob", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
             == API_KEY_VALUE
         )
+        # alice's cycle never parsed, so nothing of hers was written *or*
+        # deleted — containment is about the rows as well as the exception.
+        assert (
+            secrets_store.get_secret(
+                db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
+            is None
+        )
+
 
     def test_a_raising_user_is_contained(self, ready, monkeypatch):
         from istota import secrets_vault
@@ -936,6 +926,132 @@ class TestSyncAll:
 # ---------------------------------------------------------------------------
 # No value ever reaches a log record
 # ---------------------------------------------------------------------------
+
+
+class TestTheEnableGate:
+    """What switches a cycle on now, and what each empty answer costs.
+
+    The gate used to be a configured `vault_path`. It is now that **or** a
+    stored passphrase, which is what lets a user turn a vault on by dropping a
+    file in the folder and generating a passphrase, with nothing typed
+    anywhere. Its shape is what keeps the folder listing off every user's tick:
+    a user with neither is skipped before any file is touched.
+    """
+
+    def _folder(self, config: Config) -> Path:
+        folder = _user_root(config) / config.bot_dir_name / "vault"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def test_a_file_in_the_folder_with_no_passphrase_is_not_configured(
+        self, tmp_path, secret_key,
+    ):
+        """Half the pair is not a vault, and reporting it as a broken one
+        would notify a user who has not finished switching it on."""
+        from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
+
+        config = _vault_config(tmp_path, vault_path="")
+        _write_vault(self._folder(config) / "personal.kdbx")
+
+        result = sync_user(config, "alice")
+        assert result.outcome == OUTCOME_NOT_CONFIGURED
+        assert result.transition is False
+
+    def test_neither_half_touches_the_filesystem(
+        self, tmp_path, secret_key, monkeypatch,
+    ):
+        """Every user by default, on every tick."""
+        from istota import secrets_vault
+
+        config = _vault_config(tmp_path, vault_path="")
+
+        def _refuse(*args, **kwargs):  # pragma: no cover - the point is no call
+            raise AssertionError("the vault folder was listed")
+
+        monkeypatch.setattr(storage, "list_vault_files", _refuse)
+        result = secrets_vault.sync_user(config, "alice")
+        assert result.outcome == secrets_vault.OUTCOME_NOT_CONFIGURED
+
+    def test_a_passphrase_and_one_file_in_the_folder_applies_it(
+        self, tmp_path, secret_key,
+    ):
+        """The whole of the happy path: drop the file in, generate a
+        passphrase, and nothing is stored to select anything."""
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config = _vault_config(tmp_path, vault_path="")
+        _write_vault(self._folder(config) / "personal.kdbx")
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == OUTCOME_OK
+        assert result.apply is not None
+        assert result.apply.created == 2
+        assert (
+            secrets_store.get_secret(
+                config.db_path, "alice", VAULT_ENTRY_SERVICE, "karakeep_api_key"
+            )
+            == API_KEY_VALUE
+        )
+
+
+    def test_a_passphrase_and_an_empty_folder_is_a_missing_file(
+        self, tmp_path, secret_key,
+    ):
+        """The user had a vault and the file went away, which is worth saying."""
+        from istota.secrets_vault import VaultMissing, sync_user
+
+        config = _vault_config(tmp_path, vault_path="")
+        self._folder(config)
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == VaultMissing.__name__
+        assert result.transition is True
+
+    def test_several_files_and_no_choice_is_quiet(self, tmp_path, secret_key):
+        """A question for the settings card, not a failure.
+
+        Reporting it as one would push a notification at a user whose answer is
+        one dropdown away, every cycle until they answer it.
+        """
+        from istota.secrets_vault import OUTCOME_NOT_CONFIGURED, sync_user
+
+        config = _vault_config(tmp_path, vault_path="")
+        folder = self._folder(config)
+        _write_vault(folder / "personal.kdbx")
+        _write_vault(folder / "work.kdbx")
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == OUTCOME_NOT_CONFIGURED
+        assert result.transition is False
+
+    def test_the_stored_choice_decides_which_one_is_read(
+        self, tmp_path, secret_key,
+    ):
+        from istota.secrets_vault import OUTCOME_OK, sync_user
+
+        config = _vault_config(tmp_path, vault_path="")
+        folder = self._folder(config)
+        _write_vault(folder / "personal.kdbx", karakeep=False, ntfy=True)
+        _write_vault(folder / "work.kdbx")
+        storage.store_vault_file(config, "alice", "work.kdbx")
+        _provision_passphrase(config)
+
+        result = sync_user(config, "alice")
+        assert result.outcome == OUTCOME_OK
+        assert str(result.path).endswith("work.kdbx")
+
+    def test_the_deployment_gate_sees_a_passphrase_alone(
+        self, tmp_path, secret_key,
+    ):
+        """`any_vault_configured` is what the scheduler's interval gate reads,
+        so a folder-configured user has to turn it on without a TOML line."""
+        config = _vault_config(tmp_path, vault_path="")
+        assert config.any_vault_configured() is False
+        _provision_passphrase(config)
+        assert config.any_vault_configured() is True
 
 
 class TestNoValueIsLogged:

@@ -1120,6 +1120,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # Pure DDL with no marker — see the docstring. Last because it depends on
     # nothing above it.
     _migrate_notifications(conn)
+    # After the schema-creating migrations and before `executescript`, which is
+    # what makes it one-way: `schema.sql` no longer declares the table, so
+    # nothing recreates what this drops.
+    _migrate_drop_retired_vault_table(conn)
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -5972,6 +5976,43 @@ def _migrate_room_read_state_peruser(conn: sqlite3.Connection) -> None:
         """)
     except sqlite3.OperationalError as e:
         logger.warning("room_read_state per-user rebuild failed: %s", e)
+
+
+def _migrate_drop_retired_vault_table(conn: sqlite3.Connection) -> None:
+    """Drop the retired per-user vault selection table.
+
+    It held a path and a list of services the file owned. Both are gone: what a
+    user sets is a filename in the reserved `_vault_file` KV namespace, and what
+    an operator sets is `[users.<id>] vault_path` in `config.toml`. A vault owns
+    no typed service any more, so there is nothing for the second column to
+    mean and nothing to migrate the first one into — a stored path was a path
+    into the user's workspace, and the folder resolver takes a *name* out of
+    one directory, which is not the same value expressed differently.
+
+    **One way, with no rollback path**, which is what "no compatibility shims"
+    means here: a checkout rolled back past this recreates an empty table from
+    `schema.sql`'s older copy and reads it as "nothing configured", which is
+    the same state every user is in by default.
+
+    The table is named **once** in this file, in the statement below, and
+    `tests/test_vault_removal.py` requires exactly that: the drift guard that
+    sweeps the rest of the tree for the name exempts this file by name and then
+    asserts the one occurrence is this `DROP TABLE`. So the function and the log
+    line are spelled around it rather than after it.
+
+    `IF EXISTS` rather than a marker, and it runs on every `init_db`: the
+    statement is idempotent by construction, so a marker would be a row to
+    maintain for a DDL that costs nothing when there is nothing to drop. The
+    one *other* thing a marker buys — knowing a failed run needs retrying — is
+    covered by the same thing, since the next boot tries again.
+    """
+    try:
+        conn.execute("DROP TABLE IF EXISTS user_vault_config")
+    except sqlite3.OperationalError as e:
+        # Swallowed on the same rule as its neighbours: a migration that cannot
+        # run must not stop a daemon booting, and a table left standing is
+        # inert rather than harmful — nothing in the tree reads it.
+        logger.warning("retired vault table drop failed: %s", e)
 
 
 def _migrate_room_members(conn: sqlite3.Connection) -> None:

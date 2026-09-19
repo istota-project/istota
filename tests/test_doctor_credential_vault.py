@@ -27,6 +27,7 @@ covered without the sweep changing.
 from __future__ import annotations
 
 import importlib.util
+import gc
 import os
 import stat
 from pathlib import Path
@@ -84,6 +85,20 @@ def _write_vault(path: Path, *, password: str = PASSPHRASE) -> Path:
     return path
 
 
+def _write_unscoped_vault(config, user_id="alice") -> Path:
+    """Rewrite that user's vault with no top-level `istota` group (§1)."""
+    from pykeepass import create_database
+
+    path = (
+        Path(config.workspace_path) / "Users" / user_id / "config" / "vault.kdbx"
+    )
+    path.unlink()
+    kp = create_database(str(path), password=PASSPHRASE)
+    kp.add_entry(kp.add_group(kp.root_group, UNOWNED_GROUP), "whatever", "", "unused")
+    kp.save()
+    return path
+
+
 @pytest.fixture
 def secret_key_env():
     """A real `ISTOTA_SECRET_KEY`, so the passphrase round-trips for real."""
@@ -107,7 +122,6 @@ def vault_config(make_config, tmp_path):
             "alice": UserConfig(
                 display_name="Alice",
                 vault_path="config/vault.kdbx",
-                vault_services=["karakeep", "ntfy"],
             )
         },
     )
@@ -146,7 +160,7 @@ def _add_mixed_users(config):
         display_name="C", vault_path="config/missing.kdbx"
     )
     config.users["dave"] = UserConfig(
-        display_name="D", vault_path="config/vault.kdbx", vault_services=["ntfy"]
+        display_name="D", vault_path="config/vault.kdbx"
     )
     return config
 
@@ -197,11 +211,13 @@ class TestWhenNoVaultIsConfigured:
                 "bob": UserConfig(display_name="B", vault_path="   "),
             }
         )
-        # A mapping now, not a list of ids: `vault_path_for` merges a
-        # `user_vault_config` row over the TOML attribute, so the value costs a
-        # database read and every arm takes it from here rather than asking
-        # again. Asserting the value too is what says the merge ran.
-        assert doctor._vault_paths(config) == {"bob": "   "}
+        # A mapping rather than a list of ids, so each arm has the path without
+        # re-deriving it. Asserting the value too is what says the mapping
+        # carries what was written rather than a coerced or stripped version of
+        # it — `"   "` is a *configured* path that resolves to nothing, which
+        # the path arm below reports, and a reader that stripped it would call
+        # this user unconfigured and say nothing at all.
+        assert doctor._vault_users(config) == {"bob": "   "}
 
         result = _run(config, probe=False)["security.credential_vault.path"]
         assert result.status == FAIL
@@ -281,13 +297,17 @@ class TestTheLibraryArm:
 
 
 class TestTheScheduleArm:
-    def test_a_scheduled_deployment_names_the_interval_and_the_owned_set(
+    def test_a_scheduled_deployment_names_the_interval_and_the_count(
         self, vault_config
     ):
+        """The owned-services line went with the service mapping: a vault owns
+        no typed service now, so the arm reports the interval and how many
+        vaults it applies to."""
         result = _run(vault_config)["security.credential_vault.schedule"]
         assert result.status == OK
         assert "300" in result.detail
-        assert "karakeep" in result.detail and "ntfy" in result.detail
+        assert "vault(s) configured" in result.detail
+        assert "karakeep" not in result.detail
 
     def test_a_zeroed_interval_warns_and_says_it_may_be_deliberate(
         self, vault_config
@@ -301,33 +321,15 @@ class TestTheScheduleArm:
         assert result.status == WARN
         assert "vault-sync" in result.remedy
 
-    def test_an_empty_owned_set_is_reported_rather_than_flagged(self, make_config):
-        """Reading the file and applying nothing is the documented dry run."""
+    def test_a_vault_that_declares_nothing_is_still_reported(self, make_config):
+        """There is nothing left to declare: the arm counts vaults rather than
+        asking what each one owns."""
         config = make_config(
             users={"alice": UserConfig(display_name="A", vault_path="v.kdbx")}
         )
         result = _run(config)["security.credential_vault.schedule"]
         assert result.status == OK
-        assert "owns nothing" in result.detail
-
-    def test_an_ineligible_entry_warns_if_one_ever_reaches_here(self, make_config):
-        """The backstop arm. `config._validate_vault_services` drops an
-        ineligible name at load, so nothing reachable through `load_config`
-        arrives with one — this is built by hand, which is the only way to
-        exercise it and is why the arm is labelled defence in depth rather than
-        presented as a case with a remedy behind it."""
-        config = make_config(
-            users={
-                "alice": UserConfig(
-                    display_name="A",
-                    vault_path="v.kdbx",
-                    vault_services=["karakeep", "monarch"],
-                )
-            }
-        )
-        result = _run(config)["security.credential_vault.schedule"]
-        assert result.status == WARN
-        assert "monarch" in result.detail
+        assert "1 vault(s) configured" in result.detail
 
 
 class TestThePathArm:
@@ -448,6 +450,17 @@ class TestThePathArm:
         _add_mixed_users(vault_config)
 
         def _open_fds():
+            # `gc.collect()` first, and it does not weaken the measurement: a
+            # descriptor this check leaked is referenced by nothing and is held
+            # open regardless, while a sqlite or lxml handle that is merely
+            # awaiting finalization is not a leak and is exactly what an
+            # uncollected sample counts. Without it the reading depends on where
+            # the interpreter's generational threshold happens to fall inside a
+            # parse that allocates tens of thousands of objects — so an
+            # unrelated change to how many objects the call path builds moves
+            # `before` by four and reddens this test, which is how it behaved
+            # twice while this stage was written.
+            gc.collect()
             return len(os.listdir("/dev/fd"))
 
         _all(vault_config, probe)  # warm any lazy import before measuring
@@ -562,6 +575,107 @@ class TestThePathArm:
         assert result.status == OK
 
 
+class TestAFolderConventionUser:
+    """§7's enable is a file in the folder plus a passphrase, and §10 says this
+    check follows it. Every fixture above configures a `vault_path`, so the
+    arms that serve the ordinary shape — a user who chose their file from the
+    settings card and has no TOML line at all — were reached by nothing.
+    """
+
+    def _passphrase_only(self, make_config, tmp_path, *files):
+        """A user with a `vault/passphrase` row, no `vault_path`, and `files`
+        in their vault folder."""
+        database = tmp_path / "vault-folder.db"
+        db.init_db(database)
+        config = make_config(
+            db_path=database,
+            users={"alice": UserConfig(display_name="Alice", vault_path="")},
+        )
+        folder = (
+            Path(config.workspace_path)
+            / "Users" / "alice" / config.bot_dir_name / "vault"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in files:
+            _write_vault(folder / name)
+        _provision(config)
+        return config, folder
+
+    def test_a_passphrase_with_no_path_is_a_configured_vault(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """The half `_vault_users` gained. Reading `vault_path` alone reported
+        every folder-convention user as having no vault at all, which after §7
+        is the ordinary shape rather than an edge."""
+        config, _folder = self._passphrase_only(make_config, tmp_path, "personal.kdbx")
+
+        assert doctor._vault_users(config) == {"alice": ""}
+        assert _run(config, probe=False)["security.credential_vault.path"].status == OK
+
+    def test_a_user_with_neither_is_still_absent(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """The control: without it the enumerator could be returning every
+        configured user, and the SKIP every deployment gets by default would
+        have stopped working."""
+        database = tmp_path / "none.db"
+        db.init_db(database)
+        config = make_config(
+            db_path=database,
+            users={"alice": UserConfig(display_name="Alice", vault_path="")},
+        )
+
+        assert doctor._vault_users(config) == {}
+        assert doctor.check_credential_vault(config, True)[0].status == SKIP
+
+    def test_an_empty_folder_warns_and_names_it(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """§10: `VAULT_DIR_EMPTY` reads as "configured and no file yet". A WARN
+        rather than a FAIL, because it is the user's to fix and their own card
+        already asks for exactly this."""
+        config, folder = self._passphrase_only(make_config, tmp_path)
+
+        result = _run(config, probe=False)["security.credential_vault.path"]
+
+        assert result.status == WARN
+        assert "alice" in result.detail
+        assert folder.name in result.detail
+        assert "vault folder" in result.remedy
+
+    def test_several_files_and_no_choice_warns(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """§10: `VAULT_DIR_UNCHOSEN` reads as "several files, none chosen".
+        Also not a fault — the dropdown is one click away."""
+        config, _folder = self._passphrase_only(
+            make_config, tmp_path, "personal.kdbx", "work.kdbx"
+        )
+
+        result = _run(config, probe=False)["security.credential_vault.path"]
+
+        assert result.status == WARN
+        assert "alice" in result.detail
+        assert "Settings" in result.remedy
+
+    def test_a_refused_toml_path_still_fails_beside_a_folder_user(
+        self, make_config, tmp_path, secret_key_env
+    ):
+        """The discriminating pair. A folder refusal WARNs and a refused
+        configured path FAILs, and the arm reports the worst class present — so
+        collapsing the two would either downgrade the operator's FAIL or
+        upgrade a user's dropdown into one."""
+        config, _folder = self._passphrase_only(make_config, tmp_path)
+        config.users["bob"] = UserConfig(
+            display_name="Bob", vault_path="no-such-dir/vault.kdbx"
+        )
+
+        result = _run(config, probe=False)["security.credential_vault.path"]
+
+        assert result.status == FAIL
+        assert "alice" in result.detail and "bob" in result.detail
+
+
 class TestThePassphraseArm:
     def test_a_provisioned_passphrase_is_ok(self, vault_config, secret_key_env):
         _provision(vault_config)
@@ -614,11 +728,31 @@ class TestTheContentsCheck:
     def test_probe_reports_counts_for_a_working_vault(
         self, vault_config, secret_key_env
     ):
+        """Counts and never names, which is this arm's whole rule.
+
+        The fixture's `istota` group holds three entries, each with a password
+        and nothing else, so the file produces exactly three names.
+        """
         _provision(vault_config)
         result = _contents(vault_config)
         assert result.status == OK
-        assert "2 of 2 owned group(s) present" in result.detail
-        assert "2 key(s)" in result.detail
+        assert "3 credential(s)" in result.detail
+        assert "karakeep" not in result.detail and "api_key" not in result.detail
+
+    def test_an_unscoped_read_is_reported_as_a_posture(
+        self, vault_config, secret_key_env
+    ):
+        """§1: a vault reading its whole file shares everything in it, which is
+        an operator-visible security posture rather than a user preference. The
+        *names* still never appear."""
+        _provision(vault_config)
+        _write_unscoped_vault(vault_config)
+
+        result = _contents(vault_config)
+
+        assert result.status == OK
+        assert "whole file shared" in result.detail
+        assert UNOWNED_GROUP not in result.detail
 
     def test_a_wrong_passphrase_reports_the_class_and_not_the_sentence(
         self, vault_config, secret_key_env
@@ -656,18 +790,21 @@ class TestTheContentsCheck:
         Swept over the whole result rather than over named fields, so a field
         added later is covered without this changing.
 
-        **What is in the sweep and why the obvious members are the weak half.**
-        `VaultStatusReport` carries no key names at all — `key_counts` is a
-        count per service — and carries no values, so the three fixture strings
-        below are absent by the shape of the type rather than by this arm's
-        discretion, and a mutation cannot reach them. `UNOWNED_GROUP` is the
-        member that makes this test discriminating: it is a name written into
-        the *file*, it reaches the report through `groups` and `key_counts`, and
-        §12 records that a task in that user's own sandbox can write it. Printing
-        what the file turned out to hold turns this red on that member alone.
+        **What is in the sweep, and the discriminating member moved.** It used
+        to be that `VaultStatusReport` carried no credential names at all —
+        `key_counts` was a count per service — so the values below were absent
+        by the shape of the type and only `groups` could leak file text. Both
+        fields are gone: the report now carries `names`, the whole derived
+        namespace, written into the *file* by somebody a task in that user's
+        own sandbox can be. So `names` is what makes this discriminating, and
+        `UNOWNED_GROUP` below is a group title that appears in one of them.
+        Printing what the file turned out to hold — rather than how many —
+        turns this red on that member.
 
-        `karakeep` and `ntfy` are deliberately not swept for: those are operator
-        config, and `…schedule` reports them on purpose.
+        `karakeep` and `ntfy` used to be excluded from the sweep as operator
+        config the schedule arm reported on purpose. That arm reports no
+        service names any more, so the exclusion is about the fixture's own
+        group titles rather than about config.
         """
         _provision(vault_config)
         rendered = " ".join(
@@ -836,37 +973,39 @@ class TestTheDatabaseDirectoryComparison:
 
 
 class TestAMalformedFieldDoesNotCostEveryFinding:
-    def test_a_non_iterable_vault_services_is_dropped_rather_than_raising(
-        self, vault_config
+    """A malformed `vault_path` costs its own user, never every finding.
+
+    The class was written against `vault_services`, which is gone. The property
+    it holds is not about that field: `run_checks` turns a raise anywhere in the
+    check into one synthetic FAIL replacing all four findings, so a value the
+    operator can set wrongly must not be able to reach that. `vault_path` is the
+    one such field left, and `Config.vault_path_for` coerces rather than raising
+    — `load_config` would have dropped a non-string, so what this drives is the
+    value arriving by some other route.
+    """
+
+    @pytest.mark.parametrize("value", [5, ["v.kdbx"], None])
+    def test_a_malformed_path_is_not_read_at_all(
+        self, vault_config, secret_key_env, value
     ):
-        """`list(x or ())` raises `TypeError` on an int, and `run_checks`
-        contains that into one synthetic FAIL replacing all four findings — so a
-        single malformed field costs the operator every answer the check had
-        already computed. Unreachable through `load_config`, which coerces the
-        field before the loader's own filter sees it, and guarded for the same
-        reason `_vault_users` guards the type of `vault_path`."""
-        vault_config.users["alice"].vault_services = 5
+        # The passphrase is what keeps this user in the checked set: a
+        # malformed path reads as no path at all, and without the other half of
+        # the enable the check would skip and the arms would never run.
+        _provision(vault_config)
+        vault_config.users["alice"].vault_path = value
         results = _run(vault_config, probe=False)
         assert len(results) == 4
-        assert results["security.credential_vault.schedule"].detail.endswith(
-            "(alice owns nothing)"
+        assert not any(
+            "the check itself raised" in r.detail for r in results.values()
         )
 
-    def test_a_non_string_entry_is_dropped_rather_than_rendered(self, vault_config):
-        vault_config.users["alice"].vault_services = ["karakeep", 7, None]
-        result = _run(vault_config, probe=False)[
-            "security.credential_vault.schedule"
-        ]
-        assert "karakeep" in result.detail
-        assert "7" not in result.detail
-        assert "None" not in result.detail
-
     def test_through_the_registry_a_malformed_field_still_yields_four_findings(
-        self, vault_config
+        self, vault_config, secret_key_env
     ):
         """The blast radius, asserted where it actually bites: `run_checks` is
         what turns a raise into the synthetic FAIL."""
-        vault_config.users["alice"].vault_services = 5
+        _provision(vault_config)
+        vault_config.users["alice"].vault_path = 5
         results = doctor.run_checks(
             vault_config, only=("security.credential_vault",), probe=False
         )

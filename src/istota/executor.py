@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 from . import db
 from . import email_support
+from . import secrets_vault
 from . import task_cgroup
 from . import task_env
 from .claude_runtime_env import (
@@ -2978,7 +2979,7 @@ _MODEL_CLI_ENDPOINT_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
 #: So the proxy triple goes to the skills that call a model and nothing else,
 #: through the same per-skill map ISSUE-409 used — which is the structure for
 #: a value that must reach exactly one subprocess and stay out of the
-#: `credential-fetch` union, and that is what these need. `ANTHROPIC_BASE_URL`
+#: manifest-lookup union, and that is what these need. `ANTHROPIC_BASE_URL`
 #: travels with them because no other skill reads it and a gateway URL can
 #: carry a key in its path.
 #:
@@ -3196,7 +3197,7 @@ def build_stripped_env() -> dict[str, str]:
 # hole of a setup_env hook doing
 # ``env["ISTOTA_SECRET_KEY"] = os.environ["ISTOTA_SECRET_KEY"]``.
 # ``derive_lookup_allowlist`` subtracts this set from its return value so
-# ``credential-fetch ISTOTA_SECRET_KEY`` is rejected by the proxy even if
+# ``istota-credential env ISTOTA_SECRET_KEY`` is rejected by the proxy even if
 # the var sneaks into ``credential_env``.
 #
 # ``SKILL_MODEL_CREDENTIAL_VARS`` joins it for the same reason from the other
@@ -3448,7 +3449,8 @@ def derive_authorized_skills(
       GitLab token OR GitHub token) auto-authorize when one provider is
       configured.
     - No ``meta.cli`` gate. The ``developer`` skill is doc-only but
-      consumes its tokens via ``credential-fetch`` from helper scripts;
+      consumes its tokens through the proxy's ``credential`` request type,
+      from helper scripts its ``setup_env`` hook writes;
       gating on ``cli=true`` would lock it out (regression of e675ed9).
     - ``fallback_var`` does NOT contribute to authorization. An
       operator-set EnvironmentFile fallback is an instance-wide signal
@@ -3517,7 +3519,13 @@ def derive_lookup_allowlist(
     authorized_skills: list[str],
     skill_index: dict,
 ) -> set[str]:
-    """Union of credentials any authorized skill may fetch via credential-fetch.
+    """Union of credentials any authorized skill may fetch by name.
+
+    The proxy's ``credential`` request type, which a task reaches as
+    ``istota-credential env <VAR>``. Deliberately *not* the shared-credential
+    namespace beside it: ``vault_credential`` serves per-user names out of
+    that user's own KDBX and this serves manifest-declared variables, so one
+    name space would mean two things.
 
     Replaces ``_allowed_credentials_for_skills``. Subtracts
     ``_PROXY_LOOKUP_BLOCKED`` as a defense-in-depth hard-reject list
@@ -3714,7 +3722,7 @@ def _sandbox_bind_targets(config: Config) -> list[Path]:
     supported config value silently revokes boundaries the sandbox is built on:
     ``sandbox_cache_dir = $HOME/.cache`` overmounts the read-only huggingface
     bind, ``= config.temp_dir`` hands every user's deferred-op directory to
-    every task and makes the credential-fetch helpers under ``.developer``
+    every task and makes the git credential helpers under ``.developer``
     writable again, and ``= $HOME/.local`` gives the model write access to the
     ``claude`` binary the daemon spawns host-side.
 
@@ -4591,7 +4599,8 @@ def native_fs_roots(
     every read-only user-data mount nested inside an earlier read-write one,
     which ``project_fs_roots`` derives rather than naming (rule 2 there).
     The two named ones:
-    ``.developer`` — the credential-fetch helper and the git credential helpers
+    ``.developer`` — the git credential helpers, and the framework credential
+    shim's own ``.istota`` beside it
     — which the claude_code path has protected since the RO re-bind was added
     and which this function silently left writable until it grew this return
     value. It is carried at the path *as written*, matching the bind, which is
@@ -5795,6 +5804,7 @@ def build_prompt(
     conn: "db.sqlite3.Connection | None" = None,
     effective_prompt: str | None = None,
     attachment_status: "dict[str, str] | None" = None,
+    shared_credentials: bool = False,
 ) -> ComposedPrompt:
     """Build a task's prompt, split by authority rather than by size.
 
@@ -6218,6 +6228,29 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     display_output_target = _one_line(output_target or "text")
     display_token = _one_line(task.conversation_token or "none")
 
+    # The shared-credential namespace, named but never enumerated. The names are
+    # the user's own labels, they change with no task running, and putting them
+    # in the system half would put them in every transcript — so the prompt says
+    # the namespace exists and names the verb that lists it. Values are never
+    # here and never in any environment.
+    #
+    # The quoting sentence is not padding: the model's own shell expands
+    # `$TOKEN` before the shim runs, so the tempting one-line form sends an
+    # empty header and a model debugging that reaches for a verb that hands it
+    # the value — which is the one outcome `run` exists to avoid. One line here
+    # costs less than that.
+    shared_credentials_line = ""
+    if shared_credentials:
+        shared_credentials_line = (
+            "\n- Shared credentials: this user has stored credentials for you to "
+            "use. `istota-credential list` names them; you are not told the "
+            "values and do not need them. Hand one to the command that needs it: "
+            "`istota-credential run TOKEN=<name> -- sh -c 'curl -H \"Authorization: "
+            "Bearer $TOKEN\" <url>'`. The `sh -c` and the single quotes are "
+            "load-bearing — the variable is set in the child process, so your own "
+            "shell must not expand it first."
+        )
+
     group_chat_line = ""
     if task.is_group_chat:
         # No "below": the conversation context this names is in the user half,
@@ -6255,7 +6288,7 @@ Output target: {display_output_target}{per_user_email_line}
 You have access to:
 {file_tools}{browser_tool}{web_tools}{bash_tool}
 {cli_skills_section}{db_tool_line}
-- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.
+- Email: two commands exist — `istota-skill email send` sends immediately via SMTP, `istota-skill email output` writes a deferred reply file. Use `send` when the user asks you to email someone (this is the common case). Only use `output` when this task arrived as an incoming email (Source: email) and you are composing the reply. See the email skill for details.{shared_credentials_line}
 
 {rules_section}
 {channel_section}"""
@@ -7013,6 +7046,15 @@ def execute_task(
         conn=conn,
         effective_prompt=effective_prompt,
         attachment_status=image_attachment_status(image_prep),
+        # Presence, not the names and certainly not the values: one
+        # `list_user_services` read, no Fernet, no master key. Gated on the
+        # skill proxy too, because with it off there is no socket for the verb
+        # the line names to reach — a prompt line pointing at a program that
+        # cannot answer is worse than no line.
+        shared_credentials=(
+            config.security.skill_proxy_enabled
+            and secrets_vault.has_shared_credentials(config.db_path, task.user_id)
+        ),
     )
 
     # The two halves travel apart from here. `req.prompt` is the user half; the

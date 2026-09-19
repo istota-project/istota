@@ -31,8 +31,11 @@ from istota.executor import (
     API_RETRY_DELAY_SECONDS,
     TRANSIENT_STATUS_CODES,
 )
+from istota import credential_shim
 from istota import db as _db
 from istota import executor
+from istota.skills import developer as developer_skill
+from tests.support.drift import source_of
 from istota.brain import BrainRequest, ClaudeCodeBrain
 from istota.brain import claude_code
 from tests.support.monotonic_spy import monotonic_spy
@@ -913,24 +916,57 @@ class TestDeveloperEnvVars:
         assert "ISTOTA_PATH_PREPEND" not in env
         assert not (user_temp / ".developer" / "gh").exists()
 
-    def test_credential_fetch_written_when_the_proxy_is_on(self, tmp_path):
+    def test_the_git_helper_calls_the_framework_shim(self, tmp_path):
         """The proxy branch of setup_env. With the proxy on, the helper must
-        not hold the token itself — it shells out to credential-fetch, which
-        asks the proxy for it at call time."""
+        not hold the token itself — it shells out to the framework credential
+        shim's `env` verb, which asks the proxy for it at call time.
+
+        The shim itself is written by `task_env`, not by this hook, and it is
+        written *after* this hook runs; the path is built from the same rule
+        both sides read.
+        """
         config = self._make_config(tmp_path, skill_proxy_enabled=True)
         _, user_temp = self._hook_env(config, tmp_path)
-        dev_bin = user_temp / ".developer"
-        fetch = dev_bin / "credential-fetch"
-        assert fetch.exists()
-        assert fetch.stat().st_mode & 0o777 == 0o700
-        body = (dev_bin / "git-credential-helper").read_text()
-        assert f'echo password="$({fetch} GITLAB_TOKEN)"' in body
+        shim = credential_shim.shim_path(user_temp)
+        body = (user_temp / ".developer" / "git-credential-helper").read_text()
+        assert f'echo password="$({shim} env GITLAB_TOKEN)"' in body
         assert "glpat-test" not in body
 
-    def test_credential_fetch_absent_when_the_proxy_is_off(self, tmp_path):
-        config = self._make_config(tmp_path, skill_proxy_enabled=False)
+    def test_the_hook_no_longer_generates_a_socket_client(self, tmp_path):
+        """Two socket clients for one protocol is the duplication this removed.
+
+        Source assertion as well as a filesystem one: the generated program was
+        a string literal inside `setup_env`, so a copy reintroduced there would
+        pass the `exists()` half on a fresh temp dir.
+        """
+        config = self._make_config(tmp_path, skill_proxy_enabled=True)
         _, user_temp = self._hook_env(config, tmp_path)
         assert not (user_temp / ".developer" / "credential-fetch").exists()
+        source = source_of(developer_skill.setup_env)
+        assert "socket.AF_UNIX" not in source
+
+    def test_a_stale_credential_fetch_is_removed(self, tmp_path):
+        """`user_temp_dir` persists across tasks, so a copy written before this
+        change would otherwise stay reachable on the model's PATH for the life
+        of the deployment."""
+        config = self._make_config(tmp_path, skill_proxy_enabled=True)
+        user_temp = tmp_path / "temp" / "alice"
+        (user_temp / ".developer").mkdir(parents=True, exist_ok=True)
+        stale = user_temp / ".developer" / "credential-fetch"
+        stale.write_text("#!/bin/sh\necho leftover\n")
+
+        self._hook_env(config, tmp_path)
+
+        assert not stale.exists()
+
+    def test_the_helper_reads_the_variable_directly_when_the_proxy_is_off(
+        self, tmp_path,
+    ):
+        config = self._make_config(tmp_path, skill_proxy_enabled=False)
+        _, user_temp = self._hook_env(config, tmp_path)
+        body = (user_temp / ".developer" / "git-credential-helper").read_text()
+        assert 'echo password="$GITLAB_TOKEN"' in body
+        assert "istota-credential" not in body
 
     def test_seeded_config_is_truncated_every_run(self, tmp_path):
         """user_temp_dir persists across tasks. gh expands aliases from

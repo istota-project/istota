@@ -77,6 +77,21 @@ def _binds(argv, flag):
     ]
 
 
+def _expected_deny_roots(user_temp):
+    """Every write-deny root the projection emits unconditionally, in order.
+
+    Two now, and the list is compared for *equality* rather than membership so
+    a third arriving without an edit here fails. That is how `.istota` was
+    found: the credential shim added a deny root and every caller of this
+    assertion still named one, in the round's full pass rather than in the
+    stage that added it.
+    """
+    return [
+        user_temp.resolve() / ".developer",
+        user_temp.resolve() / ".istota",
+    ]
+
+
 class TestTheDeveloperCarveOut:
     """The plan carries the entry unconditionally so the projection can see it.
 
@@ -93,21 +108,15 @@ class TestTheDeveloperCarveOut:
 
     def test_denied_when_the_directory_is_absent(self, config, task, user_temp):
         assert not (user_temp / ".developer").exists()
-        assert self._denied(config, task, user_temp) == [
-            user_temp.resolve() / ".developer"
-        ]
+        assert self._denied(config, task, user_temp) == _expected_deny_roots(user_temp)
 
     def test_denied_when_the_path_is_a_regular_file(self, config, task, user_temp):
         (user_temp / ".developer").write_text("planted by an earlier task")
-        assert self._denied(config, task, user_temp) == [
-            user_temp.resolve() / ".developer"
-        ]
+        assert self._denied(config, task, user_temp) == _expected_deny_roots(user_temp)
 
     def test_denied_when_the_directory_exists(self, config, task, user_temp):
         (user_temp / ".developer").mkdir()
-        assert self._denied(config, task, user_temp) == [
-            user_temp.resolve() / ".developer"
-        ]
+        assert self._denied(config, task, user_temp) == _expected_deny_roots(user_temp)
 
     @pytest.mark.parametrize("shape", ["absent", "file", "symlink_loop"])
     def test_the_argv_binds_nothing_unless_it_is_a_directory(
@@ -145,9 +154,7 @@ class TestTheDeveloperCarveOut:
         dev.symlink_to(user_temp / "loop")
         (user_temp / "loop").symlink_to(dev)
 
-        assert self._denied(config, task, user_temp) == [
-            user_temp.resolve() / ".developer"
-        ]
+        assert self._denied(config, task, user_temp) == _expected_deny_roots(user_temp)
 
     def test_a_real_directory_is_still_bound_read_only(
         self, config, task, user_temp,
@@ -178,9 +185,7 @@ class TestTheDeveloperCarveOut:
         elsewhere.mkdir()
         (user_temp / ".developer").symlink_to(elsewhere)
 
-        assert self._denied(config, task, user_temp) == [
-            user_temp.resolve() / ".developer"
-        ]
+        assert self._denied(config, task, user_temp) == _expected_deny_roots(user_temp)
 
 
 class TestReadOnlyNestedInsideReadWrite:
@@ -272,7 +277,7 @@ class TestARejectedWorkspaceCostsOnlyTheWorkspace:
         assert (config.workspace_path / "Users" / "alice").resolve() in write
         assert forbidden.resolve() not in write
         assert forbidden.resolve() not in read
-        assert denied == [user_temp.resolve() / ".developer"]
+        assert denied == _expected_deny_roots(user_temp)
 
 
 class TestTheDerivedCacheIsNotAWriteRoot:

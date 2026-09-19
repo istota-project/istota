@@ -552,8 +552,9 @@ Available `from:` sources: `config` (dotted config path with `when` guard),
 
 Two flags decide who sees the resolved value. `sensitive: true` marks a
 credential: stripped from Claude's env, injected by the proxy only for the
-skills whose manifests declare it, fetchable via `credential-fetch`, and an
-auto-authorization signal. `proxy_only: true` also withholds the var from
+skills whose manifests declare it, fetchable by name over the proxy's
+`credential` request type (`istota-credential env <VAR>` is the program that
+speaks it), and an auto-authorization signal. `proxy_only: true` also withholds the var from
 Claude and hands it to the proxy, but carries none of that machinery — it is
 for non-secret values the model still must not hold, which today means paths
 to SQLite files (`HEALTH_DB_PATH`, `LOCATION_DB_PATH`; the framework
@@ -562,6 +563,23 @@ since it belongs to no manifest). Don't set both: the credential split runs
 first, so the var routes as a credential and the `proxy_only` flag is inert. The resource-backed sources (`resource`,
 `resource_json`, `user_resource_config`) were removed in the Resources sunset
 — no bundled skill used them.
+
+**A skill CLI can also take a credential the manifest never named**, out of the
+user's own shared namespace: `skills/_credref.credential_ref(parser, …)` is
+`add_argument` with a stamp, and `skills/_cli.parse_and_resolve` resolves every
+stamped value over the proxy before dispatch, exactly as it resolves a host-path
+stamp beside it. The handler receives a `SecretValue` whose `repr`, `str` and
+f-string carry no part of the plaintext and whose `reveal()` does; a name the
+namespace does not hold is refused before the handler runs, with
+`reason="vault_credential_refused"`. `browse interact --fill-credential` is the
+shipped consumer and is why the mechanism exists: the value goes from the daemon
+to the browser container without ever entering the sandbox, which is the one path
+in this design where a credential a task *uses* is a credential the task never
+holds. Prefer it over `--fill` for anything secret. A parser that declares no
+stamp behaves exactly as before, which is what lets every other skill stay
+untouched. Argparse only today — a Click skill cannot declare one, and the walk
+fails loudly rather than silently if anybody tries. See
+`.claude/rules/sandbox.md` for what bounds the namespace itself.
 
 ## Skills
 

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from istota import db
+from istota import credential_shim, db
 from istota.config import Config, DevboxConfig, DeveloperConfig, NetworkConfig, SecurityConfig
 from istota.executor import (
     SandboxProfile,
@@ -478,6 +478,44 @@ class TestBuildBwrapCmdDeveloperDir:
         result_str = " ".join(result)
         assert ".developer" not in result_str
 
+    def test_credential_shim_dir_mounted_ro_when_present(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        shim_dir = user_temp / credential_shim.SHIM_DIR_NAME
+        shim_dir.mkdir(parents=True)
+
+        result = _run_bwrap(sandbox_config, task, False, user_temp=user_temp)
+        resolved = str(shim_dir.resolve())
+        ro_pairs = _get_bind_pairs(result, "--ro-bind")
+        assert any(src == resolved for src, _ in ro_pairs), \
+            f"the shim dir is not in --ro-bind pairs: {ro_pairs}"
+
+    def test_credential_shim_dir_after_user_temp_bind(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """A later --ro-bind on a subdir overrides the parent --bind, so the
+        order is what makes the entry mean anything."""
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        shim_dir = user_temp / credential_shim.SHIM_DIR_NAME
+        shim_dir.mkdir(parents=True)
+
+        result = _run_bwrap(sandbox_config, task, False, user_temp=user_temp)
+        temp_resolved = str(user_temp.resolve())
+        shim_resolved = str(shim_dir.resolve())
+
+        bind_idx = ro_bind_idx = None
+        for i, arg in enumerate(result):
+            if arg == "--bind" and i + 1 < len(result) and result[i + 1] == temp_resolved:
+                bind_idx = i
+            if arg == "--ro-bind" and i + 1 < len(result) and result[i + 1] == shim_resolved:
+                ro_bind_idx = i
+        assert bind_idx is not None, "user_temp --bind not found"
+        assert ro_bind_idx is not None, "the shim dir's --ro-bind not found"
+        assert ro_bind_idx > bind_idx
+
 
 class TestBuildBwrapCmdTaskControlDirectory:
     """The task control directory, re-bound read-only inside the temp root.
@@ -780,10 +818,12 @@ class TestNativeFsRootsTaskControlDirectory:
         assert control in denied, denied
         assert control in read, read
 
-    def test_no_control_dir_denies_only_developer(
+    def test_no_control_dir_denies_only_the_two_program_dirs(
         self, sandbox_config, make_sandbox_task,
     ):
-        """A direct caller with no control directory is unchanged."""
+        """A direct caller with no control directory denies the two directories
+        holding programs the daemon writes and the model must not replace, and
+        nothing else."""
         task = make_sandbox_task()
         user_temp = sandbox_config.temp_dir / task.user_id
         user_temp.mkdir(parents=True, exist_ok=True)
@@ -792,7 +832,10 @@ class TestNativeFsRootsTaskControlDirectory:
             sandbox_config, task, False, [], user_temp,
         )
 
-        assert denied == [user_temp.resolve() / ".developer"]
+        assert denied == [
+            user_temp.resolve() / ".developer",
+            user_temp.resolve() / credential_shim.SHIM_DIR_NAME,
+        ]
 
 
 class TestBuildBwrapCmdPathResolution:
@@ -1430,6 +1473,46 @@ class TestNativeFsRoots:
         user_temp.mkdir(parents=True)
         _, _, denied = self._roots(sandbox_config, task, False, user_temp=user_temp)
         assert (user_temp.resolve() / ".developer") in denied
+
+    def test_credential_shim_dir_denied_for_writes(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """The shim itself is no boundary, and this entry is not about it.
+
+        The developer skill's git credential helper execs the shim by
+        *absolute path* to fetch the forge token, so PATH ordering does not
+        reach that call — and the program it replaced lived in `.developer`,
+        which the entry above covers. Leaving this directory writable would let
+        a task replace the program that hands git a token whose whole design is
+        that the model never holds it.
+        """
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        shim_dir = user_temp / credential_shim.SHIM_DIR_NAME
+        shim_dir.mkdir(parents=True)
+        read, write, denied = self._roots(
+            sandbox_config, task, False, user_temp=user_temp,
+        )
+        assert shim_dir.resolve() in denied
+        assert user_temp.resolve() in write
+        assert shim_dir.resolve() not in write
+        assert user_temp.resolve() in read
+
+    def test_credential_shim_dir_denied_before_it_exists(
+        self, sandbox_config, make_sandbox_task,
+    ):
+        """Same reason as `.developer`'s, plus one of its own: a mount point
+        cannot be unlinked from inside the namespace, so an entry that appeared
+        only once the directory did would leave a window in which a task can
+        plant a symlink at this name for the *next* task's daemon-side write to
+        follow."""
+        task = make_sandbox_task()
+        user_temp = sandbox_config.temp_dir / "alice"
+        user_temp.mkdir(parents=True)
+        _, _, denied = self._roots(sandbox_config, task, False, user_temp=user_temp)
+        assert (
+            user_temp.resolve() / credential_shim.SHIM_DIR_NAME
+        ) in denied
 
 
 class TestPerUserReposDir:

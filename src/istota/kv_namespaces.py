@@ -16,7 +16,11 @@ say whether the size ceiling rather than `retention_days` is the retention in
 force — and `_vault_sync`, what the credential-vault pass last settled for one
 user, which the web process reads to render the settings heading and to decide
 whether a vault notification is still live, neither of those being a question
-the syncing process's own in-memory state can answer from another unit. Those
+the syncing process's own in-memory state can answer from another unit — and
+`_vault_file`, the filename that user chose out of their vault folder, which is
+reserved for the same reason `_provisioned_rooms` is: it selects which file the
+daemon decrypts with a key it holds, and the folder it names is bound
+read-write into that user's own sandbox. Those
 rows are written by the daemon, by the host-side `memory` skill CLI and by the
 `provision-rooms` CLI, and read by neither the model nor the `kv` skill.
 
@@ -24,10 +28,10 @@ Both KV tables, not only the per-user one: `skills/kv` applies this in `main`
 before it dispatches a verb, so `--shared` — which reads and writes the
 deployment-wide `shared_kv` — is covered by the same line. `_avatar_import` and
 `_session_log_sweep` are `shared_kv` namespaces and would otherwise be
-reachable; `_vault_sync` is a per-user one, because a vault belongs to one user
-and that table's key already carries a user id.
+reachable; `_vault_sync` and `_vault_file` are per-user ones, because a vault
+belongs to one user and that table's key already carries a user id.
 
-The rule is a name prefix rather than a list, so a seventh reserved namespace
+The rule is a name prefix rather than a list, so an eighth reserved namespace
 costs nothing here or at either enforcement point. Both of those are needed
 and neither substitutes for the other:
 

@@ -162,7 +162,7 @@ A **Token usage** card carries 24-hour and 30-day totals, the cache hit rate, an
 
 **Location**: today view (current position, day summary, trips), history (date picker, activity filter, heatmap), places (discover clusters, create/edit/delete, visit stats). Requires GPS tracking to be enabled.
 
-**Settings**: per-user preferences plus the Connected services page (Google Workspace, Garmin, Karakeep, ntfy, Monarch) and the per-module settings pages. This is where credentials are entered — write-only, bullet-masked fields backed by the encrypted secrets store.
+**Settings**: per-user preferences plus the Connected services page (Google Workspace, Garmin, Karakeep, ntfy, Monarch) and the per-module settings pages. This is where credentials are entered — write-only, bullet-masked fields backed by the encrypted secrets store. The [credential vault](../configuration/credentials.md#credential-vault) card sits on that page too, and is the one surface a user sets one up from: it lists the `.kdbx` files in their own vault folder, takes a filename rather than a path, generates the passphrase, and names the shared credentials istota holds from the file.
 
 ## API routes
 
