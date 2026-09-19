@@ -1093,6 +1093,30 @@ class TestTheMediaStagingCheck:
         assert result.status == doctor.OK
         assert "empty" in result.detail
 
+    def test_under_root_the_ok_detail_says_ownership_was_not_checked(
+        self, tmp_path, monkeypatch,
+    ):
+        """A check may not assert what it did not compare.
+
+        The ownership arm is skipped under root, for the reason
+        `whatsapp.baileys_session` skips it: `geteuid()` is 0 while the
+        directory belongs to the daemon's account, so the comparison has no
+        true answer. But `ensure_media_dir` carries **no** such exemption — it
+        raises `PermissionError` on a foreign uid and `start_baileys_bridge`
+        turns that into a bridge that does not start — so an unqualified "OK,
+        private to this account" under `sudo istota doctor` would report a
+        working directory on a host whose WhatsApp surface is down.
+        """
+        cfg = _config(tmp_path)
+        self._staging(cfg)
+        monkeypatch.setattr(doctor.os, "geteuid", lambda: 0)
+
+        result = _run(cfg, "whatsapp.media_staging")
+
+        assert result.status == doctor.OK
+        assert "did not check" in result.detail
+        assert "private to this account" not in result.detail
+
     def test_a_world_readable_directory_fails(self, tmp_path):
         cfg = _config(tmp_path)
         self._staging(cfg, mode=0o755)
@@ -1318,6 +1342,13 @@ class TestTheMediaStagingCheck:
         # distinguishable, and naming the arm is what says the `ValueError`
         # was caught where it was meant to be.
         assert result.status == doctor.WARN
+        # **By the arm's own words**, the way the `pairing_relay` and
+        # `session_dir` null-byte tests do it. The resolve arm above produces
+        # the same status and the same exception name, and is unreachable
+        # today only because `default_media_dir` is a pure join — so asserting
+        # on `ValueError` alone would stop discriminating the moment that
+        # callee grew a `expanduser` arm like its sibling has.
+        assert "could not be read" in result.detail
         assert "ValueError" in result.detail
         assert "Traceback" not in result.detail
 

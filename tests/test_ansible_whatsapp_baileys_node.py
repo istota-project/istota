@@ -398,6 +398,116 @@ class TestTheAutoUpdateCron:
         assert "ERROR" in line and "full play" in line
 
 
+class TestTheCronRefusesToRestartIntoAStaleUnit:
+    """The same shape as the interpreter guard, for the unit's environment.
+
+    **This script delivers the program and only a full play delivers the
+    unit**, which is the asymmetry that makes it a hazard rather than a
+    nicety. The sidecar requires three environment variables and exits 2
+    without any one of them, so a commit adding a fourth reaches a
+    cron-updated host as a new `index.js` against the unit file the last full
+    play rendered. `Restart=always` then loops it, and the refusal has nowhere
+    to go: `StandardOutput=null`, and the program's only log destination is a
+    file inside the 0700 session directory. What an operator sees is an empty
+    `journalctl` and `doctor` reporting no sidecar connected, which names the
+    wrong cause.
+
+    `ISTOTA_BAILEYS_MEDIA_DIR` is the variable that has been added, so it is
+    the one the guard names.
+    """
+
+    @pytest.fixture(scope="module")
+    def cron(self) -> str:
+        return (
+            REPO / "deploy" / "ansible" / "templates" / "istota-update.sh.j2"
+        ).read_text()
+
+    @pytest.fixture(scope="module")
+    def unit(self) -> str:
+        return (
+            REPO / "deploy" / "ansible" / "templates"
+            / "istota-whatsapp-baileys.service.j2"
+        ).read_text()
+
+    def test_the_variable_it_greps_for_is_one_the_unit_actually_sets(
+        self, cron, unit,
+    ):
+        """A guard naming a variable the unit never sets refuses for ever.
+
+        This is the arm that inverts the failure: the check is a `grep` over a
+        file this repository also renders, so the two have to agree or every
+        cron run on a correctly-deployed host skips the restart and says the
+        unit is stale.
+        """
+        assert "ISTOTA_BAILEYS_MEDIA_DIR" in cron
+        assert "Environment=ISTOTA_BAILEYS_MEDIA_DIR=" in unit
+
+    def test_it_guards_both_arms_that_touch_the_unit(self, cron):
+        """`restart` and `start` alike.
+
+        A stale unit refuses the program whichever verb is used, so guarding
+        only the restart arm would leave the ordinary no-change tick starting
+        it into the same loop every two minutes.
+        """
+        start = cron.index('systemctl start "${NAMESPACE}-whatsapp-baileys"')
+        restart = cron.index('systemctl restart "${NAMESPACE}-whatsapp-baileys"')
+        preceding = cron[: min(start, restart)]
+        guard = preceding.rindex("BAILEYS_UNIT_STALE")
+        assert "\nfi\n" not in preceding[guard:], (
+            "the stale-unit check does not guard the arms that start the unit"
+        )
+
+    def test_it_reads_the_unit_on_disk_rather_than_systemd_s_loaded_copy(
+        self, cron,
+    ):
+        """`systemctl show -p Environment` reports what systemd last loaded.
+
+        The cron runs before any `daemon-reload` a full play would have done,
+        so the loaded copy can be older than the file — and the file is what
+        the next restart will read.
+        """
+        assert "/etc/systemd/system/${NAMESPACE}-whatsapp-baileys.service" in cron
+        # Directives rather than mentions, the rule the unit's own `PartOf=`
+        # test states: a comment in this script names `systemctl show` in
+        # order to say why it is not used, and a substring test cannot tell
+        # that apart from a call.
+        commands = [
+            ln.strip() for ln in cron.splitlines()
+            if not ln.lstrip().startswith("#")
+        ]
+        assert not any("systemctl show" in ln for ln in commands)
+
+    def test_it_says_so_rather_than_skipping_silently(self, cron):
+        """The cron cannot render the unit, so naming the cause and the remedy
+        is the whole of what it can usefully do."""
+        line = next(
+            ln
+            for ln in cron.splitlines()
+            if "predates ISTOTA_BAILEYS_MEDIA_DIR" in ln
+        )
+        assert "ERROR" in line and "full play" in line
+        assert "exit 2" in line, (
+            "the message does not say what would happen, which is the thing "
+            "an operator reading an empty journal needs"
+        )
+
+    def test_a_unit_file_that_is_absent_is_not_treated_as_stale(self, cron):
+        """A host with the unit not yet installed at all is a different case.
+
+        `-f` first, so the grep runs against a file that exists; without it
+        `grep` on a missing path is non-zero and every such host would be
+        reported stale rather than simply having nothing to restart.
+        """
+        guard = next(
+            ln for ln in cron.splitlines()
+            if ln.lstrip().startswith("if [") and "BAILEYS_UNIT" in ln
+        )
+        assert '-f "$BAILEYS_UNIT"' in guard
+        # And the two are one condition rather than two statements, so a unit
+        # that is absent never reaches the grep at all.
+        assert "&&" in guard and "grep -q" in guard
+
+
 class TestTheNodeInstallTaskName:
     """The issue's own "also worth a look": the task was named for the developer
     skill while its condition had grown to three consumers, so the name was a

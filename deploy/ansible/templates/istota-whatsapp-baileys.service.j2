@@ -65,7 +65,7 @@ RestartSec={{ istota_whatsapp_baileys_restart_sec }}
 # this adapter, and `media.default_media_dir` is the one rule that picks it. It
 # also needs no ReadWritePaths change — it is under {{ istota_home }}/data,
 # which this unit already grants, and that is why it is beside db_path rather
-# than under temp_dir, where PrivateTmp and the write path would both refuse.
+# than under temp_dir, which ReadWritePaths below does not reach.
 Environment=ISTOTA_BAILEYS_SOCKET={{ istota_home }}/data/whatsapp-baileys.sock
 Environment=ISTOTA_BAILEYS_SESSION_DIR={{ istota_home }}/data/whatsapp-baileys-session
 Environment=ISTOTA_BAILEYS_MEDIA_DIR={{ istota_home }}/data/whatsapp-media

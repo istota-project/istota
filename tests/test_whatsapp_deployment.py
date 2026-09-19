@@ -345,7 +345,14 @@ class TestTheBaileysSidecarService:
         config = load_config(render_docker_config(tmp_path, **REQUIRED))
         service = self._service()
 
+        istota = yaml.safe_load(COMPOSE.read_text())["services"]["istota"]
+
         assert "istota_data:/data" in service["volumes"]
+        # **Both sides, because the property is that they see one inode set.**
+        # This container writes the file and the daemon in the istota
+        # container reads it back and copies it out, so asserting the
+        # sidecar's mount alone names a two-sided property and checks one.
+        assert "istota_data:/data" in istota["volumes"]
         assert str(default_media_dir(config)).startswith("/data/")
 
     def test_it_shares_the_data_volume_and_publishes_nothing(self):
@@ -893,9 +900,11 @@ class TestTheAnsibleSidecarUnit:
         tree while holding a full WhatsApp account. So the staging directory
         had to land inside that path or the sidecar could not write a photo —
         and the alternative location, a sibling of the task control directory
-        under `temp_dir`, is refused twice over: `PrivateTmp=true` gives this
-        unit its own `/tmp`, and widening `ReadWritePaths` to reach the real
-        one would hand the sidecar every user's task temp directory.
+        under `temp_dir`, is refused by this directive alone: widening it to
+        reach `temp_dir` would hand the sidecar every user's task temp
+        directory. **Not by `PrivateTmp=true`**, which is also on the unit and
+        is easy to credit here by mistake: the role renders `temp_dir` as
+        `{istota_home}/tmp`, and a private `/tmp` does not reach it.
 
         Read as a **verification rather than an assumption**: the unit is
         parsed for its own directive and the directory is asked of the product,

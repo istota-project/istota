@@ -8008,7 +8008,8 @@ def check_whatsapp_media_staging(config: "Config", probe: bool) -> CheckResult:
     except (OSError, ValueError) as exc:
         return CheckResult(
             name, WARN,
-            f"{path} is 0700 and private to this account, but its contents "
+            f"{path} is {mode:04o} and private to this account, but its "
+            "contents "
             f"could not be listed ({type(exc).__name__}), so nothing is known "
             "about what is staged in it",
             remedy=f"Check the mode and ownership of {path}.",
@@ -8042,17 +8043,32 @@ def check_whatsapp_media_staging(config: "Config", probe: bool) -> CheckResult:
             ),
             scope=DEPLOYMENT,
         )
+    # **Under root the ownership arm above was skipped, and this says so
+    # rather than reporting a question it did not ask.** `ensure_media_dir`
+    # carries no root exemption — it raises `PermissionError` on a foreign
+    # uid, `start_baileys_bridge` catches that and returns False — so a
+    # directory belonging to another account is the whole WhatsApp surface
+    # down while `sudo istota doctor` would otherwise print an unqualified OK.
+    # The exemption itself stays, for `whatsapp.baileys_session`'s reason:
+    # under root `geteuid()` is 0 while the directory belongs to the daemon's
+    # account, so the comparison has no true answer to give.
+    owner = (
+        "private to this account" if os.geteuid() != 0
+        else f"owned by uid {info.st_uid}, which this run did not check "
+             "against the daemon's account"
+    )
     if staged:
         return CheckResult(
             name, OK,
-            f"{path} is {mode:04o}, and {staged} WhatsApp image(s) are staged "
-            "in it and still inside the consume window",
+            f"{path} is {mode:04o} and {owner}, and {staged} WhatsApp "
+            "image(s) are staged in it and still inside the consume window",
             scope=DEPLOYMENT,
         )
     return CheckResult(
         name, OK,
-        f"{path} is {mode:04o} and empty, which is where an inbound WhatsApp "
-        "photograph lands before it is copied into the sender's workspace",
+        f"{path} is {mode:04o} and {owner}, and empty, which is where an "
+        "inbound WhatsApp photograph lands before it is copied into the "
+        "sender's workspace",
         scope=DEPLOYMENT,
     )
 

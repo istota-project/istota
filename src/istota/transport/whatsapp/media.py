@@ -217,10 +217,13 @@ def default_media_dir(config: "Config") -> Path:
     than of one adapter, so an override would be `[whatsapp] media_dir` rather
     than a Baileys key, and none ships.
 
-    Three independent things make this the location. The Ansible unit sets
-    `ReadWritePaths={istota_home}/data` with `PrivateTmp=true`, so the sidecar
-    can write here and cannot write under `temp_dir` — and widening the unit
-    would hand it every user's task temp directory. The compose stack already
+    Three independent things make this the location. The Ansible unit runs
+    under `ProtectSystem=strict` with `ReadWritePaths={istota_home}/data`, so
+    the sidecar can write here and cannot write under `temp_dir` — and
+    widening the unit would hand it every user's task temp directory. It is
+    that write path doing the refusing rather than the unit's `PrivateTmp`,
+    which the first version of this paragraph credited: the role renders
+    `temp_dir` as `{istota_home}/tmp`, so a private `/tmp` never reaches it. The compose stack already
     mounts `istota_data:/data` into both containers, so they see one inode set
     with no new volume. And `build_bwrap_cmd` masks `db_path.parent` with an
     empty read-only tmpfs after every other mount, so on both shapes this
