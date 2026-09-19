@@ -38,10 +38,10 @@ DEFAULT_API_URL = "http://localhost:9223"
 # rather than the bot dir itself, so a task taking twenty captures does not
 # bury the config, exports and notes directories the user reads.
 SCREENSHOT_SUBDIR = "screenshots"
-# Where `OrderedAppend` records the command-line order of the two fill
-# arguments. Not an argument of its own, so nothing parses it and no caller
-# sets it; `interact` is the only reader.
-FILL_ORDER_DEST = "fill_order"
+# Where `OrderedAppend` records the command-line order of the `interact`
+# arguments it is declared on. Not an argument of its own, so nothing parses
+# it and no caller sets it; `interact` is the only reader.
+ACTION_ORDER_DEST = "action_order"
 # How many derived names one capture will try before giving up. Only reached
 # when that many captures land in the same UTC second, so it is a bound on a
 # loop rather than a capacity.
@@ -483,13 +483,13 @@ def cmd_extract(args):
 class OrderedAppend(argparse.Action):
     """`append`, plus a note of where this value sat on the command line.
 
-    `--fill` and `--fill-credential` are separate arguments — a marker inside
-    `--fill`'s value would be ambiguous against a literal beginning with it,
-    and the declaration is what the coverage walk reads — but a login form is
-    filled field by field, so the two have to interleave in the order the
-    caller wrote them. Argparse keeps no cross-argument order, so each value
-    records `(dest, index)` in `FILL_ORDER_DEST` as it lands and
-    `cmd_interact` replays that list.
+    `--click`, `--fill` and `--fill-credential` are separate arguments — a
+    marker inside `--fill`'s value would be ambiguous against a literal
+    beginning with it, and the declaration is what the coverage walk reads —
+    but a login is a form filled field by field and *then* submitted, so the
+    three have to interleave in the order the caller wrote them. Argparse
+    keeps no cross-argument order, so each value records `(dest, index)` in
+    `ACTION_ORDER_DEST` as it lands and `cmd_interact` replays that list.
 
     Not a shared dest, which is the shape this replaces: the credential stamp
     resolves whatever sits on its own dest, so a mixed list would send every
@@ -500,13 +500,62 @@ class OrderedAppend(argparse.Action):
         items = list(getattr(namespace, self.dest, None) or [])
         items.append(values)
         setattr(namespace, self.dest, items)
-        order = list(getattr(namespace, FILL_ORDER_DEST, None) or [])
+        order = list(getattr(namespace, ACTION_ORDER_DEST, None) or [])
         order.append((self.dest, len(items) - 1))
-        setattr(namespace, FILL_ORDER_DEST, order)
+        setattr(namespace, ACTION_ORDER_DEST, order)
 
 
-def _fill_actions(args):
-    """The fill actions for one `interact`, in the order they were written.
+def _click_action(selector):
+    return {"type": "click", "selector": selector}
+
+
+def _fill_action(spec):
+    if "=" not in spec:
+        # Refused, not skipped. A dropped fill leaves the clicks around it to
+        # run against an empty form and report `ok`, which is ISSUE-507's
+        # symptom by a second route; `--fill-credential` already refuses the
+        # same shape before dispatch.
+        raise ValueError(
+            f"Malformed --fill value: expected SELECTOR=VALUE, got {spec!r}"
+        )
+    selector, value = spec.split("=", 1)
+    return {"type": "fill", "selector": selector, "value": value}
+
+
+def _fill_credential_action(pair):
+    if not isinstance(pair, CredentialPair):
+        raise ValueError(
+            "--fill-credential was not resolved; the shared-credential "
+            "lookup did not run for this call"
+        )
+    return {"type": "fill", "selector": pair.label, "value": pair.value.reveal()}
+
+
+#: Which dest an order record may name, and what each one emits. One table
+#: rather than a tuple of dests beside a chain of branches: an argument added
+#: to only one of those reaches whichever branch is last and is resolved as
+#: what *that* branch handles, which for the shape this replaces meant a
+#: selector unwrapped as a `CredentialPair`. A dest with no entry cannot be
+#: replayed at all, and there is nowhere to add one that leaves it unhandled.
+ACTION_EMITTERS = {
+    "click": _click_action,
+    "fill": _fill_action,
+    "fill_credential": _fill_credential_action,
+}
+#: The dests `OrderedAppend` may be declared on, and the fallback order.
+ORDERED_ACTION_DESTS = tuple(ACTION_EMITTERS)
+
+
+def _interact_actions(args):
+    """The click and fill actions for one `interact`, in the order written.
+
+    The browser runs this array in order, so the order is the behaviour: a
+    login is two fills and then a click, and emitting the click first submits
+    an empty form and reports `ok` for every action (ISSUE-507). Position is
+    the only rule here; nothing infers that a click ought to follow a fill,
+    because a click that opens a modal is as ordinary as one that submits.
+    `--scroll` is not in the record — it is not repeatable, so it has no
+    position — and `cmd_interact` appends it last.
 
     A `--fill-credential` value arrives here already resolved by the stamp, as
     a `CredentialPair`, and `reveal()` is the one call that unwraps it — the
@@ -517,43 +566,40 @@ def _fill_actions(args):
     name, since typing a name into a password box is a failed login whose cause
     is invisible from the result.
     """
-    literals = list(getattr(args, "fill", None) or [])
-    credentials = list(getattr(args, "fill_credential", None) or [])
-    order = list(getattr(args, FILL_ORDER_DEST, None) or [])
+    values = {
+        dest: list(getattr(args, dest, None) or []) for dest in ORDERED_ACTION_DESTS
+    }
+    order = list(getattr(args, ACTION_ORDER_DEST, None) or [])
     if not order:
-        # A caller that built the namespace itself (or parsed with plain
-        # `parse_args`) has no order record. Literals then credentials, which
-        # is the order the flags were read in before this existed.
-        order = [("fill", i) for i in range(len(literals))]
-        order += [("fill_credential", i) for i in range(len(credentials))]
+        # A caller that built the namespace itself has no order record —
+        # `OrderedAppend` is the argparse action, so it fires under a plain
+        # `parse_args` too and argv callers never land here. Clicks, then
+        # literals, then credentials: what such a caller saw before ISSUE-507.
+        order = [
+            (dest, i)
+            for dest in ORDERED_ACTION_DESTS
+            for i in range(len(values[dest]))
+        ]
+    # Dests before lengths: an unrecognised dest contributes an order entry and
+    # no value, so it fails the count too, and that is the less useful of the
+    # two answers.
+    for dest, _index in order:
+        if dest not in ACTION_EMITTERS:
+            raise ValueError(f"no interact action is defined for {dest}")
+    if len(order) != sum(len(v) for v in values.values()):
+        # A hand-built record naming fewer values than were parsed would drop
+        # the rest in silence, leaving the clicks it does name to run against a
+        # form that was never filled.
+        raise ValueError("the action order record does not match the values parsed")
 
     actions = []
     for dest, index in order:
-        source = literals if dest == "fill" else credentials
+        source = values[dest]
         if index >= len(source):
-            # Only reachable from a hand-built namespace whose order record and
-            # value lists disagree. Named rather than left to `IndexError`,
-            # which `run_skill_cli` would report as a browser failure.
             raise ValueError(
                 f"the {dest} order record does not match the values parsed"
             )
-        if dest == "fill":
-            spec = literals[index]
-            if "=" in spec:
-                selector, value = spec.split("=", 1)
-                actions.append(
-                    {"type": "fill", "selector": selector, "value": value},
-                )
-            continue
-        pair = credentials[index]
-        if not isinstance(pair, CredentialPair):
-            raise ValueError(
-                "--fill-credential was not resolved; the shared-credential "
-                "lookup did not run for this call"
-            )
-        actions.append(
-            {"type": "fill", "selector": pair.label, "value": pair.value.reveal()},
-        )
+        actions.append(ACTION_EMITTERS[dest](source[index]))
     return actions
 
 
@@ -595,13 +641,10 @@ def _scrub(payload, secrets):
 def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
-    actions = []
-
-    if args.click:
-        for selector in args.click:
-            actions.append({"type": "click", "selector": selector})
-    actions.extend(_fill_actions(args))
+    actions = _interact_actions(args)
     if args.scroll:
+        # Last, and the one action whose position the caller does not choose;
+        # skill.md says so rather than leaving it to be found in a result.
         actions.append({"type": "scroll", "direction": args.scroll, "amount": args.scroll_amount})
 
     payload = {
@@ -781,7 +824,10 @@ def build_parser():
     # interact
     p_int = sub.add_parser("interact", help="Interact with existing session")
     p_int.add_argument("session_id", help="Session ID")
-    p_int.add_argument("--click", action="append", help="CSS selector to click")
+    p_int.add_argument(
+        "--click", action=OrderedAppend,
+        help="CSS selector to click, where you wrote it among the fills",
+    )
     p_int.add_argument(
         "--fill", action=OrderedAppend, help="selector=value to fill",
     )
