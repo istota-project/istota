@@ -2945,8 +2945,12 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     the only surface that answers for every configured user at once.
 
     Four findings, because they fail independently and are fixed in four
-    different places. A deployment where no user has a ``vault_path`` — which is
-    every deployment by default — gets one ``SKIP`` instead. The fifth question
+    different places. A deployment where no user holds a ``vault/passphrase`` row
+    and none has a TOML ``vault_path`` — which is every deployment by default —
+    gets one ``SKIP`` instead. That pair is the enable, so it is the pair
+    ``_vault_users`` iterates: a file in the folder with no passphrase can be
+    read by nothing, and a configured path with no passphrase is still a
+    misconfiguration worth naming. The fifth question
     §10 asks — what each file turns out to hold — is :func:`check_vault_contents`
     under a registry name of its own, and that split is a cost decision stated
     there rather than a tidiness one.

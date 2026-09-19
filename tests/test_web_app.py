@@ -2598,7 +2598,11 @@ class TestVaultOwnedServices:
         deliberately writes no file, which also keeps the test off `pykeepass`.
         """
         mount = tmp_path / "vaultmount"
-        (mount / "Users" / "alice" / "Istota" / "vault").mkdir(
+        # Lowercase, because `Config.bot_dir_name` is `bot_name.lower()` — a
+        # `Istota/` here is self-consistent with a `vault_path` spelled the same
+        # way and still wrong on the case-sensitive filesystem every Linux
+        # deployment has.
+        (mount / "Users" / "alice" / "istota" / "vault").mkdir(
             parents=True, exist_ok=True
         )
         cfg = _make_config(
@@ -2607,7 +2611,7 @@ class TestVaultOwnedServices:
             users={
                 "alice": UserConfig(
                     display_name="Alice",
-                    vault_path="Istota/vault/credentials.kdbx",
+                    vault_path="istota/vault/credentials.kdbx",
                 ),
                 "bob": UserConfig(display_name="Bob"),
             },
@@ -2827,23 +2831,28 @@ ORIGIN = {"Origin": "https://example.com"}
 
 @_needs_web_deps
 class TestTheVaultWriteEndpoints:
-    """The write path §9 deliberately did not have, and the two refusals it adds.
+    """The two write siblings the read endpoint has: a filename, and a passphrase.
 
-    The read endpoint above is read-only "in the strong sense: it has no writing
-    sibling". It has three now, and the security property that made the fields
-    TOML-only is preserved rather than dropped — by putting them in a table of
-    their own that nothing downstream of a task writes
-    (`tests/test_user_vault_config.py`), and by keeping the *absolute* form out
-    of a user's hands, which is what this class is mostly about.
+    **What the file half writes is a name, and that is the whole of the path
+    handling.** `PUT /settings/vault` takes `{"vault_file": "personal.kdbx"}`
+    and validates it by membership in the listing `storage.list_vault_files`
+    produced at request time — set membership rather than a parse, so there is
+    nothing to traverse, nothing to make absolute and nowhere else to point.
+    That is why this class has no absolute-path assertion and no containment
+    resolver behind the save: the *absolute* form is unaskable here rather than
+    refused, since the surface offers no path field at all. It stays operator-
+    only in `config.toml`, where `storage._sandbox_writable_roots` asks "is this
+    outside every tree a sandbox binds" — the right question for a path an
+    operator wrote, and not a line a user may put themselves on the far side
+    of, since it would read any daemon-readable file as the daemon and decrypt
+    the result into that user's own credential rows.
 
-    Read the absolute-path assertions as the boundary ones. A relative path
-    resolves under the user's own workspace, so the worst a user can do with it
-    is point at a file they already own. An absolute path is checked against
-    `storage._sandbox_writable_roots` — "is this outside every tree a sandbox
-    binds" — which is the right question for a path an operator wrote and is not
-    a line a user may put themselves on the far side of: it would read any
-    daemon-readable file, as the daemon user, and decrypt the result into that
-    user's own credential rows.
+    The two refusals worth reading as boundaries are therefore the other pair: a
+    name the folder does not hold (400), and a user whose file a `config.toml`
+    line already names (409, precedence rather than permission). The security
+    property that keeps `vault_path` out of anything a task can reach is held
+    by `tests/test_secrets_vault.py::TestTheProfileTableGuard`, which is where
+    the absence from `user_profiles` is asserted.
     """
 
     @pytest.fixture(autouse=True)
@@ -3280,6 +3289,38 @@ class TestTheVaultWriteEndpoints:
         assert secrets_store.get_secret(
             self._db_path, "alice", "vault", "passphrase",
         ) == typed
+
+    async def test_a_blank_but_present_path_is_not_writable_either(
+        self, tmp_path, client, app,
+    ):
+        """`vault_path = "  "` is configured-and-refused, not unconfigured.
+
+        `resolve_user_vault_path` draws its line at `not raw` and answers
+        `VAULT_PATH_NOT_A_FILENAME` for a blank-but-present value, so
+        `vault_location_for` returns at rule 1 and never consults the stored
+        filename. A predicate here that stripped would call the user editable,
+        take their choice and answer `{"ok": true}` about a control that does
+        nothing — which is the state the 409 exists to prevent, and which no
+        test covered until this one.
+        """
+        from istota import storage
+
+        cookies = await self._setup(tmp_path, client, app, vault_path="   ")
+        self._folder(tmp_path, "personal.kdbx")
+
+        body = (await client.get(
+            "/istota/api/settings/vault", cookies=cookies,
+        )).json()
+        assert body["editable"] is False
+
+        resp = await client.put(
+            "/istota/api/settings/vault", cookies=cookies, headers=ORIGIN,
+            json={"vault_file": "personal.kdbx"},
+        )
+        assert resp.status_code == 409
+
+        import istota.web_app as mod
+        assert storage.stored_vault_file(mod._config, "alice") == ""
 
     async def test_an_unanswerable_configuration_is_not_writable(
         self, tmp_path, client, app,

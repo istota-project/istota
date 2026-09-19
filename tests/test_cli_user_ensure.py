@@ -450,3 +450,81 @@ class TestUserEnsureDefaultRoom:
         profile = user_profiles.get_profile(db_path, "alice")
         assert profile.default_room == "room-alerts"
         assert profile.display_name == "Alice K"
+
+
+class TestUserEnsureClearVaultConfig:
+    """`--clear-vault-config` forgets the filename the user chose.
+
+    It used to delete a `user_vault_config` row. That table is gone and what a
+    user's choice *is* now is a name in the reserved `_vault_file` KV
+    namespace, so the flag was repointed rather than removed — it is the only
+    operator route back to the resolver's own rules (the single file in the
+    folder, or a question when there are several), and it is cited as that in
+    `docs/configuration/credentials.md` and `docs/deployment/security.md`.
+
+    The stage that repointed it left it covered by nothing, because its old
+    coverage lived in the deleted `tests/test_user_vault_config.py`.
+    """
+
+    def test_it_deletes_a_stored_choice_rather_than_blanking_it(
+        self, cfg_with_db, capsys
+    ):
+        from istota.cli import cmd_user_ensure
+        from istota.config import load_config
+        from istota import storage
+
+        cfg, _db_path = cfg_with_db
+        config = load_config(cfg)
+        storage.store_vault_file(config, "alice", "work.kdbx")
+        assert storage.stored_vault_file(config, "alice") == "work.kdbx"
+
+        cmd_user_ensure(
+            _FakeArgs(config=str(cfg), name="alice", clear_vault_config=True)
+        )
+
+        assert storage.stored_vault_file(config, "alice") == ""
+        # Deleted rather than blanked, which is `store_vault_file`'s own
+        # promise and the thing a `stored_vault_file() == ""` cannot tell
+        # apart: an empty row and no row are the same answer there.
+        with db.get_db(config.db_path) as conn:
+            row = db.kv_get(
+                conn, "alice",
+                storage.VAULT_FILE_NAMESPACE, storage.VAULT_FILE_KEY,
+            )
+        assert row is None
+        assert "cleared" in capsys.readouterr().out.lower()
+
+    def test_a_user_with_no_choice_is_told_so_rather_than_failing(
+        self, cfg_with_db, capsys
+    ):
+        from istota.cli import cmd_user_ensure
+        from istota.config import load_config
+        from istota import storage
+
+        cfg, _db_path = cfg_with_db
+        config = load_config(cfg)
+
+        cmd_user_ensure(
+            _FakeArgs(config=str(cfg), name="alice", clear_vault_config=True)
+        )
+
+        out = capsys.readouterr().out.lower()
+        assert "had no stored vault file" in out
+        assert storage.stored_vault_file(config, "alice") == ""
+
+    def test_without_the_flag_a_stored_choice_survives(self, cfg_with_db):
+        """The control. Both cases above would pass against a handler that
+        cleared the value unconditionally, or against one that never ran."""
+        from istota.cli import cmd_user_ensure
+        from istota.config import load_config
+        from istota import storage
+
+        cfg, _db_path = cfg_with_db
+        config = load_config(cfg)
+        storage.store_vault_file(config, "alice", "work.kdbx")
+
+        cmd_user_ensure(
+            _FakeArgs(config=str(cfg), name="alice", display_name="Alice")
+        )
+
+        assert storage.stored_vault_file(config, "alice") == "work.kdbx"

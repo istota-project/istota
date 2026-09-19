@@ -1206,10 +1206,18 @@
             withholding it left a user whose vault came from the form this
             replaced with no way to store one at all.
           -->
+          <!--
+            Precedence rather than cause. The server answers `editable: false`
+            for a configured `vault_path` and also on its two fail-closed arms
+            — no config loaded, and a lookup that raised — where naming the
+            deployment's configuration would send the user to an administrator
+            for a line that does not exist. Saying which file is live, and that
+            this page cannot change it, is true in all three.
+          -->
           {#if !vaultEditable}
             <p class="caption" data-testid="vault-not-selectable">
-              Your credential vault's file is set in this deployment's configuration, so it is not
-              selectable here. Ask your administrator to change it.
+              Your credential vault's file is set outside this page, so it is not selectable here.
+              Ask your administrator if it needs to change.
             </p>
           {/if}
           <SecretField

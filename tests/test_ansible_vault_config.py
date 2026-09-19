@@ -12,7 +12,7 @@ shape: the template task rewrites `config.toml` on every converge, and the
 entrypoint rewrites it on every boot.
 
 It is the operator's *override* rather than the ordinary route. A user's own
-vault is a `.kdbx` in their `Istota/vault/` folder plus a filename chosen from
+vault is a `.kdbx` in their `istota/vault/` folder plus a filename chosen from
 the settings page, and neither of those is a config key — which is why this file
 is much smaller than it was: `vault_services` and everything about eligibility
 went with the service mapping.
@@ -57,7 +57,7 @@ def rendered_users(**overrides) -> dict:
 
 ALICE = {
     "display_name": "Alice",
-    "vault_path": "Istota/vault/credentials.kdbx",
+    "vault_path": "istota/vault/credentials.kdbx",
 }
 
 
@@ -103,13 +103,13 @@ class TestTheUserWithNoVault:
 class TestTheUserWithAVault:
     def test_the_path_reaches_the_rendered_config(self):
         users = rendered_users(istota_users={"alice": ALICE})
-        assert users["alice"]["vault_path"] == "Istota/vault/credentials.kdbx"
+        assert users["alice"]["vault_path"] == "istota/vault/credentials.kdbx"
 
     def test_the_loader_accepts_it(self):
         # The end-to-end claim: inventory in, `UserConfig.vault_path` out.
         # `load_config` is what `storage.resolve_user_vault_path` reads.
         config = load_config_from(render(istota_users={"alice": ALICE}))
-        assert config.users["alice"].vault_path == "Istota/vault/credentials.kdbx"
+        assert config.users["alice"].vault_path == "istota/vault/credentials.kdbx"
 
     def test_an_absolute_path_survives_verbatim(self):
         # The form that keeps the file out of every sandbox-writable tree. The
@@ -177,7 +177,7 @@ class TestTheVaultBlockCoexistsWithBriefingBlocks:
 
     def test_both_sections_reach_the_parsed_config(self):
         users = rendered_users(istota_users={"alice": self.USER})
-        assert users["alice"]["vault_path"] == "Istota/vault/credentials.kdbx"
+        assert users["alice"]["vault_path"] == "istota/vault/credentials.kdbx"
         assert [b["name"] for b in users["alice"]["briefings"]] == ["world"]
 
     def test_the_scalar_keys_come_before_the_subtable(self):

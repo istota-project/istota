@@ -1878,10 +1878,10 @@ timezone = "America/New_York"  # IANA timezone for briefing scheduling
                                # plus a plain-text fallback part. Also settable per user via
                                # `istota user ensure --no-briefing-email-html` or the web UI
                                # (Briefings → settings → Email delivery).
-# vault_path = "Istota/vault/credentials.kdbx"   # a KeePass (KDBX) file this user
+# vault_path = "istota/vault/credentials.kdbx"   # a KeePass (KDBX) file this user
                                # maintains, read by the daemon and never written. Set it
                                # only to name a file somewhere other than this user's own
-                               # `Istota/vault/` folder: the ordinary route is that folder,
+                               # `istota/vault/` folder: the ordinary route is that folder,
                                # where they copy the file in and choose it from the
                                # settings page, and this line is not needed for it. A
                                # relative path resolves under this user's own workspace

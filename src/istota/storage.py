@@ -1065,8 +1065,15 @@ def store_vault_file(config: "Config", user_id: str, name: str) -> None:
 
     Deleted rather than blanked, so "nothing chosen" is one state rather than
     two: the resolver's rules 3 and 4 then apply as they do for a user who has
-    never chosen. Raises what the database raises — its one caller is a write
-    endpoint that must not report a save it did not make.
+    never chosen.
+
+    **Raises what the database raises**, and the two callers want that
+    differently. `web_app._select_vault_file` must not report a save it did not
+    make, so the raise becomes a 500 rather than an `{"ok": true}`.
+    `cli.cmd_user_ensure`'s `--clear-vault-config` does not wrap it either, so a
+    database failure there is a traceback rather than the "cleared" line — which
+    is the right direction for an operator at a terminal, since the alternative
+    is telling them a selection is gone when it is not.
     """
     from . import db  # noqa: PLC0415 - see `stored_vault_file`
 

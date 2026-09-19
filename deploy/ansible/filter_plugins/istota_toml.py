@@ -245,10 +245,11 @@ def istota_briefing_shared_blocks_toml(shared_blocks) -> str:
 
 
 def istota_vault_users_toml(users) -> str:
-    """Render ``[users.<uid>]`` blocks carrying the credential vault's two keys.
+    """Render ``[users.<uid>]`` blocks carrying the credential vault's path.
 
-    Returns "" when no user declares either, so a vault-free deployment renders
-    no ``[users.<uid>]`` section at all. Not tidiness, and load-bearing rather
+    Returns "" when no user declares one, so a deployment where every vault is
+    a file in the user's own folder renders no ``[users.<uid>]`` section at
+    all. Not tidiness, and load-bearing rather
     than incidental: the Ansible shape rendered no such block before this, so
     ``config.users`` there was built only by the ``user_profiles`` overlay. A
     block emitted per user would hand ``scheduler``'s startup
@@ -263,6 +264,15 @@ def istota_vault_users_toml(users) -> str:
     exception is a value of the wrong *type*, which is dropped: there is no
     spelling of it the loader could name back, and stringifying a ``7`` would
     configure a vault at the path ``"7"``.
+
+    **Fidelity covers what this renders, and a retired key is outside it.** The
+    service list this used to emit alongside the path is gone, and one left in
+    inventory is dropped here without a word — as is any other key this does
+    not read. The loader says nothing either: ``users`` is in
+    ``config._HANDWRITTEN``, so ``_parse_user_data`` builds the block with
+    ``.get()`` and an unrecognised key in it has always been silent, for every
+    key rather than for this one. Stated rather than fixed, because the fix is
+    unknown-key reporting for the whole section and that is its own change.
 
     Emitted before ``istota_briefing_blocks_toml``'s
     ``[[users.<uid>.briefings]]``: TOML admits a super-table after a sub-table,

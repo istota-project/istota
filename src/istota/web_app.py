@@ -10278,11 +10278,21 @@ def _vault_is_web_editable(username: str) -> bool:
     the failure arm returns False rather than letting the exception reach the
     caller, and why the test is for a value that is *empty* rather than for one
     that is set.
+
+    **Truthiness, never `.strip()`**, and the difference is a real state rather
+    than a nicety. `resolve_user_vault_path` draws its own line at `not raw`,
+    and refuses a blank-but-present value as a configured path that resolves to
+    nothing (`VAULT_PATH_NOT_A_FILENAME`) — so `vault_path = "  "` returns at
+    rule 1 of `vault_location_for` and the stored filename is never consulted.
+    Stripping here would call that user editable, take their choice, write the
+    KV row, and answer `{"ok": true}` about a control that does nothing, which
+    is the exact state the 409 exists to prevent. `doctor._vault_users` names
+    the same shape as one it expects to meet.
     """
     if _config is None:
         return False
     try:
-        return not (_config.vault_path_for(username) or "").strip()
+        return not (_config.vault_path_for(username) or "")
     except Exception:  # pragma: no cover - defensive
         logger.debug("vault path lookup failed for %r", username)
         return False

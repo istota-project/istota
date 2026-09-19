@@ -211,10 +211,12 @@ class TestWhenNoVaultIsConfigured:
                 "bob": UserConfig(display_name="B", vault_path="   "),
             }
         )
-        # A mapping now, not a list of ids: `vault_path_for` merges a
-        # `user_vault_config` row over the TOML attribute, so the value costs a
-        # database read and every arm takes it from here rather than asking
-        # again. Asserting the value too is what says the merge ran.
+        # A mapping rather than a list of ids, so each arm has the path without
+        # re-deriving it. Asserting the value too is what says the mapping
+        # carries what was written rather than a coerced or stripped version of
+        # it — `"   "` is a *configured* path that resolves to nothing, which
+        # the path arm below reports, and a reader that stripped it would call
+        # this user unconfigured and say nothing at all.
         assert doctor._vault_users(config) == {"bob": "   "}
 
         result = _run(config, probe=False)["security.credential_vault.path"]

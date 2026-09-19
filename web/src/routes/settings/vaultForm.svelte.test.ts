@@ -307,7 +307,7 @@ describe('a vault whose file is set in configuration', () => {
     await mount();
 
     const form = screen.getByTestId('vault-form');
-    expect(words(form)).toMatch(/set in this deployment's configuration/i);
+    expect(words(form)).toMatch(/set outside this page/i);
     // Not disabled controls with no explanation: the file controls are absent,
     // so there is nothing to wonder about.
     expect(control('Vault file')).toBeNull();

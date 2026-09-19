@@ -102,7 +102,7 @@ What it holds is **shared credentials**: a flat namespace of name-to-value pairs
 
 Two halves, both deliberate, and neither happens by accident.
 
-**Put the file in the folder.** Every user gets a `vault` folder inside their own Istota folder, made for them whether or not they use it — `Istota/vault/` on a default deployment. Copy a `.kdbx` there. Settings, Connected services lists what it found: one file is read on sight, and with several there the card asks which. What is stored is that **filename**, not a path, so there is nothing to spell wrongly and nowhere else for it to point. Deleting or renaming the chosen file brings the question back rather than leaving Istota reading nothing.
+**Put the file in the folder.** Every user gets a `vault` folder inside their own bot directory, made for them whether or not they use it — `istota/vault/` on a default deployment, since that directory is named from `bot_name` lowercased. Copy a `.kdbx` there. Settings, Connected services lists what it found: one file is read on sight, and with several there the card asks which. What is stored is that **filename**, not a path, so there is nothing to spell wrongly and nowhere else for it to point. Deleting or renaming the chosen file brings the question back rather than leaving Istota reading nothing.
 
 **Generate the passphrase**, from the same card or from a host shell. A file with no passphrase behind it is not a vault and nothing reads it, which is why the card says "Not set up" until both halves are there. Turning a vault off is removing either one.
 
@@ -110,7 +110,7 @@ An operator can name the file instead, per user in `config.toml`, when they want
 
 ```toml
 [users.alice]
-vault_path = "Istota/vault/credentials.kdbx"
+vault_path = "istota/vault/credentials.kdbx"
 ```
 
 A relative `vault_path` resolves under that user's own workspace directory, which is where a phone or a laptop can reach it. An absolute one is a host path and must resolve outside every tree a task sandbox can write; that form keeps the file away from a task entirely, at the cost of the user no longer being able to edit it from a phone. Empty — the default — means the folder decides.
@@ -128,7 +128,7 @@ Neither shape lets you hand-edit that `config.toml`, because both rewrite it —
 ```yaml
 istota_users:
   alice:
-    vault_path: "Istota/vault/credentials.kdbx"
+    vault_path: "istota/vault/credentials.kdbx"
 ```
 
 A user who declares no path gets no `[users.<id>]` block at all, which is the unchanged default for everybody else and is what the folder route needs. `istota_scheduler_vault_sync_interval` sets the cadence.
@@ -136,7 +136,7 @@ A user who declares no path gets no `[users.<id>]` block at all, which is the un
 **Docker**, in `docker/.env` — single-user, so the key is unprefixed:
 
 ```
-USER_VAULT_PATH=Istota/vault/credentials.kdbx
+USER_VAULT_PATH=istota/vault/credentials.kdbx
 ```
 
 with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.

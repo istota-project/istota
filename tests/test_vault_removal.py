@@ -29,9 +29,19 @@ grow to fit whatever was added next:
   file must carry the name exactly once, on that statement. That is what forced
   `_migrate_drop_retired_vault_table` to be named around the table rather than
   after it.
-- `CHANGELOG.md` holds the upgrade note. One line, asserted by a fragment of its
-  own text rather than by a count, so a second bullet reintroducing the name
-  fails here rather than passing on arithmetic.
+- `CHANGELOG.md` holds the upgrade note. One line, asserted by a count *and* by
+  a fragment of its own text — the count is what a second bullet fails, and the
+  fragment is what a bullet that merely names the retired key without saying
+  what replaced it fails.
+
+**Two trees are outside the sweep and neither is an oversight.** `tests/` would
+have to exempt this file, which names all three spellings in its own prose, and
+the cost of a stale mention there is a comment rather than an instruction to an
+operator. `.claude/rules/` carries two surviving mentions in `sandbox.md`, both
+correct historical references explaining what the removal removed — and rules
+prose is read by whoever is changing the code rather than by whoever is running
+it. Widen the sweep the day either claim stops holding; do not widen it and then
+exempt the file that fails.
 """
 
 from __future__ import annotations
@@ -109,13 +119,30 @@ def _hits(path: Path) -> list[tuple[int, str]]:
 class TestTheNamesAreGone:
     """The sweep, and the two exemptions that make it exact."""
 
+    def test_every_swept_entry_still_exists(self):
+        """A `SWEPT` entry that stops existing leaves the sweep in silence.
+
+        `_swept_files` joins the name onto `REPO`; a missing path is neither
+        `is_file()` nor yields anything from `rglob`, so it contributes zero
+        files and no error. Two entries are incidentally covered by their own
+        exemption tests, which fail on an empty `_hits` — `CHANGELOG.md` and
+        `src/istota/db.py`. `schema.sql` is covered by nothing else, so moving
+        or renaming it would drop it out of the guard while the guard stayed
+        green. This is the assertion that closes that.
+        """
+        missing = [e for e in SWEPT if not (REPO / e).exists()]
+        assert missing == []
+
     def test_the_sweep_has_something_to_sweep(self):
         """The control. A sweep over an empty file list passes vacuously, and
         `rglob` over a renamed directory returns exactly that."""
         files = _swept_files()
         assert len(files) > 500, len(files)
-        roots = {p.relative_to(REPO).parts[0] for p in files}
+        rels = {p.relative_to(REPO).as_posix() for p in files}
+        roots = {r.split("/")[0] for r in rels}
         assert {"src", "web", "deploy", "docker", "config", "docs"} <= roots
+        # The two single-file entries, which no directory root covers.
+        assert {"schema.sql", "CHANGELOG.md"} <= rels
 
     def test_no_swept_file_names_the_retired_surface(self):
         found: list[str] = []
@@ -137,7 +164,11 @@ class TestTheNamesAreGone:
         assert len(hits) == 1, hits
         _line_no, line = hits[0]
         assert line.startswith("- **Upgrade note:**"), line
-        assert "vault" in line
+        # Discriminating rather than `"vault" in line`, which every member of
+        # `RETIRED_NAMES` satisfies by construction and which therefore could
+        # not fail. The note's job is to say what replaced the thing it names,
+        # so that is what is asserted.
+        assert "istota/vault/" in line, line
 
 
 class TestTheDroppedTable:
@@ -218,10 +249,10 @@ class TestConfigIsTheOnlyReaderOfTheRawField:
     not a hit and an attribute access is.
     """
 
-    def _readers(self) -> list[str]:
+    def _readers(self, *, exempt_config: bool = True) -> list[str]:
         out: list[str] = []
         for path in sorted((REPO / "src").rglob("*.py")):
-            if path.name == "config.py" and path.parent.name == "istota":
+            if exempt_config and path.name == "config.py" and path.parent.name == "istota":
                 continue
             try:
                 tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -242,18 +273,32 @@ class TestConfigIsTheOnlyReaderOfTheRawField:
         return out
 
     def test_the_walk_finds_config_itself(self):
-        """The control: the walk is capable of finding a reader, asserted
-        against the one module that is allowed to be one."""
-        tree = ast.parse((REPO / "src" / "istota" / "config.py").read_text())
-        assert any(
-            isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Name)
-            and n.func.id == "getattr"
-            and len(n.args) >= 2
-            and isinstance(n.args[1], ast.Constant)
-            and n.args[1].value == "vault_path"
-            for n in ast.walk(tree)
+        """The control, and it drives `_readers` rather than re-implementing it.
+
+        An inline re-walk would pass against a broken `rglob` or a broken skip
+        in `_readers`, leaving the assertion below vacuous while the control
+        stayed green — which is this repository's most-logged failure mode.
+        """
+        assert self._readers(exempt_config=False), (
+            "the walk found no reader at all, so the assertion below is vacuous"
         )
+
+    def test_it_matches_a_plain_attribute_read_and_not_only_getattr(self, tmp_path):
+        """The `ast.Attribute` branch is matched by nothing in `src/` today.
+
+        Every read in `config.py` is the `getattr(user, "vault_path", "")`
+        form, so the branch that would catch the *more likely* future spelling
+        — a plain `user.vault_path` — has never fired. Driven against a
+        synthetic module instead of waiting for one to appear.
+        """
+        module = tmp_path / "leaker.py"
+        module.write_text("def f(user):\n    return user.vault_path\n")
+        tree = ast.parse(module.read_text())
+        hits = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Attribute) and n.attr == "vault_path"
+        ]
+        assert len(hits) == 1
 
     def test_no_module_outside_config_reads_the_attribute(self):
         assert self._readers() == []
@@ -289,11 +334,11 @@ class TestAStaleLineInARenderedConfigIsInert:
         config = self._load(tmp_path, """
             [users.alice]
             display_name = "Alice"
-            vault_path = "Istota/vault/credentials.kdbx"
+            vault_path = "istota/vault/credentials.kdbx"
             vault_services = ["karakeep", "ntfy"]
         """)
         assert config.users["alice"].display_name == "Alice"
-        assert config.vault_path_for("alice") == "Istota/vault/credentials.kdbx"
+        assert config.vault_path_for("alice") == "istota/vault/credentials.kdbx"
 
     def test_the_field_is_not_resurrected_as_an_attribute(self, tmp_path):
         config = self._load(tmp_path, """

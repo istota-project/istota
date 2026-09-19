@@ -682,7 +682,7 @@ istota_experimental_features: []
 #         name: "Projects"
 #         permissions: "write"
 #     # KDBX credential vault. Set this only to point at a file somewhere other
-#     # than the user's own `Istota/vault/` folder, which is where the ordinary
+#     # than the user's own `istota/vault/` folder, which is where the ordinary
 #     # route puts it and which needs no inventory entry at all — the user
 #     # copies the file in and generates a passphrase from the settings page.
 #     # It is the one per-user vault setting config.toml renders: there is no
@@ -691,7 +691,7 @@ istota_experimental_features: []
 #     # in istota_user_secrets below as service `vault`, key `passphrase`,
 #     # generated and at least 32 characters; without one nothing is read.
 #     # Full reference: docs/configuration/credentials.md#credential-vault.
-#     vault_path: "Istota/vault/credentials.kdbx"
+#     vault_path: "istota/vault/credentials.kdbx"
 #                                   # Relative to this user's workspace (they can
 #                                   # edit it from a phone); absolute is a host
 #                                   # path and must resolve outside every tree a

@@ -908,7 +908,7 @@ TOML
         echo "disabled_modules = $_modules_list" >> "$CONFIG_FILE"
     fi
     # KDBX credential vault (ISSUE-505). Only set this to point at a file
-    # somewhere other than the user's own `Istota/vault/` folder, which is the
+    # somewhere other than the user's own `istota/vault/` folder, which is the
     # ordinary route and needs no variable at all. It has no user_profiles
     # column — neither the CLI nor the web UI may set it — so this file is the
     # whole surface for it, and it is rewritten on every boot. The passphrase is

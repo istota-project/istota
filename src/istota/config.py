@@ -2512,23 +2512,25 @@ class Config:
     # `tests/test_vault_removal.py::TestConfigIsTheOnlyReaderOfTheRawField`
     # sweeps `src/` for the attribute rather than naming the consumers.
 
-    def vault_path_for(
-        self, user_id: str, conn: "sqlite3.Connection | None" = None
-    ) -> str:
+    def vault_path_for(self, user_id: str) -> str:
         """The KDBX path an operator configured for this user, or `""`.
 
         Empty is the ordinary answer and means the folder decides — see
         `storage.vault_location_for`, whose first rule this is. The value is
         returned **as written**: resolving it, and refusing it, is
         `storage.resolve_user_vault_path`'s job, and a second opinion here
-        would be a second copy of a containment rule.
+        would be a second copy of a containment rule. In particular a
+        blank-but-present value is returned as written and is a *configured*
+        path that resolves to nothing, which is why no caller may `.strip()`
+        it into "unconfigured".
 
-        `conn` is accepted and unused. It is on the signature because the two
-        remaining callers sit inside an open transaction and used to need it,
-        and because dropping it would be an argument change in a boundary
-        module's public surface for no gain.
+        The `conn` parameter went with the database read: this used to merge a
+        stored row over the TOML field, and callers inside an open transaction
+        passed their own connection to avoid the 30s busy-timeout hazard. The
+        table is dropped, so the argument had no caller left — removed rather
+        than kept as a no-op, since a connection parameter on a function that
+        opens nothing is a claim about the function that is no longer true.
         """
-        del conn  # no database read left to scope
         user = self.users.get(user_id)
         raw = getattr(user, "vault_path", "") if user is not None else ""
         return raw if isinstance(raw, str) else ""

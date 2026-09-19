@@ -47,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Upgrade note:** the credential vault no longer provisions typed services, and `vault_services` is gone with the table and the web form that stored it — so a vault set up through that older form stops syncing until its `.kdbx` is in the user's `Istota/vault/` folder, and a `vault_services` line left in a rendered `config.toml` is ignored. What the vault already put in the secrets table stays and keeps working, and those fields are editable in the settings page again. The card names the folder when it finds no file.
+- **Upgrade note:** the credential vault no longer provisions typed services, and `vault_services` is gone with the table and the web form that stored it — so a vault set up through that older form stops syncing until its `.kdbx` is in the user's `istota/vault/` folder, and a `vault_services` line left in a rendered `config.toml` is ignored. What the vault already put in the secrets table stays and keeps working, and those fields are editable in the settings page again. The card names the folder when it finds no file.
 
 - **Upgrade note:** the documentation site is Docusaurus instead of MkDocs, and the `docs` Python extra is gone with it. Build the site with `npm --prefix docs-site ci && npm --prefix docs-site run build`; `uv sync --extra docs` no longer resolves. The markdown itself has not moved — it is still `docs/` at the repository root, so every path reference in the Ansible defaults, the compose comments and the source docstrings is unchanged. The build now fails on a broken relative link or heading anchor rather than shipping one, which caught one already in the tree.
 

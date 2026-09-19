@@ -2022,10 +2022,10 @@ class TestTheConfigFields:
     def test_the_user_field_round_trips(self, tmp_path):
         config = _load_config_text(tmp_path, """
             [users.alice]
-            vault_path = "Istota/vault/credentials.kdbx"
+            vault_path = "istota/vault/credentials.kdbx"
         """)
         assert (
-            config.users["alice"].vault_path == "Istota/vault/credentials.kdbx"
+            config.users["alice"].vault_path == "istota/vault/credentials.kdbx"
         )
 
     def test_the_interval_round_trips(self, tmp_path):
@@ -2084,7 +2084,7 @@ class TestTheProfileTableGuard:
         assert "alice" in rows
 
         user = UserConfig(
-            vault_path="Istota/vault/credentials.kdbx",
+            vault_path="istota/vault/credentials.kdbx",
             display_name="from-toml",
         )
         up.merge_into_user_config(rows["alice"], user)
@@ -2093,7 +2093,7 @@ class TestTheProfileTableGuard:
         # assertion below is about what it declined to touch rather than about a
         # call that did nothing.
         assert user.display_name == "Alice"
-        assert user.vault_path == "Istota/vault/credentials.kdbx"
+        assert user.vault_path == "istota/vault/credentials.kdbx"
 
     def test_the_profile_dataclass_declares_no_vault_field(self):
         from istota.user_profiles import UserProfile

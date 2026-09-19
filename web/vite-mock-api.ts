@@ -19,7 +19,7 @@ const mockVault: Record<string, unknown> = {
   configured: false,
   editable: true,
   passphrase_present: false,
-  vault_dir: 'Istota/vault',
+  vault_dir: 'istota/vault',
   files: ['personal.kdbx'],
   vault_file: 'personal.kdbx',
   path: '',
