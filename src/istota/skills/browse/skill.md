@@ -64,7 +64,7 @@ istota-skill browse close <id>
 
 What the page does with it afterwards is the page's own business: a form submitted by GET puts the value in the URL, and a site that quotes what you typed back at you puts it in the page text. Both come back in the result, where they are replaced with `[credential]` — so if you see that marker, the value was reflected rather than lost.
 
-Repeat the flag for several fields, and mix it with `--fill` freely: the fields are filled in the order you wrote the flags, so a form that wants the username first still gets it first.
+Repeat the flag for several fields, and mix it with `--fill` and `--click` freely: the actions run in the order you wrote the flags, so a login written as one call fills the form and then submits it. `--scroll` is the exception — it always runs last, whatever position you write it in, so a sequence that has to scroll and then click is two calls.
 
 The selector may contain `=` — `input[type=password]=acme_password` splits at the last one, because a credential name never contains one.
 
