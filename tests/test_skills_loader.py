@@ -18,6 +18,7 @@ from istota.skills._loader import (
     compute_skills_fingerprint,
     eligible_skill_names,
     expand_companions,
+    advertised_cli_skills,
     format_cli_skills,
     get_skill_availability,
     inspect_overlay,
@@ -2551,7 +2552,7 @@ class TestFormatCliSkills:
         }
 
     def test_lists_cli_skills_only(self):
-        text = format_cli_skills(self._index(), is_admin=True)
+        text = format_cli_skills(self._index(), is_admin=True, disabled_skills=set())
         assert "istota-skill kv" in text
         assert "istota-skill notes" not in text
 
@@ -2560,12 +2561,12 @@ class TestFormatCliSkills:
         # but this list is built straight off `meta.cli` — so without the gate
         # an admin-only CLI is advertised in every non-admin's prompt, and the
         # skill proxy's allowed_skills (every cli:true skill) would run it.
-        text = format_cli_skills(self._index(), is_admin=False)
+        text = format_cli_skills(self._index(), is_admin=False, disabled_skills=set())
         assert "istota-skill tasks" not in text
         assert "istota-skill kv" in text
 
     def test_admin_sees_admin_only_cli_skill(self):
-        text = format_cli_skills(self._index(), is_admin=True)
+        text = format_cli_skills(self._index(), is_admin=True, disabled_skills=set())
         assert "istota-skill tasks" in text
 
     def test_empty_when_no_visible_cli_skills(self):
@@ -2574,7 +2575,78 @@ class TestFormatCliSkills:
                 name="tasks", description="Task state", cli=True, admin_only=True,
             ),
         }
-        assert format_cli_skills(index, is_admin=False) == ""
+        assert format_cli_skills(index, is_admin=False, disabled_skills=set()) == ""
+
+    def test_a_disabled_cli_skill_is_not_advertised(self):
+        """ISSUE-513: the list applies the gate the on-demand menu applies.
+
+        `effective_disabled_skills` unions the capability gate, the
+        instance-wide `disabled_skills` and the user's own, so a skill the menu
+        omits is omitted here too and the two sections of one prompt agree.
+        """
+        text = format_cli_skills(
+            self._index(), is_admin=True, disabled_skills={"kv"},
+        )
+        assert "istota-skill kv" not in text
+        assert "istota-skill tasks" in text
+
+    def test_disabled_and_admin_only_compose(self):
+        text = format_cli_skills(
+            self._index(), is_admin=False, disabled_skills={"kv"},
+        )
+        assert text == ""
+
+    def test_disabled_skills_is_required(self):
+        """Keyword-only with no default, for `is_admin`'s reason.
+
+        A caller that forgot it would silently advertise every gated CLI again,
+        which is the defect ISSUE-513 closed. A TypeError makes that
+        unreachable rather than merely discouraged.
+        """
+        with pytest.raises(TypeError):
+            format_cli_skills(self._index(), is_admin=True)
+
+
+class TestAdvertisedCliSkills:
+    """The one derivation behind both the CLI list and the `Room:` clause."""
+
+    def _index(self) -> dict[str, SkillMeta]:
+        return {
+            "kv": SkillMeta(name="kv", description="Key-value store", cli=True),
+            "notes": SkillMeta(name="notes", description="Notes"),
+            "rooms": SkillMeta(name="rooms", description="Rooms", cli=True),
+            "tasks": SkillMeta(
+                name="tasks", description="Task state", cli=True, admin_only=True,
+            ),
+        }
+
+    def test_sorted_and_cli_only(self):
+        assert advertised_cli_skills(
+            self._index(), is_admin=True, disabled_skills=set(),
+        ) == ["kv", "rooms", "tasks"]
+
+    def test_applies_all_three_gates(self):
+        assert advertised_cli_skills(
+            self._index(), is_admin=False, disabled_skills={"kv"},
+        ) == ["rooms"]
+
+    def test_format_renders_exactly_this_set(self):
+        """The renderer may not carry a filter of its own.
+
+        Two filters drift; one derivation cannot. A name in the text that is
+        not in the set, or the reverse, is the shape ISSUE-513 was.
+        """
+        index = self._index()
+        for is_admin in (True, False):
+            for disabled in (set(), {"kv"}, {"kv", "rooms", "tasks"}):
+                names = advertised_cli_skills(
+                    index, is_admin=is_admin, disabled_skills=disabled,
+                )
+                text = format_cli_skills(
+                    index, is_admin=is_admin, disabled_skills=disabled,
+                )
+                for name in index:
+                    assert (f"istota-skill {name}`" in text) == (name in names)
 
 
 

@@ -5602,7 +5602,9 @@ def _header_scalar(value: object) -> str:
     return _one_line(str(value or "")).strip()[:_ROOM_SCALAR_MAX_CHARS]
 
 
-def room_identity_line(config: Config, task: "db.Task", conn=None) -> str:
+def room_identity_line(
+    config: Config, task: "db.Task", conn=None, *, rooms_cli_available: bool,
+) -> str:
     """``Room:`` for the header — that this conversation is a registered room,
     which surface it lives on, and the descriptor that delivers into it
     (ISSUE-509).
@@ -5645,12 +5647,21 @@ def room_identity_line(config: Config, task: "db.Task", conn=None) -> str:
     prompt-assembly path, where an exception means no task at all, so the whole
     body is inside the guard rather than only the database reads.
 
-    One residual, recorded rather than closed: the sentence naming
-    ``istota-skill rooms list`` is not gated on that skill being enabled for
-    this deployment. It is the same gap `.claude/rules/skills.md` records for
-    ``format_cli_skills``, which applies neither the capability gate nor the
-    effective disabled set — an operator who disables `rooms` gets one prompt
-    line naming a verb the proxy refuses.
+    **Only the clause naming the CLI is gated** (ISSUE-513).
+    ``rooms_cli_available`` is ``"rooms" in advertised_cli_skills(...)``, asked
+    once by the caller that already holds the index and the effective disabled
+    set — never re-derived here, which would re-load the skill index on the
+    prompt-assembly path. What it drops is the ``istota-skill rooms list``
+    sentence alone. The "never create a Talk conversation" rule stays on every
+    branch, because it depends on no CLI and matters *more* once the lookup
+    verb is gone: a model that cannot list its rooms is exactly the one tempted
+    to mint a conversation instead, which is the ISSUE-509 failure this line
+    exists to prevent. The descriptor half is never gated either — ``target``
+    and ``room`` resolve "post here" with nothing else involved.
+
+    Keyword-only with no default, matching ``format_cli_skills``: a permissive
+    default is the pre-fix behaviour, so a caller that forgot the argument
+    would silently reopen the gap.
     """
     if not task.conversation_token or not config.db_path:
         return ""
@@ -5685,12 +5696,25 @@ def room_identity_line(config: Config, task: "db.Task", conn=None) -> str:
             room_target_descriptor(token, room.origin, talk_ref)
         )
         safe_token = _header_scalar(token)
+        closing = (
+            "`istota-skill rooms list` names every room you are in; never "
+            "create a Talk conversation in order to post into one."
+            if rooms_cli_available
+            # Self-contained, because the clause this replaces is what carried
+            # the antecedent for "one". The scope is the same and is the whole
+            # point of the rule: it forbids minting a conversation as a way of
+            # posting into a room the task is already in (ISSUE-509), not
+            # creating one on request. `nextcloud talk create` still does that,
+            # and promoting a web room to Talk is a web endpoint no task calls.
+            else (
+                "Never create a Talk conversation in order to post into a room "
+                "you are already in."
+            )
+        )
         return (
             f"\nRoom: this conversation is a registered room on {where}. To "
             "deliver into it from a scheduled job or a reminder, write "
-            f'target = "{descriptor}" and room = "{safe_token}". '
-            "`istota-skill rooms list` names every room you are in; never "
-            "create a Talk conversation in order to post into one."
+            f'target = "{descriptor}" and room = "{safe_token}". ' + closing
         )
     except Exception:  # pragma: no cover - best-effort labelling
         return ""
@@ -5912,6 +5936,7 @@ def build_prompt(
     playbooks: str | None = None,
     skip_persona: bool = False,
     cli_skills_text: str | None = None,
+    cli_skill_names: "frozenset[str] | set[str] | None" = None,
     skills_index: str | None = None,
     confirmation_context: str | None = None,
     knowledge_facts: str | None = None,
@@ -6344,7 +6369,25 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
     # Deliberately in the system half, beside the token it qualifies: it points
     # at nothing in the user half, and a task that has been compacted still
     # needs to know which room it is in to answer "post this here".
-    room_line = room_identity_line(config, task, conn)
+    # `None` means the caller could not answer — a direct `build_prompt` caller
+    # with no skill index — and keeps the pre-ISSUE-513 sentence rather than
+    # withholding a clause on an absence. `execute_task` always answers, and
+    # `TestTheCliAdvertisingWiring` is what holds it to that.
+    #
+    # This is the one parameter of the three that fails *open*, and the
+    # asymmetry is deliberate rather than an oversight. The two below it
+    # (`room_identity_line`'s own flag, `advertised_cli_skills`' two gates)
+    # refuse a default because they are the derivation and a forgotten argument
+    # there silently reopens the gap for every caller at once. Here the
+    # argument is one layer up and optional by necessity — `build_prompt` takes
+    # two dozen optional parameters and its test callers supply none of them —
+    # so a required one would be a mass edit for no boundary. The safe
+    # direction for an unanswered question is the sentence the prompt carried
+    # before the gate existed, not an absence the caller never asked for.
+    room_line = room_identity_line(
+        config, task, conn,
+        rooms_cli_available=cli_skill_names is None or "rooms" in cli_skill_names,
+    )
 
     # The shared-credential namespace, named but never enumerated. The names are
     # the user's own labels, they change with no task running, and putting them
@@ -7138,9 +7181,22 @@ def execute_task(
         elif task.source_type == "istota_file":
             effective_output_target = "istota_file"
 
-    # Build CLI skills list from skill index
-    from .skills._loader import format_cli_skills
-    cli_skills_text = format_cli_skills(skill_index, is_admin=is_admin)
+    # Build CLI skills list from skill index. `_disabled` is the effective set
+    # computed above — the capability gate plus instance-wide and per-user
+    # disabled — so this list applies the same *disabled* set the on-demand
+    # menu applies, which is the contradiction ISSUE-513 filed. It is not the
+    # menu's whole gate: `advertised_cli_skills`' docstring records the two
+    # `eligible_skill_names` also applies and this does not. The name set goes
+    # to `build_prompt` as well, for the `Room:` line's `rooms list` clause.
+    from .skills._loader import advertised_cli_skills, format_cli_skills
+    cli_skills_text = format_cli_skills(
+        skill_index, is_admin=is_admin, disabled_skills=_disabled,
+    )
+    cli_skill_names = frozenset(
+        advertised_cli_skills(
+            skill_index, is_admin=is_admin, disabled_skills=_disabled,
+        )
+    )
 
     # Build prompt
     # Detect confirmed tasks — pass their previous output as confirmation context
@@ -7158,6 +7214,7 @@ def execute_task(
         playbooks=playbooks_text,
         skip_persona=_skip_persona,
         cli_skills_text=cli_skills_text,
+        cli_skill_names=cli_skill_names,
         skills_index=skills_index,
         confirmation_context=_confirmation_context,
         knowledge_facts=knowledge_facts_text,
