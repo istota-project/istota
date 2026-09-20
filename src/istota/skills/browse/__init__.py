@@ -7,6 +7,7 @@ Usage:
     python -m istota.skills.browse extract "https://example.com" --selector "article"
     python -m istota.skills.browse interact <session_id> --click ".button" --fill "#input=value"
     python -m istota.skills.browse interact <session_id> --fill-credential "#password=acme_password"
+    python -m istota.skills.browse interact <session_id> --click-at 412,318 --type "Ada" --press Tab
     python -m istota.skills.browse links "https://example.com" [--selector "nav a"]
     python -m istota.skills.browse close <session_id>
 
@@ -14,6 +15,8 @@ Reads BROWSER_API_URL env var for the container endpoint.
 """
 
 import argparse
+import json
+import math
 import os
 import re
 import time
@@ -55,6 +58,19 @@ _SUFFIX_FOR_MEDIA_TYPE = {
     "image/gif": ".gif",
     "image/webp": ".webp",
 }
+# What the container puts the capture frame on, and the reason it could not.
+# Two headers rather than one, because "this container predates visual mode"
+# and "this container tried and could not measure the window" have different
+# remedies and the absence of a header cannot say which.
+CAPTURE_HEADER = "X-Browse-Capture"
+CAPTURE_ERROR_HEADER = "X-Browse-Capture-Error"
+#: Actions whose `x`/`y` are in the *delivered picture's* pixel space, so the
+#: container has to be told what that picture measured before it can convert.
+IMAGE_SPACE_ACTIONS = ("click_at", "hover_at")
+#: Every action type only a visual-mode container implements. An `unknown`
+#: naming one of these means the image is older than this code, which is a
+#: different sentence from the model having invented an action.
+VISUAL_ACTION_TYPES = IMAGE_SPACE_ACTIONS + ("key", "type", "click_challenge")
 REQUEST_TIMEOUT = 120.0  # HTTP client timeout (longer than page timeout)
 MAX_BODY_EXCERPT = 400  # chars of an undecodable body to quote back
 MAX_BODY_READ = 8192  # bytes of it to decode in the first place
@@ -369,6 +385,165 @@ def _workspace_relative(path):
     return f"/Users/{user_id}/{relative}"
 
 
+def envelope_scale(width, height):
+    """How far a `width` x `height` capture must shrink to survive delivery.
+
+    A vision provider rescales an image over its own envelope server-side, and
+    that rescale is invisible to everything in this tree — so a point read off
+    the picture the model saw would be converted against a capture it never
+    saw, and every click would land short by the difference. The answer is to
+    deliver a picture already inside the envelope, which makes the provider's
+    own rescale a no-op and collapses the two frames into one.
+
+    `MAX_EDGE` and `MAX_AREA_PIXELS` are imported rather than restated —
+    `image_attachments` is this repository's statement of the envelope and a
+    second copy would drift silently. The import is at function scope with
+    Pillow's below, because this module is loaded for every `render`, `get`,
+    `extract`, `links`, `interact` and `close` call and none of those resizes
+    anything.
+
+    Returns `1.0` where nothing has to move, which is the common case on a
+    deployment whose screen already fits. Never above 1: this shrinks a capture
+    and never enlarges one.
+    """
+    from istota.image_attachments import MAX_AREA_PIXELS, MAX_EDGE
+
+    if width <= 0 or height <= 0:
+        return 1.0
+    scale = 1.0
+    longest = max(width, height)
+    if longest > MAX_EDGE:
+        scale = MAX_EDGE / longest
+    area = width * height
+    if area > MAX_AREA_PIXELS:
+        scale = min(scale, math.sqrt(MAX_AREA_PIXELS / area))
+    return scale
+
+
+def delivered_size(width, height):
+    """The pixel size of the picture the model is handed: `(width, height)`.
+
+    The one number the coordinate contract rests on, and the reason it is a
+    function rather than two expressions at two call sites: `cmd_screenshot`
+    resizes the capture to it, and `cmd_interact` recomputes it in a *different
+    process* to tell the container what the model was looking at. A skill CLI
+    is a fresh process per invocation, so it cannot remember; it does not have
+    to, because the inputs are on the capture record the container kept. The
+    two computations must agree exactly, rounding included, or every click is
+    off by the difference.
+
+    Rounding is **down**, and that is the half worth stating: `MAX_AREA_PIXELS`
+    is a ceiling, and rounding a dimension up can cross it — 1440x813 scales to
+    1427.2 x 805.9, which rounds to 1427x806 and is 162 pixels over the cap,
+    so the provider would rescale again and the frame the model saw would stop
+    being the frame the container converts against. Truncating cannot: both
+    factors only shrink.
+    """
+    scale = envelope_scale(width, height)
+    if scale >= 1.0:
+        return int(width), int(height)
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
+
+def capture_image_size(record):
+    """`(width, height)` off a container capture record, or None.
+
+    The record is the container's JSON, arriving over a header or a session
+    read, so its shape is checked rather than assumed: a malformed one has to
+    read as "no coordinate frame" and not as a traceback on the screenshot
+    path.
+    """
+    if not isinstance(record, dict):
+        return None
+    size = record.get("image")
+    if not isinstance(size, (list, tuple)) or len(size) != 2:
+        return None
+    try:
+        width, height = int(size[0]), int(size[1])
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _capture_from_response(headers):
+    """The capture record off a screenshot response: `(record, note)`.
+
+    Three things leave a capture with no coordinate frame and the caller has to
+    be able to say which: a container predating visual mode sends no header at
+    all, one that could not measure the Chrome window sends
+    `X-Browse-Capture-Error` with its own reason, and a header that will not
+    parse means something rewrote it in transit. None of the three is a failed
+    screenshot — the picture is still worth reading — so each is a note beside
+    `capture: null` rather than an error.
+    """
+    reason = headers.get(CAPTURE_ERROR_HEADER)
+    if reason:
+        return None, (
+            f"The browser container recorded no coordinate frame for this "
+            f"capture ({reason}), so --click-at and --hover-at cannot be used "
+            f"against this session. The picture itself is fine to read."
+        )
+    raw = headers.get(CAPTURE_HEADER)
+    if not raw:
+        return None, (
+            "This browser container reports no capture frame, so it predates "
+            "visual mode: --click-at and --hover-at will not work against it. "
+            "The picture itself is fine to read."
+        )
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        record = None
+    if capture_image_size(record) is None:
+        return None, (
+            "The browser container's capture header did not parse, so "
+            "--click-at and --hover-at cannot be used against this session. "
+            "The picture itself is fine to read."
+        )
+    return record, None
+
+
+def _resize_capture(content, media_type, target):
+    """The capture resized to `target` pixels: `(bytes, error)`.
+
+    Pillow is imported here rather than at module scope for the reason
+    `envelope_scale`'s import states. A palette or bilevel image is resampled
+    nearest-neighbour instead of Lanczos, since Lanczos on an indexed mode
+    either loses the palette or refuses, and keeping the mode is what lets the
+    result be saved back in its own format.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    try:
+        with Image.open(BytesIO(content)) as image:
+            fmt = image.format or _PIL_FORMAT_FOR_MEDIA_TYPE.get(media_type, "PNG")
+            resample = (
+                Image.Resampling.NEAREST
+                if image.mode in ("P", "1")
+                else Image.Resampling.LANCZOS
+            )
+            resized = image.resize(target, resample)
+            buffer = BytesIO()
+            resized.save(buffer, format=fmt)
+        return buffer.getvalue(), None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+#: The Pillow format name for each media type the capture sniff admits, for the
+#: case where the opened image carries no `format` of its own.
+_PIL_FORMAT_FOR_MEDIA_TYPE = {
+    "image/png": "PNG",
+    "image/jpeg": "JPEG",
+    "image/gif": "GIF",
+    "image/webp": "WEBP",
+}
+
+
 def cmd_screenshot(args):
     """Take a screenshot, into the caller's own workspace.
 
@@ -427,6 +602,42 @@ def cmd_screenshot(args):
                     f"nothing was written."
                 ),
             }
+        # The envelope resize runs before the write, so `size` and the bytes on
+        # disk are the same picture. A capture the provider would rescale again
+        # is a capture whose coordinate frame the container cannot reproduce.
+        record, capture_note = _capture_from_response(resp.headers)
+        capture = None
+        raw_size = capture_image_size(record)
+        if raw_size is not None:
+            target = delivered_size(*raw_size)
+            if target != raw_size:
+                resized, resize_err = _resize_capture(content, media_type, target)
+                if resize_err:
+                    # Deliberately not a fallback to the unresized bytes: an
+                    # oversize picture delivered as if it were in frame is a
+                    # click that lands somewhere else, which is worse than no
+                    # picture at all.
+                    return {
+                        "status": "error",
+                        "error": (
+                            f"The {raw_size[0]}x{raw_size[1]} capture is over "
+                            f"the vision envelope and could not be resized to "
+                            f"{target[0]}x{target[1]}: {resize_err}. Nothing "
+                            f"was written."
+                        ),
+                    }
+                content = resized
+            page = record.get("page")
+            if not isinstance(page, dict):
+                page = None
+            capture = {
+                "image": list(target),
+                "viewport": page.get("viewport") if page else None,
+                "dpr": page.get("dpr", 1) if page else 1,
+                "scale": round(envelope_scale(*raw_size), 6),
+                "full_page": bool(record.get("full_page")),
+            }
+
         if args.output:
             # Already resolved and already contained — the stamp on the
             # declaration did it, and the value on the namespace *is* the
@@ -450,7 +661,10 @@ def cmd_screenshot(args):
             "path": str(resolved),
             "size": len(content),
             "media_type": media_type,
+            "capture": capture,
         }
+        if capture_note:
+            result["notes"] = [capture_note]
         workspace_path = _workspace_relative(resolved)
         if workspace_path:
             result["workspace_path"] = workspace_path
@@ -538,6 +752,48 @@ def _fill_credential_action(pair):
     return {"type": "fill", "selector": pair.label, "value": pair.value.reveal()}
 
 
+def _point(spec, flag):
+    """`X,Y` in the delivered picture's pixel space → `(x, y)`.
+
+    Refused, not coerced. A point the caller meant and this could not read is
+    a click somewhere else, and the actions around it would still run and
+    still report `ok` — the shape `_fill_action` already refuses for the same
+    reason.
+    """
+    if not isinstance(spec, str) or "," not in spec:
+        raise ValueError(f"Malformed {flag} value: expected X,Y, got {spec!r}")
+    raw_x, _, raw_y = spec.partition(",")
+    try:
+        x, y = float(raw_x.strip()), float(raw_y.strip())
+    except ValueError:
+        raise ValueError(
+            f"Malformed {flag} value: X and Y must be numbers, got {spec!r}"
+        ) from None
+    if not (math.isfinite(x) and math.isfinite(y)):
+        raise ValueError(f"Malformed {flag} value: X and Y must be finite, got {spec!r}")
+    return x, y
+
+
+def _click_at_action(spec):
+    x, y = _point(spec, "--click-at")
+    return {"type": "click_at", "x": x, "y": y}
+
+
+def _hover_at_action(spec):
+    x, y = _point(spec, "--hover-at")
+    return {"type": "hover_at", "x": x, "y": y}
+
+
+def _press_action(key):
+    # The container hands the name to xdotool, which refuses one it does not
+    # know; nothing here tries to keep a second copy of that key table.
+    return {"type": "key", "key": key}
+
+
+def _type_action(text):
+    return {"type": "type", "text": text}
+
+
 #: Which dest an order record may name, and what each one emits. One table
 #: rather than a tuple of dests beside a chain of branches: an argument added
 #: to only one of those reaches whichever branch is last and is resolved as
@@ -548,6 +804,10 @@ ACTION_EMITTERS = {
     "click": _click_action,
     "fill": _fill_action,
     "fill_credential": _fill_credential_action,
+    "click_at": _click_at_action,
+    "hover_at": _hover_at_action,
+    "press": _press_action,
+    "type": _type_action,
 }
 #: The dests `OrderedAppend` may be declared on, and the fallback order.
 ORDERED_ACTION_DESTS = tuple(ACTION_EMITTERS)
@@ -645,6 +905,85 @@ def _scrub(payload, secrets):
     return payload
 
 
+def _session_capture(url, session_id):
+    """The session's recorded capture frame: `(record, error)`.
+
+    A coordinate action is interpreted against the frame the container
+    recorded when the screenshot was taken, and this process has no memory of
+    that call — so the frame is fetched rather than carried. It does not have
+    to be carried: everything the conversion needs is on the record, which is
+    why nothing asks the model to quote a picture size back.
+
+    Three absences, named apart because the remedies differ: a container with
+    no `capture` key at all predates visual mode, a `null` one has never been
+    screenshotted (or its screenshot was taken by the URL form, which closes
+    its own session, or Chrome has been relaunched since), and one that will
+    not read is a record this skill cannot use.
+    """
+    resp = httpx.get(f"{url}/sessions/{session_id}", timeout=REQUEST_TIMEOUT)
+    data = _decode(resp)
+    if not isinstance(data, dict) or data.get("status") == "error":
+        return None, (
+            data.get("error")
+            if isinstance(data, dict)
+            else f"could not read session {session_id}"
+        )
+    if "capture" not in data:
+        return None, (
+            "This browser container keeps no capture frame on its session "
+            "record, so it predates visual mode — --click-at and --hover-at "
+            "are unavailable here. Drive the page with --click and a CSS "
+            "selector instead."
+        )
+    record = data["capture"]
+    if record is None:
+        return None, (
+            f"Session {session_id} has no screenshot on record, so there is "
+            f"nothing to interpret a point against. Take one first with "
+            f"`browse screenshot --session {session_id}`. A screenshot taken "
+            f"by the URL form records nothing, because it closes its own "
+            f"session, and a Chrome relaunch clears the record."
+        )
+    if capture_image_size(record) is None:
+        return None, (
+            f"Session {session_id} carries a capture record this skill could "
+            f"not read, so no point on it can be converted. Re-take the "
+            f"screenshot."
+        )
+    return record, None
+
+
+def _note_stale_container(data):
+    """Name the container as too old where it refused an action it never had.
+
+    `/interact`'s unknown-action branch answers `{"ok": false, "error":
+    "unknown"}` and carries on, which is the right shape and says nothing a
+    reader can act on. The visual-mode types are the only ones this skill
+    emits that a deployed image may not implement, so an `unknown` naming one
+    of them means the container is behind this code rather than that the model
+    invented an action.
+    """
+    if not isinstance(data, dict):
+        return data
+    stale = sorted({
+        result.get("action")
+        for result in (data.get("actions") or ())
+        if isinstance(result, dict)
+        and result.get("error") == "unknown"
+        and result.get("action") in VISUAL_ACTION_TYPES
+    })
+    if not stale:
+        return data
+    notes = list(data.get("notes") or [])
+    notes.append(
+        "This browser container does not implement "
+        + ", ".join(stale)
+        + " — it predates visual mode. Rebuild the browser image, or drive the "
+        "page with --click and a CSS selector."
+    )
+    return {**data, "notes": notes}
+
+
 def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
@@ -653,6 +992,19 @@ def cmd_interact(args):
         # Last, and the one action whose position the caller does not choose;
         # skill.md says so rather than leaving it to be found in a result.
         actions.append({"type": "scroll", "direction": args.scroll, "amount": args.scroll_amount})
+
+    # A point is read off the delivered picture, so the container is told what
+    # that picture measured and converts from it. The size is recomputed from
+    # the record rather than remembered, which is the same arithmetic
+    # `cmd_screenshot` applied — one function, so the two cannot disagree.
+    framed = [a for a in actions if a.get("type") in IMAGE_SPACE_ACTIONS]
+    if framed:
+        record, capture_err = _session_capture(url, args.session_id)
+        if capture_err:
+            return {"status": "error", "error": capture_err}
+        size = list(delivered_size(*capture_image_size(record)))
+        for action in framed:
+            action["image_size"] = size
 
     payload = {
         "session_id": args.session_id,
@@ -665,7 +1017,7 @@ def cmd_interact(args):
         for pair in (getattr(args, "fill_credential", None) or [])
         if isinstance(pair, CredentialPair)
     ]
-    return _scrub(_decode(resp), secrets)
+    return _note_stale_container(_scrub(_decode(resp), secrets))
 
 
 def _links_from_extract(data):
@@ -850,6 +1202,31 @@ def build_parser():
             "this to --fill for a password or a token — the value is looked "
             "up outside the sandbox and never enters your command line or "
             "your argv. `istota-credential list` names what is available."
+        ),
+    )
+    p_int.add_argument(
+        "--click-at", action=OrderedAppend, metavar="X,Y",
+        help=(
+            "Click a point, in the pixel space of the picture `browse "
+            "screenshot` delivered — the coordinates you read off it. Needs a "
+            "screenshot of this session on record, and is refused if the page "
+            "has scrolled or navigated since."
+        ),
+    )
+    p_int.add_argument(
+        "--hover-at", action=OrderedAppend, metavar="X,Y",
+        help="Move the pointer to a point, in the delivered picture's pixel space.",
+    )
+    p_int.add_argument(
+        "--press", action=OrderedAppend, metavar="KEY",
+        help="Press a key (Tab, Enter, Escape, ctrl+a) at whatever has focus.",
+    )
+    p_int.add_argument(
+        "--type", action=OrderedAppend, metavar="TEXT",
+        help=(
+            "Type text at whatever has focus. Use --fill-credential for a "
+            "password: a coordinate click that missed types the value into "
+            "whatever holds focus instead, with no failure and no signal."
         ),
     )
     p_int.add_argument("--scroll", choices=["up", "down"], help="Scroll direction")
