@@ -60,6 +60,7 @@ __all__ = [
     "EXTENSION_BY_MEDIA_TYPE",
     "INLINE_MEDIA_TYPES",
     "SNIFF_BYTES",
+    "image_dimensions",
     "sniff_decodable",
     "sniff_raster",
 ]
@@ -217,3 +218,143 @@ def sniff_decodable(head: object) -> str | None:
     if data is None:
         return None
     return _raster_type(data) or _heif_type(data)
+
+
+def image_dimensions(data: object) -> tuple[int, int] | None:
+    """`(width, height)` read out of an image's own header, or None.
+
+    A third question for the same table, and the one place in `src/` that asks
+    it. `Read`'s image arm names the pixel dimensions beside the media type so
+    a model looking at a picture knows what coordinate space it is naming
+    points in; nothing computes from the answer, so `None` is an ordinary
+    outcome and not a failure.
+
+    **Header parsing, never a decode**, for the reason the module docstring
+    gives: this runs inside the tool server, which holds no image library and
+    must not grow one. The four raster formats put their size at a fixed
+    offset or one short walk away. HEIF does not — ISO-BMFF needs a real box
+    walk to reach `ispe`, which is a bounded loop over attacker-supplied data
+    written for a case nobody has asked for — so it answers `None` and the
+    caller says nothing about its size.
+
+    `data` is the whole file rather than `SNIFF_BYTES` of it: JPEG stores its
+    size in a frame header that sits past any fixed prefix, after a run of
+    segments whose length the file chooses. Takes `object` and never raises,
+    like its siblings.
+    """
+    if not isinstance(data, (bytes, bytearray, memoryview)):
+        return None
+    raw = bytes(data)
+    for reader in (_png_size, _gif_size, _webp_size, _jpeg_size):
+        size = reader(raw)
+        if size is not None:
+            return size
+    return None
+
+
+def _u16be(raw: bytes, at: int) -> int:
+    return (raw[at] << 8) | raw[at + 1]
+
+
+def _positive(width: int, height: int) -> tuple[int, int] | None:
+    # A zero dimension is a malformed header rather than a picture, and a
+    # caller that renders "0x480" is reporting a measurement it did not make.
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _png_size(raw: bytes) -> tuple[int, int] | None:
+    """IHDR is the first chunk by specification, so the offsets are fixed."""
+    if len(raw) < 24 or raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR":
+        return None
+    width = int.from_bytes(raw[16:20], "big")
+    height = int.from_bytes(raw[20:24], "big")
+    return _positive(width, height)
+
+
+def _gif_size(raw: bytes) -> tuple[int, int] | None:
+    """The logical screen descriptor, little-endian, right after the header."""
+    if len(raw) < 10 or raw[:6] not in (b"GIF87a", b"GIF89a"):
+        return None
+    width = int.from_bytes(raw[6:8], "little")
+    height = int.from_bytes(raw[8:10], "little")
+    return _positive(width, height)
+
+
+def _webp_size(raw: bytes) -> tuple[int, int] | None:
+    """One of three chunk layouts, which is why WebP needs its own branch.
+
+    `VP8X` carries a canvas size and is what an animated or alpha-bearing file
+    starts with; `VP8 ` is lossy and puts the size behind a three-byte frame
+    tag and a sync code; `VP8L` is lossless and packs both dimensions, minus
+    one, into 28 bits. All three are stored minus nothing except `VP8X` and
+    `VP8L`, which store minus one — the `+ 1`s below are that and not an
+    off-by-one.
+    """
+    if len(raw) < 16 or raw[:4] != b"RIFF" or raw[8:12] != b"WEBP":
+        return None
+    chunk = raw[12:16]
+    if chunk == b"VP8X" and len(raw) >= 30:
+        width = int.from_bytes(raw[24:27], "little") + 1
+        height = int.from_bytes(raw[27:30], "little") + 1
+        return _positive(width, height)
+    if chunk == b"VP8 " and len(raw) >= 30 and raw[23:26] == b"\x9d\x01\x2a":
+        width = int.from_bytes(raw[26:28], "little") & 0x3FFF
+        height = int.from_bytes(raw[28:30], "little") & 0x3FFF
+        return _positive(width, height)
+    if chunk == b"VP8L" and len(raw) >= 25 and raw[20] == 0x2F:
+        bits = int.from_bytes(raw[21:25], "little")
+        width = (bits & 0x3FFF) + 1
+        height = ((bits >> 14) & 0x3FFF) + 1
+        return _positive(width, height)
+    return None
+
+
+#: Markers that open a frame header carrying the image's size. Every `SOF`
+#: except the three that share the range and mean something else: `C4` is a
+#: Huffman table, `C8` is a reserved JPEG extension and `CC` is an arithmetic
+#: coding table.
+_JPEG_SOF = frozenset(
+    m for m in range(0xC0, 0xD0) if m not in (0xC4, 0xC8, 0xCC)
+)
+#: Standalone markers — no length field follows them, so the walk steps by two
+#: rather than reading a segment length that is not there.
+_JPEG_STANDALONE = frozenset({0x01, *range(0xD0, 0xD8)})
+
+
+def _jpeg_size(raw: bytes) -> tuple[int, int] | None:
+    """Walk the segment chain to the first frame header.
+
+    Bounded by the buffer rather than by a segment count: each step advances by
+    at least two bytes and a non-advancing length ends the walk, so a crafted
+    file cannot spin here.
+    """
+    if len(raw) < 4 or raw[:2] != b"\xff\xd8":
+        return None
+    at = 2
+    limit = len(raw)
+    while at + 3 < limit:
+        if raw[at] != 0xFF:
+            return None
+        marker = raw[at + 1]
+        if marker == 0xFF:
+            # A fill byte; the specification allows any number of them.
+            at += 1
+            continue
+        if marker in _JPEG_STANDALONE:
+            at += 2
+            continue
+        if marker == 0xDA:
+            # Start of scan: the entropy-coded data begins and no frame header
+            # follows it that this walk could reach cheaply.
+            return None
+        length = _u16be(raw, at + 2)
+        if length < 2:
+            return None
+        if marker in _JPEG_SOF:
+            if at + 9 > limit:
+                return None
+            height = _u16be(raw, at + 5)
+            width = _u16be(raw, at + 7)
+            return _positive(width, height)
+        at += 2 + length
+    return None

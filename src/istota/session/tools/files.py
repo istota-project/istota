@@ -12,6 +12,7 @@ file can't stall the event loop driving the agent.
 from __future__ import annotations
 
 import asyncio
+import base64
 import fnmatch
 import os
 import re
@@ -19,7 +20,9 @@ from pathlib import Path
 
 from istota.agent.coercion import coerce_arguments
 from istota.agent.tools import AgentTool, ToolResult
-from istota.llm.types import TextContent, ToolParameter, ToolSchema
+from istota.image_sniff import SNIFF_BYTES, image_dimensions, sniff_decodable
+from istota.llm.types import ImageContent, TextContent, ToolParameter, ToolSchema
+from istota.untrusted import IMAGE_NOTICE
 
 from .edit_engine import (
     Edit,
@@ -34,6 +37,18 @@ from .env import ToolEnv, ToolPathError
 
 _BINARY_SNIFF_BYTES = 8192
 _MAX_LINE_CHARS = 2000
+
+# How large an image the model may be handed. The tree's answer already, from
+# `brain.native._MAX_IMAGE_BYTES`, restated here rather than imported: this
+# module runs inside the tool server, and `brain/native.py` pulls the whole
+# brain import graph into a process that starts once per task attempt.
+# `tests/native/test_tools_files.py` holds the two equal.
+#
+# Refused rather than truncated, which is why it cannot be `env.max_read_bytes`:
+# that one is 25 MB and `_read_bytes_capped` cuts the tail off, and a truncated
+# PNG is a corrupt PNG. The hard ceiling behind this is the 32 MiB tool-server
+# frame cap, which base64 inflates into at about 24 MB of source bytes.
+MAX_IMAGE_BYTES = 6 * 1024 * 1024
 
 # The five schemas below are module-level constants rather than literals inside
 # their factories, because there are now two things that bind a tool by the
@@ -97,7 +112,8 @@ READ_SCHEMA = ToolSchema(
     name="Read",
     description=(
         "Read a file from the filesystem. Returns content with line numbers "
-        "in `cat -n` format. Use `offset`/`limit` to page through large files."
+        "in `cat -n` format. Use `offset`/`limit` to page through large files. "
+        "An image file comes back as an image you can look at, not as text."
     ),
     parameters=[
         ToolParameter(name="file_path", type="string", description="Absolute path to the file."),
@@ -105,6 +121,60 @@ READ_SCHEMA = ToolSchema(
         ToolParameter(name="limit", type="integer", description="Max lines to read.", required=False),
     ],
 )
+
+
+def _read_image(path: Path, media_type: str, args: dict) -> ToolResult:
+    """An image file as two content blocks: what it is, then the pixels.
+
+    The text block goes first and is not decoration. A model with no vision
+    support never sees the image — `openai_compat._tool_image_followup`
+    replaces it with `[image output omitted: model has no vision support]` —
+    so without the block beside it that model is handed an unexplained
+    omission and loops. With it, it reads what it was given and can stop.
+    It also carries `untrusted.IMAGE_NOTICE`: a fence cannot wrap pixels, and
+    a sentence is what is available instead.
+
+    `display_name` is the basename because that is the one surface it reaches.
+    It never goes to a provider; compaction's loss notice renders it, and
+    compaction deliberately never pins a tool-result image across a cut, so
+    every screenshot in a long loop degrades to that notice eventually. Empty,
+    it reads `[image attachment — no longer in context]` and tells the model
+    nothing about which picture it lost.
+    """
+    for name in ("offset", "limit"):
+        if args.get(name) is not None:
+            # Refused rather than ignored. Both count lines; silently dropping
+            # them on an image is the shape where a caller asks for part of
+            # something and is handed all of it with nothing saying so.
+            return _err(
+                f"`{name}` counts lines and {path} is an image ({media_type}). "
+                f"An image is read whole; ask for the region you want in words."
+            )
+    data, over_cap = _read_bytes_capped(path, MAX_IMAGE_BYTES)
+    if over_cap:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = len(data)
+        return _err(
+            f"Image too large to read: {path} ({size} bytes, cap is "
+            f"{MAX_IMAGE_BYTES}). Nothing was read — a truncated image is a "
+            f"corrupt image. Resize it first."
+        )
+    shape = ""
+    dimensions = image_dimensions(data)
+    if dimensions:
+        shape = f", {dimensions[0]}x{dimensions[1]} pixels"
+    return ToolResult(content=[
+        TextContent(
+            text=f"{path} ({media_type}, {len(data)} bytes{shape})\n{IMAGE_NOTICE}",
+        ),
+        ImageContent(
+            media_type=media_type,
+            data=base64.b64encode(data).decode("ascii"),
+            display_name=path.name,
+        ),
+    ])
 
 
 def make_read_tool(env: ToolEnv) -> AgentTool:
@@ -120,6 +190,16 @@ def make_read_tool(env: ToolEnv) -> AgentTool:
         if path.is_dir():
             return _err(f"Path is a directory, not a file: {path}")
         raw, byte_truncated = _read_bytes_capped(path, env.max_read_bytes)
+        # Ahead of the binary refusal, and decided from the bytes rather than
+        # the name: an SVG called `.png` is XML text, matches no signature and
+        # still takes the branch below. `sniff_decodable` is the right
+        # predicate of the two — it answers what the image pipeline can
+        # decode, where `sniff_raster` answers what `/chat/files` serves
+        # inline and excludes HEIF on a browser-support argument that has
+        # nothing to do with what a model can see.
+        media_type = sniff_decodable(raw[:SNIFF_BYTES])
+        if media_type is not None:
+            return _read_image(path, media_type, args)
         if _looks_binary(raw):
             return _err(f"Cannot read binary file: {path} ({len(raw)} bytes)")
 
