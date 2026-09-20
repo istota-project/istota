@@ -182,7 +182,9 @@ Pass `-o` only for the picture you are going to show them at the end, and name i
 
 `--press` and `--type` act on whatever has focus, so they need no picture and no point. `--type` takes plain text; use `--fill-credential` with a selector for anything secret, because a coordinate click that missed types the value into whatever was focused instead, and that failure has no signal.
 
-`--click-at` and `--hover-at` need a screenshot of this session on record, and they are refused rather than guessed at when the picture no longer describes the page:
+One `--type` is bounded at a bit over a thousand characters — the container reports the exact number in the refusal, because it is derived from how fast the keys are paced rather than chosen. Send a longer body as several `--type` actions; the field keeps what the earlier ones typed. Neither `--type` nor `--press` takes a value beginning with `-`: xdotool would read it as an option rather than as input, so it is refused. Lead with a space if a page genuinely needs one.
+
+`--click-at` and `--hover-at` need a screenshot of this session on record, and they are refused rather than guessed at when the picture no longer describes the page. `--click-challenge` answers the same codes, since it converts through the same recorded frame:
 
 | `error` | What happened | What to do |
 |---|---|---|
@@ -190,7 +192,13 @@ Pass `-o` only for the picture you are going to show them at the end, and name i
 | `stale_capture` | The page scrolled or navigated since the picture | Re-capture, look again, click again |
 | `viewport_changed` | The browser window moved or resized | Re-capture |
 | `full_page_capture` | The picture was `--full-page`, a different coordinate space | Re-capture without `--full-page` |
+| `no_coordinate_frame` | The capture on record has no screen position to convert against | Re-capture with `--session <id>` |
 | `out_of_picture` | The point is outside the picture | Read the point off the image rather than estimating it |
+| `pointer_did_not_move` | The pointer never reached the point, so nothing was pressed | Nothing happened to the page — re-capture and try again |
+| `text_too_long` | The `--type` text is past what one action can deliver | Send it in chunks |
+| `option_shaped_input` | The text or key begins with `-`, which xdotool reads as an option | Lead with a space, or use `--fill` with a selector |
+
+`pointer_did_not_move` is the one to read carefully: it means nothing was pressed, so unlike most failures here a retry is safe. The pointer did travel part of the way, so a menu or tooltip along the path may have opened — re-capture rather than assuming the page looks as it did.
 
 A screenshot taken by the URL form records nothing, because it closes its own session. Always capture with `--session <id>`.
 

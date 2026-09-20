@@ -318,6 +318,11 @@ def human_move_to(target_x, target_y, settle_s=None):
     point instead of at random. The approach matters as much as the click:
     a pointer that teleports to a checkbox and fires has no movement history,
     and the movement history is what the challenge is watching.
+
+    Returns whether the landing move put the pointer on the target. Only that
+    last move is answered for: the points before it are jitter on the way,
+    and whatever blocks one of them blocks the landing move too, which is the
+    one a click would be sent from.
     """
     start = mouse_location() or (target_x, target_y - 200)
     num_pts = random.randint(12, 22)
@@ -329,17 +334,26 @@ def human_move_to(target_x, target_y, settle_s=None):
         time.sleep(gauss_clamp(speed, speed * 0.3, 0.005, 0.04))
     # Land exactly on target: the path carries +-1.5px of jitter, and the
     # Cloudflare checkbox is about 24px across.
-    mouse_move(target_x, target_y)
+    landed = mouse_move(target_x, target_y)
     if settle_s is None:
         settle_s = gauss_clamp(0.35, 0.15, 0.15, 0.8)
     time.sleep(settle_s)
+    return landed
 
 
 def human_click_at(target_x, target_y, button=1):
-    """Approach an X11 screen point and click it."""
-    human_move_to(target_x, target_y)
+    """Approach an X11 screen point and click it.
+
+    Returns False without pressing when the pointer did not reach the point.
+    mouse_click() presses wherever the pointer currently is, so a press after
+    a move that did not happen lands on whatever the previous action was
+    aimed at -- and the caller would report it at the point it asked for.
+    """
+    if not human_move_to(target_x, target_y):
+        return False
     mouse_click(button=button)
     time.sleep(gauss_clamp(0.25, 0.1, 0.1, 0.5))
+    return True
 
 
 def challenge_boxes(page):
