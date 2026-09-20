@@ -198,7 +198,7 @@ One `--type` is bounded at a bit over a thousand characters — the container re
 | `text_too_long` | The `--type` text is past what one action can deliver | Send it in chunks |
 | `option_shaped_input` | The text or key begins with `-`, which xdotool reads as an option | Lead with a space, or use `--fill` with a selector |
 
-`pointer_did_not_move` is the one to read carefully: it means nothing was pressed, so unlike most failures here the page is untouched and a retry is safe.
+`pointer_did_not_move` is the one to read carefully: it means nothing was pressed, so unlike most failures here a retry is safe. The pointer did travel part of the way, so a menu or tooltip along the path may have opened — re-capture rather than assuming the page looks as it did.
 
 A screenshot taken by the URL form records nothing, because it closes its own session. Always capture with `--session <id>`.
 
