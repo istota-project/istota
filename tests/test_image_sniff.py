@@ -5,10 +5,12 @@ file `inline` instead of `attachment`, so the cases that matter most are the
 misses: an SVG, an HTML document and anything that only *looks* like an image
 because of where it sits in a filename.
 
-The second half of the file is about the module's *other* question — what the
-image pipeline can decode — and the two predicates are held apart deliberately:
-`sniff_raster` must keep refusing HEIC, because that answer is what keeps
-`/chat/files` narrow.
+The second half of the file is about the module's *other two* questions — what
+the image pipeline can decode, and what a model provider will accept — and the
+three predicates are held apart deliberately. `sniff_raster` must keep refusing
+HEIC, because that answer is what keeps `/chat/files` narrow. `is_model_visible`
+must keep refusing it too, for an unrelated reason: no provider documents the
+format, and the caller that asks has no converter behind it (ISSUE-520).
 """
 
 import pytest
@@ -18,8 +20,10 @@ from istota.image_sniff import (
     DECODABLE_MEDIA_TYPES,
     EXTENSION_BY_MEDIA_TYPE,
     INLINE_MEDIA_TYPES,
+    MODEL_VISIBLE_MEDIA_TYPES,
     SNIFF_BYTES,
     image_dimensions,
+    is_model_visible,
     sniff_decodable,
     sniff_raster,
 )
@@ -259,6 +263,61 @@ def test_every_extension_it_names_survives_the_downstream_screen():
     Pinned here rather than in the module, which imports nothing."""
     assert set(EXTENSION_BY_MEDIA_TYPE) == set(DECODABLE_MEDIA_TYPES.values())
     assert set(EXTENSION_BY_MEDIA_TYPE.values()) <= IMAGE_EXTENSIONS
+
+
+def test_the_model_visible_set_is_exactly_the_documented_provider_formats():
+    """Its source is the provider's own format list, not this deployment's.
+    Anthropic's Messages API and its OpenAI-compatible layer both document
+    these four and nothing else, so a fifth entry here is a claim about
+    somebody else's API and wants a link in the commit body."""
+    assert set(MODEL_VISIBLE_MEDIA_TYPES.values()) == {
+        "image/png", "image/jpeg", "image/gif", "image/webp",
+    }
+
+
+def test_the_heif_pair_is_decodable_but_not_model_visible():
+    """The gap ISSUE-520 was: `Read` inherited the staging predicate, whose
+    safety rests on a converter that is not on its path, so a HEIC reached a
+    provider that documents no such format with the tool call reporting
+    success."""
+    for media_type in ("image/heic", "image/heif"):
+        assert media_type in DECODABLE_MEDIA_TYPES.values()
+        assert not is_model_visible(media_type)
+
+
+def test_the_model_visible_set_is_not_derived_from_the_inline_one():
+    """They hold the same four values and answer different questions — a
+    browser-support one and a provider-documentation one. Equal by
+    coincidence, so neither may be built from the other: a widening motivated
+    by one would otherwise silently apply to the other. Pinned as two objects
+    rather than by reading the source, since `dict(INLINE_MEDIA_TYPES)` and a
+    literal are indistinguishable once evaluated — what this catches is the
+    aliasing spelling, `MODEL_VISIBLE_MEDIA_TYPES = INLINE_MEDIA_TYPES`,
+    where a later mutation of one is a mutation of both."""
+    assert MODEL_VISIBLE_MEDIA_TYPES is not INLINE_MEDIA_TYPES
+
+
+def test_everything_the_attachment_pipeline_emits_is_model_visible():
+    """The other path that reaches a provider. `prepare_image_attachments`
+    re-encodes to one of these before a model sees it, so a format it can
+    emit and this set does not name is the same defect on the other path.
+    Pinned here rather than in the module, which imports nothing."""
+    from istota.image_attachments import _MEDIA_TYPE
+
+    assert set(_MEDIA_TYPE.values()) <= set(MODEL_VISIBLE_MEDIA_TYPES.values())
+    for media_type in _MEDIA_TYPE.values():
+        assert is_model_visible(media_type)
+
+
+@pytest.mark.parametrize(
+    "bad", [None, 42, [], {}, b"image/png", "image/heic", "image/svg+xml", ""],
+    ids=["none", "int", "list", "dict", "bytes", "heic", "svg", "empty"],
+)
+def test_the_visibility_predicate_never_raises_and_refuses_by_default(bad):
+    """Same contract as the sniffers. False is the safe direction: a wrong
+    False costs a visible refusal, a wrong True is a provider error on the
+    next request attributed to nothing."""
+    assert is_model_visible(bad) is False
 
 
 def test_sniff_bytes_covers_the_major_brand():

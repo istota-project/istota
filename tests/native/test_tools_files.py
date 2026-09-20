@@ -823,30 +823,75 @@ class TestReadAnImage:
         assert key in _text(result)
         assert len(result.content) == 1
 
-    async def test_a_heic_is_read_rather_than_refused(self, tmp_path):
-        # The one case that separates the two sniffers, and therefore the only
-        # thing holding the choice between them. `sniff_raster` answers what
-        # `/chat/files` serves inline and excludes HEIF on a browser-support
-        # argument that has nothing to do with what a model can see; an iPhone
-        # photograph is a HEIC.
-        #
+    def _heic(self, tmp_path, name="photo.heic"):
         # A synthetic ISO-BMFF header rather than a real encode: the arm
-        # sniffs and ships bytes without ever opening the image, so what is
-        # under test is the predicate, and the fixture needs no encoder.
-        path = tmp_path / "photo.heic"
+        # sniffs without ever opening the image, so what is under test is the
+        # predicate, and the fixture needs no encoder.
+        path = tmp_path / name
         path.write_bytes(
             b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1" + b"\x00" * 64,
         )
+        return path
+
+    async def test_a_heic_is_refused_by_name_rather_than_shipped(self, tmp_path):
+        # ISSUE-520. This asserted the opposite until the fix: it pinned
+        # `sniff_decodable` as the arm's predicate, reasoning that
+        # `sniff_raster` excludes HEIF for a browser-support reason that has
+        # nothing to do with what a model can see. The browser half of that is
+        # right and the conclusion was not — the provider envelope is what
+        # "what a model can see" means, and no shipped provider documents
+        # `image/heic`. So the tool call succeeded, the model was told it
+        # could see a photograph, and the *next* provider request failed with
+        # nothing in the transcript naming the image as the cause.
+        #
+        # An iPhone photograph is a HEIC and a WhatsApp inbound is staged
+        # under that suffix, so this is a shipped shape rather than a corner.
+        path = self._heic(tmp_path)
+
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert result.is_error
+        text = _text(result)
+        # The format is named, so the model can tell the user something true
+        # rather than trusting a call that reported success.
+        assert "image/heic" in text
+        # And the formats that would have worked, so the refusal is actionable.
+        assert "image/png" in text
+        assert "image/jpeg" in text
+        # No image block reaches the model at all. A poisoned block is
+        # re-rendered on every later call of the attempt, so the failure would
+        # repeat until the attempt ended rather than costing one turn.
+        assert len(result.content) == 1
+
+    async def test_the_heic_refusal_outranks_the_offset_complaint(self, tmp_path):
+        # Both refuse, and the order decides which reason the model is given.
+        # "You cannot be shown this format" is the one it can act on; "offset
+        # counts lines" would send it back to call again without them, onto a
+        # refusal it could have been told about the first time.
+        path = self._heic(tmp_path)
+
+        result = await _run(
+            make_read_tool(_env(tmp_path)), {"file_path": str(path), "offset": 2},
+        )
+
+        assert result.is_error
+        text = _text(result)
+        # Both refusals name the media type, so that alone does not say which
+        # one fired. The list of formats that would have worked is carried by
+        # the visibility refusal and by nothing else.
+        assert "image/png" in text
+        assert "offset" not in text
+
+    async def test_a_png_is_still_shown(self, tmp_path):
+        # The control for both cases above: the narrowing must not cost the
+        # four formats a provider does document.
+        path = _png(tmp_path)
 
         result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
 
         assert not result.is_error
         assert len(result.content) == 2
-        assert result.content[1].media_type == "image/heic"
-        # HEIF needs a real ISO-BMFF box walk to reach its size, which
-        # `image_dimensions` deliberately does not do, so the text block says
-        # nothing about the pixels rather than guessing.
-        assert "pixels" not in result.content[0].text
+        assert result.content[1].media_type == "image/png"
 
     async def test_an_svg_named_png_still_takes_the_binary_branch(self, tmp_path):
         # The case `image_sniff` exists for: the extension is a caller-supplied

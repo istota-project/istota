@@ -21,7 +21,7 @@ type that does not draw is worse than an attachment that does. SVG is XML text
 and matches no signature here, which is the point of sniffing rather than
 mapping a suffix.
 
-**Two questions, one signature table.** The paragraph above is the inline
+**Three questions, one signature table.** The paragraph above is the inline
 question and `sniff_raster` is its answer; it is unchanged and must stay that
 way. `sniff_decodable` answers a wider and separate one — *can the image
 pipeline decode this* — for a caller staging bytes off a messaging surface
@@ -32,6 +32,27 @@ core dependency — so refusing one here would be the staging sniff breaking a
 path that already works. Widening `sniff_raster` instead would change what
 `/chat/files` serves inline, on a browser-support argument nobody revisited.
 Each caller asks the question it means.
+
+The third is `is_model_visible`, and it is a question about **somebody else's
+API** rather than about this deployment: will a model provider accept a
+content block of this media type. Anthropic's Messages API and its
+OpenAI-compatible layer both document `image/jpeg`, `image/png`, `image/gif`
+and `image/webp`, and nothing else. It exists because `sniff_decodable`'s
+safety depends on a converter — `prepare_image_attachments` turns HEIF into
+JPEG before a model ever sees it — and the `Read` tool has no such step: the
+tool server holds no image library, deliberately (`.claude/rules/sandbox.md`).
+Inheriting the staging predicate there shipped `image/heic` to a provider that
+documents no such format, with the tool call reporting success (ISSUE-520).
+
+**`MODEL_VISIBLE_MEDIA_TYPES` is its own literal and must not be derived from
+`INLINE_MEDIA_TYPES`.** The two hold the same four values today and answer
+different questions — one is what a browser will draw on istota's own origin,
+the other is what a provider documents — so a future widening motivated by
+browser support would silently widen what ships to the provider, and a
+provider adding a format would silently widen what `/chat/files` serves
+inline. They are equal by coincidence, and the coincidence is not a
+derivation. A test holds each against its own reason rather than against the
+other.
 
 **The HEIF arm is a brand allowlist, never a bare `ftyp` test.** An ISO-BMFF
 file carries a box length at 0, `ftyp` at 4 and its major brand at 8 — and
@@ -59,8 +80,10 @@ __all__ = [
     "DECODABLE_MEDIA_TYPES",
     "EXTENSION_BY_MEDIA_TYPE",
     "INLINE_MEDIA_TYPES",
+    "MODEL_VISIBLE_MEDIA_TYPES",
     "SNIFF_BYTES",
     "image_dimensions",
+    "is_model_visible",
     "sniff_decodable",
     "sniff_raster",
 ]
@@ -79,6 +102,21 @@ DECODABLE_MEDIA_TYPES: dict[str, str] = {
     "heif": "image/heif",
 }
 """What `sniff_decodable` can answer. The inline four plus the HEIF family."""
+
+MODEL_VISIBLE_MEDIA_TYPES: dict[str, str] = {
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+}
+"""What a model provider will accept in an image content block.
+
+Spelled out rather than built from `INLINE_MEDIA_TYPES`, for the reason the
+module docstring gives: the two are equal today and answer different
+questions, so deriving either from the other makes a change motivated by one
+silently apply to the other. This one's source is the provider's own
+documented format list.
+"""
 
 EXTENSION_BY_MEDIA_TYPE: dict[str, str] = {
     "image/png": "png",
@@ -218,6 +256,29 @@ def sniff_decodable(head: object) -> str | None:
     if data is None:
         return None
     return _raster_type(data) or _heif_type(data)
+
+
+def is_model_visible(media_type: object) -> bool:
+    """Whether a model provider will accept an image block of this type.
+
+    Takes the **media type** rather than the leading bytes, unlike its two
+    siblings, because its caller has already sniffed: `Read` needs to know
+    what the file is in order to name the format in its refusal, so it sniffs
+    wide with `sniff_decodable` and asks this about the answer. A
+    bytes-taking fourth predicate would walk the signature table twice and
+    still not tell a HEIC apart from a text file, which is the distinction
+    the refusal message is built on.
+
+    `object` rather than `str | None`, and False for anything that is not a
+    media type this module names — same contract as the sniffers, for the
+    same reason. The safe direction here is refusing: a wrong False costs a
+    visible refusal on a file the model can ask about another way, and a
+    wrong True is a provider error on the *next* request, attributed to
+    nothing.
+    """
+    if not isinstance(media_type, str):
+        return False
+    return media_type in MODEL_VISIBLE_MEDIA_TYPES.values()
 
 
 def image_dimensions(data: object) -> tuple[int, int] | None:
