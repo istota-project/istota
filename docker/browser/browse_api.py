@@ -811,7 +811,13 @@ def render_page():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
-MAX_TYPE_CHARS = 4096
+# Asked of the module that does the typing rather than written down here.
+# It was 4096 against a fixed 30-second timeout that could deliver about a
+# quarter of that, and what a caller got past the cap was a field holding
+# part of its text, a 500, and the rest of the action list unrun. The number
+# is now the inverse of the type timeout's own ceiling, so the two cannot
+# disagree again -- see xdotool.TYPE_TIMEOUT_CEILING_S for what bounds it.
+MAX_TYPE_CHARS = xdotool.max_type_chars()
 
 
 def _settle(page, ms):
@@ -828,6 +834,27 @@ def _settle(page, ms):
     except Exception as e:
         log.info("Page changed under the settle wait (this is normal "
                  "after a click that navigates): %s", e)
+
+
+def _pointer_refusal(action_type, screen_x, screen_y):
+    """The answer when the pointer did not reach the point it was aimed at.
+
+    A move that times out for any reason other than the screen-edge clamp
+    leaves the pointer where the previous action put it, and a press there
+    lands on an element nobody chose. Reporting that as `ok` with the point
+    it was *asked* for is the failure the visual path cannot recover from:
+    there is no selector to disconfirm it -- clicking a coordinate is the
+    whole point -- so the model reads `ok: true` and reasons about a page
+    that was never pressed where it thinks.
+    """
+    return {
+        "action": action_type, "ok": False,
+        "error": "pointer_did_not_move",
+        "detail": (
+            f"the pointer did not reach ({round(screen_x)}, {round(screen_y)}) "
+            f"and nothing was pressed; take a fresh screenshot and try again"
+        ),
+    }
 
 
 def _coordinate_action(session, page, action):
@@ -864,14 +891,16 @@ def _coordinate_action(session, page, action):
             }
 
         if action_type == "hover_at":
-            browsing.human_move_to(screen_x, screen_y)
+            if not browsing.human_move_to(screen_x, screen_y):
+                return _pointer_refusal("hover_at", screen_x, screen_y)
             return {
                 "action": "hover_at", "ok": True,
                 "screen": [round(screen_x), round(screen_y)],
             }
 
         button = 3 if action.get("button") == "right" else 1
-        browsing.human_click_at(screen_x, screen_y, button=button)
+        if not browsing.human_click_at(screen_x, screen_y, button=button):
+            return _pointer_refusal("click_at", screen_x, screen_y)
         _settle(page, 1000)
         return {
             "action": "click_at", "ok": True,
@@ -882,13 +911,24 @@ def _coordinate_action(session, page, action):
         # The one action that locates its own target. The checkbox has no
         # selector, so the frame's bounding box plus a measured inset is the
         # only handle on it -- and the frame element does answer bounding_box().
+        #
+        # It converts through the recorded frame exactly as click_at does, so
+        # it takes click_at's staleness pass too. Unreachable today -- under
+        # Xvfb with no window manager the frame does not move, and a Chrome
+        # relaunch kills the session through the generation check before a
+        # stale frame could be used -- but two paths converting against the
+        # same record on different evidence is the gap that becomes reachable
+        # when something unrelated changes. The codes it can answer with now
+        # include `no_coordinate_frame`, which this arm used to report as
+        # `no_capture`.
         record = session.get("capture")
-        if not record or not record.get("offset"):
+        code, detail = visual.staleness(record, page) or (None, None)
+        if code:
+            log.info("Refusing click_challenge on %s: %s -- %s",
+                     session.get("tab_index"), code, detail)
             return {
                 "action": "click_challenge", "ok": False,
-                "error": "no_capture",
-                "detail": "screenshot the session first so the coordinate "
-                          "frame is on record",
+                "error": code, "detail": detail,
             }
         point = browsing.cloudflare_checkbox_point(page)
         if not point:
@@ -898,7 +938,8 @@ def _coordinate_action(session, page, action):
                 "detail": "no visible Cloudflare challenge frame on this page",
             }
         screen_x, screen_y = visual.page_to_screen(record, point[0], point[1])
-        browsing.human_click_at(screen_x, screen_y)
+        if not browsing.human_click_at(screen_x, screen_y):
+            return _pointer_refusal("click_challenge", screen_x, screen_y)
         _settle(page, 2000)
         return {
             "action": "click_challenge", "ok": True,
@@ -910,13 +951,43 @@ def _coordinate_action(session, page, action):
         key = action.get("key", "")
         if not key:
             return {"action": "key", "ok": False, "error": "key is required"}
-        xdotool.key_native(key)
+        try:
+            xdotool.key_native(key)
+        except xdotool.OptionShapedInput as e:
+            return {
+                "action": "key", "ok": False,
+                "error": "option_shaped_input", "detail": str(e),
+            }
         _settle(page, 300)
         return {"action": "key", "key": key, "ok": True}
 
     if action_type == "type":
-        text = action.get("text", "")[:MAX_TYPE_CHARS]
-        xdotool.type_native(text)
+        text = action.get("text", "")
+        # Refused rather than truncated. Truncation was the old behaviour and
+        # it typed most of a value into a live field while reporting `ok`,
+        # which a caller cannot undo and has no reason to look for; a refusal
+        # leaves the page as it was and says how to chunk. The length check
+        # is guarded on the type, since the value comes off model-written
+        # JSON and type_native() is what refuses everything else about it.
+        if isinstance(text, str) and len(text) > MAX_TYPE_CHARS:
+            return {
+                "action": "type", "ok": False, "error": "text_too_long",
+                "detail": (
+                    f"{len(text)} characters is past the {MAX_TYPE_CHARS} one "
+                    f"type action can deliver; send it in chunks"
+                ),
+            }
+        try:
+            xdotool.type_native(text)
+        except xdotool.OptionShapedInput as e:
+            # The refusal reaches the caller as a result rather than as a
+            # raise: /interact abandons the rest of its action list on an
+            # exception, and a list whose later actions were all fine should
+            # not be lost to one argument this one declined.
+            return {
+                "action": "type", "ok": False,
+                "error": "option_shaped_input", "detail": str(e),
+            }
         _settle(page, 300)
         return {"action": "type", "chars": len(text), "ok": True}
 
@@ -1093,14 +1164,26 @@ def challenge():
         point = browsing.cloudflare_checkbox_point(page)
         record = session.get("capture")
         screen = None
-        if point and record and record.get("offset"):
-            sx, sy = visual.page_to_screen(record, point[0], point[1])
-            screen = [round(sx), round(sy)]
+        stale = None
+        if point and record:
+            # The same live re-measure click_challenge performs, for the same
+            # reason: this reports the screen point that action would press,
+            # and a point converted against a frame that no longer describes
+            # the page is a wrong answer given confidently. Reported as
+            # `stale` with no point rather than as an error, since the CSS
+            # boxes beside it are measured now and are still good.
+            code, detail = visual.staleness(record, page) or (None, None)
+            if code:
+                stale = {"error": code, "detail": detail}
+            else:
+                sx, sy = visual.page_to_screen(record, point[0], point[1])
+                screen = [round(sx), round(sy)]
         return jsonify({
             "status": "ok",
             "frames": boxes,
             "checkbox_css": [round(point[0]), round(point[1])] if point else None,
             "checkbox_screen": screen,
+            "stale": stale,
         })
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
