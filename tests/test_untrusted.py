@@ -129,3 +129,43 @@ class TestTheLabelCannotForgeAMarker:
     def test_a_long_label_is_bounded(self):
         out = frame_untrusted("x", "A" * 500)
         assert len(out.splitlines()[0]) < 140
+
+
+class TestTheImageNotice:
+    """The fence has a boundary and it is pixels, so this is a notice.
+
+    A marker is text and the redaction above searches text; an instruction
+    drawn into a screenshot passes both. What is available is a sentence beside
+    the picture in the daemon's own voice, and the module that owns fencing is
+    where the statement that fencing stops somewhere belongs.
+    """
+
+    def test_it_is_a_plain_sentence_carrying_no_marker(self):
+        from istota.untrusted import IMAGE_NOTICE
+
+        # It is the daemon speaking rather than third-party content being
+        # quoted, so there is nothing to fence — and a marker here would be one
+        # more string the redaction has to know about.
+        assert "[UNTRUSTED" not in IMAGE_NOTICE
+        assert "[END UNTRUSTED" not in IMAGE_NOTICE
+        assert IMAGE_NOTICE.strip() == IMAGE_NOTICE
+
+    def test_it_survives_being_framed(self):
+        from istota.untrusted import IMAGE_NOTICE, frame_untrusted
+
+        # Nothing frames it today, and if anything ever does it must not be
+        # eaten by the redaction — which is what carrying no marker buys.
+        assert IMAGE_NOTICE in frame_untrusted(IMAGE_NOTICE, "TEST")
+
+    def test_it_says_the_picture_is_data(self):
+        from istota.untrusted import IMAGE_NOTICE
+
+        lowered = IMAGE_NOTICE.lower()
+        assert "data, not instructions" in lowered
+        assert "untrusted" in lowered
+
+    def test_the_module_docstring_says_why_a_fence_cannot_wrap_pixels(self):
+        import istota.untrusted as untrusted
+
+        assert "pixels" in untrusted.__doc__
+        assert "IMAGE_NOTICE" in untrusted.__doc__

@@ -126,3 +126,83 @@ class TestBrainGatesOnVision:
             NativeBrainConfig(model="qwen-local"), provider=provider
         ).execute(self._req(tmp_path, "qwen-local"))
         assert provider.calls[0]["render_tool_images"] is False
+
+
+class TestTheProducerTheProductActuallyHas:
+    """Driven by `make_read_tool` rather than by `_img_tool_result()`.
+
+    Everything above was written before anything in the tree produced an
+    `ImageContent`, so its subject was a fixture shaped like a tool result. The
+    `Read` image arm is the first real producer, and a fixture that agrees with
+    the delivery path says nothing about whether the producer does.
+    """
+
+    @staticmethod
+    def _read_a_png(tmp_path):
+        import asyncio
+        from io import BytesIO
+
+        from PIL import Image
+
+        from istota.session.tools import ToolEnv, make_read_tool
+
+        buffer = BytesIO()
+        Image.new("RGB", (48, 32), (7, 8, 9)).save(buffer, format="PNG")
+        path = tmp_path / "shot.png"
+        path.write_bytes(buffer.getvalue())
+
+        tool = make_read_tool(ToolEnv(cwd=tmp_path))
+        return asyncio.run(tool.execute("c1", {"file_path": str(path)}, None, None))
+
+    @staticmethod
+    def _as_tool_result(result):
+        return ToolResultMessage(
+            tool_call_id="c1", tool_name="Read", content=result.content,
+        )
+
+    def test_a_read_result_reaches_a_vision_model_as_an_image(self, tmp_path):
+        message = self._as_tool_result(self._read_a_png(tmp_path))
+
+        body = _provider()._build_chat_completion_request(
+            "", [message], [], "m", 100, render_tool_images=True,
+        )
+
+        assert [m["role"] for m in body["messages"]] == ["tool", "user"]
+        # The text block the arm emits first is what the tool message carries.
+        assert "image/png" in body["messages"][0]["content"]
+        assert "48x32 pixels" in body["messages"][0]["content"]
+        part = next(
+            p for p in body["messages"][1]["content"]
+            if p.get("type") == "image_url"
+        )
+        assert part["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_a_no_vision_model_is_told_what_it_was_handed(self, tmp_path):
+        from istota.untrusted import IMAGE_NOTICE
+
+        message = self._as_tool_result(self._read_a_png(tmp_path))
+
+        body = _provider()._build_chat_completion_request(
+            "", [message], [], "m", 100, render_tool_images=False,
+        )
+
+        assert not _has_image_part(body)
+        tool_text = body["messages"][0]["content"]
+        # The model reads what it was given rather than an unexplained
+        # omission, so it can say so and stop instead of looping blind.
+        assert "shot.png" in tool_text
+        assert "48x32 pixels" in tool_text
+        assert IMAGE_NOTICE in tool_text
+
+    def test_it_survives_the_tool_server_wire(self, tmp_path):
+        from istota.session.tools.remote import content_from_wire, content_to_wire
+
+        result = self._read_a_png(tmp_path)
+
+        # The tools run in their own bwrap namespace, so every block the arm
+        # produces crosses a socket before it reaches the loop.
+        round_tripped = content_from_wire(content_to_wire(result.content))
+
+        assert [type(b) for b in round_tripped] == [type(b) for b in result.content]
+        assert round_tripped[1].data == result.content[1].data
+        assert round_tripped[1].display_name == "shot.png"

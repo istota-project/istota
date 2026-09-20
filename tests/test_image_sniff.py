@@ -19,6 +19,7 @@ from istota.image_sniff import (
     EXTENSION_BY_MEDIA_TYPE,
     INLINE_MEDIA_TYPES,
     SNIFF_BYTES,
+    image_dimensions,
     sniff_decodable,
     sniff_raster,
 )
@@ -278,3 +279,73 @@ def test_the_decodable_predicate_never_raises_either(bad):
 def test_the_decodable_predicate_takes_the_same_buffer_types():
     assert sniff_decodable(bytearray(HEIC_HEADER)) == "image/heic"
     assert sniff_decodable(memoryview(HEIC_HEADER)) == "image/heic"
+
+
+class TestImageDimensions:
+    """Header parsing, never a decode: this runs inside the tool server, which
+    holds no image library and must not grow one."""
+
+    @staticmethod
+    def _encode(fmt, size, **kwargs):
+        from io import BytesIO
+
+        from PIL import Image
+
+        buffer = BytesIO()
+        Image.new("RGB", size, (9, 8, 7)).save(buffer, format=fmt, **kwargs)
+        return buffer.getvalue()
+
+    @pytest.mark.parametrize("fmt,kwargs", [
+        ("PNG", {}),
+        ("JPEG", {}),
+        ("JPEG", {"progressive": True}),
+        ("GIF", {}),
+        ("WEBP", {}),
+        ("WEBP", {"lossless": True}),
+    ])
+    @pytest.mark.parametrize("size", [(1, 1), (137, 89), (1439, 812)])
+    def test_it_agrees_with_pillow(self, fmt, kwargs, size):
+        data = self._encode(fmt, size, **kwargs)
+        assert image_dimensions(data) == size
+
+    def test_a_jpeg_with_a_long_comment_before_the_frame_still_parses(self):
+        # The size sits behind a run of segments whose length the file chooses,
+        # which is why this takes the whole file rather than a fixed prefix.
+        data = self._encode("JPEG", (200, 120), comment=b"x" * 20000)
+        assert image_dimensions(data) == (200, 120)
+
+    @pytest.mark.parametrize("data", [
+        None,
+        "not bytes",
+        b"",
+        b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+        b"\x89PNG\r\n\x1a\n",
+        b"GIF89a",
+        b"RIFF\x00\x00\x00\x00WEBP",
+        b"\xff\xd8",
+        b"\xff\xd8\xff\xfe\x00\x02",
+    ])
+    def test_anything_it_cannot_read_is_none_rather_than_a_raise(self, data):
+        assert image_dimensions(data) is None
+
+    def test_a_heif_answers_none_rather_than_guessing(self):
+        # ISO-BMFF needs a real box walk to reach `ispe`, which is a bounded
+        # loop over attacker-supplied data written for a case nobody has asked
+        # for. The caller says nothing about the size instead.
+        heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1" + b"\x00" * 64
+        assert sniff_decodable(heic[:SNIFF_BYTES]) == "image/heic"
+        assert image_dimensions(heic) is None
+
+    def test_a_zero_dimension_header_is_refused(self):
+        import struct
+
+        forged = bytearray(self._encode("PNG", (64, 48)))
+        forged[16:24] = struct.pack(">II", 64, 0)
+        assert image_dimensions(bytes(forged)) is None
+
+    def test_a_jpeg_that_reaches_its_scan_without_a_frame_stops(self):
+        # The walk is bounded by the buffer: each step advances by at least two
+        # bytes, and start-of-scan ends it rather than reading entropy-coded
+        # data as a segment length.
+        data = b"\xff\xd8" + b"\xff\xda\x00\x02" + b"\x00" * 1000
+        assert image_dimensions(data) is None

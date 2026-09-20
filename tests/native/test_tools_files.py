@@ -698,3 +698,213 @@ class TestResolveReturnsResolvedPath:
         (tmp_path / "link").symlink_to(real_dir)
         env = ToolEnv(cwd=tmp_path)
         assert env.resolve(str(tmp_path / "link" / "f.txt")) == (real_dir / "f.txt").resolve()
+
+
+# --------------------------------------------------------------------------- #
+# Read's image arm
+# --------------------------------------------------------------------------- #
+
+
+def _png(tmp_path, name="shot.png", size=(64, 48)):
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", size, (10, 20, 30)).save(buffer, format="PNG")
+    path = tmp_path / name
+    path.write_bytes(buffer.getvalue())
+    return path
+
+
+class TestReadAnImage:
+    """A PNG in the workspace used to come back as `Cannot read binary file`,
+    so nothing under the native brain could look at a page, a chart or a
+    screenshot a previous task took. Everything below the producer was already
+    built; this is the producer."""
+
+    async def test_it_comes_back_as_two_blocks_text_first(self, tmp_path):
+        from istota.llm.types import ImageContent, TextContent
+        from istota.untrusted import IMAGE_NOTICE
+
+        path = _png(tmp_path)
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert not result.is_error
+        assert len(result.content) == 2
+        notice, image = result.content
+        assert isinstance(notice, TextContent)
+        assert isinstance(image, ImageContent)
+        # Text first, because a model with no vision never sees the image and
+        # would otherwise be handed an unexplained omission.
+        assert "image/png" in notice.text
+        assert "64x48 pixels" in notice.text
+        assert IMAGE_NOTICE in notice.text
+        assert image.media_type == "image/png"
+        assert image.data
+
+    async def test_the_base64_round_trips_to_the_bytes_on_disk(self, tmp_path):
+        import base64
+
+        path = _png(tmp_path)
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert base64.b64decode(result.content[1].data) == path.read_bytes()
+
+    async def test_display_name_is_the_basename(self, tmp_path):
+        # It never reaches a provider; compaction's loss notice renders it, and
+        # empty it reads `[image attachment — no longer in context]`, which
+        # tells the model nothing about which picture it lost.
+        path = _png(tmp_path, name="screenshot-20260919-141530.png")
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert result.content[1].display_name == "screenshot-20260919-141530.png"
+
+    @pytest.mark.parametrize("fmt,suffix", [
+        ("JPEG", ".jpg"), ("GIF", ".gif"), ("WEBP", ".webp"),
+    ])
+    async def test_the_other_decodable_formats(self, tmp_path, fmt, suffix):
+        from io import BytesIO
+
+        from PIL import Image
+
+        buffer = BytesIO()
+        Image.new("RGB", (32, 16), (1, 2, 3)).save(buffer, format=fmt)
+        path = tmp_path / f"pic{suffix}"
+        path.write_bytes(buffer.getvalue())
+
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert len(result.content) == 2
+        assert result.content[1].media_type.startswith("image/")
+        assert "32x16 pixels" in result.content[0].text
+
+    async def test_a_max_read_bytes_below_the_file_does_not_truncate_it(self, tmp_path):
+        import base64
+
+        # `env.max_read_bytes` is 25 MB and `_read_bytes_capped` cuts the tail
+        # off. A truncated PNG is a corrupt PNG, so the image path reads the
+        # whole file or refuses it.
+        path = _png(tmp_path)
+        env = ToolEnv(cwd=tmp_path, max_read_bytes=16)
+
+        result = await _run(make_read_tool(env), {"file_path": str(path)})
+
+        assert not result.is_error
+        assert base64.b64decode(result.content[1].data) == path.read_bytes()
+
+    async def test_an_image_over_the_cap_is_refused_with_the_size(self, tmp_path):
+        from istota.session.tools import files
+
+        path = tmp_path / "huge.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (files.MAX_IMAGE_BYTES + 10))
+
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert result.is_error
+        text = _text(result)
+        assert "too large" in text
+        assert str(files.MAX_IMAGE_BYTES) in text
+        # Nothing truncated: no image block reaches the model at all.
+        assert len(result.content) == 1
+
+    @pytest.mark.parametrize("key,value", [("offset", 2), ("limit", 10)])
+    async def test_offset_and_limit_are_refused_rather_than_ignored(
+        self, tmp_path, key, value,
+    ):
+        # Both count lines. Silently dropping them is the shape where a caller
+        # asks for part of something and is handed all of it.
+        path = _png(tmp_path)
+        result = await _run(
+            make_read_tool(_env(tmp_path)), {"file_path": str(path), key: value},
+        )
+
+        assert result.is_error
+        assert key in _text(result)
+        assert len(result.content) == 1
+
+    async def test_a_heic_is_read_rather_than_refused(self, tmp_path):
+        # The one case that separates the two sniffers, and therefore the only
+        # thing holding the choice between them. `sniff_raster` answers what
+        # `/chat/files` serves inline and excludes HEIF on a browser-support
+        # argument that has nothing to do with what a model can see; an iPhone
+        # photograph is a HEIC.
+        #
+        # A synthetic ISO-BMFF header rather than a real encode: the arm
+        # sniffs and ships bytes without ever opening the image, so what is
+        # under test is the predicate, and the fixture needs no encoder.
+        path = tmp_path / "photo.heic"
+        path.write_bytes(
+            b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heicmif1" + b"\x00" * 64,
+        )
+
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert not result.is_error
+        assert len(result.content) == 2
+        assert result.content[1].media_type == "image/heic"
+        # HEIF needs a real ISO-BMFF box walk to reach its size, which
+        # `image_dimensions` deliberately does not do, so the text block says
+        # nothing about the pixels rather than guessing.
+        assert "pixels" not in result.content[0].text
+
+    async def test_an_svg_named_png_still_takes_the_binary_branch(self, tmp_path):
+        # The case `image_sniff` exists for: the extension is a caller-supplied
+        # string on a file the model wrote, so the decision is the bytes'.
+        path = tmp_path / "trick.png"
+        path.write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'>\x00</svg>")
+
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert result.is_error
+        assert "binary" in _text(result).lower()
+
+    async def test_a_non_image_binary_is_unchanged(self, tmp_path):
+        path = tmp_path / "blob.bin"
+        path.write_bytes(b"\x00\x01\x02binary")
+
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert result.is_error
+        assert "Cannot read binary file" in _text(result)
+
+    async def test_a_text_file_is_unchanged(self, tmp_path):
+        path = tmp_path / "a.txt"
+        path.write_text("first\nsecond\n")
+
+        result = await _run(make_read_tool(_env(tmp_path)), {"file_path": str(path)})
+
+        assert len(result.content) == 1
+        assert "1\tfirst" in _text(result)
+
+    async def test_the_confinement_still_applies(self, tmp_path):
+        # The arm sits inside `_read`, after `env.resolve`, so a path outside
+        # the roots is refused before anything is sniffed.
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        outside = _png(tmp_path, name="outside.png")
+        env = ToolEnv(cwd=workspace, read_roots=(workspace,), write_roots=(workspace,))
+
+        result = await _run(make_read_tool(env), {"file_path": str(outside)})
+
+        assert result.is_error
+        assert len(result.content) == 1
+
+
+class TestTheImageCapIsTheTreesOwnNumber:
+    async def test_it_equals_the_brains_per_image_cap(self):
+        # Restated rather than imported: `files.py` runs inside the tool
+        # server, and `brain/native.py` pulls the whole brain import graph into
+        # a process that starts once per task attempt.
+        from istota.brain import native
+        from istota.session.tools import files
+
+        assert files.MAX_IMAGE_BYTES == native._MAX_IMAGE_BYTES
+
+    async def test_it_sits_well_inside_the_tool_server_frame_cap(self):
+        # base64 inflates by 4/3, and the frame also carries the text block and
+        # the envelope.
+        from istota import tool_server_protocol as proto
+        from istota.session.tools import files
+
+        assert files.MAX_IMAGE_BYTES * 4 // 3 < proto.MAX_FRAME_BYTES

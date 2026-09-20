@@ -1969,3 +1969,422 @@ class TestFillCredential:
         }
         mock_post.return_value = mock_resp
         assert cmd_interact(args)["text"] == "[credential] is fine"
+
+
+# --------------------------------------------------------------------------- #
+# Visual mode: the picture's coordinate frame, and a point read off it
+# --------------------------------------------------------------------------- #
+
+
+def _real_png(width, height):
+    """A PNG whose IHDR really says `width` x `height`.
+
+    The stand-in at the top of this file is eight signature bytes and some
+    text, which is enough for the sniff and not for a resize: the resize path
+    opens the bytes, and a test whose fixture Pillow cannot read would pass for
+    the wrong reason.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), (20, 30, 40)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _capture_record(width, height, **overrides):
+    """What the container puts on `X-Browse-Capture` for a viewport capture."""
+    record = {
+        "image": [width, height],
+        "window": {"x": 0, "y": 0, "width": width, "height": height + 87},
+        "offset": [0, 87],
+        "page": {
+            "viewport": [width, height],
+            "dpr": 1,
+            "scroll": [0, 0],
+            "url": "https://example.com/booking",
+        },
+        "full_page": False,
+        "at": 1_758_000_000.0,
+    }
+    record.update(overrides)
+    return record
+
+
+def _screenshot_response(content, headers=None):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.content = content
+    resp.headers = {"content-type": "image/png", **(headers or {})}
+    return resp
+
+
+class TestTheDeliveredCaptureFrame:
+    """`screenshot` reports the frame it delivered, and resizes to fit it."""
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_capture_inside_the_envelope_is_written_untouched(
+        self, mock_url, mock_post, workspace,
+    ):
+        content = _real_png(1280, 800)
+        record = _capture_record(1280, 800)
+        mock_post.return_value = _screenshot_response(
+            content, {"X-Browse-Capture": json.dumps(record)},
+        )
+
+        output = str(workspace / "shot.png")
+        args = build_parser().parse_args(
+            ["screenshot", "--session", "s1", "-o", output],
+        )
+        result = cmd_screenshot(args)
+
+        assert result["status"] == "ok"
+        assert result["capture"] == {
+            "image": [1280, 800],
+            "viewport": [1280, 800],
+            "dpr": 1,
+            "scale": 1.0,
+            "full_page": False,
+        }
+        # Byte-identical, so `scale: 1` really is the identity rather than a
+        # re-encode that happens to come out the same size.
+        assert (workspace / "shot.png").read_bytes() == content
+        assert result["size"] == len(content)
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_oversize_capture_is_resized_before_it_is_written(
+        self, mock_url, mock_post, workspace,
+    ):
+        mock_post.return_value = _screenshot_response(
+            _real_png(1920, 1080),
+            {"X-Browse-Capture": json.dumps(_capture_record(1920, 1080))},
+        )
+
+        output = str(workspace / "shot.png")
+        args = build_parser().parse_args(
+            ["screenshot", "--session", "s1", "-o", output],
+        )
+        result = cmd_screenshot(args)
+
+        from istota.image_sniff import image_dimensions
+
+        written = (workspace / "shot.png").read_bytes()
+        assert result["capture"]["image"] == [1429, 804]
+        assert result["capture"]["viewport"] == [1920, 1080]
+        assert result["capture"]["scale"] < 1
+        # The file on disk, the reported size and the reported frame are one
+        # picture. A resize that did not reach the write would leave `size`
+        # describing bytes that are no longer there.
+        assert image_dimensions(written) == (1429, 804)
+        assert result["size"] == len(written)
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_pillow_failure_is_an_error_rather_than_unresized_bytes(
+        self, mock_url, mock_post, workspace,
+    ):
+        # A PNG signature the sniff admits over bytes Pillow cannot open, which
+        # is what a truncated or rewritten body looks like.
+        mock_post.return_value = _screenshot_response(
+            PNG_BYTES,
+            {"X-Browse-Capture": json.dumps(_capture_record(1920, 1080))},
+        )
+
+        output = workspace / "shot.png"
+        args = build_parser().parse_args(
+            ["screenshot", "--session", "s1", "-o", str(output)],
+        )
+        result = cmd_screenshot(args)
+
+        assert result["status"] == "error"
+        assert "1920x1080" in result["error"]
+        assert "1429x804" in result["error"]
+        # Nothing written: an oversize picture delivered as if it were in frame
+        # is a click that lands somewhere else.
+        assert not output.exists()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_old_container_sends_no_header_and_is_said_so(
+        self, mock_url, mock_post, workspace,
+    ):
+        mock_post.return_value = _screenshot_response(_real_png(1280, 800))
+
+        args = build_parser().parse_args(
+            ["screenshot", "--session", "s1", "-o", str(workspace / "shot.png")],
+        )
+        result = cmd_screenshot(args)
+
+        assert result["status"] == "ok"
+        assert result["capture"] is None
+        assert "predates visual mode" in result["notes"][0]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_container_that_could_not_measure_says_why(
+        self, mock_url, mock_post, workspace,
+    ):
+        mock_post.return_value = _screenshot_response(
+            _real_png(1280, 800),
+            {"X-Browse-Capture-Error": "Chrome window not found on the X11 display"},
+        )
+
+        args = build_parser().parse_args(
+            ["screenshot", "--session", "s1", "-o", str(workspace / "shot.png")],
+        )
+        result = cmd_screenshot(args)
+
+        assert result["capture"] is None
+        assert "Chrome window not found" in result["notes"][0]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_measureless_capture_still_reports_a_frame(
+        self, mock_url, mock_post, workspace,
+    ):
+        # `/screenshot` takes `measure: false`, which skips the one CDP
+        # evaluate and leaves `page` null. The X11 half of the frame is intact,
+        # so the picture is still clickable and only the viewport is unknown.
+        record = _capture_record(1280, 800, page=None)
+        mock_post.return_value = _screenshot_response(
+            _real_png(1280, 800), {"X-Browse-Capture": json.dumps(record)},
+        )
+
+        args = build_parser().parse_args(
+            ["screenshot", "--session", "s1", "-o", str(workspace / "shot.png")],
+        )
+        result = cmd_screenshot(args)
+
+        assert result["capture"] == {
+            "image": [1280, 800],
+            "viewport": None,
+            "dpr": 1,
+            "scale": 1.0,
+            "full_page": False,
+        }
+
+
+class TestAPointReadOffThePicture:
+    """`interact --click-at` sends the picture's own size, and refuses when
+    there is no frame to interpret the point against."""
+
+    @staticmethod
+    def _session_response(capture):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "status": "ok", "session_id": "s1", "alive": True, "capture": capture,
+        }
+        return resp
+
+    @staticmethod
+    def _interact_response():
+        resp = MagicMock()
+        resp.json.return_value = {
+            "status": "ok",
+            "session_id": "s1",
+            "actions": [{"action": "click_at", "ok": True, "screen": [412, 405]}],
+        }
+        return resp
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_delivered_size_rides_the_action(self, mock_url, mock_get, mock_post):
+        mock_get.return_value = self._session_response(_capture_record(1920, 1080))
+        mock_post.return_value = self._interact_response()
+
+        args = build_parser().parse_args(
+            ["interact", "s1", "--click-at", "412,318"],
+        )
+        result = cmd_interact(args)
+
+        assert result["status"] == "ok"
+        assert mock_get.call_args[0][0] == "http://test:9223/sessions/s1"
+        # The same number `cmd_screenshot` resized to, recomputed here in a
+        # process that remembers nothing. This is the whole contract.
+        assert mock_post.call_args[1]["json"]["actions"] == [
+            {"type": "click_at", "x": 412.0, "y": 318.0, "image_size": [1429, 804]},
+        ]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_in_envelope_capture_sends_its_own_size(
+        self, mock_url, mock_get, mock_post,
+    ):
+        mock_get.return_value = self._session_response(_capture_record(1280, 800))
+        mock_post.return_value = self._interact_response()
+
+        cmd_interact(build_parser().parse_args(
+            ["interact", "s1", "--hover-at", "10,20"],
+        ))
+
+        assert mock_post.call_args[1]["json"]["actions"] == [
+            {"type": "hover_at", "x": 10.0, "y": 20.0, "image_size": [1280, 800]},
+        ]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_session_with_no_capture_refuses_before_any_post(
+        self, mock_url, mock_get, mock_post,
+    ):
+        mock_get.return_value = self._session_response(None)
+
+        result = cmd_interact(build_parser().parse_args(
+            ["interact", "s1", "--click-at", "1,2"],
+        ))
+
+        assert result["status"] == "error"
+        assert "no screenshot on record" in result["error"]
+        # Local refusal: nothing is clicked, and no browser time is spent.
+        mock_post.assert_not_called()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_old_container_has_no_capture_key_at_all(
+        self, mock_url, mock_get, mock_post,
+    ):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"status": "ok", "session_id": "s1", "alive": True}
+        mock_get.return_value = resp
+
+        result = cmd_interact(build_parser().parse_args(
+            ["interact", "s1", "--click-at", "1,2"],
+        ))
+
+        assert result["status"] == "error"
+        assert "predates visual mode" in result["error"]
+        mock_post.assert_not_called()
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_keyboard_actions_need_no_frame(self, mock_url, mock_get, mock_post):
+        mock_post.return_value = self._interact_response()
+
+        cmd_interact(build_parser().parse_args(
+            ["interact", "s1", "--type", "Ada Lovelace", "--press", "Tab"],
+        ))
+
+        # They act on whatever has focus, which is a property of the page
+        # rather than of a picture, so no session read happens at all.
+        mock_get.assert_not_called()
+        assert mock_post.call_args[1]["json"]["actions"] == [
+            {"type": "type", "text": "Ada Lovelace"},
+            {"type": "key", "key": "Tab"},
+        ]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_unknown_action_becomes_a_named_old_container_sentence(
+        self, mock_url, mock_get, mock_post,
+    ):
+        resp = MagicMock()
+        resp.json.return_value = {
+            "status": "ok",
+            "session_id": "s1",
+            "actions": [{"action": "type", "ok": False, "error": "unknown"}],
+        }
+        mock_post.return_value = resp
+
+        result = cmd_interact(build_parser().parse_args(
+            ["interact", "s1", "--type", "hello"],
+        ))
+
+        assert "predates visual mode" in result["notes"][0]
+        assert "type" in result["notes"][0]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_unknown_selector_action_is_left_alone(
+        self, mock_url, mock_get, mock_post,
+    ):
+        # The container has always answered this way for an action it does not
+        # know. Only the visual types mean "the image is behind this code".
+        resp = MagicMock()
+        resp.json.return_value = {
+            "status": "ok",
+            "session_id": "s1",
+            "actions": [{"action": "teleport", "ok": False, "error": "unknown"}],
+        }
+        mock_post.return_value = resp
+
+        result = cmd_interact(build_parser().parse_args(
+            ["interact", "s1", "--click", ".btn"],
+        ))
+
+        assert "notes" not in result
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_coordinate_interleaves_with_a_fill_in_written_order(
+        self, mock_url, mock_get, mock_post,
+    ):
+        mock_get.return_value = self._session_response(_capture_record(1280, 800))
+        mock_post.return_value = self._interact_response()
+
+        cmd_interact(build_parser().parse_args([
+            "interact", "s1",
+            "--click-at", "10,20",
+            "--fill", "#q=hello",
+            "--press", "Enter",
+            "--scroll", "down",
+        ]))
+
+        actions = mock_post.call_args[1]["json"]["actions"]
+        assert [a["type"] for a in actions] == ["click_at", "fill", "key", "scroll"]
+        # `--scroll` is still last whatever position it was written in.
+        assert actions[-1]["direction"] == "down"
+
+
+class TestAMalformedPoint:
+    @pytest.mark.parametrize("value", ["412", "a,b", "412,", ",318", "nan,1", "1,inf"])
+    def test_it_is_refused_rather_than_coerced(self, value):
+        # Refused, not skipped: the actions around a dropped click would still
+        # run and still report `ok`, which is ISSUE-507's symptom by another
+        # route.
+        args = build_parser().parse_args(["interact", "s1", "--click-at", value])
+        with pytest.raises(ValueError, match="--click-at"):
+            _interact_actions(args)
+
+
+class TestNoCredentialAtAPoint:
+    """`--fill-credential` stays selector-only, and the point is the absence.
+
+    A source assertion because what is being checked is that a capability is
+    not there: `page.fill` refuses a selector that is not fillable, and a
+    coordinate fill is a click and then a type, where the type succeeds
+    whatever the click did.
+    """
+
+    def test_no_coordinate_emitter_can_carry_a_credential_pair(self):
+        from istota.skills import browse
+        from tests.support.drift import source_of
+
+        for dest in ("click_at", "hover_at", "press", "type"):
+            source = source_of(ACTION_EMITTERS[dest])
+            assert "CredentialPair" not in source
+            assert "reveal" not in source
+        # And the one emitter that does unwrap a credential is still reached
+        # only by the selector-shaped flag.
+        assert "reveal" in source_of(browse._fill_credential_action)
+
+    def test_the_credential_flag_is_declared_with_a_selector_metavar(self):
+        parser = _interact_parser()
+        flags = {
+            option: action
+            for action in parser._actions
+            for option in action.option_strings
+        }
+        assert flags["--fill-credential"].metavar == "SELECTOR=NAME"
+        assert flags["--click-at"].metavar == "X,Y"
