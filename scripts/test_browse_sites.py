@@ -10,6 +10,7 @@ Usage:
 
 import json
 import os
+import struct
 import sys
 import urllib.error
 import urllib.request
@@ -175,8 +176,240 @@ def test_site_extract(name, url, selector, min_articles=5, origin=None):
     close_session(sid)
 
 
+
+# -- Visual mode ------------------------------------------------------------
+#
+# The one thing the unit tests cannot prove: that a point read off the
+# delivered picture reaches the DOM element that was under it. Every other
+# test of this feature drives a stubbed page object, so the arithmetic is
+# pinned against a recorded frame and nothing has ever clicked a page.
+#
+# The page is built here rather than found, so the answer is a cell name rather
+# than an inference about a site's markup. `window.__hit` is written by the
+# cell's own click handler, so a click that landed elsewhere leaves it null or
+# names a different cell -- it cannot pass by accident.
+
+TARGET_CELL = "r1c2"
+
+GRID_PAGE = """(() => {
+  const cols = 4, rows = 3;
+  document.body.innerHTML = '';
+  document.body.style.margin = '0';
+  window.__hit = null;
+  const grid = document.createElement('div');
+  grid.style.cssText =
+    'display:grid;grid-template-columns:repeat(4,1fr);' +
+    'grid-template-rows:repeat(3,140px);';
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cell = document.createElement('div');
+      const name = 'r' + r + 'c' + c;
+      cell.textContent = name;
+      cell.style.cssText =
+        'display:flex;align-items:center;justify-content:center;' +
+        'box-sizing:border-box;border:1px solid #333;font:24px sans-serif;';
+      cell.addEventListener('click', () => {
+        window.__hit = name;
+      });
+      grid.appendChild(cell);
+    }
+  }
+  document.body.appendChild(grid);
+  const target = grid.children[1 * cols + 2].getBoundingClientRect();
+  return {
+    target: 'r1c2',
+    x: target.x + target.width / 2,
+    y: target.y + target.height / 2,
+    viewport: [window.innerWidth, window.innerHeight],
+  };
+})()"""
+
+
+def api_bytes(endpoint, data):
+    """A POST whose body is not JSON: returns `(bytes, headers)`.
+
+    `/screenshot` answers with a PNG and puts the capture frame on a response
+    header, so the coordinate case needs both halves and `api()` returns
+    neither.
+    """
+    req = urllib.request.Request(
+        API + endpoint,
+        data=json.dumps(data).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            return resp.read(), dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        return None, dict(e.headers or {}, error=e.read().decode("utf-8", "replace")[:300])
+    except Exception as e:
+        return None, {"error": str(e)}
+
+
+def png_size(data):
+    """`(width, height)` out of a PNG's IHDR, or None. Five lines, no library."""
+    if not data or len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return struct.unpack(">II", data[16:24])
+
+
+def _click_at(sid, x, y, image_size):
+    result = api("/interact", {
+        "session_id": sid,
+        "actions": [{
+            "type": "click_at", "x": x, "y": y, "image_size": list(image_size),
+        }],
+    })
+    return (result.get("actions") or [{}])[0]
+
+
+def test_visual_coordinates():
+    print("\n=== Visual mode: a point read off the picture ===")
+
+    opened = api("/browse", {
+        "url": "https://example.com",
+        "keep_session": True,
+        "skip_behavior": True,
+    })
+    sid = opened.get("session_id")
+    check("visual: session opened", bool(sid), json.dumps(opened)[:200])
+    if not sid:
+        return
+
+    try:
+        built = api("/evaluate", {"session_id": sid, "expression": GRID_PAGE})
+        target = built.get("result") or {}
+        check(
+            "visual: grid page built",
+            target.get("target") == TARGET_CELL,
+            json.dumps(built)[:300],
+        )
+        if target.get("target") != TARGET_CELL:
+            return
+
+        png, headers = api_bytes("/screenshot", {"session_id": sid})
+        check(
+            "visual: screenshot returned a PNG",
+            bool(png) and png[:8] == b"\x89PNG\r\n\x1a\n",
+            str(headers)[:300],
+        )
+        raw = headers.get("X-Browse-Capture")
+        check(
+            "visual: the capture frame came back on a header",
+            bool(raw),
+            headers.get("X-Browse-Capture-Error", "no header at all"),
+        )
+        if not png or not raw:
+            return
+
+        record = json.loads(raw)
+        image_w, image_h = record["image"]
+        # The header has to describe the bytes it came with. If it does not,
+        # every conversion below is against a picture nobody was shown.
+        check(
+            "visual: the header agrees with the PNG's own IHDR",
+            (image_w, image_h) == png_size(png),
+            f"header {record['image']}, IHDR {png_size(png)}",
+        )
+        print(
+            f"  note  window {record['window']}, capture {image_w}x{image_h}, "
+            f"offset {record['offset']}, viewport {target['viewport']}"
+        )
+
+        # The cell centre is in CSS pixels; the picture is the capture. At dpr
+        # 1 with no scrollbar these are the same number, and the ratio is what
+        # makes the case honest when they are not.
+        view_w, view_h = target["viewport"]
+        point = (target["x"] * image_w / view_w, target["y"] * image_h / view_h)
+
+        action = _click_at(sid, point[0], point[1], (image_w, image_h))
+        check("visual: the click was not refused", action.get("ok") is True,
+              json.dumps(action)[:300])
+        hit = api("/evaluate", {"session_id": sid, "expression": "window.__hit"})
+        check(
+            f"visual: the click landed on {TARGET_CELL}",
+            hit.get("result") == TARGET_CELL,
+            f"screen {action.get('screen')}, hit {hit.get('result')!r}",
+        )
+
+        # A point on a downscaled picture, which is what a vision provider's
+        # envelope makes of a capture over about 1.15 megapixels. At the
+        # shipped screen size the full-size conversion above is the identity,
+        # so this is the leg that shows the scaling doing real work.
+        api("/evaluate", {"session_id": sid, "expression": "window.__hit = null"})
+        half = (max(1, image_w // 2), max(1, image_h // 2))
+        action = _click_at(sid, point[0] / 2, point[1] / 2, half)
+        hit = api("/evaluate", {"session_id": sid, "expression": "window.__hit"})
+        check(
+            f"visual: a half-size picture still lands on {TARGET_CELL}",
+            hit.get("result") == TARGET_CELL,
+            f"image_size {half}, screen {action.get('screen')}, hit {hit.get('result')!r}",
+        )
+
+        # A capture that no longer describes the page is refused rather than
+        # clicked. Both halves are asserted: the named refusal, and that
+        # nothing was pressed -- a check that refused everything would pass
+        # the first for the wrong reason, and the two clicks above are what
+        # show it does not.
+        api("/evaluate", {"session_id": sid, "expression": (
+            "window.__hit = null;"
+            "document.body.style.height = '4000px';"
+            "window.scrollTo(0, 400); 1"
+        )})
+        action = _click_at(sid, point[0], point[1], (image_w, image_h))
+        check(
+            "visual: a scrolled page refuses with stale_capture",
+            action.get("ok") is False and action.get("error") == "stale_capture",
+            json.dumps(action)[:300],
+        )
+        hit = api("/evaluate", {"session_id": sid, "expression": "window.__hit"})
+        check("visual: the refused click pressed nothing", hit.get("result") is None,
+              f"hit {hit.get('result')!r}")
+
+        # A full-page capture is a different coordinate space from the one the
+        # pointer acts in, and is excluded by construction.
+        api("/evaluate", {"session_id": sid, "expression": "window.scrollTo(0, 0); 1"})
+        api_bytes("/screenshot", {"session_id": sid, "full_page": True})
+        action = _click_at(sid, 10, 10, (image_w, image_h))
+        check(
+            "visual: a full-page capture is not clickable",
+            action.get("ok") is False and action.get("error") == "full_page_capture",
+            json.dumps(action)[:300],
+        )
+    finally:
+        close_session(sid)
+
+def _summary():
+    total = _passed + _failed
+    print(f"\n{'=' * 40}")
+    print(f"Results: {_passed}/{total} passed, {_failed} failed")
+    if _errors:
+        print("\nFailures:")
+        for e in _errors:
+            print(f"  - {e}")
+    print()
+    sys.exit(1 if _failed else 0)
+
+
 def main():
     print(f"Browser API: {API}")
+
+    # One suite at a time, so a failure in the visual case is attributable to
+    # the visual case rather than to whichever news site was slow today.
+    # `BROWSE_TEST_ONLY=visual` is what the integration driver passes.
+    only = os.environ.get("BROWSE_TEST_ONLY", "").strip()
+    if only:
+        suites = {
+            "health": test_health,
+            "session": test_session_lifecycle,
+            "visual": test_visual_coordinates,
+        }
+        if only not in suites:
+            print(f"Unknown BROWSE_TEST_ONLY={only!r}; known: {sorted(suites)}")
+            sys.exit(2)
+        suites[only]()
+        _summary()
+        return
 
     test_health()
     test_session_lifecycle()
@@ -218,16 +451,9 @@ def main():
         origin="https://www.cnn.com",
     )
 
-    # Summary
-    total = _passed + _failed
-    print(f"\n{'=' * 40}")
-    print(f"Results: {_passed}/{total} passed, {_failed} failed")
-    if _errors:
-        print("\nFailures:")
-        for e in _errors:
-            print(f"  - {e}")
-    print()
-    sys.exit(1 if _failed else 0)
+    test_visual_coordinates()
+
+    _summary()
 
 
 if __name__ == "__main__":
