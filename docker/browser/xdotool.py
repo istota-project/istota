@@ -10,6 +10,96 @@ log = logging.getLogger(__name__)
 _XDO_ENV = {**os.environ, "DISPLAY": ":99"}
 
 
+class OptionShapedInput(ValueError):
+    """A caller's string that xdotool would read as an option, not as data.
+
+    xdotool parses with getopt_long, which consumes an option-shaped token
+    wherever it sits -- including the trailing slot that carries the text to
+    type or the key to press. `type` supports `--file <path>`, with `-` for
+    stdin, so an unguarded slot is a read of any file the container can see,
+    typed into whatever page holds focus. Measured on the shipped build
+    (3.20160805.1) in both of the argv shapes below, not taken from the manual:
+
+        xdotool type --clearmodifiers --delay 45 '--file=/nonexistent-probe'
+        xdotool type --window <wid> --delay 8 --clearmodifiers '--file=...'
+            -> Failure opening '/nonexistent-probe': No such file or directory
+
+        xdotool key --clearmodifiers --window 12345 Return
+            -> BadWindow, so the retarget is honoured too
+
+    Raised rather than escaped. A `--` separator delivers the string literally
+    and says nothing, and there is no legitimate reason to type a string
+    beginning with `-` into a page or to press a key named like one -- so the
+    refusal is the more useful answer, and a caller that meant it can lead
+    with a space.
+    """
+
+
+# How long one type may take, and therefore how much of it there may be.
+#
+# These two were written down separately and drifted: /interact advertised a
+# 4,096-character cap against a fixed 30-second timeout, and the timeout is
+# what the caller actually got -- `subprocess.run` raised at 30s and killed
+# xdotool mid-type, leaving a field half filled and the rest of the action
+# list unrun. So the cap is derived from the ceiling here, and the timeout is
+# derived from the length, and neither is a number anybody can move alone.
+#
+# The ceiling is the one free choice, and what bounds it is not the client's
+# HTTP timeout. `/interact` is registered with browse_api's in-flight
+# watchdog, which kills and relaunches Chrome once any request outlives
+# BROWSE_WATCHDOG_DEADLINE_S (90s by default) -- so a type allowed to run
+# longer than that does not merely time out, it destroys the session it was
+# typing into. 60s leaves the rest of the request half a minute of headroom.
+#
+# A character's budget is the nominal inter-key delay, which is an upper
+# bound rather than an estimate: measured on the shipped build, `--delay 45`
+# costs about 24.5 ms per character, so the derived timeout is roughly twice
+# the real cost and a type never times out on pacing alone. The cap is
+# conservative by the same factor, which is the safe direction for it.
+TYPE_DELAY_MS = 45
+TYPE_TIMEOUT_MARGIN_S = 5.0
+TYPE_TIMEOUT_CEILING_S = 60.0
+
+
+def type_timeout_s(char_count, delay_ms=TYPE_DELAY_MS):
+    """How long to let a type of this length run, bounded by the ceiling."""
+    return min(
+        TYPE_TIMEOUT_CEILING_S,
+        TYPE_TIMEOUT_MARGIN_S + char_count * delay_ms / 1000.0,
+    )
+
+
+def max_type_chars(delay_ms=TYPE_DELAY_MS):
+    """The longest type the ceiling can deliver, at this pacing.
+
+    The inverse of type_timeout_s(), so a caller held to this never meets
+    the ceiling -- which is what makes the advertised cap honest.
+    """
+    budget_s = TYPE_TIMEOUT_CEILING_S - TYPE_TIMEOUT_MARGIN_S
+    return int(budget_s * 1000 // delay_ms)
+
+
+def literal_arg(value, what):
+    """Return `value` for a trailing xdotool argv slot, or refuse it.
+
+    One helper for all four entry points, because they have one argv shape
+    between them and a guard on three of them is no guard at all. The type
+    check belongs here too: both values arrive off model-written JSON, where
+    nothing has established that a string is what turned up, and `.startswith`
+    on the alternative is a crash rather than a refusal.
+    """
+    if not isinstance(value, str):
+        raise OptionShapedInput(
+            f"{what} must be a string, got {type(value).__name__}"
+        )
+    if value.startswith("-"):
+        raise OptionShapedInput(
+            f"{what} may not begin with '-': xdotool would read "
+            f"{value[:32]!r} as an option rather than as input"
+        )
+    return value
+
+
 def chrome_wid():
     """Get the main Chrome browser window ID.
 
@@ -95,6 +185,68 @@ def mouse_location():
     return pos["X"], pos["Y"]
 
 
+def display_geometry():
+    """The X11 screen's size as (width, height), or None.
+
+    Only read after a move has timed out, to tell an edge clamp from a
+    pointer that is simply somewhere else, so the extra round trip is paid
+    on a path that is already going wrong.
+    """
+    result = subprocess.run(
+        ["xdotool", "getdisplaygeometry", "--shell"],
+        env=_XDO_ENV, capture_output=True, text=True, timeout=5,
+    )
+    geo = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key in ("WIDTH", "HEIGHT") and value.strip().isdigit():
+            geo[key] = int(value)
+    if len(geo) != 2:
+        return None
+    return geo["WIDTH"], geo["HEIGHT"]
+
+
+def _axis_landed(requested, observed, limit):
+    """Is one axis where a move asked for it, or clamped against its edge?"""
+    if observed == requested:
+        return True
+    if requested < 0 and observed == 0:
+        return True
+    if limit is not None and requested > limit and observed == limit:
+        return True
+    return False
+
+
+def pointer_landed(x, y):
+    """Is the pointer somewhere a click aimed at (x, y) may be sent?
+
+    Two answers count. The pointer is at the point; or the point was off the
+    screen on an axis and the pointer is against that edge, which is the
+    clamp mouse_move()'s docstring describes -- observed here rather than
+    assumed, which is the whole of the difference.
+
+    Anything else is the pointer sitting wherever the previous action left
+    it, and so is anything this cannot measure: the stall that makes a
+    --sync move time out is the same stall that makes the measurement time
+    out, and an unreadable pointer is not evidence of a landing. Both answer
+    False, so the caller refuses rather than presses.
+    """
+    try:
+        pos = mouse_location()
+        screen = display_geometry()
+    except (subprocess.SubprocessError, OSError) as e:
+        log.warning("Could not read the pointer after a blocked move: %s", e)
+        return False
+    if pos is None:
+        return False
+    # X11's last addressable pixel, so a request past it clamps to here. With
+    # no geometry there is nothing to compare a high-edge clamp against, and
+    # an unconfirmed clamp is not a confirmed one.
+    max_x = screen[0] - 1 if screen else None
+    max_y = screen[1] - 1 if screen else None
+    return _axis_landed(x, pos[0], max_x) and _axis_landed(y, pos[1], max_y)
+
+
 def mouse_move(x, y):
     """Move the pointer to an X11 screen coordinate, waiting for the move.
 
@@ -105,21 +257,31 @@ def mouse_move(x, y):
     and its final landing move repeats the last point outright. The comparison
     has to be on the truncated values, because those are what xdotool receives.
 
-    The timeout is still caught: the pointer clamps to the screen edge, and a
-    move to a point outside it is another way to ask for no motion. There the
-    pointer is at the edge, near enough to the target to go on and click.
+    Returns whether the pointer is somewhere a click may be sent from. The
+    timeout is still caught, but no longer on the assumption that the screen
+    edge is the only thing that causes one: an X server stall, a compositor
+    hiccup or a slow round trip leaves the pointer where the last action put
+    it, and pressing there sends a click nobody aimed. So the reason the
+    catch was written for is now measured rather than trusted.
     """
     x, y = int(x), int(y)
     if mouse_location() == (x, y):
-        return
+        return True
     try:
         subprocess.run(
             ["xdotool", "mousemove", "--sync", "--screen", "0", str(x), str(y)],
             env=_XDO_ENV, timeout=5, capture_output=True,
         )
     except subprocess.TimeoutExpired:
+        if pointer_landed(x, y):
+            log.info("mousemove to (%d, %d) blocked, but the pointer is at "
+                     "the point or clamped to the screen edge -- going on",
+                     x, y)
+            return True
         log.warning("mousemove to (%d, %d) did not complete -- "
                     "the pointer did not move", x, y)
+        return False
+    return True
 
 
 def mouse_click(button=1, dwell_s=0.09):
@@ -161,30 +323,48 @@ def key_native(key):
     its own UI -- which is why navigate() can drive the omnibox with it -- but
     page-level input should be indistinguishable from hardware, so this one
     focuses the window and then fakes the event at the server.
+
+    Refuses an option-shaped key before it focuses anything: a refusal that
+    has already moved input focus has done half of what it declined to do.
     """
+    key = literal_arg(key, "key")
     focus_chrome()
     subprocess.run(
-        ["xdotool", "key", "--clearmodifiers", key],
+        ["xdotool", "key", "--clearmodifiers", "--", key],
         env=_XDO_ENV, timeout=5, capture_output=True,
     )
 
 
-def type_native(text, delay_ms=45):
+def type_native(text, delay_ms=TYPE_DELAY_MS):
     """Type text through XTest at whatever holds input focus.
 
     The delay is per keystroke and deliberately slower than xdo_type()'s 8ms:
     that one fills the omnibox, where nothing is watching, and this one types
-    into a page, where inter-key timing is a fingerprint.
+    into a page, where inter-key timing is a fingerprint. So the pacing is not
+    the thing to adjust when a long type will not fit -- the timeout is, and
+    it comes from the length being typed rather than from a constant.
+
+    A caller held to max_type_chars() never reaches the ceiling. One that is
+    not still gets a bounded wait, because a timeout here kills xdotool
+    mid-type and leaves the field holding part of what was asked for.
     """
+    text = literal_arg(text, "text")
     focus_chrome()
     subprocess.run(
-        ["xdotool", "type", "--clearmodifiers", "--delay", str(delay_ms), text],
-        env=_XDO_ENV, timeout=30, capture_output=True,
+        ["xdotool", "type", "--clearmodifiers", "--delay", str(delay_ms),
+         "--", text],
+        env=_XDO_ENV, capture_output=True,
+        timeout=type_timeout_s(len(text), delay_ms),
     )
 
 
 def xdo_key(*keys):
-    """Send keyboard input to the Chrome window."""
+    """Send keyboard input to the Chrome window.
+
+    Guarded ahead of the window lookup for key_native()'s reason. Every
+    shipped caller passes a literal, so the guard is here for the next one.
+    """
+    keys = [literal_arg(k, "key") for k in keys]
     wid = chrome_wid()
     if not wid:
         log.warning("Chrome window not found for xdotool key input")
@@ -195,13 +375,20 @@ def xdo_key(*keys):
     )
     for key in keys:
         subprocess.run(
-            ["xdotool", "key", "--window", wid, key],
+            ["xdotool", "key", "--window", wid, "--", key],
             env=_XDO_ENV, timeout=5, capture_output=True,
         )
 
 
 def xdo_type(text, delay_ms=8):
-    """Type text into the Chrome window."""
+    """Type text into the Chrome window.
+
+    This is the one of the four with a model-supplied value on a shipped
+    path: navigate() types a URL here, and /browse checks only that the URL
+    it was handed is non-empty -- no scheme, no parse. So `--file=/etc/...`
+    as a URL reached this argv slot.
+    """
+    text = literal_arg(text, "text")
     wid = chrome_wid()
     if not wid:
         log.warning("Chrome window not found for xdotool type")
@@ -212,7 +399,7 @@ def xdo_type(text, delay_ms=8):
     )
     subprocess.run(
         ["xdotool", "type", "--window", wid, "--delay", str(delay_ms),
-         "--clearmodifiers", text],
+         "--clearmodifiers", "--", text],
         env=_XDO_ENV, timeout=10, capture_output=True,
     )
 

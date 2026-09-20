@@ -406,11 +406,20 @@ class _SettlePage(_Page):
 
 @pytest.fixture
 def pointer():
-    """The X11 half, recorded rather than performed."""
+    """The X11 half, recorded rather than performed.
+
+    Both move calls answer whether the pointer reached the point, and both
+    are set to True here rather than left as the default mock. A bare
+    MagicMock is truthy, so a test resting on that would pass just as
+    happily against a dispatcher that ignored the answer -- and a test that
+    needs the pointer to have failed sets it to False.
+    """
     with mock.patch.object(browse_api.browsing, "human_click_at") as click, \
          mock.patch.object(browse_api.browsing, "human_move_to") as move, \
          mock.patch.object(browse_api.xdotool, "key_native") as key, \
          mock.patch.object(browse_api.xdotool, "type_native") as typed:
+        click.return_value = True
+        move.return_value = True
         yield types.SimpleNamespace(click=click, move=move, key=key, typed=typed)
 
 
@@ -549,14 +558,29 @@ class TestTheCoordinateActions:
         assert result["ok"] is False
         pointer.key.assert_not_called()
 
-    def test_typed_text_is_capped(self, window, pointer):
+    def test_text_past_the_cap_is_refused_rather_than_half_typed(
+        self, window, pointer,
+    ):
         result = browse_api._coordinate_action(
             {"capture": None, "tab_index": 0}, _SettlePage(),
             {"type": "type", "text": "x" * (browse_api.MAX_TYPE_CHARS + 500)},
         )
 
+        assert result["ok"] is False
+        assert result["error"] == "text_too_long"
+        # The page is left as it was, which truncation could not promise.
+        pointer.typed.assert_not_called()
+
+    def test_text_at_the_cap_types(self, window, pointer):
+        at_cap = "x" * browse_api.MAX_TYPE_CHARS
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "type", "text": at_cap},
+        )
+
+        assert result["ok"] is True
         assert result["chars"] == browse_api.MAX_TYPE_CHARS
-        assert len(pointer.typed.call_args[0][0]) == browse_api.MAX_TYPE_CHARS
+        pointer.typed.assert_called_once_with(at_cap)
 
     def test_a_navigation_under_the_settle_wait_does_not_lose_the_click(
         self, window, pointer,
@@ -577,3 +601,263 @@ class TestTheCoordinateActions:
 
         assert result["ok"] is True
         pointer.click.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# A pointer that did not move (ISSUE-523)
+# --------------------------------------------------------------------------- #
+
+
+class TestAPointerThatDidNotMove:
+    """`ok: true` carrying the point that was *asked for* is the whole defect.
+
+    `mouse_move` catches a `--sync` timeout and carries on, on the reasoning
+    that the pointer clamps to the screen edge and is near enough to click.
+    That is right for the clamp and for nothing else: an X server stall, a
+    compositor hiccup or a slow round trip leaves the pointer where the last
+    action put it, and `mouse_click` presses wherever the pointer is.
+
+    So the click lands on an element nobody chose and the result says it went
+    where it was aimed -- and the visual path has no selector to disconfirm
+    it, since clicking a coordinate is the point. Nothing downstream catches
+    the mismatch; the model reads `ok: true` and reasons from there.
+    """
+
+    @pytest.mark.parametrize("action", [
+        {"type": "click_at", "x": 293, "y": 337},
+        {"type": "hover_at", "x": 293, "y": 337},
+    ])
+    def test_it_is_refused_rather_than_reported_at_the_point_it_wanted(
+        self, window, pointer, action,
+    ):
+        pointer.click.return_value = False
+        pointer.move.return_value = False
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(session, _SettlePage(), action)
+
+        assert result["ok"] is False
+        assert result["error"] == "pointer_did_not_move"
+        assert result["detail"]
+        # And it does not carry `screen`, which is the field that was the lie.
+        assert "screen" not in result
+
+    def test_the_challenge_click_answers_the_same_way(self, window, pointer):
+        pointer.click.return_value = False
+        session = {"capture": _record(), "tab_index": 0}
+
+        with mock.patch.object(
+            browse_api.browsing, "cloudflare_checkbox_point", return_value=(100, 200),
+        ):
+            result = browse_api._coordinate_action(
+                session, _SettlePage(), {"type": "click_challenge"},
+            )
+
+        assert result["ok"] is False
+        assert result["error"] == "pointer_did_not_move"
+
+    def test_a_pointer_that_arrived_still_reports_ok(self, window, pointer):
+        """The control: the refusal must not fire on the ordinary path."""
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(), {"type": "click_at", "x": 293, "y": 337},
+        )
+
+        assert result["ok"] is True
+        assert result["screen"] == [293, 337 + UI_INSET_Y]
+
+
+class TestTheChallengeClickReMeasures:
+    """It converts through the recorded frame, so it takes click_at's pass.
+
+    Latent rather than live: under Xvfb with no window manager the frame does
+    not move, and a Chrome relaunch kills the session through the generation
+    check before a stale frame could be used. Two paths converting against
+    the same record on different evidence is the gap that becomes reachable
+    when something unrelated changes, and it costs one call to close.
+    """
+
+    @pytest.fixture
+    def checkbox(self):
+        with mock.patch.object(
+            browse_api.browsing, "cloudflare_checkbox_point", return_value=(100, 200),
+        ) as point:
+            yield point
+
+    @pytest.mark.parametrize("page,expected", [
+        (_SettlePage(scroll=(0, 400)), "stale_capture"),
+        (_SettlePage(url="https://elsewhere.example/"), "stale_capture"),
+    ])
+    def test_a_capture_that_no_longer_describes_the_page_is_refused(
+        self, window, pointer, checkbox, page, expected,
+    ):
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, page, {"type": "click_challenge"},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == expected
+        pointer.click.assert_not_called()
+
+    @pytest.mark.parametrize("record,expected", [
+        (None, "no_capture"),
+        (_record(full_page=True), "full_page_capture"),
+        (_record(offset=None), "no_coordinate_frame"),
+    ])
+    def test_it_names_the_same_codes_click_at_names(
+        self, window, pointer, checkbox, record, expected,
+    ):
+        """A missing frame used to come back as `no_capture` from this arm."""
+        session = {"capture": record, "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(), {"type": "click_challenge"},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == expected
+        pointer.click.assert_not_called()
+
+    def test_a_live_capture_still_presses(self, window, pointer, checkbox):
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(), {"type": "click_challenge"},
+        )
+
+        assert result["ok"] is True
+        assert result["css"] == [100, 200]
+        pointer.click.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# The type cap, and what actually bounds it (ISSUE-521)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheTypeCapIsDerived:
+    """The cap and the type timeout are one number, read from one place.
+
+    They were two: `/interact` advertised 4,096 characters against a fixed
+    30-second timeout that delivers about 1,220 of them at the measured
+    24.5 ms a character the shipped build costs at `--delay 45`. Past that
+    `subprocess.run` raised, killed xdotool mid-type, and left the field
+    holding part of the text with the rest of the action list unrun.
+    """
+
+    def test_the_cap_is_asked_of_the_module_that_does_the_typing(self):
+        assert browse_api.MAX_TYPE_CHARS == browse_api.xdotool.max_type_chars()
+
+    def test_a_type_at_the_cap_fits_inside_its_own_timeout(self):
+        at_cap = browse_api.xdotool.type_timeout_s(browse_api.MAX_TYPE_CHARS)
+        assert at_cap <= browse_api.xdotool.TYPE_TIMEOUT_CEILING_S
+
+    def test_the_ceiling_sits_under_the_watchdog_that_would_kill_the_session(self):
+        """The bound is not the HTTP timeout, and this is the drift guard.
+
+        `/interact` is registered in the in-flight slot the browse watchdog
+        reads, and that watchdog kills and relaunches Chrome once a request
+        outlives its deadline. So a type allowed to run longer does not time
+        out -- it destroys the session it is typing into. Raising the ceiling
+        past the deadline has to fail here rather than in production.
+        """
+        assert (
+            browse_api.xdotool.TYPE_TIMEOUT_CEILING_S
+            < browse_api.BROWSE_WATCHDOG_DEADLINE_S
+        )
+
+
+# --------------------------------------------------------------------------- #
+# What may reach an xdotool argv slot (ISSUE-519)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def xdo_argv():
+    """Let the real guard run, and record the argv it would have issued.
+
+    The `pointer` fixture above replaces `type_native` and `key_native`
+    outright, which is right for the tests that care where the pointer went
+    and wrong for these: the refusal being pinned lives *inside* those
+    functions, so a stub in front of them would assert about the stub. Only
+    the two things that touch the display are replaced here -- the subprocess
+    and the focus call -- and the real entry points run.
+    """
+    with mock.patch.object(browse_api.xdotool.subprocess, "run") as run, \
+         mock.patch.object(browse_api.xdotool, "focus_chrome"):
+        run.return_value = None
+        yield run
+
+
+class TestTheOptionShapedRefusal:
+    """xdotool parses the trailing slot with getopt_long, so it is a boundary.
+
+    `type` supports `--file <path>`, measured against the shipped build rather
+    than read off the manual: `xdotool type --clearmodifiers --delay 45
+    '--file=/nonexistent-probe'` answers `Failure opening ...`, and the same
+    argv with `--` in front of the value types it literally. The value arrives
+    from the model -- `/interact`'s `type` action carries it unexamined -- so
+    an unguarded slot reads any file the browser container can see into a form
+    field on a page the model chose, the shared Chrome profile included.
+    """
+
+    @pytest.mark.parametrize("action", [
+        {"type": "type", "text": "--file=/etc/hostname"},
+        {"type": "type", "text": "--file=-"},
+        {"type": "key", "key": "--window=12345"},
+    ])
+    def test_it_is_refused_rather_than_typed(self, xdo_argv, action):
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(), action,
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "option_shaped_input"
+        assert result["detail"]
+        # The property the refusal exists for: nothing reached xdotool.
+        assert xdo_argv.call_args_list == []
+
+    def test_the_refusal_is_a_result_not_a_raise(self, xdo_argv):
+        """`/interact` abandons its remaining actions on an exception.
+
+        A list whose later actions are fine should not be lost to one
+        argument this action declined, so the refusal comes back in the
+        action's own slot and the loop carries on.
+        """
+        session = {"capture": None, "tab_index": 0}
+        page = _SettlePage()
+
+        refused = browse_api._coordinate_action(
+            session, page, {"type": "type", "text": "--file=/etc/hostname"},
+        )
+        after = browse_api._coordinate_action(
+            session, page, {"type": "type", "text": "ordinary text"},
+        )
+
+        assert refused["ok"] is False
+        assert after["ok"] is True
+
+    def test_ordinary_text_still_reaches_xdotool_behind_a_separator(self, xdo_argv):
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "type", "text": "hello world"},
+        )
+
+        assert result["ok"] is True
+        argv = xdo_argv.call_args[0][0]
+        assert argv[:2] == ["xdotool", "type"]
+        assert argv[-2:] == ["--", "hello world"]
+
+    def test_a_text_value_that_is_not_a_string_is_refused(self, xdo_argv):
+        """It comes off model-written JSON, so the type is not ours to assume."""
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "type", "text": {"file": "/etc/hostname"}},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "option_shaped_input"
+        assert xdo_argv.call_args_list == []

@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `browse` type or key press beginning with `-` is refused instead of being handed to xdotool as an option. xdotool parses the slot that carries the text with getopt, and `type` supports `--file`, so a task asked to type `--file=/etc/…` into a page typed the contents of that file instead — reading any file the browser container can see into a form on a page it chose. Measured against the shipped build, in each of the argv shapes a value reaches, including the one a `browse` URL travels through.
+
+- A `--type` longer than the pacing can deliver is refused with the length it can take, rather than typed halfway. The advertised cap was four times what the timeout allowed, so a long body left the field holding the first part of its text, abandoned the rest of the action list and answered with an error — and the model was told the action "may still have happened" when it definitely had, incompletely. The cap and the timeout are now derived from each other, so neither drifts again.
+
+- A coordinate click is refused when the pointer did not arrive, instead of reporting that it landed where it was aimed. A pointer move that times out for any reason other than the screen-edge clamp leaves the pointer where the last action put it, and the press went there while the answer named the point that was asked for. The pointer is read back and measured now, and `--click-challenge` re-checks the picture is still current, which it had never done.
+
 - A Docker build of the web UI no longer prints `/bin/sh: git: not found` twice. That stage carries no git and has no repository in its context, so the version stamp was already falling back to `unknown`; what reached the log was the shell's own error, which reads as a build failure. The same two lines appeared in any `npm run build` run outside a checkout.
 
 ## [0.42.0] - 2026-09-19
