@@ -984,6 +984,40 @@ def _note_stale_container(data):
     return {**data, "notes": notes}
 
 
+def _note_unreported_actions(data, actions):
+    """Say which actions came back with no result, and that they may have run.
+
+    `/interact` runs its list in order and appends one result per action; a
+    raise abandons the rest and the handler returns the partial list with a
+    500. So an action with no result is **not** an action that did not happen:
+    the raise can land after the pointer has already moved and pressed, which
+    is measured rather than hypothetical — `xdotool mousemove --sync` blocks
+    on a zero-distance move and times out, and the timeout can fire on the
+    final landing move of a click that has already been delivered.
+
+    Naming it is the whole of what this can do. The shape is `cmd_render`'s
+    404 arm's: say what is known rather than inferring, because the one answer
+    that must not be given here is a bare failure — a model reading that
+    retries the click, and a retried click that already landed is a second
+    click nobody asked for.
+    """
+    if not isinstance(data, dict) or data.get("status") != "error":
+        return data
+    results = data.get("actions")
+    if not isinstance(results, list) or len(results) >= len(actions):
+        return data
+    unreported = [str(a.get("type")) for a in actions[len(results):]]
+    notes = list(data.get("notes") or [])
+    notes.append(
+        "The browser failed before these actions reported a result: "
+        + ", ".join(unreported)
+        + ". The first of them may still have happened — the failure can land "
+        "after the pointer has moved and pressed. Take a fresh screenshot and "
+        "look at the page before repeating it; do not simply retry."
+    )
+    return {**data, "notes": notes, "unreported_actions": unreported}
+
+
 def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
@@ -1017,7 +1051,8 @@ def cmd_interact(args):
         for pair in (getattr(args, "fill_credential", None) or [])
         if isinstance(pair, CredentialPair)
     ]
-    return _note_stale_container(_scrub(_decode(resp), secrets))
+    decoded = _note_stale_container(_scrub(_decode(resp), secrets))
+    return _note_unreported_actions(decoded, actions)
 
 
 def _links_from_extract(data):

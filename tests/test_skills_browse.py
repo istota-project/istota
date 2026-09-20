@@ -2388,3 +2388,109 @@ class TestNoCredentialAtAPoint:
         }
         assert flags["--fill-credential"].metavar == "SELECTOR=NAME"
         assert flags["--click-at"].metavar == "X,Y"
+
+
+class TestAnActionWithNoResult:
+    """A 500 with a short `actions` list, which is what a click that raised
+    after the pointer already moved looks like from here.
+
+    Measured, not hypothetical: `xdotool mousemove --sync` blocks on a
+    zero-distance move and times out at five seconds, and the Bezier path's
+    final landing move is within a pixel of its predecessor often enough that
+    roughly three in ten coordinate clicks raised on a live container. The
+    timeout can fire after the press has been delivered.
+    """
+
+    @staticmethod
+    def _failed_after(n_results):
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.json.return_value = {
+            "status": "error",
+            "session_id": "s1",
+            "actions": [
+                {"action": "click_at", "ok": True, "screen": [1, 2]}
+            ] * n_results,
+            "error": (
+                "Command '['xdotool', 'mousemove', '--sync', '--screen', "
+                "'0', '819', '396']' timed out after 5 seconds"
+            ),
+        }
+        return resp
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_actions_with_no_result_are_named(self, mock_url, mock_get, mock_post):
+        mock_get.return_value = TestAPointReadOffThePicture._session_response(
+            _capture_record(1280, 800),
+        )
+        mock_post.return_value = self._failed_after(0)
+
+        result = cmd_interact(build_parser().parse_args([
+            "interact", "s1", "--click-at", "10,20", "--press", "Enter",
+        ]))
+
+        assert result["status"] == "error"
+        assert result["unreported_actions"] == ["click_at", "key"]
+        note = result["notes"][0]
+        assert "may still have happened" in note
+        assert "do not simply retry" in note
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_partial_list_names_only_the_tail(self, mock_url, mock_get, mock_post):
+        mock_get.return_value = TestAPointReadOffThePicture._session_response(
+            _capture_record(1280, 800),
+        )
+        mock_post.return_value = self._failed_after(1)
+
+        result = cmd_interact(build_parser().parse_args([
+            "interact", "s1", "--click-at", "10,20", "--click-at", "30,40",
+        ]))
+
+        # The container appends one result per action in order, so the first
+        # action with no result is the one that raised.
+        assert result["unreported_actions"] == ["click_at"]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_complete_failure_list_gets_no_note(self, mock_url, mock_get, mock_post):
+        # Every action reported a result and the call still failed — an
+        # ordinary refusal, where nothing is unknown and the note would be a
+        # false alarm.
+        mock_get.return_value = TestAPointReadOffThePicture._session_response(
+            _capture_record(1280, 800),
+        )
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.json.return_value = {
+            "status": "error", "session_id": "s1", "error": "something else",
+            "actions": [{"action": "click_at", "ok": False, "error": "stale_capture"}],
+        }
+        mock_post.return_value = resp
+
+        result = cmd_interact(build_parser().parse_args([
+            "interact", "s1", "--click-at", "10,20",
+        ]))
+
+        assert "unreported_actions" not in result
+        assert "notes" not in result
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_successful_call_gets_no_note(self, mock_url, mock_get, mock_post):
+        mock_get.return_value = TestAPointReadOffThePicture._session_response(
+            _capture_record(1280, 800),
+        )
+        mock_post.return_value = TestAPointReadOffThePicture._interact_response()
+
+        result = cmd_interact(build_parser().parse_args([
+            "interact", "s1", "--click-at", "10,20",
+        ]))
+
+        assert result["status"] == "ok"
+        assert "unreported_actions" not in result
