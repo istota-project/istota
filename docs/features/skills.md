@@ -82,7 +82,7 @@ Calendar operations use CalDAV...
 
 Supported frontmatter fields: `triggers`, `description`, `always_include`, `admin_only`, `cli`, `experimental` (requires `skill_<name>` in `[experimental] features`), `source_types`, `file_types`, `companion_skills`, `exclude_skills`, `dependencies`, `requires_capability`, `exclude_memory`, `exclude_persona`, `env` (JSON-encoded array of env spec objects).
 
-`requires_capability` gates a skill on a runtime capability being configured — `browser`, `devbox`, `nextcloud`. A standalone install with no Nextcloud drops the `nextcloud` skill from both selection and the menu rather than offering something that cannot work.
+`requires_capability` gates a skill on a runtime capability being configured — `browser`, `devbox`, `nextcloud`. A standalone install with no Nextcloud drops the `nextcloud` skill from selection, from the menu, and from the "Skill CLI tools" list, rather than offering something that cannot work.
 
 There is no `name` field: the directory name is the skill's identity.
 
@@ -93,6 +93,8 @@ Operator overrides in `config/skills/` can use `skill.md` (or `skill.toml` for b
 Skills with Python modules expose CLIs invoked by Claude Code inside the sandbox via `python -m istota.skills.<name>`. The external entry point is `istota-skill <name>`, which routes through the credential proxy when enabled. Pattern: `build_parser()` + `main()`, JSON output, credentials via env vars.
 
 When the skill proxy is enabled, CLI commands run through a Unix socket proxy that injects credentials server-side.
+
+A skill with `cli: true` is also named in the prompt's "Skill CLI tools" list. That list applies the same effective disabled set as the on-demand menu — the capability gate, the instance-wide `disabled_skills` and the per-user one — so a Nextcloud-free install is no longer told `istota-skill nextcloud` exists a few lines above a menu that omits it. Two gates the menu applies are deliberately *not* applied here, so the list can still name a CLI the menu leaves out: an unset `skill_<name>` experimental feature, and an unmet `dependencies` entry. Three shipped `cli: true` skills declare dependencies — `markets`, `transcribe` and `whisper` — so on an install without those extras the list names them and the menu does not. An eager skill is the opposite case and is not a discrepancy: the menu is built excluding what was already selected, so an `always_include` CLI such as `kv` is advertised with no menu entry because its body is already in the prompt.
 
 ## Discovery layers
 
