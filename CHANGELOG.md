@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Istota can look at a page and click a point on it. `browse screenshot` records the frame the picture was taken in, and `browse interact --click-at X,Y` takes the numbers read straight off that picture, with `--hover-at`, `--press` and `--type` for a form no selector reaches. The DOM path is still the first move — this is the rung below a CSS selector, for a canvas, a chart, a PDF viewer or a control whose class names change every build.
+
+- A picture that no longer describes the page is refused rather than clicked. A capture the page has scrolled or navigated away from, a window that moved, a full-page capture, or no capture at all each come back by name with what to do about it, so a stale picture costs a round rather than a click landing somewhere nobody chose. A screenshot too large for a vision provider's own envelope is shrunk before it is written, so the picture the model sees is the picture the click is converted against.
+
+- An image file in the workspace reaches the model as an image rather than as `Cannot read binary file`. That is what makes the visual loop work on the native brain, and it also covers a chart a skill wrote or a photograph a user dropped in their own folder. An image is read whole or refused at 6 MiB, since a truncated image is a corrupt one, and `offset` and `limit` count lines and are refused rather than quietly dropped.
+
 ## [0.42.0] - 2026-09-19
 
 You can now reach Istota from a phone's messaging apps. SMS goes through Twilio or Telnyx: a number is bound to one user, and each answer comes back as one message inside a segment budget you set. WhatsApp goes through either of two adapters — `baileys`, the default, pairs with a phone by QR scan and costs nothing, and `whatsapp_cloud` is Meta's hosted API, which is metered and is the path WhatsApp sanctions. Either way the exchange is private and stays outside Talk and web rooms, and it has a memory now, so a follow-up like "what about tomorrow?" is read as one. You can photograph a receipt, a letter or a whiteboard and send it: the picture reaches the model as pixels and as the text read out of it, whatever you type under the photograph is the request, and a copy lands in your own `inbox/` folder. A Baileys session that WhatsApp has unlinked is re-paired from Admin, Connections, with the code drawn in the page and scanned from the phone's Linked Devices screen — what that replaces is an SSH session and two stopped services.
