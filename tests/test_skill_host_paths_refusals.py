@@ -507,7 +507,7 @@ class TestEveryStampedArgument:
 
         Three of these verbs used to branch on falsiness themselves and reach
         their own "not given" path: `browse screenshot --output ""` derived a
-        name under the bot dir, `health export-csv --output ""` printed the CSV
+        destination of its own, `health export-csv --output ""` printed the CSV
         to stdout, `feeds export-opml --output ""` did the same. Those branches
         are unreachable through an explicit empty string now. It is a refusal
         rather than a widening, and it is the one the spec's Edge cases list

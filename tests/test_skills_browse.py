@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -10,6 +11,7 @@ import pytest
 from istota.skills.browse import (
     ACTION_EMITTERS,
     ACTION_ORDER_DEST,
+    SCRATCH_NOTE,
     OrderedAppend,
     _interact_actions,
     _links_from_extract,
@@ -32,21 +34,38 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image data"
 
 
 @pytest.fixture
-def workspace(tmp_path, monkeypatch):
+def deferred_dir(tmp_path, monkeypatch):
+    """The task's own temp directory, as `build_task_runtime` exports it.
+
+    `ISTOTA_DEFERRED_DIR` is `{temp_dir}/{user_id}`: the first root of the
+    write allowlist, and since the derived default moved off the workspace it
+    is also where a capture taken with no `-o` goes. Returns the directory.
+    """
+    own = tmp_path / "temp" / "alice"
+    own.mkdir(parents=True)
+    monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(own))
+    return own
+
+
+@pytest.fixture
+def workspace(tmp_path, monkeypatch, deferred_dir):
     """A mount with the calling user's workspace, as the executor builds it.
 
     `screenshot` writes through `skill_host_paths`, whose roots come out of the
     environment, so a test that captures anything has to say who is calling and
     where their workspace is. Returns `{mount}/Users/alice`.
+
+    It takes `deferred_dir` because the two roots arrive together in a real
+    task and because a capture with no `-o` now needs the second one. Every
+    `-o` case here still names a path under the returned workspace, so the
+    extra root widens no assertion in this file.
     """
     mount = tmp_path / "mount"
     own = mount / "Users" / "alice"
     own.mkdir(parents=True)
     monkeypatch.setenv("NEXTCLOUD_MOUNT_PATH", str(mount))
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
-    monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
     monkeypatch.delenv("ISTOTA_CONVERSATION_TOKEN", raising=False)
-    monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", "istota")
     return own
 
 
@@ -2018,6 +2037,120 @@ def _screenshot_response(content, headers=None):
     resp.content = content
     resp.headers = {"content-type": "image/png", **(headers or {})}
     return resp
+
+
+class TestTheScratchDefault:
+    """Where a capture goes with no `-o`, and what the answer says about it.
+
+    None of this had a test before: every screenshot case in this file passed
+    `-o`, so `screenshot_dir`, `_write_derived_capture` and
+    `_workspace_relative` were reached by nothing. The destination moving off
+    the user's workspace is what made the gap worth closing rather than
+    noting.
+    """
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_capture_with_no_output_lands_in_the_tasks_temp_dir(
+        self, mock_url, mock_post, workspace, deferred_dir,
+    ):
+        mock_post.return_value = _screenshot_response(PNG_BYTES)
+
+        result = cmd_screenshot(
+            build_parser().parse_args(["screenshot", "https://example.com"]),
+        )
+
+        assert result["status"] == "ok", result
+        written = Path(result["path"])
+        assert written.parent == deferred_dir / "screenshots"
+        assert written.read_bytes() == PNG_BYTES
+        # The workspace is resolvable here and is still not where this went:
+        # the fixture sets both roots, so a pass is the destination rule and
+        # not an unavailable alternative.
+        assert workspace not in written.parents
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_scratch_capture_says_so_and_carries_no_chat_url(
+        self, mock_url, mock_post, workspace, deferred_dir,
+    ):
+        """The absence and the note are asserted together.
+
+        `workspace_path` missing is the whole functional difference and it
+        teaches a model nothing on its own, so the note is what has to be
+        there — and the note alone would be satisfied by a capture that had
+        gone to the workspace anyway.
+        """
+        mock_post.return_value = _screenshot_response(PNG_BYTES)
+
+        result = cmd_screenshot(
+            build_parser().parse_args(["screenshot", "https://example.com"]),
+        )
+
+        assert "workspace_path" not in result, result
+        assert SCRATCH_NOTE in result.get("notes", []), result
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_output_in_the_workspace_still_earns_the_chat_url(
+        self, mock_url, mock_post, workspace,
+    ):
+        """The control. Embedding still works when a caller asks for it, which
+        is what makes the move a change of default rather than a removal."""
+        mock_post.return_value = _screenshot_response(PNG_BYTES)
+
+        result = cmd_screenshot(
+            build_parser().parse_args([
+                "screenshot", "https://example.com",
+                "-o", str(workspace / "radar.png"),
+            ]),
+        )
+
+        assert result["workspace_path"] == "/Users/alice/radar.png"
+        assert SCRATCH_NOTE not in result.get("notes", []), result
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_two_captures_in_one_second_do_not_overwrite_each_other(
+        self, mock_url, mock_post, workspace, deferred_dir,
+    ):
+        """`O_EXCL` and the suffix ladder, on the path that derives names.
+
+        Two tasks of one user share this directory and the stem is a UTC
+        second, so a check-then-write would have the second report `ok` over
+        bytes that are no longer there.
+        """
+        argv = ["screenshot", "https://example.com"]
+        mock_post.return_value = _screenshot_response(PNG_BYTES)
+        first = cmd_screenshot(build_parser().parse_args(argv))
+        mock_post.return_value = _screenshot_response(PNG_BYTES + b"second")
+        second = cmd_screenshot(build_parser().parse_args(argv))
+
+        assert first["path"] != second["path"]
+        assert Path(first["path"]).read_bytes() == PNG_BYTES
+        assert Path(second["path"]).read_bytes() == PNG_BYTES + b"second"
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_no_temp_dir_refuses_by_name_before_the_browser_is_asked(
+        self, mock_url, mock_post, workspace, monkeypatch,
+    ):
+        """The one remaining failure reason, and it costs no browser time.
+
+        The refusal names `--output` because the workspace root survives the
+        deferred dir's absence — the explicit form really would have worked,
+        so the remedy is not a stock sentence.
+        """
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR")
+
+        result = cmd_screenshot(
+            build_parser().parse_args(["screenshot", "https://example.com"]),
+        )
+
+        assert result["status"] == "error"
+        assert "ISTOTA_DEFERRED_DIR" in result["error"]
+        assert "--output" in result["error"]
+        assert not mock_post.called
 
 
 class TestTheDeliveredCaptureFrame:

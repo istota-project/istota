@@ -36,7 +36,7 @@ istota-skill browse render "https://example.com/page2" --session <id>
 istota-skill browse links "https://example.com"
 istota-skill browse links "https://example.com" --selector "nav a"
 
-# Screenshot — lands in your own workspace, and only there
+# Screenshot — scratch by default; -o when the user should see or keep it
 istota-skill browse screenshot "https://example.com"
 istota-skill browse screenshot --session <id> --full-page
 istota-skill browse screenshot "https://example.com" -o "$NEXTCLOUD_MOUNT_PATH/Users/$ISTOTA_USER_ID/{BOT_DIR}/radar.png"
@@ -107,13 +107,15 @@ Every URL in the markdown is already absolute — use them exactly as given. `mo
 `screenshot`:
 
 ```json
-{"status": "ok", "path": "/mnt/.../Users/{user_id}/{BOT_DIR}/screenshots/screenshot-20260906-141530.png",
+{"status": "ok", "path": "/.../tmp/{user_id}/screenshots/screenshot-20260906-141530.png",
  "size": 184213, "media_type": "image/png",
  "capture": {"image": [1427, 805], "viewport": [1440, 813], "dpr": 1, "scale": 0.991111, "full_page": false},
- "workspace_path": "/Users/{user_id}/{BOT_DIR}/screenshots/screenshot-20260906-141530.png"}
+ "notes": ["This capture is scratch: ..."]}
 ```
 
-With no `-o` the file lands in your own workspace under `{BOT_DIR}/screenshots/`, named for the moment it was taken, and `path` is where it actually went — read it from the answer rather than assuming a name, since a second capture in the same second gets a suffix. `workspace_path` is the same file spelled the way `/istota/api/chat/files?path=` wants it, so a web-chat reply can embed the picture without rebuilding the path by hand. It is absent when the file is somewhere that endpoint does not serve, which is anywhere outside `/Users/{user_id}/`.
+**A capture is scratch unless you asked for otherwise.** With no `-o` it lands in this task's own temp directory, which you can read back and which is swept for you — right for the picture you are taking in order to look at it. `path` is where it actually went; read it from the answer rather than assuming a name, since a second capture in the same second gets a suffix. Such a capture carries a `notes` line saying it is scratch and carries no `workspace_path`.
+
+**Pass `-o` when the picture is for the user** — something to show in a reply, or a file they will open later. Then the answer also carries `workspace_path`, the same file spelled the way `/istota/api/chat/files?path=` wants it, so a web-chat reply can embed it without rebuilding the path by hand. That key is present only for a file that endpoint serves, which is a file under `/Users/{user_id}/`.
 
 `capture` is the coordinate frame the picture was delivered in, and `image` is the size of the file that was written — read points off that picture and nothing else. It is `null` when the container recorded no frame, in which case `notes` says why and `--click-at` will not work against this session.
 
@@ -166,13 +168,15 @@ Take the picture, look at it, act on a point in it:
 
 ```bash
 istota-skill browse render "https://example.com/booking" --keep-session   # first, and usually enough
-istota-skill browse screenshot --session <id> -o "$NEXTCLOUD_MOUNT_PATH/Users/$ISTOTA_USER_ID/{BOT_DIR}/screenshots/visual.png"
-# Read that path — an image file comes back as an image you can look at.
+istota-skill browse screenshot --session <id>
+# Read the `path` it answered with — an image file comes back as an image you can look at.
 istota-skill browse interact <id> --click-at 412,318
-istota-skill browse screenshot --session <id> -o ".../visual.png"          # same file again, round 2
+istota-skill browse screenshot --session <id>                             # round 2, a fresh file
 ```
 
-Name the file with `-o` and reuse it. The derived default is timestamped, so eight rounds leave eight files in the user's own storage; `-o` overwrites, and one file is easier for them to find afterwards than eight.
+No `-o` here, deliberately. Every round of this loop is a picture taken to be looked at once, and the default puts those in the task's temp directory where they are swept — eight rounds cost the user nothing and leave nothing in their storage. Read each round's `path` out of its own answer; do not reuse the previous one, since each capture gets its own name and the old file is the old page.
+
+Pass `-o` only for the picture you are going to show them at the end, and name it somewhere sensible in the workspace.
 
 **Coordinates are in the delivered picture's pixel space** — the numbers you read off the image you were just shown, with the origin at its top left. Nothing asks you to scale, offset or convert anything: `capture.image` says what that picture measured, and the conversion to the page and to the pointer happens below you.
 

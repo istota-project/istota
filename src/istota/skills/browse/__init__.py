@@ -33,14 +33,24 @@ from istota.skill_host_paths import (
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._credref import PAIR, CredentialPair, credential_ref
 from istota.skills._hostpath import WRITE, host_path
-from istota.user_scope import scoped_user_dir
 
 DEFAULT_API_URL = "http://localhost:9223"
-# Where a screenshot lands with no `--output`, under the caller's own
-# workspace: `{mount}/Users/{uid}/{bot dir}/screenshots/`. A subdirectory
-# rather than the bot dir itself, so a task taking twenty captures does not
-# bury the config, exports and notes directories the user reads.
+# Where a screenshot lands with no `--output`: `screenshots/` under the task's
+# own per-user temp directory. A subdirectory rather than the temp dir itself,
+# so a run of captures stays legible beside the deferred-op files and the
+# credential shim that share it.
 SCREENSHOT_SUBDIR = "screenshots"
+# What the result says about a capture that took that default. The absence of
+# `workspace_path` is the whole difference between a scratch picture and one
+# the user can be shown, and an absence teaches nothing — so the note is
+# attached where a model reading the result will meet it, rather than left to
+# be inferred from a missing key.
+SCRATCH_NOTE = (
+    "This capture is scratch: it is in the task's temp directory, it is swept "
+    "on the deployment's temp-file retention, and `/chat/files` does not serve "
+    "it — so a reply cannot show it. To show the user the picture, or to keep "
+    "it, take the capture again with -o naming a path inside your workspace."
+)
 # Where `OrderedAppend` records the command-line order of the `interact`
 # arguments it is declared on. Not an argument of its own, so nothing parses
 # it and no caller sets it; `interact` is the only reader.
@@ -267,56 +277,57 @@ def cmd_render(args):
 def screenshot_dir():
     """Where a screenshot goes with no ``--output``: ``(directory, reason)``.
 
-    ``{mount}/Users/{uid}/{bot dir}/screenshots``. Every component is derived
-    rather than configured, and the derivation is the point of the directory:
-    the old default was ``/tmp/screenshot.png``, which on a sandboxed
-    deployment named a file on the far side of the boundary. The skill CLI is
-    spawned host-side by the proxy while the model's ``/tmp`` is the sandbox's
-    own ``--tmpfs``, so the write landed on the host and the model was handed a
-    path it could not open. The workspace is the one root that is bound into
-    the sandbox read-write *and* reachable through ``/chat/files``, which is
-    what lets a task read its own capture back and the reply embed it.
+    ``$ISTOTA_DEFERRED_DIR/screenshots`` — that variable is
+    ``{temp_dir}/{user_id}``, the task's own per-user temp directory, which is
+    the first root of this CLI's write allowlist and is bound read-write into
+    the sandbox. So the model can read back what it just captured, which is
+    what the visual ladder needs, and nothing else can.
 
-    Two independent things can stop it resolving and the caller has to be able
-    to tell them apart, so the reason comes back beside the answer rather than
-    being reconstructed from a single `None` — naming a variable that is set
-    when a different one is the fault is the misreport `doctor` states the rule
-    against. Falling back to ``/tmp`` is the bug this replaces.
+    **This is the third destination the default has had, and the middle one is
+    the trap.** It was ``/tmp/screenshot.png``, which on a sandboxed deployment
+    named a file on the far side of the boundary: the skill CLI is spawned
+    host-side by the proxy while the model's ``/tmp`` is the sandbox's own
+    ``--tmpfs``, so the write landed on the host and the model was handed a
+    path it could not open. The fix was the user's *workspace*, which is
+    readable from inside the sandbox and is also what ``/chat/files`` serves --
+    and that second property is what made it the wrong answer. A capture is a
+    working artifact of the visual loop, taken eight at a time, so filing them
+    there made every scratch picture a permanent file in a directory the user
+    reads. The per-user temp dir has the first property and not the second,
+    which is the trade this verb wants.
 
-    ``ISTOTA_BOT_DIR_NAME`` is required rather than defaulted, matching what
-    the two ``memory`` skills already do with it. Guessing ``istota`` on a
-    deployment whose bot is called something else files the capture in a
-    directory beside the real bot dir, where it still serves and so reports
-    nothing.
+    **The retention rule is one that already exists.**
+    ``scheduler.cleanup_old_temp_files`` walks ``temp_dir`` recursively on
+    ``[scheduler] temp_file_retention_days`` and removes the emptied directory
+    behind it, so there is no sweep to write here and no second sweeper to
+    disagree with that one. A capture the user is meant to keep is one written
+    with ``--output`` into their own workspace, which nothing sweeps — the
+    split is between a scratch file and a file, not between two retention
+    policies. An operator who has set that retention to ``0`` has disabled the
+    sweep for every temp file and not only for these.
+
+    **What the move gives up is the embed, and the giving up is the point.**
+    ``_workspace_relative`` answers ``None`` for anything outside
+    ``/Users/{uid}``, so a derived capture carries no ``workspace_path`` and a
+    reply cannot render it. That is why ``cmd_screenshot`` attaches
+    :data:`SCRATCH_NOTE` rather than letting the missing key speak for itself.
+
+    One failure reason rather than three, because the two the workspace
+    derivation needed — a resolvable mount and an ``ISTOTA_BOT_DIR_NAME`` --
+    went with it. The remedy it names is the right one and not a stock
+    sentence: ``env_host_roots`` drops each ingredient independently, so an
+    environment with no deferred dir still has the workspace root if the mount
+    and the user id resolved, and an ``--output`` written there is accepted by
+    the same allowlist that has nowhere to put the derived default.
     """
-    workspace = user_workspace_root()
-    if workspace is None:
+    deferred = os.environ.get("ISTOTA_DEFERRED_DIR", "").strip()
+    if not deferred:
         return None, (
-            "No workspace resolved for this task (NEXTCLOUD_MOUNT_PATH / "
-            "ISTOTA_USER_ID), so there is nowhere to put a screenshot. Pass "
-            "--output with a path inside your workspace."
+            "ISTOTA_DEFERRED_DIR is not set, so this task has no temp "
+            "directory to put a screenshot in. Pass --output with a path "
+            "inside your workspace."
         )
-    bot_dir = os.environ.get("ISTOTA_BOT_DIR_NAME", "").strip()
-    if not bot_dir:
-        return None, (
-            "ISTOTA_BOT_DIR_NAME is not set, so the workspace directory to "
-            "write into cannot be derived. Pass --output with a path inside "
-            "your workspace."
-        )
-    # The generic "names a plain child of this root" rule, reached for here
-    # because the variable lands in a path. `Config.bot_dir_name` already
-    # sanitizes to `[a-z0-9_-]`, so this is defence behind that rather than the
-    # boundary — and it refuses rather than substituting a name of its own,
-    # since a silent substitution would put the file somewhere the reply's URL
-    # does not name.
-    scoped = scoped_user_dir(workspace, bot_dir)
-    if scoped is None:
-        return None, (
-            "ISTOTA_BOT_DIR_NAME does not name a plain directory inside the "
-            "workspace, so there is nowhere to put a screenshot. Pass "
-            "--output with a path inside your workspace."
-        )
-    return scoped / SCREENSHOT_SUBDIR, None
+    return Path(deferred) / SCREENSHOT_SUBDIR, None
 
 
 def _write_derived_capture(directory, media_type, content):
@@ -369,8 +380,14 @@ def _workspace_relative(path):
     `/Users/{uid}` and nothing else, while `allowed_host_roots` also admits the
     task's own `{mount}/Channels/{token}` as a destination — so a `--output`
     there is a legitimate write whose mount-relative spelling is a URL the
-    endpoint refuses by design. None for anything outside the workspace, which
-    covers that case and the deferred dir with it.
+    endpoint refuses by design.
+
+    **`None` is the ordinary answer now, not the edge case.** Since the derived
+    default moved to the per-user temp dir (`screenshot_dir`), every capture
+    taken without `--output` lands outside the workspace and so has no URL.
+    That is the intended shape rather than a gap, and `SCRATCH_NOTE` is what
+    says so in the result; this function is unchanged, because the rule it
+    applies — is this file one `/chat/files` would serve — did not move.
     """
     root = user_workspace_root()
     if root is None:
@@ -545,7 +562,14 @@ _PIL_FORMAT_FOR_MEDIA_TYPE = {
 
 
 def cmd_screenshot(args):
-    """Take a screenshot, into the caller's own workspace.
+    """Take a screenshot: scratch by default, into the workspace on request.
+
+    With no `--output` the capture is a working file in the task's own temp
+    directory (`screenshot_dir`), which is where the visual ladder's eight
+    captures per loop belong; `--output` is how a model says this one is for
+    the user to see or keep. The two are told apart in the result by
+    `workspace_path`, which only a workspace write earns, and by
+    :data:`SCRATCH_NOTE`, which only the derived default carries.
 
     `--output` is declared `WRITE`, so it arrives already resolved and already
     contained: `parse_and_resolve` refuses an out-of-allowlist path before the
@@ -663,8 +687,17 @@ def cmd_screenshot(args):
             "media_type": media_type,
             "capture": capture,
         }
+        notes = []
         if capture_note:
-            result["notes"] = [capture_note]
+            notes.append(capture_note)
+        # `directory` is set only where the derived default was taken, so this
+        # is the one branch that knows the capture is scratch — the resolved
+        # path cannot be asked, since `--output` may legitimately name the temp
+        # dir too and that write is still a file the caller chose.
+        if directory is not None:
+            notes.append(SCRATCH_NOTE)
+        if notes:
+            result["notes"] = notes
         workspace_path = _workspace_relative(resolved)
         if workspace_path:
             result["workspace_path"] = workspace_path
@@ -1201,8 +1234,10 @@ def build_parser():
     host_path(
         p_ss, "--output", "-o", mode=WRITE,
         help=(
-            "Output file path, absolute and inside your own workspace. "
-            "Defaults to {bot dir}/screenshots/ in your workspace."
+            "Output file path, absolute and inside your own workspace. Pass "
+            "it when the picture is for the user to see or keep. Without it "
+            "the capture is a scratch file in this task's temp directory, "
+            "which is swept and which a reply cannot show."
         ),
     )
     p_ss.add_argument("--full-page", action="store_true", help="Capture full page")
