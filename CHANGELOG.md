@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A screenshot taken to be looked at no longer files itself in your Nextcloud. `browse screenshot` with no `-o` now writes into the task's own temp directory, which is swept on the deployment's temp-file retention, so a visual loop's eight captures per round cost you nothing and leave nothing behind. Pass `-o` with a path in your workspace for a picture Istota should show you in a reply or that you want to keep — that is still where `workspace_path` comes from, and a scratch capture says in its own answer that it is one.
 
+### Fixed
+
+- A Docker build of the web UI no longer prints `/bin/sh: git: not found` twice. That stage carries no git and has no repository in its context, so the version stamp was already falling back to `unknown`; what reached the log was the shell's own error, which reads as a build failure. The same two lines appeared in any `npm run build` run outside a checkout.
+
 ## [0.42.0] - 2026-09-19
 
 You can now reach Istota from a phone's messaging apps. SMS goes through Twilio or Telnyx: a number is bound to one user, and each answer comes back as one message inside a segment budget you set. WhatsApp goes through either of two adapters — `baileys`, the default, pairs with a phone by QR scan and costs nothing, and `whatsapp_cloud` is Meta's hosted API, which is metered and is the path WhatsApp sanctions. Either way the exchange is private and stays outside Talk and web rooms, and it has a memory now, so a follow-up like "what about tomorrow?" is read as one. You can photograph a receipt, a letter or a whiteboard and send it: the picture reaches the model as pixels and as the text read out of it, whatever you type under the photograph is the request, and a copy lands in your own `inbox/` folder. A Baileys session that WhatsApp has unlinked is re-paired from Admin, Connections, with the code drawn in the page and scanned from the phone's Linked Devices screen — what that replaces is an SSH session and two stopped services.
