@@ -133,14 +133,23 @@ class TestBuildingTheCaptureRecord:
         left = visual.image_to_screen(record, 0, 0)[0]
         right = visual.image_to_screen(record, 1424, 0)[0]
         assert right - left == 1424
-        # Recorded rather than asserted as correct: where the window and the
-        # capture differ, `build_capture` centres the capture inside the
-        # window. On the shipped container the two are equal and the inset is
-        # zero, so nothing in production depends on this; a real scrollbar
-        # would put the capture at the left edge rather than centred. The
-        # container is vendored from stealth-browser, which is where a change
-        # to that rule belongs.
-        assert record["offset"][0] == (WINDOW["width"] - 1424) // 2
+        # And the horizontal inset is zero rather than half the difference:
+        # the viewport starts at the window's left edge and the scrollbar takes
+        # its pixels off the right, so centring the capture would put every
+        # click half a scrollbar right. Measured on the shipped container at
+        # both screen sizes: window 1439x899 with capture 1439x812, and window
+        # 1919x1079 with capture 1919x992 — equal widths, inset [0, 87] in
+        # both, which is what makes this arm reachable only under a scrollbar.
+        assert record["offset"] == [0, WINDOW["height"] - 812]
+
+    def test_a_capture_wider_than_its_window_is_refused(self, window):
+        # A device pixel ratio above 1, or a capture of some other window.
+        # Either way the frame is not the one the pointer acts in, and a
+        # conversion against it would click somewhere arbitrary.
+        record, why = visual.build_capture(_png(WINDOW["width"] + 40, 812), page=_Page())
+
+        assert record is None
+        assert "wider than its window" in why
 
     def test_a_full_page_capture_gets_no_offset_at_all(self, window):
         record, why = visual.build_capture(

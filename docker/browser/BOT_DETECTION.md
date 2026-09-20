@@ -202,7 +202,9 @@ the captured PNG's own IHDR dimensions — a 1439x899 window holding a 1439x812
 capture has 87 pixels of tab strip and omnibox above the page. The capture's
 size is read from the PNG rather than computed as `viewport × dpr`, because
 those two disagree by about 15 pixels whenever a scrollbar is in play and do so
-silently. `browser/visual.py` owns all of it.
+silently. The horizontal inset is zero — the viewport starts at the window's
+left edge, so a narrower capture is a scrollbar gutter on the right, not a
+margin on both sides. `browser/visual.py` owns all of it.
 
 **Verified end to end**, twice, against `https://nopecha.com/demo/cloudflare`
 with a fresh profile: `scripts/poc_visual_cloudflare.py` passes the interstitial

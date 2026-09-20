@@ -96,11 +96,30 @@ def mouse_location():
 
 
 def mouse_move(x, y):
-    """Move the pointer to an X11 screen coordinate, waiting for the move."""
-    subprocess.run(
-        ["xdotool", "mousemove", "--sync", "--screen", "0", str(int(x)), str(int(y))],
-        env=_XDO_ENV, timeout=5, capture_output=True,
-    )
+    """Move the pointer to an X11 screen coordinate, waiting for the move.
+
+    A `--sync` move to the point the pointer already occupies blocks until the
+    timeout on the shipped xdotool, so a zero-distance move is skipped rather
+    than issued. The Bezier path in human_move_to() lands on that case often --
+    it carries +-1.5px of jitter, so consecutive points round to the same pixel,
+    and its final landing move repeats the last point outright. The comparison
+    has to be on the truncated values, because those are what xdotool receives.
+
+    The timeout is still caught: the pointer clamps to the screen edge, and a
+    move to a point outside it is another way to ask for no motion. There the
+    pointer is at the edge, near enough to the target to go on and click.
+    """
+    x, y = int(x), int(y)
+    if mouse_location() == (x, y):
+        return
+    try:
+        subprocess.run(
+            ["xdotool", "mousemove", "--sync", "--screen", "0", str(x), str(y)],
+            env=_XDO_ENV, timeout=5, capture_output=True,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("mousemove to (%d, %d) did not complete -- "
+                    "the pointer did not move", x, y)
 
 
 def mouse_click(button=1, dwell_s=0.09):

@@ -107,7 +107,10 @@ def build_capture(png_bytes, page=None, full_page=False, measure=True):
 
     image_w, image_h = size
     inset_y = window["height"] - image_h
-    inset_x = max(0, (window["width"] - image_w) // 2)
+    # Zero, not half the difference: the viewport starts at the window's left
+    # edge, and a narrower capture means a vertical scrollbar took ~15 pixels
+    # off its right. Centring it would put every click half a scrollbar right.
+    inset_x = 0
     if full_page:
         # A full-page capture is a different coordinate space from the one the
         # pointer acts in. Recorded so the refusal can name the reason, and
@@ -117,6 +120,14 @@ def build_capture(png_bytes, page=None, full_page=False, measure=True):
         return None, (
             f"implausible UI inset: window {window['width']}x{window['height']}, "
             f"capture {image_w}x{image_h}"
+        )
+    elif image_w > window["width"]:
+        # A device pixel ratio above 1, or a capture of some other window.
+        # Either way the frame is not the one the pointer acts in, and a
+        # conversion against it would click somewhere arbitrary.
+        return None, (
+            f"capture is wider than its window: window "
+            f"{window['width']}x{window['height']}, capture {image_w}x{image_h}"
         )
 
     return {
