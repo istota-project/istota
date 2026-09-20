@@ -136,7 +136,8 @@ Init script (`_STEALTH_SCRIPT` in `browse_api.py`). Sections 1, 4, 5, 7, 8, 9 re
 - **User:** Non-root `browser` user (entrypoint drops from root via `su`), suppresses `--no-sandbox` infobar
 - **Display:** Xvfb 1440x900, x11vnc, noVNC on port 6080
 - **Input:** `xdotool` for OS-level X11 mouse/keyboard events (replaces CDP input)
-- **Browser window:** `--window-size=1440,900` (Chrome sizes itself without a WM; `no_viewport=True` ensures viewport matches window)
+- **Browser window:** `--window-size=1440,900` (Chrome sizes itself without a WM; `no_viewport=True` ensures viewport matches window). The real X11 window comes out 1439x899 and the page viewport inside it 1439x812 — an 87px UI inset that `visual.py` derives per capture rather than assuming
+- **Visual mode:** `/screenshot` records the coordinate frame it captured in; `/interact` clicks a point on it through xdotool. See the Cloudflare interstitial section below
 - **Locale:** `LANG=en_US.UTF-8` (generated via `locales` package)
 - **Timezone:** `TZ=America/New_York` (OS-level, not CDP emulation)
 - **Resources:** 2 CPUs, 3GB memory, 2GB shm
@@ -173,6 +174,51 @@ Cloudflare challenge page ("Just a moment...") would spin forever when navigated
 **2. CDP Runtime.evaluate during challenge window:** Immediately after navigation, we called `page.evaluate()` for DataDome detection. This sends `Runtime.evaluate` CDP commands while Cloudflare's challenge JS is running its fingerprinting checks. The challenge detects active CDP usage and fails.
 
 **Fix:** Added 3-5 second passive wait (no CDP evaluate calls) after navigation. DataDome and captcha checks moved to after this window. `page.wait_for_timeout()` is a pure timer that doesn't send CDP commands.
+
+### Cloudflare Interstitial Checkbox (visual mode) — Fixed
+
+The "Verify you are human" checkbox on a Cloudflare managed challenge cannot be
+pressed by anything this container previously had. It lives in a closed shadow
+root inside a cross-origin `challenges.cloudflare.com` frame, so no selector
+reaches it and `page.click` has nothing to resolve; and the challenge rejects a
+CDP-dispatched click for the same reason DataDome does, which is the whole
+subject of this document.
+
+**Fix:** press it with the pointer. `/interact` gained `click_at`, `hover_at`,
+`key`, `type` and `click_challenge`, all of which drive X11 through xdotool and
+none of which send a CDP input command. A click is `mousedown`, a dwell, then
+`mouseup` via XTest, approached along the same Bezier path with Gaussian timing
+that `simulate_human_behavior` uses — a pointer that teleports onto a checkbox
+and fires has no movement history, and the movement history is part of what the
+widget scores.
+
+**The coordinate frame, which is the part that had to be right.** A click read
+off a screenshot is in the picture's pixels; the pointer acts in X11 screen
+pixels; the difference is where Chrome's own UI sits above the page. That inset
+is **not** available from the page: with no window manager on Xvfb, Chrome
+reports `window.screenX` and `window.screenY` as `0,0` whatever the truth is
+(measured, not assumed). It is derived instead from the X11 window geometry and
+the captured PNG's own IHDR dimensions — a 1439x899 window holding a 1439x812
+capture has 87 pixels of tab strip and omnibox above the page. The capture's
+size is read from the PNG rather than computed as `viewport × dpr`, because
+those two disagree by about 15 pixels whenever a scrollbar is in play and do so
+silently. `browser/visual.py` owns all of it.
+
+**Verified end to end**, twice, against `https://nopecha.com/demo/cloudflare`
+with a fresh profile: `scripts/poc_visual_cloudflare.py` passes the interstitial
+in one round, both when the container locates the widget itself
+(`click_challenge`) and when a point read off the delivered screenshot is sent
+as `click_at` — (293, 337) in the picture converted to (293, 424) on the screen
+and landed on the checkbox.
+
+**What this says about CDP during a challenge.** `page.screenshot()` is a CDP
+command and was issued repeatedly with the interstitial on screen, as was one
+`Runtime.evaluate` per capture for the staleness record, and the challenge still
+passed. So the 2024 finding above is narrower than it reads: what the challenge
+scores is the *fingerprinting window* immediately after navigation, not CDP
+traffic in general. The passive wait stays. `/screenshot` accepts
+`measure: false` to skip even that one evaluate for a caller who would rather
+not find out the hard way.
 
 ### Behavioral Realism Improvements
 

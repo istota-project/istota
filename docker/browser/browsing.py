@@ -7,7 +7,7 @@ import random
 import time
 from urllib.parse import urlparse
 
-from xdotool import xdo, xdo_key
+from xdotool import mouse_click, mouse_location, mouse_move, xdo, xdo_key
 
 log = logging.getLogger(__name__)
 
@@ -309,6 +309,96 @@ def simulate_human_behavior(page):
             time.sleep(gauss_clamp(speed, speed * 0.3, 0.005, 0.04))
     except Exception:
         pass
+
+
+def human_move_to(target_x, target_y, settle_s=None):
+    """Move the pointer to an X11 screen point along a human-ish arc.
+
+    Same Bezier-plus-jitter path simulate_human_behavior() uses, aimed at a
+    point instead of at random. The approach matters as much as the click:
+    a pointer that teleports to a checkbox and fires has no movement history,
+    and the movement history is what the challenge is watching.
+    """
+    start = mouse_location() or (target_x, target_y - 200)
+    num_pts = random.randint(12, 22)
+    points = bezier_points(start, (target_x, target_y), num_points=num_pts)
+    for i, (px, py) in enumerate(points):
+        mouse_move(px, py)
+        progress = i / max(len(points) - 1, 1)
+        speed = 0.008 + 0.014 * (1 - math.sin(progress * math.pi))
+        time.sleep(gauss_clamp(speed, speed * 0.3, 0.005, 0.04))
+    # Land exactly on target: the path carries +-1.5px of jitter, and the
+    # Cloudflare checkbox is about 24px across.
+    mouse_move(target_x, target_y)
+    if settle_s is None:
+        settle_s = gauss_clamp(0.35, 0.15, 0.15, 0.8)
+    time.sleep(settle_s)
+
+
+def human_click_at(target_x, target_y, button=1):
+    """Approach an X11 screen point and click it."""
+    human_move_to(target_x, target_y)
+    mouse_click(button=button)
+    time.sleep(gauss_clamp(0.25, 0.1, 0.1, 0.5))
+
+
+def challenge_boxes(page):
+    """Bounding boxes of visible captcha/challenge iframes, in CSS pixels.
+
+    Same frame walk detect_captcha() does, reporting geometry instead of a
+    verdict. It exists because the Cloudflare interstitial's checkbox is
+    inside a closed shadow root in a cross-origin frame -- no selector reaches
+    it and no querySelector sees it, but the frame element itself has a box,
+    and the checkbox sits at a fixed inset within it.
+    """
+    boxes = []
+    for frame in page.frames:
+        if not any(u in frame.url for u in CAPTCHA_FRAME_URLS):
+            continue
+        try:
+            el = frame.frame_element()
+            if not el.is_visible():
+                continue
+            box = el.bounding_box()
+        except Exception:
+            continue
+        if not box:
+            continue
+        boxes.append({
+            "url": frame.url,
+            "x": box["x"], "y": box["y"],
+            "width": box["width"], "height": box["height"],
+        })
+    return boxes
+
+
+# The Cloudflare managed-challenge widget draws its checkbox at a fixed inset
+# from the frame's left edge, vertically centred. Measured against a 300x65
+# frame whose left edge was at CSS x=271.5: the checkbox spanned roughly
+# x 281-306, so its centre sits 22px in. An inset rather than a ratio because
+# the widget does not scale with its frame -- a wider frame moves the label,
+# not the checkbox -- and the box is about 24px across, so the inset has
+# around 10px of slack either way.
+CF_CHECKBOX_INSET_X = 22
+CF_CHECKBOX_MIN_HEIGHT = 40
+
+
+def cloudflare_checkbox_point(page):
+    """Where the Cloudflare checkbox is, in CSS pixels, or None.
+
+    Returns (x, y) for the first challenges.cloudflare.com frame large enough
+    to be the interstitial widget rather than an invisible Turnstile beacon.
+    """
+    for box in challenge_boxes(page):
+        if "challenges.cloudflare.com" not in box["url"]:
+            continue
+        if box["height"] < CF_CHECKBOX_MIN_HEIGHT:
+            continue
+        return (
+            box["x"] + CF_CHECKBOX_INSET_X,
+            box["y"] + box["height"] / 2,
+        )
+    return None
 
 
 def wait_for_datadome(page, timeout_ms=15000):

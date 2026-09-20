@@ -7,6 +7,7 @@ cannot detect an attached debugger.
 """
 
 import atexit
+import json
 import logging
 import os
 import subprocess
@@ -19,6 +20,7 @@ from flask import Flask, Response, jsonify, request
 import chrome
 import browsing
 import render
+import visual
 import xdotool
 
 app = Flask(__name__)
@@ -491,12 +493,24 @@ def browse():
 
 @app.route("/screenshot", methods=["POST"])
 def screenshot():
-    """Take a screenshot of the current page."""
+    """Take a screenshot of the current page.
+
+    A screenshot taken against an existing session also records the coordinate
+    frame it was captured in, so a later click_at on that session can be
+    converted to an X11 screen point and refused when the page has moved under
+    it. A call that supplies a `url` instead creates and closes its own
+    session, so it records nothing -- which is why the visual loop uses
+    session_id.
+    """
     _cleanup_expired()
     data = request.get_json()
     url = data.get("url")
     session_id = data.get("session_id")
     full_page = data.get("full_page", False)
+    # Skips the one CDP evaluate that reads the page's own url, scroll and
+    # viewport. Costs the staleness check its page half; buys a look-and-click
+    # loop that sends nothing to the page beyond the capture itself.
+    measure = data.get("measure", True)
     timeout = data.get("timeout", 30) * 1000
 
     created_new = False
@@ -530,9 +544,38 @@ def screenshot():
         if not page:
             raise RuntimeError("Tab not found")
         img_bytes = page.screenshot(full_page=full_page)
+        if len(img_bytes) > visual.MAX_SCREENSHOT_BYTES:
+            # Refused rather than truncated: a truncated PNG is a corrupt PNG.
+            # Only full_page gets anywhere near this, and the remedy is named.
+            if created_new:
+                _close_session(session_id)
+            return jsonify({
+                "status": "error",
+                "error": (
+                    f"screenshot is {len(img_bytes)} bytes, over the "
+                    f"{visual.MAX_SCREENSHOT_BYTES} byte cap -- take a viewport "
+                    f"capture and scroll instead of full_page"
+                ),
+            }), 413
+
+        headers = {}
+        record, why = visual.build_capture(
+            img_bytes, page=page, full_page=full_page, measure=measure,
+        )
+        if record is None:
+            log.info("No capture frame recorded for %s: %s", session_id, why)
+            headers["X-Browse-Capture-Error"] = why
+        else:
+            headers["X-Browse-Capture"] = json.dumps(record)
+            if not created_new:
+                with _sessions_lock:
+                    live = _sessions.get(session_id)
+                    if live is not None:
+                        live["capture"] = record
+
         if created_new:
             _close_session(session_id)
-        return Response(img_bytes, mimetype="image/png")
+        return Response(img_bytes, mimetype="image/png", headers=headers)
     except Exception as e:
         if created_new:
             _close_session(session_id)
@@ -768,9 +811,127 @@ def render_page():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+MAX_TYPE_CHARS = 4096
+
+
+def _settle(page, ms):
+    """Let the page react to a pointer or key event, swallowing a navigation.
+
+    A visual click is most useful exactly when it navigates -- pressing the
+    Cloudflare checkbox replaces the interstitial with the real page -- and a
+    navigation destroys the execution context this timer is waiting in.
+    Letting that raise loses the result of a click that already happened at
+    the X11 level, which is the "success reported as a failure" shape.
+    """
+    try:
+        page.wait_for_timeout(ms)
+    except Exception as e:
+        log.info("Page changed under the settle wait (this is normal "
+                 "after a click that navigates): %s", e)
+
+
+def _coordinate_action(session, page, action):
+    """Run one visual-mode action. Returns the result dict for the action list.
+
+    Every one of these drives X11 rather than CDP. The selector actions above
+    use page.click and page.fill because they have an element to resolve; these
+    have a point, and a point can be pressed by the pointer -- which is the
+    only way to press the Cloudflare interstitial's checkbox, whose element
+    lives in a closed shadow root inside a cross-origin frame that no selector
+    reaches and whose challenge fails a CDP-dispatched click anyway.
+    """
+    action_type = action["type"]
+
+    if action_type in ("click_at", "hover_at"):
+        record = session.get("capture")
+        code, detail = visual.staleness(record, page) or (None, None)
+        if code:
+            log.info("Refusing %s on %s: %s -- %s",
+                     action_type, session.get("tab_index"), code, detail)
+            return {
+                "action": action_type, "ok": False,
+                "error": code, "detail": detail,
+            }
+        try:
+            screen_x, screen_y = visual.image_to_screen(
+                record, action.get("x"), action.get("y"),
+                image_size=action.get("image_size"),
+            )
+        except ValueError as e:
+            return {
+                "action": action_type, "ok": False,
+                "error": "out_of_picture", "detail": str(e),
+            }
+
+        if action_type == "hover_at":
+            browsing.human_move_to(screen_x, screen_y)
+            return {
+                "action": "hover_at", "ok": True,
+                "screen": [round(screen_x), round(screen_y)],
+            }
+
+        button = 3 if action.get("button") == "right" else 1
+        browsing.human_click_at(screen_x, screen_y, button=button)
+        _settle(page, 1000)
+        return {
+            "action": "click_at", "ok": True,
+            "screen": [round(screen_x), round(screen_y)],
+        }
+
+    if action_type == "click_challenge":
+        # The one action that locates its own target. The checkbox has no
+        # selector, so the frame's bounding box plus a measured inset is the
+        # only handle on it -- and the frame element does answer bounding_box().
+        record = session.get("capture")
+        if not record or not record.get("offset"):
+            return {
+                "action": "click_challenge", "ok": False,
+                "error": "no_capture",
+                "detail": "screenshot the session first so the coordinate "
+                          "frame is on record",
+            }
+        point = browsing.cloudflare_checkbox_point(page)
+        if not point:
+            return {
+                "action": "click_challenge", "ok": False,
+                "error": "no_challenge",
+                "detail": "no visible Cloudflare challenge frame on this page",
+            }
+        screen_x, screen_y = visual.page_to_screen(record, point[0], point[1])
+        browsing.human_click_at(screen_x, screen_y)
+        _settle(page, 2000)
+        return {
+            "action": "click_challenge", "ok": True,
+            "css": [round(point[0]), round(point[1])],
+            "screen": [round(screen_x), round(screen_y)],
+        }
+
+    if action_type == "key":
+        key = action.get("key", "")
+        if not key:
+            return {"action": "key", "ok": False, "error": "key is required"}
+        xdotool.key_native(key)
+        _settle(page, 300)
+        return {"action": "key", "key": key, "ok": True}
+
+    if action_type == "type":
+        text = action.get("text", "")[:MAX_TYPE_CHARS]
+        xdotool.type_native(text)
+        _settle(page, 300)
+        return {"action": "type", "chars": len(text), "ok": True}
+
+    # Unreachable while _COORDINATE_ACTIONS and the branches above agree. It
+    # answers rather than returning None because the caller appends whatever
+    # this gives it, and a null in the action list is worse than a refusal.
+    return {"action": action_type, "ok": False, "error": "unknown"}
+
+
+_COORDINATE_ACTIONS = ("click_at", "hover_at", "click_challenge", "key", "type")
+
+
 @app.route("/interact", methods=["POST"])
 def interact():
-    """Interact with an existing session (click, fill, scroll)."""
+    """Interact with an existing session (click, fill, scroll, or a point)."""
     _cleanup_expired()
     data = request.get_json()
     session_id = data.get("session_id")
@@ -828,6 +989,8 @@ def interact():
                 results.append({
                     "action": "select", "selector": selector, "ok": True,
                 })
+            elif action_type in _COORDINATE_ACTIONS:
+                results.append(_coordinate_action(session, page, action))
             else:
                 results.append({
                     "action": action_type, "ok": False, "error": "unknown",
@@ -851,6 +1014,15 @@ def interact():
         })
 
     except Exception as e:
+        # Logged, not just returned. A 500 from here used to leave nothing in
+        # the container log at all, so a caller reporting "it failed" and an
+        # operator reading the log were looking at two different amounts of
+        # information -- and the actions list is empty precisely when the raise
+        # beat the append, which is the case the message is needed for.
+        log.warning(
+            "Interact failed after %d action(s): %s",
+            len(results), e, exc_info=True,
+        )
         return jsonify({
             "status": "error",
             "session_id": session_id,
@@ -890,6 +1062,50 @@ def evaluate():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/challenge", methods=["POST"])
+def challenge():
+    """Where the captcha/challenge widgets are on this page.
+
+    Geometry rather than a verdict -- detect_captcha() answers whether one is
+    there, this answers where. Reports CSS pixels, plus the X11 screen point
+    of the Cloudflare checkbox when a capture frame is on record, so a caller
+    can see what click_challenge would press before pressing it.
+    """
+    _cleanup_expired()
+    data = request.get_json() or {}
+    session_id = data.get("session_id")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+
+    session = _get_session(session_id)
+    if not session:
+        return jsonify({
+            "error": f"session {session_id} not found or expired",
+        }), 404
+
+    chrome.connect_cdp()
+    page = _get_page(session["tab_index"])
+    if not page:
+        return jsonify({"error": "tab not found"}), 500
+
+    try:
+        boxes = browsing.challenge_boxes(page)
+        point = browsing.cloudflare_checkbox_point(page)
+        record = session.get("capture")
+        screen = None
+        if point and record and record.get("offset"):
+            sx, sy = visual.page_to_screen(record, point[0], point[1])
+            screen = [round(sx), round(sy)]
+        return jsonify({
+            "status": "ok",
+            "frames": boxes,
+            "checkbox_css": [round(point[0]), round(point[1])] if point else None,
+            "checkbox_screen": screen,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @app.route("/sessions/<session_id>", methods=["GET"])
 def get_session_info(session_id):
     """Check session status."""
@@ -913,6 +1129,10 @@ def get_session_info(session_id):
         "age_seconds": int(age),
         "ttl_seconds": int(ttl),
         "url": url,
+        # The coordinate frame the last screenshot was taken in, or null. A
+        # caller that wants to convert a point itself reads it from here; one
+        # that sends click_at never needs to.
+        "capture": session.get("capture"),
     })
 
 
