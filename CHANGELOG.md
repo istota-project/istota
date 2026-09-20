@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A picture that no longer describes the page is refused rather than clicked. A capture the page has scrolled or navigated away from, a window that moved, a full-page capture, or no capture at all each come back by name with what to do about it, so a stale picture costs a round rather than a click landing somewhere nobody chose. A screenshot too large for a vision provider's own envelope is shrunk before it is written, so the picture the model sees is the picture the click is converted against.
 
+- A coordinate action that fails after it has already acted says so. The browser runs an action list in order and a failure abandons the rest, so an action that came back with no result is not an action that did not happen — the pointer may have moved and pressed before the failure landed. Those actions are named, with the instruction to look at the page rather than repeat them.
+
 - An image file in the workspace reaches the model as an image rather than as `Cannot read binary file`. That is what makes the visual loop work on the native brain, and it also covers a chart a skill wrote or a photograph a user dropped in their own folder. An image is read whole or refused at 6 MiB, since a truncated image is a corrupt one, and `offset` and `limit` count lines and are refused rather than quietly dropped.
 
 ## [0.42.0] - 2026-09-19
