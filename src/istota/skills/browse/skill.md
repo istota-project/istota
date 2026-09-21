@@ -140,6 +140,8 @@ Every URL in the markdown is already absolute — use them exactly as given. `mo
 
 `links` here are relative or absolute exactly as the page wrote them. `session_id` is only present with `--keep-session`. `extract` returns `{"status": "ok", "selector": "...", "count": N, "elements": [{"text": "...", "html": "...", "href": "...", ...}]}`.
 
+**`links_truncated: true` means the list was cut short, and a full list of the wrong links is what it looks like.** The budget is spent in page order, so a section front whose navigation, login and subscription chrome runs past the cap can return a complete-looking array with no articles in it at all. When you see that key — on `get`, on `links` or on `interact` — do not conclude the page has nothing on it and do not start guessing URLs. Ask again with `--max-links` above the `anchors_total` the same answer gives you. Where `anchors_total` is itself the scan ceiling, raising the budget cannot reach further: read the page with `extract` and a selector instead. Neither key appears when the whole list came back, so their absence is the page's real answer.
+
 ## Researching articles from news sites
 
 1. Render the hub/index page with `--keep-session`:
@@ -224,6 +226,8 @@ A screenshot taken by the URL form records nothing, because it closes its own se
 
 **A coordinate action can fail after it has already acted.** If the result carries `unreported_actions`, those actions came back with no result of their own and the first of them may still have happened — the browser runs the list in order and a failure can land after the pointer has moved and pressed. Do not repeat it blind: take a fresh screenshot, look at the page, and decide from what you see.
 
+**If the browser never answered at all, the doubt covers the whole list.** A timeout or a dropped connection gets the same `unreported_actions` field naming every action you sent, and a note saying any of them may have happened. The container does not learn that the client went away, so it carries on running the list — the interaction may have completed in full after you were told it failed. The recovery is the same and matters more: look at the page before repeating any of it. The two notes are worded differently on purpose, so read which one you got.
+
 **Max 8 look-click rounds** — one round is a capture plus the actions you take from it. If eight rounds have not got you there, the page is not going to yield to this; say what you saw and stop. Every picture costs context for the rest of the task, and the container holds two tabs for the whole deployment.
 
 **The second tab matters here.** Sessions are tabs in one browser window, and clicks and keystrokes go to whichever tab is in front — so the container brings your session's tab forward before every action and refuses with `tab_not_foreground` if that did not take. That refusal means nothing happened. The case it protects you from is a second session that navigated after your screenshot: your picture is still correct, and without the check the input would have gone to the other tab and reported success.
@@ -273,4 +277,4 @@ When WebSearch or WebFetch aren't available, use `istota-skill browse` as a fall
 
 - Sessions expire after 10 minutes of inactivity — always close them when done
 - Anti-fingerprinting (stealth mode) is enabled by default
-- Budgets are caller-raisable: `render --max-chars` (default 100,000), `get --max-chars` / `--max-links` (50,000 / 100), `extract --max-chars` / `--limit` (25,000 per element / 20 elements)
+- Budgets are caller-raisable: `render --max-chars` (default 100,000), `get --max-chars` / `--max-links` and `links --max-links` (50,000 / 100), `extract --max-chars` / `--limit` (25,000 per element / 20 elements). The link budget counts links returned rather than anchors examined, and a clipped list says so — see `links_truncated` above.

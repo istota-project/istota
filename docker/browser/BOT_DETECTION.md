@@ -231,6 +231,56 @@ Replaced uniform-random timing model with human motor patterns:
 - **Micro-jitter** — ±1-2px gaussian perturbation on each mouse position
 - **Idle moments** — 30% chance of 0.3-1.0s pause between movements (thinking/reading)
 
+## Signals that do not work, and one test shape that lies
+
+Three findings, each measured rather than reasoned. They are here because all
+three look like reasonable ideas on paper and all three are wrong in a way
+that leaves the code looking correct.
+
+### `document.visibilityState` is not a foreground probe here
+
+Every tab reads `visible`, background ones included, measured on the shipped
+build. Sessions are tabs in one Chrome window on Xvfb with no window manager,
+and nothing in that arrangement marks a tab hidden the way a real desktop
+would — so a check asking the page whether it is in front is answered `visible`
+by whichever tab is asked, and a caller reading it as a foreground test gets a
+`True` that means nothing.
+
+What does track the foreground tab is the **X11 window title**, which is the
+one signal outside the page. That is also what `xdotool.wait_for_challenges`
+already polls, so there is no second mechanism to build — a question about
+which tab is in front is asked of the window, never of the document.
+
+### The frame arm cannot corroborate a challenge verdict
+
+`browsing.challenge_boxes` walks `page.frames` and calls `frame_element()` and
+`bounding_box()` on each candidate. Every one of those is CDP into the live
+challenge window.
+
+So the tempting idea — take the title-based verdict and confirm it by looking
+for a challenge frame before acting — spends CDP at exactly the moment the rest
+of this document says not to. It would undo the protection it was meant to
+strengthen, and it would do so invisibly, because the corroborating call
+succeeds and the page still loads. The title verdict stands alone on purpose;
+where a second opinion is wanted, it has to come from outside the page.
+
+### A test that 500s before reaching its subject, and passes anyway
+
+Three instances of this turned up in one day. The reusable one: a page double
+with no `screenshot` method, handed to the capture endpoint. The endpoint
+raised `AttributeError` and answered 500 long before `build_capture` ran — and
+the test asserted `"evaluate" not in page.calls` and passed, because a call
+that never happened satisfies a negative assertion exactly as well as a call
+that was correctly avoided.
+
+The shape generalizes past this repository: **a negative assertion cannot tell
+"the code did the right thing" from "the code never got there."** Any test
+whose whole claim is that something did *not* happen needs a positive
+assertion beside it — that the response was the one expected, that the subject
+actually ran — or it will go green for a build that is entirely broken. On a
+tier asserting against a live artifact, run the control and write down what it
+turned red.
+
 ## Open Issues
 
 ### Patchright Version Lock

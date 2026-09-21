@@ -16,6 +16,7 @@ from istota.skills.browse import (
     OrderedFlag,
     _interact_actions,
     _links_from_extract,
+    _note_unreported_actions,
     build_parser,
     cmd_challenge,
     cmd_close,
@@ -1213,6 +1214,86 @@ class TestCmdLinks:
 
         assert result["status"] == "error"
         assert result["error"] == "timeout"
+
+
+class TestLinksCarriesTheBudgetVerdict:
+    """`links` reshapes the response, so it has to carry the clipping with it.
+
+    The container says when the link budget bound (ISSUE-531), because a full
+    array of navigation chrome reads exactly like a complete answer. This
+    subcommand rebuilds the envelope from scratch — `status`, `url`, `count`,
+    `links` — so a verdict it does not copy over is a verdict the model never
+    sees, on the one subcommand whose entire subject is links.
+    """
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_clipped_list_keeps_its_flag_through_the_reshape(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com/section/world",
+            "text": "Headlines the links array cannot reach",
+            "links": [{"text": f"Section {i}", "href": f"/section/{i}"} for i in range(100)],
+            "links_truncated": True,
+            "anchors_total": 357,
+        }
+        mock_post.return_value = mock_resp
+
+        args = build_parser().parse_args(["links", "https://news.example.com/section/world"])
+        result = cmd_links(args)
+
+        assert result["links_truncated"] is True
+        assert result["anchors_total"] == 357
+        assert result["count"] == 100
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_complete_list_gains_no_flag(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com",
+            "links": [{"text": "Article One", "href": "/article/one"}],
+        }
+        mock_post.return_value = mock_resp
+
+        result = cmd_links(build_parser().parse_args(["links", "https://news.example.com"]))
+
+        assert "links_truncated" not in result
+        assert "anchors_total" not in result
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_budget_can_be_raised_from_this_subcommand(self, mock_url, mock_post):
+        """The flag names a remedy, so the remedy has to be reachable here.
+
+        Without this the model is told the list was clipped by a subcommand
+        that gives it no way to ask for more, and its only route is to switch
+        to `get` — which returns the page text as well.
+        """
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "url": "https://n.example", "links": []}
+        mock_post.return_value = mock_resp
+
+        args = build_parser().parse_args(
+            ["links", "https://n.example", "--max-links", "400"],
+        )
+        cmd_links(args)
+
+        assert mock_post.call_args.kwargs["json"]["max_links"] == 400
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_unset_budget_is_not_sent(self, mock_url, mock_post):
+        """The container owns the default; sending a null would override it."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "url": "https://n.example", "links": []}
+        mock_post.return_value = mock_resp
+
+        cmd_links(build_parser().parse_args(["links", "https://n.example"]))
+
+        assert "max_links" not in mock_post.call_args.kwargs["json"]
 
 
 def _non_json_response(status_code, body, url="http://test:9223/browse"):
@@ -2796,3 +2877,172 @@ class TestAnActionWithNoResult:
 
         assert result["status"] == "ok"
         assert "unreported_actions" not in result
+
+
+class TestAnInteractionThatNeverAnswered:
+    """A transport failure with no response, where the container carries on.
+
+    The response-based caution can only fire on a body. A `ReadTimeout`, a
+    reset connection or a socket dropped mid-POST produces no body at all,
+    so the whole action list went out to a container that never learned the
+    client had gone away — and the model was handed a bare failure. It then
+    retries from a page it believes is unchanged, which is exactly what the
+    caution exists to stop.
+
+    Reachable without anything going wrong at the network layer: the request
+    timeout is 120s and a long type action is paced in the tens of
+    milliseconds per character, so an ordinary list can outlast it.
+    """
+
+    @staticmethod
+    def _args(*extra):
+        return build_parser().parse_args(
+            ["interact", "s1", "--click", "#one", "--fill", "#q=hello", *extra],
+        )
+
+    @pytest.mark.parametrize("exc", [
+        httpx.ReadTimeout("timed out"),
+        httpx.WriteTimeout("timed out"),
+        httpx.ReadError("reset"),
+        httpx.WriteError("broken pipe"),
+        httpx.RemoteProtocolError("peer closed"),
+    ])
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_ambiguous_failure_cautions_about_the_whole_list(
+        self, mock_url, mock_post, exc,
+    ):
+        mock_post.side_effect = exc
+
+        result = cmd_interact(self._args())
+
+        assert result["status"] == "error"
+        assert result["unreported_actions"] == ["click", "fill"]
+        note = result["notes"][0]
+        assert "any of them may have happened" in note
+        assert "do not simply retry" in note
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_error_names_the_exception_class(self, mock_url, mock_post):
+        """`str(ReadTimeout)` is often empty, so the class has to carry it.
+
+        The same lesson `describe` records one layer up: a message built from
+        `str(exc)` alone names no verb, no URL and no class.
+        """
+        mock_post.side_effect = httpx.ReadTimeout("")
+
+        result = cmd_interact(self._args())
+
+        assert "ReadTimeout" in result["error"]
+        assert "http://test:9223" in result["error"]
+
+    @pytest.mark.parametrize("exc", [
+        httpx.ConnectError("refused"),
+        httpx.ConnectTimeout("timed out"),
+        httpx.PoolTimeout("no connection"),
+    ])
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_failure_before_the_request_left_is_not_cautioned(
+        self, mock_url, mock_post, exc,
+    ):
+        """Nothing reached the container, so nothing can have happened.
+
+        Cautioning here would tell the model its actions might have run
+        against a container it never opened a connection to — and it would
+        replace `describe`'s "is the container running?" with a sentence
+        about page state, which is the wrong remedy entirely.
+        """
+        mock_post.side_effect = exc
+
+        with pytest.raises(type(exc)):
+            cmd_interact(self._args())
+
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_failure_fetching_the_capture_frame_is_not_cautioned(
+        self, mock_url, mock_get,
+    ):
+        """The frame is read before the actions are sent, so it is pre-send.
+
+        This is the one caution-worthy-looking failure inside `cmd_interact`
+        that genuinely is not: `/interact` has not been called yet.
+        """
+        mock_get.side_effect = httpx.ReadTimeout("timed out")
+
+        with pytest.raises(httpx.ReadTimeout):
+            cmd_interact(build_parser().parse_args(
+                ["interact", "s1", "--click-at", "10,20"],
+            ))
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_two_cautions_do_not_read_alike(self, mock_url, mock_post):
+        """"Some of these may have happened" and "any of these may have"
+        call for different recovery, so the notes must not be one sentence.
+
+        The response arm knows which actions are in doubt and names the first
+        of them; this arm has no results list and can only name the whole
+        list. Both notes are built here and compared, because the property is
+        that they differ — asserting a phrase in one of them would pass just
+        as happily if the other were changed to match it.
+        """
+        mock_post.side_effect = httpx.ReadTimeout("timed out")
+        transport_note = cmd_interact(self._args())["notes"][0]
+
+        actions = [{"type": "click"}, {"type": "fill"}]
+        response_note = _note_unreported_actions(
+            {"status": "error", "actions": []}, actions,
+        )["notes"][0]
+
+        assert transport_note != response_note
+        assert "The first of them may still have happened" in response_note
+        assert "The first of them" not in transport_note
+        assert "any of them may have happened" in transport_note
+        assert "any of them may have happened" not in response_note
+        # Both still tell the model to look before repeating, which is the
+        # one instruction they share.
+        assert "do not simply retry" in transport_note
+        assert "do not simply retry" in response_note
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_caution_still_fails_the_command(self, mock_url, mock_post, capsys):
+        """The caution is a returned envelope where it used to be a raise.
+
+        `run_skill_cli` exits on a returned error envelope as it does on an
+        exception, so the task still fails — a note the model reads on a
+        command that reported success would be worse than no note.
+        """
+        mock_post.side_effect = httpx.ReadTimeout("timed out")
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["interact", "s1", "--click", "#one"])
+        assert exc_info.value.code == 1
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "error"
+        assert output["unreported_actions"] == ["click"]
+        assert "any of them may have happened" in output["notes"][0]
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_transport_failure_on_another_verb_gains_no_caution(
+        self, mock_url, mock_post, capsys,
+    ):
+        """`on_exception` is registered for the whole CLI, so the caution had
+        to be scoped to the interact path rather than attached there.
+
+        `get` sends no actions, so a page-state caution on it would be noise
+        pointing at a list that does not exist.
+        """
+        mock_post.side_effect = httpx.ReadTimeout("timed out")
+
+        with pytest.raises(SystemExit):
+            main(["get", "https://example.com"])
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "error"
+        assert "notes" not in output
+        assert "unreported_actions" not in output
