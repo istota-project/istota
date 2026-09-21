@@ -355,7 +355,7 @@ class TestSessionsDoNotSurviveARelaunch:
             # reads as a tab that is gone -- so the session would be dropped
             # here for a reason that has nothing to do with the generation.
             "page": _live_page(),
-            "created_at": time.time(),
+            "created_at": time.time(), "last_used_at": time.time(),
             "generation": chrome.launch_generation(),
         }
         chrome._launch_generation += 1
@@ -370,7 +370,7 @@ class TestSessionsDoNotSurviveARelaunch:
             # reads as a tab that is gone -- so the session would be dropped
             # here for a reason that has nothing to do with the generation.
             "page": _live_page(),
-            "created_at": time.time(),
+            "created_at": time.time(), "last_used_at": time.time(),
             "generation": chrome.launch_generation(),
         }
 

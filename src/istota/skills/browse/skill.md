@@ -301,7 +301,7 @@ Two fields say why there is no point to press, and they answer different questio
 
 **Press once, then look.** A pressed challenge takes a few seconds to settle, and pressing again while it works starts it over. Take a screenshot, and press a second time only if the widget is still there and still unticked. Two presses that change nothing is the point to stop.
 
-If there is no widget, the challenge does not clear, or `challenge` reports frames it cannot find a checkbox in: tell the user, give them the `vnc_url`, and wait for them to solve it. Then retry with `--session <session_id>`.
+If there is no widget, the challenge does not clear, or `challenge` reports frames it cannot find a checkbox in: tell the user, give them the `vnc_url`, and wait for them to solve it. API calls that use the session, including `session <session_id>` status checks, refresh its idle timeout. VNC activity alone does not; after ten minutes without an API call the session can expire. Then retry with `--session <session_id>`, or open a new session if it has expired.
 
 ## Fallback for web tools
 
@@ -309,7 +309,7 @@ When WebSearch or WebFetch aren't available, use `istota-skill browse` as a fall
 
 ## Notes
 
-- At capacity, a new session can replace the oldest session from the same task. It refuses with `retry_after_seconds` if every slot belongs to another caller. Close sessions you no longer need, reuse a session, or retry later. Calls without both a user and task identity cannot replace live sessions.
+- At capacity, a new session can replace the least recently used session from the same task. It refuses with `retry_after_seconds` if every slot belongs to another caller. Close sessions you no longer need, reuse a session, or retry later. Calls without both a user and task identity cannot replace live sessions.
 - The container defaults to two session slots; Ansible defaults to three. New sessions are refused above 80% container memory use. Existing sessions can still be closed by the memory-pressure backstop on requests that do not create a session. Owner hints affect scheduling only; they do not authenticate callers or isolate the shared Chrome profile.
 
 - Sessions expire after 10 minutes of inactivity — always close them when done

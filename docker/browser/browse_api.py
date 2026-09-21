@@ -54,7 +54,7 @@ log = logging.getLogger(__name__)
 #
 # The index survives only where a log line or a response wants a number, derived
 # on demand by _tab_index_of. It is authoritative nowhere.
-_sessions = {}  # id -> {page, created_at, owner, generation, context}
+_sessions = {}  # id -> {page, created_at, last_used_at, owner, generation, context}
 _sessions_lock = threading.Lock()
 SESSION_TTL = 600  # 10 minutes
 MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "2"))
@@ -260,7 +260,7 @@ def _create_session(owner=None):
             ]
             if not own_sessions:
                 earliest_expiry = min(
-                    session["created_at"] + SESSION_TTL
+                    session["last_used_at"] + SESSION_TTL
                     for session in _sessions.values()
                 )
                 retry_after = max(1, int(earliest_expiry - time.time()) + 1)
@@ -269,7 +269,7 @@ def _create_session(owner=None):
                     "can be replaced. Close a session or retry after a slot frees.",
                     retry_after,
                 )
-            oldest = min(own_sessions, key=lambda sid: _sessions[sid]["created_at"])
+            oldest = min(own_sessions, key=lambda sid: _sessions[sid]["last_used_at"])
             _close_session_unlocked(oldest)
 
     # The return value, rather than ctx.pages[-1]: the context is shared, so
@@ -278,10 +278,12 @@ def _create_session(owner=None):
     page = ctx.new_page()
 
     session_id = str(uuid.uuid4())[:8]
+    now = time.time()
     with _sessions_lock:
         _sessions[session_id] = {
             "page": page,
-            "created_at": time.time(),
+            "created_at": now,
+            "last_used_at": now,
             "owner": owner,
             # Which Chrome this page belongs to. See _get_session.
             "generation": chrome.launch_generation(),
@@ -324,8 +326,9 @@ def _get_session(session_id):
         session = _sessions.get(session_id)
         if session is None:
             return None
-        if time.time() - session["created_at"] > SESSION_TTL:
-            _sessions.pop(session_id, None)
+        now = time.time()
+        if now - session["last_used_at"] > SESSION_TTL:
+            _close_session_unlocked(session_id)
             return None
         if session.get("generation") != chrome.launch_generation():
             log.info(
@@ -350,6 +353,7 @@ def _get_session(session_id):
             )
             _sessions.pop(session_id, None)
             return None
+        session["last_used_at"] = now
         return session
 
 
@@ -485,7 +489,7 @@ def _note_memory_pressure(pct):
 
 
 def _drain_evict_request_unlocked():
-    """Evict the oldest session if the monitor asked for one and memory agrees.
+    """Evict the least recently used session if the monitor asked for one and memory agrees.
 
     Flask thread only; caller must hold the lock. Returns the evicted session
     id, or None.
@@ -518,7 +522,7 @@ def _drain_evict_request_unlocked():
             pct, MEMORY_EVICT_PCT,
         )
         return None
-    oldest = min(_sessions, key=lambda s: _sessions[s]["created_at"])
+    oldest = min(_sessions, key=lambda s: _sessions[s]["last_used_at"])
     log.warning("Memory at %.1f%% — evicting session %s", pct, oldest)
     _close_session_unlocked(oldest)
     return oldest
@@ -529,7 +533,7 @@ def _evict_expired():
     now = time.time()
     expired = [
         sid for sid, s in _sessions.items()
-        if now - s["created_at"] > SESSION_TTL
+        if now - s["last_used_at"] > SESSION_TTL
     ]
     for sid in expired:
         _close_session_unlocked(sid)
@@ -2465,8 +2469,9 @@ def get_session_info(session_id):
     session = _get_session(session_id)
     if not session:
         return jsonify({"status": "not_found"}), 404
-    age = time.time() - session["created_at"]
-    ttl = max(0, SESSION_TTL - age)
+    now = time.time()
+    age = now - session["created_at"]
+    ttl = max(0, SESSION_TTL - (now - session["last_used_at"]))
     # Try to get URL if CDP is connected
     url = ""
     if chrome.is_cdp_connected():
