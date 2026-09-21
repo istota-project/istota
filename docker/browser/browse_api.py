@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import uuid
+from urllib.parse import quote, urlsplit
 
 from flask import Flask, Response, jsonify, request
 
@@ -654,6 +655,54 @@ def _tab_index_of(page):
 # Navigation flow: disconnect CDP -> xdotool -> reconnect CDP
 # ---------------------------------------------------------------------------
 
+class NavigationMismatch(RuntimeError):
+    def __init__(self, requested, landed):
+        super().__init__("navigation_mismatch")
+        self.requested = requested
+        self.landed = landed
+
+
+def _document_url(url):
+    """Compare document addresses without fragments or browser spelling changes."""
+    parts = urlsplit(url)
+    if not parts.scheme:
+        parts = urlsplit("https://" + url.lstrip("/"))
+    if parts.scheme not in ("http", "https"):
+        return (url,)
+    port = parts.port
+    if (parts.scheme, port) in (("https", 443), ("http", 80)):
+        port = None
+    host = (parts.hostname or "").encode("idna").decode("ascii").lower()
+    # Chrome removes literal and percent-encoded dot segments. Keep empty
+    # segments and other escapes: /a//b and /a%2Fb are distinct documents.
+    segments = (parts.path or "/").split("/")[1:]
+    normalized = []
+    for index, segment in enumerate(segments):
+        dots = segment.lower().replace("%2e", ".")
+        if dots in (".", ".."):
+            if dots == ".." and normalized:
+                normalized.pop()
+            if index == len(segments) - 1:
+                normalized.append("")
+        else:
+            normalized.append(segment)
+    path = "/" + "/".join(normalized)
+    return (
+        parts.scheme, host, port,
+        quote(path, safe="/%:@!$&'()*+,;=-._~"),
+        quote(parts.query, safe="/%?:@!$&'()*+,;=-._~"),
+    )
+
+
+def _navigation_error_response(error):
+    if isinstance(error, NavigationMismatch):
+        return jsonify({
+            "status": "error", "error": "navigation_mismatch",
+            "requested": error.requested, "landed": error.landed,
+        }), 502
+    return jsonify({"status": "error", "error": str(error)}), 500
+
+
 def _navigate_and_wait(page, url, timeout_ms=30000):
     """Navigate via xdotool and wait for challenges.
 
@@ -662,10 +711,11 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
     unlike the pipe mode which Cloudflare detected. We keep CDP connected for
     simplicity and only use xdotool for navigation input.
 
-    1. Focus the correct tab (if multiple tabs exist)
+    1. Focus the correct tab
     2. Navigate via xdotool (pure X11 keyboard input)
     3. Wait for Cloudflare/security challenges to resolve
     4. Passive wait for page to settle
+    5. Require a committed navigation; retry a mismatch once
 
     Returns the challenge phrase still showing when step 3 ran out of time,
     and None when the page is clear. Every caller has to branch on it: the
@@ -676,21 +726,65 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
     """
     chrome.connect_cdp()
 
-    # Focus the right tab if multiple exist
-    ctx = chrome.get_context()
-    if ctx and len(ctx.pages) > 1 and page:
-        page.bring_to_front()
+    requested = _document_url(url)
+    for attempt in range(2):
+        # A pending event from a previous attempt must not prove this one.
+        page.wait_for_timeout(1)
+        targets = {requested}
+        if requested[0] == "http":
+            # Chrome may upgrade HTTP before emitting any request event.
+            targets.add(("https", *requested[1:]))
+        if not urlsplit(url).scheme:
+            targets.add(("http", *requested[1:]))
+        committed = set()
+        arrivals = []
+        deadline = time.monotonic() + timeout_ms / 1000
 
-    # Navigate via pure X11 input (not CDP Page.navigate)
-    xdotool.navigate(url, timeout_s=timeout_ms // 1000)
+        def on_request(req):
+            if not req.is_navigation_request() or req.frame != page.main_frame:
+                return
+            previous = req.redirected_from
+            if previous is not None and _document_url(previous.url) in targets:
+                targets.add(_document_url(req.url))
 
-    # Wait for Cloudflare/security challenges
-    challenge = xdotool.wait_for_challenges(timeout_s=15)
+        def on_commit(frame):
+            if frame != page.main_frame:
+                return
+            address = _document_url(frame.url)
+            arrivals.append(address)
+            # Once the requested document commits, later main-frame commits
+            # can be client-side redirects. An iframe cannot vouch for one.
+            if address in targets or committed:
+                committed.add(address)
 
-    # Passive wait — let page JS and fingerprinting complete
-    time.sleep(browsing.gauss_clamp(3.5, 1.0, 2.0, 5.0))
+        page.on("request", on_request)
+        page.on("framenavigated", on_commit)
+        try:
+            page.bring_to_front()
+            xdotool.navigate(url, timeout_s=timeout_ms // 1000)
+            challenge = xdotool.wait_for_challenges(timeout_s=15)
+            time.sleep(browsing.gauss_clamp(3.5, 1.0, 2.0, 5.0))
+            if challenge:
+                return challenge
 
-    return challenge
+            # time.sleep and X11 calls do not dispatch Patchright events.
+            # Pump its queue after the passive challenge window, before
+            # reading page.url (a cached property), without evaluating JS.
+            page.wait_for_timeout(1)
+            while not arrivals and time.monotonic() < deadline:
+                page.wait_for_timeout(100)
+            landed = page.url
+            if _document_url(landed) in committed:
+                return None
+            log.warning(
+                "Navigation mismatch on attempt %d: requested=%s landed=%s",
+                attempt + 1, url, landed,
+            )
+        finally:
+            page.remove_listener("request", on_request)
+            page.remove_listener("framenavigated", on_commit)
+
+    raise NavigationMismatch(url, landed)
 
 
 def _captcha_response(session_id, challenge=None):
@@ -837,7 +931,7 @@ def browse():
     except Exception as e:
         if created_new and not keep_session:
             _close_session(session_id)
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _navigation_error_response(e)
 
 
 @app.route("/screenshot", methods=["POST"])
@@ -893,7 +987,7 @@ def screenshot():
                 browsing.simulate_human_behavior(page)
         except Exception as e:
             _close_session(session_id)
-            return jsonify({"status": "error", "error": str(e)}), 500
+            return _navigation_error_response(e)
     else:
         return jsonify({"error": "url or session_id is required"}), 400
 
@@ -1017,7 +1111,7 @@ def extract():
                 browsing.simulate_human_behavior(page)
         except Exception as e:
             _close_session(session_id)
-            return jsonify({"status": "error", "error": str(e)}), 500
+            return _navigation_error_response(e)
     else:
         return jsonify({"error": "url or session_id is required"}), 400
 
@@ -1217,7 +1311,7 @@ def render_page():
     except Exception as e:
         if created_new and not keep_session:
             _close_session(session_id)
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _navigation_error_response(e)
 
 
 # Asked of the module that does the typing rather than written down here.
