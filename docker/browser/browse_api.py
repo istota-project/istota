@@ -904,6 +904,24 @@ def screenshot():
         # that is not None and is not usable either.
         if _page_is_gone(page):
             raise RuntimeError("Tab not found")
+        # The capture's own tab switch (ISSUE-536). Every other path that needs
+        # the right tab already takes one -- _navigate_and_wait,
+        # _coordinate_action, _selector_action -- and this was the only one on
+        # the visual path that did not. Under Xvfb with no window manager a tab
+        # that is not the foreground tab does not paint, so Playwright waits on
+        # a frame that never arrives and the capture dies at its own fixed 30s,
+        # on a healthy page that captures in 0.6s the moment it is in front.
+        # `--timeout` does not reach it: page.screenshot() takes no timeout
+        # argument at all.
+        #
+        # The second reason is the one that outlives the timeout. This picture
+        # is the coordinate frame a later click_at converts against, and X11
+        # input acts on whatever tab is in front -- _coordinate_action brings
+        # the named tab forward before pressing. A capture taken while some
+        # other tab was in front therefore records a frame for a page the
+        # pointer was not addressing. Fronting here makes the picture and the
+        # pointer agree by construction rather than by coincidence.
+        verdict = _capture_foreground(page)
         img_bytes = page.screenshot(full_page=full_page)
         if len(img_bytes) > visual.MAX_SCREENSHOT_BYTES:
             # Refused rather than truncated: a truncated PNG is a corrupt PNG.
@@ -944,6 +962,8 @@ def screenshot():
                     live = _sessions.get(session_id)
                     if live is not None:
                         live["capture"] = record
+
+        headers.update(_foreground_headers(verdict))
 
         if created_new:
             _close_session(session_id)
@@ -1347,6 +1367,98 @@ def _foreground(page, action_type, others=()):
     }
 
 
+#: Headers a capture reports its tab switch on. A header rather than a field
+#: because the body of that response is a PNG. Named beside the capture headers
+#: they travel with.
+FOREGROUND_HEADER = "X-Browse-Foreground"
+FOREGROUND_DETAIL_HEADER = "X-Browse-Foreground-Detail"
+
+
+def _capture_foreground(page):
+    """Bring this page's tab forward for a capture. Returns the verdict.
+
+    Unlike `_foreground`, this one **never refuses**, and that asymmetry is the
+    decision ISSUE-536 asked to be made rather than inherited. The coordinate
+    path refuses an unconfirmed switch and the selector path falls back to CDP,
+    because a click that lands on the wrong tab is invisible to the caller. A
+    picture of the wrong tab is not: it is in front of whoever asked for it,
+    and refusing the capture would leave them with neither the picture nor a
+    way to find out what went wrong. So the capture is taken either way and the
+    verdict travels with it.
+
+    `others` is deliberately not passed. It exists only to weaken a verdict to
+    `foreground_ambiguous` when another open tab carries the same title, which
+    on the coordinate path decides whether to press; here it would cost a
+    `title()` round trip per open tab on every capture in the look-and-click
+    loop to qualify a note nobody can act on differently.
+
+    Never raises: `visual.bring_to_front` returns a verdict for its own
+    failures, and a capture must not be lost to a fault in the thing that was
+    only ever meant to improve it.
+    """
+    try:
+        return visual.bring_to_front(page)
+    except Exception as e:  # pragma: no cover - bring_to_front catches its own
+        log.info("Capture foreground check failed: %s", e)
+        return None
+
+
+def _foreground_headers(verdict):
+    """The capture's foreground verdict as response headers, or {}.
+
+    A confirmed switch is the ordinary case and says nothing, exactly as
+    `_with_foreground` adds no key for one -- so a caller seeing no header
+    cannot tell a confirmed switch from a container predating this, and does
+    not need to: the remedy for both is to look at the picture.
+    """
+    if verdict is None or verdict.confirmed:
+        return {}
+    headers = {FOREGROUND_HEADER: verdict.code}
+    if verdict.detail:
+        headers[FOREGROUND_DETAIL_HEADER] = _header_safe(verdict.detail)
+    return headers
+
+
+def _header_safe(value):
+    """A detail string fit for an HTTP header value.
+
+    The detail embeds `page.title()` and `xdotool.window_title()` -- a page's
+    own text and a window title derived from it -- so every byte of it is
+    chosen by whatever page is loaded. Three separate hazards, and only the
+    first is the obvious one:
+
+    * **A line break is a header injection.** `str.split()` removes every one
+      Python calls whitespace, which is wider than CRLF: NEL, LS and PS go too.
+    * **Anything above U+00FF cannot be sent at all.** The response goes out
+      through werkzeug, which encodes each header line `latin-1, strict`, and
+      `visual.bring_to_front` builds this string with `{title!r}` -- `repr`
+      does not escape non-ASCII printables. So a page (or a sibling tab) whose
+      title carries CJK, an emoji or a curly quote raised `UnicodeEncodeError`
+      inside `send_header` and the client got a dropped connection: no picture,
+      no status, no headers. That is strictly worse than the silence this
+      header replaced, and on far commoner input than a newline -- the capture
+      was lost in exactly the degraded case the header exists to report.
+      `backslashreplace` keeps the title legible as an escape rather than
+      dropping it.
+    * **A long title is a response nobody wants.** Capped *after* the escape,
+      since escaping lengthens and a cap applied first would not bind.
+
+    `unicode_escape` rather than `ascii`/`backslashreplace`, and the difference
+    is the third hazard rather than a style: ESC and NUL *are* ASCII, so
+    `backslashreplace` has nothing to replace and leaves them in -- they
+    survive `str.split()` and werkzeug's CRLF check alike, and go out on the
+    wire. `unicode_escape` escapes the C0 set as well as everything above
+    U+00FF, so the result is printable ASCII whatever went in. It escapes a
+    literal backslash too, which is what keeps the escaping unambiguous.
+    """
+    collapsed = " ".join(str(value).split())
+    escaped = collapsed.encode("unicode_escape").decode("ascii")
+    return escaped[:_MAX_HEADER_DETAIL_CHARS]
+
+
+_MAX_HEADER_DETAIL_CHARS = 300
+
+
 def _with_foreground(result, verdict):
     """Carry an unconfirmed tab switch into the action's own result.
 
@@ -1490,8 +1602,24 @@ def _coordinate_action(session, page, action, others=()):
                 "action": "click_challenge", "ok": False,
                 "error": code, "detail": detail,
             }
-        point = browsing.cloudflare_checkbox_point(page)
+        point, target = browsing.cloudflare_checkbox_target(page)
         if not point:
+            if target == browsing.CF_TARGET_SOLVED:
+                # A solved widget keeps its frame at the same 300x65, so
+                # geometry still calls it blocking and the checkbox under it is
+                # still pressable -- which is what made this action look
+                # idempotent when it is not: pressing a green checkbox reports
+                # `ok` and starts nothing. `no_challenge` is the wrong word for
+                # it, since the caller's next move is to read the page rather
+                # than to look for a challenge of another kind (ISSUE-537).
+                return {
+                    "action": "click_challenge", "ok": False,
+                    "error": "challenge_solved",
+                    "detail": (
+                        "this Cloudflare widget has already been solved -- "
+                        "there is nothing to press; read the page instead"
+                    ),
+                }
             return {
                 "action": "click_challenge", "ok": False,
                 "error": "no_challenge",
@@ -2061,11 +2189,22 @@ def challenge():
 
     try:
         boxes = browsing.challenge_boxes(page)
-        point = browsing.cloudflare_checkbox_point(page)
+        point, target = browsing.cloudflare_checkbox_target(page)
         record = session.get("capture")
         screen = None
         stale = None
-        if point and record:
+        if point and not record:
+            # The verb exists to answer "is there a widget, and where", and it
+            # used to compute staleness only inside `if point and record` -- so
+            # with no capture on record it answered `checkbox_screen: null`
+            # with `stale: null`: no point, no reason, and no way to tell "this
+            # container cannot convert it" from "there is nothing to convert".
+            # `click_challenge` would then refuse with `no_capture`, and
+            # nothing before that refusal pointed at the remedy (ISSUE-537).
+            code, detail = visual.staleness(record, page) or (None, None)
+            if code:
+                stale = {"error": code, "detail": detail}
+        elif point and record:
             # The same live re-measure click_challenge performs, for the same
             # reason: this reports the screen point that action would press,
             # and a point converted against a frame that no longer describes
@@ -2084,6 +2223,12 @@ def challenge():
             "checkbox_css": [round(point[0]), round(point[1])] if point else None,
             "checkbox_screen": screen,
             "stale": stale,
+            # Why there is no point, when there is none. `no_challenge` and
+            # `solved` are both "nothing to press" and want opposite things
+            # done about them, and the frame list alone cannot separate them --
+            # a solved Turnstile is still a visible 300x65 frame on a challenge
+            # host. Null whenever a point was produced.
+            "checkbox_state": None if point else target,
         })
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
