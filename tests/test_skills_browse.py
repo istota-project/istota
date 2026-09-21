@@ -3723,6 +3723,7 @@ class TestProfileHandshake:
 
 @pytest.mark.parametrize("argv,method,payload", [
     (["state"], "get", None),
+    (["forget", "--all", "--profile", "--force"], "delete", {"origin": None, "all": True, "profile": True, "force": True}),
     (["forget", "--origin", "https://example.com"], "delete", {"origin": "https://example.com", "all": False, "profile": False}),
     (["forget", "--all", "--profile"], "delete", {"origin": None, "all": True, "profile": True}),
 ])
@@ -3736,3 +3737,26 @@ def test_state_and_forget_wire(argv, method, payload, monkeypatch, capsys):
     assert call.call_args.kwargs["headers"] == {"X-Istota-User": "alice"}
     assert call.call_args.kwargs.get("json") == payload
     assert json.loads(capsys.readouterr().out)["user_scope"] == "alice"
+
+
+@pytest.mark.parametrize("selection", [["--all"], ["--origin", "https://example.com"]])
+def test_forget_force_without_profile_never_sends(selection):
+    from istota.skills.browse import cmd_forget
+
+    with patch("istota.skills.browse.browser_request") as call:
+        result = cmd_forget(build_parser().parse_args(["forget", *selection, "--force"]))
+    assert result["status"] == "error"
+    assert "--all --profile" in result["error"]
+    call.assert_not_called()
+
+
+def test_forget_refusal_preserves_session_evidence(monkeypatch, capsys):
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    body = {"status": "error", "error": "Close your live browser sessions first",
+            "user_scope": "alice", "session_count": 1,
+            "sessions": [{"session_id": "example1", "age_seconds": 50, "idle_seconds": 40, "ttl_seconds": 560}]}
+    with patch("istota.skills.browse.httpx.request", return_value=httpx.Response(409, json=body)):
+        with pytest.raises(SystemExit) as exc:
+            main(["forget", "--all", "--profile"])
+    assert exc.value.code == 1
+    assert json.loads(capsys.readouterr().out) == body

@@ -314,7 +314,7 @@ def _create_session(owner=None):
     return session_id, page
 
 
-def _get_session(session_id):
+def _get_session(session_id, *, touch=True):
     """Get session info dict, or None if expired, missing, or from a dead Chrome.
 
     A session holds a page object, which is only meaningful against the Chrome
@@ -372,7 +372,8 @@ def _get_session(session_id):
             )
             _sessions.pop(session_id, None)
             return None
-        session["last_used_at"] = now
+        if touch:
+            session["last_used_at"] = now
         return session
 
 
@@ -910,9 +911,10 @@ def _captcha_response(session_id, challenge=None, **extra):
     return jsonify({
         "status": "captcha",
         "session_id": session_id,
+        "session_retained": True,
         "vnc_url": pool.console_url(_request_instance(), os.environ.get("BROWSER_VNC_URL", "")),
         "instance": {"user": _request_instance().user_id, "slot": _request_instance().slot},
-        "message": "Captcha detected. An operator must solve it in the browser console, then retry.",
+        "message": "Captcha detected. An operator must solve it in the browser console, then retry. The session is retained; close it when finished.",
         "challenge": challenge,
         **extra,
     })
@@ -2593,7 +2595,7 @@ def delete_session(session_id):
     """Close a session."""
     with _sessions_lock:
         session = _sessions.get(session_id)
-        if session is not None and session.get("user_id") != _user_scope:
+        if session is None or session.get("user_id") != _user_scope:
             return jsonify({"status": "not_found"}), 404
     _close_session(session_id)
     return jsonify({"status": "closed", "session_id": session_id})
@@ -2851,6 +2853,45 @@ def _forget_origin(value):
     return f"{parsed.scheme}://{authority}", host
 
 
+def _state_sessions():
+    """Inspect only this user's sessions on the Flask thread, without renewal.
+
+    Keep the pool's background-safe liveness helper free of Patchright calls.
+    State inspection and profile deletion instead use the same page checks as
+    a request addressing a session. The Flask server handles requests serially.
+    """
+    with _sessions_lock:
+        ids = [sid for sid, session in _sessions.items()
+               if session.get("user_id") == _user_scope]
+    inst = request.browser_instance
+    if inst is not None and not chrome.is_chrome_running(inst):
+        with _sessions_lock:
+            for sid in ids:
+                _sessions.pop(sid, None)
+        return []
+    # Drop already-invalid records before asking their connection anything.
+    # A watchdog recovery can leave a dead context attached to a new process.
+    candidates = [sid for sid in ids if _get_session(sid, touch=False) is not None]
+    if candidates:
+        # is_closed() reads Patchright's cache. A protocol round trip first
+        # delivers pending close events from tabs closed outside this API.
+        # Do not reconnect: a cold context must stay cold during inspection.
+        inst.pw_context.cookies()
+    now = time.time()
+    sessions = []
+    for sid in candidates:
+        session = _get_session(sid, touch=False)
+        if session is not None:
+            idle = max(0, now - session["last_used_at"])
+            sessions.append({
+                "session_id": sid,
+                "age_seconds": int(max(0, now - session["created_at"])),
+                "idle_seconds": int(idle),
+                "ttl_seconds": int(max(0, SESSION_TTL - idle)),
+            })
+    return sessions
+
+
 @app.route("/state", methods=["GET"])
 def browser_state():
     profile = _state_profile()
@@ -2860,6 +2901,7 @@ def browser_state():
     domains = None
     live = inst is not None and chrome.is_chrome_running(inst)
     try:
+        sessions = _state_sessions()
         size = _profile_size(profile)
         # Inspection never launches Chrome or reconnects a cold context.
         if live and inst.pw_context is not None:
@@ -2867,7 +2909,8 @@ def browser_state():
     except Exception:
         return jsonify({"status": "error", "error": "Could not inspect browser state"}), 502
     return jsonify({"status": "ok", "profile_exists": profile.is_dir(),
-                    "profile_size_bytes": size, "live": live, "cookie_domains": domains})
+                    "profile_size_bytes": size, "live": live, "cookie_domains": domains,
+                    "sessions": sessions, "session_count": len(sessions)})
 
 
 @app.route("/state", methods=["DELETE"])
@@ -2876,6 +2919,9 @@ def forget_browser_state():
     if not isinstance(body, dict):
         return jsonify({"status": "error", "error": "Expected a state selection"}), 400
     all_state, whole_profile = body.get("all", False), body.get("profile", False)
+    force = body.get("force", False)
+    if type(force) is not bool or (force and not (all_state is True and whole_profile is True)):
+        return jsonify({"status": "error", "error": "force requires all and profile"}), 400
     origin = body.get("origin")
     if (type(all_state) is not bool or type(whole_profile) is not bool
             or (all_state and origin is not None) or (whole_profile and not all_state)):
@@ -2891,10 +2937,20 @@ def forget_browser_state():
         return jsonify({"status": "error", "error": "user_scope_required"}), 400
     inst = request.browser_instance
     if whole_profile:
-        with _sessions_lock:
-            if request.user_scope in _live_session_users():
-                return jsonify({"status": "error", "error": "Close your live browser sessions first"}), 409
         try:
+            sessions = _state_sessions()
+        except Exception:
+            return jsonify({"status": "error", "error": "Could not inspect browser sessions"}), 502
+        if sessions and not force:
+            return jsonify({
+                "status": "error", "error": "Close your live browser sessions first, or use --force",
+                "sessions": sessions, "session_count": len(sessions),
+            }), 409
+        closed = []
+        try:
+            for session in sessions:
+                _close_session(session["session_id"])
+                closed.append(session["session_id"])
             if inst is not None:
                 pool.release_slot(inst, require_stopped=True)
             # Recheck canonical containment after teardown before deleting.
@@ -2905,7 +2961,7 @@ def forget_browser_state():
                 shutil.rmtree(profile)
         except (OSError, RuntimeError):
             return jsonify({"status": "error", "error": "Could not stop browser or remove profile"}), 502
-        return jsonify({"status": "ok", "profile_deleted": True})
+        return jsonify({"status": "ok", "profile_deleted": True, "closed_sessions": closed})
     if inst is None and not profile.exists():
         return jsonify({"status": "ok", "cleared": "all" if all_state else origin})
     try:
