@@ -394,6 +394,13 @@ def _navigate_and_wait(tab_index, url, timeout_ms=30000):
     2. Navigate via xdotool (pure X11 keyboard input)
     3. Wait for Cloudflare/security challenges to resolve
     4. Passive wait for page to settle
+
+    Returns the challenge phrase still showing when step 3 ran out of time,
+    and None when the page is clear. Every caller has to branch on it: the
+    passive wait at step 4 was calibrated for a challenge that clears, and a
+    CDP call made while one is still running is the detection vector
+    BOT_DETECTION.md documents. `wait_for_datadome` is the first such call in
+    every one of them.
     """
     chrome.connect_cdp()
 
@@ -408,10 +415,35 @@ def _navigate_and_wait(tab_index, url, timeout_ms=30000):
     xdotool.navigate(url, timeout_s=timeout_ms // 1000)
 
     # Wait for Cloudflare/security challenges
-    xdotool.wait_for_challenges(timeout_s=15)
+    challenge = xdotool.wait_for_challenges(timeout_s=15)
 
     # Passive wait — let page JS and fingerprinting complete
     time.sleep(browsing.gauss_clamp(3.5, 1.0, 2.0, 5.0))
+
+    return challenge
+
+
+def _captcha_response(session_id, challenge=None):
+    """The response shape for a challenge the caller has to clear.
+
+    The session is deliberately left open in every case, so the caller can
+    solve it over VNC -- or press it with `click_challenge` -- and retry
+    against the same tab.
+
+    `challenge` names the title phrase `_navigate_and_wait` saw still showing,
+    and is None when `detect_captcha` is what decided. The two are worth
+    telling apart: on the title verdict nothing has read the page at all, so
+    there is no title, text or link list to be had and none is being withheld.
+    The phrase comes from `xdotool.CHALLENGE_TITLE_PATTERNS`, so this quotes
+    itself rather than page-controlled text.
+    """
+    return jsonify({
+        "status": "captcha",
+        "session_id": session_id,
+        "vnc_url": os.environ.get("BROWSER_VNC_URL", ""),
+        "message": "Captcha detected. Solve via VNC, then retry.",
+        "challenge": challenge,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +478,14 @@ def browse():
         created_new = True
 
     try:
-        _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+        challenge = _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+        if challenge:
+            # Answered from the window title, before anything reads the page.
+            # Every call below this line goes over CDP -- the DataDome
+            # evaluate, detect_captcha's inner_text, wait_for_selector and the
+            # content extraction alike -- and a challenge that has not cleared
+            # is exactly the window BOT_DETECTION.md says not to do that in.
+            return _captcha_response(session_id, challenge)
 
         page = _get_page(tab_index)
         if not page:
@@ -463,13 +502,7 @@ def browse():
                 pass
 
         if browsing.detect_captcha(page):
-            vnc_url = os.environ.get("BROWSER_VNC_URL", "")
-            return jsonify({
-                "status": "captcha",
-                "session_id": session_id,
-                "vnc_url": vnc_url,
-                "message": "Captcha detected. Solve via VNC, then retry.",
-            })
+            return _captcha_response(session_id)
 
         content = browsing.extract_page_content(
             page,
@@ -527,10 +560,16 @@ def screenshot():
         session_id, tab_index = _create_session()
         created_new = True
         try:
-            _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+            challenge = _navigate_and_wait(tab_index, url, timeout_ms=timeout)
             page = _get_page(tab_index)
             if page:
-                browsing.wait_for_datadome(page)
+                # No CDP evaluate while a challenge is still up. Unlike
+                # /browse this does not answer `captcha` and return: a
+                # screenshot of the interstitial is what the visual path
+                # needs in order to press it, so the rest of the endpoint
+                # runs and only the documented vector is skipped.
+                if not challenge:
+                    browsing.wait_for_datadome(page)
                 browsing.simulate_human_behavior(page)
         except Exception as e:
             _close_session(session_id)
@@ -608,10 +647,17 @@ def extract():
         session_id, tab_index = _create_session()
         created_new = True
         try:
-            _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+            challenge = _navigate_and_wait(tab_index, url, timeout_ms=timeout)
             page = _get_page(tab_index)
             if page:
-                browsing.wait_for_datadome(page)
+                # No CDP evaluate while a challenge is still up. This endpoint
+                # has no `captcha` shape to answer with, so unlike /browse it
+                # carries on and only the documented vector is skipped: the
+                # selector reads below still run against whatever the
+                # challenge is showing. Giving /extract that shape is a
+                # contract change, and is left for whoever wants one.
+                if not challenge:
+                    browsing.wait_for_datadome(page)
                 browsing.simulate_human_behavior(page)
         except Exception as e:
             _close_session(session_id)
@@ -758,7 +804,13 @@ def render_page():
 
     try:
         if url:
-            _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+            challenge = _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+            if challenge:
+                # From the window title, before anything reads the page --
+                # page.content() below is as much a CDP call as the DataDome
+                # evaluate, and a challenge that has not cleared is the window
+                # BOT_DETECTION.md says not to make one in.
+                return _captcha_response(session_id, challenge)
 
         chrome.connect_cdp()
         page = _get_page(tab_index)
@@ -775,14 +827,7 @@ def render_page():
                 except Exception:
                     pass
             if browsing.detect_captcha(page):
-                # Session deliberately left open so the caller can solve it over
-                # VNC and retry against the same tab, as /browse does.
-                return jsonify({
-                    "status": "captcha",
-                    "session_id": session_id,
-                    "vnc_url": os.environ.get("BROWSER_VNC_URL", ""),
-                    "message": "Captcha detected. Solve via VNC, then retry.",
-                })
+                return _captcha_response(session_id)
 
         html = page.content()
         frame_payload, frames_capped = _collect_frames(page, include_frames)

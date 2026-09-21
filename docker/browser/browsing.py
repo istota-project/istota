@@ -11,19 +11,53 @@ from xdotool import mouse_click, mouse_location, mouse_move, xdo, xdo_key
 
 log = logging.getLogger(__name__)
 
-# Captcha detection patterns
-CAPTCHA_PATTERNS = [
+# Phrases a challenge says in its own voice. No ordinary page has a reason to
+# address its reader this way, so these decide at any length.
+CHALLENGE_PHRASES = (
+    "please verify you are a human",
+    "please complete the security check",
+)
+
+# The same intent, except that each of these is also an ordinary English
+# fragment: a transcript carries "just a moment", a support article carries
+# "checking your browser", and a page explaining captchas carries "verify you
+# are human" -- which is the very page class ISSUE-518 is about. They keep the
+# length guard they have always had, so behaviour on them is unchanged.
+#
+# ISSUE-518 asked for the guard to come off these too, on the ground that they
+# carry no false-positive risk at any length. They do carry one. The guard
+# costs little now that the frame arm recognises the Cloudflare widget on its
+# own (ISSUE-526), and a false positive here discards the page in silence,
+# which is the failure the issue is about -- so the trade runs the wrong way.
+GUARDED_CHALLENGE_PHRASES = (
     "just a moment",
     "checking your browser",
     "verify you are human",
-    "please verify you are a human",
+)
+
+# A challenge page is short. What the guard could never do is separate a real
+# challenge from a short page *about* challenges, since both are short -- which
+# is why the words below no longer reach it.
+CHALLENGE_BODY_MAX_CHARS = 2000
+
+# Words naming the *subject* rather than the state. A page listing captcha
+# demos says the first three and is not a challenge: ISSUE-518's report is
+# nopecha.com/demo, 1153 characters, no challenge frame at all, reported as
+# `captcha` with its title, text and links discarded and the model told to ask
+# a human to solve something that was not there.
+#
+# They decide nothing now. What recognises a challenge that does not announce
+# itself in words is the frame arm, which since ISSUE-526 sees the Cloudflare
+# managed-challenge widget these words used to stand in for. Kept as a list
+# because `detect_captcha` still logs when one turns up, which is what makes a
+# page the retired rule would have called a captcha auditable from the log.
+CAPTCHA_SUBJECT_WORDS = (
     "recaptcha",
     "hcaptcha",
     "captcha",
     "bot detection",
     "access denied",
-    "please complete the security check",
-]
+)
 
 CAPTCHA_FRAME_URLS = [
     "google.com/recaptcha",
@@ -78,9 +112,9 @@ FRAME_NOISE_URLS = CAPTCHA_FRAME_URLS + [
 # tracking pixels, 0x0 beacons, and the passive reCAPTCHA badge. The floor is
 # deliberately well below a banner ad — separating an ad from a widget is the
 # host list's job, and a size rule tight enough to do it would also drop real
-# embedded content. `detect_captcha`'s own 400x200 threshold is the precedent
-# for having one at all, not for its value: that one is asking whether a
-# challenge is blocking the page, which is a different question.
+# embedded content. `is_blocking_challenge_box` is the precedent for having a
+# size rule at all, not for its values: that one is asking whether a challenge
+# is in the way, which is a different question and is answered per host.
 FRAME_MIN_WIDTH = 100
 FRAME_MIN_HEIGHT = 50
 
@@ -395,6 +429,48 @@ def challenge_boxes(page):
 # around 10px of slack either way.
 CF_CHECKBOX_INSET_X = 22
 CF_CHECKBOX_MIN_HEIGHT = 40
+CLOUDFLARE_FRAME_URL = "challenges.cloudflare.com"
+# The reCAPTCHA/hCaptcha passive badge: visible, on the page, and not in the
+# way. A frame on those hosts counts as a challenge only once it is larger
+# than this in one dimension.
+PASSIVE_BADGE_MAX_WIDTH = 400
+PASSIVE_BADGE_MAX_HEIGHT = 200
+
+
+def is_blocking_challenge_box(url, box):
+    """Whether this challenge frame is in the way, or a passive badge.
+
+    Per host, because the two families draw their passive artifact at
+    different sizes and one threshold cannot separate both:
+
+    * Cloudflare's invisible Turnstile beacon has almost no height, while the
+      managed-challenge widget -- the thing a person has to click -- is about
+      300x65. Height alone separates them, and CF_CHECKBOX_MIN_HEIGHT is the
+      measured line `cloudflare_checkbox_point` has pressed against since
+      before this function existed.
+    * reCAPTCHA's passive badge is about 256x60 and is *not* blocking, so
+      Cloudflare's rule applied to that host would report a challenge on
+      every page carrying reCAPTCHA v3. Those hosts keep the 400x200 test.
+
+    The two thresholds used to disagree about the same frame, which is
+    ISSUE-526: a 300x65 Cloudflare widget was clickable according to
+    `cloudflare_checkbox_point` and invisible to `detect_captcha`, so a page
+    whose only challenge was that widget was caught only when its *text*
+    happened to trip a pattern -- and ISSUE-518 is why the text arm can no
+    longer stand in for the frame.
+
+    A frame with no measurable box is blocking. That is what the frame walk
+    already did, and a challenge that cannot be measured is the wrong one to
+    wave through.
+    """
+    if not box:
+        return True
+    if CLOUDFLARE_FRAME_URL in url:
+        return box["height"] >= CF_CHECKBOX_MIN_HEIGHT
+    return (
+        box["width"] >= PASSIVE_BADGE_MAX_WIDTH
+        or box["height"] >= PASSIVE_BADGE_MAX_HEIGHT
+    )
 
 
 def cloudflare_checkbox_point(page):
@@ -404,9 +480,9 @@ def cloudflare_checkbox_point(page):
     to be the interstitial widget rather than an invisible Turnstile beacon.
     """
     for box in challenge_boxes(page):
-        if "challenges.cloudflare.com" not in box["url"]:
+        if CLOUDFLARE_FRAME_URL not in box["url"]:
             continue
-        if box["height"] < CF_CHECKBOX_MIN_HEIGHT:
+        if not is_blocking_challenge_box(box["url"], box):
             continue
         return (
             box["x"] + CF_CHECKBOX_INSET_X,
@@ -444,25 +520,50 @@ def wait_for_datadome(page, timeout_ms=15000):
 
 
 def detect_captcha(page):
-    """Check if the page shows a captcha challenge."""
+    """Whether this page is a challenge the caller has to clear.
+
+    Two arms, and since ISSUE-518 they no longer share a rule.
+
+    The **text** arm matches phrases, never product names. A page is a
+    challenge because of what it says about the reader's situation, not
+    because it mentions captchas -- and the bare words `captcha`,
+    `recaptcha` and `hcaptcha` deciding it meant an ordinary page listing
+    captcha demos came back as `status: captcha` with its content thrown
+    away and the model told to hand the user a VNC URL.
+
+    The **frame** arm is signature-based: a frame on a known challenge host,
+    visible, and big enough to be in the way. Since ISSUE-526 that includes
+    the Cloudflare managed-challenge widget, which is what lets the subject
+    words stop deciding anything -- before that they were the only thing
+    catching such a page, so the two issues pull the same constant in
+    opposite directions and this one had to land second.
+    """
     try:
         body_text = page.inner_text("body").lower()
     except Exception:
         body_text = ""
 
-    for pattern in CAPTCHA_PATTERNS:
-        if pattern in body_text:
-            if len(body_text) < 2000:
-                log.info(
-                    "Captcha detected: pattern=%r, body_len=%d",
-                    pattern, len(body_text),
-                )
-                return True
-            else:
-                log.debug(
-                    "Captcha pattern %r found but page has %d chars",
-                    pattern, len(body_text),
-                )
+    for phrase in CHALLENGE_PHRASES:
+        if phrase in body_text:
+            log.info(
+                "Captcha detected: phrase=%r, body_len=%d",
+                phrase, len(body_text),
+            )
+            return True
+
+    for phrase in GUARDED_CHALLENGE_PHRASES:
+        if phrase not in body_text:
+            continue
+        if len(body_text) < CHALLENGE_BODY_MAX_CHARS:
+            log.info(
+                "Captcha detected: phrase=%r, body_len=%d",
+                phrase, len(body_text),
+            )
+            return True
+        log.debug(
+            "Challenge phrase %r found but page has %d chars -- reading it "
+            "as prose", phrase, len(body_text),
+        )
 
     for frame in page.frames:
         for url_pattern in CAPTCHA_FRAME_URLS:
@@ -474,13 +575,11 @@ def detect_captcha(page):
                             "Captcha iframe hidden, ignoring: %r", frame.url,
                         )
                         continue
-                    # Passive reCAPTCHA (v2 invisible, v3) loads a small badge
-                    # iframe that is visible but not blocking. Only treat large
-                    # iframes as actual captcha challenges.
                     box = el.bounding_box()
-                    if box and box["width"] < 400 and box["height"] < 200:
+                    if not is_blocking_challenge_box(frame.url, box):
                         log.debug(
-                            "Captcha iframe too small (%dx%d), likely passive badge: %r",
+                            "Challenge iframe not blocking (%dx%d), likely a "
+                            "passive badge: %r",
                             box["width"], box["height"], frame.url,
                         )
                         continue
@@ -489,6 +588,16 @@ def detect_captcha(page):
                 log.info("Captcha detected: iframe=%r", frame.url)
                 return True
 
+    subject = next((w for w in CAPTCHA_SUBJECT_WORDS if w in body_text), None)
+    if subject:
+        # The page ISSUE-518 is about, seen from the other side: this is the
+        # verdict the retired rule would have returned. Logged rather than
+        # decided, so an operator reading the container log can still tell a
+        # page the old rule got wrong from one it never looked at.
+        log.debug(
+            "Page mentions %r and shows no challenge -- not a captcha "
+            "(body_len=%d)", subject, len(body_text),
+        )
     return False
 
 

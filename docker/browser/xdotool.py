@@ -449,22 +449,60 @@ def navigate(url, timeout_s=30):
         time.sleep(0.5)
 
 
+# What a window title says while a challenge is running. Kept here rather
+# than shared with browsing.CHALLENGE_PHRASES: browsing imports this module,
+# so the dependency cannot run the other way, and a window title is a
+# different surface from a page body in any case.
+CHALLENGE_TITLE_PATTERNS = (
+    "just a moment", "checking your browser", "verify you are human",
+)
+
+
+def challenge_phrase(title):
+    """Which challenge phrase this window title shows, or None.
+
+    The phrase rather than a bool, and the phrase rather than the title: the
+    title is page-controlled text, while every string in
+    CHALLENGE_TITLE_PATTERNS is one this file wrote. A caller that puts the
+    verdict in a response therefore quotes itself and not the page.
+    """
+    lowered = (title or "").lower()
+    for pattern in CHALLENGE_TITLE_PATTERNS:
+        if pattern in lowered:
+            return pattern
+    return None
+
+
 def wait_for_challenges(timeout_s=15):
-    """Wait for Cloudflare/security challenges to resolve via X11 title polling."""
+    """Wait for a Cloudflare/security challenge to clear, by X11 title polling.
+
+    Returns the challenge phrase still showing when the wait ran out, and None
+    when there was no challenge or it resolved.
+
+    The verdict is the point. BOT_DETECTION.md names "CDP Runtime.evaluate
+    during challenge window" as the second detection vector on the Cloudflare
+    interstitial, and the passive wait after this call is sized for a
+    challenge that *clears*. This is the branch that fires when it has not --
+    and until the verdict was returned, a warning in the log was the only
+    thing distinguishing it from success, so the one page where the container
+    already knew a challenge was running was also the one page it opened
+    Runtime.evaluate on.
+    """
     title = window_title()
-    challenge_patterns = [
-        "just a moment", "checking your browser", "verify you are human",
-    ]
-    if not any(p in title.lower() for p in challenge_patterns):
-        return
+    phrase = challenge_phrase(title)
+    if not phrase:
+        return None
     log.info("Challenge detected (title=%r) -- waiting for resolution", title)
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         time.sleep(1.5)
         title = window_title()
-        if not any(p in title.lower() for p in challenge_patterns):
+        phrase = challenge_phrase(title)
+        if not phrase:
             log.info("Challenge resolved (title=%r)", title)
-            return
+            return None
     log.warning(
-        "Challenge did not resolve within %ds (title=%r)", timeout_s, title,
+        "Challenge did not resolve within %ds (title=%r) -- "
+        "skipping the CDP calls that read the page", timeout_s, title,
     )
+    return phrase
