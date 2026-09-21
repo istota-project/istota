@@ -1,0 +1,151 @@
+"""Pool lifecycle and independent browser connections."""
+import importlib
+import sys
+import threading
+import types
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+
+@pytest.fixture
+def runtime(monkeypatch, tmp_path):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "docker/browser"))
+    if "patchright.sync_api" not in sys.modules:
+        api = types.ModuleType("patchright.sync_api")
+        api.sync_playwright = mock.Mock()
+        monkeypatch.setitem(sys.modules, "patchright", types.ModuleType("patchright"))
+        monkeypatch.setitem(sys.modules, "patchright.sync_api", api)
+    pool = importlib.import_module("pool")
+    chrome = importlib.import_module("chrome")
+    monkeypatch.setattr(pool, "PROFILE_ROOT", str(tmp_path))
+    monkeypatch.setattr(pool, "_instances", {})
+    monkeypatch.setattr(chrome, "_pw", None)
+    monkeypatch.setattr(chrome, "_driver_thread_id", None)
+    processes = []
+
+    def popen(argv, **kwargs):
+        proc = mock.Mock(pid=4000 + len(processes))
+        proc.poll.return_value = None
+        processes.append((argv, kwargs, proc))
+        return proc
+
+    monkeypatch.setattr(pool.subprocess, "Popen", popen)
+    monkeypatch.setattr(pool.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=0))
+    monkeypatch.setattr(pool, "_wait_for_vnc", lambda inst: None)
+    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst: None)
+    monkeypatch.setattr(chrome, "_signal_group", lambda *a: False)
+    driver = mock.Mock()
+    driver.chromium.connect_over_cdp.side_effect = lambda *a, **k: mock.Mock(contexts=[mock.Mock(pages=[])])
+    start = mock.Mock(return_value=types.SimpleNamespace(start=mock.Mock(return_value=driver)))
+    monkeypatch.setattr(chrome, "sync_playwright", start)
+    yield pool, chrome, processes, start
+    for inst in pool.live():
+        pool.release_slot(inst)
+
+
+def test_independent_instances_share_one_driver(runtime):
+    pool, chrome, processes, start = runtime
+    alice, bob = pool.acquire("alice"), pool.acquire("bob")
+    assert (alice.display, alice.cdp_port, alice.vnc_port) == (":100", 9300, 5900)
+    assert (bob.display, bob.cdp_port, bob.vnc_port) == (":101", 9301, 5901)
+    assert Path(alice.profile_dir).name == "alice"
+    assert Path(bob.profile_dir).name == "bob"
+    assert Path(alice.profile_dir).stat().st_mode & 0o777 == 0o700
+    assert alice.proc is not bob.proc
+    assert alice.pw_context is not bob.pw_context
+    assert start.call_count == 1
+    launches = [(argv, kw) for argv, kw, _ in processes if "--no-first-run" in argv]
+    assert len(launches) == 2
+    for inst, (argv, kw) in zip((alice, bob), launches):
+        assert f"--user-data-dir={inst.profile_dir}" in argv
+        assert f"--remote-debugging-port={inst.cdp_port}" in argv
+        assert kw["env"]["DISPLAY"] == inst.display
+        assert "--disk-cache-size=104857600" in argv
+    chrome.disconnect_cdp(alice)
+    chrome.get_context(bob)
+    assert not chrome.is_cdp_connected(alice)
+    assert chrome.is_cdp_connected(bob)
+    chrome._pw.stop.assert_not_called()
+
+
+def test_reuse_and_release_preserve_profile(runtime):
+    pool, _, processes, _ = runtime
+    alice = pool.acquire("alice")
+    assert pool.acquire("alice") is alice
+    assert len(processes) == 3
+    assert pool.instance_for("absent") is None
+    handles = [alice.proc, alice.xvfb_proc, alice.x11vnc_proc]
+    pool.release_slot(alice)
+    assert pool.live() == []
+    assert Path(alice.profile_dir).is_dir()
+    for proc in handles:
+        proc.wait.assert_called()
+    assert pool.acquire("bob").slot == 0
+
+
+def test_failed_launch_cleans_every_child(runtime, monkeypatch):
+    pool, chrome, processes, _ = runtime
+    monkeypatch.setattr(chrome, "connect_cdp", mock.Mock(side_effect=RuntimeError("connect failed")))
+    with pytest.raises(RuntimeError, match="connect failed"):
+        pool.acquire("alice")
+    assert pool.live() == []
+    for _, _, proc in processes:
+        proc.wait.assert_called()
+
+
+def test_capacity_refuses_without_eviction(runtime, monkeypatch):
+    pool, _, _, _ = runtime
+    monkeypatch.setattr(pool, "MAX_INSTANCES", 1)
+    alice = pool.acquire("alice")
+    with pytest.raises(pool.PoolFull):
+        pool.acquire("bob")
+    assert pool.live() == [alice]
+
+
+def test_shared_driver_refuses_a_second_thread(runtime):
+    pool, chrome, _, _ = runtime
+    alice = pool.acquire("alice")
+    bob = pool.BrowserInstance("bob", "/unused/bob", ":101", 9301, 5901, 1)
+    errors = []
+
+    def connect():
+        try:
+            chrome.connect_cdp(bob)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    thread = threading.Thread(target=connect)
+    thread.start()
+    thread.join(timeout=2)
+    assert errors and "thread" in errors[0]
+    assert chrome.is_cdp_connected(alice)
+
+
+@pytest.mark.parametrize("display", [":100", ":101"])
+def test_x11_commands_reach_the_requested_display(runtime, monkeypatch, display):
+    import xdotool
+
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(kwargs["env"]["DISPLAY"])
+        if "search" in argv:
+            return types.SimpleNamespace(stdout="123\n")
+        return types.SimpleNamespace(stdout="WIDTH=1440\nHEIGHT=900\n")
+
+    monkeypatch.setattr(xdotool.subprocess, "run", run)
+    assert xdotool.chrome_wid(display=display) == "123"
+    xdotool.xdo_key("Tab", display=display)
+    assert calls and set(calls) == {display}
+
+
+def test_display_start_failure_reaps_its_child(runtime, monkeypatch):
+    pool, _, processes, _ = runtime
+    monkeypatch.setattr(pool, "_wait_for_display", mock.Mock(side_effect=RuntimeError("display failed")))
+    with pytest.raises(RuntimeError, match="display failed"):
+        pool.acquire("alice")
+    assert pool.live() == []
+    assert len(processes) == 1
+    processes[0][2].wait.assert_called()

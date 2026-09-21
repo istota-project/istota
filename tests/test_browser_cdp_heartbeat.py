@@ -108,19 +108,20 @@ def _write_cdp_health(**fields):
     that there is exactly one.
     """
     with chrome._cdp_health_lock:
-        chrome._cdp_health.update(fields)
+        browse_api._instance.cdp_health.update(fields)
 
 
 @pytest.fixture(autouse=True)
 def _reset_module_globals():
     """chrome and browse_api are singletons; reset their globals around each test."""
     def _reset():
-        chrome._chrome_proc = None
+        browse_api._instance.proc = None
         chrome._pw = None
-        chrome._pw_browser = None
-        chrome._pw_context = None
-        chrome._pw_thread_id = None
-        chrome._launching = False
+        chrome._driver_thread_id = None
+        browse_api._instance.pw_browser = None
+        browse_api._instance.pw_context = None
+        browse_api._instance.pw_thread_id = None
+        browse_api._instance.launching = False
         _write_cdp_health(
             last_success=0.0, last_failure=0.0,
             consecutive_failures=0, last_error="",
@@ -129,9 +130,9 @@ def _reset_module_globals():
         # drives recover_wedged_chrome(). Left unreset it accumulates across
         # tests until the deep probe's fourth arm (ISSUE-394) answers
         # `wedge-loop` for every case here that expects `ok`.
-        chrome._launch_generation = 0
+        browse_api._instance.launch_generation = 0
         with chrome._wedge_lock:
-            chrome._wedge_recoveries.clear()
+            browse_api._instance.wedge_recoveries.clear()
         browse_api._wedge_loop_reported = False
         browse_api._sessions.clear()
         browse_api._evict_request.clear()
@@ -165,18 +166,18 @@ def _healthy_chrome(monkeypatch):
     """Chrome up, DevTools answering, not launching.
 
     Both old probe tiers read green in this state, and it is also the only state
-    in which a CDP failure is *counted*: chrome._chrome_explains_failure() reads
+    in which a CDP failure is *counted*: chrome._chrome_explains_failure(browse_api._instance) reads
     the same three facts, so a failure recorded here is one Chrome does not
     account for -- the ISSUE-382 signature.
     """
-    chrome._chrome_proc = FakeProc(alive=True)
-    chrome._launching = False
-    monkeypatch.setattr(chrome, "devtools_responding", lambda timeout=2: True)
-    monkeypatch.setattr(chrome, "is_launching", lambda: False)
+    browse_api._instance.proc = FakeProc(alive=True)
+    browse_api._instance.launching = False
+    monkeypatch.setattr(chrome, "devtools_responding", lambda inst, timeout=2: True)
+    monkeypatch.setattr(chrome, "is_launching", lambda inst: False)
 
 
 def _working_playwright(monkeypatch):
-    """Make chrome.connect_cdp() succeed against doubles."""
+    """Make chrome.connect_cdp(browse_api._instance) succeed against doubles."""
     ctx = mock.MagicMock(name="context")
     ctx.pages = []
     browser = mock.MagicMock(name="browser")
@@ -227,34 +228,34 @@ class TestTheRecord:
         those, so asserting them here would test the fixture. The key set is the
         part the fixture cannot fake, since it only ever updates.
         """
-        assert set(chrome.cdp_health()) == {
+        assert set(chrome.cdp_health(browse_api._instance)) == {
             "last_success", "last_failure", "consecutive_failures", "last_error",
         }
 
     def test_a_successful_connect_records_a_success(self, monkeypatch):
         _working_playwright(monkeypatch)
         before = time.monotonic()
-        chrome.connect_cdp()
-        h = chrome.cdp_health()
+        chrome.connect_cdp(browse_api._instance)
+        h = chrome.cdp_health(browse_api._instance)
         assert h["last_success"] >= before
         assert h["consecutive_failures"] == 0
 
     def test_reusing_a_live_connection_records_a_success(self, monkeypatch):
         _working_playwright(monkeypatch)
-        chrome.connect_cdp()
+        chrome.connect_cdp(browse_api._instance)
         _write_cdp_health(last_success=0.0)
         # Second call takes the reuse branch: a real CDP round-trip over the
         # socket, which is as much evidence of a working binding as a fresh one.
-        chrome.connect_cdp()
-        assert chrome.cdp_health()["last_success"] > 0.0
+        chrome.connect_cdp(browse_api._instance)
+        assert chrome.cdp_health(browse_api._instance)["last_success"] > 0.0
 
     def test_exhausting_the_retries_records_a_failure_with_the_error(self, monkeypatch):
         _healthy_chrome(monkeypatch)
         _poisoned_playwright(monkeypatch)
         before = time.monotonic()
         with pytest.raises(RuntimeError):
-            chrome.connect_cdp()
-        h = chrome.cdp_health()
+            chrome.connect_cdp(browse_api._instance)
+        h = chrome.cdp_health(browse_api._instance)
         assert h["consecutive_failures"] == 1, "one call is one failure, not one per retry"
         assert h["last_failure"] >= before
         assert "asyncio loop" in h["last_error"]
@@ -264,12 +265,12 @@ class TestTheRecord:
         _poisoned_playwright(monkeypatch)
         for _ in range(3):
             with pytest.raises(RuntimeError):
-                chrome.connect_cdp()
-        assert chrome.cdp_health()["consecutive_failures"] == 3
+                chrome.connect_cdp(browse_api._instance)
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 3
 
         _working_playwright(monkeypatch)
-        chrome.connect_cdp()
-        assert chrome.cdp_health()["consecutive_failures"] == 0
+        chrome.connect_cdp(browse_api._instance)
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
 
     def test_a_thread_affinity_refusal_counts_as_a_failure(self, monkeypatch):
         """The other way this class of fault presents (ISSUE-382's guard).
@@ -281,12 +282,12 @@ class TestTheRecord:
         """
         _healthy_chrome(monkeypatch)
         _working_playwright(monkeypatch)
-        chrome.connect_cdp()  # this thread owns the connection
+        chrome.connect_cdp(browse_api._instance)  # this thread owns the connection
         _write_cdp_health(consecutive_failures=0, last_error="")
 
-        _, err = _run_on_another_thread(lambda: chrome.connect_cdp())
+        _, err = _run_on_another_thread(lambda: chrome.connect_cdp(browse_api._instance))
         assert isinstance(err, RuntimeError)
-        h = chrome.cdp_health()
+        h = chrome.cdp_health(browse_api._instance)
         assert h["consecutive_failures"] == 1
         assert "does not own the CDP connection" in h["last_error"]
 
@@ -300,13 +301,13 @@ class TestTheRecord:
         _poisoned_playwright(monkeypatch)
         for _ in range(2):
             with pytest.raises(RuntimeError):
-                chrome.connect_cdp()
-        monkeypatch.setattr(chrome, "launch_chrome", lambda: None)
-        chrome._chrome_proc = FakeProc(alive=True)
+                chrome.connect_cdp(browse_api._instance)
+        monkeypatch.setattr(chrome, "launch_chrome", lambda inst: None)
+        browse_api._instance.proc = FakeProc(alive=True)
 
-        chrome.recover_wedged_chrome()
+        chrome.recover_wedged_chrome(browse_api._instance)
 
-        assert chrome.cdp_health()["consecutive_failures"] == 2
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 2
 
     def test_a_failure_chrome_explains_is_recorded_but_not_counted(self, monkeypatch):
         """The signature ISSUE-384 names is a run of failures *with Chrome alive*.
@@ -317,13 +318,13 @@ class TestTheRecord:
         outlives the condition.
         """
         _poisoned_playwright(monkeypatch)
-        chrome._chrome_proc = FakeProc(alive=False)
-        monkeypatch.setattr(chrome, "devtools_responding", lambda timeout=2: True)
+        browse_api._instance.proc = FakeProc(alive=False)
+        monkeypatch.setattr(chrome, "devtools_responding", lambda inst, timeout=2: True)
 
         with pytest.raises(RuntimeError):
-            chrome.connect_cdp()
+            chrome.connect_cdp(browse_api._instance)
 
-        h = chrome.cdp_health()
+        h = chrome.cdp_health(browse_api._instance)
         assert h["consecutive_failures"] == 0, "a dead Chrome must not count"
         assert h["last_failure"] > 0.0, "but it is still recorded for diagnosis"
         assert "asyncio loop" in h["last_error"]
@@ -334,34 +335,34 @@ class TestTheRecord:
         relaunch, and that used to record a failure for a recovery that worked.
         """
         _poisoned_playwright(monkeypatch)
-        chrome._chrome_proc = FakeProc(alive=True)
-        chrome._launching = True
-        monkeypatch.setattr(chrome, "devtools_responding", lambda timeout=2: True)
+        browse_api._instance.proc = FakeProc(alive=True)
+        browse_api._instance.launching = True
+        monkeypatch.setattr(chrome, "devtools_responding", lambda inst, timeout=2: True)
 
         with pytest.raises(RuntimeError):
-            chrome.connect_cdp()
+            chrome.connect_cdp(browse_api._instance)
 
-        assert chrome.cdp_health()["consecutive_failures"] == 0
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
 
     def test_a_silent_devtools_endpoint_does_not_count(self, monkeypatch):
         _poisoned_playwright(monkeypatch)
-        chrome._chrome_proc = FakeProc(alive=True)
-        chrome._launching = False
-        monkeypatch.setattr(chrome, "devtools_responding", lambda timeout=2: False)
+        browse_api._instance.proc = FakeProc(alive=True)
+        browse_api._instance.launching = False
+        monkeypatch.setattr(chrome, "devtools_responding", lambda inst, timeout=2: False)
 
         with pytest.raises(RuntimeError):
-            chrome.connect_cdp()
+            chrome.connect_cdp(browse_api._instance)
 
-        assert chrome.cdp_health()["consecutive_failures"] == 0
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
 
     def test_record_false_keeps_a_failure_out_of_the_count(self, monkeypatch):
         _healthy_chrome(monkeypatch)
         _poisoned_playwright(monkeypatch)
 
         with pytest.raises(RuntimeError):
-            chrome.connect_cdp(record=False)
+            chrome.connect_cdp(browse_api._instance, record=False)
 
-        assert chrome.cdp_health()["consecutive_failures"] == 0
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
 
     def test_record_false_still_lets_a_success_clear_the_count(self, monkeypatch):
         """A success is never a reason to restart, so there is no false positive
@@ -372,9 +373,9 @@ class TestTheRecord:
         _write_cdp_health(consecutive_failures=5)
         _working_playwright(monkeypatch)
 
-        chrome.connect_cdp(record=False)
+        chrome.connect_cdp(browse_api._instance, record=False)
 
-        assert chrome.cdp_health()["consecutive_failures"] == 0
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
 
     def test_the_record_survives_concurrent_writers_and_readers(self, monkeypatch):
         """The leaf lock, exercised rather than asserted in a comment.
@@ -388,14 +389,14 @@ class TestTheRecord:
         def _writer():
             try:
                 for _ in range(200):
-                    chrome._record_cdp_failure(RuntimeError("x"))
+                    chrome._record_cdp_failure(browse_api._instance, RuntimeError("x"))
             except BaseException as e:  # noqa: BLE001
                 errors.append(e)
 
         def _reader():
             try:
                 for _ in range(200):
-                    h = chrome.cdp_health()
+                    h = chrome.cdp_health(browse_api._instance)
                     assert set(h) == {
                         "last_success", "last_failure",
                         "consecutive_failures", "last_error",
@@ -411,12 +412,12 @@ class TestTheRecord:
             t.join(timeout=30)
         assert not any(t.is_alive() for t in threads), "a thread did not finish"
         assert errors == []
-        assert chrome.cdp_health()["consecutive_failures"] == 600
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 600
 
     def test_the_snapshot_is_a_copy(self):
-        h = chrome.cdp_health()
+        h = chrome.cdp_health(browse_api._instance)
         h["consecutive_failures"] = 99
-        assert chrome.cdp_health()["consecutive_failures"] == 0
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
 
 
 class TestTheDeepProbeThirdArm:
@@ -442,8 +443,8 @@ class TestTheDeepProbeThirdArm:
         """Names what stayed green for eight hours, so the arm is the difference."""
         _healthy_chrome(monkeypatch)
         self._wedge()
-        assert chrome.is_chrome_running() is True
-        assert chrome.devtools_responding() is True
+        assert chrome.is_chrome_running(browse_api._instance) is True
+        assert chrome.devtools_responding(browse_api._instance) is True
         assert browse_api._probe(deep=False) == (200, b"ok\n")
 
     def test_one_failure_short_of_the_threshold_still_passes(self, monkeypatch):
@@ -460,7 +461,7 @@ class TestTheDeepProbeThirdArm:
     def test_an_idle_container_that_never_touched_cdp_passes(self, monkeypatch):
         """The false-positive shape: absence of success is not evidence of a fault."""
         _healthy_chrome(monkeypatch)
-        assert chrome.cdp_health()["last_success"] == 0.0
+        assert chrome.cdp_health(browse_api._instance)["last_success"] == 0.0
         assert browse_api._probe(deep=True) == (200, b"ok\n")
 
     def test_a_success_after_the_failures_clears_the_verdict(self, monkeypatch):
@@ -468,7 +469,7 @@ class TestTheDeepProbeThirdArm:
         self._wedge()
         assert browse_api._probe(deep=True)[0] == 503
         _working_playwright(monkeypatch)
-        chrome.connect_cdp()
+        chrome.connect_cdp(browse_api._instance)
         assert browse_api._probe(deep=True) == (200, b"ok\n")
 
     def test_the_cheap_tier_ignores_the_record(self, monkeypatch):
@@ -479,7 +480,7 @@ class TestTheDeepProbeThirdArm:
     def test_a_dead_chrome_still_wins(self, monkeypatch):
         """Ordering: the cheap tier's verdict is the more specific one."""
         _healthy_chrome(monkeypatch)
-        chrome._chrome_proc = FakeProc(alive=False)
+        browse_api._instance.proc = FakeProc(alive=False)
         self._wedge()
         assert browse_api._probe(deep=True) == (503, b"chrome-down\n")
 
@@ -493,7 +494,7 @@ class TestTheDeepProbeThirdArm:
         long as the recovery attempt that cannot fix it.
         """
         _healthy_chrome(monkeypatch)
-        monkeypatch.setattr(chrome, "is_launching", lambda: True)
+        monkeypatch.setattr(chrome, "is_launching", lambda inst: True)
         self._wedge()
         assert browse_api._probe(deep=True) == (503, b"cdp-wedged\n")
 
@@ -557,9 +558,9 @@ class TestWhatMustNeverEarnARestart:
             stale.new_browser_cdp_session.side_effect = RuntimeError("socket is dead")
             ctx = mock.MagicMock(name="stale_context")
             ctx.pages = [mock.MagicMock(name="page0"), mock.MagicMock(name="page1")]
-            chrome._pw_browser = stale
-            chrome._pw_context = ctx
-            chrome._pw_thread_id = threading.get_ident()
+            browse_api._instance.pw_browser = stale
+            browse_api._instance.pw_context = ctx
+            browse_api._instance.pw_thread_id = threading.get_ident()
 
         return _arm
 
@@ -577,7 +578,7 @@ class TestWhatMustNeverEarnARestart:
             # A session holds the page object now (ISSUE-535), and the page has
             # to look live or this test stops testing anything: on `None`,
             # _close_session_unlocked returns at its own guard *before*
-            # chrome.get_context(), which is the call whose record=False this
+            # chrome.get_context(browse_api._instance), which is the call whose record=False this
             # case exists to pin. Verified by control -- flipping that call to
             # record=True must turn this red.
             page = mock.MagicMock(name=f"stale-page-{i}")
@@ -588,7 +589,7 @@ class TestWhatMustNeverEarnARestart:
             }
             browse_api._cleanup_expired()
 
-        assert chrome.cdp_health()["consecutive_failures"] == 0
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
         assert browse_api._probe(deep=True) == (200, b"ok\n")
 
     def test_a_diagnostics_poll_never_counts(self, monkeypatch):
@@ -598,7 +599,7 @@ class TestWhatMustNeverEarnARestart:
             arm()
             browse_api._get_chrome_diagnostics()
 
-        assert chrome.cdp_health()["consecutive_failures"] == 0
+        assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
         assert browse_api._probe(deep=True) == (200, b"ok\n")
 
     def test_a_wall_clock_jump_does_not_arm_the_verdict(self, monkeypatch):
@@ -611,7 +612,7 @@ class TestWhatMustNeverEarnARestart:
         # Stamped by the real recorder, so the clock under test is the one the
         # module actually uses rather than one the test chose.
         for _ in range(browse_api.CDP_FAILURE_THRESHOLD):
-            chrome._record_cdp_failure(RuntimeError("wedged"))
+            chrome._record_cdp_failure(browse_api._instance, RuntimeError("wedged"))
         assert browse_api._probe(deep=True)[0] == 503
 
         jump = browse_api.CDP_FAILURE_WINDOW_S * 10

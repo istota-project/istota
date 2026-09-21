@@ -20,42 +20,15 @@ if [ ! -f "$CERT_DIR/cert.pem" ]; then
     chown -R browser:browser "$CERT_DIR"
 fi
 
-# Clean up stale Xvfb lock files from previous container runs
-rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
-
-# Start Xvfb (virtual display) — runs as root, X11 accepts all connections (-ac)
-Xvfb :99 -screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24 -ac &
-export DISPLAY=:99
-
-# Wait for Xvfb to be ready (verify display is accepting connections)
-echo "Waiting for Xvfb..."
-for i in $(seq 1 30); do
-    if xdpyinfo -display :99 >/dev/null 2>&1; then
-        echo "Xvfb ready"
-        break
-    fi
-    sleep 0.5
-done
-if ! xdpyinfo -display :99 >/dev/null 2>&1; then
-    echo "ERROR: Xvfb failed to start after 15 seconds"
-    exit 1
-fi
-
-# Start x11vnc
-VNC_ARGS="-display :99 -forever -shared -rfbport 5900"
-if [ -n "$VNC_PASSWORD" ]; then
-    VNC_ARGS="$VNC_ARGS -passwd $VNC_PASSWORD"
-fi
-x11vnc $VNC_ARGS &
+# The non-root pool starts one X server per instance. Prepare its socket dir.
+install -d -m 1777 /tmp/.X11-unix
+# Slots start at 100; these are stale files from a previous container process.
+rm -f /tmp/.X1*-lock /tmp/.X11-unix/X1*
 
 # Start noVNC websocket proxy (serves web UI on port 6080, with TLS)
 /usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 \
     --cert "$CERT_DIR/combined.pem" &
 
-# Clean up stale Chromium profile locks from previous container runs
-rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonCookie" "$PROFILE_DIR/SingletonSocket"
-
-
 # Start the Flask API as the non-root browser user
 # This allows Chrome to use its native sandbox (Chrome refuses to sandbox as root)
-exec su -s /bin/bash browser -c "DISPLAY=:99 LANG=$LANG TZ=$TZ BROWSER_PROFILE_DIR=$PROFILE_DIR python /app/browse_api.py"
+exec su -s /bin/bash browser -c "LANG=$LANG TZ=$TZ BROWSER_PROFILE_DIR=$PROFILE_DIR python /app/browse_api.py"

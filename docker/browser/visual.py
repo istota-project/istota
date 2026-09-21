@@ -90,7 +90,7 @@ def page_state(page):
     }
 
 
-def build_capture(png_bytes, page=None, full_page=False, measure=True):
+def build_capture(png_bytes, page=None, full_page=False, measure=True, *, display):
     """The record a later coordinate action is interpreted against.
 
     `measure=False` skips the CDP evaluate entirely, for a caller that wants
@@ -101,7 +101,7 @@ def build_capture(png_bytes, page=None, full_page=False, measure=True):
     size = png_size(png_bytes)
     if not size:
         return None, "capture is not a PNG"
-    window = xdotool.window_geometry()
+    window = xdotool.window_geometry(display=display)
     if not window:
         return None, "Chrome window not found on the X11 display"
 
@@ -140,7 +140,7 @@ def build_capture(png_bytes, page=None, full_page=False, measure=True):
     }, None
 
 
-def staleness(record, page):
+def staleness(record, page, *, display):
     """Why this capture no longer describes the page, or None if it still does.
 
     Returns (code, detail). The codes are distinguished because the remedy is
@@ -165,7 +165,7 @@ def staleness(record, page):
             "converted to a screen position"
         )
 
-    window = xdotool.window_geometry()
+    window = xdotool.window_geometry(display=display)
     if not window:
         return "window_gone", "the Chrome window is no longer on the X11 display"
     if window != record["window"]:
@@ -344,7 +344,7 @@ def titles_agree(window_title, doc_title):
     return shown[:n] == wanted[:n]
 
 
-def bring_to_front(page, others=(), owned=()):
+def bring_to_front(page, others=(), owned=(), *, display):
     """Switch to this page's tab and report whether that is confirmed.
 
     `others` is the rest of the open pages. It is consulted only to weaken the
@@ -383,7 +383,7 @@ def bring_to_front(page, others=(), owned=()):
     deadline = time.time() + FOREGROUND_SETTLE_S
     window_title = ""
     while True:
-        window_title = xdotool.window_title()
+        window_title = xdotool.window_title(display=display)
         agree = titles_agree(window_title, doc_title)
         if agree is not False or time.time() >= deadline:
             break
@@ -431,7 +431,7 @@ def bring_to_front(page, others=(), owned=()):
     return Foreground(True, True)
 
 
-def screen_frame(page, record=None):
+def screen_frame(page, record=None, *, display):
     """The X11 frame a CSS point converts against, or (None, reason).
 
     `image_to_screen` interprets a picture the *caller* looked at, so it needs
@@ -454,7 +454,7 @@ def screen_frame(page, record=None):
     replacing it would make a later `--click-at` against the caller's own,
     older picture pass the staleness check it should have failed.
     """
-    window = xdotool.window_geometry()
+    window = xdotool.window_geometry(display=display)
     if not window:
         return None, "the Chrome window is not on the X11 display"
 
@@ -471,7 +471,7 @@ def screen_frame(page, record=None):
     except Exception as e:
         return None, f"could not measure the page's position on screen: {e}"
 
-    frame, error = build_capture(png, page=page, full_page=False)
+    frame, error = build_capture(png, page=page, full_page=False, display=display)
     if not frame:
         return None, error
     return frame, None

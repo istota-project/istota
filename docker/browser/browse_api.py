@@ -20,11 +20,16 @@ from urllib.parse import quote, urlsplit
 from flask import Flask, Response, jsonify, request
 
 import chrome
+import pool
+
 import browsing
 import render
 import visual
 import xdotool
 from text_budget import checked_offset
+
+# Transitional single-user admission; the pool itself already supports isolation.
+_instance = pool.BrowserInstance("default", "", ":100", 9300, 5900, 0)
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -65,7 +70,7 @@ MEMORY_REJECT_PCT = MEMORY_EVICT_PCT  # never add a tab while eviction is needed
 # Set by the resource-monitor thread when memory is over MEMORY_EVICT_PCT, and
 # drained by the Flask thread on its next request. The monitor used to evict
 # inline, which meant calling _close_session_unlocked() -- and so
-# chrome.get_context(), page.opener(), page.is_closed(), page.goto() and
+# chrome.get_context(_instance), page.opener(), page.is_closed(), page.goto() and
 # page.close() -- from its own thread. _sweep_unclaimed_pages_unlocked reaches
 # the same set and is on the same path. Treat this list as the thread-bound
 # surface rather than as illustrative: it is what tells a reader which calls
@@ -249,8 +254,8 @@ def _create_session(owner=None):
             f"Memory pressure too high ({mem_pct}%), refusing new session", 30,
         )
 
-    chrome.connect_cdp()
-    ctx = chrome.get_context()
+    chrome.connect_cdp(_instance)
+    ctx = chrome.get_context(_instance)
 
     with _sessions_lock:
         _evict_expired()
@@ -287,7 +292,7 @@ def _create_session(owner=None):
             "last_used_at": now,
             "owner": owner,
             # Which Chrome this page belongs to. See _get_session.
-            "generation": chrome.launch_generation(),
+            "generation": chrome.launch_generation(_instance),
             # And which *connection*, which is not the same question. A page
             # object belongs to the Patchright stack that produced it, and
             # connect_cdp() rebuilds that stack on a failed liveness probe with
@@ -331,11 +336,11 @@ def _get_session(session_id):
         if now - session["last_used_at"] > SESSION_TTL:
             _close_session_unlocked(session_id)
             return None
-        if session.get("generation") != chrome.launch_generation():
+        if session.get("generation") != chrome.launch_generation(_instance):
             log.info(
                 "Session %s belonged to a previous Chrome (generation %s, now %s) "
                 "-- discarding", session_id, session.get("generation"),
-                chrome.launch_generation(),
+                chrome.launch_generation(_instance),
             )
             _sessions.pop(session_id, None)
             return None
@@ -347,7 +352,7 @@ def _get_session(session_id):
         # rebuilt Patchright stack leaves this page object bound to a dead one
         # while Chrome, and so the generation, is unchanged. Last, because it is
         # the narrowest of the four and the others give better log lines.
-        if session.get("context") is not chrome._pw_context:
+        if session.get("context") is not _instance.pw_context:
             log.info(
                 "Session %s predates the current CDP connection -- discarding",
                 session_id,
@@ -444,7 +449,7 @@ def _close_session_unlocked(session_id):
     if not session:
         return
     page = session.get("page")
-    if page is None or not chrome.is_cdp_connected():
+    if page is None or not chrome.is_cdp_connected(_instance):
         return
     try:
         # record=False: this whole block is best-effort teardown, and it runs
@@ -453,7 +458,7 @@ def _close_session_unlocked(session_id):
         # nothing here can ever produce a compensating success. Counting it let
         # three /interact calls with stale session ids restart the container
         # (ISSUE-384 review).
-        ctx = chrome.get_context(record=False)
+        ctx = chrome.get_context(_instance, record=False)
         owned = _opened_by(page, list(ctx.pages))
     except Exception:
         return
@@ -571,12 +576,12 @@ def _sweep_unclaimed_pages_unlocked():
     Everything else is unreachable by construction: every endpoint resolves a
     page from a session, and no session names these.
     """
-    if not chrome.is_cdp_connected():
+    if not chrome.is_cdp_connected(_instance):
         return 0
     try:
         # record=False for the reason _close_session_unlocked gives: this runs
         # at the top of every endpoint and can produce no compensating success.
-        ctx = chrome.get_context(record=False)
+        ctx = chrome.get_context(_instance, record=False)
         pages = list(ctx.pages)
     except Exception:
         return 0
@@ -593,7 +598,7 @@ def _sweep_unclaimed_pages_unlocked():
             # This session was built against a different Patchright stack, so
             # every wrapper it holds is from a connection that has since been
             # rebuilt -- connect_cdp() does that on a failed liveness probe,
-            # with Chrome still up and chrome.launch_generation() unchanged, so
+            # with Chrome still up and chrome.launch_generation(_instance) unchanged, so
             # _get_session's generation check does not catch it. Those wrappers
             # match nothing in `pages`, so a sweep would find every session's
             # tab unclaimed and close all of them. Stand down for this pass:
@@ -666,7 +671,7 @@ def _tab_index_of(page):
     not stored, because a stored one goes stale the next time any tab closes --
     which is the whole of ISSUE-535's second half.
 
-    Reads chrome._pw_context directly rather than calling get_context(), which
+    Reads _instance.pw_context directly rather than calling get_context(), which
     is what interact() already does for its `others` list. get_context() reaches
     connect_cdp(), which probes the socket with a real round trip and on a stale
     one tears the connection down and rebuilds it with up to two 1s sleeps --
@@ -678,7 +683,7 @@ def _tab_index_of(page):
     if page is None:
         return None
     try:
-        ctx = chrome._pw_context
+        ctx = _instance.pw_context
         if not ctx:
             return None
         for i, candidate in enumerate(ctx.pages):
@@ -762,7 +767,7 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
     BOT_DETECTION.md documents. `wait_for_datadome` is the first such call in
     every one of them.
     """
-    chrome.connect_cdp()
+    chrome.connect_cdp(_instance)
 
     requested = _document_url(url)
     for attempt in range(2):
@@ -799,8 +804,8 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
         page.on("framenavigated", on_commit)
         try:
             page.bring_to_front()
-            xdotool.navigate(url, timeout_s=timeout_ms // 1000)
-            challenge = xdotool.wait_for_challenges(timeout_s=15)
+            xdotool.navigate(url, timeout_s=timeout_ms // 1000, display=_instance.display)
+            challenge = xdotool.wait_for_challenges(timeout_s=15, display=_instance.display)
             time.sleep(browsing.gauss_clamp(3.5, 1.0, 2.0, 5.0))
             if challenge:
                 return challenge
@@ -949,7 +954,7 @@ def browse():
         if url:
             browsing.wait_for_datadome(page)
         if url and not skip_behavior:
-            browsing.simulate_human_behavior(page)
+            browsing.simulate_human_behavior(page, display=_instance.display)
 
         if wait_for:
             try:
@@ -1034,7 +1039,7 @@ def screenshot():
                 # runs and only the documented vector is skipped.
                 if not challenge:
                     browsing.wait_for_datadome(page)
-                browsing.simulate_human_behavior(page)
+                browsing.simulate_human_behavior(page, display=_instance.display)
         except Exception as e:
             _close_session(session_id)
             return _navigation_error_response(e)
@@ -1042,7 +1047,7 @@ def screenshot():
         return jsonify({"error": "url or session_id is required"}), 400
 
     try:
-        chrome.connect_cdp()
+        chrome.connect_cdp(_instance)
         # _page_is_gone rather than a falsy test: the page object outlives the
         # tab, so a session that survived a watchdog Chrome relaunch holds one
         # that is not None and is not usable either.
@@ -1095,7 +1100,7 @@ def screenshot():
             # with the session. The X11 half is unaffected and the picture is
             # still clickable against it.
             measure=measure and not challenge,
-        )
+         display=_instance.display)
         if record is None:
             log.info("No capture frame recorded for %s: %s", session_id, why)
             headers["X-Browse-Capture-Error"] = why
@@ -1212,7 +1217,7 @@ def extract():
                 # contract change, and is left for whoever wants one.
                 if not challenge:
                     browsing.wait_for_datadome(page)
-                browsing.simulate_human_behavior(page)
+                browsing.simulate_human_behavior(page, display=_instance.display)
         except Exception as e:
             _close_session(session_id)
             return _navigation_error_response(e)
@@ -1220,7 +1225,7 @@ def extract():
         return jsonify({"error": "url or session_id is required"}), 400
 
     try:
-        chrome.connect_cdp()
+        chrome.connect_cdp(_instance)
         # _page_is_gone rather than a falsy test: the page object outlives the
         # tab, so a session that survived a watchdog Chrome relaunch holds one
         # that is not None and is not usable either.
@@ -1385,7 +1390,7 @@ def render_page():
                 # BOT_DETECTION.md says not to make one in.
                 return _captcha_response(session_id, challenge)
 
-        chrome.connect_cdp()
+        chrome.connect_cdp(_instance)
         # _page_is_gone rather than a falsy test: the page object outlives the
         # tab, so a session that survived a watchdog Chrome relaunch holds one
         # that is not None and is not usable either.
@@ -1395,7 +1400,7 @@ def render_page():
         if url:
             browsing.wait_for_datadome(page)
             if not skip_behavior:
-                browsing.simulate_human_behavior(page)
+                browsing.simulate_human_behavior(page, display=_instance.display)
             if wait_for:
                 try:
                     page.wait_for_selector(wait_for, timeout=10000)
@@ -1472,7 +1477,7 @@ def _landed_point(screen_x, screen_y):
     which is the previous behaviour and the honest one -- an unconfirmed
     clamp is not a confirmed one.
     """
-    x, y = xdotool.clamp_to_screen(screen_x, screen_y)
+    x, y = xdotool.clamp_to_screen(screen_x, screen_y, display=_instance.display)
     return [round(x), round(y)]
 
 
@@ -1570,7 +1575,7 @@ def _foreground_tabs(page):
     answer costs the qualification, not the request.
     """
     try:
-        pages = list(chrome._pw_context.pages)
+        pages = list(_instance.pw_context.pages)
     except Exception:
         return [], []
     return [p for p in pages if p is not page], _opened_by(page, pages)
@@ -1590,7 +1595,7 @@ def _foreground(page, action_type, others=(), owned=()):
     interleave selector and coordinate actions and because the tab in front is
     not this request's to assume between two of them.
     """
-    verdict = visual.bring_to_front(page, others, owned)
+    verdict = visual.bring_to_front(page, others, owned, display=_instance.display)
     if verdict.ok:
         if not verdict.confirmed:
             log.info("%s on tab %s: %s", action_type, verdict.code, verdict.detail)
@@ -1632,7 +1637,7 @@ def _capture_foreground(page):
     only ever meant to improve it.
     """
     try:
-        return visual.bring_to_front(page)
+        return visual.bring_to_front(page, display=_instance.display)
     except Exception as e:  # pragma: no cover - bring_to_front catches its own
         log.info("Capture foreground check failed: %s", e)
         return None
@@ -1758,7 +1763,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
                 }
 
         record = session.get("capture")
-        code, detail = visual.staleness(record, page) or (None, None)
+        code, detail = visual.staleness(record, page, display=_instance.display) or (None, None)
         if code:
             log.info("Refusing %s on %s: %s -- %s",
                      action_type, _tab_index_of(page), code, detail)
@@ -1783,7 +1788,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
             }
 
         if action_type == "drag_at":
-            if not browsing.human_drag_at(screen_x, screen_y, end_x, end_y):
+            if not browsing.human_drag_at(screen_x, screen_y, end_x, end_y, display=_instance.display):
                 return {
                     "action": "drag_at", "ok": False,
                     "error": "drag_incomplete",
@@ -1796,7 +1801,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
             }, verdict)
 
         if action_type == "hover_at":
-            if not browsing.human_move_to(screen_x, screen_y):
+            if not browsing.human_move_to(screen_x, screen_y, display=_instance.display):
                 return _pointer_refusal("hover_at", screen_x, screen_y)
             return _with_foreground({
                 "action": "hover_at", "ok": True,
@@ -1807,7 +1812,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
             if not browsing.human_scroll_at(
                 screen_x, screen_y, button=wheel_button,
                 clicks=clicks, modifier=modifier,
-            ):
+             display=_instance.display):
                 return _pointer_refusal("scroll_at", screen_x, screen_y)
             # Longer than a key's settle and shorter than a click's: a wheel
             # can start a smooth-scroll animation or a lazy load, and neither
@@ -1824,7 +1829,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
             return _with_foreground(result, verdict)
 
         button = 3 if action.get("button") == "right" else 1
-        if not browsing.human_click_at(screen_x, screen_y, button=button):
+        if not browsing.human_click_at(screen_x, screen_y, button=button, display=_instance.display):
             return _pointer_refusal("click_at", screen_x, screen_y)
         _settle(page, 1000)
         return _with_foreground({
@@ -1847,7 +1852,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
         # include `no_coordinate_frame`, which this arm used to report as
         # `no_capture`.
         record = session.get("capture")
-        code, detail = visual.staleness(record, page) or (None, None)
+        code, detail = visual.staleness(record, page, display=_instance.display) or (None, None)
         if code:
             log.info("Refusing click_challenge on %s: %s -- %s",
                      _tab_index_of(page), code, detail)
@@ -1879,7 +1884,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
                 "detail": "no visible Cloudflare challenge frame on this page",
             }
         screen_x, screen_y = visual.page_to_screen(record, point[0], point[1])
-        if not browsing.human_click_at(screen_x, screen_y):
+        if not browsing.human_click_at(screen_x, screen_y, display=_instance.display):
             return _pointer_refusal("click_challenge", screen_x, screen_y)
         _settle(page, 2000)
         return _with_foreground({
@@ -1893,7 +1898,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
         if not key:
             return {"action": "key", "ok": False, "error": "key is required"}
         try:
-            xdotool.key_native(key)
+            xdotool.key_native(key, display=_instance.display)
         except xdotool.OptionShapedInput as e:
             return {
                 "action": "key", "ok": False,
@@ -1920,7 +1925,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
                 ),
             }
         try:
-            xdotool.type_native(text)
+            xdotool.type_native(text, display=_instance.display)
         except xdotool.OptionShapedInput as e:
             # The refusal reaches the caller as a result rather than as a
             # raise: /interact abandons the rest of its action list on an
@@ -1973,7 +1978,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
         # should be indistinguishable from hardware. It also needs no window
         # id, so it has one fewer way to do nothing quietly.
         for _ in range(presses):
-            if not xdotool.key_native(key):
+            if not xdotool.key_native(key, display=_instance.display):
                 return {
                     "action": "scroll", "ok": False,
                     "error": "window_not_focused",
@@ -2177,11 +2182,11 @@ def _selector_action(session, page, action, others=(), owned=()):
     # wrong page. The CDP call addresses the tab directly, so this is a
     # fallback rather than a refusal -- unlike the coordinate path, where
     # there is no correct alternative and the action must not run at all.
-    verdict = visual.bring_to_front(page, others, owned)
+    verdict = visual.bring_to_front(page, others, owned, display=_instance.display)
     if not verdict.ok:
         return _cdp_selector_action(page, action, "cdp", verdict.detail)
 
-    frame, reason = visual.screen_frame(page, session.get("capture"))
+    frame, reason = visual.screen_frame(page, session.get("capture"), display=_instance.display)
     if not frame:
         return _cdp_selector_action(page, action, "cdp", reason)
 
@@ -2200,7 +2205,7 @@ def _selector_action(session, page, action, others=(), owned=()):
         button = 3 if action.get("button") == "right" else 1
         if not browsing.human_click_at(
             target.screen_x, target.screen_y, button=button,
-        ):
+         display=_instance.display):
             return _pointer_refusal("click", target.screen_x, target.screen_y)
         _settle(page, 1000)
         return _with_foreground({
@@ -2228,7 +2233,7 @@ def _fill_through_keyboard(page, action, target, element, verdict):
                        f"one fill can type"),
         }
 
-    if not browsing.human_click_at(target.screen_x, target.screen_y):
+    if not browsing.human_click_at(target.screen_x, target.screen_y, display=_instance.display):
         return _pointer_refusal("fill", target.screen_x, target.screen_y)
 
     # The click is what focuses the field, and a click that missed focuses
@@ -2248,10 +2253,10 @@ def _fill_through_keyboard(page, action, target, element, verdict):
         )
 
     try:
-        xdotool.key_native("ctrl+a")
-        xdotool.key_native("Delete")
+        xdotool.key_native("ctrl+a", display=_instance.display)
+        xdotool.key_native("Delete", display=_instance.display)
         if value:
-            xdotool.type_native(value)
+            xdotool.type_native(value, display=_instance.display)
     except xdotool.OptionShapedInput as e:
         return {"action": "fill", "selector": selector, "ok": False,
                 "error": "option_shaped_input", "detail": str(e)}
@@ -2310,7 +2315,7 @@ def interact():
             "error": f"session {session_id} not found or expired",
         }), 404
 
-    chrome.connect_cdp()
+    chrome.connect_cdp(_instance)
     page = _session_page(session)
     if not page:
         return jsonify({"error": "tab not found"}), 500
@@ -2407,7 +2412,7 @@ def evaluate():
             "error": f"session {session_id} not found or expired",
         }), 404
 
-    chrome.connect_cdp()
+    chrome.connect_cdp(_instance)
     page = _session_page(session)
     if not page:
         return jsonify({"error": "tab not found"}), 500
@@ -2440,7 +2445,7 @@ def challenge():
             "error": f"session {session_id} not found or expired",
         }), 404
 
-    chrome.connect_cdp()
+    chrome.connect_cdp(_instance)
     page = _session_page(session)
     if not page:
         return jsonify({"error": "tab not found"}), 500
@@ -2459,7 +2464,7 @@ def challenge():
             # container cannot convert it" from "there is nothing to convert".
             # `click_challenge` would then refuse with `no_capture`, and
             # nothing before that refusal pointed at the remedy (ISSUE-537).
-            code, detail = visual.staleness(record, page) or (None, None)
+            code, detail = visual.staleness(record, page, display=_instance.display) or (None, None)
             if code:
                 stale = {"error": code, "detail": detail}
         elif point and record:
@@ -2469,7 +2474,7 @@ def challenge():
             # the page is a wrong answer given confidently. Reported as
             # `stale` with no point rather than as an error, since the CSS
             # boxes beside it are measured now and are still good.
-            code, detail = visual.staleness(record, page) or (None, None)
+            code, detail = visual.staleness(record, page, display=_instance.display) or (None, None)
             if code:
                 stale = {"error": code, "detail": detail}
             else:
@@ -2503,7 +2508,7 @@ def get_session_info(session_id):
     ttl = max(0, SESSION_TTL - (now - session["last_used_at"]))
     # Try to get URL if CDP is connected
     url = ""
-    if chrome.is_cdp_connected():
+    if chrome.is_cdp_connected(_instance):
         page = _session_page(session)
         if page:
             try:
@@ -2578,17 +2583,17 @@ def _get_chrome_diagnostics():
         pass
 
     try:
-        diag["chrome_running"] = chrome.is_chrome_running()
-        diag["cdp_connected"] = chrome.is_cdp_connected()
-        if chrome.is_cdp_connected():
+        diag["chrome_running"] = chrome.is_chrome_running(_instance)
+        diag["cdp_connected"] = chrome.is_cdp_connected(_instance)
+        if chrome.is_cdp_connected(_instance):
             # record=False: a diagnostics read must not be able to restart the
             # container it is reporting on. is_cdp_connected() stays True across
             # recover_wedged_chrome(), so three /health?v=1 polls taken during a
             # Chrome relaunch would otherwise reach the threshold with no
             # request having been made (ISSUE-384 review).
-            ctx = chrome.get_context(record=False)
+            ctx = chrome.get_context(_instance, record=False)
             diag["browser_pages"] = len(ctx.pages)
-        diag["browser_connected"] = chrome.is_chrome_running()
+        diag["browser_connected"] = chrome.is_chrome_running(_instance)
     except Exception as e:
         diag["browser_error"] = str(e)
 
@@ -2608,7 +2613,7 @@ def _cdp_wedged(now=None):
     fails, and the switch meant to turn this arm off would cause the restart it
     exists to prevent.
     """
-    health = chrome.cdp_health()
+    health = chrome.cdp_health(_instance)
     if CDP_FAILURE_THRESHOLD <= 0:
         return False, health
     if health["consecutive_failures"] < CDP_FAILURE_THRESHOLD:
@@ -2629,7 +2634,7 @@ def _wedge_looping(now=None):
     follows: an exception here escapes do_GET, `curl -sf` fails, and the switch
     meant to turn the arm off would cause the restart it exists to prevent.
     """
-    history = chrome.wedge_recovery_history()
+    history = chrome.wedge_recovery_history(_instance)
     if WEDGE_RECOVERY_THRESHOLD <= 0:
         return False, 0
     # Monotonic on both sides, so an NTP step cannot re-arm an aged-out verdict.
@@ -2649,13 +2654,13 @@ def health():
     """
     with _sessions_lock:
         active = len(_sessions)
-    running = chrome.is_chrome_running()
+    running = chrome.is_chrome_running(_instance)
     wedged, _ = _cdp_wedged()
     # The counters come straight off the record rather than out of _cdp_wedged,
     # so an operator who set the threshold to 0 still sees the evidence here.
     # Switching the arm off means "do not restart the container for this", not
     # "stop reporting it".
-    cdp = chrome.cdp_health()
+    cdp = chrome.cdp_health(_instance)
     data = {
         "status": "degraded" if (not running or wedged) else "ok",
         "browser_connected": running,
@@ -2724,7 +2729,7 @@ def _log_request_start():
                 "started": request._start_time,
             }
         try:
-            chrome.ensure_chrome()
+            chrome.ensure_chrome(_instance)
         except Exception as e:
             log.error("Failed to ensure Chrome: %s", e)
             return jsonify({
@@ -2922,7 +2927,7 @@ def _probe(deep):
     """
     # Cheap tier: a subprocess poll(), no Playwright/Flask round-trip.
     try:
-        alive = chrome.is_chrome_running()
+        alive = chrome.is_chrome_running(_instance)
     except Exception:
         alive = False
     if not alive:
@@ -2931,7 +2936,7 @@ def _probe(deep):
         # Deep tier, arm 1: is the live process actually responsive? Exempt the
         # launch window (DevTools not up yet) so a relaunch doesn't read as a
         # wedge.
-        if not chrome.is_launching() and not chrome.devtools_responding(timeout=2):
+        if not chrome.is_launching(_instance) and not chrome.devtools_responding(_instance, timeout=2):
             return 503, b"chrome-wedged\n"
         # Deep tier, arm 2: can this process still drive the browser it is
         # reporting on? Deliberately not exempted by is_launching(): a relaunch
@@ -3030,7 +3035,7 @@ def _start_browse_watchdog():
                     req["path"], req.get("url") or "<no-url>",
                     elapsed, BROWSE_WATCHDOG_DEADLINE_S,
                 )
-                chrome.recover_wedged_chrome()
+                chrome.recover_wedged_chrome(_instance)
                 log.info("Browse watchdog: Chrome relaunched after wedge")
             except Exception:
                 log.exception("Browse watchdog loop error")
@@ -3046,11 +3051,11 @@ def _start_browse_watchdog():
 # Startup
 # ---------------------------------------------------------------------------
 
-atexit.register(chrome.cleanup)
+atexit.register(pool.cleanup)
 
 if __name__ == "__main__":
-    chrome.launch_chrome()
-    log.info("Chrome launched (pid=%d)", chrome._chrome_proc.pid)
+    _instance = pool.acquire("default")
+    log.info("Chrome launched (pid=%d)", _instance.proc.pid)
     mon = threading.Thread(target=_resource_monitor, daemon=True)
     mon.start()
     _start_liveness_server()

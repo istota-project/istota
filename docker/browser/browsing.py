@@ -293,7 +293,7 @@ def bezier_points(start, end, num_points=20):
     return points
 
 
-def simulate_human_behavior(page):
+def simulate_human_behavior(page, *, display):
     """Simulate human-like mouse movements and scrolling after page load.
 
     Uses OS-level X11 input via xdotool. Designed to mimic real human
@@ -308,7 +308,7 @@ def simulate_human_behavior(page):
         cur_x = random.uniform(w * 0.3, w * 0.7)
         cur_y = random.uniform(h * 0.2, h * 0.5)
         xdo("mousemove", "--screen", "0", "--",
-            str(int(cur_x)), str(int(cur_y)))
+            str(int(cur_x)), str(int(cur_y)), display=display)
 
         for _ in range(random.randint(2, 3)):
             target_x = random.uniform(50, w - 50)
@@ -321,7 +321,7 @@ def simulate_human_behavior(page):
                 xdo(
                     "mousemove", "--screen", "0", "--",
                     str(int(px)), str(int(py)),
-                )
+                 display=display)
                 progress = i / max(len(points) - 1, 1)
                 speed = 0.008 + 0.014 * (1 - math.sin(progress * math.pi))
                 time.sleep(gauss_clamp(speed, speed * 0.3, 0.005, 0.04))
@@ -332,11 +332,11 @@ def simulate_human_behavior(page):
 
         scroll_steps = random.randint(1, 3)
         for i in range(scroll_steps):
-            xdo_key("Page_Down")
+            xdo_key("Page_Down", display=display)
             time.sleep(gauss_clamp(1.0, 0.4, 0.5, 2.0))
 
         if random.random() < 0.4:
-            xdo_key("Page_Up")
+            xdo_key("Page_Up", display=display)
             time.sleep(gauss_clamp(0.8, 0.3, 0.4, 1.5))
 
         target_x = random.uniform(100, w - 100)
@@ -349,7 +349,7 @@ def simulate_human_behavior(page):
             xdo(
                 "mousemove", "--screen", "0", "--",
                 str(int(px)), str(int(py)),
-            )
+             display=display)
             progress = i / max(len(points) - 1, 1)
             speed = 0.008 + 0.014 * (1 - math.sin(progress * math.pi))
             time.sleep(gauss_clamp(speed, speed * 0.3, 0.005, 0.04))
@@ -357,7 +357,7 @@ def simulate_human_behavior(page):
         pass
 
 
-def human_move_to(target_x, target_y, settle_s=None):
+def human_move_to(target_x, target_y, settle_s=None, *, display):
     """Move the pointer to an X11 screen point along a human-ish arc.
 
     Same Bezier-plus-jitter path simulate_human_behavior() uses, aimed at a
@@ -370,24 +370,24 @@ def human_move_to(target_x, target_y, settle_s=None):
     and whatever blocks one of them blocks the landing move too, which is the
     one a click would be sent from.
     """
-    start = mouse_location() or (target_x, target_y - 200)
+    start = mouse_location(display=display) or (target_x, target_y - 200)
     num_pts = random.randint(12, 22)
     points = bezier_points(start, (target_x, target_y), num_points=num_pts)
     for i, (px, py) in enumerate(points):
-        mouse_move(px, py)
+        mouse_move(px, py, display=display)
         progress = i / max(len(points) - 1, 1)
         speed = 0.008 + 0.014 * (1 - math.sin(progress * math.pi))
         time.sleep(gauss_clamp(speed, speed * 0.3, 0.005, 0.04))
     # Land exactly on target: the path carries +-1.5px of jitter, and the
     # Cloudflare checkbox is about 24px across.
-    landed = mouse_move(target_x, target_y)
+    landed = mouse_move(target_x, target_y, display=display)
     if settle_s is None:
         settle_s = gauss_clamp(0.35, 0.15, 0.15, 0.8)
     time.sleep(settle_s)
     return landed
 
 
-def human_click_at(target_x, target_y, button=1):
+def human_click_at(target_x, target_y, button=1, *, display):
     """Approach an X11 screen point and click it.
 
     Returns False without pressing when the pointer did not reach the point.
@@ -395,22 +395,22 @@ def human_click_at(target_x, target_y, button=1):
     a move that did not happen lands on whatever the previous action was
     aimed at -- and the caller would report it at the point it asked for.
     """
-    if not human_move_to(target_x, target_y):
+    if not human_move_to(target_x, target_y, display=display):
         return False
-    mouse_click(button=button)
+    mouse_click(button=button, display=display)
     time.sleep(gauss_clamp(0.25, 0.1, 0.1, 0.5))
     return True
 
 
-def human_drag_at(start_x, start_y, end_x, end_y):
+def human_drag_at(start_x, start_y, end_x, end_y, *, display):
     """Approach, hold the left button, move, then release after a short dwell."""
-    if not human_move_to(start_x, start_y):
+    if not human_move_to(start_x, start_y, display=display):
         return False
-    with mouse_button_held():
-        return human_move_to(end_x, end_y, settle_s=0.15)
+    with mouse_button_held(display=display):
+        return human_move_to(end_x, end_y, settle_s=0.15, display=display)
 
 
-def human_scroll_at(target_x, target_y, button, clicks=3, modifier=None):
+def human_scroll_at(target_x, target_y, button, clicks=3, modifier=None, *, display):
     """Approach an X11 screen point and turn the wheel there.
 
     The whole reason this takes a *point* rather than a direction: Chrome
@@ -431,13 +431,13 @@ def human_scroll_at(target_x, target_y, button, clicks=3, modifier=None):
     on. The modifier is held across the whole run rather than per tick, because
     ctrl-plus-wheel is the *state* at the moment each event arrives.
     """
-    if not human_move_to(target_x, target_y):
+    if not human_move_to(target_x, target_y, display=display):
         return False
-    with modifier_held(modifier):
+    with modifier_held(modifier, display=display):
         for i in range(clicks):
             if i:
                 time.sleep(gauss_clamp(0.07, 0.03, 0.03, 0.18))
-            mouse_wheel(button)
+            mouse_wheel(button, display=display)
     time.sleep(gauss_clamp(0.25, 0.1, 0.1, 0.5))
     return True
 

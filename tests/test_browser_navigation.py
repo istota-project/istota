@@ -121,8 +121,8 @@ class Page:
 @pytest.fixture
 def navigation(monkeypatch):
     page = Page()
-    monkeypatch.setattr(chrome, "connect_cdp", lambda: None)
-    monkeypatch.setattr(chrome, "get_context", lambda: types.SimpleNamespace(pages=[page]))
+    monkeypatch.setattr(chrome, "connect_cdp", lambda inst: None)
+    monkeypatch.setattr(chrome, "get_context", lambda inst: types.SimpleNamespace(pages=[page]))
     ticks = itertools.count()
     monkeypatch.setattr(browse_api, "time", types.SimpleNamespace(
         sleep=lambda _: None, monotonic=lambda: next(ticks),
@@ -146,7 +146,7 @@ def test_wrong_document_is_an_error_at_each_endpoint(navigation, monkeypatch, en
     close = mock.Mock()
     monkeypatch.setattr(browse_api, "_close_session", close)
     monkeypatch.setattr(browse_api.browsing, "wait_for_datadome", lambda p: None)
-    monkeypatch.setattr(browse_api.browsing, "simulate_human_behavior", lambda p: None)
+    monkeypatch.setattr(browse_api.browsing, "simulate_human_behavior", lambda p, *, display: None)
     monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda p: False)
     extract = mock.Mock(return_value={"url": OLD, "text": "Old advisory"})
     monkeypatch.setattr(browse_api.browsing, "extract_page_content", extract)
@@ -318,7 +318,7 @@ def test_extract_keeps_textless_controls_and_scrubs_before_truncation(monkeypatc
     monkeypatch.setattr(browse_api, '_credential_values', {'vault&secret'}, raising=False)
     monkeypatch.setattr(browse_api, '_cleanup_expired', lambda **kwargs: None)
     monkeypatch.setattr(browse_api, '_get_session', lambda _: {'page': page})
-    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda: None)
+    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda inst: None)
     monkeypatch.setattr(browse_api, 'request', types.SimpleNamespace(
         get_json=lambda: {'session_id': 's1', 'selector': 'input', 'max_chars': 25}))
     monkeypatch.setattr(browse_api, 'jsonify', lambda value: value)
@@ -357,7 +357,7 @@ def test_extract_live_state_and_password_reflections(monkeypatch, passwords, ent
     monkeypatch.setattr(browse_api, '_credential_values', set())
     monkeypatch.setattr(browse_api, '_cleanup_expired', lambda **kwargs: None)
     monkeypatch.setattr(browse_api, '_get_session', lambda _: {'page': page})
-    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda: None)
+    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda inst: None)
     monkeypatch.setattr(browse_api, 'request', types.SimpleNamespace(
         get_json=lambda: {'session_id': 's1', 'selector': '*'}))
     monkeypatch.setattr(browse_api, 'jsonify', lambda value: value)
@@ -373,7 +373,7 @@ def test_credential_fill_registers_before_fallback_and_failed_input(monkeypatch)
     page.fill.side_effect = RuntimeError('input failed')
     monkeypatch.setattr(browse_api, '_credential_values', set())
     monkeypatch.setattr(browse_api.visual, 'bring_to_front',
-                        lambda *a: types.SimpleNamespace(ok=False, detail='hidden'))
+                        lambda *a, display: types.SimpleNamespace(ok=False, detail='hidden'))
     with pytest.raises(RuntimeError, match='input failed'):
         browse_api._selector_action({}, page, {
             'type': 'fill', 'selector': '#token', 'value': 'api-secret',
@@ -399,7 +399,7 @@ def test_credential_fill_waits_for_field_before_marking(monkeypatch):
     page.fill.side_effect = lambda *args, **kwargs: events.append('fill')
     monkeypatch.setattr(browse_api, '_credential_values', set())
     monkeypatch.setattr(browse_api.visual, 'bring_to_front',
-                        lambda *a: types.SimpleNamespace(ok=False, detail='hidden'))
+                        lambda *a, display: types.SimpleNamespace(ok=False, detail='hidden'))
     result = browse_api._selector_action({}, page, {
         'type': 'fill', 'selector': '#password', 'value': 'fixture-secret',
         'credential': True,

@@ -8,7 +8,7 @@ call while the Flask thread is blocked inside a CDP call (ISSUE-149, ISSUE-173).
 
 ``_resource_monitor``, the container's other background thread, ignored it.
 Above ``MEMORY_EVICT_PCT`` it called ``_close_session_unlocked()``, which reaches
-``chrome.get_context()``, ``page.goto()`` and ``page.close()``. In production
+``chrome.get_context(browse_api._instance)``, ``page.goto()`` and ``page.close()``. In production
 that poisoned the process-global asyncio loop Playwright's sync API drives:
 every later ``sync_playwright().start()`` raised "It looks like you are using
 Playwright Sync API inside the asyncio loop", so every browse verb returned a
@@ -28,6 +28,7 @@ directly -- the pattern ``test_browser_chrome_watchdog.py`` already uses.
 """
 
 import sys
+from functools import partial
 import threading
 import types
 from pathlib import Path
@@ -105,12 +106,13 @@ import browse_api  # noqa: E402  (import after the stubs + path insert)
 def _reset_module_globals():
     """chrome and browse_api are singletons; reset their globals around each test."""
     def _reset():
-        chrome._chrome_proc = None
+        browse_api._instance.proc = None
         chrome._pw = None
-        chrome._pw_browser = None
-        chrome._pw_context = None
-        chrome._pw_thread_id = None
-        chrome._launching = False
+        chrome._driver_thread_id = None
+        browse_api._instance.pw_browser = None
+        browse_api._instance.pw_context = None
+        browse_api._instance.pw_thread_id = None
+        browse_api._instance.launching = False
         browse_api._sessions.clear()
         browse_api._evict_request.clear()
 
@@ -141,8 +143,8 @@ def _claim_connection_on_this_thread(monkeypatch, pages=None):
     sp.start.return_value = started
     monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
 
-    chrome.connect_cdp()
-    assert chrome._pw_context is ctx
+    chrome.connect_cdp(browse_api._instance)
+    assert browse_api._instance.pw_context is ctx
     return ctx
 
 
@@ -198,12 +200,12 @@ class TestPatchrightThreadAffinity:
 
     def test_connect_cdp_claims_the_calling_thread(self, monkeypatch):
         _claim_connection_on_this_thread(monkeypatch)
-        assert chrome._pw_thread_id == threading.get_ident()
+        assert browse_api._instance.pw_thread_id == threading.get_ident()
 
     def test_get_context_refuses_a_foreign_thread(self, monkeypatch):
         _claim_connection_on_this_thread(monkeypatch)
 
-        result, error = _run_on_another_thread(chrome.get_context)
+        result, error = _run_on_another_thread(partial(chrome.get_context, browse_api._instance))
 
         assert result is None
         assert isinstance(error, RuntimeError)
@@ -212,14 +214,14 @@ class TestPatchrightThreadAffinity:
     def test_get_page_by_index_refuses_a_foreign_thread(self, monkeypatch):
         _claim_connection_on_this_thread(monkeypatch)
 
-        _, error = _run_on_another_thread(lambda: chrome.get_page_by_index(0))
+        _, error = _run_on_another_thread(lambda: chrome.get_page_by_index(browse_api._instance, 0))
 
         assert isinstance(error, RuntimeError)
 
     def test_connect_cdp_refuses_a_foreign_thread(self, monkeypatch):
         _claim_connection_on_this_thread(monkeypatch)
 
-        _, error = _run_on_another_thread(chrome.connect_cdp)
+        _, error = _run_on_another_thread(partial(chrome.connect_cdp, browse_api._instance))
 
         assert isinstance(error, RuntimeError)
 
@@ -227,48 +229,44 @@ class TestPatchrightThreadAffinity:
         """The poisoning call. disconnect_cdp() drives _pw.stop() through the
         same thread-bound machinery, so it must be refused too."""
         _claim_connection_on_this_thread(monkeypatch)
-        browser = chrome._pw_browser
+        browser = browse_api._instance.pw_browser
 
-        _, error = _run_on_another_thread(chrome.disconnect_cdp)
+        _, error = _run_on_another_thread(partial(chrome.disconnect_cdp, browse_api._instance))
 
         assert isinstance(error, RuntimeError)
         browser.close.assert_not_called()
-        assert chrome._pw_browser is browser  # connection left intact
+        assert browse_api._instance.pw_browser is browser  # connection left intact
 
     def test_the_owning_thread_is_never_blocked(self, monkeypatch):
         """The control. The guard must not break the thread that legitimately
         owns the connection -- every helper still works from the Flask thread."""
         ctx = _claim_connection_on_this_thread(monkeypatch)
 
-        assert chrome.get_context() is ctx
-        assert chrome.get_page_by_index(0) is ctx.pages[0]
-        assert chrome.is_cdp_connected() is True
-        chrome.connect_cdp()
-        chrome.disconnect_cdp()
+        assert chrome.get_context(browse_api._instance) is ctx
+        assert chrome.get_page_by_index(browse_api._instance, 0) is ctx.pages[0]
+        assert chrome.is_cdp_connected(browse_api._instance) is True
+        chrome.connect_cdp(browse_api._instance)
+        chrome.disconnect_cdp(browse_api._instance)
 
-        assert chrome._pw_browser is None
-        assert chrome._pw_thread_id is None  # released for the next owner
+        assert browse_api._instance.pw_browser is None
+        assert browse_api._instance.pw_thread_id is None  # released for the next owner
 
     def test_recover_wedged_chrome_releases_ownership(self, monkeypatch):
-        """The guard's own escape hatch, and it is not optional.
+        """Recovery releases the instance connection without touching Patchright.
 
-        Ownership is claimed on first connect and released only by
-        disconnect_cdp -- which is itself guarded. So if a non-Flask thread ever
-        won the first connect_cdp(), every Flask call would raise for the life of
-        the process: Chrome up, probes green, every verb 500. That is ISSUE-382's
-        shape again, caused by its own fix. recover_wedged_chrome() is the reset,
-        and it can do it because killing Chrome invalidates the connection anyway
-        and a plain assignment is not a Patchright call.
+        The shared driver retains its original thread owner: recovery of one
+        Chrome cannot transfer the driver used by other instances.
         """
         _claim_connection_on_this_thread(monkeypatch)
         monkeypatch.setattr(chrome.subprocess, "Popen", lambda *a, **k: FakeProc())
-        monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda *a, **k: None)
-        assert chrome._pw_thread_id is not None
+        monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst, *a, **k: None)
+        assert browse_api._instance.pw_thread_id is not None
 
-        _, error = _run_on_another_thread(chrome.recover_wedged_chrome)
+        _, error = _run_on_another_thread(partial(chrome.recover_wedged_chrome, browse_api._instance))
 
         assert error is None
-        assert chrome._pw_thread_id is None  # the next thread may claim it
+        assert browse_api._instance.pw_thread_id is None
+        assert chrome._driver_thread_id == threading.get_ident()
 
     def test_a_foreign_thread_may_open_the_first_connection(self, monkeypatch):
         """The guard binds an existing connection to its owner; it does not
@@ -280,18 +278,18 @@ class TestPatchrightThreadAffinity:
         sp.start.return_value.chromium.connect_over_cdp.return_value = browser
         monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
 
-        _, error = _run_on_another_thread(chrome.connect_cdp)
+        _, error = _run_on_another_thread(partial(chrome.connect_cdp, browse_api._instance))
 
         assert error is None
-        assert chrome._pw_thread_id is not None
-        assert chrome._pw_thread_id != threading.get_ident()
+        assert browse_api._instance.pw_thread_id is not None
+        assert browse_api._instance.pw_thread_id != threading.get_ident()
 
     def test_is_cdp_connected_is_readable_from_any_thread(self, monkeypatch):
         """A plain attribute read, deliberately unguarded: the liveness probe
         and the diagnostics read it without owning the connection."""
         _claim_connection_on_this_thread(monkeypatch)
 
-        result, error = _run_on_another_thread(chrome.is_cdp_connected)
+        result, error = _run_on_another_thread(partial(chrome.is_cdp_connected, browse_api._instance))
 
         assert error is None
         assert result is True
@@ -546,7 +544,7 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
 
         assert "old" not in browse_api._sessions
         ctx.pages[0].close.assert_called_once()
-        assert chrome._pw_thread_id == threading.get_ident()
+        assert browse_api._instance.pw_thread_id == threading.get_ident()
 
 
 @pytest.mark.parametrize("existing_owner", ["first-task", None])

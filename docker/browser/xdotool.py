@@ -9,7 +9,6 @@ import time
 
 log = logging.getLogger(__name__)
 
-_XDO_ENV = {**os.environ, "DISPLAY": ":99"}
 
 
 class RefusedInput(ValueError):
@@ -201,7 +200,7 @@ def literal_url(url):
     return url
 
 
-def chrome_wid():
+def chrome_wid( *, display):
     """Get the main Chrome browser window ID.
 
     Without a window manager on Xvfb, xdotool can't infer the active window.
@@ -210,7 +209,7 @@ def chrome_wid():
     """
     result = subprocess.run(
         ["xdotool", "search", "--class", "chrome"],
-        env=_XDO_ENV, capture_output=True, text=True, timeout=5,
+        env={**os.environ, "DISPLAY": display}, capture_output=True, text=True, timeout=5,
     )
     wids = [w.strip() for w in result.stdout.strip().split("\n") if w.strip()]
     if not wids:
@@ -219,7 +218,7 @@ def chrome_wid():
     for wid in wids:
         geo = subprocess.run(
             ["xdotool", "getwindowgeometry", "--shell", wid],
-            env=_XDO_ENV, capture_output=True, text=True, timeout=5,
+            env={**os.environ, "DISPLAY": display}, capture_output=True, text=True, timeout=5,
         )
         w = h = 0
         for line in geo.stdout.splitlines():
@@ -234,7 +233,7 @@ def chrome_wid():
     return best_wid
 
 
-def window_geometry(wid=None):
+def window_geometry(wid=None, *, display):
     """Geometry of a window as {x, y, width, height}, or None.
 
     Defaults to the main Chrome window. This is the only honest source for
@@ -242,12 +241,12 @@ def window_geometry(wid=None):
     reports window.screenX/screenY as 0,0 regardless of the real inset, so
     the visual coordinate frame is derived from here instead.
     """
-    wid = wid or chrome_wid()
+    wid = wid or chrome_wid(display=display)
     if not wid:
         return None
     result = subprocess.run(
         ["xdotool", "getwindowgeometry", "--shell", wid],
-        env=_XDO_ENV, capture_output=True, text=True, timeout=5,
+        env={**os.environ, "DISPLAY": display}, capture_output=True, text=True, timeout=5,
     )
     geo = {}
     for line in result.stdout.splitlines():
@@ -262,19 +261,19 @@ def window_geometry(wid=None):
     }
 
 
-def xdo(*args):
+def xdo(*args, display):
     """Run an xdotool command on the Xvfb display."""
     subprocess.run(
         ["xdotool"] + list(args),
-        env=_XDO_ENV, timeout=5, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
     )
 
 
-def mouse_location():
+def mouse_location( *, display):
     """Current pointer position as (x, y) in X11 screen coordinates."""
     result = subprocess.run(
         ["xdotool", "getmouselocation", "--shell"],
-        env=_XDO_ENV, capture_output=True, text=True, timeout=5,
+        env={**os.environ, "DISPLAY": display}, capture_output=True, text=True, timeout=5,
     )
     pos = {}
     for line in result.stdout.splitlines():
@@ -286,14 +285,12 @@ def mouse_location():
     return pos["X"], pos["Y"]
 
 
-#: The screen size, once something has read it. entrypoint.sh starts
-#: `Xvfb :99 -screen 0 ${W}x${H}x24` once per container and nothing here
-#: resizes it -- no xrandr, no window manager -- so the answer cannot change
-#: while this process lives.
-_SCREEN = None
+# Each instance owns a fixed-size display. Cache its geometry by display so a
+# measurement on one display cannot answer a pointer operation on another.
+_SCREENS = {}
 
 
-def display_geometry():
+def display_geometry( *, display):
     """The X11 screen's size as (width, height), or None.
 
     Memoized, which is what lets clamp_to_screen() be arithmetic. It used to
@@ -306,12 +303,11 @@ def display_geometry():
     answer, which is a state that can end; caching it would turn one bad
     moment into a permanently unknown screen.
     """
-    global _SCREEN
-    if _SCREEN is not None:
-        return _SCREEN
+    if display in _SCREENS:
+        return _SCREENS[display]
     result = subprocess.run(
         ["xdotool", "getdisplaygeometry", "--shell"],
-        env=_XDO_ENV, capture_output=True, text=True, timeout=5,
+        env={**os.environ, "DISPLAY": display}, capture_output=True, text=True, timeout=5,
     )
     geo = {}
     for line in result.stdout.splitlines():
@@ -320,11 +316,11 @@ def display_geometry():
             geo[key] = int(value)
     if len(geo) != 2:
         return None
-    _SCREEN = (geo["WIDTH"], geo["HEIGHT"])
-    return _SCREEN
+    _SCREENS[display] = (geo["WIDTH"], geo["HEIGHT"])
+    return _SCREENS[display]
 
 
-def clamp_to_screen(x, y):
+def clamp_to_screen(x, y, *, display):
     """Where a move to (x, y) actually leaves the pointer.
 
     X11 warps to the nearest addressable pixel rather than refusing a point
@@ -347,7 +343,7 @@ def clamp_to_screen(x, y):
     that had already happened, from a helper whose whole job is arithmetic.
     """
     try:
-        screen = display_geometry()
+        screen = display_geometry(display=display)
     except (subprocess.SubprocessError, OSError):
         return x, y
     if not screen:
@@ -369,7 +365,7 @@ def _axis_landed(requested, observed, limit):
     return False
 
 
-def pointer_landed(x, y):
+def pointer_landed(x, y, *, display):
     """Is the pointer somewhere a click aimed at (x, y) may be sent?
 
     Two answers count. The pointer is at the point; or the point was off the
@@ -384,8 +380,8 @@ def pointer_landed(x, y):
     False, so the caller refuses rather than presses.
     """
     try:
-        pos = mouse_location()
-        screen = display_geometry()
+        pos = mouse_location(display=display)
+        screen = display_geometry(display=display)
     except (subprocess.SubprocessError, OSError) as e:
         log.warning("Could not read the pointer after a blocked move: %s", e)
         return False
@@ -399,7 +395,7 @@ def pointer_landed(x, y):
     return _axis_landed(x, pos[0], max_x) and _axis_landed(y, pos[1], max_y)
 
 
-def mouse_move(x, y):
+def mouse_move(x, y, *, display):
     """Move the pointer to an X11 screen coordinate, waiting for the move.
 
     A `--sync` move to the point the pointer already occupies blocks until the
@@ -444,7 +440,7 @@ def mouse_move(x, y):
     nothing, because display_geometry() is memoized.
     """
     x, y = int(x), int(y)
-    if mouse_location() == clamp_to_screen(x, y):
+    if mouse_location(display=display) == clamp_to_screen(x, y, display=display):
         return True
     try:
         # `timeout` has to stay under xdotool's own wait, which is bounded
@@ -457,10 +453,10 @@ def mouse_move(x, y):
         result = subprocess.run(
             ["xdotool", "mousemove", "--sync", "--screen", "0", "--",
              str(x), str(y)],
-            env=_XDO_ENV, timeout=5, capture_output=True,
+            env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
         )
     except subprocess.TimeoutExpired:
-        if pointer_landed(x, y):
+        if pointer_landed(x, y, display=display):
             log.info("mousemove to (%d, %d) blocked, but the pointer is at "
                      "the point or clamped to the screen edge -- going on",
                      x, y)
@@ -476,22 +472,22 @@ def mouse_move(x, y):
 
 
 @contextlib.contextmanager
-def mouse_button_held(button=1):
+def mouse_button_held(button=1, *, display):
     """Release even when a press times out after reaching the X server."""
     try:
         subprocess.run(
             ["xdotool", "mousedown", str(button)],
-            env=_XDO_ENV, timeout=5, capture_output=True, check=True,
+            env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True, check=True,
         )
         yield
     finally:
         subprocess.run(
             ["xdotool", "mouseup", str(button)],
-            env=_XDO_ENV, timeout=5, capture_output=True, check=True,
+            env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True, check=True,
         )
 
 
-def mouse_click(button=1, dwell_s=0.09):
+def mouse_click(button=1, dwell_s=0.09, *, display):
     """Press and release a mouse button at the current pointer position.
 
     Split into mousedown/mouseup rather than `xdotool click` so the press has
@@ -501,12 +497,12 @@ def mouse_click(button=1, dwell_s=0.09):
     """
     subprocess.run(
         ["xdotool", "mousedown", str(button)],
-        env=_XDO_ENV, timeout=5, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
     )
     time.sleep(dwell_s)
     subprocess.run(
         ["xdotool", "mouseup", str(button)],
-        env=_XDO_ENV, timeout=5, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
     )
 
 
@@ -523,7 +519,7 @@ WHEEL_BUTTONS = (WHEEL_UP, WHEEL_DOWN)
 WHEEL_DWELL_S = 0.015
 
 
-def mouse_wheel(button):
+def mouse_wheel(button, *, display):
     """One wheel tick at the current pointer position.
 
     Delivered wherever the pointer *is*, which is the point of it: Chrome
@@ -533,7 +529,7 @@ def mouse_wheel(button):
     """
     if button not in WHEEL_BUTTONS:
         raise ValueError(f"not a wheel button: {button!r}")
-    mouse_click(button=button, dwell_s=WHEEL_DWELL_S)
+    mouse_click(button=button, dwell_s=WHEEL_DWELL_S, display=display)
 
 
 # What a caller may hold down across a wheel. An allowlist rather than a
@@ -545,7 +541,7 @@ MODIFIERS = ("ctrl", "shift", "alt")
 
 
 @contextlib.contextmanager
-def modifier_held(key):
+def modifier_held(key, *, display):
     """Hold a modifier down for the duration of the block.
 
     ctrl plus wheel is the browser's zoom gesture and shift plus wheel is its
@@ -570,33 +566,33 @@ def modifier_held(key):
         return
     if key not in MODIFIERS:
         raise ValueError(f"not a modifier this container will hold: {key!r}")
-    focus_chrome()
+    focus_chrome(display=display)
     try:
         subprocess.run(
             ["xdotool", "keydown", "--", key],
-            env=_XDO_ENV, timeout=5, capture_output=True,
+            env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
         )
         yield
     finally:
         subprocess.run(
             ["xdotool", "keyup", "--", key],
-            env=_XDO_ENV, timeout=5, capture_output=True,
+            env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
         )
 
 
-def focus_chrome():
+def focus_chrome( *, display):
     """Give the Chrome window X11 input focus. Returns True on success."""
-    wid = chrome_wid()
+    wid = chrome_wid(display=display)
     if not wid:
         return False
     subprocess.run(
         ["xdotool", "windowfocus", "--sync", wid],
-        env=_XDO_ENV, timeout=5, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
     )
     return True
 
 
-def key_native(key):
+def key_native(key, *, display):
     """Press a key through XTest, addressed at whatever holds input focus.
 
     The difference from xdo_key() is `--window`: that routes through
@@ -618,15 +614,15 @@ def key_native(key):
     page rather than about a keystroke.
     """
     key = literal_arg(key, "key")
-    focused = focus_chrome()
+    focused = focus_chrome(display=display)
     subprocess.run(
         ["xdotool", "key", "--clearmodifiers", "--", key],
-        env=_XDO_ENV, timeout=5, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
     )
     return focused
 
 
-def type_native(text, delay_ms=TYPE_DELAY_MS):
+def type_native(text, delay_ms=TYPE_DELAY_MS, *, display):
     """Type text through XTest at whatever holds input focus.
 
     The delay is per keystroke and deliberately slower than xdo_type()'s 8ms:
@@ -640,38 +636,38 @@ def type_native(text, delay_ms=TYPE_DELAY_MS):
     mid-type and leaves the field holding part of what was asked for.
     """
     text = literal_arg(text, "text")
-    focus_chrome()
+    focus_chrome(display=display)
     subprocess.run(
         ["xdotool", "type", "--clearmodifiers", "--delay", str(delay_ms),
          "--", text],
-        env=_XDO_ENV, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, capture_output=True,
         timeout=type_timeout_s(len(text), delay_ms),
     )
 
 
-def xdo_key(*keys):
+def xdo_key(*keys, display):
     """Send keyboard input to the Chrome window.
 
     Guarded ahead of the window lookup for key_native()'s reason. Every
     shipped caller passes a literal, so the guard is here for the next one.
     """
     keys = [literal_arg(k, "key") for k in keys]
-    wid = chrome_wid()
+    wid = chrome_wid(display=display)
     if not wid:
         log.warning("Chrome window not found for xdotool key input")
         return
     subprocess.run(
         ["xdotool", "windowfocus", "--sync", wid],
-        env=_XDO_ENV, timeout=5, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
     )
     for key in keys:
         subprocess.run(
             ["xdotool", "key", "--window", wid, "--", key],
-            env=_XDO_ENV, timeout=5, capture_output=True,
+            env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
         )
 
 
-def xdo_type(text, delay_ms=8):
+def xdo_type(text, delay_ms=8, *, display):
     """Type text into the Chrome window.
 
     This is the one of the four with a model-supplied value on a shipped
@@ -685,34 +681,34 @@ def xdo_type(text, delay_ms=8):
     is a slot guarded by whoever remembers to.
     """
     text = literal_arg(text, "text")
-    wid = chrome_wid()
+    wid = chrome_wid(display=display)
     if not wid:
         log.warning("Chrome window not found for xdotool type")
         return
     subprocess.run(
         ["xdotool", "windowfocus", "--sync", wid],
-        env=_XDO_ENV, timeout=5, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
     )
     subprocess.run(
         ["xdotool", "type", "--window", wid, "--delay", str(delay_ms),
          "--clearmodifiers", "--", text],
-        env=_XDO_ENV, timeout=10, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=10, capture_output=True,
     )
 
 
-def window_title():
+def window_title( *, display):
     """Get Chrome window title via X11 (zero CDP)."""
-    wid = chrome_wid()
+    wid = chrome_wid(display=display)
     if not wid:
         return ""
     result = subprocess.run(
         ["xdotool", "getwindowname", wid],
-        env=_XDO_ENV, capture_output=True, text=True, timeout=5,
+        env={**os.environ, "DISPLAY": display}, capture_output=True, text=True, timeout=5,
     )
     return result.stdout.strip()
 
 
-def navigate(url, timeout_s=30):
+def navigate(url, timeout_s=30, *, display):
     """Navigate by typing URL in Chrome's address bar via pure X11 input.
 
     The URL is checked **first**, before the window is even looked up. It
@@ -728,17 +724,17 @@ def navigate(url, timeout_s=30):
     handed.
     """
     url = literal_url(url)
-    wid = chrome_wid()
+    wid = chrome_wid(display=display)
     if not wid:
         raise RuntimeError("Chrome window not found")
     subprocess.run(
         ["xdotool", "windowfocus", "--sync", wid],
-        env=_XDO_ENV, timeout=5, capture_output=True,
+        env={**os.environ, "DISPLAY": display}, timeout=5, capture_output=True,
     )
     time.sleep(0.2)
-    xdo_key("ctrl+l")
+    xdo_key("ctrl+l", display=display)
     time.sleep(0.2)
-    xdo_type(url)
+    xdo_type(url, display=display)
     time.sleep(0.15)
     # Chrome inline-autocompletes the address bar from history: typing
     # "apnews.com" appends a highlighted suffix like "/some-old-article",
@@ -747,13 +743,13 @@ def navigate(url, timeout_s=30):
     # so a forward-Delete removes exactly that suffix. With no completion
     # the cursor is at end-of-line with nothing selected, so it's a no-op
     # (it can NOT eat the last typed char — that would be BackSpace).
-    xdo_key("Delete")
+    xdo_key("Delete", display=display)
     time.sleep(0.1)
-    xdo_key("Return")
+    xdo_key("Return", display=display)
     time.sleep(1.0)
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        title = window_title()
+        title = window_title(display=display)
         if title and "about:blank" not in title and "New Tab" not in title:
             break
         time.sleep(0.5)
@@ -826,7 +822,7 @@ def challenge_title_verdict(title):
     return normalised if normalised in CHALLENGE_TITLES else None
 
 
-def wait_for_challenges(timeout_s=15):
+def wait_for_challenges(timeout_s=15, *, display):
     """Wait for a Cloudflare/security challenge to clear, by X11 title polling.
 
     Returns the challenge title still showing when the wait ran out, and None
@@ -846,7 +842,7 @@ def wait_for_challenges(timeout_s=15):
     already knew a challenge was running was also the one page it opened
     Runtime.evaluate on.
     """
-    title = window_title()
+    title = window_title(display=display)
     phrase = challenge_phrase(title)
     if not phrase:
         return None
@@ -854,7 +850,7 @@ def wait_for_challenges(timeout_s=15):
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         time.sleep(1.5)
-        title = window_title()
+        title = window_title(display=display)
         phrase = challenge_phrase(title)
         if not phrase:
             log.info("Challenge resolved (title=%r)", title)
