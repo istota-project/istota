@@ -13,9 +13,11 @@ from istota.skills.browse import (
     ACTION_ORDER_DEST,
     SCRATCH_NOTE,
     OrderedAppend,
+    OrderedFlag,
     _interact_actions,
     _links_from_extract,
     build_parser,
+    cmd_challenge,
     cmd_close,
     cmd_extract,
     cmd_get,
@@ -692,6 +694,19 @@ class TestTheActionOrderRecord:
             {"type": "fill", "selector": "#email", "value": "me@example.com"},
         ]
 
+    def test_a_flag_dest_holding_a_bare_true_is_named(self):
+        """ISSUE-531: `list(True)` raised a bare TypeError, which reads as a
+        browser failure rather than as a malformed call.
+
+        Unreachable from argv -- `OrderedFlag` appends one marker per
+        occurrence -- but a hand-built namespace naturally spells a valueless
+        option as `True`, which is exactly what the fallback order below is
+        for.
+        """
+        args = _interact_namespace(click_challenge=True)
+        with pytest.raises(ValueError, match="must be a list of values"):
+            _interact_actions(args)
+
     def test_an_order_record_naming_an_unknown_dest_is_refused(self):
         """A dest declared nowhere — the only drift the table above allows."""
         args = _interact_namespace()
@@ -719,6 +734,159 @@ class TestTheActionOrderRecord:
         setattr(args, ACTION_ORDER_DEST, [("click", 0)])
         with pytest.raises(ValueError, match="action order record"):
             _interact_actions(args)
+
+
+class TestTheChallengeClick:
+    """ISSUE-525: the action the visual path exists for, reachable from argv.
+
+    The container has implemented `click_challenge` and `/challenge` since
+    visual mode landed, and the skill declared no flag and no verb for either
+    — so the one element the whole path was written to reach could only be
+    pressed by reading it off a screenshot by eye and sending `--click-at`,
+    which throws away the frame's measured box, the checkbox inset and the
+    test that tells the widget from an invisible beacon.
+    """
+
+    def test_the_flag_emits_the_action(self):
+        args = _interact_parser().parse_args(["s1", "--click-challenge"])
+        assert _interact_actions(args) == [{"type": "click_challenge"}]
+
+    def test_it_takes_no_coordinate(self):
+        """The container measures the widget, so there is nothing to pass."""
+        with pytest.raises(SystemExit):
+            _interact_parser().parse_args(["s1", "--click-challenge", "40,50"])
+
+    def test_it_keeps_the_position_it_was_written_in(self):
+        """ISSUE-525's one open decision, settled as a position rather than
+        inherited as "appends last".
+
+        The flag is deliberately not last here: an implementation that made it
+        a `store_true` and appended the action at the end would put the press
+        after the type and pass a test that ended with it. Pressing a checkbox
+        and then typing into the page behind it is the ordering ISSUE-507
+        established is the caller's to choose.
+        """
+        args = _interact_parser().parse_args([
+            "s1", "--fill", "#u=bob", "--click-challenge", "--type", "hi",
+        ])
+        assert _interact_actions(args) == [
+            {"type": "fill", "selector": "#u", "value": "bob"},
+            {"type": "click_challenge"},
+            {"type": "type", "text": "hi"},
+        ]
+
+    def test_two_presses_are_two_actions(self):
+        """The marker is appended per occurrence, so the order record's count
+        still answers to the values parsed."""
+        args = _interact_parser().parse_args([
+            "s1", "--click-challenge", "--click-challenge",
+        ])
+        assert _interact_actions(args) == [{"type": "click_challenge"}] * 2
+        assert len(getattr(args, ACTION_ORDER_DEST)) == 2
+
+    def test_absent_it_emits_nothing(self):
+        args = _interact_parser().parse_args(["s1", "--click", ".btn"])
+        assert _interact_actions(args) == [{"type": "click", "selector": ".btn"}]
+
+    def test_the_ordered_flag_refuses_to_carry_a_value(self):
+        """A later argument declared `OrderedFlag` with an nargs would append
+        the value itself as the marker, and the emitter ignores its argument —
+        so the value would vanish with nothing saying so."""
+        parser = argparse.ArgumentParser()
+        with pytest.raises(ValueError, match="takes no value"):
+            parser.add_argument("--thing", action=OrderedFlag, nargs=1)
+
+
+class TestTheChallengeVerb:
+    """A look before a press: `frames`, `checkbox_css` and `checkbox_screen`.
+
+    It is the only way to tell "no challenge here" from "a challenge this
+    cannot locate", which leave `--click-challenge` with nothing to press and
+    want opposite things done about them.
+    """
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_it_asks_the_endpoint_about_this_session(self, mock_url, mock_post):
+        mock_post.return_value = _json_response({
+            "status": "ok",
+            "frames": [{"url": "https://challenges.cloudflare.com/x",
+                        "x": 271.5, "y": 400.0, "width": 300, "height": 65}],
+            "checkbox_css": [293.5, 432.5],
+            "checkbox_screen": [293, 519],
+        })
+
+        result = _run_verb(["challenge", "sess1"])
+
+        mock_post.assert_called_once()
+        assert mock_post.call_args[0][0] == "http://test:9223/challenge"
+        assert mock_post.call_args[1]["json"] == {"session_id": "sess1"}
+        assert result["checkbox_screen"] == [293, 519]
+        assert result["frames"][0]["height"] == 65
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_page_with_no_challenge_is_an_ok_answer(self, mock_url, mock_post):
+        """Not an error: "there is nothing to press" is the thing being asked."""
+        mock_post.return_value = _json_response({
+            "status": "ok", "frames": [], "checkbox_css": None,
+            "checkbox_screen": None,
+        })
+
+        result = _run_verb(["challenge", "sess1"])
+
+        assert result["status"] == "ok"
+        assert result["checkbox_css"] is None
+        assert "notes" not in result
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_unknown_session_keeps_the_api_s_own_answer(self, mock_url, mock_post):
+        """The API's 404 is JSON and carries the diagnosis, so it is not
+        rewritten as a missing route."""
+        resp = _json_response({"error": "session sess9 not found or expired"})
+        resp.status_code = 404
+        mock_post.return_value = resp
+
+        result = _run_verb(["challenge", "sess9"])
+
+        assert result["status"] == "error"
+        assert "not found" in result["error"]
+        assert "notes" not in result
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_container_without_the_route_is_named(self, mock_url, mock_post):
+        """Flask's own 404 is HTML, which means there is no such route — on
+        this endpoint, an image older than visual mode."""
+        mock_post.return_value = _non_json_response(
+            404,
+            "<!doctype html>\n<title>404 Not Found</title>\n",
+            url="http://test:9223/challenge",
+        )
+
+        result = _run_verb(["challenge", "sess1"])
+
+        assert result["status"] == "error"
+        assert any("predates visual mode" in n for n in result["notes"])
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_main_dispatches_it(self, mock_url, mock_post, capsys):
+        """The verb is in `main`'s table and not only in the parser."""
+        mock_post.return_value = _json_response({"status": "ok", "frames": []})
+
+        main(["challenge", "sess1"])
+
+        assert json.loads(capsys.readouterr().out)["status"] == "ok"
+
+
+def _json_response(payload, status_code=200):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.headers = {"content-type": "application/json"}
+    resp.json.return_value = payload
+    return resp
 
 
 class TestAFillWithNoSeparator:
@@ -1082,6 +1250,7 @@ def _run_verb(argv):
         "extract": cmd_extract,
         "interact": cmd_interact,
         "links": cmd_links,
+        "challenge": cmd_challenge,
         "close": cmd_close,
     }
     return commands[args.command](args)

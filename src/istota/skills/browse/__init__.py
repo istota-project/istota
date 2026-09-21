@@ -8,7 +8,9 @@ Usage:
     python -m istota.skills.browse interact <session_id> --click ".button" --fill "#input=value"
     python -m istota.skills.browse interact <session_id> --fill-credential "#password=acme_password"
     python -m istota.skills.browse interact <session_id> --click-at 412,318 --type "Ada" --press Tab
+    python -m istota.skills.browse interact <session_id> --click-challenge
     python -m istota.skills.browse links "https://example.com" [--selector "nav a"]
+    python -m istota.skills.browse challenge <session_id>
     python -m istota.skills.browse close <session_id>
 
 Reads BROWSER_API_URL env var for the container endpoint.
@@ -759,6 +761,33 @@ class OrderedAppend(argparse.Action):
         setattr(namespace, ACTION_ORDER_DEST, order)
 
 
+class OrderedFlag(OrderedAppend):
+    """`OrderedAppend` for an option that takes no value.
+
+    `--click-challenge` names no target: the checkbox lives in a closed shadow
+    root inside a cross-origin frame, so the container measures it and there is
+    nothing for the caller to pass. A `store_true` would record no position,
+    which is the wrinkle ISSUE-525 asks to be decided rather than inherited —
+    and appending last is wrong the moment somebody presses the checkbox and
+    then types into the page behind it, which is the ordering ISSUE-507
+    established has to be the caller's to choose.
+
+    So it keeps a position. Argparse hands a zero-argument action an empty
+    list, so what lands on the dest is this class's own marker: the record
+    needs a slot to count and an index to replay, and the emitter reads
+    neither. That also keeps `_interact_actions`' invariant intact, since one
+    order entry still answers to one value.
+    """
+
+    def __init__(self, option_strings, dest, nargs=None, **kwargs):
+        if nargs not in (None, 0):
+            raise ValueError("OrderedFlag takes no value, so nargs must be 0")
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        super().__call__(parser, namespace, True, option_string)
+
+
 def _click_action(selector):
     return {"type": "click", "selector": selector}
 
@@ -827,6 +856,17 @@ def _type_action(text):
     return {"type": "type", "text": text}
 
 
+def _click_challenge_action(_marker):
+    """The one action that locates its own target.
+
+    `_marker` is `OrderedFlag`'s placeholder and carries nothing: the
+    container finds the Cloudflare checkbox from the challenge frame's
+    bounding box plus a measured inset, which is the only handle on an
+    element no selector reaches.
+    """
+    return {"type": "click_challenge"}
+
+
 #: Which dest an order record may name, and what each one emits. One table
 #: rather than a tuple of dests beside a chain of branches: an argument added
 #: to only one of those reaches whichever branch is last and is resolved as
@@ -841,6 +881,7 @@ ACTION_EMITTERS = {
     "hover_at": _hover_at_action,
     "press": _press_action,
     "type": _type_action,
+    "click_challenge": _click_challenge_action,
 }
 #: The dests `OrderedAppend` may be declared on, and the fallback order.
 ORDERED_ACTION_DESTS = tuple(ACTION_EMITTERS)
@@ -866,9 +907,21 @@ def _interact_actions(args):
     name, since typing a name into a password box is a failed login whose cause
     is invisible from the result.
     """
-    values = {
-        dest: list(getattr(args, dest, None) or []) for dest in ORDERED_ACTION_DESTS
-    }
+    values = {}
+    for dest in ORDERED_ACTION_DESTS:
+        raw = getattr(args, dest, None) or []
+        if not isinstance(raw, (list, tuple)):
+            # Named rather than left to `list(True)`'s raw TypeError, which
+            # reads as a browser failure rather than as a malformed call.
+            # `--click-challenge` is the one that invites it: a hand-built
+            # namespace naturally spells a valueless option `True`, where
+            # `OrderedFlag` appends one marker per occurrence so that the
+            # order record keeps a slot to count (ISSUE-531).
+            raise ValueError(
+                f"{dest} must be a list of values, not {type(raw).__name__}; "
+                f"a valueless action is recorded as one marker per occurrence"
+            )
+        values[dest] = list(raw)
     order = list(getattr(args, ACTION_ORDER_DEST, None) or [])
     if not order:
         # A caller that built the namespace itself has no order record —
@@ -1183,6 +1236,49 @@ def cmd_links(args):
         }
 
 
+def _note_missing_challenge_route(data, resp):
+    """Name the container as too old where `/challenge` is not a route at all.
+
+    The API answers an unknown session with its own JSON 404, so a 404 whose
+    body is not JSON is Flask saying the route does not exist — which on this
+    endpoint means the image predates the visual path. Without this the caller
+    gets `_decode`'s excerpt of an HTML error page, which names a status and
+    nothing to do about it. Same sentence `_note_stale_container` gives for an
+    action the container never had.
+    """
+    if resp.status_code != 404:
+        return data
+    if "json" in (resp.headers.get("content-type") or "").lower():
+        return data
+    if not isinstance(data, dict):
+        return data
+    notes = list(data.get("notes") or [])
+    notes.append(
+        "This browser container has no /challenge endpoint — it predates "
+        "visual mode. Rebuild the browser image, or drive the page with "
+        "--click and a CSS selector."
+    )
+    return {**data, "notes": notes}
+
+
+def cmd_challenge(args):
+    """Where the challenge widgets are, without pressing anything.
+
+    Geometry rather than a verdict: `get` answers whether a page is a
+    challenge, this answers where the widget is and whether the container can
+    locate it. That is the distinction ISSUE-525 wanted, because "no challenge
+    here" and "a challenge this cannot find" both leave `--click-challenge`
+    with nothing to press and want opposite things done about them.
+    """
+    url = get_api_url()
+    resp = httpx.post(
+        f"{url}/challenge",
+        json={"session_id": args.session_id},
+        timeout=REQUEST_TIMEOUT,
+    )
+    return _note_missing_challenge_route(_decode(resp), resp)
+
+
 def cmd_close(args):
     """Close a session."""
     url = get_api_url()
@@ -1288,6 +1384,16 @@ def build_parser():
         help="Move the pointer to a point, in the delivered picture's pixel space.",
     )
     p_int.add_argument(
+        "--click-challenge", action=OrderedFlag,
+        help=(
+            "Press the Cloudflare challenge checkbox. Takes no coordinate — "
+            "the container measures the widget itself, which is more accurate "
+            "than reading it off a screenshot and is the only way to reach an "
+            "element that has no selector. Use `browse challenge` first to see "
+            "whether there is one and where it is."
+        ),
+    )
+    p_int.add_argument(
         "--press", action=OrderedAppend, metavar="KEY",
         help="Press a key (Tab, Enter, Escape, ctrl+a) at whatever has focus.",
     )
@@ -1309,6 +1415,12 @@ def build_parser():
     p_links.add_argument("--session", help="Existing session ID")
     p_links.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
 
+    # challenge
+    p_chal = sub.add_parser(
+        "challenge", help="Where the challenge widgets on this page are",
+    )
+    p_chal.add_argument("session_id", help="Session ID")
+
     # close
     p_close = sub.add_parser("close", help="Close a session")
     p_close.add_argument("session_id", help="Session ID to close")
@@ -1327,6 +1439,7 @@ def main(argv=None):
         "extract": cmd_extract,
         "interact": cmd_interact,
         "links": cmd_links,
+        "challenge": cmd_challenge,
         "close": cmd_close,
     }
 
