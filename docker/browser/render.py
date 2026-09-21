@@ -367,21 +367,30 @@ def _splice_frames(soup, frames, base_url):
 _FRAME_OPEN_RE = re.compile(rf"^\s*>*\s*{re.escape(FRAME_MARKER)}\s+\S", re.M)
 
 
-def _count_frame_markers(markdown):
-    """How many frames are actually present in the markdown being returned.
-
-    `_splice_frames` reports what it put into the *soup*, and two later stages
-    can take it back out again: article extraction selects one node and
-    discards the rest of the page, and `_truncate` cuts the tail. Reporting the
-    splice count as `included` therefore claimed content the caller could not
-    see — the same class of silent short read ISSUE-516 exists to remove, one
-    layer further along. Counting the markers in the finished markdown is the
-    only answer that describes what was returned.
-    """
-    return len(_FRAME_OPEN_RE.findall(markdown or ""))
+_FRAME_BOUNDARY_RE = re.compile(
+    rf"^[ \t>]*(?:(?P<open>{re.escape(FRAME_MARKER)})[ \t]+\S[^\n]*"
+    rf"|(?P<close>{re.escape(FRAME_MARKER_END)})[ \t]*$)", re.M,
+)
 
 
-def _frame_notes(found, placed, included, unread, nested, capped, include_frames):
+def _frame_spans(markdown):
+    """Locate frame spans in the converted markdown before pagination."""
+    spans = []
+    start = None
+    for boundary in _FRAME_BOUNDARY_RE.finditer(markdown):
+        if boundary.group("open"):
+            if start is not None:
+                spans.append((start, boundary.start()))
+            start = boundary.start()
+        elif start is not None:
+            spans.append((start, boundary.end()))
+            start = None
+    if start is not None:
+        spans.append((start, len(markdown)))
+    return spans
+
+
+def _frame_notes(found, placed, included, unread, nested, capped, include_frames, rendered):
     """What to tell the caller about frames it cannot see in the markdown.
 
     A capped walk is reported even when it found nothing, which is the case a
@@ -435,11 +444,17 @@ def _frame_notes(found, placed, included, unread, nested, capped, include_frames
             "placed — most often an <iframe> with no src attribute, whose "
             "document JavaScript wrote, so nothing in the page names it"
         )
-    if included < placed:
+    if rendered < placed:
         notes.append(
-            f"{placed - included} frame{'s' if placed - included != 1 else ''} "
-            "were spliced in and then dropped by article extraction or by the "
-            "--max-chars cut; re-run with --mode full or a larger budget"
+            f"{placed - rendered} frame{'s' if placed - rendered != 1 else ''} "
+            "were spliced in and then dropped by article extraction; "
+            "re-run with --mode full"
+        )
+    if included < rendered:
+        notes.append(
+            f"{rendered - included} frame{'s' if rendered - included != 1 else ''} "
+            "are outside this character window; read the other chunks "
+            "with --offset"
         )
     return notes
 
@@ -657,17 +672,21 @@ def to_markdown(html, base_url="", mode="full", max_chars=DEFAULT_MAX_CHARS,
         markdown = _converter(strip_images=True).convert_soup(body)
 
     markdown = _postprocess(markdown)
+    frame_spans = _frame_spans(markdown) if placed else []
     markdown, text_metadata = text_window(
         markdown, max_chars if max_chars > 0 else max(1, len(markdown)), offset,
     )
     truncated = text_metadata.get("text_truncated", False)
 
-    # After truncation, deliberately: `included` is what the caller can read,
-    # not what was put into the soup.
-    included = _count_frame_markers(markdown) if placed else 0
+    # A continuation may contain the frame body without its opening marker.
+    window_end = offset + len(markdown)
+    included = sum(
+        start < window_end and end > offset
+        for start, end in frame_spans
+    ) if markdown else 0
     notes.extend(_frame_notes(
         len(frame_records), placed, included, unread, nested,
-        frames_capped, include_frames,
+        frames_capped, include_frames, len(frame_spans),
     ))
 
     return {

@@ -380,3 +380,46 @@ def test_stub_converter_was_never_actually_used():
     """Guards the premise of the markdownify stub above."""
     assert isinstance(sys.modules["markdownify"].MarkdownConverter, type)
     assert not isinstance(sys.modules["markdownify"], mock.MagicMock)
+
+
+@pytest.mark.parametrize("position,expected", [("inside", 1), ("after", 0), ("before", 0)])
+def test_frame_census_tracks_the_returned_window(position, expected):
+    html = ('<html><body><p>' + 'before ' * 40 + '</p>'
+            '<iframe src="https://widget.example/embed"></iframe>'
+            '<p>' + 'after ' * 40 + '</p></body></html>')
+    options = {
+        "frames": [{"url": "https://widget.example/embed", "html": "<p>" + "abcdef" * 100 + "</p>"}],
+        "include_frames": True,
+    }
+    whole = render.to_markdown(html, **options)["markdown"]
+    if position == "inside":
+        offset, budget = whole.index("abcdef") + 10, 10000
+    elif position == "after":
+        offset, budget = whole.index("after"), 10000
+    else:
+        offset, budget = 0, 100
+    result = render.to_markdown(html, offset=offset, max_chars=budget, **options)
+    assert result["markdown"] == whole[offset:offset + budget]
+    assert result["frames"]["included"] == expected
+    assert not any("dropped" in note or "larger budget" in note for note in result["notes"])
+    if not expected:
+        assert any("outside this character window" in note for note in result["notes"])
+
+
+def test_frame_pagination_reassembles_without_changing_markdown():
+    html = '<html><body><iframe src="https://widget.example/embed"></iframe></body></html>'
+    options = {
+        "frames": [{"url": "https://widget.example/embed", "html": "<p>" + "abcdef" * 100 + "</p>"}],
+        "include_frames": True,
+    }
+    whole = render.to_markdown(html, **options)["markdown"]
+    chunks = []
+    offset = 0
+    while offset < len(whole):
+        result = render.to_markdown(html, offset=offset, max_chars=100, **options)
+        chunks.append(result["markdown"])
+        assert result["frames"]["included"] == 1
+        if "next_offset" not in result:
+            break
+        offset = result["next_offset"]
+    assert "".join(chunks) == whole
