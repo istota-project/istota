@@ -11,7 +11,11 @@ import pytest
 from istota.skills.browse import (
     ACTION_EMITTERS,
     ACTION_ORDER_DEST,
+    IMAGE_SPACE_ACTIONS,
+    KEY_PRESSES_DEFAULT,
     SCRATCH_NOTE,
+    VISUAL_ACTION_TYPES,
+    WHEEL_CLICKS_DEFAULT,
     OrderedAppend,
     OrderedFlag,
     _interact_actions,
@@ -26,6 +30,7 @@ from istota.skills.browse import (
     cmd_links,
     cmd_render,
     cmd_screenshot,
+    delivered_size,
     get_api_url,
     main,
 )
@@ -194,9 +199,19 @@ class TestBuildParser:
 
     def test_interact_scroll(self):
         parser = build_parser()
-        args = parser.parse_args(["interact", "sess1", "--scroll", "down", "--scroll-amount", "1000"])
+        args = parser.parse_args([
+            "interact", "sess1", "--scroll", "down", "--scroll-clicks", "4",
+        ])
         assert args.scroll == "down"
-        assert args.scroll_amount == 1000
+        assert args.scroll_clicks == 4
+
+    def test_interact_scroll_at(self):
+        parser = build_parser()
+        args = parser.parse_args([
+            "interact", "sess1", "--scroll", "up", "--scroll-at", "412,318",
+        ])
+        assert args.scroll_at == ["412,318"]
+        assert args.scroll == "up"
 
     def test_close_command(self):
         parser = build_parser()
@@ -612,11 +627,11 @@ class TestCmdInteract:
         mock_post.return_value = mock_resp
 
         parser = build_parser()
-        args = parser.parse_args(["interact", "sess1", "--scroll", "down", "--scroll-amount", "1000"])
+        args = parser.parse_args(["interact", "sess1", "--scroll", "down", "--scroll-clicks", "2"])
         cmd_interact(args)
 
         payload = mock_post.call_args[1]["json"]
-        assert payload["actions"] == [{"type": "scroll", "direction": "down", "amount": 1000}]
+        assert payload["actions"] == [{"type": "scroll", "direction": "down", "presses": 2}]
 
 
 def _interact_parser():
@@ -636,7 +651,10 @@ def _interact_namespace(**values):
         fill=[],
         fill_credential=[],
         scroll=None,
-        scroll_amount=500,
+        scroll_at=[],
+        scroll_clicks=None,
+        scroll_zoom=False,
+        scroll_amount=None,
     )
     for dest, value in values.items():
         setattr(args, dest, value)
@@ -2735,7 +2753,7 @@ class TestAPointReadOffThePicture:
             ["interact", "s1", "--type", "hello"],
         ))
 
-        assert "predates visual mode" in result["notes"][0]
+        assert "older than this skill" in result["notes"][0]
         assert "type" in result["notes"][0]
 
     @patch("istota.skills.browse.httpx.post")
@@ -3099,3 +3117,246 @@ class TestAnInteractionThatNeverAnswered:
         assert output["status"] == "error"
         assert "notes" not in output
         assert "unreported_actions" not in output
+
+
+def _alive_response(capture):
+    """What `GET /sessions/<id>` answers, for the framed-action capture read."""
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {
+        "status": "ok", "session_id": "s1", "alive": True, "capture": capture,
+    }
+    return resp
+
+
+def _ok_interact_response():
+    resp = MagicMock()
+    resp.json.return_value = {"status": "ok", "session_id": "s1", "actions": []}
+    return resp
+
+
+class TestTheScrollFlags:
+    """`--scroll-at` has a position; the keyless `--scroll` still does not.
+
+    ISSUE-528. A scroll used to be one thing — a CDP `window.scrollBy` on the
+    document — so it was not repeatable, had no position, and `cmd_interact`
+    appended it last whatever the caller wrote. A wheel *at a point* is none of
+    those: two of them at two points are two different actions, and one before
+    a click is a different outcome from one after it. So `--scroll-at` joins
+    `ACTION_EMITTERS` with the rest and the keyless form keeps its old slot.
+    """
+
+    def _actions(self, argv):
+        return _interact_actions(build_parser().parse_args(
+            ["interact", "s1"] + argv,
+        ))
+
+    def test_a_point_scroll_is_a_wheel_at_that_point(self):
+        assert self._actions(["--scroll-at", "412,318"]) == [{
+            "type": "scroll_at", "x": 412.0, "y": 318.0,
+            "direction": "down", "clicks": WHEEL_CLICKS_DEFAULT,
+        }]
+
+    def test_the_direction_flag_supplies_the_point_scroll_s_direction(self):
+        actions = self._actions(["--scroll", "up", "--scroll-at", "10,20"])
+        assert [a["type"] for a in actions] == ["scroll_at"]
+        assert actions[0]["direction"] == "up"
+
+    def test_a_directed_point_scroll_appends_no_keyless_scroll(self):
+        """`--scroll` contributes direction there and nothing else. Emitting
+        both would scroll the widget and then the document behind it, which is
+        the failure this issue is about, performed twice."""
+        actions = self._actions(["--scroll", "down", "--scroll-at", "10,20"])
+        assert [a["type"] for a in actions] == ["scroll_at"]
+
+    def test_the_keyless_scroll_is_presses_rather_than_pixels(self):
+        assert self._actions(["--scroll", "down"]) == [{
+            "type": "scroll", "direction": "down",
+            "presses": KEY_PRESSES_DEFAULT,
+        }]
+
+    def test_the_keyless_scroll_is_still_last_whatever_position_it_was_written_in(self):
+        actions = self._actions([
+            "--scroll", "down", "--click-at", "10,20", "--press", "Enter",
+        ])
+        assert [a["type"] for a in actions] == ["click_at", "key", "scroll"]
+
+    def test_a_point_scroll_interleaves_in_the_order_written(self):
+        actions = self._actions([
+            "--click-at", "10,20",
+            "--scroll-at", "30,40",
+            "--fill", "#q=hello",
+        ])
+        assert [a["type"] for a in actions] == ["click_at", "scroll_at", "fill"]
+
+    def test_two_point_scrolls_are_two_actions(self):
+        actions = self._actions(["--scroll-at", "10,20", "--scroll-at", "30,40"])
+        assert [(a["x"], a["y"]) for a in actions] == [(10.0, 20.0), (30.0, 40.0)]
+
+    def test_the_click_count_reaches_both_paths_under_its_own_name(self):
+        assert self._actions(
+            ["--scroll-at", "10,20", "--scroll-clicks", "7"],
+        )[0]["clicks"] == 7
+        assert self._actions(
+            ["--scroll", "down", "--scroll-clicks", "4"],
+        )[0]["presses"] == 4
+
+    def test_zoom_is_the_modifier_on_a_point_scroll(self):
+        action = self._actions(
+            ["--scroll", "up", "--scroll-at", "10,20", "--scroll-zoom"],
+        )[0]
+        assert action["modifier"] == "ctrl"
+
+    def test_an_ordinary_point_scroll_carries_no_modifier(self):
+        """The control for the test above: a key on the action means a
+        gesture was asked for, so the ordinary case must not carry one."""
+        assert "modifier" not in self._actions(["--scroll-at", "10,20"])[0]
+
+    def test_zoom_without_a_point_is_refused(self):
+        """There is no keyless zoom: Page_Down cannot carry the gesture, so
+        the flag would be accepted and do nothing."""
+        with pytest.raises(ValueError, match="--scroll-zoom"):
+            self._actions(["--scroll", "down", "--scroll-zoom"])
+
+    def test_a_click_count_with_no_scroll_at_all_is_refused(self):
+        with pytest.raises(ValueError, match="--scroll-clicks"):
+            self._actions(["--scroll-clicks", "3"])
+
+    @pytest.mark.parametrize("count", ["0", "-1", "999"])
+    def test_a_click_count_outside_the_bound_is_refused(self, count):
+        with pytest.raises(ValueError, match="--scroll-clicks"):
+            self._actions(["--scroll-at", "10,20", "--scroll-clicks", count])
+
+    @pytest.mark.parametrize("value", ["412", "a,b", "412,", "nan,1"])
+    def test_a_malformed_point_is_refused_rather_than_coerced(self, value):
+        with pytest.raises(ValueError, match="--scroll-at"):
+            self._actions(["--scroll-at", value])
+
+
+class TestTheRetiredPixelArgument:
+    """`--scroll-amount` is refused by name, not dropped and not reinterpreted.
+
+    A wheel tick is a distance the browser picks and a Page_Down is a viewport,
+    so neither path can honour a pixel figure — and `skill.md` documented
+    `--scroll-amount 2000` as the infinite-scroll recipe, which a task holds in
+    its prompt from the moment it started. So the flag stays declared and
+    answers with the name that replaced it: argparse's own `unrecognized
+    arguments` would be usage text with no remedy in it.
+    """
+
+    def test_it_says_what_replaced_it(self):
+        args = build_parser().parse_args(
+            ["interact", "s1", "--scroll", "down", "--scroll-amount", "2000"],
+        )
+        with pytest.raises(ValueError, match="--scroll-clicks"):
+            _interact_actions(args)
+
+    def test_it_is_not_advertised(self):
+        """Suppressed rather than deleted, so the help does not offer a flag
+        every call refuses."""
+        for action in _interact_parser()._actions:
+            if "--scroll-amount" in action.option_strings:
+                assert action.help == argparse.SUPPRESS
+                return
+        raise AssertionError("--scroll-amount is no longer declared at all")
+
+
+class TestThePointScrollIsFramed:
+    """It is read off a picture, so it needs the delivered size like a click."""
+
+    def test_scroll_at_is_an_image_space_action(self):
+        assert "scroll_at" in IMAGE_SPACE_ACTIONS
+        assert "scroll_at" in VISUAL_ACTION_TYPES
+
+    def test_the_keyless_scroll_is_neither(self):
+        """It converts nothing, so it must not drag a capture fetch in front
+        of itself — and an old container still scrolls the document for it, so
+        an `unknown` naming it would be wrong about what happened."""
+        assert "scroll" not in IMAGE_SPACE_ACTIONS
+        assert "scroll" not in VISUAL_ACTION_TYPES
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_delivered_size_is_patched_onto_it(
+        self, mock_url, mock_get, mock_post,
+    ):
+        mock_post.return_value = _ok_interact_response()
+        mock_get.return_value = _alive_response(_capture_record(1280, 800))
+
+        cmd_interact(build_parser().parse_args(
+            ["interact", "s1", "--scroll-at", "10,20"],
+        ))
+
+        action = mock_post.call_args[1]["json"]["actions"][0]
+        assert action["image_size"] == list(delivered_size(1280, 800))
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_keyless_scroll_fetches_no_capture(
+        self, mock_url, mock_get, mock_post,
+    ):
+        mock_post.return_value = _ok_interact_response()
+
+        cmd_interact(build_parser().parse_args(
+            ["interact", "s1", "--scroll", "down"],
+        ))
+
+        mock_get.assert_not_called()
+
+
+class TestTheScrollRefusalsAreNotDefaults:
+    """Where a guess is cheap to get wrong, the flag is required instead.
+
+    A plain `--scroll-at` defaults to `down`, because scrolling a pane the
+    wrong way costs one more call. Zoom does not: zooming a map out when the
+    caller meant in changes what the next screenshot shows, and reads as the
+    page having moved rather than as a wrong flag.
+    """
+
+    def _actions(self, argv):
+        return _interact_actions(build_parser().parse_args(
+            ["interact", "s1"] + argv,
+        ))
+
+    def test_zoom_with_no_direction_is_refused_rather_than_zooming_out(self):
+        with pytest.raises(ValueError, match="--scroll up or --scroll down"):
+            self._actions(["--scroll-at", "10,20", "--scroll-zoom"])
+
+    @pytest.mark.parametrize("direction,expected", [("up", "up"), ("down", "down")])
+    def test_a_named_direction_is_carried(self, direction, expected):
+        """The control: both directions work, so the refusal above is about
+        the absent one rather than about zoom being broken."""
+        action = self._actions(
+            ["--scroll", direction, "--scroll-at", "10,20", "--scroll-zoom"],
+        )[0]
+        assert action["direction"] == expected
+        assert action["modifier"] == "ctrl"
+
+    def test_a_plain_point_scroll_still_defaults_to_down(self):
+        """The other control, and the asymmetry stated: only zoom requires it."""
+        assert self._actions(["--scroll-at", "10,20"])[0]["direction"] == "down"
+
+
+class TestAHandBuiltClickCount:
+    """argv cannot produce these; `_interact_actions` is called directly too.
+
+    The skill's count check exists to save a round trip, so a value the
+    container would refuse has to be refused here — and as a `ValueError`,
+    which is what the CLI's envelope machinery turns into an error answer. A
+    `TypeError` out of the comparison would escape as an unhandled exception.
+    """
+
+    @pytest.mark.parametrize("value", [True, False, "3", 3.5, None.__class__])
+    def test_a_non_integer_count_raises_the_envelope_s_own_error(self, value):
+        args = _interact_namespace(scroll_at=["10,20"], scroll_clicks=value)
+        args.action_order = [("scroll_at", 0)]
+        with pytest.raises(ValueError, match="--scroll-clicks"):
+            _interact_actions(args)
+
+    def test_a_whole_number_in_range_is_carried(self):
+        """The control: the type guard must not refuse the ordinary value."""
+        args = _interact_namespace(scroll_at=["10,20"], scroll_clicks=7)
+        args.action_order = [("scroll_at", 0)]
+        assert _interact_actions(args)[0]["clicks"] == 7

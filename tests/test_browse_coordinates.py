@@ -28,6 +28,7 @@ no stubs.
 """
 
 import struct
+import subprocess
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -40,6 +41,7 @@ if str(_BROWSER_DIR) not in sys.path:
     sys.path.insert(0, str(_BROWSER_DIR))
 
 import visual  # noqa: E402
+import xdotool  # noqa: E402
 
 
 def _png(width, height):
@@ -435,6 +437,17 @@ if "flask" not in sys.modules:
 pytest.importorskip("bs4", reason="browser render module needs bs4")
 
 import browse_api  # noqa: E402
+
+# The skill half, for the parity guard at the end of this file alone. The two
+# are separate programs in separate repositories -- `docker/browser/` is a
+# vendored copy of stealth-browser -- so a number restated on both sides is
+# held equal here rather than shared.
+from istota.skills.browse import (  # noqa: E402
+    KEY_PRESSES_DEFAULT,
+    MAX_SCROLL_UNITS,
+    WHEEL_CLICKS_DEFAULT,
+    ZOOM_MODIFIER,
+)
 
 
 class _SettlePage(_Page):
@@ -1030,3 +1043,494 @@ class TestTheForegroundGuard:
         )
         assert result["ok"] is True
         assert "foreground" not in result
+
+
+class TestTheWheel:
+    """`scroll_at` is a wheel at a point, and it takes click_at's whole pass.
+
+    ISSUE-528. `--scroll` was the last model-driven action still going through
+    `page.evaluate`, and `window.scrollBy` was also the weakest scroll
+    available: it moves the document, never the pane the pointer is over, so a
+    chat log, a code viewer, a results list inside a modal and a PDF viewer --
+    precisely the widgets visual mode exists for -- were the cases where it did
+    nothing useful.
+
+    Two paths now, and the split is what each one can address. A wheel tick is
+    delivered wherever the pointer is, so `scroll_at` converts a picture point
+    exactly as `click_at` does and takes the same refusals. A keyless scroll has
+    no point to aim at, so it goes to whatever holds keyboard focus -- the
+    document -- through `xdo_key`, which is what `simulate_human_behavior` has
+    always used.
+    """
+
+    @pytest.fixture
+    def wheel(self):
+        """The wheel half, recorded. Nothing here performs X11 input."""
+        with mock.patch.object(browse_api.browsing, "human_scroll_at") as at, \
+             mock.patch.object(browse_api.xdotool, "key_native") as key:
+            at.return_value = True
+            key.return_value = True
+            yield types.SimpleNamespace(at=at, key=key)
+
+    def test_a_wheel_reaches_the_pointer_at_the_converted_point(
+        self, window, pointer, wheel,
+    ):
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(),
+            {"type": "scroll_at", "x": 293, "y": 337,
+             "direction": "down", "clicks": 3},
+        )
+
+        assert result["ok"] is True
+        assert result["screen"] == [293, 337 + UI_INSET_Y]
+        assert result["clicks"] == 3
+        x, y = wheel.at.call_args[0]
+        assert (round(x), round(y)) == (293, 337 + UI_INSET_Y)
+        assert wheel.at.call_args[1]["button"] == browse_api.xdotool.WHEEL_DOWN
+        assert wheel.at.call_args[1]["clicks"] == 3
+
+    def test_up_is_the_other_wheel_button(self, window, pointer, wheel):
+        session = {"capture": _record(), "tab_index": 0}
+
+        browse_api._coordinate_action(
+            session, _SettlePage(),
+            {"type": "scroll_at", "x": 10, "y": 10, "direction": "up"},
+        )
+
+        assert wheel.at.call_args[1]["button"] == browse_api.xdotool.WHEEL_UP
+
+    def test_a_zoom_holds_the_modifier_across_the_ticks(
+        self, window, pointer, wheel,
+    ):
+        """ctrl plus wheel at a point is the map-zoom gesture, and it falls out
+        of the same primitive rather than being a second mechanism."""
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(),
+            {"type": "scroll_at", "x": 10, "y": 10, "modifier": "ctrl"},
+        )
+
+        assert result["ok"] is True
+        assert result["modifier"] == "ctrl"
+        assert wheel.at.call_args[1]["modifier"] == "ctrl"
+
+    def test_a_modifier_the_container_does_not_know_is_refused(
+        self, window, pointer, wheel,
+    ):
+        """An allowlist rather than a pass-through: the value reaches
+        `xdotool keydown` and a modifier nobody vetted is an arbitrary key
+        held down across the rest of the action list."""
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(),
+            {"type": "scroll_at", "x": 10, "y": 10, "modifier": "--file=/etc/x"},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "unknown_modifier"
+        wheel.at.assert_not_called()
+
+    @pytest.mark.parametrize("record,expected", [
+        (None, "no_capture"),
+        (_record(full_page=True), "full_page_capture"),
+        (_record(offset=None), "no_coordinate_frame"),
+    ])
+    def test_it_takes_click_at_s_refusals(
+        self, window, pointer, wheel, record, expected,
+    ):
+        session = {"capture": record, "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(), {"type": "scroll_at", "x": 10, "y": 10},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == expected
+        wheel.at.assert_not_called()
+
+    def test_a_scrolled_page_is_refused_rather_than_wheeled(
+        self, window, pointer, wheel,
+    ):
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(scroll=(0, 400)),
+            {"type": "scroll_at", "x": 10, "y": 10},
+        )
+
+        assert result["error"] == "stale_capture"
+        wheel.at.assert_not_called()
+
+    def test_a_point_outside_the_picture_is_refused_before_the_pointer_moves(
+        self, window, pointer, wheel,
+    ):
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(), {"type": "scroll_at", "x": 99999, "y": 10},
+        )
+
+        assert result["error"] == "out_of_picture"
+        wheel.at.assert_not_called()
+
+    def test_a_pointer_that_did_not_arrive_wheels_nothing(
+        self, window, pointer, wheel,
+    ):
+        """`human_scroll_at` answers False when the landing move failed, and a
+        wheel tick delivered wherever the pointer happens to be scrolls
+        whatever the previous action was aimed at."""
+        session = {"capture": _record(), "tab_index": 0}
+        wheel.at.return_value = False
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(), {"type": "scroll_at", "x": 10, "y": 10},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "pointer_did_not_move"
+
+    @pytest.mark.parametrize("clicks", [0, -1, 99999, "3", True])
+    def test_a_click_count_outside_the_bound_is_refused(
+        self, window, pointer, wheel, clicks,
+    ):
+        """Refused rather than clamped: a caller that asked for 500 ticks and
+        silently got 30 has been told the pane reached its bottom when it did
+        not. `True` is in the list because `bool` is an `int` in Python, so it
+        would otherwise be accepted as one tick."""
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(),
+            {"type": "scroll_at", "x": 10, "y": 10, "clicks": clicks},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "bad_click_count"
+        wheel.at.assert_not_called()
+
+    def test_an_omitted_count_takes_the_container_s_own_default(self, window, pointer, wheel):
+        """The skill always sends a count, so this is the hand-built request's
+        path -- and it must not be the refusal above."""
+        session = {"capture": _record(), "tab_index": 0}
+
+        result = browse_api._coordinate_action(
+            session, _SettlePage(), {"type": "scroll_at", "x": 10, "y": 10},
+        )
+
+        assert result["ok"] is True
+        assert result["clicks"] == browse_api.DEFAULT_WHEEL_CLICKS
+
+
+class TestTheKeylessScroll:
+    """No point, so it goes to keyboard focus -- and never to CDP.
+
+    The discriminating assertion is that `page.evaluate` is not called. A page
+    that scrolled is indistinguishable from one that did not at this layer, so
+    asserting only that a key was sent would pass just as happily against a
+    build that sent the key *and* kept the evaluate.
+    """
+
+    @pytest.fixture
+    def wheel(self):
+        with mock.patch.object(browse_api.browsing, "human_scroll_at") as at, \
+             mock.patch.object(browse_api.xdotool, "key_native") as key:
+            at.return_value = True
+            key.return_value = True
+            yield types.SimpleNamespace(at=at, key=key)
+
+    def test_down_is_page_down_through_xdo_key(self, window, pointer, wheel):
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "down", "presses": 2},
+        )
+
+        assert result["ok"] is True
+        assert result["presses"] == 2
+        assert wheel.key.call_args_list == [mock.call("Page_Down")] * 2
+
+    def test_up_is_page_up(self, window, pointer, wheel):
+        browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "up"},
+        )
+        assert wheel.key.call_args_list == [mock.call("Page_Up")]
+
+    def test_it_needs_no_capture(self, window, pointer, wheel):
+        """A scroll with no point converts nothing, so a session that has
+        never been screenshotted can still scroll -- which is what the
+        infinite-scroll recipe does before it ever takes a picture."""
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "down"},
+        )
+        assert result["ok"] is True
+
+    def test_nothing_on_this_path_evaluates(self, window, pointer, wheel):
+        class _NoEvaluate(_SettlePage):
+            def evaluate(self, *_a, **_k):
+                raise AssertionError(
+                    "the scroll reached page.evaluate -- ISSUE-528's whole "
+                    "subject is that it must not"
+                )
+
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _NoEvaluate(),
+            {"type": "scroll", "direction": "down"},
+        )
+        assert result["ok"] is True
+
+    @pytest.mark.parametrize("presses", [0, -1, 99999, "2", True])
+    def test_a_press_count_outside_the_bound_is_refused(
+        self, window, pointer, wheel, presses,
+    ):
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "down", "presses": presses},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "bad_click_count"
+        wheel.key.assert_not_called()
+
+    def test_an_unknown_direction_is_refused(self, window, pointer, wheel):
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "sideways"},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "bad_direction"
+        wheel.key.assert_not_called()
+
+
+class TestTheScrollCeilingsAgree:
+    """The skill restates the container's bound, so the two are held equal.
+
+    The skill refuses an out-of-range count before the request is sent, which
+    saves a round trip and names the flag rather than the wire field. That is
+    a second copy of a number, and a skill whose ceiling drifted *above* the
+    container's would send requests that come back `bad_click_count` with the
+    flag's own help text saying they were fine.
+    """
+
+    def test_the_maximum_is_the_same_number(self):
+        assert MAX_SCROLL_UNITS == browse_api.MAX_SCROLL_UNITS
+
+    def test_the_wheel_default_is_the_same_number(self):
+        assert WHEEL_CLICKS_DEFAULT == browse_api.DEFAULT_WHEEL_CLICKS
+
+    def test_the_press_default_is_the_same_number(self):
+        assert KEY_PRESSES_DEFAULT == browse_api.DEFAULT_SCROLL_PRESSES
+
+    def test_the_zoom_modifier_is_one_the_container_will_hold(self):
+        assert ZOOM_MODIFIER in browse_api.xdotool.MODIFIERS
+
+
+class TestTheRetiredWireArgument:
+    """A caller still speaking the old contract is refused, not half-obeyed.
+
+    `--scroll-amount` defaulted to 500, so *every* scroll an older caller sends
+    carries `amount`. Reading `presses` and ignoring it would do one Page_Down
+    and answer `ok: true` for a request that asked to move four screens — the
+    shape `_scroll_count` refuses a few lines up, arriving by the one route the
+    skill's own refusal cannot cover: a caller that does not go through the
+    skill.
+    """
+
+    @pytest.fixture
+    def wheel(self):
+        with mock.patch.object(browse_api.browsing, "human_scroll_at") as at, \
+             mock.patch.object(browse_api.xdotool, "key_native") as key:
+            at.return_value = True
+            key.return_value = True
+            yield types.SimpleNamespace(at=at, key=key)
+
+    def test_the_old_pixel_argument_is_refused_by_name(self, window, pointer, wheel):
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "down", "amount": 2000},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "retired_argument"
+        assert "presses" in result["detail"]
+        wheel.key.assert_not_called()
+
+    def test_it_is_refused_even_where_a_press_count_is_also_sent(
+        self, window, pointer, wheel,
+    ):
+        """A caller sending both has two different distances in mind and this
+        cannot tell which it meant."""
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "down", "amount": 2000, "presses": 2},
+        )
+
+        assert result["error"] == "retired_argument"
+        wheel.key.assert_not_called()
+
+    def test_a_scroll_without_it_is_unaffected(self, window, pointer, wheel):
+        """The control: the refusal keys on the argument's presence, so an
+        ordinary scroll must not trip it."""
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "down", "presses": 2},
+        )
+
+        assert result["ok"] is True
+        assert wheel.key.call_count == 2
+
+
+class TestAScrollThatCouldNotAimIsNotReportedAsDistance:
+    """`presses: 3` is a claim about the page, so it needs the window.
+
+    `key_native` sends the key whatever happens — XTest delivers to whatever
+    holds focus — but it answers whether the Chrome window could be focused,
+    and a scroll is the one of the three keyboard actions that reports how far
+    something moved. `key` and `type` deliberately still ignore that answer:
+    they report a keystroke, not a distance.
+    """
+
+    @pytest.fixture
+    def wheel(self):
+        with mock.patch.object(browse_api.browsing, "human_scroll_at") as at, \
+             mock.patch.object(browse_api.xdotool, "key_native") as key:
+            at.return_value = True
+            key.return_value = True
+            yield types.SimpleNamespace(at=at, key=key)
+
+    def test_an_unfocusable_window_refuses_rather_than_reporting_presses(
+        self, window, pointer, wheel,
+    ):
+        wheel.key.return_value = False
+
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "down", "presses": 3},
+        )
+
+        assert result["ok"] is False
+        assert result["error"] == "window_not_focused"
+
+    def test_it_stops_at_the_first_one_rather_than_pressing_on(
+        self, window, pointer, wheel,
+    ):
+        """Three presses against a window nothing can aim at is three chances
+        for the keys to land somewhere else."""
+        wheel.key.return_value = False
+
+        browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "scroll", "direction": "down", "presses": 3},
+        )
+
+        assert wheel.key.call_count == 1
+
+    def test_the_key_action_still_ignores_the_same_answer(
+        self, window, pointer, wheel,
+    ):
+        """The control, and the decision: `key` reports that a key was sent,
+        which is true whether or not the window took focus. Changing that is a
+        different contract and was not part of ISSUE-528."""
+        wheel.key.return_value = False
+
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "key", "key": "Tab"},
+        )
+
+        assert result["ok"] is True
+
+
+class TestTheModifierIsAlwaysReleased:
+    """A modifier left down outlives the action, and the display is shared.
+
+    X11 modifier state belongs to the server, so a stuck ctrl turns every later
+    keystroke on this container into a shortcut until something releases it —
+    not merely the rest of this action list. The whole of `modifier_held` is
+    that the keyup happens anyway, and it is the one thing in the wheel path no
+    higher-level test reaches, since every container test mocks
+    `human_scroll_at` clean over it.
+    """
+
+    @pytest.fixture
+    def runs(self):
+        with mock.patch.object(xdotool, "focus_chrome", return_value=True), \
+             mock.patch.object(xdotool.subprocess, "run") as run:
+            yield run
+
+    def _argvs(self, run):
+        return [call.args[0] for call in run.call_args_list]
+
+    def test_the_ordinary_path_presses_and_releases(self, runs):
+        with xdotool.modifier_held("ctrl"):
+            pass
+
+        assert self._argvs(runs) == [
+            ["xdotool", "keydown", "--", "ctrl"],
+            ["xdotool", "keyup", "--", "ctrl"],
+        ]
+
+    def test_a_raise_inside_the_block_still_releases(self, runs):
+        with pytest.raises(RuntimeError):
+            with xdotool.modifier_held("ctrl"):
+                raise RuntimeError("the wheel failed mid-run")
+
+        assert self._argvs(runs)[-1] == ["xdotool", "keyup", "--", "ctrl"]
+
+    def test_a_keydown_that_times_out_still_releases(self, runs):
+        """The finding this test exists for. `subprocess.run` raises
+        `TimeoutExpired` *after* xdotool may already have delivered the press,
+        so a keydown outside the `try` leaves ctrl held with no `finally` to
+        run. Moving the keydown back above the `try` turns this red and
+        nothing else."""
+        runs.side_effect = [
+            subprocess.TimeoutExpired(["xdotool", "keydown"], 5),
+            None,
+        ]
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            with xdotool.modifier_held("ctrl"):
+                raise AssertionError("the block must not run")
+
+        assert self._argvs(runs)[-1] == ["xdotool", "keyup", "--", "ctrl"]
+
+    def test_no_modifier_touches_the_display_at_all(self, runs):
+        """`None` is the ordinary case, so it must cost nothing — a keyup for
+        a key nobody pressed is a keystroke this container did not intend."""
+        with xdotool.modifier_held(None):
+            pass
+
+        assert runs.call_args_list == []
+
+    def test_a_modifier_outside_the_allowlist_presses_nothing(self, runs):
+        with pytest.raises(ValueError):
+            with xdotool.modifier_held("--file=/etc/passwd"):
+                pass
+
+        assert runs.call_args_list == []
+
+
+class TestTheWheelButtonGuard:
+    """`mouse_wheel` takes a button rather than a direction, so it checks."""
+
+    def test_a_wheel_tick_is_a_press_and_release_of_that_button(self):
+        with mock.patch.object(xdotool, "mouse_click") as click:
+            xdotool.mouse_wheel(xdotool.WHEEL_DOWN)
+
+        assert click.call_args[1]["button"] == xdotool.WHEEL_DOWN
+        # Far shorter than a click's: a wheel tick is a detent, and a mouse
+        # holding button 5 down for 90ms is its own signature.
+        assert click.call_args[1]["dwell_s"] < 0.05
+
+    @pytest.mark.parametrize("button", [1, 3, 0, -1, "4"])
+    def test_a_button_that_is_not_the_wheel_presses_nothing(self, button):
+        with mock.patch.object(xdotool, "mouse_click") as click:
+            with pytest.raises(ValueError):
+                xdotool.mouse_wheel(button)
+
+        click.assert_not_called()

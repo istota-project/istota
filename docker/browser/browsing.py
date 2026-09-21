@@ -7,7 +7,15 @@ import random
 import time
 from urllib.parse import urlparse
 
-from xdotool import mouse_click, mouse_location, mouse_move, xdo, xdo_key
+from xdotool import (
+    modifier_held,
+    mouse_click,
+    mouse_location,
+    mouse_move,
+    mouse_wheel,
+    xdo,
+    xdo_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -387,6 +395,38 @@ def human_click_at(target_x, target_y, button=1):
     if not human_move_to(target_x, target_y):
         return False
     mouse_click(button=button)
+    time.sleep(gauss_clamp(0.25, 0.1, 0.1, 0.5))
+    return True
+
+
+def human_scroll_at(target_x, target_y, button, clicks=3, modifier=None):
+    """Approach an X11 screen point and turn the wheel there.
+
+    The whole reason this takes a *point* rather than a direction: Chrome
+    routes a wheel event to whatever is under the pointer, so this scrolls the
+    chat log, the code viewer, the list inside the modal or the PDF pane the
+    caller aimed at. `window.scrollBy`, which it replaced, could only ever move
+    the document behind those (ISSUE-528).
+
+    Returns False without turning the wheel when the pointer did not reach the
+    point, for human_click_at()'s reason and with the same consequence: a tick
+    delivered wherever the pointer happens to be scrolls whatever the previous
+    action was aimed at, and the caller would report it at the point it asked
+    for.
+
+    Ticks are spaced rather than fired in a burst. A real wheel produces a
+    detent every few tens of milliseconds, and a run of them at zero interval
+    is a signature of its own -- the same argument mouse_click()'s dwell rests
+    on. The modifier is held across the whole run rather than per tick, because
+    ctrl-plus-wheel is the *state* at the moment each event arrives.
+    """
+    if not human_move_to(target_x, target_y):
+        return False
+    with modifier_held(modifier):
+        for i in range(clicks):
+            if i:
+                time.sleep(gauss_clamp(0.07, 0.03, 0.03, 0.18))
+            mouse_wheel(button)
     time.sleep(gauss_clamp(0.25, 0.1, 0.1, 0.5))
     return True
 

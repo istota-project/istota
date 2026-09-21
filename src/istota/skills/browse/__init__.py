@@ -78,11 +78,28 @@ CAPTURE_HEADER = "X-Browse-Capture"
 CAPTURE_ERROR_HEADER = "X-Browse-Capture-Error"
 #: Actions whose `x`/`y` are in the *delivered picture's* pixel space, so the
 #: container has to be told what that picture measured before it can convert.
-IMAGE_SPACE_ACTIONS = ("click_at", "hover_at")
+IMAGE_SPACE_ACTIONS = ("click_at", "hover_at", "scroll_at")
 #: Every action type only a visual-mode container implements. An `unknown`
 #: naming one of these means the image is older than this code, which is a
-#: different sentence from the model having invented an action.
+#: different sentence from the model having invented an action. The keyless
+#: `scroll` is deliberately absent: an old container still scrolls the document
+#: for it, so it never answers `unknown` and the note would be wrong about what
+#: happened. `scroll_at` is a distinct type for that reason — sending a `scroll`
+#: with unfamiliar `x`/`y` keys would have had the old container ignore them and
+#: scroll the document, silently and reported `ok` (ISSUE-528).
 VISUAL_ACTION_TYPES = IMAGE_SPACE_ACTIONS + ("key", "type", "click_challenge")
+#: How many wheel ticks a `--scroll-at` sends when the caller names no count,
+#: and how many key presses a keyless `--scroll` sends. Two numbers rather than
+#: one because the units move different distances: a wheel tick is a detent,
+#: around a tenth of a screen, and a Page_Down is most of one.
+WHEEL_CLICKS_DEFAULT = 3
+KEY_PRESSES_DEFAULT = 1
+#: The container's own ceiling, restated so a caller is refused here rather than
+#: after the request has been sent. Held equal by test.
+MAX_SCROLL_UNITS = 30
+#: What `--scroll-zoom` holds down. ctrl plus wheel is the browser's own zoom
+#: gesture, which is why a map zooms at a point rather than needing a control.
+ZOOM_MODIFIER = "ctrl"
 REQUEST_TIMEOUT = 120.0  # HTTP client timeout (longer than page timeout)
 MAX_BODY_EXCERPT = 400  # chars of an undecodable body to quote back
 MAX_BODY_READ = 8192  # bytes of it to decode in the first place
@@ -846,6 +863,18 @@ def _hover_at_action(spec):
     return {"type": "hover_at", "x": x, "y": y}
 
 
+def _scroll_at_action(spec):
+    """A wheel at a point. Direction, count and modifier are patched on after.
+
+    They come off other arguments rather than off this one, and an emitter is
+    handed the ordered value alone — `_interact_actions` fills them in, which
+    is where the namespace is. The type is what the action *is*, so it belongs
+    here; the rest is settings that apply to every scroll in the call.
+    """
+    x, y = _point(spec, "--scroll-at")
+    return {"type": "scroll_at", "x": x, "y": y}
+
+
 def _press_action(key):
     # The container hands the name to xdotool, which refuses one it does not
     # know; nothing here tries to keep a second copy of that key table.
@@ -879,6 +908,7 @@ ACTION_EMITTERS = {
     "fill_credential": _fill_credential_action,
     "click_at": _click_at_action,
     "hover_at": _hover_at_action,
+    "scroll_at": _scroll_at_action,
     "press": _press_action,
     "type": _type_action,
     "click_challenge": _click_challenge_action,
@@ -895,8 +925,12 @@ def _interact_actions(args):
     an empty form and reports `ok` for every action (ISSUE-507). Position is
     the only rule here; nothing infers that a click ought to follow a fill,
     because a click that opens a modal is as ordinary as one that submits.
-    `--scroll` is not in the record — it is not repeatable, so it has no
-    position — and `cmd_interact` appends it last.
+
+    The keyless `--scroll` is still not in the record — it is not repeatable,
+    so it has no position — and it is appended last. `--scroll-at` *is* in it:
+    a wheel at a point is repeatable, two of them at two points are two
+    different actions, and one before a click is a different outcome from one
+    after it (ISSUE-528).
 
     A `--fill-credential` value arrives here already resolved by the stamp, as
     a `CredentialPair`, and `reveal()` is the one call that unwraps it — the
@@ -953,7 +987,94 @@ def _interact_actions(args):
                 f"the {dest} order record does not match the values parsed"
             )
         actions.append(ACTION_EMITTERS[dest](source[index]))
+    _apply_scroll_settings(args, actions)
     return actions
+
+
+def _scroll_count(args, default):
+    """How many wheel ticks or key presses a scroll in this call sends.
+
+    Refused rather than clamped, and refused here rather than at the container:
+    the answer depends on the argument alone, so sending a request that is going
+    to come back `bad_click_count` costs a round trip and teaches nothing the
+    flag name does not.
+    """
+    clicks = getattr(args, "scroll_clicks", None)
+    if clicks is None:
+        return default
+    # `bool` is an `int` in Python, so `True` passes the range test and ships
+    # `"clicks": true` for the container to refuse — a round trip this check
+    # exists to save. Argv cannot produce either shape (`type=int`); a
+    # hand-built namespace can, and `"3"` would otherwise raise `TypeError`
+    # out of the comparison rather than the `ValueError` the envelope expects.
+    if isinstance(clicks, bool) or not isinstance(clicks, int):
+        raise ValueError(
+            f"--scroll-clicks takes a whole number, got {clicks!r}"
+        )
+    if not 1 <= clicks <= MAX_SCROLL_UNITS:
+        raise ValueError(
+            f"--scroll-clicks takes a whole number between 1 and "
+            f"{MAX_SCROLL_UNITS}, got {clicks}"
+        )
+    return clicks
+
+
+def _apply_scroll_settings(args, actions):
+    """Fill in what every scroll in this call shares, and append the keyless one.
+
+    `--scroll` does two jobs and which one depends on whether a point was given.
+    With `--scroll-at` it supplies the direction and nothing else; alone it is
+    the keyless scroll, which goes last. It never does both: a call that scrolled
+    the widget and then the document behind it would be this issue's own failure
+    performed twice.
+    """
+    points = [a for a in actions if a.get("type") == "scroll_at"]
+    zoom = bool(getattr(args, "scroll_zoom", False))
+    direction = getattr(args, "scroll", None)
+
+    # Declared so a task holding the old recipe is told what replaced it rather
+    # than handed argparse's usage text (ISSUE-528). Neither path can honour a
+    # pixel figure: a wheel tick is a distance the browser picks and a Page_Down
+    # is a viewport.
+    if getattr(args, "scroll_amount", None) is not None:
+        raise ValueError(
+            "--scroll-amount is gone: a scroll is wheel ticks at a point or "
+            "Page_Down presses, and neither is a number of pixels. Use "
+            "--scroll-clicks, and --scroll-at X,Y to scroll the pane under a "
+            "point rather than the whole page."
+        )
+    if zoom and not points:
+        raise ValueError(
+            "--scroll-zoom needs --scroll-at X,Y: zoom is ctrl plus the wheel "
+            "at a point, and a keyless scroll cannot carry the gesture"
+        )
+    # Refused rather than defaulted, unlike a plain `--scroll-at`, which takes
+    # `down`. Scrolling a pane the wrong way is one more call; zooming a map
+    # out when the caller meant in changes what the next screenshot shows and
+    # reads as the page having moved. The direction is free to supply and the
+    # guess is not worth making.
+    if zoom and not direction:
+        raise ValueError(
+            "--scroll-zoom needs --scroll up or --scroll down: up zooms in at "
+            "the point, down zooms out"
+        )
+    if getattr(args, "scroll_clicks", None) is not None and not points and not direction:
+        raise ValueError(
+            "--scroll-clicks needs something to scroll: add --scroll up|down, "
+            "or --scroll-at X,Y"
+        )
+
+    for action in points:
+        action["direction"] = direction or "down"
+        action["clicks"] = _scroll_count(args, WHEEL_CLICKS_DEFAULT)
+        if zoom:
+            action["modifier"] = ZOOM_MODIFIER
+
+    if direction and not points:
+        actions.append({
+            "type": "scroll", "direction": direction,
+            "presses": _scroll_count(args, KEY_PRESSES_DEFAULT),
+        })
 
 
 #: What a credential that came back in a response is replaced with.
@@ -1048,6 +1169,13 @@ def _note_stale_container(data):
     emits that a deployed image may not implement, so an `unknown` naming one
     of them means the container is behind this code rather than that the model
     invented an action.
+
+    The note says "older than this skill" rather than "predates visual mode",
+    which it used to: `scroll_at` arrived long after the rest of the set
+    (ISSUE-528), so an image can implement every other type here and still not
+    know that one. Both cases have the same remedy, and only the diagnosis was
+    wrong — but a model told the container has no visual mode at all will stop
+    reaching for the flags that do work on it.
     """
     if not isinstance(data, dict):
         return data
@@ -1064,8 +1192,8 @@ def _note_stale_container(data):
     notes.append(
         "This browser container does not implement "
         + ", ".join(stale)
-        + " — it predates visual mode. Rebuild the browser image, or drive the "
-        "page with --click and a CSS selector."
+        + " — its image is older than this skill. Rebuild the browser image, "
+        "or drive the page with --click and a CSS selector."
     )
     return {**data, "notes": notes}
 
@@ -1162,10 +1290,6 @@ def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
     actions = _interact_actions(args)
-    if args.scroll:
-        # Last, and the one action whose position the caller does not choose;
-        # skill.md says so rather than leaving it to be found in a result.
-        actions.append({"type": "scroll", "direction": args.scroll, "amount": args.scroll_amount})
 
     # A point is read off the delivered picture, so the container is told what
     # that picture measured and converts from it. The size is recomputed from
@@ -1487,8 +1611,45 @@ def build_parser():
             "whatever holds focus instead, with no failure and no signal."
         ),
     )
-    p_int.add_argument("--scroll", choices=["up", "down"], help="Scroll direction")
-    p_int.add_argument("--scroll-amount", type=int, default=500, help="Scroll pixels")
+    p_int.add_argument(
+        "--scroll", choices=["up", "down"],
+        help=(
+            "Scroll direction. On its own this scrolls the page, as Page_Down "
+            "would; with --scroll-at it is the direction the wheel turns."
+        ),
+    )
+    p_int.add_argument(
+        "--scroll-at", action=OrderedAppend, metavar="X,Y",
+        help=(
+            "Turn the wheel at a point, in the delivered picture's pixel "
+            "space — this scrolls the pane under that point (a chat log, a "
+            "code viewer, a list inside a modal, a PDF), which a plain "
+            "--scroll cannot reach. Needs a screenshot of this session on "
+            "record, and takes its position in the action list like --click-at."
+        ),
+    )
+    p_int.add_argument(
+        "--scroll-clicks", type=int, default=None, metavar="N",
+        help=(
+            f"How far to scroll: wheel ticks with --scroll-at (default "
+            f"{WHEEL_CLICKS_DEFAULT}), Page_Down presses without one (default "
+            f"{KEY_PRESSES_DEFAULT}). Maximum {MAX_SCROLL_UNITS}."
+        ),
+    )
+    p_int.add_argument(
+        "--scroll-zoom", action="store_true",
+        help=(
+            "Hold ctrl while the wheel turns, which is the browser's zoom "
+            "gesture — this is how you zoom a map in or out at a point. "
+            "Needs both --scroll-at X,Y and an explicit --scroll up|down: up "
+            "zooms in at the point, down zooms out."
+        ),
+    )
+    # Retired, declared so the refusal can name what replaced it rather than
+    # leaving argparse to answer `unrecognized arguments` with no remedy in it.
+    p_int.add_argument(
+        "--scroll-amount", type=int, default=None, help=argparse.SUPPRESS,
+    )
 
     # links
     p_links = sub.add_parser("links", help="Fetch a page and return only links")
