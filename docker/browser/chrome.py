@@ -9,6 +9,7 @@ navigation path; the connection is not torn down around it.
 
 import logging
 import os
+from pathlib import Path
 import signal
 import subprocess
 import threading
@@ -20,6 +21,41 @@ from patchright.sync_api import sync_playwright
 log = logging.getLogger(__name__)
 
 PROFILE_ROOT = os.environ.get("BROWSER_PROFILE_DIR", "/data/browser-profile")
+
+
+def migrate_legacy_profile(root):
+    """Park the shared jar before serving requests; never overwrite parked data.
+
+    An existing park also triggers the scan: a stopped boot may already have
+    moved both detection entries while leaving other profile files behind.
+    Boot is the only caller, before any browser or background thread starts.
+    """
+    root = Path(root)
+    parked = root / "legacy-profile"
+    if not any(os.path.lexists(root / name)
+               for name in ("Default", "Local State", "legacy-profile")):
+        return
+    if parked.is_symlink():
+        raise OSError(f"Legacy profile destination is a symlink: {parked}")
+    parked.mkdir(mode=0o700, exist_ok=True)
+    entries = sorted((entry for entry in root.iterdir()
+                      if entry.name not in {"ssl", "users", "legacy-profile"}),
+                     key=lambda entry: entry.name)
+    if entries:
+        log.warning("Parking shared browser profile at %s; no user inherits it", parked)
+    for entry in entries:
+        destination = parked / entry.name
+        try:
+            # rename replaces files and empty directories; broken links count
+            # as collisions too. Only boot writes here, before browsers start.
+            if os.path.lexists(destination):
+                raise FileExistsError(f"Destination already exists: {destination}")
+            os.rename(entry, destination)
+        except OSError:
+            log.warning("Could not park legacy profile entry %s; leaving it for retry",
+                        entry, exc_info=True)
+
+
 EXTENSION_DIR = "/app/stealth-extension"
 _driver_thread_id = None
 

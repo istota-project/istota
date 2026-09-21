@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Existing shared browser logins are parked on upgrade. Each user starts with a separate profile and signs in again; the old logins remain available for an operator to recover.
+
+  **Upgrade note:** The first boot of the rebuilt browser image moves the old shared profile into `legacy-profile/` inside the existing browser volume. No user inherits it. The TLS certificates and existing per-user profiles stay in place. If parking is interrupted, the next boot resumes; a destination collision is logged without overwriting either copy and needs operator attention. Run the full Ansible play to rebuild and deploy the browser image, rather than updating the skill alone.
+
 - A `browse` scroll is now real wheel and keyboard input rather than a script the page can see. It was the last action the model could drive through `page.evaluate`, which is the signal a Cloudflare challenge watches for during its fingerprinting window — and it was the weakest scroll available besides, since it could only ever move the document. A scroll with no point now sends Page_Down or Page_Up. `--select` still sets a dropdown's value directly, and says so in its own result.
 
   **Upgrade note:** `--scroll-amount` is gone, because neither scroll is measured in pixels any more — a wheel tick is a distance the browser picks and a Page_Down is a viewport. Use `--scroll-clicks N` instead: wheel ticks with `--scroll-at`, Page_Down presses without one. A call that still passes `--scroll-amount` is refused by name and told what replaced it, so nothing scrolls the wrong distance quietly. This needs the rebuilt browser image; an older one answers `unknown` for a scroll at a point and says to rebuild.

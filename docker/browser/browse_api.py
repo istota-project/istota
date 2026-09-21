@@ -3190,6 +3190,7 @@ def _start_browse_watchdog():
 atexit.register(pool.cleanup)
 
 if __name__ == "__main__":
+    chrome.migrate_legacy_profile(chrome.PROFILE_ROOT)
     mon = threading.Thread(target=_resource_monitor, daemon=True)
     mon.start()
     _start_liveness_server()
