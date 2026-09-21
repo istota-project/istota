@@ -574,8 +574,17 @@ class TestWhatMustNeverEarnARestart:
         arm = self._broken_cdp(monkeypatch)
         for i in range(5):
             arm()  # a fresh request finds the connection live-looking again
+            # A session holds the page object now (ISSUE-535), and the page has
+            # to look live or this test stops testing anything: on `None`,
+            # _close_session_unlocked returns at its own guard *before*
+            # chrome.get_context(), which is the call whose record=False this
+            # case exists to pin. Verified by control -- flipping that call to
+            # record=True must turn this red.
+            page = mock.MagicMock(name=f"stale-page-{i}")
+            page.is_closed.return_value = False
             browse_api._sessions[f"stale-{i}"] = {
-                "tab_index": 0, "created_at": time.time() - browse_api.SESSION_TTL - 60,
+                "page": page,
+                "created_at": time.time() - browse_api.SESSION_TTL - 60,
             }
             browse_api._cleanup_expired()
 

@@ -128,6 +128,11 @@ def _claim_connection_on_this_thread(monkeypatch, pages=None):
     ctx.pages = pages if pages is not None else [
         mock.MagicMock(name="page0"), mock.MagicMock(name="page1"),
     ]
+    # A session holds the page object now (ISSUE-535), so every path asks
+    # is_closed() before using one -- and a bare MagicMock answers it with a
+    # truthy mock, which reads as a tab that is gone. Say so explicitly.
+    for page in ctx.pages:
+        page.is_closed.return_value = False
     browser = mock.MagicMock(name="browser")
     browser.contexts = [ctx]
     started = mock.MagicMock(name="started_pw")
@@ -337,15 +342,21 @@ class _PatchrightTripwire:
 
 
 class TestMemoryPressureIsDeferredToTheFlaskThread:
-    def _add_session(self, session_id, age_s=0.0, tab_index=0):
-        """Register a live session `age_s` seconds old.
+    def _add_session(self, session_id, age_s=0.0, page=None):
+        """Register a live session `age_s` seconds old, holding `page`.
 
         Ages are relative to now and well inside SESSION_TTL, so _evict_expired()
         leaves them alone and what the drain does is the only thing under test.
+
+        `page` is the object itself rather than an index into ctx.pages
+        (ISSUE-535). It is not optional in any test that asserts on a close: a
+        session with no page is one the sweep counts as naming nothing, so its
+        tab is closed as an orphan and the eviction assertion passes for the
+        wrong reason.
         """
         assert age_s < browse_api.SESSION_TTL, "session would expire on its own"
         browse_api._sessions[session_id] = {
-            "tab_index": tab_index,
+            "page": page,
             "created_at": browse_api.time.time() - age_s,
         }
 
@@ -445,8 +456,8 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
         """The Flask thread does the work the monitor asked for."""
         ctx = _claim_connection_on_this_thread(monkeypatch)
         self._pressure(monkeypatch, browse_api.MEMORY_EVICT_PCT + 5)
-        self._add_session("older", age_s=60, tab_index=0)
-        self._add_session("newer", age_s=10, tab_index=1)
+        self._add_session("older", age_s=60, page=ctx.pages[0])
+        self._add_session("newer", age_s=10, page=ctx.pages[1])
         browse_api._evict_request.set()
 
         browse_api._cleanup_expired()
@@ -467,7 +478,7 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
         """
         ctx = _claim_connection_on_this_thread(monkeypatch)
         self._pressure(monkeypatch, browse_api.MEMORY_EVICT_PCT - 60)
-        self._add_session("live", age_s=60)
+        self._add_session("live", age_s=60, page=ctx.pages[0])
         browse_api._evict_request.set()
 
         browse_api._cleanup_expired()
@@ -481,7 +492,7 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
         unexpired session stays -- so it is the request that drives eviction."""
         ctx = _claim_connection_on_this_thread(monkeypatch)
         self._pressure(monkeypatch, browse_api.MEMORY_EVICT_PCT + 5)
-        self._add_session("live", age_s=0)
+        self._add_session("live", age_s=0, page=ctx.pages[0])
 
         browse_api._cleanup_expired()
 
@@ -490,10 +501,10 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
 
     def test_a_drained_request_does_not_evict_twice(self, monkeypatch):
         """The flag is consumed, so one pressure report costs one session."""
-        _claim_connection_on_this_thread(monkeypatch)
+        ctx = _claim_connection_on_this_thread(monkeypatch)
         self._pressure(monkeypatch, browse_api.MEMORY_EVICT_PCT + 5)
-        self._add_session("a", age_s=60, tab_index=0)
-        self._add_session("b", age_s=10, tab_index=1)
+        self._add_session("a", age_s=60, page=ctx.pages[0])
+        self._add_session("b", age_s=10, page=ctx.pages[1])
         browse_api._evict_request.set()
 
         browse_api._cleanup_expired()
@@ -521,7 +532,7 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
         point of the split."""
         ctx = _claim_connection_on_this_thread(monkeypatch)
         self._pressure(monkeypatch, browse_api.MEMORY_EVICT_PCT + 5)
-        self._add_session("old", age_s=60)
+        self._add_session("old", age_s=60, page=ctx.pages[0])
 
         _, error = _run_on_another_thread(
             lambda: browse_api._note_memory_pressure(
