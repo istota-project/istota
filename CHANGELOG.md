@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A coordinate click is refused when the pointer did not arrive, instead of reporting that it landed where it was aimed. A pointer move that times out for any reason other than the screen-edge clamp leaves the pointer where the last action put it, and the press went there while the answer named the point that was asked for. The pointer is read back and measured now, and `--click-challenge` re-checks the picture is still current, which it had never done.
 
+- A coordinate click is also refused when the pointer move failed outright, not only when it timed out. The move's exit status was thrown away, so a command rejected in milliseconds — a negative coordinate the tool read as an option, or a display that is no longer there — still reported a landed pointer, and the press went wherever the previous action had left it. A negative coordinate is now passed as a coordinate, and a move that fails says so. That is the other half of the fix above.
+
+- A URL `browse` cannot use is refused before the browser is touched. `file:`, `javascript:`, `data:` and `view-source:` all resolve in the address bar and nothing on that path had ever read the scheme, so a task could have the container read any file it can see and hand back the text. A URL beginning with `-` was caught, but only after the address bar had been focused and its contents selected, and it came back as a server error about *text* rather than about a URL. Both are answered now before a tab is opened, with the reason and the remedy named. An ordinary address with no scheme, such as `example.com`, still works.
+
 - A Docker build of the web UI no longer prints `/bin/sh: git: not found` twice. That stage carries no git and has no repository in its context, so the version stamp was already falling back to `unknown`; what reached the log was the shell's own error, which reads as a build failure. The same two lines appeared in any `npm run build` run outside a checkout.
 
 ## [0.42.0] - 2026-09-19

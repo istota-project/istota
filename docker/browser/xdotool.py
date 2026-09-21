@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -10,7 +11,17 @@ log = logging.getLogger(__name__)
 _XDO_ENV = {**os.environ, "DISPLAY": ":99"}
 
 
-class OptionShapedInput(ValueError):
+class RefusedInput(ValueError):
+    """A caller's value this module declined to hand to the display.
+
+    The base the two refusals below share, so a caller may catch the decision
+    rather than each of its forms -- /browse wants one arm for "the URL was
+    not usable", and which of the two rules refused it is a detail of the
+    message rather than of the handling.
+    """
+
+
+class OptionShapedInput(RefusedInput):
     """A caller's string that xdotool would read as an option, not as data.
 
     xdotool parses with getopt_long, which consumes an option-shaped token
@@ -32,6 +43,25 @@ class OptionShapedInput(ValueError):
     beginning with `-` into a page or to press a key named like one -- so the
     refusal is the more useful answer, and a caller that meant it can lead
     with a space.
+    """
+
+
+class UnsafeUrl(RefusedInput):
+    """A string navigate() will not type into Chrome's address bar.
+
+    The omnibox resolves whatever it is given, so the scheme decides what the
+    keystrokes do. `file:///etc/passwd` is a read of any file the container
+    can see, rendered into a page whose text the caller then gets back;
+    `javascript:` and `data:` run in whatever origin is loaded; `view-source:`
+    and `chrome://` reach the browser's own surfaces. None of that is
+    browsing, and nothing upstream checked -- /browse required the URL to be
+    non-empty and nothing else, which is the residual ISSUE-519 recorded and
+    ISSUE-530 closes.
+
+    Separate from OptionShapedInput because the two guard different things:
+    that one is about how xdotool parses the argv, this one about what Chrome
+    does with the result. A scheme refusal reported under a name about getopt
+    would send a reader to the wrong mechanism.
     """
 
 
@@ -98,6 +128,67 @@ def literal_arg(value, what):
             f"{value[:32]!r} as an option rather than as input"
         )
     return value
+
+
+#: A scheme, per RFC 3986: a letter then letters, digits and `+-.`, then `:`.
+#: `localhost:8080` matches it, which is the one false positive worth naming
+#: -- see literal_url()'s docstring for why it is accepted rather than
+#: special-cased.
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+#: The two schemes the omnibox may be asked to resolve. Everything else it
+#: honours -- file, data, javascript, view-source, chrome, ftp -- does
+#: something other than fetch a web page.
+_ALLOWED_SCHEMES = ("http:", "https:")
+
+
+def literal_url(url):
+    """Return `url` for navigate() to type, or refuse it.
+
+    Three rules, and they are three because each closes something the others
+    do not.
+
+    The **option shape** is `literal_arg`'s, reused rather than restated:
+    xdo_type() already applies it, and the only thing wrong with that was
+    where it happened -- see navigate(). Delegating keeps one answer to "what
+    does xdotool read as an option".
+
+    A **line break** is refused because xdotool types one as Return. The
+    omnibox would navigate to whatever came before it and the remainder would
+    be typed into whatever the loaded page puts focus on, which is a caller's
+    string reaching a page's input by a route nobody declared. Every break
+    `str.splitlines` recognises is covered, not just newline and carriage
+    return -- the vertical tab and the Unicode separators split a line too.
+
+    The **scheme** is refused unless it is http or https, and a URL with no
+    scheme at all is allowed through: Chrome's omnibox resolves `apnews.com`,
+    that is an ordinary way to ask for a page, and navigate() already handles
+    the inline-autocomplete that follows from it. So the rule is "if it names
+    a scheme, it names one of two", which costs `host:port` with no scheme --
+    `localhost:8080` is scheme-shaped and reads as one. Accepted as a trade:
+    this container browses the public web, the refusal names `https://` as
+    the remedy, and the alternative is admitting every scheme that does not
+    look like a host, which is the hole rather than the cost.
+
+    Returns the stripped value, which is what the caller should go on to use.
+    """
+    url = literal_arg(url, "url").strip()
+    if not url:
+        raise UnsafeUrl("url is required")
+    if len(url.splitlines()) > 1:
+        raise UnsafeUrl(
+            "url may not contain a line break: xdotool types one as Return, "
+            "which would submit the part before it and type the rest into "
+            "the page that loads"
+        )
+    scheme = _SCHEME_RE.match(url)
+    if scheme and scheme.group(0).lower() not in _ALLOWED_SCHEMES:
+        raise UnsafeUrl(
+            f"url scheme {scheme.group(0)!r} is not browsable: navigate() "
+            f"types into Chrome's address bar, which resolves it. Use "
+            f"http:// or https://, or a bare host with no scheme"
+        )
+    return url
 
 
 def chrome_wid():
@@ -263,13 +354,38 @@ def mouse_move(x, y):
     hiccup or a slow round trip leaves the pointer where the last action put
     it, and pressing there sends a click nobody aimed. So the reason the
     catch was written for is now measured rather than trusted.
+
+    A **fast failure** is the other way the move does not happen, and it was
+    the half ISSUE-523 left open: the exit status was discarded, so any
+    non-zero exit read as a landing and produced exactly the defect that
+    issue was filed about (ISSUE-530). Two causes reach it. A coordinate
+    xdotool's getopt consumed as an option -- the fifth argv slot ISSUE-519
+    did not reach, which the `--` below closes -- and an X server that is
+    gone, which nothing can close and which has to be reported instead.
+
+    The status is read rather than the pointer, and the non-zero branch does
+    not consult pointer_landed(): a fast failure is not evidence of a clamp,
+    and the reading would be answered by the same display that just refused
+    the move. A clamp is measured on the timeout path alone, where the
+    command reported that it ran. The zero-exit path is not re-measured
+    either, deliberately -- display_geometry()'s docstring states the rule
+    that the extra round trip is paid only on a path already going wrong,
+    and human_move_to() walks a Bezier path of these.
+
+    The residual, which the `--` makes deliberate rather than accidental: a
+    request outside the screen now clamps and reports success, while the
+    caller's result still names the point it computed. So human_click_at(-40,
+    396) presses at (0, 396) and reports (-40, 396). Reporting where the
+    press landed means reading the pointer after every click, which is the
+    round trip declined above.
     """
     x, y = int(x), int(y)
     if mouse_location() == (x, y):
         return True
     try:
-        subprocess.run(
-            ["xdotool", "mousemove", "--sync", "--screen", "0", str(x), str(y)],
+        result = subprocess.run(
+            ["xdotool", "mousemove", "--sync", "--screen", "0", "--",
+             str(x), str(y)],
             env=_XDO_ENV, timeout=5, capture_output=True,
         )
     except subprocess.TimeoutExpired:
@@ -280,6 +396,10 @@ def mouse_move(x, y):
             return True
         log.warning("mousemove to (%d, %d) did not complete -- "
                     "the pointer did not move", x, y)
+        return False
+    if result.returncode != 0:
+        log.warning("mousemove to (%d, %d) exited %d -- "
+                    "the pointer did not move", x, y, result.returncode)
         return False
     return True
 
@@ -384,9 +504,14 @@ def xdo_type(text, delay_ms=8):
     """Type text into the Chrome window.
 
     This is the one of the four with a model-supplied value on a shipped
-    path: navigate() types a URL here, and /browse checks only that the URL
-    it was handed is non-empty -- no scheme, no parse. So `--file=/etc/...`
-    as a URL reached this argv slot.
+    path: navigate() types a URL here. It used to be the *only* thing
+    checking that URL, which is what made `--file=/etc/...` as a URL reach
+    this argv slot -- and the check landed after navigate() had already
+    focused the omnibox. Both ends are closed now: literal_url() runs at
+    navigate()'s first statement and again at /browse before a session is
+    created (ISSUE-530). This guard stays as the one behind them, since
+    xdo_type is reachable from elsewhere and a slot guarded by its caller
+    is a slot guarded by whoever remembers to.
     """
     text = literal_arg(text, "text")
     wid = chrome_wid()
@@ -417,7 +542,21 @@ def window_title():
 
 
 def navigate(url, timeout_s=30):
-    """Navigate by typing URL in Chrome's address bar via pure X11 input."""
+    """Navigate by typing URL in Chrome's address bar via pure X11 input.
+
+    The URL is checked **first**, before the window is even looked up. It
+    used to be checked by xdo_type() several statements later, which is
+    after windowfocus --sync and ctrl+l had focused the omnibox and selected
+    its contents -- so a refusal had already done half of what it declined
+    to do, the rule ISSUE-519's own commit states. Nothing typed and Return
+    never ran, and what the caller got back was a generic 500 saying that
+    *text* may not begin with `-` about the value it had passed as a URL.
+
+    literal_url() also closes the residual ISSUE-519 recorded: no scheme was
+    validated anywhere on this path, and the omnibox resolves whatever it is
+    handed.
+    """
+    url = literal_url(url)
     wid = chrome_wid()
     if not wid:
         raise RuntimeError("Chrome window not found")
