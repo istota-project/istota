@@ -16,6 +16,7 @@ eggs/
 lib/
 !web/src/lib/
 !docker/devbox/lib/
+!docker/browser/lib/
 lib64/
 parts/
 sdist/

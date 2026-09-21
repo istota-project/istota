@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Copy the stdlib-only leaves the devbox image needs into its build context.
+# Copy the stdlib-only leaves the devbox and browser images need into their build contexts.
 #
-# Docker cannot COPY from outside its build context, and the devbox context is
-# docker/devbox/. Moving the context to the repo root would pull the whole tree
+# Docker cannot COPY from outside its build context, and these contexts are
+# docker/devbox/ and docker/browser/. Moving the context to the repo root would pull the whole tree
 # into every build, and a symlink pointing out of the context fails the same way
 # a path would. So: one canonical file under src/, one generated copy here, and
 # a test that fails when they drift.
@@ -11,9 +11,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-dest_dir="${repo_root}/docker/devbox/lib"
 
-# source-relative-path  ->  destination basename
+# source-relative-path  ->  repo-relative destination
 #
 # Byte copies only. docker/devbox/lib/istota_devbox_client.py is deliberately
 # NOT here: it is a rewrite of devbox_proxy_protocol's client half for a shim
@@ -21,18 +20,18 @@ dest_dir="${repo_root}/docker/devbox/lib"
 # that file has no reason to hold — adding it would overwrite the rewrite and
 # break git-credential-istota's import at image build. It is pinned
 # behaviourally instead, in tests/test_devbox_vendored_lib.py, which also lists
-# this directory and fails on any file pinned by neither mechanism.
+# these directories and fails on any file pinned by neither mechanism.
 sync_pairs=(
-    "src/istota/forge_cli.py:istota_forge_cli.py"
-    "src/istota/devbox_exec_protocol.py:istota_devbox_exec_protocol.py"
+    "src/istota/forge_cli.py:docker/devbox/lib/istota_forge_cli.py"
+    "src/istota/devbox_exec_protocol.py:docker/devbox/lib/istota_devbox_exec_protocol.py"
+    "src/istota/user_scope.py:docker/browser/lib/istota_user_scope.py"
 )
-
-mkdir -p "${dest_dir}"
 
 changed=0
 for pair in "${sync_pairs[@]}"; do
     src="${repo_root}/${pair%%:*}"
-    dest="${dest_dir}/${pair##*:}"
+    dest="${repo_root}/${pair##*:}"
+    mkdir -p "$(dirname "${dest}")"
     if [ ! -f "${src}" ]; then
         echo "sync-devbox-lib: missing source ${src}" >&2
         exit 1
@@ -48,7 +47,7 @@ for pair in "${sync_pairs[@]}"; do
         continue
     fi
     cp "${src}" "${dest}"
-    echo "synced ${pair%%:*} -> docker/devbox/lib/${pair##*:}"
+    echo "synced ${pair%%:*} -> ${pair##*:}"
     changed=1
 done
 

@@ -7,13 +7,13 @@ be read by the monitor; Chrome's lifecycle lock serializes watchdog recovery.
 from dataclasses import dataclass, field
 import os
 import logging
-from pathlib import Path
 import socket
 import subprocess
 import threading
 import time
 
 import chrome
+from lib.istota_user_scope import scoped_user_dir
 
 log = logging.getLogger(__name__)
 
@@ -123,9 +123,9 @@ def _start_display(inst):
 
 def acquire(user_id):
     """Start or reuse one profile. Capacity policy is added separately."""
-    # This stage admits only a hardcoded user through Flask. The common scoping
-    # rule is vendored in the next stage, before user ids arrive over the wire.
-    if not user_id or user_id in (".", "..") or any(c in user_id for c in ("/", "\\", "\x00")):
+    users = scoped_user_dir(PROFILE_ROOT, "users")
+    profile = scoped_user_dir(users, user_id)
+    if profile is None:
         raise ValueError("Invalid browser user id")
     inst = instance_for(user_id)
     if inst is not None:
@@ -135,11 +135,7 @@ def acquire(user_id):
     slot = next((slot for slot in range(MAX_INSTANCES) if slot not in used), None)
     if slot is None:
         raise PoolFull("All browser slots are occupied")
-    users = Path(PROFILE_ROOT) / "users"
     users.mkdir(parents=True, exist_ok=True)
-    profile = users / user_id
-    if users.is_symlink() or profile.is_symlink():
-        raise ValueError("Browser profile must not be a symlink")
     profile.mkdir(mode=0o700, exist_ok=True)
     profile.chmod(0o700)
     for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):

@@ -255,3 +255,40 @@ def test_release_after_driver_exit_does_not_call_a_dead_browser(runtime):
     assert chrome._pw is None
     assert bob.pw_context is None
     assert pool.live() == [bob]
+
+
+@pytest.mark.parametrize("user_id", [" alice", "alice ", "", ".", "..", "/alice", "alice/bob", "alice/../bob", "alice\0", None, 42])
+def test_invalid_profile_identity_starts_nothing(runtime, user_id):
+    pool, _, processes, _ = runtime
+    with pytest.raises(ValueError, match="Invalid browser user id"):
+        pool.acquire(user_id)
+    assert pool.live() == []
+    assert processes == []
+    assert not (Path(pool.PROFILE_ROOT) / "users").exists()
+
+
+@pytest.mark.parametrize("user_id", ["first.last", "DOMAIN\\alice", "álîce"])
+def test_contained_profile_names_keep_their_spelling(runtime, user_id):
+    pool, _, _, _ = runtime
+    inst = pool.acquire(user_id)
+    assert Path(inst.profile_dir) == Path(pool.PROFILE_ROOT) / "users" / user_id
+
+
+@pytest.mark.parametrize("link_at", ["users", "alice"])
+def test_profile_symlinks_cannot_select_another_directory(runtime, tmp_path, link_at):
+    pool, _, processes, _ = runtime
+    other = tmp_path / "other"
+    other.mkdir()
+    marker = other / "SingletonLock"
+    marker.write_text("retain")
+    users = tmp_path / "users"
+    if link_at == "users":
+        users.symlink_to(other, target_is_directory=True)
+    else:
+        users.mkdir()
+        (users / "alice").symlink_to(other, target_is_directory=True)
+    with pytest.raises(ValueError):
+        pool.acquire("alice")
+    assert marker.read_text() == "retain"
+    assert processes == []
+    assert pool.live() == []

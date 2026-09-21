@@ -83,6 +83,7 @@ RUN curl -fsSL -o /tmp/autoconsent-bundle.js \
        /app/stealth-extension/autoconsent-suffix.js
 
 COPY browse_api.py chrome.py pool.py browsing.py render.py text_budget.py visual.py xdotool.py ./
+COPY lib/ ./lib/
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
