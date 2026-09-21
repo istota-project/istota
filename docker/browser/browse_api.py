@@ -465,6 +465,18 @@ def browse():
     if not url:
         return jsonify({"error": "url is required"}), 400
 
+    # Before the session, because a URL this cannot use is a tab that need
+    # not be launched -- and because the guard downstream was too late to be
+    # one. navigate() types into the omnibox, so the scheme decides what the
+    # keystrokes do, and nothing here read it (ISSUE-519's residual). The
+    # option shape was refused by xdo_type() three statements into navigate(),
+    # after the omnibox had been focused and its contents selected, and came
+    # back as a 500 talking about text rather than about a URL (ISSUE-530).
+    try:
+        url = xdotool.literal_url(url)
+    except xdotool.RefusedInput as e:
+        return jsonify({"status": "error", "error": str(e)}), 400
+
     created_new = False
     if session_id:
         session = _get_session(session_id)

@@ -1249,6 +1249,58 @@ class TestLinksCarriesTheBudgetVerdict:
 
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_limit_that_bound_travels_too(self, mock_url, mock_post):
+        """Without it the verb advertises a retry it cannot perform.
+
+        `--max-links` is this subcommand's own remedy for a clipped list, and
+        on a page past the container's scan ceiling no value of it reaches
+        further (ISSUE-533). The key saying which of the two bound is the
+        only thing that separates them, so the reshape has to carry it.
+        """
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://directory.example.com/all",
+            "links": [{"text": f"Entry {i}", "href": f"/e/{i}"} for i in range(2000)],
+            "links_truncated": True,
+            "links_truncated_by": "scan_ceiling",
+            "anchors_total": 5400,
+        }
+        mock_post.return_value = mock_resp
+
+        args = build_parser().parse_args(
+            ["links", "https://directory.example.com/all", "--max-links", "5000"],
+        )
+        result = cmd_links(args)
+
+        assert result["links_truncated_by"] == "scan_ceiling"
+        assert result["anchors_total"] == 5400
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_budget_verdict_travels_as_readily_as_a_ceiling_one(
+        self, mock_url, mock_post,
+    ):
+        """The control: the copy is not keyed on one particular value."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com/section/world",
+            "links": [{"text": f"Section {i}", "href": f"/s/{i}"} for i in range(100)],
+            "links_truncated": True,
+            "links_truncated_by": "max_links",
+            "anchors_total": 357,
+        }
+        mock_post.return_value = mock_resp
+
+        result = cmd_links(
+            build_parser().parse_args(["links", "https://news.example.com/section/world"]),
+        )
+
+        assert result["links_truncated_by"] == "max_links"
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
     def test_a_complete_list_gains_no_flag(self, mock_url, mock_post):
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
@@ -1261,6 +1313,7 @@ class TestLinksCarriesTheBudgetVerdict:
         result = cmd_links(build_parser().parse_args(["links", "https://news.example.com"]))
 
         assert "links_truncated" not in result
+        assert "links_truncated_by" not in result
         assert "anchors_total" not in result
 
     @patch("istota.skills.browse.httpx.post")
