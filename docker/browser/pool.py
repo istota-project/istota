@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 RUNTIME_DIR = Path("/run/istota-browser")
 PROFILE_ROOT = chrome.PROFILE_ROOT
 MAX_INSTANCES = int(os.environ.get("BROWSER_MAX_INSTANCES", "2"))
+INSTANCE_IDLE_S = int(os.environ.get("BROWSER_INSTANCE_IDLE_S", "900"))
 CDP_PORT_BASE = 9300
 VNC_PORT_BASE = 5900
 DISPLAY_BASE = 100
@@ -44,6 +45,9 @@ class BrowserInstance:
     pw_thread_id: int | None = None
     launch_generation: int = 0
     launching: bool = False
+    retired: bool = False
+    cdp_wedge_reported: bool = False
+    wedge_loop_reported: bool = False
     last_used: float = 0.0
     wedge_recoveries: list[float] = field(default_factory=list)
     cdp_health: dict = field(default_factory=lambda: {
@@ -54,6 +58,10 @@ class BrowserInstance:
 
 class PoolFull(RuntimeError):
     """No free browser slot."""
+
+
+class MemoryRejected(RuntimeError):
+    """Memory remains too high to start another browser."""
 
 
 class LaunchFailed(RuntimeError):
@@ -170,7 +178,27 @@ def _start_display(inst):
     _wait_for_vnc(inst)
 
 
-def acquire(user_id, *, on_acquire=None):
+def evictable(exclude=()):
+    """Return the oldest instance outside the caller's live-session set."""
+    candidates = [inst for inst in live() if inst.user_id not in exclude]
+    return min(candidates, key=lambda inst: inst.last_used, default=None)
+
+
+def reap_idle(now, *, exclude=(), on_release=None):
+    """Stop idle instances on the Flask thread, preserving their profiles."""
+    reaped = []
+    for inst in live():
+        if inst.user_id in exclude or now - inst.last_used <= INSTANCE_IDLE_S:
+            continue
+        if on_release is not None:
+            on_release(inst)
+        release_slot(inst)
+        reaped.append(inst.user_id)
+    return reaped
+
+
+def acquire(user_id, *, on_acquire=None, exclude=(), memory_pct=None,
+            memory_reject_pct=80):
     """Start or reuse a profile; notify before browser work for watchdog arming."""
     users = scoped_user_dir(PROFILE_ROOT, "users")
     profile = scoped_user_dir(users, user_id)
@@ -178,11 +206,29 @@ def acquire(user_id, *, on_acquire=None):
         raise ValueError("Invalid browser user id")
     inst = instance_for(user_id)
     if inst is not None:
+        chrome._assert_pw_thread(inst, "acquire", record=False)
         if on_acquire is not None:
             on_acquire(inst)
         inst.last_used = time.monotonic()
         _publish_instances()
         return inst
+    # The API supplies its existing cgroup reader, so admission and deferred
+    # pressure eviction use the same measurement and threshold.
+    if memory_pct is not None and memory_pct() > memory_reject_pct:
+        victim = evictable(exclude)
+        if victim is not None:
+            if on_acquire is not None:
+                on_acquire(victim)
+            release_slot(victim)
+        if memory_pct() > memory_reject_pct:
+            raise MemoryRejected("Memory pressure too high, refusing browser instance")
+    if len(live()) >= MAX_INSTANCES:
+        victim = evictable(exclude)
+        if victim is None:
+            raise PoolFull("All browser instances hold live sessions")
+        if on_acquire is not None:
+            on_acquire(victim)
+        release_slot(victim)
     used = {item.slot for item in live()}
     slot = next((slot for slot in range(MAX_INSTANCES) if slot not in used), None)
     if slot is None:
@@ -222,9 +268,11 @@ def acquire(user_id, *, on_acquire=None):
 
 def release_slot(inst):
     """Stop every instance child, retaining its profile directory."""
+    chrome._assert_pw_thread(inst, "release_slot", record=False)
     # Hold the lifecycle lock through teardown so recovery cannot resurrect a
     # Chrome between its stop and its display's stop.
     with chrome._chrome_lock:
+        inst.retired = True
         try:
             (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
         except OSError as exc:

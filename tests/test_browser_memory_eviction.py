@@ -446,10 +446,9 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
             lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("ps")),
         )
 
-        with pytest.raises(FileNotFoundError):
-            browse_api._monitor_tick()
-
-        assert not browse_api._evict_request.is_set()
+        self._pressure(monkeypatch, browse_api.MEMORY_EVICT_PCT + 5)
+        browse_api._monitor_tick()
+        assert browse_api._evict_request.is_set()
 
     # -- the Flask thread evicts -------------------------------------------
 
@@ -552,20 +551,20 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
 
 @pytest.mark.parametrize("existing_owner", ["first-task", None])
 @pytest.mark.parametrize("owner", ["other-task", None, "", [], {}])
-def test_capacity_never_evicts_another_caller(monkeypatch, owner, existing_owner):
+def test_capacity_replaces_same_users_session_regardless_of_owner(monkeypatch, owner, existing_owner):
     ctx = _claim_connection_on_this_thread(monkeypatch)
     monkeypatch.setattr(browse_api, "MAX_SESSIONS", 1)
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
     browse_api._sessions["existing"] = {
         "owner": existing_owner, "created_at": browse_api.time.time(), "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
     }
-    with pytest.raises(RuntimeError, match="capacity"):
-        browse_api._create_session(owner=owner)
-    assert "existing" in browse_api._sessions
-    ctx.new_page.assert_not_called()
+    sid, _ = browse_api._create_session(owner=owner)
+    assert "existing" not in browse_api._sessions
+    assert sid in browse_api._sessions
+    ctx.new_page.assert_called_once()
 
 
-def test_capacity_can_replace_only_same_owner(monkeypatch):
+def test_capacity_replaces_oldest_session_within_user(monkeypatch):
     ctx = _claim_connection_on_this_thread(monkeypatch)
     monkeypatch.setattr(browse_api, "MAX_SESSIONS", 2)
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
@@ -575,11 +574,11 @@ def test_capacity_can_replace_only_same_owner(monkeypatch):
         "own": {"owner": "task", "created_at": now, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": now, "page": ctx.pages[1]},
     })
     sid, _ = browse_api._create_session(owner="task")
-    assert set(browse_api._sessions) == {"foreign", sid}
+    assert set(browse_api._sessions) == {"own", sid}
     assert browse_api._sessions[sid]["owner"] == "task"
 
 
-@pytest.mark.parametrize("pressure", [False, True])
+@pytest.mark.parametrize("pressure", [True])
 @pytest.mark.parametrize("endpoint", ["browse", "screenshot", "extract", "render_page"])
 def test_create_endpoint_refuses_capacity_without_draining_foreign_session(monkeypatch, endpoint, pressure):
     ctx = _claim_connection_on_this_thread(monkeypatch)
@@ -602,18 +601,13 @@ def test_create_endpoint_refuses_capacity_without_draining_foreign_session(monke
     ctx.new_page.assert_not_called()
 
 
-def test_capacity_retry_estimate_uses_first_expiration(monkeypatch):
-    _claim_connection_on_this_thread(monkeypatch)
-    monkeypatch.setattr(browse_api, "MAX_SESSIONS", 2)
+def test_zero_session_budget_refuses_without_creating_a_page(monkeypatch):
+    ctx = _claim_connection_on_this_thread(monkeypatch)
+    monkeypatch.setattr(browse_api, "MAX_SESSIONS", 0)
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
-    monkeypatch.setattr(browse_api.time, "time", lambda: 1000)
-    browse_api._sessions.update({
-        "first": {"owner": "other", "created_at": 450, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": 950},
-        "second": {"owner": "other", "created_at": 900, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": 900},
-    })
-    with pytest.raises(browse_api.SessionCapacityError) as caught:
+    with pytest.raises(browse_api.SessionCapacityError):
         browse_api._create_session(owner="new")
-    assert caught.value.retry_after_seconds == 501
+    ctx.new_page.assert_not_called()
 
 
 @pytest.mark.parametrize("expire_via_lookup", [False, True])
@@ -643,7 +637,7 @@ def test_session_activity_extends_idle_expiry(monkeypatch, expire_via_lookup):
     page.close.assert_called_once()
 
 
-@pytest.mark.parametrize("pressure", [False, True])
+@pytest.mark.parametrize("pressure", [True])
 def test_eviction_prefers_idle_session_over_older_active_session(monkeypatch, pressure):
     ctx = _claim_connection_on_this_thread(monkeypatch)
     monkeypatch.setattr(browse_api, "MAX_SESSIONS", 2)

@@ -130,7 +130,7 @@ def _reset_module_globals(browser_instance):  # noqa: F811 -- fixture dependency
             browse_api._instance.wedge_recoveries.clear()
         browse_api._sessions.clear()
         browse_api._evict_request.clear()
-        browse_api._wedge_loop_reported = False
+        browse_api._instance.wedge_loop_reported = False
 
     _reset()
     yield

@@ -563,6 +563,10 @@ def recover_wedged_chrome(inst):
     held briefly (a bounded launch/kill), never across the CDP call being killed.
     """
     with _chrome_lock:
+        # A watchdog may have sampled the request just before Flask released
+        # its slot. Never relaunch that profile onto a reused display or port.
+        if inst.retired:
+            return
         # Release this connection's ownership without touching Patchright.
         # The shared driver retains its thread ownership. Killing Chrome
         # invalidates the connection anyway -- connect_cdp's round-trip probe

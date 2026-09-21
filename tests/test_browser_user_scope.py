@@ -226,13 +226,13 @@ def test_close_reaped_session_does_not_launch_or_touch_stale_page(api):
     assert api.pool.live() == []
 
 
-def test_same_task_owner_cannot_replace_another_users_session(api, monkeypatch):
+def test_per_user_budget_does_not_consume_another_users_allowance(api, monkeypatch):
     monkeypatch.setattr(api, "MAX_SESSIONS", 1)
     sid = post(api, "/browse", url="https://example.com/", keep_session=True, owner="task").json["session_id"]
     page = api._sessions[sid]["page"]
     page.reset_mock()
     response = post(api, "/browse", "bob", url="https://example.com/", keep_session=True, owner="task")
-    assert response.status_code == 503
+    assert response.status_code == 200
     assert sid in api._sessions
     assert page.mock_calls == []
 
@@ -282,3 +282,112 @@ def test_watchdog_covers_existing_session_teardown_without_acquisition(api, monk
         assert inflight["instance"] is inst
     acquire.assert_not_called()
     assert api._inflight is None
+
+
+def test_global_budget_evicts_other_user_only_when_binding(api, monkeypatch):
+    monkeypatch.setattr(api, "MAX_TOTAL_SESSIONS", 1)
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    response = post(api, "/browse", "bob", url="https://example.com/", keep_session=True)
+    assert response.status_code == 200
+    assert sid not in api._sessions
+    assert list(api._sessions) == [response.json["session_id"]]
+
+
+def test_busy_pool_refuses_without_stopping_live_session(api, monkeypatch):
+    monkeypatch.setattr(api.pool, "MAX_INSTANCES", 1)
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    inst = api.pool.instance_for("alice")
+    response = post(api, "/browse", "bob", url="https://example.com/")
+    assert response.status_code == 503
+    assert response.json["retry_after_seconds"] > 0
+    assert api.pool.live() == [inst]
+    assert sid in api._sessions
+
+
+def test_health_reports_recovery_loop_of_one_instance(api):
+    import time
+    for user in ("alice", "bob"):
+        post(api, "/browse", user, url="https://example.com/", keep_session=True)
+    api.pool.instance_for("bob").wedge_recoveries = [time.monotonic()] * api.WEDGE_RECOVERY_THRESHOLD
+    response = api.app.test_client().get("/health")
+    assert response.json["status"] == "degraded"
+    assert len(response.json["instances"]) == 2
+
+
+def test_global_eviction_arms_watchdog_for_victim_and_restores_request(api, monkeypatch):
+    monkeypatch.setattr(api, "MAX_TOTAL_SESSIONS", 1)
+    post(api, "/browse", url="https://example.com/", keep_session=True)
+    observed = []
+
+    def context(inst, **kwargs):
+        observed.append((inst.user_id, api._inflight["instance"].user_id))
+        return inst.pw_context
+
+    monkeypatch.setattr(api.chrome, "get_context", context)
+    response = post(api, "/browse", "bob", url="https://example.com/", keep_session=True)
+    assert response.status_code == 200
+    assert ("alice", "alice") in observed
+    assert all(actual == armed for actual, armed in observed)
+    assert api._sessions[response.json["session_id"]]["user_id"] == "bob"
+
+
+def test_cleanup_reaps_idle_foreign_instance_before_pressure_session(api, monkeypatch):
+    import time
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    post(api, "/browse", "bob", url="https://example.com/")
+    bob = api.pool.instance_for("bob")
+    bob.last_used = time.monotonic()  # pressure, not the idle timer
+    monkeypatch.setattr(api, "_get_memory_pct", lambda: 90)
+    api._evict_request.set()
+    response = post(api, "/evaluate", session_id=sid, expression="1")
+    assert response.status_code == 200
+    assert api.pool.instance_for("bob") is None
+    assert sid in api._sessions
+    assert not api._evict_request.is_set()
+
+
+def test_cleanup_reaps_expired_foreign_sessions_and_idle_instance(api):
+    sid = post(api, "/browse", "bob", url="https://example.com/", keep_session=True).json["session_id"]
+    api._sessions[sid]["last_used_at"] = 0
+    api.pool.instance_for("bob").last_used = 0
+    response = post(api, "/browse", url="https://example.com/")
+    assert response.status_code == 200
+    assert sid not in api._sessions
+    assert api.pool.instance_for("bob") is None
+
+
+def test_monitor_attributes_descendant_rss_without_browser_calls(api, monkeypatch, caplog):
+    import logging
+    import threading
+    for user, pid in (("alice", 100), ("bob", 200)):
+        post(api, "/browse", user, url="https://example.com/", keep_session=True)
+        api.pool.instance_for(user).proc.pid = pid
+    # Grandchild first, plus a separate chrome tree that belongs to nobody.
+    rows = "103 102 1024 chrome --type=renderer\n102 100 2048 chrome --type=zygote\n100 1 4096 chrome\n201 200 8192 chrome --type=renderer\n200 1 1024 chrome\n999 1 65536 chrome\n"
+    monkeypatch.setattr(api.subprocess, "run", lambda *a, **kw: types.SimpleNamespace(stdout=rows))
+    monkeypatch.setattr(api, "_get_memory_pct", lambda: 90)
+    monkeypatch.setattr(api.chrome, "get_context", MagicMock(side_effect=AssertionError("monitor touched browser")))
+    with caplog.at_level(logging.WARNING):
+        thread = threading.Thread(target=api._monitor_tick)
+        thread.start()
+        thread.join(5)
+    assert "slot=0:rss=7MB" in caplog.text
+    assert "slot=1:rss=9MB" in caplog.text
+    assert "chrome_rss=16MB" in caplog.text
+    assert len(api._sessions) == 2
+    assert api._evict_request.is_set()
+
+
+def test_health_logs_a_second_instances_wedge_once(api, monkeypatch, caplog):
+    import logging
+    import time
+    for user in ("alice", "bob"):
+        post(api, "/browse", user, url="https://example.com/", keep_session=True)
+    monkeypatch.setattr(api.chrome, "devtools_responding", lambda *a, **kw: True)
+    api.pool.instance_for("bob").cdp_health.update(
+        consecutive_failures=api.CDP_FAILURE_THRESHOLD, last_failure=time.monotonic(), last_error="example failure",
+    )
+    with caplog.at_level(logging.ERROR):
+        for _ in range(3):
+            assert api._probe(True) == (503, b"cdp-wedged slot=1\n")
+    assert len([r for r in caplog.records if "consecutive CDP failures" in r.message]) == 1

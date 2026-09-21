@@ -100,12 +100,12 @@ def test_failed_launch_cleans_every_child(runtime, monkeypatch):
         proc.wait.assert_called()
 
 
-def test_capacity_refuses_without_eviction(runtime, monkeypatch):
+def test_capacity_refuses_busy_instances_without_eviction(runtime, monkeypatch):
     pool, _, _, _ = runtime
     monkeypatch.setattr(pool, "MAX_INSTANCES", 1)
     alice = pool.acquire("alice")
     with pytest.raises(pool.PoolFull):
-        pool.acquire("bob")
+        pool.acquire("bob", exclude={"alice"})
     assert pool.live() == [alice]
 
 
@@ -386,3 +386,74 @@ def test_unremovable_route_does_not_prevent_shutdown_or_reach_reused_slot(runtim
         pool.acquire("bob")
     assert len(processes) == 3
     assert pool.live() == []
+
+
+def test_capacity_evicts_lru_idle_instance(runtime):
+    pool, _, _, _ = runtime
+    alice, bob = pool.acquire("alice"), pool.acquire("bob")
+    alice.last_used, bob.last_used = 1, 2
+    carol = pool.acquire("carol")
+    assert carol.slot == alice.slot
+    assert pool.live() == [bob, carol]
+    assert Path(alice.profile_dir).is_dir()
+
+
+def test_reap_idle_keeps_live_sessions_and_reuses_slot(runtime, monkeypatch):
+    pool, _, _, _ = runtime
+    alice, bob = pool.acquire("alice"), pool.acquire("bob")
+    alice.last_used = bob.last_used = 0
+    monkeypatch.setattr(pool, "INSTANCE_IDLE_S", 100)
+    assert pool.reap_idle(101, exclude={"bob"}) == ["alice"]
+    assert pool.live() == [bob]
+    assert pool.acquire("carol").slot == alice.slot
+
+
+def test_memory_rejection_starts_nothing(runtime):
+    pool, _, processes, _ = runtime
+    with pytest.raises(pool.MemoryRejected):
+        pool.acquire("alice", memory_pct=lambda: 99)
+    assert processes == []
+    assert pool.live() == []
+
+
+def test_memory_reclaims_idle_instance_before_launch(runtime):
+    pool, _, _, _ = runtime
+    alice = pool.acquire("alice")
+    readings = iter([99, 20])
+    bob = pool.acquire("bob", memory_pct=lambda: next(readings))
+    assert pool.live() == [bob]
+    assert Path(alice.profile_dir).is_dir()
+
+
+def test_released_instance_cannot_be_resurrected_by_late_watchdog(runtime):
+    pool, chrome, processes, _ = runtime
+    alice = pool.acquire("alice")
+    pool.release_slot(alice)
+    bob = pool.acquire("bob")
+    count = len(processes)
+    chrome.recover_wedged_chrome(alice)
+    assert len(processes) == count
+    assert pool.live() == [bob]
+    assert alice.proc is None
+
+
+def test_watchdog_recovers_only_its_instance(runtime):
+    pool, chrome, _, _ = runtime
+    alice, bob = pool.acquire("alice"), pool.acquire("bob")
+    bob_proc, bob_generation, bob_context = bob.proc, bob.launch_generation, bob.pw_context
+    errors = []
+
+    def recover():
+        try:
+            chrome.recover_wedged_chrome(alice)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=recover)
+    thread.start()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert errors == []
+    assert len(alice.wedge_recoveries) == 1
+    assert bob.wedge_recoveries == []
+    assert (bob.proc, bob.launch_generation, bob.pw_context) == (bob_proc, bob_generation, bob_context)

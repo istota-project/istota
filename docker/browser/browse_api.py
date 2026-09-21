@@ -7,6 +7,7 @@ cannot detect an attached debugger.
 """
 
 import atexit
+from contextlib import contextmanager
 from html import escape
 import json
 import logging
@@ -72,6 +73,7 @@ _sessions = {}  # id -> {page, created_at, last_used_at, owner, generation, cont
 _sessions_lock = threading.Lock()
 SESSION_TTL = 600  # 10 minutes
 MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "2"))
+MAX_TOTAL_SESSIONS = int(os.environ.get("BROWSER_MAX_TOTAL_SESSIONS", "4"))
 MEMORY_EVICT_PCT = 80  # evict oldest session above this on non-creation requests
 MEMORY_REJECT_PCT = MEMORY_EVICT_PCT  # never add a tab while eviction is needed
 
@@ -251,11 +253,13 @@ def _capacity_response(error):
 def _create_session(owner=None):
     """Create a new browser tab session.
 
-    Owner is a scheduling hint, not authentication. Anonymous callers cannot
-    replace a live session, including another anonymous caller's session.
+    Owner is provenance metadata. Capacity is per user, then global; within
+    either budget the requesting user's oldest session is replaced first.
     """
     if not isinstance(owner, str) or not owner.strip():
         owner = None
+    if MAX_SESSIONS <= 0 or MAX_TOTAL_SESSIONS <= 0:
+        raise SessionCapacityError("Browser session capacity is disabled", 30)
     mem_pct = _get_memory_pct()
     if mem_pct > MEMORY_REJECT_PCT:
         raise SessionCapacityError(
@@ -267,25 +271,16 @@ def _create_session(owner=None):
 
     with _sessions_lock:
         _evict_expired()
-        while len(_sessions) >= MAX_SESSIONS:
-            own_sessions = [
-                sid for sid, session in _sessions.items()
-                if session.get("user_id") == _request_instance().user_id
-                and owner is not None and session.get("owner") == owner
-            ]
-            if not own_sessions:
-                earliest_expiry = min(
-                    session["last_used_at"] + SESSION_TTL
-                    for session in _sessions.values()
-                )
-                retry_after = max(1, int(earliest_expiry - time.time()) + 1)
-                raise SessionCapacityError(
-                    "Browser at capacity; no session belonging to this caller "
-                    "can be replaced. Close a session or retry after a slot frees.",
-                    retry_after,
-                )
-            oldest = min(own_sessions, key=lambda sid: _sessions[sid]["last_used_at"])
+        own_sessions = [sid for sid, session in _sessions.items()
+                        if session.get("user_id") == _request_instance().user_id]
+        while len(own_sessions) >= MAX_SESSIONS or len(_sessions) >= MAX_TOTAL_SESSIONS:
+            candidates = own_sessions or list(_sessions)
+            if not candidates:
+                raise SessionCapacityError("Browser session capacity is disabled", 30)
+            oldest = min(candidates, key=lambda sid: _sessions[sid]["last_used_at"])
             _close_session_unlocked(oldest)
+            if oldest in own_sessions:
+                own_sessions.remove(oldest)
 
     # The return value, rather than ctx.pages[-1]: the context is shared, so
     # between new_page() and the read a popup can append and the last entry is
@@ -449,6 +444,28 @@ def _close_page(page, ctx):
         pass
 
 
+def _set_watchdog_instance(inst):
+    """Track temporary maintenance targets without changing request identity."""
+    with _inflight_lock:
+        if _inflight is not None:
+            _inflight["instance"] = inst
+
+
+@contextmanager
+def _watchdog_instance(inst):
+    with _inflight_lock:
+        inflight = _inflight
+        previous = inflight.get("instance") if inflight is not None else None
+        if inflight is not None:
+            inflight["instance"] = inst
+    try:
+        yield
+    finally:
+        with _inflight_lock:
+            if _inflight is inflight and inflight is not None:
+                inflight["instance"] = previous
+
+
 def _close_session_unlocked(session_id):
     """Close a session, its tab, and every tab that tab opened (caller holds lock).
 
@@ -464,29 +481,30 @@ def _close_session_unlocked(session_id):
     inst = pool.instance_for(session.get("user_id"))
     if inst is None or session.get("context") is not inst.pw_context:
         return
-    page = session.get("page")
-    if page is None or not chrome.is_cdp_connected(inst):
-        return
-    try:
-        # record=False: this whole block is best-effort teardown, and it runs
-        # from _cleanup_expired() at the top of every endpoint -- including ones
-        # that then return 404 without ever making a CDP call of their own, so
-        # nothing here can ever produce a compensating success. Counting it let
-        # three /interact calls with stale session ids restart the container
-        # (ISSUE-384 review).
-        ctx = chrome.get_context(inst, record=False)
-        owned = _opened_by(page, list(ctx.pages))
-    except Exception:
-        return
-    if owned:
-        log.info(
-            "Session %s opened %d tab(s) of its own -- closing them with it",
-            session_id, len(owned),
-        )
-    # Deepest first, so a popup is gone before the popup that opened it.
-    for extra in reversed(owned):
-        _close_page(extra, ctx)
-    _close_page(page, ctx)
+    with _watchdog_instance(inst):
+        page = session.get("page")
+        if page is None or not chrome.is_cdp_connected(inst):
+            return
+        try:
+            # record=False: this whole block is best-effort teardown, and it runs
+            # from _cleanup_expired() at the top of every endpoint -- including ones
+            # that then return 404 without ever making a CDP call of their own, so
+            # nothing here can ever produce a compensating success. Counting it let
+            # three /interact calls with stale session ids restart the container
+            # (ISSUE-384 review).
+            ctx = chrome.get_context(inst, record=False)
+            owned = _opened_by(page, list(ctx.pages))
+        except Exception:
+            return
+        if owned:
+            log.info(
+                "Session %s opened %d tab(s) of its own -- closing them with it",
+                session_id, len(owned),
+            )
+        # Deepest first, so a popup is gone before the popup that opened it.
+        for extra in reversed(owned):
+            _close_page(extra, ctx)
+        _close_page(page, ctx)
 
 
 def _close_session(session_id):
@@ -537,14 +555,17 @@ def _drain_evict_request_unlocked():
     if not _evict_request.is_set():
         return None
     _evict_request.clear()
-    if not _sessions:
-        return None
     pct = _get_memory_pct()
     if pct <= MEMORY_EVICT_PCT:
         log.info(
             "Eviction request dropped — memory back to %.1f%% (threshold %d%%)",
             pct, MEMORY_EVICT_PCT,
         )
+        return None
+    victim = pool.evictable(_live_session_users() | {str(_user_scope)})
+    if victim is not None:
+        with _watchdog_instance(victim):
+            pool.release_slot(victim)
         return None
     candidates = [sid for sid, session in _sessions.items()
                   if session.get("user_id") == _user_scope]
@@ -556,13 +577,25 @@ def _drain_evict_request_unlocked():
     return oldest
 
 
+def _live_session_users():
+    """Read session liveness without touching Patchright; caller holds lock."""
+    now = time.time()
+    users = set()
+    for session in _sessions.values():
+        inst = pool.instance_for(session.get("user_id"))
+        if (inst is not None and now - session["last_used_at"] <= SESSION_TTL
+                and session.get("generation", inst.launch_generation) == inst.launch_generation
+                and session.get("context") is inst.pw_context):
+            users.add(inst.user_id)
+    return users
+
+
 def _evict_expired():
     """Remove expired sessions and close their tabs. Caller must hold lock."""
     now = time.time()
     expired = [
         sid for sid, s in _sessions.items()
-        if s.get("user_id") == _user_scope
-        and now - s["last_used_at"] > SESSION_TTL
+        if now - s["last_used_at"] > SESSION_TTL
     ]
     for sid in expired:
         _close_session_unlocked(sid)
@@ -2565,33 +2598,49 @@ def delete_session(session_id):
 # Health and monitoring
 # ---------------------------------------------------------------------------
 
-def _get_chrome_diagnostics(inst):
-    """Collect Chrome process and memory diagnostics."""
-    diag = {}
+def _read_process_rows():
+    """Snapshot process ancestry and RSS without touching browser objects."""
+    rows = {}
     try:
         result = subprocess.run(
-            ["ps", "aux"], capture_output=True, text=True, timeout=5,
+            ["ps", "-eo", "pid=,ppid=,rss=,args="], capture_output=True, text=True, timeout=5,
         )
-        chrome_procs = []
-        total_rss_kb = 0
         for line in result.stdout.splitlines():
-            if "chrome" in line.lower() and "--type=" in line:
-                parts = line.split()
-                rss_kb = int(parts[5])
-                proc_type = "unknown"
-                for arg in line.split():
-                    if arg.startswith("--type="):
-                        proc_type = arg.split("=", 1)[1]
-                        break
-                chrome_procs.append({
-                    "type": proc_type, "rss_mb": rss_kb // 1024,
-                })
-                total_rss_kb += rss_kb
-        diag["chrome_processes"] = len(chrome_procs)
-        diag["chrome_rss_mb"] = total_rss_kb // 1024
-        diag["process_detail"] = chrome_procs
-    except Exception as e:
-        diag["chrome_process_error"] = str(e)
+            fields = line.split(None, 3)
+            if len(fields) == 4:
+                try:
+                    pid, parent, rss = map(int, fields[:3])
+                except ValueError:
+                    continue
+                rows[pid] = (parent, rss, fields[3])
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return rows
+
+
+def _process_diagnostics(inst, rows):
+    """Attribute Chrome and its descendants to exactly one instance."""
+    pids = {inst.proc.pid} if inst.proc is not None else set()
+    while True:
+        children = {pid for pid, (parent, _, _) in rows.items() if parent in pids}
+        if children <= pids:
+            break
+        pids.update(children)
+    detail = []
+    for pid in sorted(pids & rows.keys()):
+        _, rss, args = rows[pid]
+        kind = next((arg.split("=", 1)[1] for arg in args.split()
+                     if arg.startswith("--type=")), "browser")
+        detail.append({"type": kind, "rss_mb": rss // 1024})
+    return {"chrome_processes": len(detail),
+            "chrome_rss_mb": sum(rows[pid][1] for pid in pids & rows.keys()) // 1024,
+            "process_detail": detail}
+
+
+def _get_chrome_diagnostics(inst, rows=None):
+    """Collect Chrome process and memory diagnostics."""
+    diag = {}
+    diag.update(_process_diagnostics(inst, _read_process_rows() if rows is None else rows))
 
     try:
         with open("/sys/fs/cgroup/memory.current", "r") as f:
@@ -2683,9 +2732,11 @@ def health():
     instances = pool.live()
     running = all(chrome.is_chrome_running(inst) for inst in instances)
     wedged = any(_cdp_wedged(inst=inst)[0] for inst in instances)
+    looping = any(_wedge_looping(inst=inst)[0] for inst in instances)
     records = [chrome.cdp_health(inst) for inst in instances]
+    process_rows = _read_process_rows()
     data = {
-        "status": "degraded" if (not running or wedged) else "ok",
+        "status": "degraded" if (not running or wedged or looping) else "ok",
         "per_user_profiles": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,
@@ -2694,10 +2745,15 @@ def health():
         "active_sessions": active,
         "total_sessions": active,
         "max_sessions": MAX_SESSIONS,
+        "max_total_sessions": MAX_TOTAL_SESSIONS,
+        "instances": [{"user": inst.user_id, "slot": inst.slot,
+                       "last_used": inst.last_used,
+                       **_process_diagnostics(inst, process_rows)} for inst in instances],
     }
     if request.args.get("v") == "1":
         data["instances"] = [
-            {"user": inst.user_id, "slot": inst.slot, **_get_chrome_diagnostics(inst)}
+            {"user": inst.user_id, "slot": inst.slot, "last_used": inst.last_used,
+             **_get_chrome_diagnostics(inst, process_rows)}
             for inst in instances
         ]
     return jsonify(data)
@@ -2728,6 +2784,11 @@ def _cleanup_expired(allow_pressure_eviction=True):
     with _sessions_lock:
         _evict_expired()
         _sweep_unclaimed_pages_unlocked()
+        with _watchdog_instance(_request_instance()):
+            pool.reap_idle(
+                time.monotonic(), exclude=_live_session_users() | {str(_user_scope)},
+                on_release=_set_watchdog_instance,
+            )
         # A create request must not take a foreign live session as a side
         # effect of cleanup. Creation refuses new work under pressure instead.
         evicted = _drain_evict_request_unlocked() if allow_pressure_eviction else None
@@ -2739,6 +2800,7 @@ def _track_request_instance(inst):
     """Arm recovery before browser work, without publishing a starting instance."""
     global _inflight
     request.browser_instance = inst
+    inst.last_used = time.monotonic()
     body = request.get_json(silent=True)
     url = body.get("url", "") if isinstance(body, dict) else ""
     with _inflight_lock:
@@ -2784,8 +2846,13 @@ def _log_request_start():
     if request.endpoint not in page_endpoints:
         return None
     try:
-        request.browser_instance = pool.acquire(user_id, on_acquire=_track_request_instance)
-    except pool.PoolFull as error:
+        with _sessions_lock:
+            busy_users = _live_session_users()
+        request.browser_instance = pool.acquire(
+            user_id, on_acquire=_track_request_instance, exclude=busy_users,
+            memory_pct=_get_memory_pct, memory_reject_pct=MEMORY_REJECT_PCT,
+        )
+    except (pool.PoolFull, pool.MemoryRejected) as error:
         return _capacity_response(SessionCapacityError(str(error), 30))
     except pool.LaunchFailed as error:
         return jsonify({"status": "error", "error": str(error)}), 502
@@ -2843,16 +2910,14 @@ def _monitor_tick():
     or through a helper. `_note_memory_pressure` is the whole of its interaction
     with session state, by design.
     """
-    result = subprocess.run(
-        ["ps", "aux"], capture_output=True, text=True, timeout=5,
+    rows = _read_process_rows()
+    instances = pool.live()
+    diagnostics = [(inst, _process_diagnostics(inst, rows)) for inst in instances]
+    chrome_count = sum(diag["chrome_processes"] for _, diag in diagnostics)
+    chrome_rss_mb = sum(diag["chrome_rss_mb"] for _, diag in diagnostics)
+    instance_usage = " ".join(
+        f"slot={inst.slot}:rss={diag['chrome_rss_mb']}MB" for inst, diag in diagnostics
     )
-    chrome_rss_kb = 0
-    chrome_count = 0
-    for line in result.stdout.splitlines():
-        if "chrome" in line.lower() and "--type=" in line:
-            chrome_count += 1
-            chrome_rss_kb += int(line.split()[5])
-    chrome_rss_mb = chrome_rss_kb // 1024
 
     container_mb, limit_mb = _read_container_memory_mb()
 
@@ -2878,7 +2943,7 @@ def _monitor_tick():
 
     msg = (
         f"sessions={sessions} "
-        f"chrome_procs={chrome_count} chrome_rss={chrome_rss_mb}MB "
+        f"chrome_procs={chrome_count} chrome_rss={chrome_rss_mb}MB {instance_usage} "
         f"container={container_mb}MB/{limit_mb}MB ({pct}%)"
     )
     if pct > MEMORY_EVICT_PCT:
@@ -2944,43 +3009,39 @@ LIVENESS_PORT = int(os.environ.get("BROWSER_LIVENESS_PORT", "9224"))
 # once per wedge, and it also stops the line repeating every 30s for the rest of
 # the day once the watchdog's crash-loop guard has stopped acting on it. A plain
 # bool: assignment is atomic under the GIL and no reader needs a consistent pair.
-_cdp_wedge_reported = False
 
 
-def _note_cdp_wedge(wedged, cdp):
+def _note_cdp_wedge(inst, wedged, cdp):
     """Log a wedge once when it starts, and once more when it clears."""
-    global _cdp_wedge_reported
-    if wedged and not _cdp_wedge_reported:
-        _cdp_wedge_reported = True
+    if wedged and not inst.cdp_wedge_reported:
+        inst.cdp_wedge_reported = True
         log.error(
             "Liveness: %d consecutive CDP failures with Chrome up and answering "
             "-- reporting unhealthy so the container is restarted (ISSUE-384). "
             "Last error: %s",
             cdp["consecutive_failures"], cdp["last_error"] or "<none recorded>",
         )
-    elif not wedged and _cdp_wedge_reported:
-        _cdp_wedge_reported = False
+    elif not wedged and inst.cdp_wedge_reported:
+        inst.cdp_wedge_reported = False
         log.info("Liveness: CDP heartbeat recovered, reporting healthy again")
 
 
-# Same shape and same reason as _cdp_wedge_reported above: the liveness thread
+# Same shape and same reason as inst.cdp_wedge_reported above: the liveness thread
 # must not block, and logging writes to a stream shared with the Flask thread.
-_wedge_loop_reported = False
 
 
-def _note_wedge_loop(looping, recoveries):
+def _note_wedge_loop(inst, looping, recoveries):
     """Log a recovery loop once when it starts, and once more when it clears."""
-    global _wedge_loop_reported
-    if looping and not _wedge_loop_reported:
-        _wedge_loop_reported = True
+    if looping and not inst.wedge_loop_reported:
+        inst.wedge_loop_reported = True
         log.error(
             "Liveness: %d Chrome wedge recoveries within %ds -- the browse "
             "watchdog is healing the same fault on a loop, reporting unhealthy "
             "so the container is restarted (ISSUE-394)",
             recoveries, WEDGE_RECOVERY_WINDOW_S,
         )
-    elif not looping and _wedge_loop_reported:
-        _wedge_loop_reported = False
+    elif not looping and inst.wedge_loop_reported:
+        inst.wedge_loop_reported = False
         log.info("Liveness: wedge recoveries back under threshold, reporting healthy")
 
 
@@ -3021,7 +3082,7 @@ def _probe_instance(inst, deep):
         # exempting it would blind the probe for exactly as long as a recovery
         # attempt that cannot fix this fault.
         wedged, cdp = _cdp_wedged(inst=inst)
-        _note_cdp_wedge(wedged, cdp)
+        _note_cdp_wedge(inst, wedged, cdp)
         if wedged:
             return 503, b"cdp-wedged\n"
         # Deep tier, arm 3: is this container healing the same wedge on a loop?
@@ -3030,7 +3091,7 @@ def _probe_instance(inst, deep):
         # hung CDP call records no failure at all. The recovery rate is the one
         # signal the wedge cannot fake, because the watchdog produces it.
         looping, recoveries = _wedge_looping(inst=inst)
-        _note_wedge_loop(looping, recoveries)
+        _note_wedge_loop(inst, looping, recoveries)
         if looping:
             return 503, b"wedge-loop\n"
     return 200, b"ok\n"

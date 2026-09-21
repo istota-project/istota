@@ -136,7 +136,7 @@ def _reset_module_globals(browser_instance):  # noqa: F811 -- fixture dependency
         browse_api._instance.launch_generation = 0
         with chrome._wedge_lock:
             browse_api._instance.wedge_recoveries.clear()
-        browse_api._wedge_loop_reported = False
+        browse_api._instance.wedge_loop_reported = False
         browse_api._sessions.clear()
         browse_api._evict_request.clear()
 
@@ -672,9 +672,9 @@ class TestTheWedgeIsLoggedOnce:
 
     @pytest.fixture(autouse=True)
     def _clear_flag(self):
-        browse_api._cdp_wedge_reported = False
+        browse_api._instance.cdp_wedge_reported = False
         yield
-        browse_api._cdp_wedge_reported = False
+        browse_api._instance.cdp_wedge_reported = False
 
     def test_a_sustained_wedge_logs_one_line_not_one_per_probe(
         self, monkeypatch, caplog,
