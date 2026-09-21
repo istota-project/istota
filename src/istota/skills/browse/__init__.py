@@ -1305,8 +1305,14 @@ def cmd_links(args):
         # (ISSUE-531). `count` alone cannot carry it: a full array of
         # navigation chrome and a complete list of the same length are the
         # same number. Copied only when present, which is how the container
-        # sends it — an untruncated page carries neither key.
-        for key in ("links_truncated", "anchors_total"):
+        # sends it — an untruncated page carries none of them.
+        #
+        # `links_truncated_by` is the one that says whether the remedy the
+        # other two imply can work at all (ISSUE-533): a budget this verb
+        # can raise, or the container's scan ceiling, which no --max-links
+        # reaches past. Dropping it here would leave this verb advertising a
+        # retry it cannot perform, which is the shape ISSUE-531 was about.
+        for key in ("links_truncated", "links_truncated_by", "anchors_total"):
             if key in data:
                 result[key] = data[key]
         return result

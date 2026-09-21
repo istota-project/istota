@@ -634,6 +634,15 @@ DEFAULT_MAX_LINKS = 100
 MAX_TEXT_MAX_CHARS = 500000
 MAX_MAX_LINKS = 2000
 
+#: What `links_truncated_by` says, and what each value means the caller can
+#: do about it. The budget is the caller's own `max_links` and a larger one
+#: reaches further; the ceiling is MAX_MAX_LINKS and no budget passes it, so
+#: a page that hits it wants `extract` with a selector rather than a retry.
+#: A clamped budget -- more asked for than the ceiling allows -- reports the
+#: ceiling, because that is what actually bound the answer.
+LINKS_BOUND_BY_BUDGET = "max_links"
+LINKS_BOUND_BY_CEILING = "scan_ceiling"
+
 
 def extract_page_content(page, max_chars=None, max_links=None):
     """Extract text content, title, and links from a page.
@@ -660,14 +669,31 @@ def extract_page_content(page, max_chars=None, max_links=None):
     them — navigation links are real hrefs and legitimately spend the budget.
     What was wrong was that the caller could not tell: a full array of the
     wrong links reads exactly like a complete answer to "what is on this page".
-    So a clipped list carries `links_truncated` and `anchors_total`, and the
-    caller can raise `max_links` and ask again.
+    So a clipped list carries `links_truncated`, `anchors_total` and
+    `links_truncated_by`.
 
-    Both keys are **absent** rather than false on a complete list, which keeps
-    every untruncated response byte-identical to what it was. Spending context
-    on every call to report a budget that did not bind is the same objection
-    that ruled out simply raising the default: it costs every caller and only
-    moves the cliff.
+    **The third key is what makes the remedy honest** (ISSUE-533). The first
+    two say the list was cut short and how many anchors there were, and
+    between them they cannot say whether asking again with a larger budget
+    reaches any further. On a page carrying more anchors than MAX_MAX_LINKS
+    it does not: every retry clamps to the same ceiling and returns the
+    identical answer. `links_truncated_by` names the limit that bound --
+    LINKS_BOUND_BY_BUDGET for one the caller can raise, LINKS_BOUND_BY_CEILING
+    for one nobody can -- so the caller has somewhere to go rather than a
+    retry that cannot work.
+
+    That is a narrower gap than ISSUE-533 described. `anchors_total` is the
+    length of the `a[href]` list, taken before the walk, so it has always
+    reported the page's own count rather than saturating at the ceiling.
+    The consequence runs the other way from the entry's: the guidance that
+    told a caller to treat `anchors_total == MAX_MAX_LINKS` as the stop
+    signal almost never fires, because the two are equal only by coincidence.
+
+    All three keys are **absent** rather than false on a complete list, which
+    keeps every untruncated response byte-identical to what it was. Spending
+    context on every call to report a budget that did not bind is the same
+    objection that ruled out simply raising the default: it costs every caller
+    and only moves the cliff.
 
     Reordering the anchors instead — dropping navigation before slicing — was
     considered and rejected. The only rule general enough to try is same-origin
@@ -689,7 +715,7 @@ def extract_page_content(page, max_chars=None, max_links=None):
         text = ""
 
     links = []
-    truncated = False
+    bound_by = None
     anchors_total = 0
     try:
         anchors = page.query_selector_all("a[href]")
@@ -701,12 +727,25 @@ def extract_page_content(page, max_chars=None, max_links=None):
         # ask to be served, so it is the scan ceiling too.
         scanned = 0
         for a in anchors:
-            if len(links) >= max_links or scanned >= MAX_MAX_LINKS:
+            budget_spent = len(links) >= max_links
+            ceiling_reached = scanned >= MAX_MAX_LINKS
+            if budget_spent or ceiling_reached:
                 # Anchors left with the walk stopped. Whether any of them would
                 # have survived the filter is not known from here, and that is
                 # what the flag claims: the list was cut short, not that
                 # something specific was lost.
-                truncated = True
+                #
+                # Which limit stopped it is the part the caller can act on. A
+                # budget it chose can be raised; the ceiling cannot, and a
+                # retry against it returns the identical answer for ever.
+                # The ceiling takes the tie, and it also takes the case where
+                # the caller asked for more than the ceiling and was clamped
+                # to it -- no separate test for that is needed, because `links`
+                # is never longer than `scanned`, so a budget standing at the
+                # ceiling cannot break the loop before the scan does.
+                bound_by = LINKS_BOUND_BY_BUDGET if (
+                    budget_spent and not ceiling_reached
+                ) else LINKS_BOUND_BY_CEILING
                 break
             scanned += 1
             href = a.get_attribute("href")
@@ -716,19 +755,14 @@ def extract_page_content(page, max_chars=None, max_links=None):
     except Exception:
         pass
 
-    if truncated:
-        return {
-            "title": title,
-            "url": page.url,
-            "text": text,
-            "links": links,
-            "links_truncated": True,
-            "anchors_total": anchors_total,
-        }
-
-    return {
+    result = {
         "title": title,
         "url": page.url,
         "text": text,
         "links": links,
     }
+    if bound_by is not None:
+        result["links_truncated"] = True
+        result["links_truncated_by"] = bound_by
+        result["anchors_total"] = anchors_total
+    return result
