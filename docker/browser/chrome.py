@@ -816,8 +816,9 @@ def cleanup(inst):
     runs on the main thread -- the same thread Flask serves on, so it owns the
     connection. See the _chrome_lock comment.
     """
+    # A stuck CDP close must not prevent the process kill that releases it.
+    # Only bounded process work belongs under the lifecycle lock.
     with _chrome_lock:
-        disconnect_cdp(inst)
-        if inst.proc:
-            _kill_chrome_proc(inst.proc)
-            inst.proc = None
+        proc, inst.proc = inst.proc, None
+        _kill_chrome_proc(proc)
+    disconnect_cdp(inst)

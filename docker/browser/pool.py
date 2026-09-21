@@ -269,25 +269,31 @@ def acquire(user_id, *, on_acquire=None, exclude=(), memory_pct=None,
 def release_slot(inst):
     """Stop every instance child, retaining its profile directory."""
     chrome._assert_pw_thread(inst, "release_slot", record=False)
-    # Hold the lifecycle lock through teardown so recovery cannot resurrect a
-    # Chrome between its stop and its display's stop.
+    # Retire under the lifecycle lock so a late watchdog cannot resurrect this
+    # slot. CDP teardown must run outside that lock, after Chrome is stopped.
     with chrome._chrome_lock:
         inst.retired = True
-        try:
-            (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
-        except OSError as exc:
-            log.warning("Could not remove browser console route: %s", exc)
+    try:
+        (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Could not remove browser console route: %s", exc)
+    try:
         chrome.cleanup(inst)
-        chrome._kill_chrome_proc(inst.x11vnc_proc)
-        chrome._kill_chrome_proc(inst.xvfb_proc)
-        inst.x11vnc_proc = inst.xvfb_proc = None
-        with _registry_lock:
-            if _instances.get(inst.user_id) is inst:
-                del _instances[inst.user_id]
+    except Exception as exc:
+        log.warning("Could not clean up browser connection in slot %d: %s", inst.slot, exc)
+    for name in ("x11vnc_proc", "xvfb_proc"):
         try:
-            _publish_instances()
-        except OSError as exc:
-            log.warning("Could not update browser console index: %s", exc)
+            chrome._kill_chrome_proc(getattr(inst, name))
+        except Exception as exc:
+            log.warning("Could not stop %s in slot %d: %s", name, inst.slot, exc)
+        setattr(inst, name, None)
+    with _registry_lock:
+        if _instances.get(inst.user_id) is inst:
+            del _instances[inst.user_id]
+    try:
+        _publish_instances()
+    except OSError as exc:
+        log.warning("Could not update browser console index: %s", exc)
 
 
 def cleanup():

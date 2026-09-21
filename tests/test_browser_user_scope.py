@@ -391,3 +391,14 @@ def test_health_logs_a_second_instances_wedge_once(api, monkeypatch, caplog):
         for _ in range(3):
             assert api._probe(True) == (503, b"cdp-wedged slot=1\n")
     assert len([r for r in caplog.records if "consecutive CDP failures" in r.message]) == 1
+
+
+def test_global_budget_prefers_own_session_even_if_other_user_is_older(api, monkeypatch):
+    monkeypatch.setattr(api, "MAX_TOTAL_SESSIONS", 2)
+    alice = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    bob = post(api, "/browse", "bob", url="https://example.com/", keep_session=True).json["session_id"]
+    api._sessions[alice]["last_used_at"] -= 10
+    response = post(api, "/browse", "bob", url="https://example.com/", keep_session=True)
+    assert response.status_code == 200
+    assert set(api._sessions) == {alice, response.json["session_id"]}
+    assert bob not in api._sessions

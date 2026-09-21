@@ -637,7 +637,7 @@ def test_session_activity_extends_idle_expiry(monkeypatch, expire_via_lookup):
     page.close.assert_called_once()
 
 
-@pytest.mark.parametrize("pressure", [True])
+@pytest.mark.parametrize("pressure", [False, True])
 def test_eviction_prefers_idle_session_over_older_active_session(monkeypatch, pressure):
     ctx = _claim_connection_on_this_thread(monkeypatch)
     monkeypatch.setattr(browse_api, "MAX_SESSIONS", 2)

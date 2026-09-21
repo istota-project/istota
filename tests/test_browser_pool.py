@@ -457,3 +457,26 @@ def test_watchdog_recovers_only_its_instance(runtime):
     assert len(alice.wedge_recoveries) == 1
     assert bob.wedge_recoveries == []
     assert (bob.proc, bob.launch_generation, bob.pw_context) == (bob_proc, bob_generation, bob_context)
+
+
+def test_capacity_eviction_kills_chrome_before_waiting_for_cdp_close(runtime, monkeypatch):
+    pool, _, _, _ = runtime
+    monkeypatch.setattr(pool, "MAX_INSTANCES", 1)
+    alice = pool.acquire("alice")
+    stopped = threading.Event()
+    alice.proc.wait.side_effect = lambda **kwargs: stopped.set()
+    observed = []
+    alice.pw_browser.close.side_effect = lambda: observed.append(stopped.wait(0.05))
+    bob = pool.acquire("bob")
+    assert observed == [True]
+    assert pool.live() == [bob]
+
+
+def test_release_attempts_display_cleanup_when_cdp_teardown_raises(runtime, monkeypatch):
+    pool, chrome, processes, _ = runtime
+    alice = pool.acquire("alice")
+    monkeypatch.setattr(chrome, "disconnect_cdp", mock.Mock(side_effect=RuntimeError("driver unavailable")))
+    pool.release_slot(alice)
+    assert pool.live() == []
+    for _, _, proc in processes:
+        proc.wait.assert_called()
