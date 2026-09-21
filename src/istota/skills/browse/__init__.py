@@ -91,7 +91,7 @@ FOREGROUND_HEADER = "X-Browse-Foreground"
 FOREGROUND_DETAIL_HEADER = "X-Browse-Foreground-Detail"
 #: Actions whose `x`/`y` are in the *delivered picture's* pixel space, so the
 #: container has to be told what that picture measured before it can convert.
-IMAGE_SPACE_ACTIONS = ("click_at", "hover_at", "scroll_at")
+IMAGE_SPACE_ACTIONS = ("click_at", "hover_at", "scroll_at", "drag_at")
 #: Every action type only a visual-mode container implements. An `unknown`
 #: naming one of these means the image is older than this code, which is a
 #: different sentence from the model having invented an action. The keyless
@@ -918,6 +918,14 @@ def _click_at_action(spec):
     return {"type": "click_at", "x": x, "y": y}
 
 
+def _drag_at_action(points):
+    if not isinstance(points, (list, tuple)) or len(points) != 2:
+        raise ValueError("Malformed --drag-at value: expected two X,Y points")
+    x, y = _point(points[0], "--drag-at")
+    to_x, to_y = _point(points[1], "--drag-at")
+    return {"type": "drag_at", "x": x, "y": y, "to_x": to_x, "to_y": to_y}
+
+
 def _hover_at_action(spec):
     x, y = _point(spec, "--hover-at")
     return {"type": "hover_at", "x": x, "y": y}
@@ -968,6 +976,7 @@ ACTION_EMITTERS = {
     "fill_credential": _fill_credential_action,
     "click_at": _click_at_action,
     "hover_at": _hover_at_action,
+    "drag_at": _drag_at_action,
     "scroll_at": _scroll_at_action,
     "press": _press_action,
     "type": _type_action,
@@ -1646,6 +1655,10 @@ def build_parser():
             "screenshot of this session on record, and is refused if the page "
             "has scrolled or navigated since."
         ),
+    )
+    p_int.add_argument(
+        "--drag-at", action=OrderedAppend, nargs=2, metavar=("X1,Y1", "X2,Y2"),
+        help="Drag between two points in the delivered screenshot, holding the left mouse button.",
     )
     p_int.add_argument(
         "--hover-at", action=OrderedAppend, metavar="X,Y",

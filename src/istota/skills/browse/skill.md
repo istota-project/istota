@@ -207,14 +207,17 @@ Pass `-o` only for the picture you are going to show them at the end, and name i
 
 **Coordinates are in the delivered picture's pixel space** — the numbers you read off the image you were just shown, with the origin at its top left. Nothing asks you to scale, offset or convert anything: `capture.image` says what that picture measured, and the conversion to the page and to the pointer happens below you.
 
+`--drag-at X1,Y1 X2,Y2` drags from the first point to the second with the left mouse button held. Use it for sliders, map panning, canvas selection or reordering. Both points come from the same delivered screenshot and are checked before the pointer moves. Each drag keeps its place among the other actions, so `--drag-at 120,250 480,250 --press Enter` drags before pressing Enter. The drag pauses briefly at its destination before releasing. Take a fresh screenshot after a drag before choosing another point; the page may have moved. This needs a rebuilt browser image.
+
 `--press` and `--type` act on whatever has focus, so they need no picture and no point. `--type` takes plain text; use `--fill-credential` with a selector for anything secret, because a coordinate click that missed types the value into whatever was focused instead, and that failure has no signal.
 
 One `--type` is bounded at a bit over a thousand characters — the container reports the exact number in the refusal, because it is derived from how fast the keys are paced rather than chosen. Send a longer body as several `--type` actions; the field keeps what the earlier ones typed. Neither `--type` nor `--press` takes a value beginning with `-`: xdotool would read it as an option rather than as input, so it is refused. Lead with a space if a page genuinely needs one.
 
-`--click-at` and `--hover-at` need a screenshot of this session on record, and they are refused rather than guessed at when the picture no longer describes the page. `--scroll-at` and `--click-challenge` answer the same codes, since they convert through the same recorded frame:
+`--click-at` and `--hover-at` need a screenshot of this session on record, and they are refused rather than guessed at when the picture no longer describes the page. `--drag-at`, `--scroll-at` and `--click-challenge` answer the same codes, since they convert through the same recorded frame:
 
 | `error` | What happened | What to do |
 |---|---|---|
+| `drag_incomplete` | The pointer did not reach a drag endpoint; the page may have changed | Take a new screenshot and inspect before retrying |
 | `no_capture` | This session has never been screenshotted, or Chrome was relaunched | Take a screenshot with `--session <id>` first |
 | `stale_capture` | The page scrolled or navigated since the picture | Re-capture, look again, click again |
 | `viewport_changed` | The browser window moved or resized | Re-capture |

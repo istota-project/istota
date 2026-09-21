@@ -1585,3 +1585,24 @@ class TestTheWheelButtonGuard:
                 xdotool.mouse_wheel(button)
 
         click.assert_not_called()
+
+
+class TestDragCoordinates:
+    def test_drag_converts_both_points(self, window):
+        with mock.patch.object(browse_api.browsing, "human_drag_at", return_value=True) as drag:
+            result = browse_api._coordinate_action(
+                {"capture": _record()}, _SettlePage(),
+                {"type": "drag_at", "x": 50, "y": 60, "to_x": 200, "to_y": 180,
+                 "image_size": [CAPTURE_W / 2, CAPTURE_H / 2]},
+            )
+        assert result["ok"] is True
+        drag.assert_called_once_with(100, 120 + UI_INSET_Y, 400, 360 + UI_INSET_Y)
+
+    def test_invalid_destination_does_not_start_drag(self, window):
+        with mock.patch.object(browse_api.browsing, "human_drag_at") as drag:
+            result = browse_api._coordinate_action(
+                {"capture": _record()}, _SettlePage(),
+                {"type": "drag_at", "x": 50, "y": 60, "to_x": 99999, "to_y": 180},
+            )
+        assert result["error"] == "out_of_picture"
+        drag.assert_not_called()

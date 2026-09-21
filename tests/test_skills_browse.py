@@ -3505,6 +3505,49 @@ def test_browser_owner_without_both_identities_is_anonymous(monkeypatch, user, t
     assert with_browser_owner({"url": "https://example.com"}) == {"url": "https://example.com"}
 
 
+class TestDragAt:
+    def test_drag_is_one_ordered_action(self):
+        from istota.skills.browse import _interact_actions
+
+        args = build_parser().parse_args([
+            "interact", "s1", "--click-at", "1,2", "--drag-at", "3,4", "5,6",
+            "--press", "Enter", "--drag-at", "7,8", "9,10",
+        ])
+        actions = _interact_actions(args)
+        assert [a["type"] for a in actions] == ["click_at", "drag_at", "key", "drag_at"]
+        assert actions[1] == {"type": "drag_at", "x": 3, "y": 4, "to_x": 5, "to_y": 6}
+        assert actions[3]["to_y"] == 10
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.httpx.get")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_drag_sends_the_delivered_frame(self, mock_url, mock_get, mock_post):
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "status": "ok", "session_id": "s1", "alive": True,
+            "capture": _capture_record(1920, 1080),
+        }
+        mock_post.return_value.json.return_value = {
+            "status": "ok", "actions": [{"action": "drag_at", "ok": True}],
+        }
+        args = build_parser().parse_args(["interact", "s1", "--drag-at", "10,20", "30,40"])
+        assert cmd_interact(args)["status"] == "ok"
+        assert mock_post.call_args.kwargs["json"]["actions"] == [{
+            "type": "drag_at", "x": 10, "y": 20, "to_x": 30, "to_y": 40,
+            "image_size": [1429, 804],
+        }]
+
+    @pytest.mark.parametrize("points", [["1,2"], ["1,2", "nan,4"], ["bad", "3,4"]])
+    def test_malformed_drag_is_refused_before_http(self, points):
+        from istota.skills.browse import _interact_actions
+
+        with patch("istota.skills.browse.httpx.post") as post:
+            with pytest.raises((SystemExit, ValueError)):
+                args = build_parser().parse_args(["interact", "s1", "--drag-at", *points])
+                _interact_actions(args)
+            post.assert_not_called()
+
+
 @pytest.mark.parametrize("verb,command", [("get", cmd_get), ("render", cmd_render)])
 @patch("istota.skills.browse.browser_request")
 @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")

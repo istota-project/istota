@@ -475,6 +475,22 @@ def mouse_move(x, y):
     return True
 
 
+@contextlib.contextmanager
+def mouse_button_held(button=1):
+    """Release even when a press times out after reaching the X server."""
+    try:
+        subprocess.run(
+            ["xdotool", "mousedown", str(button)],
+            env=_XDO_ENV, timeout=5, capture_output=True, check=True,
+        )
+        yield
+    finally:
+        subprocess.run(
+            ["xdotool", "mouseup", str(button)],
+            env=_XDO_ENV, timeout=5, capture_output=True, check=True,
+        )
+
+
 def mouse_click(button=1, dwell_s=0.09):
     """Press and release a mouse button at the current pointer position.
 
