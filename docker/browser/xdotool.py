@@ -109,7 +109,7 @@ def max_type_chars(delay_ms=TYPE_DELAY_MS):
     return int(budget_s * 1000 // delay_ms)
 
 
-def literal_arg(value, what):
+def literal_arg(value, what, strip=False):
     """Return `value` for a trailing xdotool argv slot, or refuse it.
 
     One helper for all four entry points, because they have one argv shape
@@ -117,11 +117,20 @@ def literal_arg(value, what):
     check belongs here too: both values arrive off model-written JSON, where
     nothing has established that a string is what turned up, and `.startswith`
     on the alternative is a crash rather than a refusal.
+
+    `strip` is here rather than at the one call site that wants it, because
+    the *order* is the rule: a caller that strips first cannot type-check,
+    and one that checks the option shape first reads `" --file=x"` as
+    ordinary text and then hands on the stripped `"--file=x"`, which is the
+    shape the check exists to refuse. Off by default -- xdo_type() carries a
+    caller's text, where surrounding whitespace is theirs and not ours.
     """
     if not isinstance(value, str):
         raise OptionShapedInput(
             f"{what} must be a string, got {type(value).__name__}"
         )
+    if strip:
+        value = value.strip()
     if value.startswith("-"):
         raise OptionShapedInput(
             f"{what} may not begin with '-': xdotool would read "
@@ -172,7 +181,7 @@ def literal_url(url):
 
     Returns the stripped value, which is what the caller should go on to use.
     """
-    url = literal_arg(url, "url").strip()
+    url = literal_arg(url, "url", strip=True)
     if not url:
         raise UnsafeUrl("url is required")
     if len(url.splitlines()) > 1:
@@ -383,6 +392,13 @@ def mouse_move(x, y):
     if mouse_location() == (x, y):
         return True
     try:
+        # `timeout` has to stay under xdotool's own wait, which is bounded
+        # rather than infinite: cmd_mousemove.c loops MAX_TRIES=500 at
+        # usleep(30000), so it gives up after about 15 seconds and exits 0.
+        # A clamped move that produces no motion is the case that reaches
+        # pointer_landed(), and it reaches it only because we kill the
+        # command first. Raise this past ~15s and that path exits 0 instead,
+        # the answer stays right by luck, and the clamp arm quietly dies.
         result = subprocess.run(
             ["xdotool", "mousemove", "--sync", "--screen", "0", "--",
              str(x), str(y)],
