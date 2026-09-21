@@ -1107,7 +1107,8 @@ def _note_unreported_actions(data, actions):
 # A transport failure that provably happened before the request left this
 # process. Nothing reached the container, so no action can have run, and the
 # caution below would be a false alarm pointing at the wrong remedy — these
-# re-raise and `main`'s `describe` names them ("is the container running?").
+# re-raise and `main`'s `describe` reports them by class. Only `ConnectError`
+# reads as "is the container running?"; the other four name themselves.
 # `WriteTimeout` and `WriteError` are deliberately *not* here: those fire
 # mid-send, where the body may already be complete on the wire.
 PRE_SEND_TRANSPORT_ERRORS = (

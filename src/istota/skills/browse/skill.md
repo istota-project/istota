@@ -140,7 +140,7 @@ Every URL in the markdown is already absolute — use them exactly as given. `mo
 
 `links` here are relative or absolute exactly as the page wrote them. `session_id` is only present with `--keep-session`. `extract` returns `{"status": "ok", "selector": "...", "count": N, "elements": [{"text": "...", "html": "...", "href": "...", ...}]}`.
 
-**`links_truncated: true` means the list was cut short, and a full list of the wrong links is what it looks like.** The budget is spent in page order, so a section front whose navigation, login and subscription chrome runs past the cap can return a complete-looking array with no articles in it at all. When you see that key — on `get` or on `links` — do not conclude the page has nothing on it and do not start guessing URLs. Ask again with `--max-links` above the `anchors_total` the same answer gives you. Neither key appears when the whole list came back, so their absence is the page's real answer.
+**`links_truncated: true` means the list was cut short, and a full list of the wrong links is what it looks like.** The budget is spent in page order, so a section front whose navigation, login and subscription chrome runs past the cap can return a complete-looking array with no articles in it at all. When you see that key — on `get`, on `links` or on `interact` — do not conclude the page has nothing on it and do not start guessing URLs. Ask again with `--max-links` above the `anchors_total` the same answer gives you. Where `anchors_total` is itself the scan ceiling, raising the budget cannot reach further: read the page with `extract` and a selector instead. Neither key appears when the whole list came back, so their absence is the page's real answer.
 
 ## Researching articles from news sites
 
