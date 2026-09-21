@@ -673,9 +673,23 @@ def _document_url(url):
     if (parts.scheme, port) in (("https", 443), ("http", 80)):
         port = None
     host = (parts.hostname or "").encode("idna").decode("ascii").lower()
+    # Chrome removes literal and percent-encoded dot segments. Keep empty
+    # segments and other escapes: /a//b and /a%2Fb are distinct documents.
+    segments = (parts.path or "/").split("/")[1:]
+    normalized = []
+    for index, segment in enumerate(segments):
+        dots = segment.lower().replace("%2e", ".")
+        if dots in (".", ".."):
+            if dots == ".." and normalized:
+                normalized.pop()
+            if index == len(segments) - 1:
+                normalized.append("")
+        else:
+            normalized.append(segment)
+    path = "/" + "/".join(normalized)
     return (
         parts.scheme, host, port,
-        quote(parts.path or "/", safe="/%:@!$&'()*+,;=-._~"),
+        quote(path, safe="/%:@!$&'()*+,;=-._~"),
         quote(parts.query, safe="/%?:@!$&'()*+,;=-._~"),
     )
 

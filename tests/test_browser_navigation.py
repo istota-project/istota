@@ -239,6 +239,14 @@ def test_challenge_does_not_retry_or_read_the_page(navigation, monkeypatch):
     ("http://news.example/", "https://news.example/"),
     ("https://NEWS.example:443/a#section", "https://news.example/a"),
     ("https://news.example/café", "https://news.example/caf%C3%A9"),
+    ("https://news.example/advisories/../article", "https://news.example/article"),
+    ("https://news.example/a/./b", "https://news.example/a/b"),
+    ("https://news.example/a/%2E%2e/b", "https://news.example/b"),
+    ("https://news.example/a/.%2e/b", "https://news.example/b"),
+    ("https://news.example/a/..", "https://news.example/"),
+    ("https://news.example/a/.", "https://news.example/a/"),
+    ("https://news.example/../../b", "https://news.example/b"),
+    ("https://news.example/a//../b", "https://news.example/a/b"),
 ])
 def test_browser_url_spelling_and_upgrade(navigation, requested, landed):
     page, navigate = navigation
@@ -279,3 +287,16 @@ def test_a_slow_commit_is_waited_for(navigation):
     assert browse_api._navigate_and_wait(page, REQUESTED) is None
     assert waits.count(100) == 2
     assert navigate.call_count == 1
+
+
+@pytest.mark.parametrize(("requested", "landed"), [
+    ("https://news.example/a//b", "https://news.example/a/b"),
+    ("https://news.example/a%2Fb", "https://news.example/a/b"),
+    ("https://news.example/a/.../b", "https://news.example/a/b"),
+])
+def test_path_normalization_does_not_merge_distinct_documents(navigation, requested, landed):
+    page, navigate = navigation
+    navigate.side_effect = lambda *a, **kw: page.commit(landed)
+    with pytest.raises(RuntimeError, match="navigation_mismatch"):
+        browse_api._navigate_and_wait(page, requested)
+    assert navigate.call_count == 2
