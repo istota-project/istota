@@ -1341,7 +1341,31 @@ def _scroll_count(action_type, value, default):
     return value, None
 
 
-def _foreground(page, action_type, others=()):
+def _foreground_tabs(page):
+    """The other open tabs, and which of them this session's tab opened.
+
+    Both halves go to the foreground check and they answer different questions.
+    `others` is what a title collision is looked for among. `owned` is what
+    lets the detail say whose the colliding tab is -- a session's own popup
+    carries its opener's title and outlives the action list, so since
+    ISSUE-535 that collision is the ordinary case rather than a rare one
+    (ISSUE-538). Ownership does **not** take a tab out of `others`; see
+    `visual.bring_to_front` for why that would report a confirmed switch in
+    exactly the case the title cannot settle.
+
+    Read once per request: an action list is not long enough for the tab set
+    to be worth re-reading, and a page that closes under us is caught by the
+    try/except around the title read. Never raises -- a context that will not
+    answer costs the qualification, not the request.
+    """
+    try:
+        pages = list(chrome._pw_context.pages)
+    except Exception:
+        return [], []
+    return [p for p in pages if p is not page], _opened_by(page, pages)
+
+
+def _foreground(page, action_type, others=(), owned=()):
     """Put the named session's tab in front, or say why the action must not run.
 
     Returns (verdict, refusal). X11 input reaches whatever tab the one Chrome
@@ -1355,7 +1379,7 @@ def _foreground(page, action_type, others=()):
     interleave selector and coordinate actions and because the tab in front is
     not this request's to assume between two of them.
     """
-    verdict = visual.bring_to_front(page, others)
+    verdict = visual.bring_to_front(page, others, owned)
     if verdict.ok:
         if not verdict.confirmed:
             log.info("%s on tab %s: %s", action_type, verdict.code, verdict.detail)
@@ -1472,7 +1496,7 @@ def _with_foreground(result, verdict):
     return {**result, "foreground": verdict.code, "foreground_detail": verdict.detail}
 
 
-def _coordinate_action(session, page, action, others=()):
+def _coordinate_action(session, page, action, others=(), owned=()):
     """Run one visual-mode action. Returns the result dict for the action list.
 
     Every one of these drives X11 rather than CDP. The selector actions beside
@@ -1494,7 +1518,7 @@ def _coordinate_action(session, page, action, others=()):
     # picture still describes the page; this asks whether the page is the one
     # about to be pressed, and the second question is worthless after the
     # first has passed on a tab nobody is looking at.
-    verdict, refusal = _foreground(page, action_type, others)
+    verdict, refusal = _foreground(page, action_type, others, owned)
     if refusal:
         return refusal
 
@@ -1894,7 +1918,7 @@ def _cdp_selector_action(page, action, path, why):
     }
 
 
-def _selector_action(session, page, action, others=()):
+def _selector_action(session, page, action, others=(), owned=()):
     """Run one selector action, through the pointer and the keyboard.
 
     Falls back to the CDP call, reporting that it did, whenever the X11 path
@@ -1912,7 +1936,7 @@ def _selector_action(session, page, action, others=()):
     # wrong page. The CDP call addresses the tab directly, so this is a
     # fallback rather than a refusal -- unlike the coordinate path, where
     # there is no correct alternative and the action must not run at all.
-    verdict = visual.bring_to_front(page, others)
+    verdict = visual.bring_to_front(page, others, owned)
     if not verdict.ok:
         return _cdp_selector_action(page, action, "cdp", verdict.detail)
 
@@ -2050,14 +2074,7 @@ def interact():
     if not page:
         return jsonify({"error": "tab not found"}), 500
 
-    # The other tabs, for the foreground check to say when the window title
-    # cannot tell this session's from another's. Read once: an action list is
-    # not long enough for the tab set to be worth re-reading, and a page that
-    # closes under us is caught by the try/except around the title read.
-    try:
-        others = [p for p in chrome._pw_context.pages if p is not page]
-    except Exception:
-        others = []
+    others, owned = _foreground_tabs(page)
 
     results = []
     try:
@@ -2067,7 +2084,7 @@ def interact():
 
             if action_type in _SELECTOR_ACTIONS:
                 results.append(
-                    _selector_action(session, page, action, others))
+                    _selector_action(session, page, action, others, owned))
             elif action_type == "wait":
                 timeout_ms = action.get("timeout", 2000)
                 page.wait_for_timeout(min(timeout_ms, 30000))
@@ -2089,7 +2106,7 @@ def interact():
                 })
             elif action_type in _COORDINATE_ACTIONS:
                 results.append(
-                    _coordinate_action(session, page, action, others))
+                    _coordinate_action(session, page, action, others, owned))
             else:
                 results.append({
                     "action": action_type, "ok": False, "error": "unknown",

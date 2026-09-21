@@ -286,6 +286,21 @@ FOREGROUND_POLL_S = 0.05
 # breaking every action on a long-titled page. Compared on a bounded prefix.
 TITLE_MATCH_CHARS = 60
 
+# Two open tabs carry one title, so the window-title probe cannot say which of
+# them is in front. Two wordings under one code rather than two codes:
+# ownership does not settle the verdict -- see `bring_to_front` -- but it tells
+# a caller whether the collision is with its own popup or with another
+# session's page, which is the difference between noise and news (ISSUE-538).
+AMBIGUOUS_DETAIL = (
+    "the tab switch was requested and the window title matches, but another "
+    "open tab carries the same title, so the title cannot tell the two apart"
+)
+AMBIGUOUS_OWNED_DETAIL = (
+    "the tab switch was requested and the window title matches, but a tab "
+    "this session opened carries the same title, so the title cannot tell "
+    "the two apart"
+)
+
 
 class Foreground:
     """The verdict on whether the named session's tab is the one in front.
@@ -329,14 +344,24 @@ def titles_agree(window_title, doc_title):
     return shown[:n] == wanted[:n]
 
 
-def bring_to_front(page, others=()):
+def bring_to_front(page, others=(), owned=()):
     """Switch to this page's tab and report whether that is confirmed.
 
     `others` is the rest of the open pages. It is consulted only to weaken the
     verdict: two tabs sharing a title make the window-title probe unable to
     tell them apart, so the switch is reported unconfirmed rather than
-    confirmed. The switch itself has been requested either way, and a tab this
-    container opened is the only thing that could be behind the collision.
+    confirmed. The switch itself has been requested either way.
+
+    `owned` is the subset of `others` that this page opened -- a popup from an
+    OAuth or consent flow, which carries its opener's title and is kept alive
+    for as long as its session is (ISSUE-535), so it collides with its opener
+    as a matter of course. Those are **not** dropped from the check, and the
+    temptation to drop them is what ISSUE-538 is about: confirmation here is
+    by title, so the window title agreeing says a tab with that title is in
+    front and not which of the two it is. Ownership answers whose the
+    colliding tab is, not which one the window is showing, and excluding an
+    owned tab would report `confirmed` in exactly the case the probe cannot
+    settle. So the verdict stands and the detail says whose the tab is.
     """
     try:
         page.bring_to_front()
@@ -377,17 +402,31 @@ def bring_to_front(page, others=()):
             f"showing {_strip_chrome_suffix(window_title)!r}",
         )
 
+    # A collision with a tab this session did not open is the more general
+    # answer and cannot be improved on, so it returns at once. An owned one
+    # keeps walking: a foreign tab further down the list outranks it, and
+    # naming the collision as this session's own popup when another tab shares
+    # the title too would be the verdict lying in the other direction.
+    owned_ids = {id(p) for p in owned}
+    owned_collision = False
     for other in others:
+        if other is page:
+            continue
         try:
-            if other is not page and titles_agree(window_title, other.title()):
-                return Foreground(
-                    True, False, "foreground_ambiguous",
-                    "the tab switch was requested and the window title "
-                    "matches, but another open tab carries the same title, "
-                    "so the title cannot tell the two apart",
-                )
+            if not titles_agree(window_title, other.title()):
+                continue
         except Exception:
             continue
+        if id(other) not in owned_ids:
+            return Foreground(
+                True, False, "foreground_ambiguous", AMBIGUOUS_DETAIL,
+            )
+        owned_collision = True
+
+    if owned_collision:
+        return Foreground(
+            True, False, "foreground_ambiguous", AMBIGUOUS_OWNED_DETAIL,
+        )
 
     return Foreground(True, True)
 

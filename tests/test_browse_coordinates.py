@@ -1046,6 +1046,55 @@ class TestTheForegroundGuard:
         assert result["ok"] is True
         assert "foreground" not in result
 
+    def test_a_twin_titled_tab_is_carried_as_an_ambiguity(self, live, pointer):
+        """Two tabs under one title and the window title cannot say which is
+        in front, so the switch is reported unconfirmed rather than confirmed.
+        The action still runs: nothing was contradicted."""
+        session, page = live
+        result = browse_api._coordinate_action(
+            session, page, {"type": "click_at", "x": 10, "y": 10},
+            others=[_Page(title=DOC_TITLE)],
+        )
+        assert result["ok"] is True
+        assert result["foreground"] == "foreground_ambiguous"
+        assert "this session opened" not in result["foreground_detail"]
+        assert pointer.click.call_args_list != []
+
+    def test_the_session_s_own_popup_is_named_as_one(self, live, pointer):
+        """ISSUE-538. A popup carries its opener's title and, since ISSUE-535,
+        outlives the action that opened it -- so this collision is the ordinary
+        case and the caller was told the switch could not be proved for as long
+        as the popup stayed open. It is still an ambiguity, because the window
+        title agreeing says a tab with that title is in front and not which of
+        the two; what the detail adds is whose the other tab is."""
+        session, page = live
+        popup = _Page(title=DOC_TITLE)
+        result = browse_api._coordinate_action(
+            session, page, {"type": "click_at", "x": 10, "y": 10},
+            others=[popup], owned=[popup],
+        )
+        assert result["ok"] is True
+        assert result["foreground"] == "foreground_ambiguous"
+        assert "this session opened" in result["foreground_detail"]
+
+    def test_the_selector_path_carries_the_same_qualification(self, live,
+                                                              pointer):
+        """The threading is what regresses in silence -- both dispatch arms
+        take the list, and a verdict this feeds is advisory, so an arm that
+        dropped it would cost a worse sentence rather than a failure."""
+        session, page = live
+        popup = _Page(title=DOC_TITLE)
+
+        with mock.patch.object(browse_api.visual, "bring_to_front") as front:
+            front.return_value = visual.Foreground(True, True)
+            browse_api._selector_action(
+                session, page, {"type": "click", "selector": "#go"},
+                others=[popup], owned=[popup],
+            )
+
+        assert front.call_args[0][1] == [popup]
+        assert front.call_args[0][2] == [popup]
+
 
 class TestTheWheel:
     """`scroll_at` is a wheel at a point, and it takes click_at's whole pass.
