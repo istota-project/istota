@@ -245,3 +245,40 @@ def test_chrome_receives_concrete_instances_not_request_proxies(api):
     # They must remain usable after Flask has torn the request context down.
     assert {inst.user_id for inst in api.connected_instances} == {"alice", "bob"}
     assert all(inst is api.pool.instance_for(inst.user_id) for inst in api.connected_instances)
+
+
+def test_watchdog_is_armed_before_initial_cdp_connection(api, monkeypatch):
+    observed = []
+    monkeypatch.setattr(api.chrome, "connect_cdp", lambda inst: observed.append((inst, api._inflight)))
+    response = post(api, "/browse", url="https://example.com/", keep_session=True)
+    assert response.status_code == 200
+    assert observed
+    for inst, inflight in observed:
+        assert inflight is not None
+        assert inflight["instance"] is inst
+        assert inst is api.pool.instance_for("alice")
+    assert api._inflight is None
+
+
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+def test_watchdog_covers_existing_session_teardown_without_acquisition(api, monkeypatch, method):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    if method == "GET":
+        api._sessions[sid]["last_used_at"] = 0
+    observed = []
+
+    def context(inst, **kwargs):
+        observed.append((inst, api._inflight))
+        return inst.pw_context
+
+    monkeypatch.setattr(api.chrome, "get_context", context)
+    acquire = MagicMock(side_effect=AssertionError("session teardown must not acquire"))
+    monkeypatch.setattr(api.pool, "acquire", acquire)
+    response = api.app.test_client().open(f"/sessions/{sid}", method=method, headers={"X-Istota-User": "alice"})
+    assert response.status_code == (404 if method == "GET" else 200)
+    assert observed
+    for inst, inflight in observed:
+        assert inflight is not None
+        assert inflight["instance"] is inst
+    acquire.assert_not_called()
+    assert api._inflight is None

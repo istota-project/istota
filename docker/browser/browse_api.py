@@ -2735,9 +2735,21 @@ def _cleanup_expired(allow_pressure_eviction=True):
         log.info("Evicted session %s before serving this request", evicted)
 
 
+def _track_request_instance(inst):
+    """Arm recovery before browser work, without publishing a starting instance."""
+    global _inflight
+    request.browser_instance = inst
+    body = request.get_json(silent=True)
+    url = body.get("url", "") if isinstance(body, dict) else ""
+    with _inflight_lock:
+        _inflight = {
+            "path": request.path, "url": url or "",
+            "started": request._start_time, "instance": inst,
+        }
+
+
 @app.before_request
 def _log_request_start():
-    global _inflight
     request._start_time = time.time()
     if request.path == "/health":
         return None
@@ -2765,21 +2777,18 @@ def _log_request_start():
                 return jsonify({"status": "not_found"}), 404
         if request.browser_instance is None and request.endpoint != "delete_session":
             return jsonify({"status": "not_found"}), 404
+    if request.browser_instance is not None:
+        _track_request_instance(request.browser_instance)
     page_endpoints = {"browse", "render_page", "extract", "screenshot",
                       "interact", "evaluate", "challenge"}
     if request.endpoint not in page_endpoints:
         return None
     try:
-        request.browser_instance = pool.acquire(user_id)
+        request.browser_instance = pool.acquire(user_id, on_acquire=_track_request_instance)
     except pool.PoolFull as error:
         return _capacity_response(SessionCapacityError(str(error), 30))
     except pool.LaunchFailed as error:
         return jsonify({"status": "error", "error": str(error)}), 502
-    with _inflight_lock:
-        _inflight = {
-            "path": request.path, "url": body.get("url", "") or "",
-            "started": request._start_time, "instance": request.browser_instance,
-        }
     try:
         chrome.ensure_chrome(request.browser_instance)
     except Exception as error:

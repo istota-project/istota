@@ -170,14 +170,16 @@ def _start_display(inst):
     _wait_for_vnc(inst)
 
 
-def acquire(user_id):
-    """Start or reuse one profile. Capacity policy is added separately."""
+def acquire(user_id, *, on_acquire=None):
+    """Start or reuse a profile; notify before browser work for watchdog arming."""
     users = scoped_user_dir(PROFILE_ROOT, "users")
     profile = scoped_user_dir(users, user_id)
     if profile is None:
         raise ValueError("Invalid browser user id")
     inst = instance_for(user_id)
     if inst is not None:
+        if on_acquire is not None:
+            on_acquire(inst)
         inst.last_used = time.monotonic()
         _publish_instances()
         return inst
@@ -197,6 +199,8 @@ def acquire(user_id):
     )
     chrome._assert_pw_thread(inst, "acquire", record=False)
     try:
+        if on_acquire is not None:
+            on_acquire(inst)
         # A failed removal during an earlier release must not route its old
         # address to this slot while the replacement browser is starting.
         (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
