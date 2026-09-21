@@ -1223,17 +1223,29 @@ def cmd_links(args):
         payload = {"url": args.url, "timeout": args.timeout, "keep_session": False}
         if args.session:
             payload["session_id"] = args.session
+        if args.max_links:
+            payload["max_links"] = args.max_links
         resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
         data = _decode(resp)
         if data.get("status") != "ok":
             return data
         links = data.get("links", [])
-        return {
+        result = {
             "status": "ok",
             "url": data.get("url", args.url),
             "count": len(links),
             "links": links,
         }
+        # The envelope is rebuilt rather than filtered, so the container's
+        # clipping verdict has to be copied across or it is lost here
+        # (ISSUE-531). `count` alone cannot carry it: a full array of
+        # navigation chrome and a complete list of the same length are the
+        # same number. Copied only when present, which is how the container
+        # sends it — an untruncated page carries neither key.
+        for key in ("links_truncated", "anchors_total"):
+            if key in data:
+                result[key] = data[key]
+        return result
 
 
 def _note_missing_challenge_route(data, resp):
@@ -1414,6 +1426,11 @@ def build_parser():
     p_links.add_argument("--selector", "-s", help="CSS selector to extract links from")
     p_links.add_argument("--session", help="Existing session ID")
     p_links.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
+    p_links.add_argument(
+        "--max-links", type=int,
+        help="Link budget (default 100). Raise it when the answer says "
+             "links_truncated; ignored with --selector, which has its own.",
+    )
 
     # challenge
     p_chal = sub.add_parser(

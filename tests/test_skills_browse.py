@@ -1215,6 +1215,86 @@ class TestCmdLinks:
         assert result["error"] == "timeout"
 
 
+class TestLinksCarriesTheBudgetVerdict:
+    """`links` reshapes the response, so it has to carry the clipping with it.
+
+    The container says when the link budget bound (ISSUE-531), because a full
+    array of navigation chrome reads exactly like a complete answer. This
+    subcommand rebuilds the envelope from scratch — `status`, `url`, `count`,
+    `links` — so a verdict it does not copy over is a verdict the model never
+    sees, on the one subcommand whose entire subject is links.
+    """
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_clipped_list_keeps_its_flag_through_the_reshape(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com/section/world",
+            "text": "Headlines the links array cannot reach",
+            "links": [{"text": f"Section {i}", "href": f"/section/{i}"} for i in range(100)],
+            "links_truncated": True,
+            "anchors_total": 357,
+        }
+        mock_post.return_value = mock_resp
+
+        args = build_parser().parse_args(["links", "https://news.example.com/section/world"])
+        result = cmd_links(args)
+
+        assert result["links_truncated"] is True
+        assert result["anchors_total"] == 357
+        assert result["count"] == 100
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_a_complete_list_gains_no_flag(self, mock_url, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "status": "ok",
+            "url": "https://news.example.com",
+            "links": [{"text": "Article One", "href": "/article/one"}],
+        }
+        mock_post.return_value = mock_resp
+
+        result = cmd_links(build_parser().parse_args(["links", "https://news.example.com"]))
+
+        assert "links_truncated" not in result
+        assert "anchors_total" not in result
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_the_budget_can_be_raised_from_this_subcommand(self, mock_url, mock_post):
+        """The flag names a remedy, so the remedy has to be reachable here.
+
+        Without this the model is told the list was clipped by a subcommand
+        that gives it no way to ask for more, and its only route is to switch
+        to `get` — which returns the page text as well.
+        """
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "url": "https://n.example", "links": []}
+        mock_post.return_value = mock_resp
+
+        args = build_parser().parse_args(
+            ["links", "https://n.example", "--max-links", "400"],
+        )
+        cmd_links(args)
+
+        assert mock_post.call_args.kwargs["json"]["max_links"] == 400
+
+    @patch("istota.skills.browse.httpx.post")
+    @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+    def test_an_unset_budget_is_not_sent(self, mock_url, mock_post):
+        """The container owns the default; sending a null would override it."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"status": "ok", "url": "https://n.example", "links": []}
+        mock_post.return_value = mock_resp
+
+        cmd_links(build_parser().parse_args(["links", "https://n.example"]))
+
+        assert "max_links" not in mock_post.call_args.kwargs["json"]
+
+
 def _non_json_response(status_code, body, url="http://test:9223/browse"):
     """A response whose body is not JSON, the way httpx presents one.
 

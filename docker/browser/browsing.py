@@ -643,6 +643,37 @@ def extract_page_content(page, max_chars=None, max_links=None):
     page used to read as dead (ISSUE-192). For structure-preserving output
     prefer render.to_markdown — inner_text drops every href, and this flat link
     list drops every position.
+
+    **The link budget counts links returned, not anchors walked past, and a
+    clipped list says so** (ISSUE-531). Both halves come from one measurement
+    on a news section page: under the default cap it answered 98 links holding
+    no articles at all, the first headline sitting at DOM index 84 behind
+    navigation, login and subscription chrome.
+
+    The 98 is the smaller half. Slicing before filtering let an anchor dropped
+    for being `javascript:`, `#` or `mailto:` spend budget and then not appear,
+    so the cap silently under-delivered and nothing distinguished that from a
+    page with 98 links on it. Filtering first makes `max_links` mean what it
+    says.
+
+    The missing articles are the reported half, and filtering does not fix
+    them — navigation links are real hrefs and legitimately spend the budget.
+    What was wrong was that the caller could not tell: a full array of the
+    wrong links reads exactly like a complete answer to "what is on this page".
+    So a clipped list carries `links_truncated` and `anchors_total`, and the
+    caller can raise `max_links` and ask again.
+
+    Both keys are **absent** rather than false on a complete list, which keeps
+    every untruncated response byte-identical to what it was. Spending context
+    on every call to report a budget that did not bind is the same objection
+    that ruled out simply raising the default: it costs every caller and only
+    moves the cliff.
+
+    Reordering the anchors instead — dropping navigation before slicing — was
+    considered and rejected. The only rule general enough to try is same-origin
+    or text-free, and on the page that prompted this every article link is
+    same-origin too, so it would discard the headlines along with the menu
+    while changing what every other caller gets back.
     """
     title = page.title()
     max_chars = max(1, min(int(max_chars or DEFAULT_TEXT_MAX_CHARS), MAX_TEXT_MAX_CHARS))
@@ -658,15 +689,42 @@ def extract_page_content(page, max_chars=None, max_links=None):
         text = ""
 
     links = []
+    truncated = False
+    anchors_total = 0
     try:
         anchors = page.query_selector_all("a[href]")
-        for a in anchors[:max_links]:
+        anchors_total = len(anchors)
+        # The walk is bounded separately from the budget. Filtering before the
+        # slice is what stops unusable anchors spending it, but it also means
+        # the loop can reach every anchor on the page, and each read below is a
+        # CDP round trip. MAX_MAX_LINKS is the ceiling a caller could already
+        # ask to be served, so it is the scan ceiling too.
+        scanned = 0
+        for a in anchors:
+            if len(links) >= max_links or scanned >= MAX_MAX_LINKS:
+                # Anchors left with the walk stopped. Whether any of them would
+                # have survived the filter is not known from here, and that is
+                # what the flag claims: the list was cut short, not that
+                # something specific was lost.
+                truncated = True
+                break
+            scanned += 1
             href = a.get_attribute("href")
             link_text = a.inner_text().strip()
             if href and not href.startswith(("javascript:", "#", "mailto:")):
                 links.append({"text": link_text[:100], "href": href})
     except Exception:
         pass
+
+    if truncated:
+        return {
+            "title": title,
+            "url": page.url,
+            "text": text,
+            "links": links,
+            "links_truncated": True,
+            "anchors_total": anchors_total,
+        }
 
     return {
         "title": title,
