@@ -11,6 +11,8 @@ from unittest import mock
 
 import pytest
 
+from tests.support.sleep_spy import sleep_spy
+
 
 @pytest.fixture
 def runtime(monkeypatch, tmp_path):
@@ -170,7 +172,7 @@ def test_dead_driver_is_replaced_and_all_its_connections_are_invalidated(runtime
     replacement = mock.Mock()
     replacement.chromium.connect_over_cdp.side_effect = lambda *a, **k: mock.Mock(contexts=[mock.Mock(pages=[])])
     start.return_value.start.return_value = replacement
-    monkeypatch.setattr(chrome.time, "sleep", lambda _: None)
+    sleep_spy(monkeypatch, chrome, record=False)
 
     chrome.connect_cdp(alice)
 
@@ -193,7 +195,7 @@ def test_one_failed_browser_connection_does_not_reset_a_healthy_driver(runtime, 
     )
     context = alice.pw_context
     driver.chromium.connect_over_cdp.side_effect = RuntimeError("CDP port refused")
-    monkeypatch.setattr(chrome.time, "sleep", lambda _: None)
+    sleep_spy(monkeypatch, chrome, record=False)
     with pytest.raises(RuntimeError, match="CDP port refused"):
         pool.acquire("bob")
     assert chrome._pw is driver

@@ -131,6 +131,7 @@ def test_boot_parks_before_starting_any_service(runtime, fails):
     if fails:
         calls.chrome.migrate_legacy_profile.side_effect = OSError("park failed")
     namespace = {"__name__": "__main__", "chrome": calls.chrome,
+                 "signal": mock.Mock(), "_exit_on_sigterm": mock.Mock(),
                  "threading": calls.threading, "_resource_monitor": mock.Mock(),
                  "_start_liveness_server": calls.liveness,
                  "_start_browse_watchdog": calls.watchdog, "app": calls.app}

@@ -461,11 +461,15 @@ class TestTheFetchCap:
         from istota.skills import browse
 
         monkeypatch.setenv("ISTOTA_SKILL_PROXY_SOCK", str(sock_path))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
         response = MagicMock()
         response.json.return_value = {
-            "status": "ok", "session_id": "s1", "actions": [],
+            "status": "ok", "session_id": "s1", "actions": [], "user_scope": "alice",
         }
-        with proxy(sock_path, vault_fetch_limit=2):
+        health = MagicMock()
+        health.is_success = True
+        health.json.return_value = {"status": "ok", "per_user_profiles": True}
+        with proxy(sock_path, vault_fetch_limit=2), patch.object(browse.httpx, "get", return_value=health):
             with patch.object(browse.httpx, "post", return_value=response) as post:
                 with patch.object(
                     browse, "get_api_url", return_value="http://test:9223",

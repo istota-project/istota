@@ -16,6 +16,8 @@ def api(monkeypatch, tmp_path):
     for name in list(sys.modules):
         if name == "flask" or name.startswith("flask."):
             monkeypatch.delitem(sys.modules, name)
+    import flask
+
     browser = Path(__file__).resolve().parents[1] / "docker/browser"
     monkeypatch.syspath_prepend(str(browser))
     if "patchright.sync_api" not in sys.modules:
@@ -30,6 +32,7 @@ def api(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("_scope_api", browser / "browse_api.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    assert isinstance(module.app, flask.Flask)
     module.app.config.update(TESTING=True)
     monkeypatch.setattr(module.pool, "PROFILE_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setattr(module.pool, "RUNTIME_DIR", tmp_path / "runtime")
