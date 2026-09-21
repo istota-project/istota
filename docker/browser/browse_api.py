@@ -2725,6 +2725,14 @@ def _wedge_looping(now=None, inst=None):
     return recent >= WEDGE_RECOVERY_THRESHOLD, recent
 
 
+@app.route("/instances", methods=["GET"])
+def browser_instances():
+    # Management-network metadata, like /health. Never acquire a browser here.
+    response = jsonify({"instances": pool.instance_metadata(request.args.get("vnc_url", ""))})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """Health check.
@@ -3021,7 +3029,7 @@ def _track_request_instance(inst):
 @app.before_request
 def _log_request_start():
     request._start_time = time.time()
-    if request.path == "/health":
+    if request.path in {"/health", "/instances"}:
         return None
     user_id = request.headers.get("X-Istota-User")
     # HTTP identity is exact ASCII. Do not normalize or URL-decode it; the
