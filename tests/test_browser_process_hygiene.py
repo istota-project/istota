@@ -45,6 +45,8 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
 import yaml
 
 # Stub patchright before importing chrome -- chrome does
@@ -107,7 +109,7 @@ import browse_api  # noqa: E402  (import after the stubs + path insert)
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_globals():
+def _reset_module_globals(browser_instance):  # noqa: F811 -- fixture dependency
     """chrome and browse_api are singletons; reset their globals around each test."""
     def _reset():
         browse_api._instance.proc = None
@@ -358,7 +360,7 @@ class TestSessionsDoNotSurviveARelaunch:
             # reads as a tab that is gone -- so the session would be dropped
             # here for a reason that has nothing to do with the generation.
             "page": _live_page(),
-            "created_at": time.time(), "last_used_at": time.time(),
+            "created_at": time.time(), "user_id": "alice", "last_used_at": time.time(),
             "generation": chrome.launch_generation(browse_api._instance),
         }
         browse_api._instance.launch_generation += 1
@@ -373,7 +375,7 @@ class TestSessionsDoNotSurviveARelaunch:
             # reads as a tab that is gone -- so the session would be dropped
             # here for a reason that has nothing to do with the generation.
             "page": _live_page(),
-            "created_at": time.time(), "last_used_at": time.time(),
+            "created_at": time.time(), "user_id": "alice", "last_used_at": time.time(),
             "generation": chrome.launch_generation(browse_api._instance),
         }
 
@@ -443,7 +445,7 @@ class TestARecoveryLoopEscalates:
         for _ in range(2):
             chrome.record_wedge_recovery(browse_api._instance)
 
-        assert browse_api._probe(deep=True) == (503, b"wedge-loop\n")
+        assert browse_api._probe(deep=True) == (503, b"wedge-loop slot=0\n")
 
     def test_the_shallow_probe_is_unaffected(self, monkeypatch):
         monkeypatch.setattr(browse_api, "WEDGE_RECOVERY_THRESHOLD", 2)

@@ -36,6 +36,8 @@ from unittest import mock
 
 import pytest
 
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
+
 # Stub patchright before importing chrome -- chrome does
 # `from patchright.sync_api import sync_playwright` at module top.
 if "patchright" not in sys.modules:
@@ -103,7 +105,7 @@ import browse_api  # noqa: E402  (import after the stubs + path insert)
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_globals():
+def _reset_module_globals(browser_instance):  # noqa: F811 -- fixture dependency
     """chrome and browse_api are singletons; reset their globals around each test."""
     def _reset():
         browse_api._instance.proc = None
@@ -356,7 +358,7 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
         assert age_s < browse_api.SESSION_TTL, "session would expire on its own"
         browse_api._sessions[session_id] = {
             "page": page,
-            "created_at": browse_api.time.time() - age_s, "last_used_at": browse_api.time.time() - age_s,
+            "created_at": browse_api.time.time() - age_s, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": browse_api.time.time() - age_s,
         }
 
     def _pressure(self, monkeypatch, pct):
@@ -555,7 +557,7 @@ def test_capacity_never_evicts_another_caller(monkeypatch, owner, existing_owner
     monkeypatch.setattr(browse_api, "MAX_SESSIONS", 1)
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
     browse_api._sessions["existing"] = {
-        "owner": existing_owner, "created_at": browse_api.time.time(), "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
+        "owner": existing_owner, "created_at": browse_api.time.time(), "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
     }
     with pytest.raises(RuntimeError, match="capacity"):
         browse_api._create_session(owner=owner)
@@ -569,8 +571,8 @@ def test_capacity_can_replace_only_same_owner(monkeypatch):
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
     now = browse_api.time.time()
     browse_api._sessions.update({
-        "foreign": {"owner": "other", "created_at": now - 10, "last_used_at": now - 10, "page": ctx.pages[0]},
-        "own": {"owner": "task", "created_at": now, "last_used_at": now, "page": ctx.pages[1]},
+        "foreign": {"owner": "other", "created_at": now - 10, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": now - 10, "page": ctx.pages[0]},
+        "own": {"owner": "task", "created_at": now, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": now, "page": ctx.pages[1]},
     })
     sid, _ = browse_api._create_session(owner="task")
     assert set(browse_api._sessions) == {"foreign", sid}
@@ -589,7 +591,7 @@ def test_create_endpoint_refuses_capacity_without_draining_foreign_session(monke
         get_json=lambda: {"url": "https://example.com", "owner": "other"},
     ))
     browse_api._sessions["foreign"] = {
-        "owner": "first", "created_at": browse_api.time.time(), "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
+        "owner": "first", "created_at": browse_api.time.time(), "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
     }
     browse_api._evict_request.set()
     body, status = getattr(browse_api, endpoint)()
@@ -606,8 +608,8 @@ def test_capacity_retry_estimate_uses_first_expiration(monkeypatch):
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
     monkeypatch.setattr(browse_api.time, "time", lambda: 1000)
     browse_api._sessions.update({
-        "first": {"owner": "other", "created_at": 450, "last_used_at": 950},
-        "second": {"owner": "other", "created_at": 900, "last_used_at": 900},
+        "first": {"owner": "other", "created_at": 450, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": 950},
+        "second": {"owner": "other", "created_at": 900, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": 900},
     })
     with pytest.raises(browse_api.SessionCapacityError) as caught:
         browse_api._create_session(owner="new")

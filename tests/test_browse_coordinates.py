@@ -36,6 +36,8 @@ from unittest import mock
 
 import pytest
 
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
+
 _BROWSER_DIR = Path(__file__).resolve().parent.parent / "docker" / "browser"
 if str(_BROWSER_DIR) not in sys.path:
     sys.path.insert(0, str(_BROWSER_DIR))

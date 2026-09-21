@@ -360,4 +360,5 @@ dev = [
     # psutil, and now ruff — about 10 MB more. Adding `--no-dev` there is the
     # real answer and is a deployment change, not this one.
     "ruff==0.16.4",
+    "flask>=3.1.0",
 ]

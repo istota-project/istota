@@ -35,6 +35,8 @@ from unittest import mock
 
 import pytest
 
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
+
 # Stub patchright before importing chrome -- chrome does
 # `from patchright.sync_api import sync_playwright` at module top.
 if "patchright" not in sys.modules:
@@ -112,7 +114,7 @@ def _write_cdp_health(**fields):
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_globals():
+def _reset_module_globals(browser_instance):  # noqa: F811 -- fixture dependency
     """chrome and browse_api are singletons; reset their globals around each test."""
     def _reset():
         browse_api._instance.proc = None
@@ -438,7 +440,7 @@ class TestTheDeepProbeThirdArm:
         self._wedge()
         status, body = browse_api._probe(deep=True)
         assert status == 503
-        assert body == b"cdp-wedged\n"
+        assert body == b"cdp-wedged slot=0\n"
 
     def test_the_same_container_passes_the_two_old_tiers(self, monkeypatch):
         """Names what stayed green for eight hours, so the arm is the difference."""
@@ -483,7 +485,7 @@ class TestTheDeepProbeThirdArm:
         _healthy_chrome(monkeypatch)
         browse_api._instance.proc = FakeProc(alive=False)
         self._wedge()
-        assert browse_api._probe(deep=True) == (503, b"chrome-down\n")
+        assert browse_api._probe(deep=True) == (503, b"chrome-down slot=0\n")
 
     def test_the_launch_window_is_not_exempt_from_this_arm(self, monkeypatch):
         """is_launching() exempts the DevTools tier, not a wedged binding.
@@ -497,7 +499,7 @@ class TestTheDeepProbeThirdArm:
         _healthy_chrome(monkeypatch)
         monkeypatch.setattr(chrome, "is_launching", lambda inst: True)
         self._wedge()
-        assert browse_api._probe(deep=True) == (503, b"cdp-wedged\n")
+        assert browse_api._probe(deep=True) == (503, b"cdp-wedged slot=0\n")
 
     def test_the_arm_can_be_switched_off(self, monkeypatch):
         _healthy_chrome(monkeypatch)
@@ -522,7 +524,7 @@ class TestTheDeepProbeThirdArm:
         monkeypatch.setattr(chrome, "get_page_by_index", _forbidden)
         monkeypatch.setattr(chrome, "disconnect_cdp", _forbidden)
 
-        assert browse_api._probe(deep=True) == (503, b"cdp-wedged\n")
+        assert browse_api._probe(deep=True) == (503, b"cdp-wedged slot=0\n")
 
     def test_the_probe_answers_from_a_foreign_thread(self, monkeypatch):
         """The real caller is the liveness server's own thread."""
@@ -530,7 +532,7 @@ class TestTheDeepProbeThirdArm:
         self._wedge()
         result, err = _run_on_another_thread(lambda: browse_api._probe(deep=True))
         assert err is None
-        assert result == (503, b"cdp-wedged\n")
+        assert result == (503, b"cdp-wedged slot=0\n")
 
 
 class TestWhatMustNeverEarnARestart:
@@ -586,7 +588,7 @@ class TestWhatMustNeverEarnARestart:
             page.is_closed.return_value = False
             browse_api._sessions[f"stale-{i}"] = {
                 "page": page,
-                "created_at": time.time() - browse_api.SESSION_TTL - 60, "last_used_at": time.time() - browse_api.SESSION_TTL - 60,
+                "created_at": time.time() - browse_api.SESSION_TTL - 60, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": time.time() - browse_api.SESSION_TTL - 60,
             }
             browse_api._cleanup_expired()
 
@@ -598,7 +600,7 @@ class TestWhatMustNeverEarnARestart:
         arm = self._broken_cdp(monkeypatch)
         for _ in range(5):
             arm()
-            browse_api._get_chrome_diagnostics()
+            browse_api._get_chrome_diagnostics(browse_api._instance)
 
         assert chrome.cdp_health(browse_api._instance)["consecutive_failures"] == 0
         assert browse_api._probe(deep=True) == (200, b"ok\n")

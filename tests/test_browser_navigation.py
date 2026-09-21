@@ -8,6 +8,8 @@ from unittest import mock
 
 import pytest
 
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
+
 # Stub patchright before importing chrome -- chrome does
 # `from patchright.sync_api import sync_playwright` at module top.
 if "patchright" not in sys.modules:
