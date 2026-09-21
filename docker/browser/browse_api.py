@@ -450,6 +450,29 @@ def _captcha_response(session_id, challenge=None):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _checked_url(url):
+    """Refuse a url before anything is spent on it, or hand back the clean one.
+
+    navigate() applies the same guard as its first statement, so this is
+    never the boundary -- it is where the refusal is cheap. Past this point
+    each of the four endpoints has created a session, which is a tab
+    launched and then closed, and a refusal that surfaces as the generic
+    500 talking about the omnibox where a 400 and no session is the whole
+    answer.
+
+    Returns (url, None), or (None, response) for a refusal. A falsy url is
+    handed straight back rather than refused here: every caller has its own
+    "url or session_id is required" branch, and pre-empting it with a
+    different message would change what an empty request answers.
+    """
+    if not url:
+        return url, None
+    try:
+        return xdotool.literal_url(url), None
+    except xdotool.RefusedInput as e:
+        return None, (jsonify({"status": "error", "error": str(e)}), 400)
+
+
 @app.route("/browse", methods=["POST"])
 def browse():
     """Navigate to URL and return page content."""
@@ -472,10 +495,9 @@ def browse():
     # option shape was refused by xdo_type() three statements into navigate(),
     # after the omnibox had been focused and its contents selected, and came
     # back as a 500 talking about text rather than about a URL (ISSUE-530).
-    try:
-        url = xdotool.literal_url(url)
-    except xdotool.RefusedInput as e:
-        return jsonify({"status": "error", "error": str(e)}), 400
+    url, refusal = _checked_url(url)
+    if refusal:
+        return refusal
 
     created_new = False
     if session_id:
@@ -557,6 +579,10 @@ def screenshot():
     # loop that sends nothing to the page beyond the capture itself.
     measure = data.get("measure", True)
     timeout = data.get("timeout", 30) * 1000
+
+    url, refusal = _checked_url(url)
+    if refusal:
+        return refusal
 
     created_new = False
     tab_index = None
@@ -656,6 +682,10 @@ def extract():
     timeout = data.get("timeout", 30) * 1000
     max_chars = max(1, min(int(data.get("max_chars") or EXTRACT_MAX_CHARS), RENDER_MAX_CHARS))
     limit = max(1, min(int(data.get("limit") or 20), EXTRACT_MAX_ELEMENTS))
+
+    url, refusal = _checked_url(url)
+    if refusal:
+        return refusal
 
     created_new = False
     tab_index = None
@@ -812,6 +842,10 @@ def render_page():
         1, min(int(data.get("max_chars") or render.DEFAULT_MAX_CHARS), RENDER_MAX_CHARS),
     )
 
+    url, refusal = _checked_url(url)
+    if refusal:
+        return refusal
+
     created_new = False
     if session_id:
         session = _get_session(session_id)
@@ -903,6 +937,26 @@ def _settle(page, ms):
     except Exception as e:
         log.info("Page changed under the settle wait (this is normal "
                  "after a click that navigates): %s", e)
+
+
+def _landed_point(screen_x, screen_y):
+    """The screen point a press actually reached, for the result to report.
+
+    X11 warps an off-screen request to the nearest addressable pixel, so the
+    computed point and the pressed point are the same only while the request
+    is in bounds. Reporting the computed one told the caller a click had
+    happened somewhere it had not -- the residual ISSUE-530's fix made
+    deliberate rather than accidental, and declined at the time because
+    reading the pointer back is a round trip per press.
+
+    It is not a round trip any more: xdotool.clamp_to_screen() is arithmetic
+    over a memoized screen size, and it answers the same question the warp
+    does. Where the geometry is unknown it hands the point back unchanged,
+    which is the previous behaviour and the honest one -- an unconfirmed
+    clamp is not a confirmed one.
+    """
+    x, y = xdotool.clamp_to_screen(screen_x, screen_y)
+    return [round(x), round(y)]
 
 
 def _pointer_refusal(action_type, screen_x, screen_y):
@@ -1011,7 +1065,7 @@ def _coordinate_action(session, page, action, others=()):
                 return _pointer_refusal("hover_at", screen_x, screen_y)
             return _with_foreground({
                 "action": "hover_at", "ok": True,
-                "screen": [round(screen_x), round(screen_y)],
+                "screen": _landed_point(screen_x, screen_y),
             }, verdict)
 
         button = 3 if action.get("button") == "right" else 1
@@ -1020,7 +1074,7 @@ def _coordinate_action(session, page, action, others=()):
         _settle(page, 1000)
         return _with_foreground({
             "action": "click_at", "ok": True,
-            "screen": [round(screen_x), round(screen_y)],
+            "screen": _landed_point(screen_x, screen_y),
         }, verdict)
 
     if action_type == "click_challenge":
@@ -1060,7 +1114,7 @@ def _coordinate_action(session, page, action, others=()):
         return _with_foreground({
             "action": "click_challenge", "ok": True,
             "css": [round(point[0]), round(point[1])],
-            "screen": [round(screen_x), round(screen_y)],
+            "screen": _landed_point(screen_x, screen_y),
         }, verdict)
 
     if action_type == "key":
@@ -1314,7 +1368,7 @@ def _selector_action(session, page, action, others=()):
         return _with_foreground({
             "action": "click", "selector": selector, "ok": True,
             "path": "x11",
-            "screen": [round(target.screen_x), round(target.screen_y)],
+            "screen": _landed_point(target.screen_x, target.screen_y),
             "element": element,
         }, verdict)
 
@@ -1384,7 +1438,7 @@ def _fill_through_keyboard(page, action, target, element, verdict):
     result = {
         "action": "fill", "selector": selector, "ok": True,
         "path": "x11",
-        "screen": [round(target.screen_x), round(target.screen_y)],
+        "screen": _landed_point(target.screen_x, target.screen_y),
         "element": element,
     }
     if landed is None or focused is None:

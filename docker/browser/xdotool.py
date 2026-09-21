@@ -285,13 +285,29 @@ def mouse_location():
     return pos["X"], pos["Y"]
 
 
+#: The screen size, once something has read it. entrypoint.sh starts
+#: `Xvfb :99 -screen 0 ${W}x${H}x24` once per container and nothing here
+#: resizes it -- no xrandr, no window manager -- so the answer cannot change
+#: while this process lives.
+_SCREEN = None
+
+
 def display_geometry():
     """The X11 screen's size as (width, height), or None.
 
-    Only read after a move has timed out, to tell an edge clamp from a
-    pointer that is simply somewhere else, so the extra round trip is paid
-    on a path that is already going wrong.
+    Memoized, which is what lets clamp_to_screen() be arithmetic. It used to
+    be read only after a move had timed out, on the rule that the round trip
+    is paid on a path already going wrong -- and that rule is why the clamp
+    could not be consulted on the ordinary move path, which is what left a
+    repeated clamped move stalling for the full timeout each time.
+
+    A failed read is deliberately not cached. It means the X server did not
+    answer, which is a state that can end; caching it would turn one bad
+    moment into a permanently unknown screen.
     """
+    global _SCREEN
+    if _SCREEN is not None:
+        return _SCREEN
     result = subprocess.run(
         ["xdotool", "getdisplaygeometry", "--shell"],
         env=_XDO_ENV, capture_output=True, text=True, timeout=5,
@@ -303,7 +319,42 @@ def display_geometry():
             geo[key] = int(value)
     if len(geo) != 2:
         return None
-    return geo["WIDTH"], geo["HEIGHT"]
+    _SCREEN = (geo["WIDTH"], geo["HEIGHT"])
+    return _SCREEN
+
+
+def clamp_to_screen(x, y):
+    """Where a move to (x, y) actually leaves the pointer.
+
+    X11 warps to the nearest addressable pixel rather than refusing a point
+    off the screen, so this is the move's real destination and not a guess
+    at one. Two callers need it and neither could afford a round trip for
+    it, which is what display_geometry()'s memo buys.
+
+    Returns the point unchanged when the geometry is unknown. An unconfirmed
+    clamp is not a confirmed one -- the same rule pointer_landed() follows --
+    and both callers are written for that answer: the skip below declines to
+    skip, and the reporting sites name the point that was asked for.
+
+    That includes a read that *fails*, and the caller that needs the catch
+    is _landed_point() in browse_api rather than the skip below: on the move
+    path mouse_location() is the left operand of the same comparison and
+    evaluates first, so a stalled server raises there, uncaught, before this
+    is reached. (That exposure is the old skip's too, and is not this
+    helper's to close.) _landed_point has no pointer read in front of it and
+    runs while a result is being assembled, where raising would lose a click
+    that had already happened, from a helper whose whole job is arithmetic.
+    """
+    try:
+        screen = display_geometry()
+    except (subprocess.SubprocessError, OSError):
+        return x, y
+    if not screen:
+        return x, y
+    return (
+        min(max(x, 0), screen[0] - 1),
+        min(max(y, 0), screen[1] - 1),
+    )
 
 
 def _axis_landed(requested, observed, limit):
@@ -381,15 +432,18 @@ def mouse_move(x, y):
     that the extra round trip is paid only on a path already going wrong,
     and human_move_to() walks a Bezier path of these.
 
-    The residual, which the `--` makes deliberate rather than accidental: a
-    request outside the screen now clamps and reports success, while the
-    caller's result still names the point it computed. So human_click_at(-40,
-    396) presses at (0, 396) and reports (-40, 396). Reporting where the
-    press landed means reading the pointer after every click, which is the
-    round trip declined above.
+    The skip is against the **clamped** destination, not the requested
+    point, and that is what stops a clamped path stalling. A request off the
+    screen lands at the edge, so a second request to any point off that same
+    edge is zero-distance too -- and human_move_to() walks 12 to 22 points
+    per click, whose tail all clamp together on an out-of-bounds target.
+    Comparing the raw request there skips none of them and pays the full
+    timeout for each, turning one click into 5 to 15 seconds of waiting for
+    moves that were never going to move anything. Comparing the clamp costs
+    nothing, because display_geometry() is memoized.
     """
     x, y = int(x), int(y)
-    if mouse_location() == (x, y):
+    if mouse_location() == clamp_to_screen(x, y):
         return True
     try:
         # `timeout` has to stay under xdotool's own wait, which is bounded
