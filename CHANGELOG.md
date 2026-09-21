@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Scheduled jobs targeting a web room now warn when their `room` setting is missing or names another room. The warning explains how to make the result appear as an assistant turn instead of a standalone note.
+
 - Browse can now drag sliders, pan maps and select regions on a canvas with `--drag-at X1,Y1 X2,Y2`. Both points use the screenshot coordinates, and a stale picture is refused before the drag begins. Requires a rebuilt browser image.
 
 - Large browsed documents can now be read in successive chunks through a retained session. Truncation is reported outside the content, with a reason and the next offset, so callers can reconstruct text or JSON beyond the response limit. Iframe counts stay correct when a chunk starts inside a frame, and frames outside the current chunk are distinguished from dropped content. Requires a rebuilt browser image.
