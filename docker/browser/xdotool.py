@@ -1,5 +1,6 @@
 """X11 input helpers via xdotool for CDP-free browser interaction."""
 
+import contextlib
 import logging
 import os
 import re
@@ -493,6 +494,80 @@ def mouse_click(button=1, dwell_s=0.09):
     )
 
 
+# X11 numbers the scroll wheel as two more mouse buttons, so a wheel tick is a
+# press and a release in the same button space `mouse_click` already drives --
+# nothing new reaches the server, which is the whole reason `scroll_at` could
+# replace a CDP evaluate without inventing a mechanism (ISSUE-528).
+WHEEL_UP = 4
+WHEEL_DOWN = 5
+WHEEL_BUTTONS = (WHEEL_UP, WHEEL_DOWN)
+# Far shorter than a click's. A wheel tick is a detent rather than a press, and
+# a mouse holding button 5 down for 90ms is a signature of its own, in the
+# other direction from the one `mouse_click`'s dwell exists to avoid.
+WHEEL_DWELL_S = 0.015
+
+
+def mouse_wheel(button):
+    """One wheel tick at the current pointer position.
+
+    Delivered wherever the pointer *is*, which is the point of it: Chrome
+    routes a wheel event to whatever is under the cursor, so this reaches the
+    scrollable pane the caller aimed at rather than the document behind it.
+    The caller is responsible for having put the pointer there.
+    """
+    if button not in WHEEL_BUTTONS:
+        raise ValueError(f"not a wheel button: {button!r}")
+    mouse_click(button=button, dwell_s=WHEEL_DWELL_S)
+
+
+# What a caller may hold down across a wheel. An allowlist rather than a
+# pass-through: the value reaches `xdotool keydown` and is chosen by the model,
+# and a modifier nobody vetted is an arbitrary key held down across whatever
+# runs next. `literal_arg` refuses an option-shaped value and this refuses
+# everything else.
+MODIFIERS = ("ctrl", "shift", "alt")
+
+
+@contextlib.contextmanager
+def modifier_held(key):
+    """Hold a modifier down for the duration of the block.
+
+    ctrl plus wheel is the browser's zoom gesture and shift plus wheel is its
+    horizontal scroll, and both are the modifier *state* at the moment the
+    wheel event arrives rather than anything on the event itself -- so the
+    only way to express either is to hold the key across the ticks.
+
+    `None` is the ordinary case and holds nothing, so a caller need not branch.
+    The release is in a `finally`: a modifier left down outlives this action
+    and turns every later keystroke in the list into a shortcut -- not just the
+    rest of this action list, but everything on this display until something
+    releases it, since X11 modifier state is the server's rather than ours.
+
+    **The keydown is inside the `try`**, which looks like a mistake and is the
+    whole guarantee: `subprocess.run` raises `TimeoutExpired` *after* xdotool
+    may already have delivered the press, so a keydown outside it leaves ctrl
+    held with no `finally` to run. Entering the block first costs one redundant
+    keyup on a press that never landed, which is harmless.
+    """
+    if key is None:
+        yield
+        return
+    if key not in MODIFIERS:
+        raise ValueError(f"not a modifier this container will hold: {key!r}")
+    focus_chrome()
+    try:
+        subprocess.run(
+            ["xdotool", "keydown", "--", key],
+            env=_XDO_ENV, timeout=5, capture_output=True,
+        )
+        yield
+    finally:
+        subprocess.run(
+            ["xdotool", "keyup", "--", key],
+            env=_XDO_ENV, timeout=5, capture_output=True,
+        )
+
+
 def focus_chrome():
     """Give the Chrome window X11 input focus. Returns True on success."""
     wid = chrome_wid()
@@ -516,13 +591,23 @@ def key_native(key):
 
     Refuses an option-shaped key before it focuses anything: a refusal that
     has already moved input focus has done half of what it declined to do.
+
+    Returns whether the window could be focused. The key is sent either way --
+    XTest delivers to whatever holds focus, which is usually still Chrome --
+    so this is a "could not confirm" rather than a "did not happen", and the
+    two shipped callers differ on what to do with it. `key` and `type` ignore
+    it, as they always have. The keyless scroll refuses on it (ISSUE-528),
+    because it is the one of the three that reports a *distance* moved, and
+    `presses: 3` against a display we could not aim at is a claim about the
+    page rather than about a keystroke.
     """
     key = literal_arg(key, "key")
-    focus_chrome()
+    focused = focus_chrome()
     subprocess.run(
         ["xdotool", "key", "--clearmodifiers", "--", key],
         env=_XDO_ENV, timeout=5, capture_output=True,
     )
+    return focused
 
 
 def type_native(text, delay_ms=TYPE_DELAY_MS):

@@ -980,6 +980,61 @@ def _pointer_refusal(action_type, screen_x, screen_y):
     }
 
 
+# Which X11 event each direction becomes, on the two paths. Two tables rather
+# than one, because the paths address different things: a wheel tick goes to
+# whatever the pointer is over and a key goes to whatever holds focus, so the
+# direction is the only thing they share.
+_WHEEL_BUTTONS = {"up": xdotool.WHEEL_UP, "down": xdotool.WHEEL_DOWN}
+_SCROLL_KEYS = {"up": "Page_Up", "down": "Page_Down"}
+# The most ticks or presses one action may ask for. Each one is a subprocess
+# with its own timeout and a human gap after it, so an unbounded count is an
+# action list that never comes back -- and 30 already moves a long page.
+MAX_SCROLL_UNITS = 30
+SCROLL_SETTLE_MS = 400
+# Two defaults, because the two paths move different distances per unit. A
+# wheel tick is a detent -- around a tenth of a screen -- and a Page_Down is
+# most of one, so one number would be either a twitch or a leap. Only a
+# hand-built request reaches these; the skill sends an explicit count.
+DEFAULT_WHEEL_CLICKS = 3
+DEFAULT_SCROLL_PRESSES = 1
+
+
+def _bad_direction(action_type, direction):
+    return {
+        "action": action_type, "ok": False, "error": "bad_direction",
+        "detail": (
+            f"{direction!r} is not a scroll direction; "
+            f"it is up or down"
+        ),
+    }
+
+
+def _scroll_count(action_type, value, default):
+    """How many ticks or presses this action asks for. Returns (n, refusal).
+
+    Refused rather than clamped. The count comes off model-written JSON, and a
+    caller that asked for 500 ticks and silently got 30 has been told a page
+    reached the bottom when it did not -- the `ok: true` with something else
+    having happened that every refusal on this path exists to prevent. `None`
+    is the default rather than a value, since the skill fills it in and a
+    hand-built request should not have to.
+    """
+    if value is None:
+        return default, None
+    # `bool` is an `int` in Python, and `True` would otherwise be one tick --
+    # which is not what a caller who sent it meant by it.
+    ok = isinstance(value, int) and not isinstance(value, bool)
+    if not ok or not (1 <= value <= MAX_SCROLL_UNITS):
+        return None, {
+            "action": action_type, "ok": False, "error": "bad_click_count",
+            "detail": (
+                f"a scroll takes a whole number of wheel ticks or key presses "
+                f"between 1 and {MAX_SCROLL_UNITS}"
+            ),
+        }
+    return value, None
+
+
 def _foreground(page, action_type, others=()):
     """Put the named session's tab in front, or say why the action must not run.
 
@@ -1023,11 +1078,17 @@ def _coordinate_action(session, page, action, others=()):
     """Run one visual-mode action. Returns the result dict for the action list.
 
     Every one of these drives X11 rather than CDP. The selector actions beside
-    them now do too -- see _selector_action -- but these are the ones that have
-    only a point to go on, which is the only way to press the Cloudflare
+    them now do too -- see _selector_action -- but these are the ones with no
+    selector to go on, which is the only way to press the Cloudflare
     interstitial's checkbox, whose element lives in a closed shadow root inside
     a cross-origin frame that no selector reaches and whose challenge fails a
     CDP-dispatched click anyway.
+
+    Not all of them have a *point* to go on either. `key`, `type` and the
+    keyless `scroll` address whatever holds keyboard focus, so they convert
+    nothing and need no capture; the keyless scroll is here rather than beside
+    `wait` and `select` in the dispatcher because it is X11 input and takes the
+    foreground check every other action on this path takes (ISSUE-528).
     """
     action_type = action["type"]
 
@@ -1039,7 +1100,30 @@ def _coordinate_action(session, page, action, others=()):
     if refusal:
         return refusal
 
-    if action_type in ("click_at", "hover_at"):
+    if action_type in ("click_at", "hover_at", "scroll_at"):
+        # Both scroll arguments are read before the pointer moves and before
+        # the capture is consulted, since the answer depends on the action
+        # alone: a refusal after a converted point has travelled has already
+        # moved the pointer for an action it then declined.
+        if action_type == "scroll_at":
+            wheel_button = _WHEEL_BUTTONS.get(action.get("direction", "down"))
+            if wheel_button is None:
+                return _bad_direction("scroll_at", action.get("direction"))
+            clicks, refusal = _scroll_count(
+                "scroll_at", action.get("clicks"), DEFAULT_WHEEL_CLICKS)
+            if refusal:
+                return refusal
+            modifier = action.get("modifier")
+            if modifier is not None and modifier not in xdotool.MODIFIERS:
+                return {
+                    "action": "scroll_at", "ok": False,
+                    "error": "unknown_modifier",
+                    "detail": (
+                        f"{modifier!r} is not a modifier this container will "
+                        f"hold; it knows {', '.join(xdotool.MODIFIERS)}"
+                    ),
+                }
+
         record = session.get("capture")
         code, detail = visual.staleness(record, page) or (None, None)
         if code:
@@ -1067,6 +1151,26 @@ def _coordinate_action(session, page, action, others=()):
                 "action": "hover_at", "ok": True,
                 "screen": _landed_point(screen_x, screen_y),
             }, verdict)
+
+        if action_type == "scroll_at":
+            if not browsing.human_scroll_at(
+                screen_x, screen_y, button=wheel_button,
+                clicks=clicks, modifier=modifier,
+            ):
+                return _pointer_refusal("scroll_at", screen_x, screen_y)
+            # Longer than a key's settle and shorter than a click's: a wheel
+            # can start a smooth-scroll animation or a lazy load, and neither
+            # is a navigation the click settle is sized for.
+            _settle(page, SCROLL_SETTLE_MS)
+            result = {
+                "action": "scroll_at", "ok": True,
+                "direction": action.get("direction", "down"),
+                "clicks": clicks,
+                "screen": _landed_point(screen_x, screen_y),
+            }
+            if modifier is not None:
+                result["modifier"] = modifier
+            return _with_foreground(result, verdict)
 
         button = 3 if action.get("button") == "right" else 1
         if not browsing.human_click_at(screen_x, screen_y, button=button):
@@ -1162,6 +1266,61 @@ def _coordinate_action(session, page, action, others=()):
         _settle(page, 300)
         return _with_foreground(
             {"action": "type", "chars": len(text), "ok": True}, verdict)
+
+    if action_type == "scroll":
+        # No point, so nothing is converted and no capture is needed -- which
+        # is what keeps the infinite-scroll recipe working on a session that
+        # has never been screenshotted. It still takes the foreground check
+        # above, and that is a change the evaluate did not need: a key reaches
+        # whatever tab is in front, where `window.scrollBy` reached the named
+        # session's page whichever tab that was.
+        direction = action.get("direction", "down")
+        key = _SCROLL_KEYS.get(direction)
+        if key is None:
+            return _bad_direction("scroll", direction)
+        # The old wire contract carried `amount`, in pixels, and defaulted it
+        # to 500 -- so every scroll an older caller sends has it. Reading
+        # `presses` and ignoring it would perform one Page_Down and answer
+        # `ok: true` for a request that asked to move four screens, which is
+        # the "something else happened" shape _scroll_count refuses two
+        # screens up. The skill refuses `--scroll-amount` by name; this is the
+        # same refusal for a caller that does not go through the skill.
+        if "amount" in action:
+            return {
+                "action": "scroll", "ok": False, "error": "retired_argument",
+                "detail": (
+                    "`amount` was pixels and no scroll is measured in pixels "
+                    "any more; send `presses` (Page_Down presses) or use "
+                    "`scroll_at` with `clicks` to turn the wheel at a point"
+                ),
+            }
+        presses, refusal = _scroll_count(
+            "scroll", action.get("presses"), DEFAULT_SCROLL_PRESSES)
+        if refusal:
+            return refusal
+        # `key_native` rather than `xdo_key`, which is the one place this
+        # departs from what `simulate_human_behavior` does. That one routes
+        # through XSendEvent, so its events arrive carrying `send_event=True`;
+        # this is model-driven page-level input, which the `key` action beside
+        # it already sends through XTest on the stated ground that page input
+        # should be indistinguishable from hardware. It also needs no window
+        # id, so it has one fewer way to do nothing quietly.
+        for _ in range(presses):
+            if not xdotool.key_native(key):
+                return {
+                    "action": "scroll", "ok": False,
+                    "error": "window_not_focused",
+                    "detail": (
+                        "the Chrome window could not be given X11 focus, so "
+                        "the scroll cannot be reported as having moved the "
+                        "page; retry, and if it persists the browser is dead"
+                    ),
+                }
+            _settle(page, SCROLL_SETTLE_MS)
+        return _with_foreground({
+            "action": "scroll", "direction": direction,
+            "presses": presses, "ok": True,
+        }, verdict)
 
     # Unreachable while _COORDINATE_ACTIONS and the branches above agree. It
     # answers rather than returning None because the caller appends whatever
@@ -1449,7 +1608,10 @@ def _fill_through_keyboard(page, action, target, element, verdict):
 _SELECTOR_ACTIONS = ("click", "fill")
 
 
-_COORDINATE_ACTIONS = ("click_at", "hover_at", "click_challenge", "key", "type")
+_COORDINATE_ACTIONS = (
+    "click_at", "hover_at", "click_challenge", "key", "type",
+    "scroll_at", "scroll",
+)
 
 
 @app.route("/interact", methods=["POST"])
@@ -1492,16 +1654,6 @@ def interact():
             if action_type in _SELECTOR_ACTIONS:
                 results.append(
                     _selector_action(session, page, action, others))
-            elif action_type == "scroll":
-                direction = action.get("direction", "down")
-                amount = action.get("amount", 500)
-                if direction == "down":
-                    page.evaluate(f"window.scrollBy(0, {amount})")
-                elif direction == "up":
-                    page.evaluate(f"window.scrollBy(0, -{amount})")
-                results.append({
-                    "action": "scroll", "direction": direction, "ok": True,
-                })
             elif action_type == "wait":
                 timeout_ms = action.get("timeout", 2000)
                 page.wait_for_timeout(min(timeout_ms, 30000))

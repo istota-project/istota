@@ -222,6 +222,52 @@ traffic in general. The passive wait stays. `/screenshot` accepts
 `measure: false` to skip even that one evaluate for a caller who would rather
 not find out the hard way.
 
+### The scroll was the last model-driven evaluate — and the weakest scroll
+
+`/interact`'s `scroll` ran `page.evaluate("window.scrollBy(0, N)")`, which is
+vector 2 above, on pages the container was sent to deliberately rather than on
+its own initiative — `simulate_human_behavior` three functions away had always
+scrolled with `xdo_key("Page_Down")`. So the model-driven path was the one
+still sending `Runtime.evaluate` and the autonomous path was not.
+
+It was also the wrong mechanism regardless of detection. `window.scrollBy`
+moves the *document*. It does not move the pane under the pointer, which is
+what a chat log, a code viewer, a results list inside a modal, a PDF.js viewer
+and a map all need — so the cases visual mode exists for were precisely the
+cases where the scroll did nothing useful, and the look-act loop degenerated
+into scrolling the page behind the widget.
+
+**Fix:** two scrolls, addressed differently. `scroll_at` moves the pointer to a
+converted picture point and turns the wheel there — X11 numbers the wheel as
+buttons 4 and 5, so a tick is a `mousedown`/`mouseup` pair through XTest in the
+same button space a click already uses, and Chrome routes a wheel event to
+whatever is under the cursor. Ticks are spaced with Gaussian gaps for the reason
+a click has a dwell: a burst at zero interval is a signature of its own. The
+keyless `scroll` sends `Page_Down`/`Page_Up`. Nothing on either path evaluates.
+
+**The keyless scroll uses `key_native`, not the `xdo_key` the autonomous path
+uses, and that difference is deliberate.** `xdo_key` routes through
+`xdotool key --window`, which is XSendEvent, so its events arrive carrying
+`send_event=True`; `key_native` focuses the window and fakes the event at the
+server, which is XTest. `simulate_human_behavior` has always used the first and
+is left alone — it scrolls on the container's own initiative, on pages nobody
+was sent to. This is model-driven page-level input, and the `key` action beside
+it already takes the XTest path on the stated ground that page input should be
+indistinguishable from hardware; a page-level scroll is page-level input. It
+also needs no window id, so it has one fewer way to do nothing quietly.
+
+**Unverified, and the measurement worth taking**: whether a page can actually
+tell the two apart here — a `keydown` listener logging `event.isTrusted`,
+driven once through each in a live container. The switch is defensible on the
+container's own criterion either way, so nothing rests on the answer; it would
+settle whether the autonomous path should move too.
+
+ctrl plus wheel falls out of the same primitive and is the browser's own zoom
+gesture, so `scroll_at` takes a modifier held across the ticks — which is how a
+map zooms at a point. The modifier is an allowlist rather than a pass-through:
+the value reaches `xdotool keydown` and is chosen by the caller, and a key
+nobody vetted would be held down across whatever runs next.
+
 ### Behavioral Realism Improvements
 
 Replaced uniform-random timing model with human motor patterns:
