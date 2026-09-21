@@ -296,7 +296,8 @@ def simulate_human_behavior(page):
 
         cur_x = random.uniform(w * 0.3, w * 0.7)
         cur_y = random.uniform(h * 0.2, h * 0.5)
-        xdo("mousemove", "--screen", "0", str(int(cur_x)), str(int(cur_y)))
+        xdo("mousemove", "--screen", "0", "--",
+            str(int(cur_x)), str(int(cur_y)))
 
         for _ in range(random.randint(2, 3)):
             target_x = random.uniform(50, w - 50)
@@ -307,7 +308,7 @@ def simulate_human_behavior(page):
             )
             for i, (px, py) in enumerate(points):
                 xdo(
-                    "mousemove", "--screen", "0",
+                    "mousemove", "--screen", "0", "--",
                     str(int(px)), str(int(py)),
                 )
                 progress = i / max(len(points) - 1, 1)
@@ -335,7 +336,7 @@ def simulate_human_behavior(page):
         )
         for i, (px, py) in enumerate(points):
             xdo(
-                "mousemove", "--screen", "0",
+                "mousemove", "--screen", "0", "--",
                 str(int(px)), str(int(py)),
             )
             progress = i / max(len(points) - 1, 1)
