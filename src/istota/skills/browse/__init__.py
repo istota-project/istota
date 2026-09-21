@@ -1104,6 +1104,59 @@ def _note_unreported_actions(data, actions):
     return {**data, "notes": notes, "unreported_actions": unreported}
 
 
+# A transport failure that provably happened before the request left this
+# process. Nothing reached the container, so no action can have run, and the
+# caution below would be a false alarm pointing at the wrong remedy — these
+# re-raise and `main`'s `describe` names them ("is the container running?").
+# `WriteTimeout` and `WriteError` are deliberately *not* here: those fire
+# mid-send, where the body may already be complete on the wire.
+PRE_SEND_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+)
+
+
+def _note_unanswered_interaction(url, command, actions, exc):
+    """Say the whole list is in doubt where nothing answered at all.
+
+    `_note_unreported_actions` is the same caution reasoned from a *response*
+    — it reads the results list and names the actions past its end. A failure
+    that produces no response misses it entirely (ISSUE-522), and the
+    container is the one party that never learns the client went away: it
+    goes on executing the rest of the list.
+
+    Necessarily weaker than the response arm, and worded so the difference is
+    readable. With no results list there is no way to say *which* actions are
+    in doubt, so the honest answer is that all of them are — "some of these
+    may have happened" and "any of these may have happened" call for
+    different recovery, and collapsing them into one sentence would lose the
+    distinction the model needs.
+
+    The class name is carried into the message for the reason `describe`
+    records one layer up: `str()` on an httpx `ReadTimeout` is "timed out"
+    and on several of its siblings the empty string, naming no verb, no URL
+    and no class.
+    """
+    unreported = [str(a.get("type")) for a in actions]
+    detail = str(exc).strip()
+    return error_envelope(
+        f"browse {command} against {url} got no answer: "
+        f"{type(exc).__name__}{': ' + detail if detail else ''}",
+        notes=[
+            "The browser never answered, so none of these actions reported a "
+            "result: " + ", ".join(unreported)
+            + ". The container does not learn that the client went away, so "
+            "it carries on running the list — any of them may have happened, "
+            "in full or in part. Take a fresh screenshot and look at the page "
+            "before repeating any of it; do not simply retry."
+        ],
+        unreported_actions=unreported,
+    )
+
+
 def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
@@ -1131,7 +1184,17 @@ def cmd_interact(args):
         "actions": actions,
     }
 
-    resp = httpx.post(f"{url}/interact", json=payload, timeout=REQUEST_TIMEOUT)
+    # Only the POST is wrapped. `_session_capture`'s GET above runs before any
+    # action is sent, so a failure there is provably pre-send and must keep
+    # propagating — cautioning about it would claim actions may have run
+    # against a call that had not been made.
+    try:
+        resp = httpx.post(f"{url}/interact", json=payload, timeout=REQUEST_TIMEOUT)
+    except PRE_SEND_TRANSPORT_ERRORS:
+        raise
+    except httpx.TransportError as exc:
+        return _note_unanswered_interaction(url, args.command, actions, exc)
+
     secrets = [
         pair.value.reveal()
         for pair in (getattr(args, "fill_credential", None) or [])
