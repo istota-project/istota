@@ -2806,8 +2806,12 @@ def _state_profile():
 
 def _profile_size(profile):
     """Count regular file bytes without following profile symlinks."""
+    def walk_error(error):
+        if not isinstance(error, FileNotFoundError):
+            raise error
+
     total = 0
-    for directory, _, files in os.walk(profile, followlinks=False):
+    for directory, _, files in os.walk(profile, followlinks=False, onerror=walk_error):
         for name in files:
             try:
                 info = os.lstat(os.path.join(directory, name))
@@ -2831,8 +2835,9 @@ def _forget_origin(value):
             or parsed.path not in {"", "/"}
             or not re.fullmatch(r"[A-Za-z0-9.:-]+", host)):
         raise ValueError("origin must be an http(s) origin without a path, query or credentials")
-    if ":" in host or host.rsplit(".", 1)[-1].isdigit():
-        ipaddress.ip_address(host)
+    final_label = host.rstrip(".").rsplit(".", 1)[-1]
+    if ":" in host or final_label.isdigit() or re.fullmatch(r"0x[0-9a-f]*", final_label):
+        host = str(ipaddress.ip_address(host))
     elif (len(host) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
                                   for label in host.rstrip(".").split("."))):
         raise ValueError("origin has an invalid host")
@@ -2890,18 +2895,15 @@ def forget_browser_state():
                 return jsonify({"status": "error", "error": "Close your live browser sessions first"}), 409
         try:
             if inst is not None:
-                proc = inst.proc
-                pool.release_slot(inst)
-                if proc is not None and proc.poll() is None:
-                    return jsonify({"status": "error", "error": "Browser did not stop; profile retained"}), 502
+                pool.release_slot(inst, require_stopped=True)
             # Recheck canonical containment after teardown before deleting.
             profile = _state_profile()
             if profile is None:
                 return jsonify({"status": "error", "error": "user_scope_required"}), 400
             if profile.exists():
                 shutil.rmtree(profile)
-        except OSError:
-            return jsonify({"status": "error", "error": "Could not remove browser profile"}), 502
+        except (OSError, RuntimeError):
+            return jsonify({"status": "error", "error": "Could not stop browser or remove profile"}), 502
         return jsonify({"status": "ok", "profile_deleted": True})
     if inst is None and not profile.exists():
         return jsonify({"status": "ok", "cleared": "all" if all_state else origin})
@@ -2917,7 +2919,7 @@ def forget_browser_state():
             context.clear_cookies()
         else:
             domains = {cookie["domain"] for cookie in context.cookies()
-                       if host == cookie["domain"].lstrip(".")
+                       if host == cookie["domain"].lstrip(".").strip("[]")
                        or host.endswith("." + cookie["domain"].lstrip("."))}
             for domain in sorted(domains):
                 context.clear_cookies(domain=domain)

@@ -266,13 +266,20 @@ def acquire(user_id, *, on_acquire=None, exclude=(), memory_pct=None,
     return inst
 
 
-def release_slot(inst):
+def release_slot(inst, *, require_stopped=False):
     """Stop every instance child, retaining its profile directory."""
     chrome._assert_pw_thread(inst, "release_slot", record=False)
     # Retire under the lifecycle lock so a late watchdog cannot resurrect this
     # slot. CDP teardown must run outside that lock, after Chrome is stopped.
     with chrome._chrome_lock:
         inst.retired = True
+        if require_stopped and inst.proc is not None:
+            # A destructive caller must retain the registry entry on failure,
+            # or its next request could mistake a still-live profile for cold.
+            chrome._kill_chrome_proc(inst.proc)
+            if inst.proc.poll() is None:
+                inst.retired = False
+                raise RuntimeError("Browser did not stop; profile retained")
     try:
         (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
     except OSError as exc:

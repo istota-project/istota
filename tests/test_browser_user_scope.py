@@ -482,9 +482,9 @@ def test_forget_profile_refuses_live_session_then_stops_before_deletion(api, mon
     client.delete(f"/sessions/{sid}", headers={"X-Istota-User": "alice"})
     release = api.pool.release_slot
     stopped = []
-    def stop(instance):
+    def stop(instance, **kwargs):
         assert own.exists()
-        release(instance)
+        release(instance, **kwargs)
         stopped.append(instance)
     monkeypatch.setattr(api.pool, "release_slot", stop)
     inst.proc.poll.return_value = 0
@@ -496,7 +496,7 @@ def test_forget_profile_refuses_live_session_then_stops_before_deletion(api, mon
     assert api.pool.instance_for("alice") is None
 
 
-@pytest.mark.parametrize("origin", ["https://..", "https://-bad.example", "https://999.999.999.999", "https://example.999"])
+@pytest.mark.parametrize("origin", ["https://..", "https://-bad.example", "https://999.999.999.999", "https://example.999", "https://example.999.", "https://999.999.999.999.", "https://0xfffffffff", "https://0x123456789.", "https://example.0x"])
 def test_forget_rejects_invalid_hosts_before_cdp(api, origin):
     response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json={"origin": origin})
     assert response.status_code == 400
@@ -518,10 +518,15 @@ def test_forget_profile_preserved_when_chrome_cannot_stop(api, monkeypatch):
     post(api, "/browse", url="https://example.com/")
     inst = api.pool.instance_for("alice")
     profile = Path(inst.profile_dir)
-    monkeypatch.setattr(api.pool, "release_slot", lambda inst: None)
+    monkeypatch.setattr(api.chrome, "_kill_chrome_proc", lambda *args, **kwargs: None)
     response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True})
     assert response.status_code == 502
     assert profile.exists()
+    assert api.pool.instance_for("alice") is inst
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True})
+    assert response.status_code == 502
+    assert profile.exists()
+    assert api.pool.instance_for("alice") is inst
 
 
 def test_state_scope_rejects_profile_symlink_to_other_user(api):
@@ -533,3 +538,60 @@ def test_state_scope_rejects_profile_symlink_to_other_user(api):
         response = client.open("/state", method=method, headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True})
         assert response.status_code == 400
     assert (users / "bob").is_dir()
+
+
+
+def test_state_unreadable_profile_does_not_report_partial_size(api, monkeypatch):
+    def walk(*args, **kwargs):
+        kwargs["onerror"](PermissionError("private path"))
+        return []
+    monkeypatch.setattr(api.os, "walk", walk)
+    response = api.app.test_client().get("/state", headers={"X-Istota-User": "alice"})
+    assert response.status_code == 502
+    assert "private path" not in response.text
+
+
+def test_forget_ipv6_matches_exact_cookie_domain_and_canonical_origin(api):
+    post(api, "/browse", url="https://example.com/")
+    ctx = api.pool.instance_for("alice").pw_context
+    ctx.cookies.return_value = [{"domain": "[::1]"}, {"domain": "example.com"}]
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json={"origin": "http://[0:0:0:0:0:0:0:1]:80/"})
+    assert response.status_code == 200
+    ctx.clear_cookies.assert_called_once_with(domain="[::1]")
+    assert ctx.new_cdp_session.return_value.send.call_args.args[1]["origin"] == "http://[::1]"
+
+
+def test_forget_absent_profile_noop_and_cold_profile_launch(api):
+    client = api.app.test_client()
+    response = client.delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True})
+    assert response.status_code == 200
+    assert api.pool.live() == []
+    profile = Path(api.pool.PROFILE_ROOT) / "users/alice"
+    profile.mkdir(parents=True)
+    response = client.delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True})
+    assert response.status_code == 200
+    api.pool.instance_for("alice").pw_context.clear_cookies.assert_called_once_with()
+
+
+def test_forget_without_pages_closes_temporary_page(api):
+    post(api, "/browse", url="https://example.com/")
+    ctx = api.pool.instance_for("alice").pw_context
+    ctx.pages = []
+    ctx.reset_mock()
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True})
+    assert response.status_code == 200
+    ctx.new_page.assert_called_once()
+    ctx.new_page.return_value.close.assert_called_once()
+    ctx.new_cdp_session.return_value.detach.assert_called_once()
+
+
+def test_state_disconnected_context_does_not_reconnect(api, monkeypatch):
+    post(api, "/browse", url="https://example.com/")
+    api.pool.instance_for("alice").pw_context = None
+    reconnect = MagicMock(side_effect=AssertionError("reconnected"))
+    monkeypatch.setattr(api.chrome, "connect_cdp", reconnect)
+    response = api.app.test_client().get("/state", headers={"X-Istota-User": "alice"})
+    assert response.status_code == 200
+    assert response.json["cookie_domains"] is None
+    assert response.json["live"] is True
+    reconnect.assert_not_called()
