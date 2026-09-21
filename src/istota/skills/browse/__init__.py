@@ -232,6 +232,8 @@ def _decode(resp):
 def cmd_get(args):
     """Browse a URL and return page content."""
     url = get_api_url()
+    if not args.url and not args.session:
+        return {"status": "error", "error": "get needs a URL or --session <id>"}
     payload = {
         "url": args.url,
         "timeout": args.timeout,
@@ -243,6 +245,8 @@ def cmd_get(args):
         payload["wait_for"] = args.wait_for
     if args.skip_behavior:
         payload["skip_behavior"] = True
+    if args.offset:
+        payload["offset"] = args.offset
     if args.max_chars:
         payload["max_chars"] = args.max_chars
     if args.max_links:
@@ -277,6 +281,8 @@ def cmd_render(args):
         payload["session_id"] = args.session
     if args.wait_for:
         payload["wait_for"] = args.wait_for
+    if args.offset:
+        payload["offset"] = args.offset
     if args.max_chars:
         payload["max_chars"] = args.max_chars
     if args.include_frames:
@@ -1555,13 +1561,14 @@ def build_parser():
 
     # get
     p_get = sub.add_parser("get", help="Browse a URL")
-    p_get.add_argument("url", help="URL to browse")
+    p_get.add_argument("url", nargs="?", help="URL to browse")
     p_get.add_argument("--keep-session", action="store_true", help="Keep session alive for follow-up")
     p_get.add_argument("--session", help="Reuse existing session ID")
     p_get.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
     p_get.add_argument("--wait-for", help="CSS selector to wait for after load")
     p_get.add_argument("--skip-behavior", action="store_true",
                        help="Skip simulated mouse/scroll after load (for DataDome-protected sites)")
+    p_get.add_argument("--offset", type=int, default=0, help="Character offset for a later text chunk")
     p_get.add_argument("--max-chars", type=int, help="Page text budget (default 50000)")
     p_get.add_argument("--max-links", type=int, help="Link budget (default 100)")
 
@@ -1576,6 +1583,7 @@ def build_parser():
     p_render.add_argument("--keep-session", action="store_true", help="Keep session alive")
     p_render.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
     p_render.add_argument("--wait-for", help="CSS selector to wait for after load")
+    p_render.add_argument("--offset", type=int, default=0, help="Character offset for a later markdown chunk")
     p_render.add_argument("--max-chars", type=int, help="Markdown budget (default 100000)")
     p_render.add_argument("--include-frames", action="store_true",
                           help="Splice iframe content into the markdown (counts "

@@ -28,6 +28,7 @@ network. The caller supplies `page.content()` (the serialized post-JS DOM) and
 import logging
 import re
 from urllib.parse import urljoin, urlparse
+from text_budget import text_window
 
 from bs4 import BeautifulSoup, Comment
 from markdownify import MarkdownConverter
@@ -475,22 +476,6 @@ def _postprocess(markdown):
     return text.strip()
 
 
-def _truncate(markdown, max_chars):
-    """Cut at a line boundary and say so. Returns (text, truncated)."""
-    if max_chars <= 0 or len(markdown) <= max_chars:
-        return markdown, False
-    cut = markdown[:max_chars]
-    newline = cut.rfind("\n")
-    if newline > max_chars * 0.8:
-        cut = cut[:newline]
-    return (
-        cut.rstrip()
-        + f"\n\n[Markdown truncated at {max_chars} characters — "
-        "raise --max-chars or switch to --mode article]",
-        True,
-    )
-
-
 def _url_looks_like_index(url):
     """Does this URL *shape* suggest a section front rather than one article?
 
@@ -608,7 +593,7 @@ def _article_markdown(html, soup, base_url, notes):
 
 
 def to_markdown(html, base_url="", mode="full", max_chars=DEFAULT_MAX_CHARS,
-                frames=None, include_frames=False, frames_capped=False):
+                frames=None, include_frames=False, frames_capped=False, offset=0):
     """Convert rendered HTML to markdown.
 
     Returns a dict with `markdown`, the `mode` actually used (which may differ
@@ -672,7 +657,10 @@ def to_markdown(html, base_url="", mode="full", max_chars=DEFAULT_MAX_CHARS,
         markdown = _converter(strip_images=True).convert_soup(body)
 
     markdown = _postprocess(markdown)
-    markdown, truncated = _truncate(markdown, max_chars)
+    markdown, text_metadata = text_window(
+        markdown, max_chars if max_chars > 0 else max(1, len(markdown)), offset,
+    )
+    truncated = text_metadata.get("text_truncated", False)
 
     # After truncation, deliberately: `included` is what the caller can read,
     # not what was put into the soup.
@@ -688,6 +676,7 @@ def to_markdown(html, base_url="", mode="full", max_chars=DEFAULT_MAX_CHARS,
         "requested_mode": requested,
         "chars": len(markdown),
         "truncated": truncated,
+        **text_metadata,
         "frames": {
             "found": len(frame_records),
             "included": included,
