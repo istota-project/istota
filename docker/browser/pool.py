@@ -91,10 +91,20 @@ def console_url(inst, base="vnc.html"):
     token = quote(inst.user_id, safe="")
     websocket_path = "websockify/?" + urlencode({"token": token})
     parts = urlsplit(base)
-    query = [(name, value) for name, value in parse_qsl(parts.query)
+    query = [(name, value) for name, value in parse_qsl(parts.query, keep_blank_values=True)
              if name != "path"]
     query.append(("path", websocket_path))
     return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def instance_metadata(base=""):
+    """Read the live pool without acquiring instances or extending idle time."""
+    now = time.monotonic()
+    return [{
+        "user": inst.user_id, "slot": inst.slot,
+        "idle_seconds": max(0, now - inst.last_used),
+        "url": console_url(inst, base),
+    } for inst in live()]
 
 
 def _write_console_file(path, text):

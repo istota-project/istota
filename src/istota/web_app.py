@@ -3818,6 +3818,13 @@ async def admin_log_stream(
     )
 
 
+@api_router.get("/admin/browsers")
+async def admin_browser_instances(_: dict = Depends(_require_admin)):
+    from .admin_browsers import snapshot
+
+    return JSONResponse(await snapshot(_config.browser), headers={"Cache-Control": "no-store"})
+
+
 @api_router.get("/admin/config")
 async def admin_config(_: dict = Depends(_require_admin)):
     """The loaded config, sectioned and credential-redacted. Read-only.

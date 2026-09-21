@@ -598,3 +598,32 @@ def test_state_disconnected_context_does_not_reconnect(api, monkeypatch):
     assert response.json["cookie_domains"] is None
     assert response.json["live"] is True
     reconnect.assert_not_called()
+
+
+def test_instance_discovery_is_read_only(api, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit, unquote
+    inst = api.pool.acquire("alice+test@example.com")
+    inst.last_used = 100.0
+    monkeypatch.setattr(api.pool.time, "monotonic", lambda: 142.0)
+    base = "https://console.example.com/vnc.html?autoconnect=1&resize=scale&path=old&view_only="
+    client = api.app.test_client()
+    response = client.get("/instances", query_string={"vnc_url": base})
+    assert response.status_code == 200
+    row = response.json["instances"][0]
+    assert (row["user"], row["slot"], row["idle_seconds"]) == (inst.user_id, inst.slot, 42.0)
+    query = parse_qs(urlsplit(row["url"]).query, keep_blank_values=True)
+    assert query["resize"] == ["scale"]
+    assert query["view_only"] == [""]
+    assert query["autoconnect"] == ["1"]
+    token = parse_qs(urlsplit(query["path"][0]).query)["token"][0]
+    assert unquote(token) == inst.user_id
+    assert inst.last_used == 100.0
+    assert len(api.pool.live()) == 1
+    api.pool._instances.clear()
+    assert client.get("/instances").json == {"instances": []}
+    replacement = api.pool.acquire("bob")
+    assert replacement.slot == inst.slot
+    row = client.get("/instances", query_string={"vnc_url": base}).json["instances"][0]
+    assert row["user"] == "bob"
+    assert "alice" not in row["url"]
+    assert client.get("/instances").json["instances"][0]["url"] == ""

@@ -2,7 +2,14 @@
   import { base } from '$app/paths';
   import { page } from '$app/state';
   import { AppShell, ShellHeader, Sidebar, SidebarToggle } from '$lib/components/ui';
-  import { Activity, Plug, ScrollText, SlidersHorizontal, Stethoscope } from 'lucide-svelte';
+  import {
+    Activity,
+    Monitor,
+    Plug,
+    ScrollText,
+    SlidersHorizontal,
+    Stethoscope,
+  } from 'lucide-svelte';
 
   let { children } = $props();
 
@@ -16,6 +23,7 @@
     { href: '/health', label: 'Health', icon: Stethoscope },
     { href: '/config', label: 'Configuration', icon: SlidersHorizontal },
     { href: '/connections', label: 'Connections', icon: Plug },
+    { href: '/browsers', label: 'Browsers', icon: Monitor },
     { href: '/logs', label: 'Logs', icon: ScrollText },
   ];
 
