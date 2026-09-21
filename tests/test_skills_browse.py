@@ -42,6 +42,12 @@ from istota.skills.browse import (
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake image data"
 
 
+@pytest.fixture(autouse=True)
+def browser_identity(monkeypatch):
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setattr("istota.skills.browse._shared_profile_warned", False)
+
+
 @pytest.fixture
 def deferred_dir(tmp_path, monkeypatch):
     """The task's own temp directory, as `build_task_runtime` exports it.
@@ -965,7 +971,7 @@ class TestCmdClose:
 
         assert result["status"] == "closed"
         mock_delete.assert_called_once_with(
-            "http://test:9223/sessions/sess1", timeout=30.0
+            "http://test:9223/sessions/sess1", timeout=30.0, headers={"X-Istota-User": "alice"}
         )
 
 
@@ -1610,6 +1616,7 @@ class TestNonJsonResponsesAreReported:
 
         assert result == {
             "status": "error",
+            "shared_profile": True,
             "error": "Chrome unavailable: CDP connect failed",
         }
 
@@ -1830,7 +1837,7 @@ class TestBareErrorBodiesAreClassified:
         parser = build_parser()
         result = cmd_get(parser.parse_args(["get", "https://example.com"]))
 
-        assert result == {"status": "not_found"}
+        assert result == {"status": "not_found", "shared_profile": True}
 
 
 class TestScreenshotDoesNotTrustTheContentType:
@@ -1952,6 +1959,11 @@ class TestFillCredential:
         "acme_token": "browsevalue-tok-bbbbbbbb",
     }
 
+    @pytest.fixture(autouse=True)
+    def isolated_browser(self):
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True})):
+            yield
+
     @pytest.fixture
     def proxy(self, monkeypatch):
         import tempfile
@@ -1987,7 +1999,7 @@ class TestFillCredential:
         proxy()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "ok", "session_id": "s1",
+            "user_scope": "alice", "status": "ok", "session_id": "s1",
             "actions": [{"action": "fill", "selector": "#password", "ok": True}],
         }
         mock_post.return_value = mock_resp
@@ -2018,7 +2030,7 @@ class TestFillCredential:
         proxy()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "ok", "session_id": "s1", "actions": [],
+            "user_scope": "alice", "status": "ok", "session_id": "s1", "actions": [],
         }
         mock_post.return_value = mock_resp
 
@@ -2056,7 +2068,7 @@ class TestFillCredential:
         proxy()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "ok", "session_id": "s1", "actions": [],
+            "user_scope": "alice", "status": "ok", "session_id": "s1", "actions": [],
         }
         mock_post.return_value = mock_resp
 
@@ -2090,7 +2102,7 @@ class TestFillCredential:
         proxy()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "ok", "session_id": "s1", "actions": [],
+            "user_scope": "alice", "status": "ok", "session_id": "s1", "actions": [],
         }
         mock_post.return_value = mock_resp
 
@@ -2119,7 +2131,7 @@ class TestFillCredential:
         proxy()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "ok", "session_id": "s1", "actions": [],
+            "user_scope": "alice", "status": "ok", "session_id": "s1", "actions": [],
         }
         mock_post.return_value = mock_resp
 
@@ -2228,7 +2240,7 @@ class TestFillCredential:
         proxy()
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "ok", "session_id": "s1", "actions": [],
+            "user_scope": "alice", "status": "ok", "session_id": "s1", "actions": [],
         }
         mock_post.return_value = mock_resp
 
@@ -2263,7 +2275,7 @@ class TestFillCredential:
         secret = self.VAULT["acme_password"]
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "ok",
+            "user_scope": "alice", "status": "ok",
             "session_id": "s1",
             "url": f"https://site.example/login?password={secret}",
             "text": f"We could not sign you in as {secret}",
@@ -2288,7 +2300,7 @@ class TestFillCredential:
         secret = self.VAULT["acme_password"]
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "error",
+            "user_scope": "alice", "status": "error",
             "error": f'page.fill: Timeout. Call log: fill("{secret}")',
         }
         mock_post.return_value = mock_resp
@@ -2310,7 +2322,7 @@ class TestFillCredential:
         args = parser.parse_args(["interact", "s1", "--fill", "#a=b"])
         mock_resp = MagicMock()
         mock_resp.json.return_value = {
-            "status": "ok", "session_id": "s1", "text": "[credential] is fine",
+            "user_scope": "alice", "status": "ok", "session_id": "s1", "text": "[credential] is fine",
         }
         mock_post.return_value = mock_resp
         assert cmd_interact(args)["text"] == "[credential] is fine"
@@ -3556,8 +3568,154 @@ def test_text_offset_session_passthrough(mock_url, mock_request, verb, command):
     mock_request.return_value.status_code = 200
     mock_request.return_value.json.return_value = response
     args = build_parser().parse_args([verb, "--session", "sess1", "--offset", "500000"])
-    assert command(args) == response
+    assert command(args) == {**response, "shared_profile": True}
     payload = mock_request.call_args.kwargs["json"]
     assert payload["offset"] == 500000
     assert payload["session_id"] == "sess1"
     assert not payload.get("url")
+
+
+class TestProfileHandshake:
+    @pytest.mark.parametrize("health", [{}, {"per_user_profiles": False}, {"per_user_profiles": "true"}])
+    def test_credential_refused_before_post(self, monkeypatch, health):
+        from istota.skills._credref import CredentialPair, SecretValue
+
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        args = build_parser().parse_args(["interact", "s1", "--fill-credential", "#password=example"])
+        args.fill_credential = [CredentialPair("#password", SecretValue("example", "test-value"))]
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json=health)), patch("istota.skills.browse.httpx.post") as post:
+            result = cmd_interact(args)
+        assert result["status"] == "error"
+        assert "full Ansible play" in result["error"]
+        post.assert_not_called()
+
+
+    @staticmethod
+    def credential_args():
+        from istota.skills._credref import CredentialPair, SecretValue
+
+        args = build_parser().parse_args(["interact", "s1", "--fill-credential", "#password=example"])
+        args.fill_credential = [CredentialPair("#password", SecretValue("example", "test-value"))]
+        return args
+
+    @pytest.mark.parametrize("response", [
+        httpx.Response(503, json={"per_user_profiles": True}),
+        httpx.Response(200, text="not JSON"),
+        httpx.Response(200, json=[]),
+        httpx.ReadTimeout("timed out"),
+    ])
+    def test_preflight_errors_never_send_actions(self, response):
+        with patch("istota.skills.browse.httpx.get") as get, patch("istota.skills.browse.httpx.post") as post:
+            if isinstance(response, Exception):
+                get.side_effect = response
+            else:
+                get.return_value = response
+            result = cmd_interact(self.credential_args())
+        assert result["status"] == "error"
+        assert "No interaction actions were sent" in result["error"]
+        post.assert_not_called()
+
+    @pytest.mark.parametrize("scope", ["alice", "bob", None])
+    def test_credential_requires_exact_scope_echo(self, scope):
+        body = {"status": "ok", "actions": [{"action": "fill", "ok": True}]}
+        if scope is not None:
+            body["user_scope"] = scope
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True})) as get, patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)) as post:
+            result = cmd_interact(self.credential_args())
+        assert get.call_args.kwargs["headers"] == {"X-Istota-User": "alice"}
+        assert post.call_args.kwargs["json"]["actions"][0]["credential"] is True
+        assert result["status"] == ("ok" if scope == "alice" else "error")
+        if scope != "alice":
+            assert "may have run; do not retry" in result["error"]
+        assert "test-value" not in json.dumps(result)
+
+    @pytest.mark.parametrize("error", ["unknown", "Timeout waiting for selector"])
+    def test_failed_action_fails_cli(self, error, capsys):
+        body = {"status": "ok", "user_scope": "alice", "actions": [{"action": "click", "ok": False, "error": error}]}
+        with patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)):
+            with pytest.raises(SystemExit) as exc:
+                main(["interact", "s1", "--click", "#submit"])
+        assert exc.value.code == 1
+        result = json.loads(capsys.readouterr().out)
+        assert result["status"] == "error"
+        assert result["actions"][0]["error"] == error
+
+    @pytest.mark.parametrize("user", [None, "", "alice\nBob", "alice\rBob", "álîce", " alice", "alice ", "alice\x00", "alice\x7f"])
+    def test_unrepresentable_identity_fails_locally(self, user):
+        # NUL cannot live in os.environ; exercise the same helper with a
+        # replaced environment mapping to pin its rejection too.
+        with patch("istota.browser_owner.os.environ", {} if user is None else {"ISTOTA_USER_ID": user}), patch("istota.skills.browse.httpx.post") as post:
+            with pytest.raises(ValueError, match="ISTOTA_USER_ID"):
+                _run_verb(["get", "https://example.com"])
+        post.assert_not_called()
+
+    @pytest.mark.parametrize("scope", [None, "alice", "bob"])
+    @pytest.mark.parametrize("argv", [
+        ["get", "https://example.com"],
+        ["render", "https://example.com"],
+        ["extract", "https://example.com", "--selector", "a"],
+        ["screenshot", "--session", "s1"],
+        ["interact", "s1", "--click", "a"],
+        ["interact", "s1", "--click-at", "10,20"],
+        ["links", "https://example.com"],
+        ["links", "https://example.com", "--selector", "a"],
+        ["links", "--session", "s1", "--selector", "a"],
+        ["challenge", "s1"],
+        ["close", "s1"],
+    ])
+    def test_all_verbs_send_identity_and_report_scope(self, scope, argv, monkeypatch, workspace, caplog):
+        from istota.skills.browse import USER_SCOPE_HEADER
+
+        requests = []
+        def respond(request):
+            requests.append(request)
+            assert request.headers["X-Istota-User"] == "alice"
+            assert request.url.path != "/health"  # No preflight for ordinary actions.
+            if request.url.path == "/screenshot":
+                headers = {"content-type": "image/png"}
+                if scope is not None:
+                    headers[USER_SCOPE_HEADER] = scope
+                return httpx.Response(200, content=PNG_BYTES, headers=headers)
+            body = {"status": "ok", "session_id": "s1", "links": [], "elements": [], "capture": _capture_record(1280, 800), "actions": [{"action": "click", "ok": True}]}
+            if scope is not None:
+                body["user_scope"] = scope
+            return httpx.Response(200, json=body)
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            for method in ("post", "get", "delete"):
+                monkeypatch.setattr(httpx, method, getattr(client, method))
+            first = _run_verb(argv)
+            second = _run_verb(argv)
+        assert requests
+        for result in (first, second):
+            assert result["status"] == "ok"
+            assert result.get("shared_profile", False) is (scope != "alice")
+            if scope == "alice":
+                assert result["user_scope"] == "alice"
+        warnings = [r for r in caplog.records if "shared profile" in r.message]
+        assert len(warnings) == (0 if scope == "alice" else 1)
+
+    def test_every_browser_call_site_passes_identity_headers(self):
+        import ast
+        from istota.skills import browse
+        from istota.skills.markets import finviz
+        from tests.support.drift import source_of
+
+        for module in (browse, finviz):
+            calls = [node for node in ast.walk(ast.parse(source_of(module)))
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                     and node.func.id == "browser_request"]
+            assert calls
+            assert all(any(kw.arg == "headers" for kw in call.keywords) for call in calls)
+
+
+    def test_scope_check_precedes_secret_redaction(self):
+        from istota.skills._credref import CredentialPair, SecretValue
+
+        args = self.credential_args()
+        args.fill_credential = [CredentialPair("#username", SecretValue("example", "alice"))]
+        body = {"status": "ok", "user_scope": "alice", "actions": [{"action": "fill", "ok": True}]}
+        with patch("istota.skills.browse.httpx.get", return_value=httpx.Response(200, json={"per_user_profiles": True})), patch("istota.skills.browse.httpx.post", return_value=httpx.Response(200, json=body)):
+            result = cmd_interact(args)
+        assert result["status"] == "ok"
+        assert "alice" not in json.dumps(result)
