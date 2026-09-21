@@ -19,7 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A screenshot taken to be looked at no longer files itself in your Nextcloud. `browse screenshot` with no `-o` now writes into the task's own temp directory, which is swept on the deployment's temp-file retention, so a visual loop's eight captures per round cost you nothing and leave nothing behind. Pass `-o` with a path in your workspace for a picture Istota should show you in a reply or that you want to keep — that is still where `workspace_path` comes from, and a scratch capture says in its own answer that it is one.
 
+### Changed
+
+- `browse interact --click` and `--fill` now drive the page the way the coordinate flags already did: the pointer travels to the element and presses it, and a value is typed key by key rather than inserted whole. A filled field used to receive no keystroke at all — the value simply appeared, which is exactly what a login form behind bot detection is watching for — and a click arrived with no movement behind it. Measured on the shipped container, the same fill went from no key events to ten, and a click from one pointer movement to fifteen along an approach path. Selectors, results and error codes are unchanged, each action now reports which element it matched, and the older method is still there as an automatic fallback when the typed path cannot run.
+
 ### Fixed
+
+- A coordinate action reaches the session it names rather than whichever tab is in front. Sessions are tabs in one browser window, so clicks and keystrokes went to whatever had last navigated — a second session opened between your screenshot and your click took the input, reported success, and left your page untouched. Reproduced against two live sessions in both directions. The named session's tab is brought forward before every action and the switch is confirmed rather than assumed; where it cannot be, the action is refused with nothing pressed instead of landing somewhere nobody chose.
 
 - A `browse` type or key press beginning with `-` is refused instead of being handed to xdotool as an option. xdotool parses the slot that carries the text with getopt, and `type` supports `--file`, so a task asked to type `--file=/etc/…` into a page typed the contents of that file instead — reading any file the browser container can see into a form on a page it chose. Measured against the shipped build, in each of the argv shapes a value reaches, including the one a `browse` URL travels through.
 

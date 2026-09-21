@@ -63,17 +63,57 @@ def window():
         yield WINDOW
 
 
-class _Page:
-    """A page that answers the one evaluate `visual.page_state` makes."""
+#: What the X11 window title reports while a page double is in front. The
+#: double's own title by default, so the foreground check agrees with it.
+DOC_TITLE = "A Example"
 
-    def __init__(self, viewport=(1439, 812), dpr=1, scroll=(0, 0), url="https://a.example/"):
+
+class _Page:
+    """A page that answers the one evaluate `visual.page_state` makes.
+
+    It also comes to the front and reports its title, because the real one
+    does and every coordinate action now asks it to: X11 input reaches
+    whichever tab the window is showing, so the action brings the named
+    session's tab forward first. A double that cannot do that is less capable
+    than the thing it stands in for, which makes every action refuse for a
+    reason no test chose.
+    """
+
+    def __init__(self, viewport=(1439, 812), dpr=1, scroll=(0, 0), url="https://a.example/",
+                 title=DOC_TITLE):
         self.state = [viewport[0], viewport[1], dpr, scroll[0], scroll[1], url]
         self.raises = False
+        self.doc_title = title
+        self.brought_to_front = 0
+        # A page with no frames, so `click_challenge` reaches its own
+        # `no_challenge` answer rather than an AttributeError from the frame
+        # walk. A test that wants a challenge patches the point out.
+        self.frames = []
 
     def evaluate(self, _script):
         if self.raises:
             raise RuntimeError("Execution context was destroyed")
         return list(self.state)
+
+    def bring_to_front(self):
+        self.brought_to_front += 1
+
+    def title(self):
+        return self.doc_title
+
+
+@pytest.fixture(autouse=True)
+def foreground_window():
+    """The window showing whatever tab was last asked for.
+
+    Autouse because the foreground check runs ahead of every coordinate
+    action, so without it each one refuses with `tab_unavailable` before
+    reaching the behaviour under test. `TestTheForegroundGuard` overrides it
+    to drive the refusals themselves.
+    """
+    with mock.patch.object(visual.xdotool, "window_title",
+                           return_value=f"{DOC_TITLE} - Google Chrome"):
+        yield
 
 
 class TestThePngHeaderParse:
@@ -861,3 +901,132 @@ class TestTheOptionShapedRefusal:
         assert result["ok"] is False
         assert result["error"] == "option_shaped_input"
         assert xdo_argv.call_args_list == []
+
+
+class TestTheForegroundGuard:
+    """Which tab a coordinate action addresses.
+
+    Sessions are tabs in one Chrome window and X11 input reaches whatever tab
+    that window is showing, so an action that does not switch tabs lands in
+    whichever session navigated last -- with `ok: true` and the point it was
+    asked for. The staleness check cannot see it: it compares the *named*
+    session's url, scroll and viewport, and none of those moves when the input
+    goes somewhere else.
+
+    These drive `_coordinate_action` rather than `visual.bring_to_front`,
+    because the guard's placement is the half that can regress silently. A
+    check that ran after the staleness pass, or on only one of the five
+    actions, would leave every test in `visual`'s own suite green.
+    """
+
+    @pytest.fixture
+    def other_tab_in_front(self):
+        """The window is showing a different tab from the one named."""
+        with mock.patch.object(visual.xdotool, "window_title",
+                               return_value="Some Other Tab - Google Chrome"):
+            yield
+
+    @pytest.fixture
+    def live(self, window):
+        """A session whose picture is current, so only the tab is in question."""
+        page = _SettlePage()
+        record, error = visual.build_capture(_png(CAPTURE_W, CAPTURE_H), page=page)
+        assert not error
+        return {"capture": record, "tab_index": 0}, page
+
+    ACTIONS = [
+        {"type": "click_at", "x": 10, "y": 10},
+        {"type": "hover_at", "x": 10, "y": 10},
+        {"type": "click_challenge"},
+        {"type": "key", "key": "Return"},
+        {"type": "type", "text": "hello"},
+    ]
+
+    @pytest.mark.parametrize("action", ACTIONS,
+                             ids=[a["type"] for a in ACTIONS])
+    def test_every_action_asks_for_its_own_tab(self, live, pointer, action):
+        session, page = live
+        browse_api._coordinate_action(session, page, action)
+        assert page.brought_to_front == 1
+
+    @pytest.mark.parametrize("action", ACTIONS,
+                             ids=[a["type"] for a in ACTIONS])
+    def test_a_tab_that_is_not_in_front_refuses_before_acting(
+        self, live, pointer, other_tab_in_front, action,
+    ):
+        """The 524 shape. Nothing may be pressed or typed on this path: the
+        input would reach another session's page."""
+        session, page = live
+        result = browse_api._coordinate_action(session, page, action)
+
+        assert result["ok"] is False
+        assert result["error"] == "tab_not_foreground"
+        assert pointer.click.call_args_list == []
+        assert pointer.move.call_args_list == []
+        assert pointer.typed.call_args_list == []
+        assert pointer.key.call_args_list == []
+
+    def test_key_and_type_are_guarded_though_they_skip_staleness(
+        self, other_tab_in_front, pointer,
+    ):
+        """They need no picture, which is why they never reach the staleness
+        check -- so the tab guard is the only thing standing in front of them,
+        and it has to run on a session that has never been screenshotted."""
+        page = _SettlePage()
+        for action in ({"type": "key", "key": "Return"},
+                       {"type": "type", "text": "hello"}):
+            result = browse_api._coordinate_action(
+                {"capture": None, "tab_index": 0}, page, action,
+            )
+            assert result["error"] == "tab_not_foreground", action
+
+    def test_the_guard_runs_before_the_staleness_check(self, other_tab_in_front,
+                                                       pointer):
+        """Asking whether the picture still describes the page is worthless
+        once it has passed on a tab nobody is looking at. With both wrong, the
+        tab is the answer that comes back."""
+        result = browse_api._coordinate_action(
+            {"capture": None, "tab_index": 0}, _SettlePage(),
+            {"type": "click_at", "x": 10, "y": 10},
+        )
+        assert result["error"] == "tab_not_foreground"
+
+    def test_a_tab_that_will_not_come_forward_refuses(self, live, pointer):
+        session, page = live
+
+        def gone():
+            raise RuntimeError("Target closed")
+
+        page.bring_to_front = gone
+        result = browse_api._coordinate_action(
+            session, page, {"type": "click_at", "x": 10, "y": 10},
+        )
+        assert result["ok"] is False
+        assert result["error"] == "tab_unavailable"
+        assert pointer.click.call_args_list == []
+
+    def test_an_unconfirmed_switch_is_allowed_and_carried_on_the_result(
+        self, live, pointer,
+    ):
+        """A page with no title cannot be checked against the window title.
+        Refusing there would strand every caller on an untitled page, so it
+        runs and says the tab could not be confirmed."""
+        session, page = live
+        page.doc_title = ""
+
+        result = browse_api._coordinate_action(
+            session, page, {"type": "click_at", "x": 10, "y": 10},
+        )
+        assert result["ok"] is True
+        assert result["foreground"] == "foreground_unconfirmed"
+        assert pointer.click.call_args_list != []
+
+    def test_a_confirmed_switch_says_nothing(self, live, pointer):
+        """The control for the test above: the ordinary case adds no key, so
+        `foreground` on a result means something was not established."""
+        session, page = live
+        result = browse_api._coordinate_action(
+            session, page, {"type": "click_at", "x": 10, "y": 10},
+        )
+        assert result["ok"] is True
+        assert "foreground" not in result
