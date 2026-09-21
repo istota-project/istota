@@ -142,7 +142,7 @@ Every URL in the markdown is already absolute — use them exactly as given. `mo
 
 `-o` takes an **absolute path inside your own workspace**. Anywhere else is refused before the page is even loaded, nothing is written, and no directory is created outside the workspace. A refusal is not something to retry with a different path outside the workspace.
 
-`links` here are relative or absolute exactly as the page wrote them. `session_id` is only present with `--keep-session`. `extract` returns `{"status": "ok", "selector": "...", "count": N, "elements": [{"text": "...", "html": "...", "href": "...", ...}]}`.
+`links` here are relative or absolute exactly as the page wrote them. `session_id` is only present with `--keep-session`. `extract` returns `{"status": "ok", "selector": "...", "count": N, "elements": [{"text": "...", "html": "...", "href": "...", ...}]}`. Matched elements without rendered text are included, with labels from ARIA, placeholder, name or alt text. Controls report live `value` and `checked` properties where available, plus `name`, `type` and `value_present`. Password and credential-filled fields withhold `value`; known credential text is redacted from extraction labels, HTML and attributes before truncation. This needs the rebuilt browser image. Redaction lasts for the browser API process and covers literal, HTML-escaped and URL-encoded values; it does not prevent a page from transforming or displaying a credential elsewhere. The shared login profile is unchanged.
 
 **`links_truncated: true` means the list was cut short, and a full list of the wrong links is what it looks like.** The budget is spent in page order, so a section front whose navigation, login and subscription chrome runs past the cap can return a complete-looking array with no articles in it at all. When you see that key — on `get`, on `links` or on `interact` — do not conclude the page has nothing on it and do not start guessing URLs. What to do about it is in `links_truncated_by`, which names the limit that clipped the list. `max_links` means your own budget bound it: ask again with `--max-links` above the `anchors_total` the same answer gives you. `scan_ceiling` means the browser's own limit bound it and no value of `--max-links` reaches further, so read the page with `extract` and a selector instead of retrying. None of the three keys appears when the whole list came back, so their absence is the page's real answer.
 
@@ -309,6 +309,11 @@ When WebSearch or WebFetch aren't available, use `istota-skill browse` as a fall
 
 ## Notes
 
+- At capacity, a new session can replace the oldest session from the same task. It refuses with `retry_after_seconds` if every slot belongs to another caller. Close sessions you no longer need, reuse a session, or retry later. Calls without both a user and task identity cannot replace live sessions.
+- The container defaults to two session slots; Ansible defaults to three. New sessions are refused above 80% container memory use. Existing sessions can still be closed by the memory-pressure backstop on requests that do not create a session. Owner hints affect scheduling only; they do not authenticate callers or isolate the shared Chrome profile.
+
 - Sessions expire after 10 minutes of inactivity — always close them when done
 - Anti-fingerprinting (stealth mode) is enabled by default
 - Budgets are caller-raisable: `render --max-chars` (default 100,000), `get --max-chars` / `--max-links` and `links --max-links` (50,000 / 100), `extract --max-chars` / `--limit` (25,000 per element / 20 elements). The link budget counts links returned rather than anchors examined, and a clipped list says so — see `links_truncated` above.
+
+Browser calls share one queue with briefing sources and FinViz. A call waits up to 90 seconds for the browser before its HTTP timeout starts. A busy-queue error means no request was sent; retry later.

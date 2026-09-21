@@ -14,7 +14,9 @@ import os
 import re
 from dataclasses import dataclass, field
 
-import httpx
+from istota.browser_owner import with_browser_owner
+from istota.browser_admission import browser_request, BrowserQueueTimeout
+
 
 logger = logging.getLogger("istota.skills.markets.finviz")
 
@@ -422,9 +424,9 @@ def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizDat
             time.sleep(delay)
 
         try:
-            resp = httpx.post(
+            resp = browser_request("post",
                 f"{api_url}/browse",
-                json={"url": FINVIZ_URL, "timeout": 30},
+                json=with_browser_owner({"url": FINVIZ_URL, "timeout": 30}),
                 timeout=BROWSE_TIMEOUT,
             )
             result = resp.json()
@@ -442,6 +444,9 @@ def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizDat
 
             return parse_finviz_page(text)
 
+        except BrowserQueueTimeout as e:
+            logger.warning("FinViz skipped: %s", e)
+            return None
         except Exception as e:
             last_error = str(e)
             logger.warning("FinViz fetch error (attempt %d): %s", attempt + 1, e)

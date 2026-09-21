@@ -547,3 +547,69 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
         assert "old" not in browse_api._sessions
         ctx.pages[0].close.assert_called_once()
         assert chrome._pw_thread_id == threading.get_ident()
+
+
+@pytest.mark.parametrize("existing_owner", ["first-task", None])
+@pytest.mark.parametrize("owner", ["other-task", None, "", [], {}])
+def test_capacity_never_evicts_another_caller(monkeypatch, owner, existing_owner):
+    ctx = _claim_connection_on_this_thread(monkeypatch)
+    monkeypatch.setattr(browse_api, "MAX_SESSIONS", 1)
+    monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
+    browse_api._sessions["existing"] = {
+        "owner": existing_owner, "created_at": browse_api.time.time(), "page": ctx.pages[0],
+    }
+    with pytest.raises(RuntimeError, match="capacity"):
+        browse_api._create_session(owner=owner)
+    assert "existing" in browse_api._sessions
+    ctx.new_page.assert_not_called()
+
+
+def test_capacity_can_replace_only_same_owner(monkeypatch):
+    ctx = _claim_connection_on_this_thread(monkeypatch)
+    monkeypatch.setattr(browse_api, "MAX_SESSIONS", 2)
+    monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
+    now = browse_api.time.time()
+    browse_api._sessions.update({
+        "foreign": {"owner": "other", "created_at": now - 10, "page": ctx.pages[0]},
+        "own": {"owner": "task", "created_at": now, "page": ctx.pages[1]},
+    })
+    sid, _ = browse_api._create_session(owner="task")
+    assert set(browse_api._sessions) == {"foreign", sid}
+    assert browse_api._sessions[sid]["owner"] == "task"
+
+
+@pytest.mark.parametrize("pressure", [False, True])
+@pytest.mark.parametrize("endpoint", ["browse", "screenshot", "extract", "render_page"])
+def test_create_endpoint_refuses_capacity_without_draining_foreign_session(monkeypatch, endpoint, pressure):
+    ctx = _claim_connection_on_this_thread(monkeypatch)
+    monkeypatch.setattr(browse_api, "MAX_SESSIONS", 1)
+    monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: browse_api.MEMORY_EVICT_PCT + 1 if pressure else 0)
+    monkeypatch.setattr(browse_api, "_sweep_unclaimed_pages_unlocked", lambda: None)
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(
+        get_json=lambda: {"url": "https://example.com", "owner": "other"},
+    ))
+    browse_api._sessions["foreign"] = {
+        "owner": "first", "created_at": browse_api.time.time(), "page": ctx.pages[0],
+    }
+    browse_api._evict_request.set()
+    body, status = getattr(browse_api, endpoint)()
+    assert status == 503
+    assert body["status"] == "error"
+    assert body["retry_after_seconds"] > 0
+    assert "foreign" in browse_api._sessions
+    ctx.new_page.assert_not_called()
+
+
+def test_capacity_retry_estimate_uses_first_expiration(monkeypatch):
+    _claim_connection_on_this_thread(monkeypatch)
+    monkeypatch.setattr(browse_api, "MAX_SESSIONS", 2)
+    monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
+    monkeypatch.setattr(browse_api.time, "time", lambda: 1000)
+    browse_api._sessions.update({
+        "first": {"owner": "other", "created_at": 450},
+        "second": {"owner": "other", "created_at": 900},
+    })
+    with pytest.raises(browse_api.SessionCapacityError) as caught:
+        browse_api._create_session(owner="new")
+    assert caught.value.retry_after_seconds == 51

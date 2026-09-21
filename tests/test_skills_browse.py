@@ -2000,6 +2000,7 @@ class TestFillCredential:
                 "type": "fill",
                 "selector": "#password",
                 "value": self.VAULT["acme_password"],
+                "credential": True,
             },
         ]
         # The name is the model's own label and is not what the browser is
@@ -2072,6 +2073,7 @@ class TestFillCredential:
                 "type": "fill",
                 "selector": "#password",
                 "value": self.VAULT["acme_password"],
+                "credential": True,
             },
             {"type": "click", "selector": "button[type=submit]"},
         ]
@@ -2104,6 +2106,7 @@ class TestFillCredential:
                 "type": "fill",
                 "selector": "#password",
                 "value": self.VAULT["acme_password"],
+                "credential": True,
             },
         ]
 
@@ -2240,6 +2243,7 @@ class TestFillCredential:
                 "type": "fill",
                 "selector": "input[type=password]",
                 "value": self.VAULT["acme_password"],
+                "credential": True,
             },
         ]
 
@@ -3469,3 +3473,33 @@ class TestTheForegroundNoteOnACapture:
         assert _foreground_note_from_response(
             {"X-Browse-Foreground-Detail": "something"}
         ) is None
+
+
+@pytest.mark.parametrize("verb,command,extra", [
+    ("get", cmd_get, []), ("render", cmd_render, []),
+    ("extract", cmd_extract, ["--selector", "input"]),
+    ("screenshot", cmd_screenshot, []),
+    ("links", cmd_links, []),
+])
+def test_creation_verbs_send_task_owner(monkeypatch, deferred_dir, verb, command, extra):
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("ISTOTA_TASK_ID", "42")
+    args = build_parser().parse_args([verb, "https://example.com", *extra])
+    response = MagicMock()
+    response.status_code = 503
+    response.headers = {"content-type": "application/json"}
+    response.json.return_value = {"status": "error", "error": "capacity"}
+    with patch("istota.skills.browse.httpx.post", return_value=response) as post:
+        command(args)
+    assert json.loads(post.call_args.kwargs["json"]["owner"]) == ["alice", "42"]
+
+
+@pytest.mark.parametrize("user,task", [(None, None), ("alice", None), (None, "42")])
+def test_browser_owner_without_both_identities_is_anonymous(monkeypatch, user, task):
+    from istota.browser_owner import with_browser_owner
+    for name, value in [("ISTOTA_USER_ID", user), ("ISTOTA_TASK_ID", task)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    assert with_browser_owner({"url": "https://example.com"}) == {"url": "https://example.com"}

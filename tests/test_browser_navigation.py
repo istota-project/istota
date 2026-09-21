@@ -140,8 +140,8 @@ def test_wrong_document_is_an_error_at_each_endpoint(navigation, monkeypatch, en
         get_json=lambda: {"url": REQUESTED, "skip_behavior": True},
     ))
     monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
-    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda: None)
-    monkeypatch.setattr(browse_api, "_create_session", lambda: ("session", page))
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kwargs: None)
+    monkeypatch.setattr(browse_api, "_create_session", lambda **kwargs: ("session", page))
     monkeypatch.setattr(browse_api, "_page_is_gone", lambda p: False)
     close = mock.Mock()
     monkeypatch.setattr(browse_api, "_close_session", close)
@@ -300,3 +300,151 @@ def test_path_normalization_does_not_merge_distinct_documents(navigation, reques
     with pytest.raises(RuntimeError, match="navigation_mismatch"):
         browse_api._navigate_and_wait(page, requested)
     assert navigate.call_count == 2
+
+
+def test_extract_keeps_textless_controls_and_scrubs_before_truncation(monkeypatch):
+    page = mock.Mock()
+    page.url = 'https://example.com/'
+    page.is_closed.return_value = False
+    field = mock.Mock()
+    field.inner_text.return_value = ''
+    field.evaluate.return_value = {
+        'text': 'Search', 'html': '<input value="vault&amp;secret">',
+        'tag': 'input', 'type': 'text', 'value': 'vault&secret',
+        'value_present': True, 'name': 'query', 'checked': False,
+    }
+    page.query_selector_all.return_value = [field]
+    page.evaluate.return_value = []
+    monkeypatch.setattr(browse_api, '_credential_values', {'vault&secret'}, raising=False)
+    monkeypatch.setattr(browse_api, '_cleanup_expired', lambda **kwargs: None)
+    monkeypatch.setattr(browse_api, '_get_session', lambda _: {'page': page})
+    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda: None)
+    monkeypatch.setattr(browse_api, 'request', types.SimpleNamespace(
+        get_json=lambda: {'session_id': 's1', 'selector': 'input', 'max_chars': 25}))
+    monkeypatch.setattr(browse_api, 'jsonify', lambda value: value)
+    result = browse_api.extract()
+    assert result['count'] == 1
+    entry = result['elements'][0]
+    assert entry['text'] == 'Search'
+    assert 'value' not in entry
+    assert entry['value_present'] is True
+    assert entry['checked'] is False
+    assert 'vault' not in str(result)
+
+
+@pytest.mark.parametrize('passwords, entry, expected', [
+    ([], {'text': '', 'html': '', 'tag': 'input', 'value': 'typed query',
+          'checked': True}, {'value': 'typed query', 'checked': True}),
+    (['secret', 'default-secret'],
+     {'text': 'secret', 'html': '<input value="default-secret">',
+      'value_present': True, 'type': 'password'},
+     {'text': '[REDACTED]', 'html': '<input value="[REDACTED]">',
+      'value_present': True}),
+    (["a\"b'c"],
+     {'text': '', 'html': "<input type=\"password\" value=\"a&quot;b'c\">"},
+     {'html': '<input type="password" value="[REDACTED]">'}),
+    ([], {'text': 'Photo', 'html': '', 'src': '/photo.png', 'alt': 'Photo'},
+     {'src': '/photo.png', 'alt': 'Photo'}),
+])
+def test_extract_live_state_and_password_reflections(monkeypatch, passwords, entry, expected):
+    page = mock.Mock()
+    page.url = 'https://example.com/'
+    page.is_closed.return_value = False
+    field = mock.Mock()
+    field.evaluate.return_value = entry
+    page.query_selector_all.return_value = [field]
+    page.evaluate.return_value = passwords
+    monkeypatch.setattr(browse_api, '_credential_values', set())
+    monkeypatch.setattr(browse_api, '_cleanup_expired', lambda **kwargs: None)
+    monkeypatch.setattr(browse_api, '_get_session', lambda _: {'page': page})
+    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda: None)
+    monkeypatch.setattr(browse_api, 'request', types.SimpleNamespace(
+        get_json=lambda: {'session_id': 's1', 'selector': '*'}))
+    monkeypatch.setattr(browse_api, 'jsonify', lambda value: value)
+    result = browse_api.extract()
+    assert result['count'] == 1
+    for key, value in expected.items():
+        assert result['elements'][0][key] == value
+    field.evaluate.assert_called_once_with(browse_api._EXTRACT_ELEMENT_JS)
+
+
+def test_credential_fill_registers_before_fallback_and_failed_input(monkeypatch):
+    page = mock.Mock()
+    page.fill.side_effect = RuntimeError('input failed')
+    monkeypatch.setattr(browse_api, '_credential_values', set())
+    monkeypatch.setattr(browse_api.visual, 'bring_to_front',
+                        lambda *a: types.SimpleNamespace(ok=False, detail='hidden'))
+    with pytest.raises(RuntimeError, match='input failed'):
+        browse_api._selector_action({}, page, {
+            'type': 'fill', 'selector': '#token', 'value': 'api-secret',
+            'credential': True,
+        })
+    assert browse_api._credential_values == {'api-secret'}
+    page.wait_for_selector.return_value.evaluate.assert_called_once_with(
+        'el => { el.__istotaCredential = true; }')
+
+
+def test_credential_fill_waits_for_field_before_marking(monkeypatch):
+    page = mock.Mock()
+    handle = mock.Mock()
+    events = []
+
+    def wait_for_field(selector, **kwargs):
+        events.append('wait')
+        return handle
+
+    page.wait_for_selector.side_effect = wait_for_field
+    page.eval_on_selector.side_effect = RuntimeError('field not inserted yet')
+    handle.evaluate.side_effect = lambda script: events.append('mark')
+    page.fill.side_effect = lambda *args, **kwargs: events.append('fill')
+    monkeypatch.setattr(browse_api, '_credential_values', set())
+    monkeypatch.setattr(browse_api.visual, 'bring_to_front',
+                        lambda *a: types.SimpleNamespace(ok=False, detail='hidden'))
+    result = browse_api._selector_action({}, page, {
+        'type': 'fill', 'selector': '#password', 'value': 'fixture-secret',
+        'credential': True,
+    })
+    assert result['ok'] is True
+    assert events == ['wait', 'mark', 'fill']
+    page.wait_for_selector.assert_called_once_with(
+        '#password', state='visible', timeout=browse_api.SELECTOR_TIMEOUT_MS)
+
+
+def test_extract_javascript_reads_live_properties_and_withholds_sensitive_values():
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('node is needed to execute the browser extraction script')
+    script = r'''
+const extract = eval(process.argv[1]);
+function field(tag, attrs, props = {}) {
+  return {tagName: tag, innerText: '', innerHTML: '',
+          getAttribute: name => attrs[name] ?? null, ...props};
+}
+const controls = [
+  field('INPUT', {name: 'search', value: 'old'}, {value: 'typed', checked: false}),
+  field('INPUT', {type: 'checkbox'}, {value: 'on', checked: true}),
+  field('SELECT', {name: 'quantity'}, {value: '3', innerText: 'One Two Three'}),
+  field('IMG', {src: '/photo.png', alt: 'Photo'}),
+  field('BUTTON', {'aria-label': 'Close'}),
+  field('INPUT', {type: 'password'}, {type: 'password', value: 'hidden'}),
+  field('INPUT', {name: 'token'}, {value: 'new secret', __istotaCredential: true}),
+];
+console.log(JSON.stringify(controls.map(extract)));
+'''
+    result = subprocess.run([node, '-e', script, browse_api._EXTRACT_ELEMENT_JS],
+                            capture_output=True, text=True, check=True)
+    entries = json.loads(result.stdout)
+    assert entries[0]['value'] == 'typed'
+    assert entries[0]['text'] == 'search'
+    assert entries[1]['checked'] is True
+    assert entries[2]['value'] == '3'
+    assert entries[3]['src'] == '/photo.png'
+    assert entries[3]['text'] == 'Photo'
+    assert entries[4]['text'] == 'Close'
+    for entry in entries[5:]:
+        assert 'value' not in entry
+        assert entry['value_present'] is True

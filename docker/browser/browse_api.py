@@ -7,6 +7,7 @@ cannot detect an attached debugger.
 """
 
 import atexit
+from html import escape
 import json
 import logging
 import os
@@ -53,12 +54,12 @@ log = logging.getLogger(__name__)
 #
 # The index survives only where a log line or a response wants a number, derived
 # on demand by _tab_index_of. It is authoritative nowhere.
-_sessions = {}  # id -> {page, created_at, generation}
+_sessions = {}  # id -> {page, created_at, owner, generation, context}
 _sessions_lock = threading.Lock()
 SESSION_TTL = 600  # 10 minutes
 MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "2"))
-MEMORY_REJECT_PCT = 85  # reject new sessions above this
-MEMORY_EVICT_PCT = 80   # evict oldest idle session above this
+MEMORY_EVICT_PCT = 80  # evict oldest session above this on non-creation requests
+MEMORY_REJECT_PCT = MEMORY_EVICT_PCT  # never add a tab while eviction is needed
 
 # Set by the resource-monitor thread when memory is over MEMORY_EVICT_PCT, and
 # drained by the Flask thread on its next request. The monitor used to evict
@@ -220,15 +221,31 @@ def _get_memory_pct():
     return 0
 
 
-def _create_session():
+class SessionCapacityError(RuntimeError):
+    def __init__(self, message, retry_after_seconds):
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _capacity_response(error):
+    return jsonify({
+        "status": "error", "error": str(error),
+        "retry_after_seconds": error.retry_after_seconds,
+    }), 503
+
+
+def _create_session(owner=None):
     """Create a new browser tab session.
 
-    Raises RuntimeError if memory pressure is too high.
+    Owner is a scheduling hint, not authentication. Anonymous callers cannot
+    replace a live session, including another anonymous caller's session.
     """
+    if not isinstance(owner, str) or not owner.strip():
+        owner = None
     mem_pct = _get_memory_pct()
     if mem_pct > MEMORY_REJECT_PCT:
-        raise RuntimeError(
-            f"Memory pressure too high ({mem_pct}%), refusing new session"
+        raise SessionCapacityError(
+            f"Memory pressure too high ({mem_pct}%), refusing new session", 30,
         )
 
     chrome.connect_cdp()
@@ -237,7 +254,22 @@ def _create_session():
     with _sessions_lock:
         _evict_expired()
         while len(_sessions) >= MAX_SESSIONS:
-            oldest = min(_sessions, key=lambda s: _sessions[s]["created_at"])
+            own_sessions = [
+                sid for sid, session in _sessions.items()
+                if owner is not None and session.get("owner") == owner
+            ]
+            if not own_sessions:
+                earliest_expiry = min(
+                    session["created_at"] + SESSION_TTL
+                    for session in _sessions.values()
+                )
+                retry_after = max(1, int(earliest_expiry - time.time()) + 1)
+                raise SessionCapacityError(
+                    "Browser at capacity; no session belonging to this caller "
+                    "can be replaced. Close a session or retry after a slot frees.",
+                    retry_after,
+                )
+            oldest = min(own_sessions, key=lambda sid: _sessions[sid]["created_at"])
             _close_session_unlocked(oldest)
 
     # The return value, rather than ctx.pages[-1]: the context is shared, so
@@ -250,6 +282,7 @@ def _create_session():
         _sessions[session_id] = {
             "page": page,
             "created_at": time.time(),
+            "owner": owner,
             # Which Chrome this page belongs to. See _get_session.
             "generation": chrome.launch_generation(),
             # And which *connection*, which is not the same question. A page
@@ -840,8 +873,8 @@ def _checked_url(url):
 @app.route("/browse", methods=["POST"])
 def browse():
     """Navigate to URL and return page content."""
-    _cleanup_expired()
     data = request.get_json()
+    _cleanup_expired(allow_pressure_eviction=bool(data.get("session_id")))
     url = data.get("url", "")
     session_id = data.get("session_id")
     timeout = data.get("timeout", 30) * 1000
@@ -881,7 +914,10 @@ def browse():
                 "error": f"session {session_id} not found or expired",
             }), 404
     else:
-        session_id, page = _create_session()
+        try:
+            session_id, page = _create_session(owner=data.get("owner"))
+        except SessionCapacityError as error:
+            return _capacity_response(error)
         created_new = True
 
     try:
@@ -945,8 +981,8 @@ def screenshot():
     session, so it records nothing -- which is why the visual loop uses
     session_id.
     """
-    _cleanup_expired()
     data = request.get_json()
+    _cleanup_expired(allow_pressure_eviction=bool(data.get("session_id")))
     url = data.get("url")
     session_id = data.get("session_id")
     full_page = data.get("full_page", False)
@@ -972,7 +1008,10 @@ def screenshot():
             }), 404
         page = _session_page(session)
     elif url:
-        session_id, page = _create_session()
+        try:
+            session_id, page = _create_session(owner=data.get("owner"))
+        except SessionCapacityError as error:
+            return _capacity_response(error)
         created_new = True
         try:
             challenge = _navigate_and_wait(page, url, timeout_ms=timeout)
@@ -1068,11 +1107,62 @@ def screenshot():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+# Retained across tabs and session closure: the Chrome profile is shared.
+# This is readback redaction, not cleanup of persisted login state.
+_credential_values = set()
+
+_EXTRACT_ELEMENT_JS = """el => {
+  const a = n => el.getAttribute(n);
+  const entry = {
+    text: (el.innerText || '').trim() || a('aria-label') || a('placeholder')
+          || a('name') || a('alt') || '',
+    html: el.innerHTML,
+    tag: el.tagName.toLowerCase(),
+  };
+  for (const name of ['href', 'src', 'data-link-name', 'id', 'class',
+                       'name', 'type', 'alt']) {
+    const value = a(name);
+    if (value !== null) entry[name] = value;
+  }
+  if ('value' in el) {
+    entry.value_present = String(el.value).length > 0;
+    if (el.type !== 'password' && !el.__istotaCredential) entry.value = String(el.value);
+  }
+  if ('checked' in el) entry.checked = el.checked;
+  return entry;
+}"""
+
+_PASSWORD_VALUES_JS = """() => Array.from(
+  document.querySelectorAll('input[type="password"]'),
+  el => [el.value, el.defaultValue]
+).flat()"""
+
+
+def _scrub_extracted(value, secrets):
+    if isinstance(value, str):
+        variants = set()
+        for secret in secrets:
+            if secret:
+                text_escaped = escape(secret, quote=False)
+                # DOM attributes escape double quotes, but keep apostrophes.
+                attribute_escaped = text_escaped.replace('"', '&quot;')
+                variants.update((secret, escape(secret), text_escaped,
+                                 attribute_escaped, quote(secret, safe='')))
+        for secret in sorted(variants, key=len, reverse=True):
+            value = value.replace(secret, '[REDACTED]')
+        return value
+    if isinstance(value, dict):
+        return {key: _scrub_extracted(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_extracted(item, secrets) for item in value]
+    return value
+
+
 @app.route("/extract", methods=["POST"])
 def extract():
     """Extract content by CSS selector."""
-    _cleanup_expired()
     data = request.get_json()
+    _cleanup_expired(allow_pressure_eviction=bool(data.get("session_id")))
     url = data.get("url")
     session_id = data.get("session_id")
     selector = data.get("selector", "body")
@@ -1095,7 +1185,10 @@ def extract():
             }), 404
         page = _session_page(session)
     elif url:
-        session_id, page = _create_session()
+        try:
+            session_id, page = _create_session(owner=data.get("owner"))
+        except SessionCapacityError as error:
+            return _capacity_response(error)
         created_new = True
         try:
             challenge = _navigate_and_wait(page, url, timeout_ms=timeout)
@@ -1123,33 +1216,39 @@ def extract():
         if _page_is_gone(page):
             raise RuntimeError("Tab not found")
 
+        # Passwords can be autofilled without a credential action. Read their
+        # values only into the redactor, never into the returned element data.
+        secrets = _credential_values | set(page.evaluate(_PASSWORD_VALUES_JS))
         elements = page.query_selector_all(selector)
         results = []
         for el in elements[:limit]:
-            text = el.inner_text().strip()
-            html = el.inner_html()
-            if text:
-                entry = {"text": text[:max_chars], "html": html[:max_chars]}
-                for attr in ("href", "src", "data-link-name", "id", "class"):
-                    val = el.get_attribute(attr)
-                    if val:
-                        entry[attr] = val[:500]
-                results.append(entry)
+            entry = el.evaluate(_EXTRACT_ELEMENT_JS)
+            value = entry.get("value", "")
+            if any(secret and secret in value for secret in secrets):
+                entry.pop("value", None)
+            # Scrub before the budgets: truncation can otherwise leave a
+            # credential prefix which no longer matches the complete secret.
+            entry = _scrub_extracted(entry, secrets)
+            for key, value in entry.items():
+                if isinstance(value, str):
+                    entry[key] = value[:max_chars if key in ("text", "html", "value") else 500]
+            results.append(entry)
 
         if created_new:
             _close_session(session_id)
 
-        return jsonify({
+        return jsonify(_scrub_extracted({
             "status": "ok",
             "url": page.url,
             "selector": selector,
             "count": len(results),
             "elements": results,
-        })
+        }, secrets))
     except Exception as e:
         if created_new:
             _close_session(session_id)
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return jsonify(_scrub_extracted({"status": "error", "error": str(e)},
+                                        locals().get("secrets", _credential_values))), 500
 
 
 # How many frames `include_frames` will actually read. Separate from the
@@ -1226,8 +1325,8 @@ def render_page():
     Takes `url` (navigate first), `session_id` (render what that tab already
     holds), or both (navigate within an existing session).
     """
-    _cleanup_expired()
     data = request.get_json()
+    _cleanup_expired(allow_pressure_eviction=bool(data.get("session_id")))
     url = data.get("url")
     session_id = data.get("session_id")
     include_frames = bool(data.get("include_frames"))
@@ -1253,7 +1352,10 @@ def render_page():
             }), 404
         page = _session_page(session)
     elif url:
-        session_id, page = _create_session()
+        try:
+            session_id, page = _create_session(owner=data.get("owner"))
+        except SessionCapacityError as error:
+            return _capacity_response(error)
         created_new = True
     else:
         return jsonify({"error": "url or session_id is required"}), 400
@@ -2021,7 +2123,19 @@ def _selector_action(session, page, action, others=(), owned=()):
     fill whose keystrokes did not arrive as sent.
     """
     action_type = action["type"]
+    if action_type == "fill" and action.get("credential"):
+        # Register before either input path, including partially failed fills.
+        value = action.get("value", "")
+        if value:
+            _credential_values.add(value)
     selector = action.get("selector") or ""
+    if selector and action_type == "fill" and action.get("credential"):
+        # Preserve the fill's wait for dynamically inserted controls. Mark
+        # the resolved handle before either input path can write a credential.
+        handle = page.wait_for_selector(
+            selector, state="visible", timeout=SELECTOR_TIMEOUT_MS,
+        )
+        handle.evaluate("el => { el.__istotaCredential = true; }")
     if not selector:
         return {"action": action_type, "ok": False,
                 "error": "selector is required"}
@@ -2522,7 +2636,7 @@ def health():
     return jsonify(data)
 
 
-def _cleanup_expired():
+def _cleanup_expired(allow_pressure_eviction=True):
     """Remove expired sessions, and serve any eviction the monitor asked for.
 
     Called at the top of every endpoint, so this is where the monitor thread's
@@ -2547,7 +2661,9 @@ def _cleanup_expired():
     with _sessions_lock:
         _evict_expired()
         _sweep_unclaimed_pages_unlocked()
-        evicted = _drain_evict_request_unlocked()
+        # A create request must not take a foreign live session as a side
+        # effect of cleanup. Creation refuses new work under pressure instead.
+        evicted = _drain_evict_request_unlocked() if allow_pressure_eviction else None
     if evicted:
         log.info("Evicted session %s before serving this request", evicted)
 

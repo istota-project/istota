@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Browse, briefing sources and FinViz now share a bounded cross-process browser queue. Waiting no longer consumes the page request timeout; a saturated queue reports the browser as busy.
+
+- Opening a browser session at capacity no longer closes another task's session. Callers receive a capacity error with a retry estimate, and new sessions are refused under memory pressure instead of evicting a foreign session. Requires a rebuilt browser image.
+
+- Browse extraction includes controls, images and icon-only elements even when they have no rendered text. It reports live form values and checkbox state, withholds password and credential-filled values, and redacts known credentials from extraction output before truncation. Requires a rebuilt browser image.
+
 - A browser fetch retries when it lands on the wrong page and reports a navigation error if the retry fails. Previously it could return an older page as a successful fetch; redirects are accepted only when the browser observed them. Equivalent paths such as `/a/../b` and `/b` are accepted when Chrome normalizes them. Needs the rebuilt browser image.
 
 - A browse action no longer reports the tab switch as unproved because of the session's own popup. A popup carries the title of the page that opened it, and a session's popups are now kept alive so a login or consent flow is not interrupted — so the session's tab and the tab it opened collided in the check that confirms which tab is in front, and every click, keystroke and scroll in that session came back saying the switch could not be confirmed while nothing was wrong. Nothing was ever refused for it, which is the problem: a warning that fires routinely stops being read. The collision is still reported, because the window title agreeing says a tab with that title is in front and not which of the two — but the note now says when the other tab is one this session opened, so it can be told apart from another session's page. Needs the rebuilt browser image.

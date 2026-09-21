@@ -24,6 +24,9 @@ import re
 import time
 from pathlib import Path
 
+from istota.browser_owner import with_browser_owner
+from istota.browser_admission import browser_request
+
 import httpx
 
 from istota.image_sniff import SNIFF_BYTES, sniff_raster
@@ -245,7 +248,7 @@ def cmd_get(args):
     if args.max_links:
         payload["max_links"] = args.max_links
 
-    resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
+    resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
     return _decode(resp)
 
 
@@ -281,7 +284,7 @@ def cmd_render(args):
     if args.skip_behavior:
         payload["skip_behavior"] = True
 
-    resp = httpx.post(f"{url}/render", json=payload, timeout=REQUEST_TIMEOUT)
+    resp = browser_request("post", f"{url}/render", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
     if resp.status_code == 404:
         # Two unrelated failures share this status. The endpoint's own
         # "session not found or expired" is a JSON body with an `error` key —
@@ -665,7 +668,7 @@ def cmd_screenshot(args):
     if args.session:
         payload["session_id"] = args.session
 
-    resp = httpx.post(f"{url}/screenshot", json=payload, timeout=REQUEST_TIMEOUT)
+    resp = browser_request("post", f"{url}/screenshot", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
 
     # The status is checked as well as the content type, because this is the
     # one verb that reports success off a body it never parses: an intermediary
@@ -799,7 +802,7 @@ def cmd_extract(args):
     if args.limit:
         payload["limit"] = args.limit
 
-    resp = httpx.post(f"{url}/extract", json=payload, timeout=REQUEST_TIMEOUT)
+    resp = browser_request("post", f"{url}/extract", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
     return _decode(resp)
 
 
@@ -878,7 +881,8 @@ def _fill_credential_action(pair):
             "--fill-credential was not resolved; the shared-credential "
             "lookup did not run for this call"
         )
-    return {"type": "fill", "selector": pair.label, "value": pair.value.reveal()}
+    return {"type": "fill", "selector": pair.label, "value": pair.value.reveal(),
+            "credential": True}
 
 
 def _point(spec, flag):
@@ -1177,7 +1181,7 @@ def _session_capture(url, session_id):
     its own session, or Chrome has been relaunched since), and one that will
     not read is a record this skill cannot use.
     """
-    resp = httpx.get(f"{url}/sessions/{session_id}", timeout=REQUEST_TIMEOUT)
+    resp = browser_request("get", f"{url}/sessions/{session_id}", timeout=REQUEST_TIMEOUT)
     data = _decode(resp)
     if not isinstance(data, dict) or data.get("status") == "error":
         return None, (
@@ -1364,7 +1368,7 @@ def cmd_interact(args):
     # propagating — cautioning about it would claim actions may have run
     # against a call that had not been made.
     try:
-        resp = httpx.post(f"{url}/interact", json=payload, timeout=REQUEST_TIMEOUT)
+        resp = browser_request("post", f"{url}/interact", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
     except PRE_SEND_TRANSPORT_ERRORS:
         raise
     except httpx.TransportError as exc:
@@ -1414,7 +1418,7 @@ def cmd_links(args):
         # Extract links from specific elements in existing session
         payload = {"selector": args.selector, "timeout": args.timeout}
         payload["session_id"] = args.session
-        resp = httpx.post(f"{url}/extract", json=payload, timeout=REQUEST_TIMEOUT)
+        resp = browser_request("post", f"{url}/extract", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
         data = _decode(resp)
         if data.get("status") != "ok":
             return data
@@ -1428,7 +1432,7 @@ def cmd_links(args):
     elif args.selector:
         # Fetch page then extract links from selector
         payload = {"url": args.url, "timeout": args.timeout, "keep_session": False}
-        resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
+        resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
         browse_data = _decode(resp)
         if browse_data.get("status") != "ok":
             return browse_data
@@ -1439,12 +1443,12 @@ def cmd_links(args):
             ext_payload["session_id"] = session_id
         else:
             ext_payload["url"] = args.url
-        ext_resp = httpx.post(f"{url}/extract", json=ext_payload, timeout=REQUEST_TIMEOUT)
+        ext_resp = browser_request("post", f"{url}/extract", json=with_browser_owner(ext_payload), timeout=REQUEST_TIMEOUT)
         data = _decode(ext_resp)
         # Clean up session if we got one
         if session_id:
             try:
-                httpx.delete(f"{url}/sessions/{session_id}", timeout=5.0)
+                browser_request("delete", f"{url}/sessions/{session_id}", timeout=5.0)
             except Exception:
                 pass
         if data.get("status") != "ok":
@@ -1463,7 +1467,7 @@ def cmd_links(args):
             payload["session_id"] = args.session
         if args.max_links:
             payload["max_links"] = args.max_links
-        resp = httpx.post(f"{url}/browse", json=payload, timeout=REQUEST_TIMEOUT)
+        resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
         data = _decode(resp)
         if data.get("status") != "ok":
             return data
@@ -1527,7 +1531,7 @@ def cmd_challenge(args):
     with nothing to press and want opposite things done about them.
     """
     url = get_api_url()
-    resp = httpx.post(
+    resp = browser_request("post",
         f"{url}/challenge",
         json={"session_id": args.session_id},
         timeout=REQUEST_TIMEOUT,
@@ -1538,7 +1542,7 @@ def cmd_challenge(args):
 def cmd_close(args):
     """Close a session."""
     url = get_api_url()
-    resp = httpx.delete(f"{url}/sessions/{args.session_id}", timeout=30.0)
+    resp = browser_request("delete", f"{url}/sessions/{args.session_id}", timeout=30.0)
     return _decode(resp)
 
 
