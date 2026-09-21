@@ -13,6 +13,7 @@ import json
 import ipaddress
 import logging
 import os
+import signal
 import re
 import shutil
 import stat
@@ -3338,9 +3339,17 @@ def _start_browse_watchdog():
 # Startup
 # ---------------------------------------------------------------------------
 
+def _exit_on_sigterm(_signum, _frame):
+    # Python runs handlers on the main thread. Unwind the request before atexit
+    # reaches Patchright, and let a repeated stop signal leave cleanup intact.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise SystemExit(0)
+
+
 atexit.register(pool.cleanup)
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     chrome.migrate_legacy_profile(chrome.PROFILE_ROOT)
     mon = threading.Thread(target=_resource_monitor, daemon=True)
     mon.start()

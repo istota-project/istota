@@ -23,6 +23,8 @@ ENV TZ=America/New_York
 # Narrow faces bookworm's 1.x shipped. Both are here to keep the font list level
 # with the bookworm image; check `fc-list : family` against it before trimming.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
+    util-linux \
     x11vnc \
     novnc \
     python3-websockify \

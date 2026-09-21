@@ -38,6 +38,10 @@ chown -R browser:browser "$BROWSER_RUNTIME_DIR"
 websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
     --token-plugin TokenFile --token-source "$BROWSER_RUNTIME_DIR/vnc-tokens" 6080 &
 
-# Start the Flask API as the non-root browser user
-# This allows Chrome to use its native sandbox (Chrome refuses to sandbox as root)
-exec su -s /bin/bash browser -c "LANG=$LANG TZ=$TZ BROWSER_PROFILE_DIR=$PROFILE_DIR python /app/browse_api.py"
+# Forward Docker stop to the API only, then reap orphaned children. su kills
+# its shell after two seconds, before the API can flush every Chrome profile.
+# setpriv execs directly and preserves the configured environment without a
+# second shell parsing paths or values. Keep the browser account's HOME too.
+exec tini -- setpriv --reuid=browser --regid=browser --init-groups \
+    env HOME=/home/browser USER=browser LOGNAME=browser SHELL=/bin/bash \
+    BROWSER_PROFILE_DIR="$PROFILE_DIR" python /app/browse_api.py

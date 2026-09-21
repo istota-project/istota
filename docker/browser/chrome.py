@@ -303,7 +303,7 @@ def _signal_group(proc, sig):
     Chrome's renderers, GPU process, zygotes and utility processes are children
     of the *browser* process, not of this one, so signalling the handle alone
     orphans every one of them -- they reparent to PID 1, which in this container
-    is ``su`` and reaps nothing. ``start_new_session=True`` at launch puts the
+    is an init that reaps them but does not terminate them. ``start_new_session=True`` at launch puts the
     whole tree in a group of its own so one signal reaches all of it.
 
     The leadership check is a safety interlock, not a formality. If the process
@@ -325,7 +325,7 @@ def _signal_group(proc, sig):
         return False
 
 
-def _kill_chrome_proc(proc, timeout=5):
+def _kill_chrome_proc(proc, timeout=5, *, graceful=False):
     """Stop Chrome and reap it. Never raises.
 
     The reap is the part that was missing. The old shape was ``terminate()``,
@@ -342,7 +342,9 @@ def _kill_chrome_proc(proc, timeout=5):
     if proc is None:
         return
     try:
-        if not _signal_group(proc, signal.SIGTERM):
+        # Normal retirement lets the browser ask its renderers to flush before
+        # they exit. Wedge recovery still signals the whole process group.
+        if graceful or not _signal_group(proc, signal.SIGTERM):
             proc.terminate()
     except Exception:
         pass
@@ -856,5 +858,5 @@ def cleanup(inst):
     # Only bounded process work belongs under the lifecycle lock.
     with _chrome_lock:
         proc, inst.proc = inst.proc, None
-        _kill_chrome_proc(proc)
+        _kill_chrome_proc(proc, graceful=True)
     disconnect_cdp(inst)

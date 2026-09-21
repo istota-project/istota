@@ -305,7 +305,18 @@ def release_slot(inst, *, require_stopped=False):
 
 def cleanup():
     """Release instances and then the one shared Patchright driver at exit."""
-    for inst in live():
+    instances = live()
+    # Give every profile a chance to flush before waiting for any one browser
+    # or its CDP connection. The init forwards SIGTERM to this API alone.
+    with chrome._chrome_lock:
+        for inst in instances:
+            inst.retired = True
+            if inst.proc is not None:
+                try:
+                    inst.proc.terminate()
+                except OSError:
+                    pass
+    for inst in instances:
         release_slot(inst)
     if chrome._pw is not None:
         chrome._pw.stop()
