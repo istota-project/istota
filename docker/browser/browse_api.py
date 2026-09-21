@@ -1722,7 +1722,7 @@ def _coordinate_action(session, page, action, others=(), owned=()):
     if refusal:
         return refusal
 
-    if action_type in ("click_at", "hover_at", "scroll_at"):
+    if action_type in ("click_at", "hover_at", "scroll_at", "drag_at"):
         # Both scroll arguments are read before the pointer moves and before
         # the capture is consulted, since the answer depends on the action
         # alone: a refusal after a converted point has travelled has already
@@ -1760,11 +1760,29 @@ def _coordinate_action(session, page, action, others=(), owned=()):
                 record, action.get("x"), action.get("y"),
                 image_size=action.get("image_size"),
             )
+            if action_type == "drag_at":
+                end_x, end_y = visual.image_to_screen(
+                    record, action.get("to_x"), action.get("to_y"),
+                    image_size=action.get("image_size"),
+                )
         except ValueError as e:
             return {
                 "action": action_type, "ok": False,
                 "error": "out_of_picture", "detail": str(e),
             }
+
+        if action_type == "drag_at":
+            if not browsing.human_drag_at(screen_x, screen_y, end_x, end_y):
+                return {
+                    "action": "drag_at", "ok": False,
+                    "error": "drag_incomplete",
+                    "detail": "the pointer did not reach a drag endpoint; inspect a new screenshot before retrying",
+                }
+            _settle(page, 1000)
+            return _with_foreground({
+                "action": "drag_at", "ok": True,
+                "screen": _landed_point(end_x, end_y),
+            }, verdict)
 
         if action_type == "hover_at":
             if not browsing.human_move_to(screen_x, screen_y):
@@ -2260,7 +2278,7 @@ _SELECTOR_ACTIONS = ("click", "fill")
 
 _COORDINATE_ACTIONS = (
     "click_at", "hover_at", "click_challenge", "key", "type",
-    "scroll_at", "scroll",
+    "scroll_at", "scroll", "drag_at",
 )
 
 

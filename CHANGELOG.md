@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Browse can now drag sliders, pan maps and select regions on a canvas with `--drag-at X1,Y1 X2,Y2`. Both points use the screenshot coordinates, and a stale picture is refused before the drag begins. Requires a rebuilt browser image.
+
 - Active browser sessions no longer expire while in use. Idle sessions are evicted before recently used ones, and session status and capacity retry estimates follow the idle timeout.
 
 - Browse, briefing sources and FinViz now share a bounded cross-process browser queue. Waiting no longer consumes the page request timeout; a saturated queue reports the browser as busy.

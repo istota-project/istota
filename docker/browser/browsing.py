@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from xdotool import (
     modifier_held,
+    mouse_button_held,
     mouse_click,
     mouse_location,
     mouse_move,
@@ -397,6 +398,14 @@ def human_click_at(target_x, target_y, button=1):
     mouse_click(button=button)
     time.sleep(gauss_clamp(0.25, 0.1, 0.1, 0.5))
     return True
+
+
+def human_drag_at(start_x, start_y, end_x, end_y):
+    """Approach, hold the left button, move, then release after a short dwell."""
+    if not human_move_to(start_x, start_y):
+        return False
+    with mouse_button_held():
+        return human_move_to(end_x, end_y, settle_s=0.15)
 
 
 def human_scroll_at(target_x, target_y, button, clicks=3, modifier=None):
