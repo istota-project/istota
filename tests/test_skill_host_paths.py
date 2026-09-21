@@ -55,6 +55,20 @@ def mount(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def deferred(mount):
+    """`$ISTOTA_DEFERRED_DIR`, the directory the `mount` fixture exports.
+
+    The task's own per-user temp dir: the first root of the write allowlist,
+    and since `ff060a59` also where a `browse screenshot` with no `--output`
+    goes. Read back off the environment rather than rebuilt from `tmp_path`,
+    so the fixture above stays the only thing deciding where it is.
+    """
+    import os
+
+    return Path(os.environ["ISTOTA_DEFERRED_DIR"])
+
+
+@pytest.fixture
 def repos(tmp_path, monkeypatch):
     """The developer repos tree, and the variable as `execute_task` builds it.
 
@@ -818,9 +832,14 @@ class TestWriteResolved:
 class TestBrowseScreenshotIsScoped:
     """`--output` was an unguarded host write, and the default was worse.
 
-    The old default was `/tmp/screenshot.png`. The CLI runs host-side through
-    the proxy while the model's `/tmp` is the sandbox's own tmpfs, so the file
-    landed on the host and the model was handed a path it could not open.
+    The default has moved twice since. It was `/tmp/screenshot.png` — the CLI
+    runs host-side through the proxy while the model's `/tmp` is the sandbox's
+    own tmpfs, so the file landed on the host and the model was handed a path
+    it could not open. Then the user's own workspace, which fixed that and is
+    also what `/chat/files` serves, so a visual loop taking eight captures
+    filed eight permanent pictures in a directory the user reads. It is now
+    `$ISTOTA_DEFERRED_DIR/screenshots` (`ff060a59`), which has the first
+    property and not the second.
 
     **Driven through `main`, because that is where the scoping is.** `--output`
     is declared `WRITE` and resolved by `parse_and_resolve`, so calling
@@ -876,74 +895,84 @@ class TestBrowseScreenshotIsScoped:
         assert dest.read_bytes().startswith(b"\x89PNG")
         assert result["media_type"] == "image/png"
 
-    def test_the_default_lands_in_the_callers_own_workspace(
-        self, mount, monkeypatch, post,
+    def test_the_default_lands_in_the_tasks_own_temp_dir(
+        self, mount, deferred, post,
     ):
-        monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", "istota")
-        result = self._shot("https://example.com")
-        assert result["status"] == "ok"
-        written = Path(result["path"])
-        expected_dir = (mount / "Users" / "alice" / "istota" / "screenshots").resolve()
-        assert written.parent == expected_dir
-        assert written.read_bytes().startswith(b"\x89PNG")
-        # The `?path=` spelling `/chat/files` takes, so a reply can embed the
-        # picture without rebuilding the path by hand.
-        assert result["workspace_path"] == (
-            "/Users/alice/istota/screenshots/" + written.name
-        )
+        """No `--output` puts the capture in `$ISTOTA_DEFERRED_DIR/screenshots`.
 
-    def test_the_default_follows_the_configured_bot_dir(
-        self, mount, monkeypatch, post,
-    ):
-        monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", "mister_jones")
-        result = self._shot("https://example.com")
-        assert Path(result["path"]).parent.name == "screenshots"
-        assert Path(result["path"]).parent.parent.name == "mister_jones"
-
-    def test_a_bot_dir_that_is_not_a_plain_component_is_refused(
-        self, mount, monkeypatch, post,
-    ):
-        monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", "../../etc")
-        result = self._shot("https://example.com")
-        assert result["status"] == "error"
-        post.assert_not_called()
-
-    def test_no_output_and_no_workspace_refuses_rather_than_falling_back(
-        self, monkeypatch, post,
-    ):
-        """The old fallback was `/tmp/screenshot.png`, which is the bug."""
-        monkeypatch.delenv("NEXTCLOUD_MOUNT_PATH", raising=False)
-        monkeypatch.delenv("ISTOTA_USER_ID", raising=False)
-        monkeypatch.delenv("ISTOTA_DEFERRED_DIR", raising=False)
-        result = self._shot("https://example.com")
-        assert result["status"] == "error"
-        assert "NEXTCLOUD_MOUNT_PATH" in result["error"]
-        # Nothing was captured, so there are no bytes to have written
-        # anywhere. Asserting on `/tmp/screenshot.png` instead would read
-        # machine-global state this test does not own.
-        post.assert_not_called()
-
-    def test_no_bot_dir_refuses_and_names_that_variable(
-        self, mount, monkeypatch, post,
-    ):
-        """Two things stop the directory resolving and they read differently.
-
-        Naming the mount variables when `ISTOTA_BOT_DIR_NAME` is the one
-        missing sends the reader to a setting that is correct — the misreport
-        `doctor` states the rule against. The variable is required rather than
-        defaulted, matching the two `memory` skills: guessing `istota` on a
-        deployment whose bot is called something else files the capture beside
-        the real bot dir, where it serves fine and reports nothing.
+        That directory is bound read-write into the sandbox, so the model can
+        read back what it just captured, and `cleanup_old_temp_files` already
+        sweeps it on `[scheduler] temp_file_retention_days` — which is why a
+        scratch picture goes there rather than into the workspace, where
+        nothing sweeps and `/chat/files` serves.
         """
-        monkeypatch.delenv("ISTOTA_BOT_DIR_NAME", raising=False)
+        result = self._shot("https://example.com")
+        assert result["status"] == "ok", result
+        written = Path(result["path"])
+        assert written.parent == (deferred / "screenshots").resolve()
+        assert written.read_bytes().startswith(b"\x89PNG")
+        # Where it is *not*. The workspace resolves in this fixture, so a pass
+        # is the destination rule rather than the absence of an alternative.
+        assert not written.is_relative_to((mount / "Users" / "alice").resolve())
+
+    def test_a_symlinked_screenshots_dir_does_not_redirect_the_capture(
+        self, mount, deferred, tmp_path, post,
+    ):
+        """The derived name goes through the allowlist, not straight to `open`.
+
+        `$ISTOTA_DEFERRED_DIR` is bound read-write into the sandbox, so the
+        `screenshots` directory under it is the model's to create — including
+        as a link pointing out of the roots. Every candidate name goes through
+        `resolve_host_path`, which refuses a symlinked destination parent, so
+        nothing is written. A verb that derived the path and opened it would
+        land the bytes at the link's target as the daemon user with an `ok`
+        envelope over them.
+
+        The browser *is* asked here, unlike the refusals above: the capture is
+        taken and then has nowhere to go, so the assertion is on the target
+        rather than on `post`.
+        """
+        elsewhere = tmp_path / "attacker"
+        elsewhere.mkdir()
+        (deferred / "screenshots").symlink_to(elsewhere, target_is_directory=True)
+
+        result = self._shot("https://example.com")
+
+        assert result["status"] == "error"
+        assert list(elsewhere.iterdir()) == []
+
+    def test_no_temp_dir_refuses_and_names_that_variable(
+        self, mount, monkeypatch, post,
+    ):
+        """One failure reason now, and it names the setting that is missing.
+
+        `env_host_roots` drops each ingredient independently, so the mount and
+        the user id still resolve here and an `--output` under the workspace
+        really would have been accepted. Naming the mount variables in that
+        state sends the reader to a setting that is correct — the misreport
+        `doctor` states the rule against, and the property the old
+        `test_no_bot_dir_refuses_and_names_that_variable` was written for.
+
+        `tests/test_skills_browse.py::TestTheScratchDefault` asserts the same
+        refusal against `cmd_screenshot`; this one is through `main`, and is
+        the only place asserting which variable is *not* named.
+
+        There is also no fallback, which is what the old
+        `test_no_output_and_no_workspace_refuses_rather_than_falling_back`
+        held. Nothing was captured, so there are no bytes to have written
+        anywhere; asserting on `/tmp/screenshot.png` — the destination two
+        moves ago — would read machine-global state this test does not own.
+        """
+        monkeypatch.delenv("ISTOTA_DEFERRED_DIR")
         result = self._shot("https://example.com")
         assert result["status"] == "error"
-        assert "ISTOTA_BOT_DIR_NAME" in result["error"]
+        assert "ISTOTA_DEFERRED_DIR" in result["error"]
         assert "NEXTCLOUD_MOUNT_PATH" not in result["error"]
+        assert "--output" in result["error"]
         post.assert_not_called()
 
     def test_a_derived_name_never_overwrites_an_existing_capture(
-        self, mount, monkeypatch, post,
+        self, mount, post,
     ):
         """Two tasks of one user can derive the same name in one second.
 
@@ -952,7 +981,6 @@ class TestBrowseScreenshotIsScoped:
         first and both report ok, the first with a `size` describing bytes
         that are no longer on disk. The name is claimed by `O_EXCL` instead.
         """
-        monkeypatch.setenv("ISTOTA_BOT_DIR_NAME", "istota")
         first = self._shot("https://example.com")
         assert first["status"] == "ok"
 
