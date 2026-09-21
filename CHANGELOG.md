@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Admins can find live browsers under Browsers and open each user’s VNC viewer directly. The list refreshes without starting browsers or keeping idle sessions alive.
+
 - Users can inspect their saved browser state and clear a site, all site data or their complete profile with `browse state` and `browse forget`. Closing a browsing session keeps their logins for later tasks.
 
 - Istota can look at a page and click a point on it. `browse screenshot` records the frame the picture was taken in, and `browse interact --click-at X,Y` takes the numbers read straight off that picture, with `--hover-at`, `--press` and `--type` for a form no selector reaches. The DOM path is still the first move — this is the rung below a CSS selector, for a canvas, a chart, a PDF viewer or a control whose class names change every build.

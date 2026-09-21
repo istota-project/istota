@@ -610,6 +610,16 @@ export interface AdminConnection {
   pairing_blocked_reason: string | null;
 }
 
+export interface AdminBrowsers {
+  status: 'ok' | 'disabled' | 'unavailable';
+  console_configured: boolean;
+  instances: { user: string; slot: number; idle_seconds: number; url: string }[];
+}
+
+export async function getAdminBrowsers(): Promise<AdminBrowsers> {
+  return apiFetch<AdminBrowsers>('/admin/browsers', undefined, 8_000);
+}
+
 export async function getAdminConnections(): Promise<{ connections: AdminConnection[] }> {
   return apiFetch<{ connections: AdminConnection[] }>('/admin/connections');
 }
