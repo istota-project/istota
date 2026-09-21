@@ -194,6 +194,7 @@ One `--type` is bounded at a bit over a thousand characters — the container re
 | `full_page_capture` | The picture was `--full-page`, a different coordinate space | Re-capture without `--full-page` |
 | `no_coordinate_frame` | The capture on record has no screen position to convert against | Re-capture with `--session <id>` |
 | `out_of_picture` | The point is outside the picture | Read the point off the image rather than estimating it |
+| `no_challenge` | `--click-challenge` found no visible Cloudflare widget on the page | Run `browse challenge <id>` to see what is there — it may be a challenge of another kind |
 | `pointer_did_not_move` | The pointer never reached the point, so nothing was pressed | Nothing happened to the page — re-capture and try again |
 | `text_too_long` | The `--type` text is past what one action can deliver | Send it in chunks |
 | `option_shaped_input` | The text or key begins with `-`, which xdotool reads as an option | Lead with a space, or use `--fill` with a selector |
@@ -224,7 +225,24 @@ A screenshot taken by the URL form records nothing, because it closes its own se
 
 ## Captcha handling
 
-If a response has `"status": "captcha"`, tell the user and provide the `vnc_url`. Wait for them to solve it, then retry with `--session <session_id>`.
+`"status": "captcha"` means the page is a challenge rather than the content you asked for. There is no `title`, `text` or `links` in that answer, and none is being withheld — the page was not read. A `challenge` field naming a phrase means the verdict came from the window title, before anything read the page at all.
+
+On a Cloudflare challenge you can often clear it yourself, and that is the first thing to try:
+
+```bash
+istota-skill browse challenge <session_id>                  # is there a widget, and where
+istota-skill browse interact <session_id> --click-challenge
+istota-skill browse screenshot --session <session_id>       # look at what happened
+istota-skill browse render --session <session_id>           # the page, once it clears
+```
+
+`challenge` presses nothing. It answers `frames`, `checkbox_css` and `checkbox_screen`, and the two empty answers mean different things: no `frames` at all means there is no Cloudflare widget here, so this is a challenge of another kind or one that has already gone, while `frames` with a `null` `checkbox_css` means there is a challenge here that the container cannot locate — hand that one to the user rather than pressing at it.
+
+`--click-challenge` takes no coordinate. The container measures the widget's own box and presses the checkbox inside it, which is more accurate than reading a point off a picture and is the only way to reach an element that has no selector and sits in a frame no selector enters. It needs a screenshot of this session on record, exactly as `--click-at` does, and answers the same error codes.
+
+**Press once, then look.** A pressed challenge takes a few seconds to settle, and pressing again while it works starts it over. Take a screenshot, and press a second time only if the widget is still there and still unticked. Two presses that change nothing is the point to stop.
+
+If there is no widget, the challenge does not clear, or `challenge` reports frames it cannot find a checkbox in: tell the user, give them the `vnc_url`, and wait for them to solve it. Then retry with `--session <session_id>`.
 
 ## Fallback for web tools
 
