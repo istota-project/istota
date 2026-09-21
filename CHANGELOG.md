@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Active browser sessions no longer expire while in use. Idle sessions are evicted before recently used ones, and session status and capacity retry estimates follow the idle timeout.
+
 - Browse, briefing sources and FinViz now share a bounded cross-process browser queue. Waiting no longer consumes the page request timeout; a saturated queue reports the browser as busy.
 
 - Opening a browser session at capacity no longer closes another task's session. Callers receive a capacity error with a retry estimate, and new sessions are refused under memory pressure instead of evicting a foreign session. Requires a rebuilt browser image.

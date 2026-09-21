@@ -584,7 +584,7 @@ class TestWhatMustNeverEarnARestart:
             page.is_closed.return_value = False
             browse_api._sessions[f"stale-{i}"] = {
                 "page": page,
-                "created_at": time.time() - browse_api.SESSION_TTL - 60,
+                "created_at": time.time() - browse_api.SESSION_TTL - 60, "last_used_at": time.time() - browse_api.SESSION_TTL - 60,
             }
             browse_api._cleanup_expired()
 
