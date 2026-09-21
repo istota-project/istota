@@ -162,20 +162,25 @@ class TestPostprocess:
 
 
 class TestTruncationContract:
-    def test_marker_shape_is_what_the_briefing_source_strips(self):
-        """briefings/sources/browse.py greps this footer out of the prompt."""
-        from istota.briefings.sources.browse import _TRUNCATION_FOOTER_RE
+    def test_truncation_metadata_leaves_content_as_an_exact_prefix(self):
+        from text_budget import text_window
 
-        text, truncated = render._truncate("x" * 500, 100)
-        assert truncated is True
-        assert _TRUNCATION_FOOTER_RE.search(text) is not None
-        assert _TRUNCATION_FOOTER_RE.sub("", text).strip() == "x" * 100
+        text, metadata = text_window("x" * 500, 100)
+        assert text == "x" * 100
+        assert metadata["text_truncated_by"] == "max_chars"
+        assert metadata["next_offset"] == 100
 
     def test_under_the_cap_is_untouched(self):
-        assert render._truncate("short", 100) == ("short", False)
+        from text_budget import text_window
 
-    def test_zero_disables_the_cap(self):
-        assert render._truncate("x" * 500, 0) == ("x" * 500, False)
+        assert text_window("short", 100) == ("short", {})
+
+    def test_final_chunk_has_no_next_offset(self):
+        from text_budget import text_window
+
+        text, metadata = text_window("abcde", 3, offset=3)
+        assert text == "de"
+        assert metadata == {"text_total_chars": 5, "text_offset": 3}
 
 
 class TestTheFrameSplice:
