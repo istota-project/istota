@@ -254,3 +254,193 @@ def page_to_screen(record, css_x, css_y):
         record["window"]["x"] + offset_x + css_x * dpr,
         record["window"]["y"] + offset_y + css_y * dpr,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Which tab the pointer and the keyboard are actually addressing
+# --------------------------------------------------------------------------- #
+#
+# Sessions are tabs in one Chrome window. X11 input reaches whatever tab that
+# window is showing, so an action on the X11 path lands in the foreground tab
+# whatever session id the caller named. `focus_chrome()` focuses the *window*
+# and says nothing about the tab.
+#
+# `Page.bringToFront` is the switch. It is a target-level command rather than
+# a page evaluate, so it opens none of the CDP the challenge path is careful
+# to avoid, and `_navigate_and_wait` already uses it on these same pages.
+#
+# Confirming it took is the harder half, and the obvious probe does not work:
+# `document.visibilityState` reads "visible" on every tab in this container,
+# background ones included -- measured against the shipped build, not assumed.
+# The X11 window title is what does track the foreground tab, exactly and
+# immediately, and it is the signal wait_for_challenges() already polls.
+
+CHROME_TITLE_SUFFIXES = (" - Google Chrome", " - Chromium")
+
+# How long to let Chrome repaint the window title after the tab switch.
+FOREGROUND_SETTLE_S = 0.6
+FOREGROUND_POLL_S = 0.05
+
+# Chrome does not elide a window title at any length seen here, but a
+# comparison that assumes it never will is one silent refusal away from
+# breaking every action on a long-titled page. Compared on a bounded prefix.
+TITLE_MATCH_CHARS = 60
+
+
+class Foreground:
+    """The verdict on whether the named session's tab is the one in front.
+
+    Three states rather than two, because "could not tell" and "it is not"
+    want opposite handling: an unconfirmed switch is reported and allowed, a
+    contradicted one is refused. Collapsing them either strands a caller whose
+    page has no title, or lets the wrong-tab bug through under a title the
+    check could not read.
+    """
+
+    def __init__(self, ok, confirmed, code=None, detail=None):
+        self.ok = ok
+        self.confirmed = confirmed
+        self.code = code
+        self.detail = detail
+
+    def __repr__(self):
+        return (f"Foreground(ok={self.ok}, confirmed={self.confirmed}, "
+                f"code={self.code!r})")
+
+
+def _strip_chrome_suffix(title):
+    for suffix in CHROME_TITLE_SUFFIXES:
+        if title.endswith(suffix):
+            return title[: -len(suffix)].strip()
+    return title.strip()
+
+
+def titles_agree(window_title, doc_title):
+    """Does the X11 window title name the page whose document title this is?
+
+    None means the question could not be answered -- an untitled page, or a
+    window that reported nothing -- which is not the same as "no".
+    """
+    shown = _strip_chrome_suffix(window_title or "")
+    wanted = (doc_title or "").strip()
+    if not shown or not wanted:
+        return None
+    n = min(len(shown), len(wanted), TITLE_MATCH_CHARS)
+    return shown[:n] == wanted[:n]
+
+
+def bring_to_front(page, others=()):
+    """Switch to this page's tab and report whether that is confirmed.
+
+    `others` is the rest of the open pages. It is consulted only to weaken the
+    verdict: two tabs sharing a title make the window-title probe unable to
+    tell them apart, so the switch is reported unconfirmed rather than
+    confirmed. The switch itself has been requested either way, and a tab this
+    container opened is the only thing that could be behind the collision.
+    """
+    try:
+        page.bring_to_front()
+    except Exception as e:
+        return Foreground(
+            False, False, "tab_unavailable",
+            f"could not bring this session's tab to the front: {e}",
+        )
+
+    try:
+        doc_title = page.title()
+    except Exception as e:
+        log.info("Foreground check: page title unavailable (%s)", e)
+        return Foreground(
+            True, False, "foreground_unconfirmed",
+            f"the tab switch was requested but could not be confirmed: {e}",
+        )
+
+    deadline = time.time() + FOREGROUND_SETTLE_S
+    window_title = ""
+    while True:
+        window_title = xdotool.window_title()
+        agree = titles_agree(window_title, doc_title)
+        if agree is not False or time.time() >= deadline:
+            break
+        time.sleep(FOREGROUND_POLL_S)
+
+    if agree is None:
+        return Foreground(
+            True, False, "foreground_unconfirmed",
+            "the tab switch was requested; this page has no title to check "
+            "the window title against",
+        )
+    if not agree:
+        return Foreground(
+            False, False, "tab_not_foreground",
+            f"asked for the tab titled {doc_title!r} and the window is "
+            f"showing {_strip_chrome_suffix(window_title)!r}",
+        )
+
+    for other in others:
+        try:
+            if other is not page and titles_agree(window_title, other.title()):
+                return Foreground(
+                    True, False, "foreground_ambiguous",
+                    "the tab switch was requested and the window title "
+                    "matches, but another open tab carries the same title, "
+                    "so the title cannot tell the two apart",
+                )
+        except Exception:
+            continue
+
+    return Foreground(True, True)
+
+
+def screen_frame(page, record=None):
+    """The X11 frame a CSS point converts against, or (None, reason).
+
+    `image_to_screen` interprets a picture the *caller* looked at, so it needs
+    that caller's capture. `page_to_screen` interprets a point this container
+    just measured out of the DOM, and needs nothing from the picture but the
+    two X11 facts: where the window is, and how far below its top edge the
+    page starts. So a selector action needs a coordinate frame and does not
+    need a screenshot the caller has seen.
+
+    A recorded capture supplies both for free, and is reused whenever the
+    window has not moved since -- the inset is a function of the window height
+    and the capture height, and neither the page's scroll nor its url enters
+    it. That is why this does not go through `staleness()`: a stale picture is
+    still a valid coordinate frame, and refusing on it would refuse a
+    selector click for a reason that does not apply to it.
+
+    With no usable record, one internal viewport capture is taken to measure
+    the inset. It is deliberately not written back onto the session: the
+    session's capture is the picture the caller reads coordinates off, and
+    replacing it would make a later `--click-at` against the caller's own,
+    older picture pass the staleness check it should have failed.
+    """
+    window = xdotool.window_geometry()
+    if not window:
+        return None, "the Chrome window is not on the X11 display"
+
+    if (
+        record
+        and record.get("offset")
+        and not record.get("full_page")
+        and record.get("window") == window
+    ):
+        return record, None
+
+    try:
+        png = page.screenshot(type="png")
+    except Exception as e:
+        return None, f"could not measure the page's position on screen: {e}"
+
+    frame, error = build_capture(png, page=page, full_page=False)
+    if not frame:
+        return None, error
+    return frame, None
+
+
+def viewport_size(page):
+    """(width, height) in CSS pixels, or None if the page will not answer."""
+    state = page_state(page)
+    if not state:
+        return None
+    return tuple(state["viewport"])

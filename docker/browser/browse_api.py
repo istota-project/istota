@@ -902,17 +902,64 @@ def _pointer_refusal(action_type, screen_x, screen_y):
     }
 
 
-def _coordinate_action(session, page, action):
+def _foreground(page, action_type, others=()):
+    """Put the named session's tab in front, or say why the action must not run.
+
+    Returns (verdict, refusal). X11 input reaches whatever tab the one Chrome
+    window is showing, and nothing on this path used to bring the named
+    session's tab there -- so a coordinate action landed in whichever session
+    navigated last, with `ok: true` and the point it was asked for. The
+    staleness check cannot see it: it compares the *named* session's url,
+    scroll and viewport, none of which moves when the input goes elsewhere.
+
+    Called per action rather than once per request, because a list can
+    interleave selector and coordinate actions and because the tab in front is
+    not this request's to assume between two of them.
+    """
+    verdict = visual.bring_to_front(page, others)
+    if verdict.ok:
+        if not verdict.confirmed:
+            log.info("%s on tab %s: %s", action_type, verdict.code, verdict.detail)
+        return verdict, None
+    log.info("Refusing %s: %s -- %s", action_type, verdict.code, verdict.detail)
+    return verdict, {
+        "action": action_type, "ok": False,
+        "error": verdict.code, "detail": verdict.detail,
+    }
+
+
+def _with_foreground(result, verdict):
+    """Carry an unconfirmed tab switch into the action's own result.
+
+    Confirmed is the ordinary case and says nothing, so it adds no key. The
+    other two are the honest version of "we asked for the tab and could not
+    prove we got it", and a caller reading `ok: true` should be able to see
+    the difference.
+    """
+    if verdict is None or verdict.confirmed:
+        return result
+    return {**result, "foreground": verdict.code, "foreground_detail": verdict.detail}
+
+
+def _coordinate_action(session, page, action, others=()):
     """Run one visual-mode action. Returns the result dict for the action list.
 
-    Every one of these drives X11 rather than CDP. The selector actions above
-    use page.click and page.fill because they have an element to resolve; these
-    have a point, and a point can be pressed by the pointer -- which is the
-    only way to press the Cloudflare interstitial's checkbox, whose element
-    lives in a closed shadow root inside a cross-origin frame that no selector
-    reaches and whose challenge fails a CDP-dispatched click anyway.
+    Every one of these drives X11 rather than CDP. The selector actions beside
+    them now do too -- see _selector_action -- but these are the ones that have
+    only a point to go on, which is the only way to press the Cloudflare
+    interstitial's checkbox, whose element lives in a closed shadow root inside
+    a cross-origin frame that no selector reaches and whose challenge fails a
+    CDP-dispatched click anyway.
     """
     action_type = action["type"]
+
+    # Before the staleness check, deliberately. Staleness asks whether the
+    # picture still describes the page; this asks whether the page is the one
+    # about to be pressed, and the second question is worthless after the
+    # first has passed on a tab nobody is looking at.
+    verdict, refusal = _foreground(page, action_type, others)
+    if refusal:
+        return refusal
 
     if action_type in ("click_at", "hover_at"):
         record = session.get("capture")
@@ -938,19 +985,19 @@ def _coordinate_action(session, page, action):
         if action_type == "hover_at":
             if not browsing.human_move_to(screen_x, screen_y):
                 return _pointer_refusal("hover_at", screen_x, screen_y)
-            return {
+            return _with_foreground({
                 "action": "hover_at", "ok": True,
                 "screen": [round(screen_x), round(screen_y)],
-            }
+            }, verdict)
 
         button = 3 if action.get("button") == "right" else 1
         if not browsing.human_click_at(screen_x, screen_y, button=button):
             return _pointer_refusal("click_at", screen_x, screen_y)
         _settle(page, 1000)
-        return {
+        return _with_foreground({
             "action": "click_at", "ok": True,
             "screen": [round(screen_x), round(screen_y)],
-        }
+        }, verdict)
 
     if action_type == "click_challenge":
         # The one action that locates its own target. The checkbox has no
@@ -986,11 +1033,11 @@ def _coordinate_action(session, page, action):
         if not browsing.human_click_at(screen_x, screen_y):
             return _pointer_refusal("click_challenge", screen_x, screen_y)
         _settle(page, 2000)
-        return {
+        return _with_foreground({
             "action": "click_challenge", "ok": True,
             "css": [round(point[0]), round(point[1])],
             "screen": [round(screen_x), round(screen_y)],
-        }
+        }, verdict)
 
     if action_type == "key":
         key = action.get("key", "")
@@ -1004,7 +1051,8 @@ def _coordinate_action(session, page, action):
                 "error": "option_shaped_input", "detail": str(e),
             }
         _settle(page, 300)
-        return {"action": "key", "key": key, "ok": True}
+        return _with_foreground(
+            {"action": "key", "key": key, "ok": True}, verdict)
 
     if action_type == "type":
         text = action.get("text", "")
@@ -1034,12 +1082,293 @@ def _coordinate_action(session, page, action):
                 "error": "option_shaped_input", "detail": str(e),
             }
         _settle(page, 300)
-        return {"action": "type", "chars": len(text), "ok": True}
+        return _with_foreground(
+            {"action": "type", "chars": len(text), "ok": True}, verdict)
 
     # Unreachable while _COORDINATE_ACTIONS and the branches above agree. It
     # answers rather than returning None because the caller appends whatever
     # this gives it, and a null in the action list is worse than a refusal.
     return {"action": action_type, "ok": False, "error": "unknown"}
+
+
+# --------------------------------------------------------------------------- #
+# Selector actions, on the same X11 input the coordinate actions use
+# --------------------------------------------------------------------------- #
+#
+# `page.click` dispatches Input.dispatchMouseEvent and `page.fill` dispatches
+# Input.insertText. BOT_DETECTION.md names the first as what DataDome reads
+# through screenX/pageX inconsistencies, and it is why the coordinate path was
+# built on XTest in the first place. The selector path was the same dispatch,
+# on the same pages, reached by the flag a caller is far more likely to use.
+#
+# `page.fill` is the sharper half: Input.insertText dispatches no keydown and
+# no keyup at all, so the value simply appears. A login form behind bot
+# detection is exactly where a credential fill gets used, and a password
+# appearing in a field with no keystroke history is visible to anything
+# watching.
+#
+# Selector *addressing* does not have to be given up to get X11 input. Resolve
+# the element, take its box through DOM.getBoxModel -- which is a read, not an
+# Input dispatch -- convert the box centre through the same recorded frame
+# click_challenge already uses, and press it with the pointer.
+#
+# CDP stays for reading, and stays as the fallback. `render`, `extract`,
+# `links` and `detect_captcha` all need it; the goal is no CDP *input* on the
+# path that has an alternative, not no CDP. Where the X11 path cannot run --
+# no coordinate frame, a tab that will not come to the front -- the old call
+# still runs and the result says which path it took.
+
+SELECTOR_TIMEOUT_MS = 10000
+
+# Deliberately never reads `el.value`. On a credential fill that is the
+# password, and this dict goes into the action result, which is logged by the
+# caller and read by a model. Everything here is page structure the caller
+# could have read off `extract` anyway.
+_ELEMENT_DESC_JS = """el => {
+  const a = n => (el.getAttribute ? el.getAttribute(n) : null);
+  const label = ((el.innerText || '').trim()
+                 || a('aria-label') || a('placeholder') || a('name') || '');
+  return {
+    tag: el.tagName ? el.tagName.toLowerCase() : null,
+    type: a('type'),
+    text: label.trim().slice(0, 80),
+    href: a('href'),
+  };
+}"""
+
+_IS_FOCUSED_JS = "el => el === document.activeElement"
+
+_FIELD_HOLDS_JS = (
+    "(el, want) => (el.value !== undefined ? el.value : el.textContent) === want"
+)
+
+
+class _Target:
+    """Where the pointer has to go to press a resolved element."""
+
+    def __init__(self, handle, css_x, css_y, screen_x, screen_y):
+        self.handle = handle
+        self.css_x = css_x
+        self.css_y = css_y
+        self.screen_x = screen_x
+        self.screen_y = screen_y
+
+
+def _describe_element(handle):
+    """Tag, type, label and href of the element that was actually matched.
+
+    Worth reporting on its own, and it is what replaces the error the X11 fill
+    path gives up: typing at a focused point succeeds whatever the click did,
+    so a mis-resolved selector has no `not fillable` to raise. Saying which
+    element was pressed is how a caller disconfirms that.
+    """
+    try:
+        return handle.evaluate(_ELEMENT_DESC_JS)
+    except Exception as e:
+        log.info("Could not describe the matched element: %s", e)
+        return None
+
+
+def _resolve_target(page, selector, frame):
+    """Resolve a selector to an X11 point, or (None, (code, detail)).
+
+    `bounding_box()` is viewport-relative, which is what makes this work
+    against a frame recorded before the page scrolled: the scroll cancels out
+    of both sides, exactly as it does for the iframe box click_challenge
+    converts. So this deliberately does not take the staleness pass -- a stale
+    *picture* is still a valid coordinate frame, and refusing on it would
+    refuse a selector click for a reason that does not apply to it.
+    """
+    try:
+        handle = page.wait_for_selector(
+            selector, state="visible", timeout=SELECTOR_TIMEOUT_MS,
+        )
+    except Exception as e:
+        return None, ("no_element",
+                      f"no visible element matched {selector!r}: {e}")
+    if handle is None:
+        return None, ("no_element", f"no visible element matched {selector!r}")
+
+    # page.click does this itself and then re-measures; the X11 path has to do
+    # both by hand, and the re-measure is the half that is easy to forget.
+    try:
+        handle.scroll_into_view_if_needed(timeout=SELECTOR_TIMEOUT_MS)
+    except Exception as e:
+        return None, ("element_unreachable",
+                      f"could not bring {selector!r} into view: {e}")
+
+    box = handle.bounding_box()
+    if not box or box["width"] <= 0 or box["height"] <= 0:
+        return None, ("element_not_visible",
+                      f"{selector!r} resolved but has no box to press")
+
+    css_x = box["x"] + box["width"] / 2
+    css_y = box["y"] + box["height"] / 2
+
+    # An element the scroll could not bring in -- fixed-position furniture
+    # overhanging the viewport, a box taller than the window -- would convert
+    # to a screen point outside the page and press whatever is there.
+    viewport = visual.viewport_size(page)
+    if viewport and not (0 <= css_x <= viewport[0] and 0 <= css_y <= viewport[1]):
+        return None, ("element_off_screen", (
+            f"{selector!r} sits at ({round(css_x)}, {round(css_y)}) which is "
+            f"outside the {viewport[0]}x{viewport[1]} viewport even after "
+            f"scrolling to it"
+        ))
+
+    screen_x, screen_y = visual.page_to_screen(frame, css_x, css_y)
+    return _Target(handle, css_x, css_y, screen_x, screen_y), None
+
+
+def _cdp_selector_action(page, action, path, why):
+    """The original CDP call, run because the X11 path could not be.
+
+    Kept rather than deleted, on the issue's own reasoning: `xdotool type` on
+    an unusual character set or a non-US layout can mistype where `page.fill`
+    is exact, and a login that cannot be completed is worse than one completed
+    the detectable way. What changes is that the result says which happened.
+    """
+    action_type = action["type"]
+    selector = action.get("selector", "")
+    log.info("Selector %s on %r falling back to CDP: %s",
+             action_type, selector, why)
+    if action_type == "click":
+        page.click(selector, timeout=SELECTOR_TIMEOUT_MS)
+        page.wait_for_timeout(1000)
+    else:
+        page.fill(selector, action.get("value", ""), timeout=SELECTOR_TIMEOUT_MS)
+    return {
+        "action": action_type, "selector": selector, "ok": True,
+        "path": path, "path_reason": why,
+    }
+
+
+def _selector_action(session, page, action, others=()):
+    """Run one selector action, through the pointer and the keyboard.
+
+    Falls back to the CDP call, reporting that it did, whenever the X11 path
+    has no way to run: a tab that will not come to the front, no coordinate
+    frame to convert against, a click that did not land on the field, or a
+    fill whose keystrokes did not arrive as sent.
+    """
+    action_type = action["type"]
+    selector = action.get("selector") or ""
+    if not selector:
+        return {"action": action_type, "ok": False,
+                "error": "selector is required"}
+
+    # A tab that is not in front takes the pointer and the keyboard to the
+    # wrong page. The CDP call addresses the tab directly, so this is a
+    # fallback rather than a refusal -- unlike the coordinate path, where
+    # there is no correct alternative and the action must not run at all.
+    verdict = visual.bring_to_front(page, others)
+    if not verdict.ok:
+        return _cdp_selector_action(page, action, "cdp", verdict.detail)
+
+    frame, reason = visual.screen_frame(page, session.get("capture"))
+    if not frame:
+        return _cdp_selector_action(page, action, "cdp", reason)
+
+    target, refusal = _resolve_target(page, selector, frame)
+    if refusal:
+        # Not a fallback: page.click would fail on the same selector for the
+        # same reason, and reporting the element problem is more useful than
+        # reporting it a second time through another mechanism.
+        code, detail = refusal
+        return {"action": action_type, "selector": selector, "ok": False,
+                "error": code, "detail": detail}
+
+    element = _describe_element(target.handle)
+
+    if action_type == "click":
+        button = 3 if action.get("button") == "right" else 1
+        if not browsing.human_click_at(
+            target.screen_x, target.screen_y, button=button,
+        ):
+            return _pointer_refusal("click", target.screen_x, target.screen_y)
+        _settle(page, 1000)
+        return _with_foreground({
+            "action": "click", "selector": selector, "ok": True,
+            "path": "x11",
+            "screen": [round(target.screen_x), round(target.screen_y)],
+            "element": element,
+        }, verdict)
+
+    return _fill_through_keyboard(page, action, target, element, verdict)
+
+
+def _fill_through_keyboard(page, action, target, element, verdict):
+    """Click the field, clear it, and type the value as real keystrokes."""
+    selector = action.get("selector", "")
+    value = action.get("value", "")
+    if not isinstance(value, str):
+        return {"action": "fill", "selector": selector, "ok": False,
+                "error": "value must be a string"}
+    if len(value) > MAX_TYPE_CHARS:
+        return {
+            "action": "fill", "selector": selector, "ok": False,
+            "error": "text_too_long",
+            "detail": (f"{len(value)} characters is past the {MAX_TYPE_CHARS} "
+                       f"one fill can type"),
+        }
+
+    if not browsing.human_click_at(target.screen_x, target.screen_y):
+        return _pointer_refusal("fill", target.screen_x, target.screen_y)
+
+    # The click is what focuses the field, and a click that missed focuses
+    # something else -- after which ctrl+a selects the whole page and the
+    # value is typed into nothing. Checked before anything is typed, because
+    # a credential typed at the wrong focus is the failure this path must not
+    # add. `document.activeElement` is read in the handle's own frame.
+    try:
+        focused = bool(target.handle.evaluate(_IS_FOCUSED_JS))
+    except Exception as e:
+        log.info("Could not confirm focus on %r: %s", selector, e)
+        focused = None
+    if focused is False:
+        return _cdp_selector_action(
+            page, action, "cdp_fallback",
+            "the pointer click did not put focus in the field",
+        )
+
+    try:
+        xdotool.key_native("ctrl+a")
+        xdotool.key_native("Delete")
+        if value:
+            xdotool.type_native(value)
+    except xdotool.OptionShapedInput as e:
+        return {"action": "fill", "selector": selector, "ok": False,
+                "error": "option_shaped_input", "detail": str(e)}
+
+    # `xdotool type` on an unusual character set or a non-US layout can
+    # mistype where Input.insertText is exact. The field is asked what it
+    # actually holds, and a mismatch takes the CDP path rather than leaving a
+    # half-typed credential in a login form reported as `ok`. The comparison
+    # runs in the page and its answer is a boolean; the value itself never
+    # reaches the result or the log.
+    try:
+        landed = bool(target.handle.evaluate(_FIELD_HOLDS_JS, value))
+    except Exception as e:
+        log.info("Could not read back %r after typing: %s", selector, e)
+        landed = None
+    if landed is False:
+        return _cdp_selector_action(
+            page, action, "cdp_fallback",
+            "the typed value did not arrive in the field as sent",
+        )
+
+    result = {
+        "action": "fill", "selector": selector, "ok": True,
+        "path": "x11",
+        "screen": [round(target.screen_x), round(target.screen_y)],
+        "element": element,
+    }
+    if landed is None or focused is None:
+        result["verified"] = False
+    return _with_foreground(result, verdict)
+
+
+_SELECTOR_ACTIONS = ("click", "fill")
 
 
 _COORDINATE_ACTIONS = ("click_at", "hover_at", "click_challenge", "key", "type")
@@ -1067,24 +1396,24 @@ def interact():
     if not page:
         return jsonify({"error": "tab not found"}), 500
 
+    # The other tabs, for the foreground check to say when the window title
+    # cannot tell this session's from another's. Read once: an action list is
+    # not long enough for the tab set to be worth re-reading, and a page that
+    # closes under us is caught by the try/except around the title read.
+    try:
+        others = [p for p in chrome._pw_context.pages if p is not page]
+    except Exception:
+        others = []
+
     results = []
     try:
         for action in actions:
             action_type = action.get("type")
             selector = action.get("selector", "")
 
-            if action_type == "click":
-                page.click(selector, timeout=10000)
-                page.wait_for_timeout(1000)
-                results.append({
-                    "action": "click", "selector": selector, "ok": True,
-                })
-            elif action_type == "fill":
-                value = action.get("value", "")
-                page.fill(selector, value, timeout=10000)
-                results.append({
-                    "action": "fill", "selector": selector, "ok": True,
-                })
+            if action_type in _SELECTOR_ACTIONS:
+                results.append(
+                    _selector_action(session, page, action, others))
             elif action_type == "scroll":
                 direction = action.get("direction", "down")
                 amount = action.get("amount", 500)
@@ -1100,13 +1429,23 @@ def interact():
                 page.wait_for_timeout(min(timeout_ms, 30000))
                 results.append({"action": "wait", "ok": True})
             elif action_type == "select":
+                # Stays on CDP, and says so. select_option dispatches no
+                # Input events at all -- it sets the value and fires
+                # input/change through Runtime -- so it is not the
+                # Input.dispatchMouseEvent signature the rest of this moved
+                # to avoid. Pressing a native <select> through the pointer
+                # opens an OS-level popup that is not part of the page and
+                # has no box to convert, so there is no X11 path to move it
+                # to; what there is, is the escape hatch below.
                 value = action.get("value", "")
                 page.select_option(selector, value, timeout=10000)
                 results.append({
                     "action": "select", "selector": selector, "ok": True,
+                    "path": "cdp",
                 })
             elif action_type in _COORDINATE_ACTIONS:
-                results.append(_coordinate_action(session, page, action))
+                results.append(
+                    _coordinate_action(session, page, action, others))
             else:
                 results.append({
                     "action": action_type, "ok": False, "error": "unknown",

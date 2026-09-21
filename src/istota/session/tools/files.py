@@ -20,7 +20,13 @@ from pathlib import Path
 
 from istota.agent.coercion import coerce_arguments
 from istota.agent.tools import AgentTool, ToolResult
-from istota.image_sniff import SNIFF_BYTES, image_dimensions, sniff_decodable
+from istota.image_sniff import (
+    MODEL_VISIBLE_MEDIA_TYPES,
+    SNIFF_BYTES,
+    image_dimensions,
+    is_model_visible,
+    sniff_decodable,
+)
 from istota.llm.types import ImageContent, TextContent, ToolParameter, ToolSchema
 from istota.untrusted import IMAGE_NOTICE
 
@@ -192,13 +198,37 @@ def make_read_tool(env: ToolEnv) -> AgentTool:
         raw, byte_truncated = _read_bytes_capped(path, env.max_read_bytes)
         # Ahead of the binary refusal, and decided from the bytes rather than
         # the name: an SVG called `.png` is XML text, matches no signature and
-        # still takes the branch below. `sniff_decodable` is the right
-        # predicate of the two — it answers what the image pipeline can
-        # decode, where `sniff_raster` answers what `/chat/files` serves
-        # inline and excludes HEIF on a browser-support argument that has
-        # nothing to do with what a model can see.
+        # still takes the branch below.
+        #
+        # Sniff wide, then narrow at the point of delivery. `sniff_decodable`
+        # is what identifies the file — it admits the HEIF family, so the
+        # refusal below can name the format instead of calling a photograph a
+        # binary file — and `is_model_visible` is what decides whether the
+        # bytes may be shipped. The two are separate because this tool has no
+        # converter behind it: `prepare_image_attachments` turns a HEIC into a
+        # JPEG before a model sees one, and the tool server holds no image
+        # library by design, so the staging predicate's safety does not carry
+        # here (ISSUE-520).
         media_type = sniff_decodable(raw[:SNIFF_BYTES])
         if media_type is not None:
+            if not is_model_visible(media_type):
+                # Ahead of `_read_image`, so this outranks its offset/limit
+                # refusal: "no provider accepts this format" is the reason the
+                # model can act on, where "offset counts lines" sends it back
+                # to call again onto a refusal it could have had the first
+                # time. Erroring rather than returning the image is the whole
+                # fix — a tool call that reports success puts a block the
+                # provider rejects into the message list, where it is
+                # re-rendered on every later call of the attempt, so one bad
+                # file fails every remaining turn with nothing naming it.
+                accepted = ", ".join(sorted(MODEL_VISIBLE_MEDIA_TYPES.values()))
+                return _err(
+                    f"Cannot show this image to the model: {path} is "
+                    f"{media_type}, which no model provider accepts. Nothing "
+                    f"was read. Accepted formats are {accepted}; convert it "
+                    f"to one of those and read the converted file, or ask the "
+                    f"user about the picture in words."
+                )
             return _read_image(path, media_type, args)
         if _looks_binary(raw):
             return _err(f"Cannot read binary file: {path} ({len(raw)} bytes)")
