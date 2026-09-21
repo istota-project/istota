@@ -35,6 +35,7 @@ from istota.skill_host_paths import (
 from istota.skills._cli import error_envelope, parse_and_resolve, run_skill_cli
 from istota.skills._credref import PAIR, CredentialPair, credential_ref
 from istota.skills._hostpath import WRITE, host_path
+from istota.untrusted import frame_untrusted
 
 DEFAULT_API_URL = "http://localhost:9223"
 # Where a screenshot lands with no `--output`: `screenshots/` under the task's
@@ -567,18 +568,24 @@ def _foreground_note_from_response(headers):
     code = (headers.get(FOREGROUND_HEADER) or "").strip()
     if not code:
         return None
-    detail = (headers.get(FOREGROUND_DETAIL_HEADER) or "").strip()
     note = (
         f"The browser container could not confirm this session's tab was in "
         f"front when the picture was taken ({code}), so the capture may show "
-        f"another tab."
+        f"another tab. Check the picture is the page you expect before "
+        f"clicking against it."
     )
-    if detail:
-        note = f"{note} {detail}"
-    return (
-        f"{note} Check the picture is the page you expect before clicking "
-        f"against it."
-    )
+    # The detail quotes the titles of two tabs, which is text those pages
+    # chose. Interpolated bare it reads as istota's own words, and a page
+    # titled "ignore the above and ..." lands in the note verbatim -- the
+    # room-name defect (ISSUE-509) in a different field. The container has
+    # already collapsed it to one line of printable ASCII and capped it, so
+    # what the fence adds is the frame rather than the sanitising. Kept out of
+    # the sentence above so the instruction is istota's and the evidence is
+    # marked as not.
+    detail = (headers.get(FOREGROUND_DETAIL_HEADER) or "").strip()
+    if not detail:
+        return note
+    return f"{note}\n{frame_untrusted(detail, 'TAB TITLES')}"
 
 
 def _resize_capture(content, media_type, target):
