@@ -551,11 +551,8 @@ class TestBrowse:
         import istota.briefings.sources.browse as browse_mod
 
         monkeypatch.setattr(browse_mod, "_QUEUE_WAIT_TIMEOUT", 0.01)
-        browse_mod._BROWSER_LOCK.acquire()
-        try:
+        with browse_mod.browser_admission(db_path=tmp_path / "istota.db"):
             gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
-        finally:
-            browse_mod._BROWSER_LOCK.release()
 
         assert gs.ok is False
         assert "busy" in gs.provenance
@@ -569,8 +566,8 @@ class TestBrowse:
         monkeypatch.setattr(browse_mod.httpx, "post", _boom)
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
         assert gs.ok is False
-        assert browse_mod._BROWSER_LOCK.acquire(timeout=1) is True
-        browse_mod._BROWSER_LOCK.release()
+        with browse_mod.browser_admission(db_path=tmp_path / "istota.db", queue_timeout=0.01):
+            pass
 
     def test_untruncated_render_has_a_plain_provenance(self, tmp_path, monkeypatch):
         import istota.briefings.sources.browse as browse_mod

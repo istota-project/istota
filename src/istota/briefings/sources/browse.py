@@ -29,11 +29,11 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 
 import httpx
 
 from istota.briefings.sources import GatheredSource, SourceContext
+from istota.browser_admission import browser_admission, BrowserQueueTimeout
 
 
 logger = logging.getLogger(__name__)
@@ -76,19 +76,6 @@ BROWSE_PRESETS: dict[str, dict] = {
 # and leaving the container working on a request nobody is waiting for.
 _FETCH_TIMEOUT = 120.0
 
-# The container serves one request at a time (Flask ``threaded=False``), so
-# concurrent browse sources queue in the kernel backlog with their client clocks
-# already running: source 5 can spend its entire budget waiting to be served and
-# then report a live frontpage as unreachable — the exact failure this source
-# exists to fix. Serializing costs no wall-clock (the browser was never going to
-# work in parallel) and gives each request its full budget from the moment it is
-# actually issued. Process-global on purpose: per-user briefings and the shared
-# block generator contend for the same single browser.
-_BROWSER_LOCK = threading.Lock()
-
-# How long a queued source waits for its turn before giving up, so N browse
-# sources in one briefing can't serialize into N × _FETCH_TIMEOUT of generation.
-# Skipping is the fail-soft outcome the whole module contracts for.
 _QUEUE_WAIT_TIMEOUT = 90.0
 
 # Markdown carries the URLs the flattened text dropped, so it needs a bigger
@@ -197,26 +184,25 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
         )
 
     api_url = browser.api_url
-    if not _BROWSER_LOCK.acquire(timeout=_QUEUE_WAIT_TIMEOUT):
+    try:
+        with browser_admission(db_path=ctx.app_config.db_path, queue_timeout=_QUEUE_WAIT_TIMEOUT):
+            body, truncated = _render_markdown(api_url, url, mode, markdown_max)
+            if body is None:
+                body = _browse_text(api_url, url)
+                if len(body) > text_max:
+                    body = body[:text_max]
+                    truncated = True
+    except BrowserQueueTimeout:
         logger.warning("browse source: browser busy, skipped %s", url)
         return GatheredSource(
             kind="browse", title=title,
-            provenance="(browse skipped — browser busy)", ok=False,
+            provenance="(browse skipped — timed out waiting for busy browser)", ok=False,
         )
-    try:
-        body, truncated = _render_markdown(api_url, url, mode, markdown_max)
-        if body is None:
-            body = _browse_text(api_url, url)
-            if len(body) > text_max:
-                body = body[:text_max]
-                truncated = True
     except Exception as e:  # noqa: BLE001
         logger.warning("browse source: fetch failed for %s: %s", url, e)
         return GatheredSource(
             kind="browse", title=title, provenance="(browse fetch failed)", ok=False,
         )
-    finally:
-        _BROWSER_LOCK.release()
 
     if not body:
         return GatheredSource(
