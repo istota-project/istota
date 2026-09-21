@@ -887,7 +887,11 @@ istota_browser_vnc_bind_address: "127.0.0.1"
 # existing empty setting. Required only when the bind address is not loopback.
 istota_browser_vnc_password: ""
 istota_browser_vnc_external_url: ""  # e.g. https://vnc.example.com:6080
-istota_browser_max_sessions: 3
+istota_browser_max_sessions: 3  # per user
+istota_browser_max_instances: 2
+istota_browser_instance_idle_s: 900
+istota_browser_max_total_sessions: 4
+istota_browser_disk_cache_bytes: 104857600
 istota_browser_shm_size: "2gb"
 istota_browser_cpu_limit: "{{ ansible_facts['processor_vcpus'] }}"
 istota_browser_memory_limit: "3G"

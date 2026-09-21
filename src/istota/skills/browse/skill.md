@@ -12,6 +12,8 @@ Headless browser for fetching pages that need JavaScript rendering or bot detect
 
 **Reach for `render` first.** It returns the page as markdown, so headings, list position and link URLs arrive together — which is what lets you tell an article link from footer chrome. `get` returns flattened text with every URL stripped out, and `links` returns a position-stripped list where nav items and articles look identical. Use those two only when you specifically want plain text or a bare link list.
 
+Your browser profile belongs to the requesting user. Cookies and site storage persist across tasks, closed sessions and container restarts; other users do not inherit these logins. A later task for the same user can use an existing login without fetching a credential again. Closing a session closes its tabs, not the profile.
+
 ## Commands
 
 ```bash
@@ -28,7 +30,7 @@ istota-skill browse get "https://example.com"
 istota-skill browse get "https://example.com" --keep-session --timeout 60
 istota-skill browse get "https://example.com" --wait-for "article.content"
 
-# Navigate within an existing session (preserves cookies, referrer, state)
+# Navigate within the same tab (preserves its referrer and page state)
 istota-skill browse get "https://example.com/page2" --session <id>
 istota-skill browse render "https://example.com/page2" --session <id>
 
@@ -64,9 +66,25 @@ istota-skill browse interact <id> --fill "#email=user@example.com" \
                                  --fill-credential "#password=acme_password" \
                                  --click "button[type=submit]"
 
+# Inspect or clear this user's saved browser state
+istota-skill browse state
+istota-skill browse forget --origin https://example.com
+istota-skill browse forget --all
+istota-skill browse forget --all --profile
+
 # Close session
 istota-skill browse close <id>
 ```
+
+## Saved state and session limits
+
+`state` reports this user's profile size, whether its browser is live, and cookie domains without cookie values. Cookie domains are `null` when Chrome is stopped or disconnected; inspection does not launch it. This is not a list of all stored origins or authenticated accounts.
+
+`forget --origin https://example.com` clears cookies for that host and storage for that origin; cookies shared with a parent domain can also affect sibling sites. `forget --all` clears cookies and origin storage for this user. These operations can log out live tabs. Close this user's live sessions before `forget --all --profile`, which resets the complete profile, including history, permissions and caches, only after the browser has stopped successfully. Other users' profiles are unchanged. Forgetting a login means signing in again later.
+
+Session limits apply per user and across the deployment. At the per-user limit, opening a session closes that user's oldest session. At the global limit, it prefers that user's oldest session, but can close another user's oldest session if the requesting user has none. Task ownership records provenance; it does not protect a session from eviction. Close sessions when done. A full browser-process pool never evicts an instance holding live sessions just to admit another user; retry after the reported delay. Requests still run one at a time.
+
+An older browser image reports `shared_profile`: its logins are still shared. Credential fills refuse until an operator rebuilds and deploys the browser image; do not bypass that refusal.
 
 ## Logging in: use `--fill-credential`, never `--fill`
 

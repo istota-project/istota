@@ -216,9 +216,33 @@ docker build -t istota-devbox:latest docker/devbox
 | `shared_files` | Shared between Nextcloud and Istota (RW both) |
 | `postgres_data` | PostgreSQL data |
 | `redis_data` | Redis data |
-| `browser_profile` | Chrome profile for the browser container (logged-in sessions) |
+| `browser_profile` | Persistent Chrome profiles per user, including their logins; also the console TLS certificate and parked legacy profile |
 
 Nextcloud's native data volume is mounted RO in istota at `/mnt/nc-data` for Talk attachment fallback.
+
+## Browser profiles
+
+Each user has a separate profile under `/data/browser-profile/users/`. Logins and site storage survive task completion, session closure, process reaping and container restarts. They are never shared between users. Later tasks for the same user inherit that user's authenticated access without another vault fetch. Cloudflare clearance warms up separately for each user. Profiles are not automatically deleted.
+
+Both compose files pass these settings to the browser service:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BROWSER_MAX_INSTANCES` | `2` | Maximum live Chrome processes |
+| `BROWSER_INSTANCE_IDLE_S` | `900` | Idle seconds before a process with no live sessions is reaped |
+| `MAX_BROWSER_SESSIONS` | `2` | Session limit per user |
+| `BROWSER_MAX_TOTAL_SESSIONS` | `4` | Session limit across all users |
+| `BROWSER_DISK_CACHE_BYTES` | `104857600` | Chrome disk-cache limit per profile, not a limit on total profile size |
+
+The container retains its 3 GiB memory limit. Setting `BROWSER_MAX_INSTANCES=1` reduces process memory while keeping separate profiles; switching users can require a cold start. A full process pool evicts only an instance with no live sessions, otherwise it returns a capacity error with a retry delay. Session limits are separate: opening a session evicts the requesting user's oldest first, and can evict another user's oldest at the global cap when the requester has none. Browser requests still execute serially.
+
+The Ansible equivalents are `istota_browser_max_instances`, `istota_browser_instance_idle_s`, `istota_browser_max_sessions`, `istota_browser_max_total_sessions` and `istota_browser_disk_cache_bytes`. Ansible retains its existing per-user session default of `3`. The role writes these to `browser.env`, which its compose template loads.
+
+Use `istota-skill browse state` to inspect the requesting user's profile size and cookie domains, never cookie values. Domains are `null` when its browser is stopped or disconnected; state inspection does not start Chrome. Close that user's sessions before `browse forget --origin https://example.com` or `browse forget --all` to clear cookies and origin storage. Origin clearing includes cookies shared through a parent domain and can log out sibling sites. `browse forget --all --profile` removes the complete profile only after verified browser shutdown, and resets history, permissions and caches too.
+
+The noVNC console is for operators only. Reach `/instances.html` on the existing console address over the deployment's VPN or management network, choose the user, then enter the deployment's VNC password when configured. Each view is routed to that user's display; a login completed there belongs only to that user. Routing tokens are addresses, not credentials. The index exposes live user IDs to anyone who can reach the console port, so keep the existing bind and firewall restrictions. Do not give users console links or publish this port to the internet.
+
+**Upgrade:** Rebuild and recreate the browser container when updating the skill. For Ansible installations, run the full play. On first boot the old shared profile is parked under `legacy-profile/` in the same volume; no user inherits it. Each user signs in again unless an operator deliberately recovers the old profile. TLS certificates and existing per-user profiles stay in place. A parking collision needs operator attention and does not overwrite either copy. Until the image is updated, non-credential calls warn with `shared_profile` and credential fills refuse. After upgrading, verify `/health` advertises `per_user_profiles: true`. Direct API clients must send `X-Istota-User` on scoped requests; IDs must be single path components, ASCII, without control characters or surrounding whitespace.
 
 ## Security differences
 

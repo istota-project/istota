@@ -2869,6 +2869,10 @@
       VNC_PASSWORD={{ istota_browser_vnc_password }}
       BROWSER_VNC_URL={{ istota_browser_vnc_external_url }}
       MAX_BROWSER_SESSIONS={{ istota_browser_max_sessions }}
+      BROWSER_MAX_INSTANCES={{ istota_browser_max_instances }}
+      BROWSER_INSTANCE_IDLE_S={{ istota_browser_instance_idle_s }}
+      BROWSER_MAX_TOTAL_SESSIONS={{ istota_browser_max_total_sessions }}
+      BROWSER_DISK_CACHE_BYTES={{ istota_browser_disk_cache_bytes }}
       BROWSER_CDP_FAILURE_THRESHOLD={{ istota_browser_cdp_failure_threshold }}
       BROWSER_CDP_FAILURE_WINDOW_S={{ istota_browser_cdp_failure_window }}
   when: istota_browser_enabled and not istota_web_only

@@ -384,7 +384,8 @@ class TestAValueTheGuardAcceptsCanBeRendered:
 class TestTheEntrypointStillHonoursThePassword:
     """The guard is worth nothing if the container ignores the value."""
 
-    def test_a_password_is_passed_to_x11vnc(self):
+    def test_a_password_is_passed_to_x11vnc(self, monkeypatch):
+        monkeypatch.syspath_prepend(str(ENTRYPOINT.parent))
         import importlib.util
         import sys
         from unittest import mock
