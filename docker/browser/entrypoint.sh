@@ -6,6 +6,7 @@ SCREEN_WIDTH=${SCREEN_WIDTH:-1440}
 SCREEN_HEIGHT=${SCREEN_HEIGHT:-900}
 CERT_DIR="/data/browser-profile/ssl"
 PROFILE_DIR="${BROWSER_PROFILE_DIR:-/data/browser-profile}"
+BROWSER_RUNTIME_DIR="/run/istota-browser"
 
 # Ensure browser user owns the profile directory (volume may be owned by root)
 chown -R browser:browser "$PROFILE_DIR"
@@ -25,9 +26,17 @@ install -d -m 1777 /tmp/.X11-unix
 # Slots start at 100; these are stale files from a previous container process.
 rm -f /tmp/.X1*-lock /tmp/.X11-unix/X1*
 
-# Start noVNC websocket proxy (serves web UI on port 6080, with TLS)
-/usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 \
-    --cert "$CERT_DIR/combined.pem" &
+# Token and index files are transient. The browser user publishes both; the
+# packaged noVNC tree is root-owned, so serve a writable runtime copy.
+rm -rf "$BROWSER_RUNTIME_DIR"
+install -d "$BROWSER_RUNTIME_DIR/web" "$BROWSER_RUNTIME_DIR/vnc-tokens"
+cp -a /usr/share/novnc/. "$BROWSER_RUNTIME_DIR/web/"
+printf '[]\n' > "$BROWSER_RUNTIME_DIR/web/instances.json"
+chown -R browser:browser "$BROWSER_RUNTIME_DIR"
+
+# One TLS listener routes operator viewers to the requested live instance.
+websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
+    --token-plugin TokenFile --token-source "$BROWSER_RUNTIME_DIR/vnc-tokens" 6080 &
 
 # Start the Flask API as the non-root browser user
 # This allows Chrome to use its native sandbox (Chrome refuses to sandbox as root)

@@ -1,7 +1,10 @@
 """Pool lifecycle and independent browser connections."""
 import importlib
+import json
+from urllib.parse import parse_qs, urlsplit, unquote
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 from unittest import mock
@@ -20,6 +23,7 @@ def runtime(monkeypatch, tmp_path):
     pool = importlib.import_module("pool")
     chrome = importlib.import_module("chrome")
     monkeypatch.setattr(pool, "PROFILE_ROOT", str(tmp_path))
+    monkeypatch.setattr(pool, "RUNTIME_DIR", tmp_path / "runtime", raising=False)
     monkeypatch.setattr(pool, "_instances", {})
     monkeypatch.setattr(chrome, "_connections", {})
     monkeypatch.setattr(chrome, "_pw", None)
@@ -291,4 +295,94 @@ def test_profile_symlinks_cannot_select_another_directory(runtime, tmp_path, lin
         pool.acquire("alice")
     assert marker.read_text() == "retain"
     assert processes == []
+    assert pool.live() == []
+
+
+@pytest.mark.parametrize("user_id", ["alice", "DOMAIN\\alice", "álîce", "alice: team", "#alice", "alice: localhost:5999\nbob", "alice%20bob"])
+def test_console_routes_preserve_identity_without_token_syntax(runtime, user_id):
+    pool, _, _, _ = runtime
+    inst = pool.acquire(user_id)
+    routes = list((pool.RUNTIME_DIR / "vnc-tokens").iterdir())
+    assert len(routes) == 1
+    lines = routes[0].read_text().splitlines()
+    assert len(lines) == 1
+    token, target = lines[0].split(": ")
+    assert unquote(token) == user_id
+    assert not token.startswith("#")
+    assert target == "localhost:5900"
+    index = json.loads((pool.RUNTIME_DIR / "web/instances.json").read_text())
+    assert index[0]["user"] == user_id
+    assert index[0]["slot"] == 0
+    path = parse_qs(urlsplit(index[0]["url"]).query)["path"][0]
+    routed_token = parse_qs(urlsplit(path).query)["token"][0]
+    assert routed_token == token
+    assert 0 <= time.time() - index[0]["last_used"] < 2
+    pool.release_slot(inst)
+    assert list((pool.RUNTIME_DIR / "vnc-tokens").iterdir()) == []
+    assert json.loads((pool.RUNTIME_DIR / "web/instances.json").read_text()) == []
+
+
+def test_console_release_and_slot_reuse_do_not_route_to_previous_user(runtime):
+    pool, _, _, _ = runtime
+    alice, bob = pool.acquire("alice"), pool.acquire("bob")
+    pool.release_slot(alice)
+    carol = pool.acquire("carol")
+    assert carol.slot == 0
+    routes = "".join(p.read_text() for p in (pool.RUNTIME_DIR / "vnc-tokens").iterdir())
+    assert "alice:" not in routes
+    assert "bob: localhost:5901" in routes
+    assert "carol: localhost:5900" in routes
+    assert {item["user"] for item in json.loads((pool.RUNTIME_DIR / "web/instances.json").read_text())} == {"bob", "carol"}
+    assert pool.instance_for("bob") is bob
+
+
+def test_console_publication_failure_cleans_processes_and_registry(runtime, monkeypatch):
+    pool, _, processes, _ = runtime
+    publish = pool._publish_instances
+    monkeypatch.setattr(pool, "_publish_instances", mock.Mock(side_effect=OSError("disk full")))
+    with pytest.raises(pool.LaunchFailed):
+        pool.acquire("alice")
+    assert pool.live() == []
+    assert list((pool.RUNTIME_DIR / "vnc-tokens").iterdir()) == []
+    for _, _, proc in processes:
+        proc.wait.assert_called()
+    monkeypatch.setattr(pool, "_publish_instances", publish)
+    assert pool.acquire("bob").slot == 0
+
+
+@pytest.mark.parametrize("base", ["", "https://console.example/vnc.html?resize=scale&path=old#view"])
+def test_console_url_preserves_configuration(runtime, base):
+    pool, _, _, _ = runtime
+    inst = pool.acquire("alice")
+    url = pool.console_url(inst, base)
+    if not base:
+        assert url == ""
+    else:
+        parts = urlsplit(url)
+        assert parts.scheme == "https"
+        assert parts.netloc == "console.example"
+        assert parts.path == "/vnc.html"
+        assert parts.fragment == "view"
+        assert parse_qs(parts.query) == {"resize": ["scale"], "path": ["websockify/?token=alice"]}
+
+
+
+def test_unremovable_route_does_not_prevent_shutdown_or_reach_reused_slot(runtime, monkeypatch):
+    pool, _, processes, _ = runtime
+    alice = pool.acquire("alice")
+    unlink = Path.unlink
+
+    def fail_route_removal(path, *args, **kwargs):
+        if path.parent.name == "vnc-tokens":
+            raise PermissionError("route removal refused")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_route_removal)
+    pool.release_slot(alice)
+    assert pool.live() == []
+    for _, _, proc in processes:
+        proc.wait.assert_called()
+    with pytest.raises(pool.LaunchFailed):
+        pool.acquire("bob")
+    assert len(processes) == 3
     assert pool.live() == []

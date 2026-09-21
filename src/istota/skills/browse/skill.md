@@ -308,7 +308,7 @@ Two fields say why there is no point to press, and they answer different questio
 
 **Press once, then look.** A pressed challenge takes a few seconds to settle, and pressing again while it works starts it over. Take a screenshot, and press a second time only if the widget is still there and still unticked. Two presses that change nothing is the point to stop.
 
-If there is no widget, the challenge does not clear, or `challenge` reports frames it cannot find a checkbox in: tell the user, give them the `vnc_url`, and wait for them to solve it. API calls that use the session, including `session <session_id>` status checks, refresh its idle timeout. VNC activity alone does not; after ten minutes without an API call the session can expire. Then retry with `--session <session_id>`, or open a new session if it has expired.
+If there is no widget, the challenge does not clear, or `challenge` reports frames it cannot find a checkbox in: tell the user that an operator must solve it in the browser console. The `vnc_url` identifies the affected browser for the operator; do not pass it to the user. API calls that use the session, including `session <session_id>` status checks, refresh its idle timeout. VNC activity alone does not; after ten minutes without an API call the session can expire. Then retry with `--session <session_id>`, or open a new session if it has expired.
 
 ## Fallback for web tools
 

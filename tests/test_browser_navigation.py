@@ -448,3 +448,34 @@ console.log(JSON.stringify(controls.map(extract)));
     for entry in entries[5:]:
         assert 'value' not in entry
         assert entry['value_present'] is True
+
+
+@pytest.mark.parametrize("endpoint", ["browse", "render_page", "interact"])
+def test_captcha_names_operator_instance_and_routes_console(navigation, monkeypatch, endpoint):
+    from urllib.parse import parse_qs, urlsplit, unquote
+
+    page, _ = navigation
+    monkeypatch.setattr(browse_api, "_navigate_and_wait", lambda *a, **k: None)
+    inst = types.SimpleNamespace(user_id="alice: team", slot=1, display=":101")
+    monkeypatch.setattr(browse_api, "_instance", inst)
+    monkeypatch.setenv("BROWSER_VNC_URL", "https://console.example/vnc.html")
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(
+        get_json=lambda: {"session_id": "session", "url": REQUESTED, "skip_behavior": True, "actions": []},
+    ))
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kwargs: None)
+    monkeypatch.setattr(browse_api, "_get_session", lambda sid: {"page": page})
+    monkeypatch.setattr(browse_api, "_session_page", lambda session: page)
+    monkeypatch.setattr(browse_api, "_foreground_tabs", lambda page: ([], []))
+    monkeypatch.setattr(browse_api, "_page_is_gone", lambda page: False)
+    monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda page: True)
+    monkeypatch.setattr(browse_api.browsing, "wait_for_datadome", lambda page: None)
+    monkeypatch.setattr(browse_api.browsing, "simulate_human_behavior", lambda *a, **k: None)
+    result = getattr(browse_api, endpoint)()
+    assert result["status"] == "captcha"
+    assert result["instance"] == {"user": "alice: team", "slot": 1}
+    assert "operator" in result["message"]
+    path = parse_qs(urlsplit(result["vnc_url"]).query)["path"][0]
+    assert unquote(parse_qs(urlsplit(path).query)["token"][0]) == inst.user_id
+    if endpoint == "interact":
+        assert result["actions"] == []

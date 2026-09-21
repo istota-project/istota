@@ -6,6 +6,9 @@ be read by the monitor; Chrome's lifecycle lock serializes watchdog recovery.
 
 from dataclasses import dataclass, field
 import os
+import json
+from pathlib import Path
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit, parse_qsl
 import logging
 import socket
 import subprocess
@@ -17,6 +20,7 @@ from lib.istota_user_scope import scoped_user_dir
 
 log = logging.getLogger(__name__)
 
+RUNTIME_DIR = Path("/run/istota-browser")
 PROFILE_ROOT = chrome.PROFILE_ROOT
 MAX_INSTANCES = int(os.environ.get("BROWSER_MAX_INSTANCES", "2"))
 CDP_PORT_BASE = 9300
@@ -69,6 +73,51 @@ def live():
 def instance_for(user_id):
     with _registry_lock:
         return _instances.get(user_id)
+
+
+def console_url(inst, base="vnc.html"):
+    """Encode the address, websocket query, and noVNC path independently."""
+    if not base:
+        return ""
+    token = quote(inst.user_id, safe="")
+    websocket_path = "websockify/?" + urlencode({"token": token})
+    parts = urlsplit(base)
+    query = [(name, value) for name, value in parse_qsl(parts.query)
+             if name != "path"]
+    query.append(("path", websocket_path))
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def _write_console_file(path, text):
+    # Temporary files stay outside TokenFile's directory: it reads every file.
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = RUNTIME_DIR / "console.tmp"
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _publish_instances():
+    now, monotonic_now = time.time(), time.monotonic()
+    entries = [{
+        "user": inst.user_id, "slot": inst.slot,
+        "last_used": now - max(0, monotonic_now - inst.last_used),
+        "url": console_url(inst),
+    } for inst in live()]
+    _write_console_file(RUNTIME_DIR / "web/instances.json", json.dumps(entries))
+
+
+def _publish_route(inst):
+    # Canonical identities may contain newlines or TokenFile's ': ' delimiter.
+    # Slot filenames also avoid expanding long UTF-8 identities past NAME_MAX.
+    token = quote(inst.user_id, safe="")
+    _write_console_file(
+        RUNTIME_DIR / "vnc-tokens" / str(inst.slot),
+        f"{token}: localhost:{inst.vnc_port}\n",
+    )
 
 
 def _wait_for_display(inst):
@@ -130,6 +179,7 @@ def acquire(user_id):
     inst = instance_for(user_id)
     if inst is not None:
         inst.last_used = time.monotonic()
+        _publish_instances()
         return inst
     used = {item.slot for item in live()}
     slot = next((slot for slot in range(MAX_INSTANCES) if slot not in used), None)
@@ -147,17 +197,22 @@ def acquire(user_id):
     )
     chrome._assert_pw_thread(inst, "acquire", record=False)
     try:
+        # A failed removal during an earlier release must not route its old
+        # address to this slot while the replacement browser is starting.
+        (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
         _start_display(inst)
         chrome.launch_chrome(inst)
         chrome.connect_cdp(inst)
+        with _registry_lock:
+            _instances[user_id] = inst
+        _publish_route(inst)
+        _publish_instances()
     except BaseException as exc:
         release_slot(inst)
         if isinstance(exc, Exception):
             log.warning("Browser instance launch failed for slot %d: %s", slot, exc)
             raise LaunchFailed(f"Browser instance failed to start: {exc}") from exc
         raise
-    with _registry_lock:
-        _instances[user_id] = inst
     return inst
 
 
@@ -166,6 +221,10 @@ def release_slot(inst):
     # Hold the lifecycle lock through teardown so recovery cannot resurrect a
     # Chrome between its stop and its display's stop.
     with chrome._chrome_lock:
+        try:
+            (RUNTIME_DIR / "vnc-tokens" / str(inst.slot)).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("Could not remove browser console route: %s", exc)
         chrome.cleanup(inst)
         chrome._kill_chrome_proc(inst.x11vnc_proc)
         chrome._kill_chrome_proc(inst.xvfb_proc)
@@ -173,6 +232,10 @@ def release_slot(inst):
         with _registry_lock:
             if _instances.get(inst.user_id) is inst:
                 del _instances[inst.user_id]
+        try:
+            _publish_instances()
+        except OSError as exc:
+            log.warning("Could not update browser console index: %s", exc)
 
 
 def cleanup():

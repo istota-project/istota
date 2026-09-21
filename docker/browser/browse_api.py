@@ -830,11 +830,11 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
     raise NavigationMismatch(url, landed)
 
 
-def _captcha_response(session_id, challenge=None):
-    """The response shape for a challenge the caller has to clear.
+def _captcha_response(session_id, challenge=None, **extra):
+    """The response shape for a challenge requiring operator attention.
 
     The session is deliberately left open in every case, so the caller can
-    solve it over VNC -- or press it with `click_challenge` -- and retry
+    request operator help -- or press it with `click_challenge` -- and retry
     against the same tab.
 
     `challenge` names the title phrase `_navigate_and_wait` saw still showing,
@@ -847,9 +847,11 @@ def _captcha_response(session_id, challenge=None):
     return jsonify({
         "status": "captcha",
         "session_id": session_id,
-        "vnc_url": os.environ.get("BROWSER_VNC_URL", ""),
-        "message": "Captcha detected. Solve via VNC, then retry.",
+        "vnc_url": pool.console_url(_instance, os.environ.get("BROWSER_VNC_URL", "")),
+        "instance": {"user": _instance.user_id, "slot": _instance.slot},
+        "message": "Captcha detected. An operator must solve it in the browser console, then retry.",
         "challenge": challenge,
+        **extra,
     })
 
 
@@ -2359,13 +2361,7 @@ def interact():
                 })
 
         if browsing.detect_captcha(page):
-            vnc_url = os.environ.get("BROWSER_VNC_URL", "")
-            return jsonify({
-                "status": "captcha",
-                "session_id": session_id,
-                "vnc_url": vnc_url,
-                "actions": results,
-            })
+            return _captcha_response(session_id, actions=results)
 
         content = browsing.extract_page_content(page)
         return jsonify({
