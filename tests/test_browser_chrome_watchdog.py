@@ -16,6 +16,7 @@ env, so we stub ``patchright`` and import the standalone ``chrome`` module from
 """
 
 import sys
+from functools import partial
 import threading
 import time
 import types
@@ -37,6 +38,10 @@ if "patchright" not in sys.modules:
 _BROWSER_DIR = Path(__file__).resolve().parent.parent / "docker" / "browser"
 if str(_BROWSER_DIR) not in sys.path:
     sys.path.insert(0, str(_BROWSER_DIR))
+
+from pool import BrowserInstance  # noqa: E402
+
+INSTANCE = BrowserInstance("default", "/tmp/test-profile", ":100", 9300, 5900, 0)
 
 import chrome  # noqa: E402  (import after the patchright stub + path insert)
 
@@ -69,26 +74,28 @@ class FakeProc:
 def _reset_chrome_globals():
     """Chrome is a singleton module; reset its globals around every test."""
     def _reset():
-        chrome._chrome_proc = None
+        INSTANCE.proc = None
         chrome._pw = None
-        chrome._pw_browser = None
-        chrome._pw_context = None
-        chrome._pw_thread_id = None
-        chrome._launching = False
+        chrome._connections.clear()
+        chrome._driver_thread_id = None
+        INSTANCE.pw_browser = None
+        INSTANCE.pw_context = None
+        INSTANCE.pw_thread_id = None
+        INSTANCE.launching = False
         # The CDP heartbeat is module state like the rest, and this file's
         # connect_cdp tests now write to it. Three test files share the `chrome`
         # singleton inside one xdist worker, so a reset list that omits a global
         # leaks it to whichever file runs next.
-        chrome._cdp_health.update(
+        INSTANCE.cdp_health.update(
             last_success=0.0, last_failure=0.0,
             consecutive_failures=0, last_error="",
         )
         # Same reason: the launch generation and the wedge-recovery record
         # (ISSUE-394) are module state, and this file drives both restart and
         # recover paths that write them.
-        chrome._launch_generation = 0
+        INSTANCE.launch_generation = 0
         with chrome._wedge_lock:
-            chrome._wedge_recoveries.clear()
+            INSTANCE.wedge_recoveries.clear()
 
     _reset()
     yield
@@ -104,17 +111,17 @@ def test_connect_cdp_reuses_live_connection(monkeypatch):
     live = mock.MagicMock(name="live_browser")
     session = mock.MagicMock(name="cdp_session")
     live.new_browser_cdp_session.return_value = session
-    chrome._pw_browser = live
+    INSTANCE.pw_browser = live
 
     sp = mock.MagicMock(name="sync_playwright")
     monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
 
-    chrome.connect_cdp()
+    chrome.connect_cdp(INSTANCE)
 
     live.new_browser_cdp_session.assert_called_once()  # a real round-trip ran
     session.detach.assert_called_once()
     sp.start.assert_not_called()  # no reconnect
-    assert chrome._pw_browser is live
+    assert INSTANCE.pw_browser is live
 
 
 def test_connect_cdp_reconnects_when_round_trip_fails(monkeypatch):
@@ -125,8 +132,7 @@ def test_connect_cdp_reconnects_when_round_trip_fails(monkeypatch):
     stale.contexts = [mock.MagicMock(name="cached_ctx")]
     # The real state: the websocket is dead, so any round-trip raises.
     stale.new_browser_cdp_session.side_effect = Exception("Target closed")
-    chrome._pw_browser = stale
-    chrome._pw = mock.MagicMock(name="stale_pw")
+    INSTANCE.pw_browser = stale
 
     new_browser = mock.MagicMock(name="new_browser")
     new_browser.contexts = [mock.MagicMock(name="new_ctx")]
@@ -136,11 +142,13 @@ def test_connect_cdp_reconnects_when_round_trip_fails(monkeypatch):
     sp.start.return_value = started
     monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
 
-    chrome.connect_cdp()
+    chrome._pw = started  # Reconnect one browser through the existing shared driver.
+    chrome.connect_cdp(INSTANCE)
 
+    sp.start.assert_not_called()
     stale.new_browser_cdp_session.assert_called_once()
     started.chromium.connect_over_cdp.assert_called_once()
-    assert chrome._pw_browser is new_browser  # reconnected, not the stale one
+    assert INSTANCE.pw_browser is new_browser  # reconnected, not the stale one
 
 
 def test_connect_cdp_detach_failure_does_not_force_reconnect(monkeypatch):
@@ -150,15 +158,15 @@ def test_connect_cdp_detach_failure_does_not_force_reconnect(monkeypatch):
     session = mock.MagicMock(name="cdp_session")
     session.detach.side_effect = Exception("detach boom")
     live.new_browser_cdp_session.return_value = session
-    chrome._pw_browser = live
+    INSTANCE.pw_browser = live
 
     sp = mock.MagicMock(name="sync_playwright")
     monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
 
-    chrome.connect_cdp()
+    chrome.connect_cdp(INSTANCE)
 
     sp.start.assert_not_called()  # attach succeeded -> reuse
-    assert chrome._pw_browser is live
+    assert INSTANCE.pw_browser is live
 
 
 # --------------------------------------------------------------------------
@@ -181,9 +189,9 @@ def test_concurrent_recover_and_ensure_never_double_launch(monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(chrome.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda *a, **k: None)
+    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst, *a, **k: None)
 
-    chrome._chrome_proc = None
+    INSTANCE.proc = None
     errors = []
 
     def _run(fn):
@@ -192,8 +200,8 @@ def test_concurrent_recover_and_ensure_never_double_launch(monkeypatch):
         except Exception as exc:  # pragma: no cover - surfaced via assert
             errors.append(exc)
 
-    t1 = threading.Thread(target=_run, args=(chrome.recover_wedged_chrome,))
-    t2 = threading.Thread(target=_run, args=(chrome.ensure_chrome,))
+    t1 = threading.Thread(target=_run, args=(partial(chrome.recover_wedged_chrome, INSTANCE),))
+    t2 = threading.Thread(target=_run, args=(partial(chrome.ensure_chrome, INSTANCE),))
     t1.start()
     t2.start()
     t1.join()
@@ -208,37 +216,37 @@ def test_recover_wedged_kills_old_proc_and_skips_disconnect(monkeypatch):
     never touch Patchright (thread affinity -- it runs on the watchdog thread)."""
     new_proc = FakeProc()
     monkeypatch.setattr(chrome.subprocess, "Popen", lambda *a, **k: new_proc)
-    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda *a, **k: None)
+    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst, *a, **k: None)
     disc = mock.MagicMock(name="disconnect_cdp")
     monkeypatch.setattr(chrome, "disconnect_cdp", disc)
 
     old = FakeProc(alive=True)
-    chrome._chrome_proc = old
+    INSTANCE.proc = old
 
-    chrome.recover_wedged_chrome()
+    chrome.recover_wedged_chrome(INSTANCE)
 
     assert old.terminated is True
-    assert chrome._chrome_proc is new_proc
+    assert INSTANCE.proc is new_proc
     disc.assert_not_called()
 
 
 def test_recover_wedged_relaunches_with_no_existing_proc(monkeypatch):
     new_proc = FakeProc()
     monkeypatch.setattr(chrome.subprocess, "Popen", lambda *a, **k: new_proc)
-    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda *a, **k: None)
+    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst, *a, **k: None)
 
-    chrome._chrome_proc = None
-    chrome.recover_wedged_chrome()
+    INSTANCE.proc = None
+    chrome.recover_wedged_chrome(INSTANCE)
 
-    assert chrome._chrome_proc is new_proc
+    assert INSTANCE.proc is new_proc
 
 
 def test_ensure_chrome_noop_when_already_running(monkeypatch):
     popen = mock.MagicMock(name="Popen")
     monkeypatch.setattr(chrome.subprocess, "Popen", popen)
 
-    chrome._chrome_proc = FakeProc(alive=True)
-    chrome.ensure_chrome()
+    INSTANCE.proc = FakeProc(alive=True)
+    chrome.ensure_chrome(INSTANCE)
 
     popen.assert_not_called()
 
@@ -249,13 +257,13 @@ def test_launch_sets_launching_window_and_clears_it(monkeypatch):
     seen = {}
 
     def fake_wait(*_a, **_k):
-        seen["during"] = chrome._launching
+        seen["during"] = INSTANCE.launching
 
     monkeypatch.setattr(chrome.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(chrome, "_wait_for_chrome_ready", fake_wait)
 
-    assert chrome.is_launching() is False
-    chrome.launch_chrome()
+    assert chrome.is_launching(INSTANCE) is False
+    chrome.launch_chrome(INSTANCE)
 
     assert seen["during"] is True
-    assert chrome.is_launching() is False
+    assert chrome.is_launching(INSTANCE) is False

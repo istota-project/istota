@@ -447,7 +447,7 @@ class TestVendoredCopy:
 
     def test_the_sync_script_lists_it(self):
         assert (
-            "src/istota/devbox_exec_protocol.py:istota_devbox_exec_protocol.py"
+            "src/istota/devbox_exec_protocol.py:docker/devbox/lib/istota_devbox_exec_protocol.py"
             in SYNC_SCRIPT.read_text()
         )
 

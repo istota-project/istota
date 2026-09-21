@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser instances</title>
+<style>
+  body { font: 1rem system-ui, sans-serif; max-width: 50rem; margin: 3rem auto; padding: 0 1rem; }
+  li { margin: 1rem 0; }
+</style>
+<h1>Browser instances</h1>
+<p>Operator console. Each connection uses the configured VNC password.</p>
+<p id="status" role="status">Loading instances…</p>
+<ul id="instances"></ul>
+<script>
+  async function refresh() {
+    const status = document.getElementById('status');
+    const list = document.getElementById('instances');
+    try {
+      const response = await fetch('instances.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error('Could not read instances');
+      const instances = await response.json();
+      const rows = instances.map(instance => {
+        const row = document.createElement('li');
+        const link = document.createElement('a');
+        link.href = instance.url;
+        link.textContent = instance.user;
+        const idle = Math.max(0, Math.floor(Date.now() / 1000 - instance.last_used));
+        row.append(link, document.createTextNode(` — slot ${instance.slot}, idle ${idle}s`));
+        return row;
+      });
+      list.replaceChildren(...rows);
+      status.textContent = instances.length ? 'Live browsers:' : 'No live browsers.';
+    } catch (error) {
+      list.replaceChildren();
+      status.textContent = 'Could not load browser instances. Retrying…';
+    } finally {
+      setTimeout(refresh, 5000);
+    }
+  }
+  refresh();
+</script>
+</html>

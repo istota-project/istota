@@ -585,3 +585,31 @@ class TestParsingEdgeCases:
         assert "KO" in before.tickers
         after = next(e for e in data.earnings if "/a" in e.date)
         assert "GILD" in after.tickers
+
+
+@pytest.fixture(autouse=True)
+def browser_identity(monkeypatch):
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+
+
+def test_finviz_identity_on_constructed_request(monkeypatch):
+    import httpx
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "ok", "text": SAMPLE_PAGE_TEXT})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr(httpx, "post", client.post)
+        assert fetch_finviz_data(retries=0) is not None
+    assert len(requests) == 1
+    assert requests[0].headers["X-Istota-User"] == "alice"
+
+
+def test_finviz_missing_identity_never_sends(monkeypatch):
+    monkeypatch.delenv("ISTOTA_USER_ID")
+    with patch("httpx.post") as post:
+        with pytest.raises(ValueError, match="ISTOTA_USER_ID"):
+            fetch_finviz_data()
+    post.assert_not_called()

@@ -8,6 +8,8 @@ from unittest import mock
 
 import pytest
 
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
+
 # Stub patchright before importing chrome -- chrome does
 # `from patchright.sync_api import sync_playwright` at module top.
 if "patchright" not in sys.modules:
@@ -121,8 +123,8 @@ class Page:
 @pytest.fixture
 def navigation(monkeypatch):
     page = Page()
-    monkeypatch.setattr(chrome, "connect_cdp", lambda: None)
-    monkeypatch.setattr(chrome, "get_context", lambda: types.SimpleNamespace(pages=[page]))
+    monkeypatch.setattr(chrome, "connect_cdp", lambda inst: None)
+    monkeypatch.setattr(chrome, "get_context", lambda inst: types.SimpleNamespace(pages=[page]))
     ticks = itertools.count()
     monkeypatch.setattr(browse_api, "time", types.SimpleNamespace(
         sleep=lambda _: None, monotonic=lambda: next(ticks),
@@ -146,7 +148,7 @@ def test_wrong_document_is_an_error_at_each_endpoint(navigation, monkeypatch, en
     close = mock.Mock()
     monkeypatch.setattr(browse_api, "_close_session", close)
     monkeypatch.setattr(browse_api.browsing, "wait_for_datadome", lambda p: None)
-    monkeypatch.setattr(browse_api.browsing, "simulate_human_behavior", lambda p: None)
+    monkeypatch.setattr(browse_api.browsing, "simulate_human_behavior", lambda p, *, display: None)
     monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda p: False)
     extract = mock.Mock(return_value={"url": OLD, "text": "Old advisory"})
     monkeypatch.setattr(browse_api.browsing, "extract_page_content", extract)
@@ -318,7 +320,7 @@ def test_extract_keeps_textless_controls_and_scrubs_before_truncation(monkeypatc
     monkeypatch.setattr(browse_api, '_credential_values', {'vault&secret'}, raising=False)
     monkeypatch.setattr(browse_api, '_cleanup_expired', lambda **kwargs: None)
     monkeypatch.setattr(browse_api, '_get_session', lambda _: {'page': page})
-    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda: None)
+    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda inst: None)
     monkeypatch.setattr(browse_api, 'request', types.SimpleNamespace(
         get_json=lambda: {'session_id': 's1', 'selector': 'input', 'max_chars': 25}))
     monkeypatch.setattr(browse_api, 'jsonify', lambda value: value)
@@ -357,7 +359,7 @@ def test_extract_live_state_and_password_reflections(monkeypatch, passwords, ent
     monkeypatch.setattr(browse_api, '_credential_values', set())
     monkeypatch.setattr(browse_api, '_cleanup_expired', lambda **kwargs: None)
     monkeypatch.setattr(browse_api, '_get_session', lambda _: {'page': page})
-    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda: None)
+    monkeypatch.setattr(browse_api.chrome, 'connect_cdp', lambda inst: None)
     monkeypatch.setattr(browse_api, 'request', types.SimpleNamespace(
         get_json=lambda: {'session_id': 's1', 'selector': '*'}))
     monkeypatch.setattr(browse_api, 'jsonify', lambda value: value)
@@ -373,7 +375,7 @@ def test_credential_fill_registers_before_fallback_and_failed_input(monkeypatch)
     page.fill.side_effect = RuntimeError('input failed')
     monkeypatch.setattr(browse_api, '_credential_values', set())
     monkeypatch.setattr(browse_api.visual, 'bring_to_front',
-                        lambda *a: types.SimpleNamespace(ok=False, detail='hidden'))
+                        lambda *a, display: types.SimpleNamespace(ok=False, detail='hidden'))
     with pytest.raises(RuntimeError, match='input failed'):
         browse_api._selector_action({}, page, {
             'type': 'fill', 'selector': '#token', 'value': 'api-secret',
@@ -399,7 +401,7 @@ def test_credential_fill_waits_for_field_before_marking(monkeypatch):
     page.fill.side_effect = lambda *args, **kwargs: events.append('fill')
     monkeypatch.setattr(browse_api, '_credential_values', set())
     monkeypatch.setattr(browse_api.visual, 'bring_to_front',
-                        lambda *a: types.SimpleNamespace(ok=False, detail='hidden'))
+                        lambda *a, display: types.SimpleNamespace(ok=False, detail='hidden'))
     result = browse_api._selector_action({}, page, {
         'type': 'fill', 'selector': '#password', 'value': 'fixture-secret',
         'credential': True,
@@ -448,3 +450,34 @@ console.log(JSON.stringify(controls.map(extract)));
     for entry in entries[5:]:
         assert 'value' not in entry
         assert entry['value_present'] is True
+
+
+@pytest.mark.parametrize("endpoint", ["browse", "render_page", "interact"])
+def test_captcha_names_operator_instance_and_routes_console(navigation, monkeypatch, endpoint):
+    from urllib.parse import parse_qs, urlsplit, unquote
+
+    page, _ = navigation
+    monkeypatch.setattr(browse_api, "_navigate_and_wait", lambda *a, **k: None)
+    inst = types.SimpleNamespace(user_id="alice: team", slot=1, display=":101")
+    monkeypatch.setattr(browse_api, "_instance", inst)
+    monkeypatch.setenv("BROWSER_VNC_URL", "https://console.example/vnc.html")
+    monkeypatch.setattr(browse_api, "request", types.SimpleNamespace(
+        get_json=lambda: {"session_id": "session", "url": REQUESTED, "skip_behavior": True, "actions": []},
+    ))
+    monkeypatch.setattr(browse_api, "jsonify", lambda value: value)
+    monkeypatch.setattr(browse_api, "_cleanup_expired", lambda **kwargs: None)
+    monkeypatch.setattr(browse_api, "_get_session", lambda sid: {"page": page})
+    monkeypatch.setattr(browse_api, "_session_page", lambda session: page)
+    monkeypatch.setattr(browse_api, "_foreground_tabs", lambda page: ([], []))
+    monkeypatch.setattr(browse_api, "_page_is_gone", lambda page: False)
+    monkeypatch.setattr(browse_api.browsing, "detect_captcha", lambda page: True)
+    monkeypatch.setattr(browse_api.browsing, "wait_for_datadome", lambda page: None)
+    monkeypatch.setattr(browse_api.browsing, "simulate_human_behavior", lambda *a, **k: None)
+    result = getattr(browse_api, endpoint)()
+    assert result["status"] == "captcha"
+    assert result["instance"] == {"user": "alice: team", "slot": 1}
+    assert "operator" in result["message"]
+    path = parse_qs(urlsplit(result["vnc_url"]).query)["path"][0]
+    assert unquote(parse_qs(urlsplit(path).query)["token"][0]) == inst.user_id
+    if endpoint == "interact":
+        assert result["actions"] == []

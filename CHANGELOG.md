@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Users can inspect their saved browser state and clear a site, all site data or their complete profile with `browse state` and `browse forget`. Closing a browsing session keeps their logins for later tasks.
+
 - Istota can look at a page and click a point on it. `browse screenshot` records the frame the picture was taken in, and `browse interact --click-at X,Y` takes the numbers read straight off that picture, with `--hover-at`, `--press` and `--type` for a form no selector reaches. The DOM path is still the first move — this is the rung below a CSS selector, for a canvas, a chart, a PDF viewer or a control whose class names change every build.
 
 - A picture that no longer describes the page is refused rather than clicked. A capture the page has scrolled or navigated away from, a window that moved, a full-page capture, or no capture at all each come back by name with what to do about it, so a stale picture costs a round rather than a click landing somewhere nobody chose. A screenshot too large for a vision provider's own envelope is shrunk before it is written, so the picture the model sees is the picture the click is converted against.
@@ -24,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Istota can scroll the panel you point at rather than the page behind it. `browse interact --scroll down --scroll-at 700,500` turns the wheel at a point read off a screenshot, which is what reaches a chat log, a code viewer, a results list inside a modal or a PDF viewer — the widgets a page-level scroll cannot move, and exactly the ones the look-and-click loop exists for. `--scroll-zoom` holds ctrl while the wheel turns, so a map zooms in and out at the point you name. A scroll at a point keeps the position you wrote it in among the clicks and fills around it.
 
 ### Changed
+
+- Browser sessions now have separate per-user and deployment-wide limits. Opening a session at capacity closes the requesting user's oldest first; it can close another user's oldest only at the global limit when the requester has none. Idle browser processes stop while their saved profiles remain.
+
+- Existing shared browser logins are parked on upgrade. Each user starts with a separate profile and signs in again; the old logins remain available for an operator to recover.
+
+  **Upgrade note:** The first boot of the rebuilt browser image moves the old shared profile into `legacy-profile/` inside the existing browser volume. No user inherits it. The TLS certificates and existing per-user profiles stay in place. If parking is interrupted, the next boot resumes; a destination collision is logged without overwriting either copy and needs operator attention. Run the full Ansible play to rebuild and deploy the browser image, rather than updating the skill alone.
 
 - A `browse` scroll is now real wheel and keyboard input rather than a script the page can see. It was the last action the model could drive through `page.evaluate`, which is the signal a Cloudflare challenge watches for during its fingerprinting window — and it was the weakest scroll available besides, since it could only ever move the document. A scroll with no point now sends Page_Down or Page_Up. `--select` still sets a dropdown's value directly, and says so in its own result.
 
@@ -42,8 +50,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Active browser sessions no longer expire while in use. Idle sessions are evicted before recently used ones, and session status and capacity retry estimates follow the idle timeout.
 
 - Browse, briefing sources and FinViz now share a bounded cross-process browser queue. Waiting no longer consumes the page request timeout; a saturated queue reports the browser as busy.
-
-- Opening a browser session at capacity no longer closes another task's session. Callers receive a capacity error with a retry estimate, and new sessions are refused under memory pressure instead of evicting a foreign session. Requires a rebuilt browser image.
 
 - Browse extraction includes controls, images and icon-only elements even when they have no rendered text. It reports live form values and checkbox state, withholds password and credential-filled values, and redacts known credentials from extraction output before truncation. Requires a rebuilt browser image.
 
@@ -94,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A URL `browse` cannot use is refused before the browser is touched. `file:`, `javascript:`, `data:` and `view-source:` all resolve in the address bar and nothing on that path had ever read the scheme, so a task could have the container read any file it can see and hand back the text. A URL beginning with `-` was caught, but only after the address bar had been focused and its contents selected, and it came back as a server error about *text* rather than about a URL. Both are answered now before a tab is opened, with the reason and the remedy named. An ordinary address with no scheme, such as `example.com`, still works.
 
 - A Docker build of the web UI no longer prints `/bin/sh: git: not found` twice. That stage carries no git and has no repository in its context, so the version stamp was already falling back to `unknown`; what reached the log was the shell's own error, which reads as a build failure. The same two lines appeared in any `npm run build` run outside a checkout.
+
+### Security
+
+- Browser logins and site storage are isolated per user and persist across tasks and restarts. The operator console opens the selected user's browser; a login completed there no longer reaches other users. Credential fills refuse an older shared-profile browser until its image is rebuilt and deployed.
 
 ## [0.42.0] - 2026-09-19
 

@@ -36,6 +36,8 @@ from unittest import mock
 
 import pytest
 
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
+
 _BROWSER_DIR = Path(__file__).resolve().parent.parent / "docker" / "browser"
 if str(_BROWSER_DIR) not in sys.path:
     sys.path.insert(0, str(_BROWSER_DIR))
@@ -147,7 +149,7 @@ class TestBuildingTheCaptureRecord:
     def test_the_inset_is_the_difference_between_the_window_and_the_capture(
         self, window,
     ):
-        record, why = visual.build_capture(_png(CAPTURE_W, CAPTURE_H), page=_Page())
+        record, why = visual.build_capture(_png(CAPTURE_W, CAPTURE_H), page=_Page(), display=":100")
 
         assert why is None
         assert record["image"] == [CAPTURE_W, CAPTURE_H]
@@ -164,7 +166,7 @@ class TestBuildingTheCaptureRecord:
         # `viewport * dpr` would compute a frame about 1% wrong on any page
         # with a scrollbar -- constantly, and with nothing to notice it by.
         page = _Page(viewport=(1439, 812))
-        record, why = visual.build_capture(_png(1424, 812), page=page)
+        record, why = visual.build_capture(_png(1424, 812), page=page, display=":100")
 
         assert why is None
         assert record["image"] == [1424, 812]
@@ -188,7 +190,7 @@ class TestBuildingTheCaptureRecord:
         # A device pixel ratio above 1, or a capture of some other window.
         # Either way the frame is not the one the pointer acts in, and a
         # conversion against it would click somewhere arbitrary.
-        record, why = visual.build_capture(_png(WINDOW["width"] + 40, 812), page=_Page())
+        record, why = visual.build_capture(_png(WINDOW["width"] + 40, 812), page=_Page(), display=":100")
 
         assert record is None
         assert "wider than its window" in why
@@ -196,7 +198,7 @@ class TestBuildingTheCaptureRecord:
     def test_a_full_page_capture_gets_no_offset_at_all(self, window):
         record, why = visual.build_capture(
             _png(CAPTURE_W, 6000), page=_Page(), full_page=True,
-        )
+         display=":100")
 
         assert why is None
         assert record["full_page"] is True
@@ -208,20 +210,20 @@ class TestBuildingTheCaptureRecord:
     def test_an_implausible_inset_is_refused_with_both_measurements(self, window):
         # A capture taller than the window it came from means the window that
         # was measured is not the one that was captured.
-        record, why = visual.build_capture(_png(CAPTURE_W, 2000), page=_Page())
+        record, why = visual.build_capture(_png(CAPTURE_W, 2000), page=_Page(), display=":100")
 
         assert record is None
         assert "implausible UI inset" in why
         assert "2000" in why
 
     def test_bytes_that_are_not_a_png_are_refused(self, window):
-        record, why = visual.build_capture(b"not a picture", page=_Page())
+        record, why = visual.build_capture(b"not a picture", page=_Page(), display=":100")
         assert record is None
         assert "not a PNG" in why
 
     def test_no_chrome_window_is_refused(self):
         with mock.patch.object(visual.xdotool, "window_geometry", return_value=None):
-            record, why = visual.build_capture(_png(320, 240), page=_Page())
+            record, why = visual.build_capture(_png(320, 240), page=_Page(), display=":100")
         assert record is None
         assert "Chrome window not found" in why
 
@@ -231,7 +233,7 @@ class TestBuildingTheCaptureRecord:
 
         record, why = visual.build_capture(
             _png(CAPTURE_W, CAPTURE_H), page=page, measure=False,
-        )
+         display=":100")
 
         assert why is None
         assert record["page"] is None
@@ -263,25 +265,25 @@ class TestWhatMakesACaptureStale:
     the wrong reason."""
 
     def test_an_unchanged_page_is_not_stale(self, window):
-        assert visual.staleness(_record(), _Page()) is None
+        assert visual.staleness(_record(), _Page(), display=":100") is None
 
     def test_no_record_at_all(self, window):
-        code, detail = visual.staleness(None, _Page())
+        code, detail = visual.staleness(None, _Page(), display=":100")
         assert code == "no_capture"
         assert "never been screenshotted" in detail
 
     def test_a_full_page_record(self, window):
-        code, _ = visual.staleness(_record(full_page=True), _Page())
+        code, _ = visual.staleness(_record(full_page=True), _Page(), display=":100")
         assert code == "full_page_capture"
 
     def test_a_record_with_no_coordinate_frame(self, window):
-        code, _ = visual.staleness(_record(offset=None), _Page())
+        code, _ = visual.staleness(_record(offset=None), _Page(), display=":100")
         assert code == "no_coordinate_frame"
 
     def test_a_navigation(self, window):
         code, detail = visual.staleness(
             _record(), _Page(url="https://b.example/other"),
-        )
+         display=":100")
         assert code == "stale_capture"
         # Both states named: an operator reading a log wants to know which way
         # the page moved.
@@ -289,7 +291,7 @@ class TestWhatMakesACaptureStale:
         assert "https://b.example/other" in detail
 
     def test_a_scroll(self, window):
-        code, detail = visual.staleness(_record(), _Page(scroll=(0, 40)))
+        code, detail = visual.staleness(_record(), _Page(scroll=(0, 40)), display=":100")
         assert code == "stale_capture"
         assert "40" in detail
 
@@ -297,22 +299,22 @@ class TestWhatMakesACaptureStale:
         # Scroll positions are doubles, a sticky header or a smooth-scroll
         # settle leaves fractions behind, and refusing a click over 0.4 of a
         # pixel costs the caller a round for nothing.
-        assert visual.staleness(_record(), _Page(scroll=(0.4, 0.4))) is None
+        assert visual.staleness(_record(), _Page(scroll=(0.4, 0.4)), display=":100") is None
 
     def test_a_resized_viewport(self, window):
-        code, _ = visual.staleness(_record(), _Page(viewport=(1000, 700)))
+        code, _ = visual.staleness(_record(), _Page(viewport=(1000, 700)), display=":100")
         assert code == "viewport_changed"
 
     def test_a_moved_window(self):
         moved = {"x": 100, "y": 0, "width": 1439, "height": 899}
         with mock.patch.object(visual.xdotool, "window_geometry", return_value=moved):
-            code, detail = visual.staleness(_record(), _Page())
+            code, detail = visual.staleness(_record(), _Page(), display=":100")
         assert code == "viewport_changed"
         assert "100" in detail
 
     def test_a_window_that_is_gone(self):
         with mock.patch.object(visual.xdotool, "window_geometry", return_value=None):
-            code, _ = visual.staleness(_record(), _Page())
+            code, _ = visual.staleness(_record(), _Page(), display=":100")
         assert code == "window_gone"
 
     def test_a_page_that_will_not_answer_is_allowed_on_the_window_check(self, window):
@@ -320,7 +322,7 @@ class TestWhatMakesACaptureStale:
         # the window comparison above has already passed.
         page = _Page()
         page.raises = True
-        assert visual.staleness(_record(), page) is None
+        assert visual.staleness(_record(), page, display=":100") is None
 
 
 class TestConvertingAPoint:
@@ -490,7 +492,7 @@ class TestTheCoordinateActions:
         }
         pointer.click.assert_called_once()
         assert pointer.click.call_args[0] == (293, 337 + UI_INSET_Y)
-        assert pointer.click.call_args[1] == {"button": 1}
+        assert pointer.click.call_args[1] == {"button": 1, "display": ":100"}
 
     def test_the_delivered_picture_size_rides_the_action(self, window, pointer):
         # The half the skill supplies: a point on a downscaled picture is
@@ -512,7 +514,7 @@ class TestTheCoordinateActions:
             session, _SettlePage(),
             {"type": "click_at", "x": 10, "y": 10, "button": "right"},
         )
-        assert pointer.click.call_args[1] == {"button": 3}
+        assert pointer.click.call_args[1] == {"button": 3, "display": ":100"}
 
     def test_a_hover_moves_and_does_not_click(self, window, pointer):
         session = {"capture": _record(), "tab_index": 0}
@@ -522,7 +524,7 @@ class TestTheCoordinateActions:
         )
 
         assert result["ok"] is True
-        pointer.move.assert_called_once_with(10, 20 + UI_INSET_Y)
+        pointer.move.assert_called_once_with(10, 20 + UI_INSET_Y, display=":100")
         pointer.click.assert_not_called()
 
     @pytest.mark.parametrize("record,expected", [
@@ -602,7 +604,7 @@ class TestTheCoordinateActions:
         )
 
         assert result == {"action": "key", "key": "Tab", "ok": True}
-        pointer.key.assert_called_once_with("Tab")
+        pointer.key.assert_called_once_with("Tab", display=":100")
 
     def test_an_empty_key_is_refused(self, window, pointer):
         result = browse_api._coordinate_action(
@@ -633,7 +635,7 @@ class TestTheCoordinateActions:
 
         assert result["ok"] is True
         assert result["chars"] == browse_api.MAX_TYPE_CHARS
-        pointer.typed.assert_called_once_with(at_cap)
+        pointer.typed.assert_called_once_with(at_cap, display=":100")
 
     def test_a_navigation_under_the_settle_wait_does_not_lose_the_click(
         self, window, pointer,
@@ -945,7 +947,7 @@ class TestTheForegroundGuard:
     def live(self, window):
         """A session whose picture is current, so only the tab is in question."""
         page = _SettlePage()
-        record, error = visual.build_capture(_png(CAPTURE_W, CAPTURE_H), page=page)
+        record, error = visual.build_capture(_png(CAPTURE_W, CAPTURE_H), page=page, display=":100")
         assert not error
         return {"capture": record, "tab_index": 0}, page
 
@@ -1301,14 +1303,14 @@ class TestTheKeylessScroll:
 
         assert result["ok"] is True
         assert result["presses"] == 2
-        assert wheel.key.call_args_list == [mock.call("Page_Down")] * 2
+        assert wheel.key.call_args_list == [mock.call("Page_Down", display=":100")] * 2
 
     def test_up_is_page_up(self, window, pointer, wheel):
         browse_api._coordinate_action(
             {"capture": None, "tab_index": 0}, _SettlePage(),
             {"type": "scroll", "direction": "up"},
         )
-        assert wheel.key.call_args_list == [mock.call("Page_Up")]
+        assert wheel.key.call_args_list == [mock.call("Page_Up", display=":100")]
 
     def test_it_needs_no_capture(self, window, pointer, wheel):
         """A scroll with no point converts nothing, so a session that has
@@ -1518,7 +1520,7 @@ class TestTheModifierIsAlwaysReleased:
         return [call.args[0] for call in run.call_args_list]
 
     def test_the_ordinary_path_presses_and_releases(self, runs):
-        with xdotool.modifier_held("ctrl"):
+        with xdotool.modifier_held("ctrl", display=":100"):
             pass
 
         assert self._argvs(runs) == [
@@ -1528,7 +1530,7 @@ class TestTheModifierIsAlwaysReleased:
 
     def test_a_raise_inside_the_block_still_releases(self, runs):
         with pytest.raises(RuntimeError):
-            with xdotool.modifier_held("ctrl"):
+            with xdotool.modifier_held("ctrl", display=":100"):
                 raise RuntimeError("the wheel failed mid-run")
 
         assert self._argvs(runs)[-1] == ["xdotool", "keyup", "--", "ctrl"]
@@ -1545,7 +1547,7 @@ class TestTheModifierIsAlwaysReleased:
         ]
 
         with pytest.raises(subprocess.TimeoutExpired):
-            with xdotool.modifier_held("ctrl"):
+            with xdotool.modifier_held("ctrl", display=":100"):
                 raise AssertionError("the block must not run")
 
         assert self._argvs(runs)[-1] == ["xdotool", "keyup", "--", "ctrl"]
@@ -1553,14 +1555,14 @@ class TestTheModifierIsAlwaysReleased:
     def test_no_modifier_touches_the_display_at_all(self, runs):
         """`None` is the ordinary case, so it must cost nothing — a keyup for
         a key nobody pressed is a keystroke this container did not intend."""
-        with xdotool.modifier_held(None):
+        with xdotool.modifier_held(None, display=":100"):
             pass
 
         assert runs.call_args_list == []
 
     def test_a_modifier_outside_the_allowlist_presses_nothing(self, runs):
         with pytest.raises(ValueError):
-            with xdotool.modifier_held("--file=/etc/passwd"):
+            with xdotool.modifier_held("--file=/etc/passwd", display=":100"):
                 pass
 
         assert runs.call_args_list == []
@@ -1571,7 +1573,7 @@ class TestTheWheelButtonGuard:
 
     def test_a_wheel_tick_is_a_press_and_release_of_that_button(self):
         with mock.patch.object(xdotool, "mouse_click") as click:
-            xdotool.mouse_wheel(xdotool.WHEEL_DOWN)
+            xdotool.mouse_wheel(xdotool.WHEEL_DOWN, display=":100")
 
         assert click.call_args[1]["button"] == xdotool.WHEEL_DOWN
         # Far shorter than a click's: a wheel tick is a detent, and a mouse
@@ -1582,7 +1584,7 @@ class TestTheWheelButtonGuard:
     def test_a_button_that_is_not_the_wheel_presses_nothing(self, button):
         with mock.patch.object(xdotool, "mouse_click") as click:
             with pytest.raises(ValueError):
-                xdotool.mouse_wheel(button)
+                xdotool.mouse_wheel(button, display=":100")
 
         click.assert_not_called()
 
@@ -1596,7 +1598,7 @@ class TestDragCoordinates:
                  "image_size": [CAPTURE_W / 2, CAPTURE_H / 2]},
             )
         assert result["ok"] is True
-        drag.assert_called_once_with(100, 120 + UI_INSET_Y, 400, 360 + UI_INSET_Y)
+        drag.assert_called_once_with(100, 120 + UI_INSET_Y, 400, 360 + UI_INSET_Y, display=":100")
 
     def test_invalid_destination_does_not_start_drag(self, window):
         with mock.patch.object(browse_api.browsing, "human_drag_at") as drag:

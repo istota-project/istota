@@ -23,8 +23,11 @@ ENV TZ=America/New_York
 # Narrow faces bookworm's 1.x shipped. Both are here to keep the font list level
 # with the bookworm image; check `fc-list : family` against it before trimming.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
+    util-linux \
     x11vnc \
     novnc \
+    python3-websockify \
     xvfb \
     x11-utils \
     xdotool \
@@ -82,7 +85,9 @@ RUN curl -fsSL -o /tmp/autoconsent-bundle.js \
        /app/stealth-extension/autoconsent-prefix.js \
        /app/stealth-extension/autoconsent-suffix.js
 
-COPY browse_api.py chrome.py browsing.py render.py text_budget.py visual.py xdotool.py ./
+COPY browse_api.py chrome.py pool.py browsing.py render.py text_budget.py visual.py xdotool.py ./
+COPY lib/ ./lib/
+COPY novnc-web/ /usr/share/novnc/
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
 

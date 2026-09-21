@@ -6,6 +6,7 @@ SCREEN_WIDTH=${SCREEN_WIDTH:-1440}
 SCREEN_HEIGHT=${SCREEN_HEIGHT:-900}
 CERT_DIR="/data/browser-profile/ssl"
 PROFILE_DIR="${BROWSER_PROFILE_DIR:-/data/browser-profile}"
+BROWSER_RUNTIME_DIR="/run/istota-browser"
 
 # Ensure browser user owns the profile directory (volume may be owned by root)
 chown -R browser:browser "$PROFILE_DIR"
@@ -20,42 +21,27 @@ if [ ! -f "$CERT_DIR/cert.pem" ]; then
     chown -R browser:browser "$CERT_DIR"
 fi
 
-# Clean up stale Xvfb lock files from previous container runs
-rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+# The non-root pool starts one X server per instance. Prepare its socket dir.
+install -d -m 1777 /tmp/.X11-unix
+# Slots start at 100; these are stale files from a previous container process.
+rm -f /tmp/.X1*-lock /tmp/.X11-unix/X1*
 
-# Start Xvfb (virtual display) — runs as root, X11 accepts all connections (-ac)
-Xvfb :99 -screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x24 -ac &
-export DISPLAY=:99
+# Token and index files are transient. The browser user publishes both; the
+# packaged noVNC tree is root-owned, so serve a writable runtime copy.
+rm -rf "$BROWSER_RUNTIME_DIR"
+install -d "$BROWSER_RUNTIME_DIR/web" "$BROWSER_RUNTIME_DIR/vnc-tokens"
+cp -a /usr/share/novnc/. "$BROWSER_RUNTIME_DIR/web/"
+printf '[]\n' > "$BROWSER_RUNTIME_DIR/web/instances.json"
+chown -R browser:browser "$BROWSER_RUNTIME_DIR"
 
-# Wait for Xvfb to be ready (verify display is accepting connections)
-echo "Waiting for Xvfb..."
-for i in $(seq 1 30); do
-    if xdpyinfo -display :99 >/dev/null 2>&1; then
-        echo "Xvfb ready"
-        break
-    fi
-    sleep 0.5
-done
-if ! xdpyinfo -display :99 >/dev/null 2>&1; then
-    echo "ERROR: Xvfb failed to start after 15 seconds"
-    exit 1
-fi
+# One TLS listener routes operator viewers to the requested live instance.
+websockify --web "$BROWSER_RUNTIME_DIR/web" --cert "$CERT_DIR/combined.pem" \
+    --token-plugin TokenFile --token-source "$BROWSER_RUNTIME_DIR/vnc-tokens" 6080 &
 
-# Start x11vnc
-VNC_ARGS="-display :99 -forever -shared -rfbport 5900"
-if [ -n "$VNC_PASSWORD" ]; then
-    VNC_ARGS="$VNC_ARGS -passwd $VNC_PASSWORD"
-fi
-x11vnc $VNC_ARGS &
-
-# Start noVNC websocket proxy (serves web UI on port 6080, with TLS)
-/usr/share/novnc/utils/novnc_proxy --vnc localhost:5900 --listen 6080 \
-    --cert "$CERT_DIR/combined.pem" &
-
-# Clean up stale Chromium profile locks from previous container runs
-rm -f "$PROFILE_DIR/SingletonLock" "$PROFILE_DIR/SingletonCookie" "$PROFILE_DIR/SingletonSocket"
-
-
-# Start the Flask API as the non-root browser user
-# This allows Chrome to use its native sandbox (Chrome refuses to sandbox as root)
-exec su -s /bin/bash browser -c "DISPLAY=:99 LANG=$LANG TZ=$TZ BROWSER_PROFILE_DIR=$PROFILE_DIR python /app/browse_api.py"
+# Forward Docker stop to the API only, then reap orphaned children. su kills
+# its shell after two seconds, before the API can flush every Chrome profile.
+# setpriv execs directly and preserves the configured environment without a
+# second shell parsing paths or values. Keep the browser account's HOME too.
+exec tini -- setpriv --reuid=browser --regid=browser --init-groups \
+    env HOME=/home/browser USER=browser LOGNAME=browser SHELL=/bin/bash \
+    BROWSER_PROFILE_DIR="$PROFILE_DIR" python /app/browse_api.py

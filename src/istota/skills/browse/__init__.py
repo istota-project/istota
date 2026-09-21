@@ -18,14 +18,15 @@ Reads BROWSER_API_URL env var for the container endpoint.
 
 import argparse
 import json
+import logging
 import math
 import os
 import re
 import time
 from pathlib import Path
 
-from istota.browser_owner import with_browser_owner
-from istota.browser_admission import browser_request
+from istota.browser_owner import browser_headers, with_browser_owner
+from istota.browser_admission import BrowserQueueTimeout, browser_request
 
 import httpx
 
@@ -133,6 +134,43 @@ def get_api_url():
     return os.environ.get("BROWSER_API_URL", DEFAULT_API_URL)
 
 
+# Binary screenshots echo scope here; JSON endpoints use user_scope.
+USER_SCOPE_HEADER = "X-Istota-User-Scope"
+_shared_profile_warned = False
+logger = logging.getLogger(__name__)
+
+
+def _profile_result(data, scope):
+    """Keep the applied scope visible even when a verb rebuilds its result."""
+    global _shared_profile_warned
+    if scope == os.environ.get("ISTOTA_USER_ID") and scope:
+        return {**data, "user_scope": scope}
+    if not _shared_profile_warned:
+        logger.warning(
+            "Browser did not confirm the requested user profile; shared profile "
+            "may be in use. Run the full Ansible play to rebuild the browser image."
+        )
+        _shared_profile_warned = True
+    return {**data, "shared_profile": True}
+
+
+def _credential_preflight(url):
+    """Refuse the whole action list before a credential can reach an old image."""
+    headers = browser_headers()
+    try:
+        resp = browser_request("get", f"{url}/health", headers=headers, timeout=REQUEST_TIMEOUT)
+        data = resp.json()
+        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True:
+            return None
+    except (httpx.HTTPError, BrowserQueueTimeout, ValueError):
+        pass
+    return error_envelope(
+        "Credential fill refused: browser profile isolation was not confirmed. "
+        "Run the full Ansible play to rebuild the browser image with per-user profiles. "
+        "No interaction actions were sent."
+    )
+
+
 def _body_excerpt(resp, limit=MAX_BODY_EXCERPT):
     """A short, printable slice of a response body we could not decode.
 
@@ -203,8 +241,8 @@ def _decode(resp):
         data = None
     if isinstance(data, dict):
         if data.get("error") and "status" not in data:
-            return {"status": "error", **data}
-        return data
+            data = {"status": "error", **data}
+        return _profile_result(data, data.get("user_scope"))
 
     excerpt = _body_excerpt(resp)
     if excerpt is None:
@@ -252,7 +290,7 @@ def cmd_get(args):
     if args.max_links:
         payload["max_links"] = args.max_links
 
-    resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
+    resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     return _decode(resp)
 
 
@@ -290,7 +328,7 @@ def cmd_render(args):
     if args.skip_behavior:
         payload["skip_behavior"] = True
 
-    resp = browser_request("post", f"{url}/render", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
+    resp = browser_request("post", f"{url}/render", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     if resp.status_code == 404:
         # Two unrelated failures share this status. The endpoint's own
         # "session not found or expired" is a JSON body with an `error` key —
@@ -304,7 +342,7 @@ def cmd_render(args):
         except ValueError:
             data = None
         if isinstance(data, dict) and data.get("error"):
-            return {"status": "error", "error": data["error"]}
+            return _decode(resp)
         return {
             "status": "error",
             "error": "This browser container has no render endpoint — use `browse get` instead.",
@@ -674,7 +712,7 @@ def cmd_screenshot(args):
     if args.session:
         payload["session_id"] = args.session
 
-    resp = browser_request("post", f"{url}/screenshot", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
+    resp = browser_request("post", f"{url}/screenshot", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
 
     # The status is checked as well as the content type, because this is the
     # one verb that reports success off a body it never parses: an intermediary
@@ -779,7 +817,7 @@ def cmd_screenshot(args):
         workspace_path = _workspace_relative(resolved)
         if workspace_path:
             result["workspace_path"] = workspace_path
-        return result
+        return _profile_result(result, resp.headers.get(USER_SCOPE_HEADER))
     if is_image:
         return {
             "status": "error",
@@ -808,7 +846,7 @@ def cmd_extract(args):
     if args.limit:
         payload["limit"] = args.limit
 
-    resp = browser_request("post", f"{url}/extract", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
+    resp = browser_request("post", f"{url}/extract", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     return _decode(resp)
 
 
@@ -1196,7 +1234,7 @@ def _session_capture(url, session_id):
     its own session, or Chrome has been relaunched since), and one that will
     not read is a record this skill cannot use.
     """
-    resp = browser_request("get", f"{url}/sessions/{session_id}", timeout=REQUEST_TIMEOUT)
+    resp = browser_request("get", f"{url}/sessions/{session_id}", timeout=REQUEST_TIMEOUT, headers=browser_headers())
     data = _decode(resp)
     if not isinstance(data, dict) or data.get("status") == "error":
         return None, (
@@ -1359,6 +1397,11 @@ def cmd_interact(args):
     """Interact with an existing session."""
     url = get_api_url()
     actions = _interact_actions(args)
+    credential_fill = any(action.get("credential") for action in actions)
+    if credential_fill:
+        refusal = _credential_preflight(url)
+        if refusal:
+            return refusal
 
     # A point is read off the delivered picture, so the container is told what
     # that picture measured and converts from it. The size is recomputed from
@@ -1383,7 +1426,7 @@ def cmd_interact(args):
     # propagating — cautioning about it would claim actions may have run
     # against a call that had not been made.
     try:
-        resp = browser_request("post", f"{url}/interact", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
+        resp = browser_request("post", f"{url}/interact", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
     except PRE_SEND_TRANSPORT_ERRORS:
         raise
     except httpx.TransportError as exc:
@@ -1394,7 +1437,17 @@ def cmd_interact(args):
         for pair in (getattr(args, "fill_credential", None) or [])
         if isinstance(pair, CredentialPair)
     ]
-    decoded = _note_stale_container(_scrub(_decode(resp), secrets))
+    decoded = _decode(resp)
+    scope_confirmed = decoded.get("user_scope") == os.environ.get("ISTOTA_USER_ID")
+    decoded = _note_stale_container(_scrub(decoded, secrets))
+    if credential_fill and not scope_confirmed:
+        decoded = {**decoded, "status": "error", "error": (
+            "The browser did not confirm the credential interaction ran in your profile. "
+            "Actions may have run; do not retry. Run the full Ansible play to rebuild the browser image."
+        )}
+    if any(isinstance(result, dict) and result.get("ok") is False
+           for result in (decoded.get("actions") or [])):
+        decoded = {**decoded, "status": "error", "error": decoded.get("error") or "One or more browser actions failed."}
     return _note_unreported_actions(decoded, actions)
 
 
@@ -1433,7 +1486,7 @@ def cmd_links(args):
         # Extract links from specific elements in existing session
         payload = {"selector": args.selector, "timeout": args.timeout}
         payload["session_id"] = args.session
-        resp = browser_request("post", f"{url}/extract", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
+        resp = browser_request("post", f"{url}/extract", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
         data = _decode(resp)
         if data.get("status") != "ok":
             return data
@@ -1443,11 +1496,12 @@ def cmd_links(args):
             "url": data.get("url", ""),
             "count": len(links),
             "links": links,
+            **{k: data[k] for k in ("user_scope", "shared_profile") if k in data},
         }
     elif args.selector:
         # Fetch page then extract links from selector
         payload = {"url": args.url, "timeout": args.timeout, "keep_session": False}
-        resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
+        resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
         browse_data = _decode(resp)
         if browse_data.get("status") != "ok":
             return browse_data
@@ -1458,12 +1512,14 @@ def cmd_links(args):
             ext_payload["session_id"] = session_id
         else:
             ext_payload["url"] = args.url
-        ext_resp = browser_request("post", f"{url}/extract", json=with_browser_owner(ext_payload), timeout=REQUEST_TIMEOUT)
+        ext_resp = browser_request("post", f"{url}/extract", json=with_browser_owner(ext_payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
         data = _decode(ext_resp)
+        if browse_data.get("shared_profile"):
+            data["shared_profile"] = True
         # Clean up session if we got one
         if session_id:
             try:
-                browser_request("delete", f"{url}/sessions/{session_id}", timeout=5.0)
+                browser_request("delete", f"{url}/sessions/{session_id}", timeout=5.0, headers=browser_headers())
             except Exception:
                 pass
         if data.get("status") != "ok":
@@ -1474,6 +1530,7 @@ def cmd_links(args):
             "url": browse_data.get("url", args.url),
             "count": len(links),
             "links": links,
+            **{k: data[k] for k in ("user_scope", "shared_profile") if k in data},
         }
     else:
         # Simple: fetch page, return only links
@@ -1482,7 +1539,7 @@ def cmd_links(args):
             payload["session_id"] = args.session
         if args.max_links:
             payload["max_links"] = args.max_links
-        resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT)
+        resp = browser_request("post", f"{url}/browse", json=with_browser_owner(payload), timeout=REQUEST_TIMEOUT, headers=browser_headers())
         data = _decode(resp)
         if data.get("status") != "ok":
             return data
@@ -1492,6 +1549,7 @@ def cmd_links(args):
             "url": data.get("url", args.url),
             "count": len(links),
             "links": links,
+            **{k: data[k] for k in ("user_scope", "shared_profile") if k in data},
         }
         # The envelope is rebuilt rather than filtered, so the container's
         # clipping verdict has to be copied across or it is lost here
@@ -1549,7 +1607,7 @@ def cmd_challenge(args):
     resp = browser_request("post",
         f"{url}/challenge",
         json={"session_id": args.session_id},
-        timeout=REQUEST_TIMEOUT,
+        timeout=REQUEST_TIMEOUT, headers=browser_headers(),
     )
     return _note_missing_challenge_route(_decode(resp), resp)
 
@@ -1557,7 +1615,25 @@ def cmd_challenge(args):
 def cmd_close(args):
     """Close a session."""
     url = get_api_url()
-    resp = browser_request("delete", f"{url}/sessions/{args.session_id}", timeout=30.0)
+    resp = browser_request("delete", f"{url}/sessions/{args.session_id}", timeout=30.0, headers=browser_headers())
+    return _decode(resp)
+
+
+def cmd_state(args):
+    """Inspect the requesting user's persistent browser profile."""
+    resp = browser_request("get", f"{get_api_url()}/state", timeout=REQUEST_TIMEOUT,
+                           headers=browser_headers())
+    return _decode(resp)
+
+
+def cmd_forget(args):
+    """Clear selected state from the requesting user's browser profile."""
+    if args.profile and not args.all:
+        return {"status": "error", "error": "--profile requires --all"}
+    resp = browser_request("delete", f"{get_api_url()}/state", timeout=REQUEST_TIMEOUT,
+                           headers=browser_headers(), json={
+                               "origin": args.origin, "all": args.all, "profile": args.profile,
+                           })
     return _decode(resp)
 
 
@@ -1759,6 +1835,13 @@ def build_parser():
     p_close = sub.add_parser("close", help="Close a session")
     p_close.add_argument("session_id", help="Session ID to close")
 
+    sub.add_parser("state", help="Inspect your persistent browser profile")
+    p_forget = sub.add_parser("forget", help="Clear your browser cookies and persistent origin storage")
+    selection = p_forget.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--origin", help="HTTP(S) origin to clear")
+    selection.add_argument("--all", action="store_true", help="Clear cookies and storage for all origins")
+    p_forget.add_argument("--profile", action="store_true", help="With --all, delete your entire profile after closing sessions")
+
     return parser
 
 
@@ -1775,6 +1858,8 @@ def main(argv=None):
         "links": cmd_links,
         "challenge": cmd_challenge,
         "close": cmd_close,
+        "state": cmd_state,
+        "forget": cmd_forget,
     }
 
     def describe(exc: BaseException) -> dict:

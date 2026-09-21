@@ -384,12 +384,29 @@ class TestAValueTheGuardAcceptsCanBeRendered:
 class TestTheEntrypointStillHonoursThePassword:
     """The guard is worth nothing if the container ignores the value."""
 
-    def test_a_password_is_passed_to_x11vnc(self):
-        text = ENTRYPOINT.read_text()
-        assert "-passwd" in text, "x11vnc is no longer given a password at all"
-        assert re.search(r'if\s+\[\s+-n\s+"\$VNC_PASSWORD"\s+\]', text), (
-            "the entrypoint no longer gates -passwd on VNC_PASSWORD being set"
+    def test_a_password_is_passed_to_x11vnc(self, monkeypatch):
+        monkeypatch.syspath_prepend(str(ENTRYPOINT.parent))
+        import importlib.util
+        import sys
+        from unittest import mock
+
+        spec = importlib.util.spec_from_file_location(
+            "browser_pool_password_test", ENTRYPOINT.parent / "pool.py",
         )
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(sys.modules, {"chrome": mock.Mock(), spec.name: module}):
+            spec.loader.exec_module(module)
+        for password in ("", "test-password"):
+            inst = module.BrowserInstance("alice", "/unused", ":100", 9300, 5900, 0)
+            with mock.patch.dict("os.environ", {"VNC_PASSWORD": password}), \
+                 mock.patch.object(module, "_wait_for_display"), \
+                 mock.patch.object(module, "_wait_for_vnc"), \
+                 mock.patch.object(module.subprocess, "Popen") as popen:
+                module._start_display(inst)
+            args = popen.call_args_list[-1].args[0]
+            assert ("-passwd" in args) == bool(password)
+            if password:
+                assert args[args.index("-passwd") + 1] == password
 
     def test_the_password_reaches_the_container(self):
         """The env file is what carries it; a guard on a variable the container

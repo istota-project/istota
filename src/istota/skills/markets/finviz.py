@@ -14,7 +14,7 @@ import os
 import re
 from dataclasses import dataclass, field
 
-from istota.browser_owner import with_browser_owner
+from istota.browser_owner import browser_headers, with_browser_owner
 from istota.browser_admission import browser_request, BrowserQueueTimeout
 
 
@@ -416,6 +416,7 @@ def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizDat
     if api_url is None:
         api_url = os.environ.get("BROWSER_API_URL", DEFAULT_API_URL)
 
+    headers = browser_headers()
     last_error = None
     for attempt in range(1 + retries):
         if attempt > 0:
@@ -427,7 +428,7 @@ def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizDat
             resp = browser_request("post",
                 f"{api_url}/browse",
                 json=with_browser_owner({"url": FINVIZ_URL, "timeout": 30}),
-                timeout=BROWSE_TIMEOUT,
+                timeout=BROWSE_TIMEOUT, headers=headers,
             )
             result = resp.json()
 

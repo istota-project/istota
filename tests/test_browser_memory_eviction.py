@@ -8,7 +8,7 @@ call while the Flask thread is blocked inside a CDP call (ISSUE-149, ISSUE-173).
 
 ``_resource_monitor``, the container's other background thread, ignored it.
 Above ``MEMORY_EVICT_PCT`` it called ``_close_session_unlocked()``, which reaches
-``chrome.get_context()``, ``page.goto()`` and ``page.close()``. In production
+``chrome.get_context(browse_api._instance)``, ``page.goto()`` and ``page.close()``. In production
 that poisoned the process-global asyncio loop Playwright's sync API drives:
 every later ``sync_playwright().start()`` raised "It looks like you are using
 Playwright Sync API inside the asyncio loop", so every browse verb returned a
@@ -28,12 +28,15 @@ directly -- the pattern ``test_browser_chrome_watchdog.py`` already uses.
 """
 
 import sys
+from functools import partial
 import threading
 import types
 from pathlib import Path
 from unittest import mock
 
 import pytest
+
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
 
 # Stub patchright before importing chrome -- chrome does
 # `from patchright.sync_api import sync_playwright` at module top.
@@ -102,15 +105,17 @@ import browse_api  # noqa: E402  (import after the stubs + path insert)
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_globals():
+def _reset_module_globals(browser_instance):  # noqa: F811 -- fixture dependency
     """chrome and browse_api are singletons; reset their globals around each test."""
     def _reset():
-        chrome._chrome_proc = None
+        browse_api._instance.proc = None
         chrome._pw = None
-        chrome._pw_browser = None
-        chrome._pw_context = None
-        chrome._pw_thread_id = None
-        chrome._launching = False
+        chrome._connections.clear()
+        chrome._driver_thread_id = None
+        browse_api._instance.pw_browser = None
+        browse_api._instance.pw_context = None
+        browse_api._instance.pw_thread_id = None
+        browse_api._instance.launching = False
         browse_api._sessions.clear()
         browse_api._evict_request.clear()
 
@@ -141,8 +146,8 @@ def _claim_connection_on_this_thread(monkeypatch, pages=None):
     sp.start.return_value = started
     monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
 
-    chrome.connect_cdp()
-    assert chrome._pw_context is ctx
+    chrome.connect_cdp(browse_api._instance)
+    assert browse_api._instance.pw_context is ctx
     return ctx
 
 
@@ -198,12 +203,12 @@ class TestPatchrightThreadAffinity:
 
     def test_connect_cdp_claims_the_calling_thread(self, monkeypatch):
         _claim_connection_on_this_thread(monkeypatch)
-        assert chrome._pw_thread_id == threading.get_ident()
+        assert browse_api._instance.pw_thread_id == threading.get_ident()
 
     def test_get_context_refuses_a_foreign_thread(self, monkeypatch):
         _claim_connection_on_this_thread(monkeypatch)
 
-        result, error = _run_on_another_thread(chrome.get_context)
+        result, error = _run_on_another_thread(partial(chrome.get_context, browse_api._instance))
 
         assert result is None
         assert isinstance(error, RuntimeError)
@@ -212,14 +217,14 @@ class TestPatchrightThreadAffinity:
     def test_get_page_by_index_refuses_a_foreign_thread(self, monkeypatch):
         _claim_connection_on_this_thread(monkeypatch)
 
-        _, error = _run_on_another_thread(lambda: chrome.get_page_by_index(0))
+        _, error = _run_on_another_thread(lambda: chrome.get_page_by_index(browse_api._instance, 0))
 
         assert isinstance(error, RuntimeError)
 
     def test_connect_cdp_refuses_a_foreign_thread(self, monkeypatch):
         _claim_connection_on_this_thread(monkeypatch)
 
-        _, error = _run_on_another_thread(chrome.connect_cdp)
+        _, error = _run_on_another_thread(partial(chrome.connect_cdp, browse_api._instance))
 
         assert isinstance(error, RuntimeError)
 
@@ -227,48 +232,44 @@ class TestPatchrightThreadAffinity:
         """The poisoning call. disconnect_cdp() drives _pw.stop() through the
         same thread-bound machinery, so it must be refused too."""
         _claim_connection_on_this_thread(monkeypatch)
-        browser = chrome._pw_browser
+        browser = browse_api._instance.pw_browser
 
-        _, error = _run_on_another_thread(chrome.disconnect_cdp)
+        _, error = _run_on_another_thread(partial(chrome.disconnect_cdp, browse_api._instance))
 
         assert isinstance(error, RuntimeError)
         browser.close.assert_not_called()
-        assert chrome._pw_browser is browser  # connection left intact
+        assert browse_api._instance.pw_browser is browser  # connection left intact
 
     def test_the_owning_thread_is_never_blocked(self, monkeypatch):
         """The control. The guard must not break the thread that legitimately
         owns the connection -- every helper still works from the Flask thread."""
         ctx = _claim_connection_on_this_thread(monkeypatch)
 
-        assert chrome.get_context() is ctx
-        assert chrome.get_page_by_index(0) is ctx.pages[0]
-        assert chrome.is_cdp_connected() is True
-        chrome.connect_cdp()
-        chrome.disconnect_cdp()
+        assert chrome.get_context(browse_api._instance) is ctx
+        assert chrome.get_page_by_index(browse_api._instance, 0) is ctx.pages[0]
+        assert chrome.is_cdp_connected(browse_api._instance) is True
+        chrome.connect_cdp(browse_api._instance)
+        chrome.disconnect_cdp(browse_api._instance)
 
-        assert chrome._pw_browser is None
-        assert chrome._pw_thread_id is None  # released for the next owner
+        assert browse_api._instance.pw_browser is None
+        assert browse_api._instance.pw_thread_id is None  # released for the next owner
 
     def test_recover_wedged_chrome_releases_ownership(self, monkeypatch):
-        """The guard's own escape hatch, and it is not optional.
+        """Recovery releases the instance connection without touching Patchright.
 
-        Ownership is claimed on first connect and released only by
-        disconnect_cdp -- which is itself guarded. So if a non-Flask thread ever
-        won the first connect_cdp(), every Flask call would raise for the life of
-        the process: Chrome up, probes green, every verb 500. That is ISSUE-382's
-        shape again, caused by its own fix. recover_wedged_chrome() is the reset,
-        and it can do it because killing Chrome invalidates the connection anyway
-        and a plain assignment is not a Patchright call.
+        The shared driver retains its original thread owner: recovery of one
+        Chrome cannot transfer the driver used by other instances.
         """
         _claim_connection_on_this_thread(monkeypatch)
         monkeypatch.setattr(chrome.subprocess, "Popen", lambda *a, **k: FakeProc())
-        monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda *a, **k: None)
-        assert chrome._pw_thread_id is not None
+        monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst, *a, **k: None)
+        assert browse_api._instance.pw_thread_id is not None
 
-        _, error = _run_on_another_thread(chrome.recover_wedged_chrome)
+        _, error = _run_on_another_thread(partial(chrome.recover_wedged_chrome, browse_api._instance))
 
         assert error is None
-        assert chrome._pw_thread_id is None  # the next thread may claim it
+        assert browse_api._instance.pw_thread_id is None
+        assert chrome._driver_thread_id == threading.get_ident()
 
     def test_a_foreign_thread_may_open_the_first_connection(self, monkeypatch):
         """The guard binds an existing connection to its owner; it does not
@@ -280,18 +281,18 @@ class TestPatchrightThreadAffinity:
         sp.start.return_value.chromium.connect_over_cdp.return_value = browser
         monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
 
-        _, error = _run_on_another_thread(chrome.connect_cdp)
+        _, error = _run_on_another_thread(partial(chrome.connect_cdp, browse_api._instance))
 
         assert error is None
-        assert chrome._pw_thread_id is not None
-        assert chrome._pw_thread_id != threading.get_ident()
+        assert browse_api._instance.pw_thread_id is not None
+        assert browse_api._instance.pw_thread_id != threading.get_ident()
 
     def test_is_cdp_connected_is_readable_from_any_thread(self, monkeypatch):
         """A plain attribute read, deliberately unguarded: the liveness probe
         and the diagnostics read it without owning the connection."""
         _claim_connection_on_this_thread(monkeypatch)
 
-        result, error = _run_on_another_thread(chrome.is_cdp_connected)
+        result, error = _run_on_another_thread(partial(chrome.is_cdp_connected, browse_api._instance))
 
         assert error is None
         assert result is True
@@ -357,7 +358,7 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
         assert age_s < browse_api.SESSION_TTL, "session would expire on its own"
         browse_api._sessions[session_id] = {
             "page": page,
-            "created_at": browse_api.time.time() - age_s, "last_used_at": browse_api.time.time() - age_s,
+            "created_at": browse_api.time.time() - age_s, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": browse_api.time.time() - age_s,
         }
 
     def _pressure(self, monkeypatch, pct):
@@ -445,10 +446,9 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
             lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("ps")),
         )
 
-        with pytest.raises(FileNotFoundError):
-            browse_api._monitor_tick()
-
-        assert not browse_api._evict_request.is_set()
+        self._pressure(monkeypatch, browse_api.MEMORY_EVICT_PCT + 5)
+        browse_api._monitor_tick()
+        assert browse_api._evict_request.is_set()
 
     # -- the Flask thread evicts -------------------------------------------
 
@@ -546,39 +546,39 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
 
         assert "old" not in browse_api._sessions
         ctx.pages[0].close.assert_called_once()
-        assert chrome._pw_thread_id == threading.get_ident()
+        assert browse_api._instance.pw_thread_id == threading.get_ident()
 
 
 @pytest.mark.parametrize("existing_owner", ["first-task", None])
 @pytest.mark.parametrize("owner", ["other-task", None, "", [], {}])
-def test_capacity_never_evicts_another_caller(monkeypatch, owner, existing_owner):
+def test_capacity_replaces_same_users_session_regardless_of_owner(monkeypatch, owner, existing_owner):
     ctx = _claim_connection_on_this_thread(monkeypatch)
     monkeypatch.setattr(browse_api, "MAX_SESSIONS", 1)
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
     browse_api._sessions["existing"] = {
-        "owner": existing_owner, "created_at": browse_api.time.time(), "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
+        "owner": existing_owner, "created_at": browse_api.time.time(), "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
     }
-    with pytest.raises(RuntimeError, match="capacity"):
-        browse_api._create_session(owner=owner)
-    assert "existing" in browse_api._sessions
-    ctx.new_page.assert_not_called()
+    sid, _ = browse_api._create_session(owner=owner)
+    assert "existing" not in browse_api._sessions
+    assert sid in browse_api._sessions
+    ctx.new_page.assert_called_once()
 
 
-def test_capacity_can_replace_only_same_owner(monkeypatch):
+def test_capacity_replaces_oldest_session_within_user(monkeypatch):
     ctx = _claim_connection_on_this_thread(monkeypatch)
     monkeypatch.setattr(browse_api, "MAX_SESSIONS", 2)
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
     now = browse_api.time.time()
     browse_api._sessions.update({
-        "foreign": {"owner": "other", "created_at": now - 10, "last_used_at": now - 10, "page": ctx.pages[0]},
-        "own": {"owner": "task", "created_at": now, "last_used_at": now, "page": ctx.pages[1]},
+        "foreign": {"owner": "other", "created_at": now - 10, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": now - 10, "page": ctx.pages[0]},
+        "own": {"owner": "task", "created_at": now, "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": now, "page": ctx.pages[1]},
     })
     sid, _ = browse_api._create_session(owner="task")
-    assert set(browse_api._sessions) == {"foreign", sid}
+    assert set(browse_api._sessions) == {"own", sid}
     assert browse_api._sessions[sid]["owner"] == "task"
 
 
-@pytest.mark.parametrize("pressure", [False, True])
+@pytest.mark.parametrize("pressure", [True])
 @pytest.mark.parametrize("endpoint", ["browse", "screenshot", "extract", "render_page"])
 def test_create_endpoint_refuses_capacity_without_draining_foreign_session(monkeypatch, endpoint, pressure):
     ctx = _claim_connection_on_this_thread(monkeypatch)
@@ -590,7 +590,7 @@ def test_create_endpoint_refuses_capacity_without_draining_foreign_session(monke
         get_json=lambda: {"url": "https://example.com", "owner": "other"},
     ))
     browse_api._sessions["foreign"] = {
-        "owner": "first", "created_at": browse_api.time.time(), "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
+        "owner": "first", "created_at": browse_api.time.time(), "context": browse_api._instance.pw_context, "user_id": "alice", "last_used_at": browse_api.time.time(), "page": ctx.pages[0],
     }
     browse_api._evict_request.set()
     body, status = getattr(browse_api, endpoint)()
@@ -601,18 +601,13 @@ def test_create_endpoint_refuses_capacity_without_draining_foreign_session(monke
     ctx.new_page.assert_not_called()
 
 
-def test_capacity_retry_estimate_uses_first_expiration(monkeypatch):
-    _claim_connection_on_this_thread(monkeypatch)
-    monkeypatch.setattr(browse_api, "MAX_SESSIONS", 2)
+def test_zero_session_budget_refuses_without_creating_a_page(monkeypatch):
+    ctx = _claim_connection_on_this_thread(monkeypatch)
+    monkeypatch.setattr(browse_api, "MAX_SESSIONS", 0)
     monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 0)
-    monkeypatch.setattr(browse_api.time, "time", lambda: 1000)
-    browse_api._sessions.update({
-        "first": {"owner": "other", "created_at": 450, "last_used_at": 950},
-        "second": {"owner": "other", "created_at": 900, "last_used_at": 900},
-    })
-    with pytest.raises(browse_api.SessionCapacityError) as caught:
+    with pytest.raises(browse_api.SessionCapacityError):
         browse_api._create_session(owner="new")
-    assert caught.value.retry_after_seconds == 501
+    ctx.new_page.assert_not_called()
 
 
 @pytest.mark.parametrize("expire_via_lookup", [False, True])

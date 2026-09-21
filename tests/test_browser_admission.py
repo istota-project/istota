@@ -59,6 +59,7 @@ def test_browse_cli_process_waits_for_daemon_lock(tmp_path, monkeypatch):
 
     db_path = tmp_path / "istota.db"
     monkeypatch.setenv("ISTOTA_DB_PATH", str(db_path))
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     code = '''
 import httpx
 from istota.skills.browse import main
@@ -89,6 +90,7 @@ main(["get", "https://example.com"])
 
 
 def test_finviz_queue_timeout_is_not_retried(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     from istota.browser_admission import BrowserQueueTimeout
     from istota.skills.markets import finviz
 

@@ -38,12 +38,15 @@ import ast
 import signal
 import subprocess
 import sys
+from functools import partial
 import time
 import types
 from pathlib import Path
 from unittest import mock
 
 import pytest
+
+from tests.support.browser_instance import browser_instance  # noqa: F401 -- autouse fixture
 import yaml
 
 # Stub patchright before importing chrome -- chrome does
@@ -106,26 +109,28 @@ import browse_api  # noqa: E402  (import after the stubs + path insert)
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_globals():
+def _reset_module_globals(browser_instance):  # noqa: F811 -- fixture dependency
     """chrome and browse_api are singletons; reset their globals around each test."""
     def _reset():
-        chrome._chrome_proc = None
+        browse_api._instance.proc = None
         chrome._pw = None
-        chrome._pw_browser = None
-        chrome._pw_context = None
-        chrome._pw_thread_id = None
-        chrome._launching = False
-        chrome._launch_generation = 0
+        chrome._connections.clear()
+        chrome._driver_thread_id = None
+        browse_api._instance.pw_browser = None
+        browse_api._instance.pw_context = None
+        browse_api._instance.pw_thread_id = None
+        browse_api._instance.launching = False
+        browse_api._instance.launch_generation = 0
         with chrome._cdp_health_lock:
-            chrome._cdp_health.update(
+            browse_api._instance.cdp_health.update(
                 last_success=0.0, last_failure=0.0,
                 consecutive_failures=0, last_error="",
             )
         with chrome._wedge_lock:
-            chrome._wedge_recoveries.clear()
+            browse_api._instance.wedge_recoveries.clear()
         browse_api._sessions.clear()
         browse_api._evict_request.clear()
-        browse_api._wedge_loop_reported = False
+        browse_api._instance.wedge_loop_reported = False
 
     _reset()
     yield
@@ -187,7 +192,7 @@ def launched(monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(chrome.subprocess, "Popen", _popen)
-    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda *a, **k: None)
+    monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst, *a, **k: None)
     return calls
 
 
@@ -199,18 +204,18 @@ class TestChromeStderrIsNeverAnUnreadPipe:
     """The root cause. A PIPE nobody reads blocks Chrome's UI thread at 64 KiB."""
 
     def test_stderr_is_not_a_pipe(self, launched):
-        chrome.launch_chrome()
+        chrome.launch_chrome(browse_api._instance)
         assert launched[0]["kwargs"]["stderr"] is not subprocess.PIPE
 
     def test_stderr_goes_to_devnull_by_default(self, launched, monkeypatch):
         monkeypatch.delenv("CHROME_LOG_STDERR", raising=False)
-        chrome.launch_chrome()
+        chrome.launch_chrome(browse_api._instance)
         assert launched[0]["kwargs"]["stderr"] is subprocess.DEVNULL
 
     def test_stderr_logging_flags_are_absent_by_default(self, launched, monkeypatch):
         """Nothing consumes the log, so asking Chrome to produce it is all cost."""
         monkeypatch.delenv("CHROME_LOG_STDERR", raising=False)
-        chrome.launch_chrome()
+        chrome.launch_chrome(browse_api._instance)
         args = launched[0]["args"]
         assert "--enable-logging=stderr" not in args
         assert not any(a.startswith("--v=") for a in args)
@@ -223,7 +228,7 @@ class TestChromeStderrIsNeverAnUnreadPipe:
         wedge restored behind a flag that reads like a debugging convenience.
         """
         monkeypatch.setenv("CHROME_LOG_STDERR", "1")
-        chrome.launch_chrome()
+        chrome.launch_chrome(browse_api._instance)
         assert launched[0]["kwargs"]["stderr"] is None
         assert "--enable-logging=stderr" in launched[0]["args"]
 
@@ -231,11 +236,11 @@ class TestChromeStderrIsNeverAnUnreadPipe:
         for value in ("1", "true", "yes", "on"):
             launched.clear()
             monkeypatch.setenv("CHROME_LOG_STDERR", value)
-            chrome.launch_chrome()
+            chrome.launch_chrome(browse_api._instance)
             assert launched[0]["kwargs"]["stderr"] is not subprocess.PIPE
 
     def test_stdout_is_still_sunk(self, launched):
-        chrome.launch_chrome()
+        chrome.launch_chrome(browse_api._instance)
         assert launched[0]["kwargs"]["stdout"] is subprocess.DEVNULL
 
 
@@ -248,7 +253,7 @@ class TestChromeIsReaped:
 
     def test_chrome_leads_its_own_session(self, launched):
         """Without a group of its own there is nothing safe to signal."""
-        chrome.launch_chrome()
+        chrome.launch_chrome(browse_api._instance)
         assert launched[0]["kwargs"]["start_new_session"] is True
 
     def test_a_killed_chrome_is_waited_on(self, monkeypatch):
@@ -316,12 +321,12 @@ class TestChromeIsReaped:
         """restart, recover and cleanup had three copies of the same broken code."""
         killed = []
         monkeypatch.setattr(chrome, "_kill_chrome_proc", lambda p, **k: killed.append(p))
-        monkeypatch.setattr(chrome, "launch_chrome", lambda: None)
-        monkeypatch.setattr(chrome, "disconnect_cdp", lambda: None)
+        monkeypatch.setattr(chrome, "launch_chrome", lambda inst: None)
+        monkeypatch.setattr(chrome, "disconnect_cdp", lambda inst: None)
 
-        for fn in (chrome.restart_chrome, chrome.recover_wedged_chrome, chrome.cleanup):
+        for fn in (partial(chrome.restart_chrome, browse_api._instance), partial(chrome.recover_wedged_chrome, browse_api._instance), partial(chrome.cleanup, browse_api._instance)):
             killed.clear()
-            chrome._chrome_proc = FakeProc()
+            browse_api._instance.proc = FakeProc()
             fn()
             assert len(killed) == 1, f"{fn.__name__} did not use the shared kill path"
 
@@ -334,19 +339,19 @@ class TestSessionsDoNotSurviveARelaunch:
     """A tab index into a Chrome that no longer exists is not a session."""
 
     def test_the_generation_advances_on_every_launch(self, launched):
-        before = chrome.launch_generation()
-        chrome.launch_chrome()
-        assert chrome.launch_generation() == before + 1
+        before = chrome.launch_generation(browse_api._instance)
+        chrome.launch_chrome(browse_api._instance)
+        assert chrome.launch_generation(browse_api._instance) == before + 1
 
     def test_recovery_advances_the_generation(self, monkeypatch):
         monkeypatch.setattr(chrome, "_kill_chrome_proc", lambda p, **k: None)
         monkeypatch.setattr(chrome.subprocess, "Popen", lambda *a, **k: FakeProc())
-        monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda *a, **k: None)
-        before = chrome.launch_generation()
+        monkeypatch.setattr(chrome, "_wait_for_chrome_ready", lambda inst, *a, **k: None)
+        before = chrome.launch_generation(browse_api._instance)
 
-        chrome.recover_wedged_chrome()
+        chrome.recover_wedged_chrome(browse_api._instance)
 
-        assert chrome.launch_generation() > before
+        assert chrome.launch_generation(browse_api._instance) > before
 
     def test_a_session_from_an_older_generation_is_dropped(self):
         browse_api._sessions["s1"] = {
@@ -355,10 +360,10 @@ class TestSessionsDoNotSurviveARelaunch:
             # reads as a tab that is gone -- so the session would be dropped
             # here for a reason that has nothing to do with the generation.
             "page": _live_page(),
-            "created_at": time.time(), "last_used_at": time.time(),
-            "generation": chrome.launch_generation(),
+            "created_at": time.time(), "user_id": "alice", "last_used_at": time.time(),
+            "generation": chrome.launch_generation(browse_api._instance),
         }
-        chrome._launch_generation += 1
+        browse_api._instance.launch_generation += 1
 
         assert browse_api._get_session("s1") is None
         assert "s1" not in browse_api._sessions
@@ -370,8 +375,8 @@ class TestSessionsDoNotSurviveARelaunch:
             # reads as a tab that is gone -- so the session would be dropped
             # here for a reason that has nothing to do with the generation.
             "page": _live_page(),
-            "created_at": time.time(), "last_used_at": time.time(),
-            "generation": chrome.launch_generation(),
+            "created_at": time.time(), "user_id": "alice", "last_used_at": time.time(),
+            "generation": chrome.launch_generation(browse_api._instance),
         }
 
         assert browse_api._get_session("s1") is not None
@@ -380,12 +385,12 @@ class TestSessionsDoNotSurviveARelaunch:
         ctx = mock.MagicMock()
         ctx.pages = [mock.MagicMock(), mock.MagicMock()]
         monkeypatch.setattr(browse_api, "_get_memory_pct", lambda: 10)
-        monkeypatch.setattr(chrome, "connect_cdp", lambda **k: None)
-        monkeypatch.setattr(chrome, "get_context", lambda **k: ctx)
+        monkeypatch.setattr(chrome, "connect_cdp", lambda inst, **k: None)
+        monkeypatch.setattr(chrome, "get_context", lambda inst, **k: ctx)
 
         sid, _ = browse_api._create_session()
 
-        assert browse_api._sessions[sid]["generation"] == chrome.launch_generation()
+        assert browse_api._sessions[sid]["generation"] == chrome.launch_generation(browse_api._instance)
 
 
 # ---------------------------------------------------------------------------
@@ -397,22 +402,22 @@ class TestARecoveryLoopEscalates:
 
     def test_recovery_is_recorded(self, monkeypatch):
         monkeypatch.setattr(chrome, "_kill_chrome_proc", lambda p, **k: None)
-        monkeypatch.setattr(chrome, "launch_chrome", lambda: None)
+        monkeypatch.setattr(chrome, "launch_chrome", lambda inst: None)
 
-        chrome.recover_wedged_chrome()
+        chrome.recover_wedged_chrome(browse_api._instance)
 
-        assert len(chrome.wedge_recovery_history()) == 1
+        assert len(chrome.wedge_recovery_history(browse_api._instance)) == 1
 
     def test_one_recovery_is_not_a_loop(self, monkeypatch):
         monkeypatch.setattr(browse_api, "WEDGE_RECOVERY_THRESHOLD", 3)
-        chrome.record_wedge_recovery()
+        chrome.record_wedge_recovery(browse_api._instance)
 
         assert browse_api._wedge_looping()[0] is False
 
     def test_the_threshold_is_a_loop(self, monkeypatch):
         monkeypatch.setattr(browse_api, "WEDGE_RECOVERY_THRESHOLD", 3)
         for _ in range(3):
-            chrome.record_wedge_recovery()
+            chrome.record_wedge_recovery(browse_api._instance)
 
         assert browse_api._wedge_looping()[0] is True
 
@@ -421,46 +426,46 @@ class TestARecoveryLoopEscalates:
         monkeypatch.setattr(browse_api, "WEDGE_RECOVERY_WINDOW_S", 600)
         old = time.monotonic() - 3600
         with chrome._wedge_lock:
-            chrome._wedge_recoveries.extend([old, old, old])
+            browse_api._instance.wedge_recoveries.extend([old, old, old])
 
         assert browse_api._wedge_looping()[0] is False
 
     def test_zero_disables_the_arm(self, monkeypatch):
         monkeypatch.setattr(browse_api, "WEDGE_RECOVERY_THRESHOLD", 0)
         for _ in range(20):
-            chrome.record_wedge_recovery()
+            chrome.record_wedge_recovery(browse_api._instance)
 
         assert browse_api._wedge_looping()[0] is False
 
     def test_the_deep_probe_reports_the_loop(self, monkeypatch):
         monkeypatch.setattr(browse_api, "WEDGE_RECOVERY_THRESHOLD", 2)
-        monkeypatch.setattr(chrome, "is_chrome_running", lambda: True)
-        monkeypatch.setattr(chrome, "devtools_responding", lambda timeout=2: True)
-        monkeypatch.setattr(chrome, "is_launching", lambda: False)
+        monkeypatch.setattr(chrome, "is_chrome_running", lambda inst: True)
+        monkeypatch.setattr(chrome, "devtools_responding", lambda inst, timeout=2: True)
+        monkeypatch.setattr(chrome, "is_launching", lambda inst: False)
         for _ in range(2):
-            chrome.record_wedge_recovery()
+            chrome.record_wedge_recovery(browse_api._instance)
 
-        assert browse_api._probe(deep=True) == (503, b"wedge-loop\n")
+        assert browse_api._probe(deep=True) == (503, b"wedge-loop slot=0\n")
 
     def test_the_shallow_probe_is_unaffected(self, monkeypatch):
         monkeypatch.setattr(browse_api, "WEDGE_RECOVERY_THRESHOLD", 2)
-        monkeypatch.setattr(chrome, "is_chrome_running", lambda: True)
+        monkeypatch.setattr(chrome, "is_chrome_running", lambda inst: True)
         for _ in range(5):
-            chrome.record_wedge_recovery()
+            chrome.record_wedge_recovery(browse_api._instance)
 
         assert browse_api._probe(deep=False) == (200, b"ok\n")
 
     def test_the_history_is_bounded(self):
         """A record kept per recovery must not grow for the life of the process."""
         for _ in range(5000):
-            chrome.record_wedge_recovery()
+            chrome.record_wedge_recovery(browse_api._instance)
 
-        assert len(chrome._wedge_recoveries) <= chrome.WEDGE_HISTORY_MAX
+        assert len(browse_api._instance.wedge_recoveries) <= chrome.WEDGE_HISTORY_MAX
 
     def test_a_healthy_container_still_passes(self, monkeypatch):
-        monkeypatch.setattr(chrome, "is_chrome_running", lambda: True)
-        monkeypatch.setattr(chrome, "devtools_responding", lambda timeout=2: True)
-        monkeypatch.setattr(chrome, "is_launching", lambda: False)
+        monkeypatch.setattr(chrome, "is_chrome_running", lambda inst: True)
+        monkeypatch.setattr(chrome, "devtools_responding", lambda inst, timeout=2: True)
+        monkeypatch.setattr(chrome, "is_launching", lambda inst: False)
 
         assert browse_api._probe(deep=True) == (200, b"ok\n")
 
@@ -486,7 +491,7 @@ class TestModalUiCannotBlockTheMainThread:
         "--disable-print-preview",
     ])
     def test_the_suppression_flags_are_passed(self, launched, flag):
-        chrome.launch_chrome()
+        chrome.launch_chrome(browse_api._instance)
         assert flag in launched[0]["args"]
 
     def test_a_dialog_handler_is_registered_on_connect(self, monkeypatch):
@@ -501,7 +506,7 @@ class TestModalUiCannotBlockTheMainThread:
         sp.start.return_value = started
         monkeypatch.setattr(chrome, "sync_playwright", lambda: sp)
 
-        chrome.connect_cdp()
+        chrome.connect_cdp(browse_api._instance)
 
         assert "dialog" in {c.args[0] for c in page.on.call_args_list}
         assert "page" in {c.args[0] for c in ctx.on.call_args_list}
