@@ -18,6 +18,7 @@ from istota.skills.browse import (
     WHEEL_CLICKS_DEFAULT,
     OrderedAppend,
     OrderedFlag,
+    _foreground_note_from_response,
     _interact_actions,
     _links_from_extract,
     _note_unreported_actions,
@@ -3360,3 +3361,86 @@ class TestAHandBuiltClickCount:
         args = _interact_namespace(scroll_at=["10,20"], scroll_clicks=7)
         args.action_order = [("scroll_at", 0)]
         assert _interact_actions(args)[0]["clicks"] == 7
+
+
+class TestTheCaptureRequirementIsStatedWhereItIsMet:
+    """ISSUE-537: `--click-challenge`'s help said the opposite of the rule.
+
+    "Takes no coordinate -- the container measures the widget itself" reads as
+    "no capture needed", and the refusal that follows (`no_capture`) is the
+    first thing on the whole path that mentions one. `skill.md` had it right
+    and the flag's own help did not, which is the copy a caller reaching for
+    `--help` actually sees.
+
+    Asserting on the help *string* rather than on behaviour, deliberately:
+    there is no behaviour here to assert on. The requirement lives in the
+    container, and what was wrong was the sentence.
+    """
+
+    def _help(self, option):
+        parser = build_parser()
+        interact = parser._subparsers._group_actions[0].choices["interact"]
+        action = next(
+            a for a in interact._actions if option in a.option_strings
+        )
+        return " ".join((action.help or "").split())
+
+    def test_click_challenge_names_the_screenshot_it_needs(self):
+        help_text = self._help("--click-challenge")
+        assert "screenshot of this session on record" in help_text
+
+    def test_click_at_still_names_it_too(self):
+        """The control. `--click-at` is the flag whose help was already right,
+        and the phrase asserted above is the one it uses -- so a change that
+        reworded both would turn this red rather than passing quietly."""
+        assert "screenshot of this session on record" in self._help("--click-at")
+
+    def test_the_challenge_verb_says_what_a_null_screen_point_means(self):
+        """The other half: `challenge` is the verb `--click-challenge`'s help
+        sends you to first, and it said nothing about the capture at all."""
+        parser = build_parser()
+        challenge = parser._subparsers._group_actions[0].choices["challenge"]
+        description = " ".join((challenge.description or "").split())
+        assert "no_capture" in description
+        assert "browse screenshot --session" in description
+
+
+class TestTheForegroundNoteOnACapture:
+    """ISSUE-536: a capture now brings its own tab forward and says so.
+
+    The verdict cannot be a field — the body of that response is a PNG — so it
+    rides on a header, and the skill turns it into a note beside the capture
+    note. Confirmed says nothing, which is why the absent case is asserted as
+    carefully as the present one: a container predating the fix also sends no
+    header, and the two are deliberately indistinguishable from here.
+    """
+
+    def test_a_confirmed_switch_adds_no_note(self):
+        assert _foreground_note_from_response({}) is None
+
+    def test_an_empty_header_is_not_a_verdict(self):
+        """httpx returns "" for a header the container set to nothing, and an
+        empty code in a note reads as a fault with no name."""
+        assert _foreground_note_from_response({"X-Browse-Foreground": "  "}) is None
+
+    def test_an_unconfirmed_switch_names_the_code(self):
+        note = _foreground_note_from_response(
+            {"X-Browse-Foreground": "foreground_unconfirmed"}
+        )
+        assert "foreground_unconfirmed" in note
+        assert "may show another tab" in note
+
+    def test_the_detail_rides_along_when_there_is_one(self):
+        note = _foreground_note_from_response({
+            "X-Browse-Foreground": "foreground_ambiguous",
+            "X-Browse-Foreground-Detail": "another open tab carries the same title",
+        })
+        assert "another open tab carries the same title" in note
+
+    def test_a_detail_with_no_code_is_not_a_note_on_its_own(self):
+        """The code is the verdict. A detail without one is a container
+        sending half an answer, and inventing a verdict for it would report an
+        unconfirmed switch that was never reported."""
+        assert _foreground_note_from_response(
+            {"X-Browse-Foreground-Detail": "something"}
+        ) is None

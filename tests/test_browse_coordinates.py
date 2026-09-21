@@ -700,7 +700,8 @@ class TestAPointerThatDidNotMove:
         session = {"capture": _record(), "tab_index": 0}
 
         with mock.patch.object(
-            browse_api.browsing, "cloudflare_checkbox_point", return_value=(100, 200),
+            browse_api.browsing, "cloudflare_checkbox_target",
+            return_value=((100, 200), browse_api.browsing.CF_TARGET_UNSOLVED),
         ):
             result = browse_api._coordinate_action(
                 session, _SettlePage(), {"type": "click_challenge"},
@@ -734,7 +735,8 @@ class TestTheChallengeClickReMeasures:
     @pytest.fixture
     def checkbox(self):
         with mock.patch.object(
-            browse_api.browsing, "cloudflare_checkbox_point", return_value=(100, 200),
+            browse_api.browsing, "cloudflare_checkbox_target",
+            return_value=((100, 200), browse_api.browsing.CF_TARGET_UNSOLVED),
         ) as point:
             yield point
 

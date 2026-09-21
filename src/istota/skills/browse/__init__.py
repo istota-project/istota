@@ -76,6 +76,15 @@ _SUFFIX_FOR_MEDIA_TYPE = {
 # remedies and the absence of a header cannot say which.
 CAPTURE_HEADER = "X-Browse-Capture"
 CAPTURE_ERROR_HEADER = "X-Browse-Capture-Error"
+#: What the container's tab switch reported, on a capture that took one. A
+#: header rather than a field because the body of this response is a PNG.
+#: Absent on a confirmed switch, which is the ordinary case and says nothing —
+#: and absent on a container predating ISSUE-536, which took no switch at all.
+#: The two are indistinguishable here and deliberately so: the remedy for a
+#: capture of the wrong tab is the same either way, which is to look at the
+#: picture.
+FOREGROUND_HEADER = "X-Browse-Foreground"
+FOREGROUND_DETAIL_HEADER = "X-Browse-Foreground-Detail"
 #: Actions whose `x`/`y` are in the *delivered picture's* pixel space, so the
 #: container has to be told what that picture measured before it can convert.
 IMAGE_SPACE_ACTIONS = ("click_at", "hover_at", "scroll_at")
@@ -541,6 +550,37 @@ def _capture_from_response(headers):
     return record, None
 
 
+def _foreground_note_from_response(headers):
+    """A note where the container could not confirm the tab was in front.
+
+    `/screenshot` brings the session's tab forward before capturing, because a
+    tab that is not the foreground tab under Xvfb does not paint and the
+    capture times out after Playwright's fixed 30s (ISSUE-536). Where the
+    switch could not be *confirmed* the picture is taken anyway and the verdict
+    comes back on a header: a picture of the wrong tab is visible to whoever is
+    looking at it, in a way a misplaced click is not, so refusing the capture
+    would cost more than it buys.
+
+    Returns None on a confirmed switch and on any container that sends no
+    header, which is the same answer for both and is all this can honestly say.
+    """
+    code = (headers.get(FOREGROUND_HEADER) or "").strip()
+    if not code:
+        return None
+    detail = (headers.get(FOREGROUND_DETAIL_HEADER) or "").strip()
+    note = (
+        f"The browser container could not confirm this session's tab was in "
+        f"front when the picture was taken ({code}), so the capture may show "
+        f"another tab."
+    )
+    if detail:
+        note = f"{note} {detail}"
+    return (
+        f"{note} Check the picture is the page you expect before clicking "
+        f"against it."
+    )
+
+
 def _resize_capture(content, media_type, target):
     """The capture resized to `target` pixels: `(bytes, error)`.
 
@@ -709,6 +749,9 @@ def cmd_screenshot(args):
         notes = []
         if capture_note:
             notes.append(capture_note)
+        foreground_note = _foreground_note_from_response(resp.headers)
+        if foreground_note:
+            notes.append(foreground_note)
         # `directory` is set only where the derived default was taken, so this
         # is the one branch that knows the capture is scratch — the resolved
         # path cannot be asked, since `--output` may legitimately name the temp
@@ -1595,8 +1638,11 @@ def build_parser():
             "Press the Cloudflare challenge checkbox. Takes no coordinate — "
             "the container measures the widget itself, which is more accurate "
             "than reading it off a screenshot and is the only way to reach an "
-            "element that has no selector. Use `browse challenge` first to see "
-            "whether there is one and where it is."
+            "element that has no selector. It still needs a screenshot of this "
+            "session on record, like --click-at: measuring the widget gives a "
+            "CSS box, and only a capture carries the inset that converts one to "
+            "a screen point. Use `browse challenge` first to see whether there "
+            "is one, where it is, and whether it has already been solved."
         ),
     )
     p_int.add_argument(
@@ -1665,7 +1711,15 @@ def build_parser():
 
     # challenge
     p_chal = sub.add_parser(
-        "challenge", help="Where the challenge widgets on this page are",
+        "challenge",
+        help="Where the challenge widgets on this page are, and which are solved",
+        description=(
+            "Report each challenge widget on the page: its frame box in CSS "
+            "pixels, whether it has already been solved, and the screen point "
+            "--click-challenge would press. `checkbox_screen` is null whenever "
+            "that point cannot be produced, and `stale` then says why — "
+            "`no_capture` means take a `browse screenshot --session` first."
+        ),
     )
     p_chal.add_argument("session_id", help="Session ID")
 

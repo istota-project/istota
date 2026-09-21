@@ -439,6 +439,13 @@ def challenge_boxes(page):
     inside a closed shadow root in a cross-origin frame -- no selector reaches
     it and no querySelector sees it, but the frame element itself has a box,
     and the checkbox sits at a fixed inset within it.
+
+    Each Cloudflare box also carries `solved`, from the host page's response
+    input (see cf_widget_solved). Non-Cloudflare hosts report False rather than
+    null: hCaptcha and reCAPTCHA use the same `h-captcha-response` /
+    `g-recaptcha-response` pattern, but neither has been measured here, and a
+    guessed lookup that reads the wrong input would report a live challenge as
+    already passed -- which is the one direction this must not fail in.
     """
     boxes = []
     for frame in page.frames:
@@ -457,6 +464,13 @@ def challenge_boxes(page):
             "url": frame.url,
             "x": box["x"], "y": box["y"],
             "width": box["width"], "height": box["height"],
+            # Per frame rather than per page, because the association is per
+            # widget -- see cf_widget_solved. Reported here rather than used to
+            # filter, since /challenge answers *where the widgets are* and a
+            # caller is better served by "this one is done" than by a frame
+            # that silently stopped being listed.
+            "solved": cf_widget_solved(page, el)
+            if CLOUDFLARE_FRAME_URL in frame.url else False,
         })
     return boxes
 
@@ -476,6 +490,122 @@ CLOUDFLARE_FRAME_URL = "challenges.cloudflare.com"
 # than this in one dimension.
 PASSIVE_BADGE_MAX_WIDTH = 400
 PASSIVE_BADGE_MAX_HEIGHT = 200
+
+
+# Turnstile writes its response token into a hidden input on the *host* page,
+# outside the frame and with no shadow root in the way. Empty while the widget
+# is unsolved, a token once it has passed. That is the only signal here that
+# distinguishes a widget a person still has to press from one that is already
+# green, and without it `detect_captcha` answers `captcha` for as long as an
+# inline widget is on the page -- so an ordinary login form carrying a Turnstile
+# that has already passed reads as blocked forever, its content thrown away and
+# a VNC URL handed to the model for a challenge nobody has to clear (ISSUE-537).
+CF_RESPONSE_INPUT_NAME = "cf-turnstile-response"
+# The per-widget association, and the reason this is not a page-wide lookup.
+# Turnstile names the iframe `cf-chl-widget-<id>` and its own hidden input
+# `cf-chl-widget-<id>_response`, so the id on the frame element names the input
+# belonging to *that* widget. A page carrying two widgets -- one solved, one not
+# -- is the ordinary case on a demo page and a real one on a form with a second
+# protected action, and a first-match lookup would report both as whatever the
+# first one said.
+CF_WIDGET_ID_PREFIX = "cf-chl-widget-"
+CF_RESPONSE_ID_SUFFIX = "_response"
+
+
+def _first_attribute(el, names):
+    """First non-empty attribute among `names`, or ''. Never raises."""
+    for name in names:
+        try:
+            value = el.get_attribute(name)
+        except Exception:
+            continue
+        if value:
+            return value.strip()
+    return ""
+
+
+def cf_widget_solved(page, el):
+    """Whether the Turnstile widget behind this frame element has passed.
+
+    `el` is the frame element in the host document. Returns True only on
+    positive evidence -- an associated `cf-turnstile-response` input holding a
+    non-empty token. Every other outcome is False, which is the safe direction:
+    a widget we cannot prove solved keeps being reported as a challenge, which
+    is exactly what this function's absence did.
+
+    Two lookups, tried in order, and the second is deliberately narrower than
+    "find any response input on the page":
+
+    1. **By widget id.** The frame carries `cf-chl-widget-<id>` on `id` or
+       `name`, and the input is that plus `_response`. This is the only route
+       that stays correct on a page with more than one widget.
+    2. **The unambiguous single-widget page.** Where the id route finds nothing
+       and the page holds exactly one response input, there is nothing it could
+       be misattributed to. It exists because route 1 rests on a naming
+       convention in somebody else's script: if a Turnstile release stops
+       putting the id on the frame, route 1 fails silently and closed, and this
+       feature would then do nothing at all while every test still passed.
+       Route 2 is what keeps the common case working through that, and it
+       refuses the moment a second widget makes the association a guess.
+
+    DOM reads throughout -- `get_attribute`, `query_selector`,
+    `query_selector_all` -- never `Runtime.evaluate`, which is the documented
+    detection vector (BOT_DETECTION.md) and the one thing this path must not
+    open on a page that may be mid-challenge.
+    """
+    widget_id = _first_attribute(el, ("id", "name"))
+    if widget_id.startswith(CF_WIDGET_ID_PREFIX):
+        # `id` is an arbitrary attribute value, so it is escaped into the
+        # selector rather than interpolated: a value carrying a quote or a
+        # bracket would otherwise build a selector that means something else.
+        selector = (
+            f'input[id="{_css_escape_value(widget_id + CF_RESPONSE_ID_SUFFIX)}"]'
+        )
+        try:
+            found = page.query_selector(selector)
+        except Exception:
+            found = None
+        if found is not None:
+            return bool(_input_token(found))
+        # The id said which input to read and that input is not there. Falling
+        # through to the page-wide route here would answer with a *different*
+        # widget's token, which is the misattribution route 1 exists to stop.
+        return False
+
+    try:
+        inputs = page.query_selector_all(f'input[name="{CF_RESPONSE_INPUT_NAME}"]')
+    except Exception:
+        return False
+    if len(inputs) != 1:
+        return False
+    return bool(_input_token(inputs[0]))
+
+
+def _css_escape_value(value):
+    """Escape a value for use inside a double-quoted CSS attribute selector."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _input_token(el):
+    """The value held by a hidden response input, or ''. Never raises.
+
+    `input_value()` reads the live property, which is what the widget writes;
+    the `value` attribute is the markup default and is not updated on every
+    Turnstile version. Both are tried rather than one, because a token under
+    either is positive evidence and neither can produce a false one -- the
+    field is empty until the widget passes.
+    """
+    try:
+        live = el.input_value()
+    except Exception:
+        live = None
+    if live and live.strip():
+        return live.strip()
+    try:
+        attr = el.get_attribute("value")
+    except Exception:
+        attr = None
+    return attr.strip() if attr and attr.strip() else ""
 
 
 def is_blocking_challenge_box(url, box):
@@ -537,22 +667,61 @@ def is_blocking_challenge_box(url, box):
     return large
 
 
-def cloudflare_checkbox_point(page):
-    """Where the Cloudflare checkbox is, in CSS pixels, or None.
+#: What cloudflare_checkbox_target() found. `NONE` is "no widget on this page
+#: to press"; `SOLVED` is "there is one and it has already passed". They are
+#: separated because they want different words from the caller -- a refusal
+#: naming a widget that is already green is actionable, and `no_challenge` for
+#: it is not.
+CF_TARGET_NONE = "none"
+CF_TARGET_SOLVED = "solved"
+CF_TARGET_UNSOLVED = "unsolved"
 
-    Returns (x, y) for the first challenges.cloudflare.com frame large enough
-    to be the interstitial widget rather than an invisible Turnstile beacon.
+
+def cloudflare_checkbox_target(page):
+    """(point, status) for the Cloudflare checkbox on this page.
+
+    One frame walk answering both questions, because the walk is a handful of
+    DOM reads per frame and the two callers -- the point to press and the
+    reason there is none -- used to want two of them.
+
+    `point` is (x, y) in CSS pixels for the first challenges.cloudflare.com
+    frame large enough to be the widget rather than an invisible Turnstile
+    beacon, and `None` unless `status` is CF_TARGET_UNSOLVED. A solved widget
+    is remembered while the walk continues, so a page carrying a solved widget
+    *and* an unsolved one still reports the unsolved one's point rather than
+    stopping at the first frame it saw.
     """
+    solved_seen = False
     for box in challenge_boxes(page):
         if CLOUDFLARE_FRAME_URL not in box["url"]:
             continue
         if not is_blocking_challenge_box(box["url"], box):
             continue
+        if box.get("solved"):
+            # A solved widget keeps its frame at the same 300x65, so geometry
+            # alone still calls it blocking. Pressing the checkbox under it is
+            # available and reports `ok`, which is what made click_challenge
+            # look idempotent when it is not.
+            solved_seen = True
+            continue
         return (
-            box["x"] + CF_CHECKBOX_INSET_X,
-            box["y"] + box["height"] / 2,
+            (
+                box["x"] + CF_CHECKBOX_INSET_X,
+                box["y"] + box["height"] / 2,
+            ),
+            CF_TARGET_UNSOLVED,
         )
-    return None
+    return None, CF_TARGET_SOLVED if solved_seen else CF_TARGET_NONE
+
+
+def cloudflare_checkbox_point(page):
+    """Where the Cloudflare checkbox is, in CSS pixels, or None.
+
+    The point half of cloudflare_checkbox_target(). Kept because two callers
+    want only the point, and because a `None` here has always meant "nothing
+    to press" -- which a solved widget also is.
+    """
+    return cloudflare_checkbox_target(page)[0]
 
 
 def wait_for_datadome(page, timeout_ms=15000):
@@ -645,6 +814,19 @@ def detect_captcha(page):
                             "Challenge iframe not blocking (%dx%d), likely a "
                             "passive badge: %r",
                             box["width"], box["height"], frame.url,
+                        )
+                        continue
+                    if (CLOUDFLARE_FRAME_URL in frame.url
+                            and cf_widget_solved(page, el)):
+                        # Inline widgets only: an interstitial has no host page
+                        # to carry a response input, so it never takes this arm
+                        # and resolves itself by navigating away as before. The
+                        # inline case is the one that was wrong -- a login form
+                        # whose Turnstile had already passed read as blocked for
+                        # as long as the widget stayed on the page (ISSUE-537).
+                        log.debug(
+                            "Challenge iframe already solved, ignoring: %r",
+                            frame.url,
                         )
                         continue
                 except Exception:
