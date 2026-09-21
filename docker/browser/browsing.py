@@ -7,6 +7,8 @@ import random
 import time
 from urllib.parse import urlparse
 
+from text_budget import checked_offset, text_window
+
 from xdotool import (
     modifier_held,
     mouse_button_held,
@@ -899,7 +901,7 @@ LINKS_BOUND_BY_BUDGET = "max_links"
 LINKS_BOUND_BY_CEILING = "scan_ceiling"
 
 
-def extract_page_content(page, max_chars=None, max_links=None):
+def extract_page_content(page, max_chars=None, max_links=None, offset=0):
     """Extract text content, title, and links from a page.
 
     Both budgets are caller-overridable within the ceilings above. The defaults
@@ -956,6 +958,7 @@ def extract_page_content(page, max_chars=None, max_links=None):
     same-origin too, so it would discard the headlines along with the menu
     while changing what every other caller gets back.
     """
+    offset = checked_offset(offset)
     title = page.title()
     max_chars = max(1, min(int(max_chars or DEFAULT_TEXT_MAX_CHARS), MAX_TEXT_MAX_CHARS))
     max_links = max(1, min(int(max_links or DEFAULT_MAX_LINKS), MAX_MAX_LINKS))
@@ -964,10 +967,10 @@ def extract_page_content(page, max_chars=None, max_links=None):
         text = page.inner_text("body")
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         text = "\n".join(lines)
-        if len(text) > max_chars:
-            text = text[:max_chars] + f"\n\n[Content truncated at {max_chars} characters]"
     except Exception:
         text = ""
+
+    text, text_metadata = text_window(text, max_chars, offset)
 
     links = []
     bound_by = None
@@ -1015,6 +1018,7 @@ def extract_page_content(page, max_chars=None, max_links=None):
         "url": page.url,
         "text": text,
         "links": links,
+        **text_metadata,
     }
     if bound_by is not None:
         result["links_truncated"] = True

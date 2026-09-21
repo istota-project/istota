@@ -3546,3 +3546,18 @@ class TestDragAt:
                 args = build_parser().parse_args(["interact", "s1", "--drag-at", *points])
                 _interact_actions(args)
             post.assert_not_called()
+
+
+@pytest.mark.parametrize("verb,command", [("get", cmd_get), ("render", cmd_render)])
+@patch("istota.skills.browse.browser_request")
+@patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
+def test_text_offset_session_passthrough(mock_url, mock_request, verb, command):
+    response = {"status": "ok", "text_truncated": True, "next_offset": 500010}
+    mock_request.return_value.status_code = 200
+    mock_request.return_value.json.return_value = response
+    args = build_parser().parse_args([verb, "--session", "sess1", "--offset", "500000"])
+    assert command(args) == response
+    payload = mock_request.call_args.kwargs["json"]
+    assert payload["offset"] == 500000
+    assert payload["session_id"] == "sess1"
+    assert not payload.get("url")

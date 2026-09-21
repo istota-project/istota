@@ -24,6 +24,7 @@ import browsing
 import render
 import visual
 import xdotool
+from text_budget import checked_offset
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -878,6 +879,10 @@ def _checked_url(url):
 def browse():
     """Navigate to URL and return page content."""
     data = request.get_json()
+    try:
+        offset = checked_offset(data.get("offset", 0))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     _cleanup_expired(allow_pressure_eviction=bool(data.get("session_id")))
     url = data.get("url", "")
     session_id = data.get("session_id")
@@ -886,8 +891,8 @@ def browse():
     keep_session = data.get("keep_session", False)
     skip_behavior = data.get("skip_behavior", False)
 
-    if not url:
-        return jsonify({"error": "url is required"}), 400
+    if not url and not session_id:
+        return jsonify({"error": "url or session_id is required"}), 400
 
     # Before the session, because a URL this cannot use is a tab that need
     # not be launched -- and because the guard downstream was too late to be
@@ -925,7 +930,7 @@ def browse():
         created_new = True
 
     try:
-        challenge = _navigate_and_wait(page, url, timeout_ms=timeout)
+        challenge = _navigate_and_wait(page, url, timeout_ms=timeout) if url else None
         if challenge:
             # Answered from the window title, before anything reads the page.
             # Every call below this line goes over CDP -- the DataDome
@@ -941,8 +946,9 @@ def browse():
         if _page_is_gone(page):
             raise RuntimeError("Tab not found after reconnection")
 
-        browsing.wait_for_datadome(page)
-        if not skip_behavior:
+        if url:
+            browsing.wait_for_datadome(page)
+        if url and not skip_behavior:
             browsing.simulate_human_behavior(page)
 
         if wait_for:
@@ -958,6 +964,7 @@ def browse():
             page,
             max_chars=data.get("max_chars"),
             max_links=data.get("max_links"),
+            offset=offset,
         )
         result = {"status": "ok", **content}
 
@@ -1330,6 +1337,10 @@ def render_page():
     holds), or both (navigate within an existing session).
     """
     data = request.get_json()
+    try:
+        offset = checked_offset(data.get("offset", 0))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
     _cleanup_expired(allow_pressure_eviction=bool(data.get("session_id")))
     url = data.get("url")
     session_id = data.get("session_id")
@@ -1398,7 +1409,7 @@ def render_page():
         rendered = render.to_markdown(
             html, base_url=page.url, mode=mode, max_chars=max_chars,
             frames=frame_payload, include_frames=include_frames,
-            frames_capped=frames_capped,
+            frames_capped=frames_capped, offset=offset,
         )
         result = {
             "status": "ok",
