@@ -552,6 +552,17 @@ def cf_widget_solved(page, el):
     `query_selector_all` -- never `Runtime.evaluate`, which is the documented
     detection vector (BOT_DETECTION.md) and the one thing this path must not
     open on a page that may be mid-challenge.
+
+    **Both lookups query `page`, which is the main frame, and that is a real
+    limit rather than an oversight.** `page.frames` is recursive, so `el` may
+    belong to a nested frame -- a Turnstile the site hosts inside an iframe of
+    its own keeps its response input in *that* document, where neither route
+    reaches it. Such a widget reads unsolved for ever: the safe direction, but
+    ISSUE-537's symptom survives there, and this is the likeliest shape of a
+    future "the fix did not work" report. `el.owner_frame()` is the precise
+    host if it ever needs closing; it is left alone here because no measured
+    case needs it and widening a credential-shaped lookup on speculation is how
+    the misattribution above gets reintroduced.
     """
     widget_id = _first_attribute(el, ("id", "name"))
     if widget_id.startswith(CF_WIDGET_ID_PREFIX):
@@ -717,9 +728,12 @@ def cloudflare_checkbox_target(page):
 def cloudflare_checkbox_point(page):
     """Where the Cloudflare checkbox is, in CSS pixels, or None.
 
-    The point half of cloudflare_checkbox_target(). Kept because two callers
-    want only the point, and because a `None` here has always meant "nothing
-    to press" -- which a solved widget also is.
+    The point half of cloudflare_checkbox_target(). **No production caller is
+    left** -- both moved to the pair form when click_challenge needed to tell a
+    solved widget from an absent one -- so this is a compatibility shim for the
+    tests that still name it, kept rather than deleted because a `None` here
+    has always meant "nothing to press" and a solved widget also is that.
+    Delete it with its last test.
     """
     return cloudflare_checkbox_target(page)[0]
 
@@ -818,12 +832,21 @@ def detect_captcha(page):
                         continue
                     if (CLOUDFLARE_FRAME_URL in frame.url
                             and cf_widget_solved(page, el)):
-                        # Inline widgets only: an interstitial has no host page
-                        # to carry a response input, so it never takes this arm
-                        # and resolves itself by navigating away as before. The
-                        # inline case is the one that was wrong -- a login form
-                        # whose Turnstile had already passed read as blocked for
-                        # as long as the widget stayed on the page (ISSUE-537).
+                        # The inline case is the one that was wrong -- a login
+                        # form whose Turnstile had already passed read as
+                        # blocked for as long as the widget stayed on the page
+                        # (ISSUE-537).
+                        #
+                        # A full-page interstitial is not rescued by this arm,
+                        # and the reason is the text arm above rather than the
+                        # DOM: the challenge platform's own page may well carry
+                        # a token-bearing input, so "an interstitial has no host
+                        # input" is not a fact to rest on. What actually holds
+                        # is that an interstitial says `just a moment` or
+                        # `verify you are human`, both in
+                        # GUARDED_CHALLENGE_PHRASES, and its body is short
+                        # enough to clear CHALLENGE_BODY_MAX_CHARS -- so it is
+                        # decided before the frame walk runs at all.
                         log.debug(
                             "Challenge iframe already solved, ignoring: %r",
                             frame.url,

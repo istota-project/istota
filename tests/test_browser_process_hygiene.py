@@ -132,6 +132,18 @@ def _reset_module_globals():
     _reset()
 
 
+def _live_page():
+    """A page double that reports itself open.
+
+    A session holds the page object rather than a tab index (ISSUE-535), and
+    every read of one asks is_closed() first. A bare MagicMock answers that
+    with a truthy mock, so a session built on one is discarded as a dead tab.
+    """
+    page = mock.MagicMock(name="page")
+    page.is_closed.return_value = False
+    return page
+
+
 class FakeProc:
     """A subprocess.Popen stand-in that records how it was signalled and reaped."""
 
@@ -338,7 +350,11 @@ class TestSessionsDoNotSurviveARelaunch:
 
     def test_a_session_from_an_older_generation_is_dropped(self):
         browse_api._sessions["s1"] = {
-            "tab_index": 1,
+            # The page object, not an index (ISSUE-535). is_closed() is stated
+            # because a bare MagicMock answers it truthily, which _get_session
+            # reads as a tab that is gone -- so the session would be dropped
+            # here for a reason that has nothing to do with the generation.
+            "page": _live_page(),
             "created_at": time.time(),
             "generation": chrome.launch_generation(),
         }
@@ -349,7 +365,11 @@ class TestSessionsDoNotSurviveARelaunch:
 
     def test_a_session_from_the_current_generation_survives(self):
         browse_api._sessions["s1"] = {
-            "tab_index": 1,
+            # The page object, not an index (ISSUE-535). is_closed() is stated
+            # because a bare MagicMock answers it truthily, which _get_session
+            # reads as a tab that is gone -- so the session would be dropped
+            # here for a reason that has nothing to do with the generation.
+            "page": _live_page(),
             "created_at": time.time(),
             "generation": chrome.launch_generation(),
         }

@@ -31,8 +31,28 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Session management — sessions track Chrome tab indices
-_sessions = {}  # id -> {tab_index, created_at}
+# Session management — a session is one page in the shared Patchright context.
+#
+# It holds the page *object*, not its index in ctx.pages (ISSUE-535). The index
+# was wrong in two directions at once, and both were silent:
+#
+#   * A tab the page opens -- target="_blank", window.open, a middle click --
+#     appends to ctx.pages with no row here. Every reaper iterates _sessions, so
+#     nothing could name that tab and nothing ever closed it; closing every
+#     session in turn still left it holding a renderer process, and only a
+#     watchdog Chrome relaunch cleared it, which throws away the live sessions
+#     too. Ownership is now a question the page itself answers, through
+#     opener(), so _close_session_unlocked takes a session's popups with it and
+#     _sweep_unclaimed_pages_unlocked takes the ones nothing can name at all.
+#   * A page closing shifts every index above it. This table was corrected only
+#     in _close_session_unlocked, the one closure the API performs itself, so a
+#     popup that closed *itself* corrected nothing and every session above it
+#     silently addressed its neighbour's tab. Holding the page removes the
+#     question rather than adding a second observer for it.
+#
+# The index survives only where a log line or a response wants a number, derived
+# on demand by _tab_index_of. It is authoritative nowhere.
+_sessions = {}  # id -> {page, created_at, generation}
 _sessions_lock = threading.Lock()
 SESSION_TTL = 600  # 10 minutes
 MAX_SESSIONS = int(os.environ.get("MAX_BROWSER_SESSIONS", "2"))
@@ -42,7 +62,11 @@ MEMORY_EVICT_PCT = 80   # evict oldest idle session above this
 # Set by the resource-monitor thread when memory is over MEMORY_EVICT_PCT, and
 # drained by the Flask thread on its next request. The monitor used to evict
 # inline, which meant calling _close_session_unlocked() -- and so
-# chrome.get_context(), page.goto() and page.close() -- from its own thread.
+# chrome.get_context(), page.opener(), page.is_closed(), page.goto() and
+# page.close() -- from its own thread. _sweep_unclaimed_pages_unlocked reaches
+# the same set and is on the same path. Treat this list as the thread-bound
+# surface rather than as illustrative: it is what tells a reader which calls
+# may not leave the Flask thread, so a new one belongs in it.
 # Patchright's sync objects are bound to the thread that created them, and
 # touching them from another one wedges the process-global asyncio loop for the
 # life of the process: every later browse returned a Flask HTML 500 while Chrome
@@ -215,36 +239,52 @@ def _create_session():
             oldest = min(_sessions, key=lambda s: _sessions[s]["created_at"])
             _close_session_unlocked(oldest)
 
-    ctx.new_page()
-    tab_index = len(ctx.pages) - 1
+    # The return value, rather than ctx.pages[-1]: the context is shared, so
+    # between new_page() and the read a popup can append and the last entry is
+    # then somebody else's tab.
+    page = ctx.new_page()
 
     session_id = str(uuid.uuid4())[:8]
     with _sessions_lock:
         _sessions[session_id] = {
-            "tab_index": tab_index,
+            "page": page,
             "created_at": time.time(),
-            # Which Chrome this index means. See _get_session.
+            # Which Chrome this page belongs to. See _get_session.
             "generation": chrome.launch_generation(),
+            # And which *connection*, which is not the same question. A page
+            # object belongs to the Patchright stack that produced it, and
+            # connect_cdp() rebuilds that stack on a failed liveness probe with
+            # Chrome still up -- so the generation is unchanged and every
+            # wrapper here is silently from a dead connection. The context
+            # object is what changes, so it is what identifies the connection.
+            "context": ctx,
         }
-    return session_id, tab_index
+    return session_id, page
 
 
 def _get_session(session_id):
     """Get session info dict, or None if expired, missing, or from a dead Chrome.
 
-    A session here is a *tab index*, not a page object, so it is only meaningful
-    against the Chrome that was running when it was created. The browse watchdog
-    kills and relaunches Chrome, which comes back with a single about:blank tab
-    while this table still holds indices 1 and 2 -- so every request carrying a
+    A session holds a page object, which is only meaningful against the Chrome
+    that was running when it was created. The browse watchdog kills and
+    relaunches Chrome, which comes back with a single about:blank tab while this
+    table still holds pages from the dead one -- so every request carrying a
     pre-kill session id resolved to nothing and returned "Tab not found" for the
     rest of the 600s TTL. A recovery that worked, reported to the client as a
-    fault, for ten minutes after the fact (ISSUE-394).
+    fault, for ten minutes after the fact (ISSUE-394). The generation check is
+    still what catches that: a page object from a dead Chrome does not reliably
+    report itself closed, so is_closed() below is not a substitute for it.
 
     Treated as expiry rather than as an error, because that is what it is: the
     tab is gone and the caller's next request opens a fresh one. Dropped here on
     the Flask thread rather than cleared by the watchdog that did the relaunch,
     since touching this table from that thread is a smaller version of the
     mistake ISSUE-382 is about.
+
+    The closed-page arm is the same verdict for the case the index model could
+    not see at all: the page itself went -- window.close(), a crashed renderer,
+    a tab closed at the noVNC console -- and the session names nothing. Under an
+    index that read as somebody else's tab (ISSUE-535).
     """
     with _sessions_lock:
         session = _sessions.get(session_id)
@@ -261,44 +301,132 @@ def _get_session(session_id):
             )
             _sessions.pop(session_id, None)
             return None
+        if _page_is_gone(session.get("page")):
+            log.info("Session %s's tab is gone -- discarding", session_id)
+            _sessions.pop(session_id, None)
+            return None
+        # The connection, which the generation above does not answer for: a
+        # rebuilt Patchright stack leaves this page object bound to a dead one
+        # while Chrome, and so the generation, is unchanged. Last, because it is
+        # the narrowest of the four and the others give better log lines.
+        if session.get("context") is not chrome._pw_context:
+            log.info(
+                "Session %s predates the current CDP connection -- discarding",
+                session_id,
+            )
+            _sessions.pop(session_id, None)
+            return None
         return session
 
 
-def _close_session_unlocked(session_id):
-    """Close a session and its tab (caller must hold lock).
+def _page_is_gone(page):
+    """Whether this page can still be acted on. Never raises.
 
-    Closes the tab to free renderer processes, then adjusts tab indices
-    for remaining sessions. If it's the last tab, navigates to about:blank
-    instead (Chrome exits when all tabs close).
+    Measured against the shipped image rather than assumed: a wrapper whose CDP
+    connection has been torn down answers is_closed() with True, while a real
+    call on it (page.title()) raises "Event loop is closed". So the ordinary
+    answer here is a plain True and the exception arm is the defensive one --
+    but "I could not tell" still has to mean gone, since the alternative is
+    handing a dead object to a caller that is about to drive it.
+
+    This is not the guard against a stale *connection*, and must not be read as
+    one: it runs per page, and _sweep_unclaimed_pages_unlocked needs to know
+    about a rebuilt connection before it closes anything. See the stand-down
+    there.
+    """
+    if page is None:
+        return True
+    try:
+        return page.is_closed()
+    except Exception:
+        return True
+
+
+def _opened_by(page, pages):
+    """The pages in `pages` that `page` opened, transitively.
+
+    This is the ownership the index model had no way to express: a popup belongs
+    to the session whose tab opened it, and Chrome is what knows that.
+
+    **Call this while the opener is still open.** Patchright answers opener()
+    with None once the opener has been closed, so closing a session's tab first
+    destroys the link to every popup it opened and the walk then finds nothing.
+    Measured against the shipped image -- it is the reason this returns a list
+    for the caller to close rather than closing as it goes.
+    """
+    owned = []
+    frontier = [page]
+    seen = {id(page)}
+    while frontier:
+        parent = frontier.pop()
+        for candidate in pages:
+            if id(candidate) in seen:
+                continue
+            try:
+                if candidate.opener() is not parent:
+                    continue
+            except Exception:
+                # A page that will not answer cannot be attributed, and the
+                # sweep is what collects it once its opener has gone.
+                continue
+            seen.add(id(candidate))
+            owned.append(candidate)
+            frontier.append(candidate)
+    return owned
+
+
+def _close_page(page, ctx):
+    """Close one tab, or blank it when it is the last one. Never raises.
+
+    Chrome exits when its final tab closes, taking every other session with it,
+    so the last one is navigated to about:blank instead. Best-effort throughout:
+    this runs from _cleanup_expired() at the top of every endpoint, and a
+    teardown that raised would fail requests over tabs nobody asked about.
+    """
+    try:
+        if len(ctx.pages) <= 1:
+            page.goto("about:blank", timeout=5000)
+            return
+        page.close()
+    except Exception:
+        pass
+
+
+def _close_session_unlocked(session_id):
+    """Close a session, its tab, and every tab that tab opened (caller holds lock).
+
+    The popups go first, and that order is load-bearing rather than tidy: their
+    opener() answers None the moment this session's page closes, so a walk done
+    afterwards finds nothing to close and the tabs leak exactly as they did
+    before (ISSUE-535). They are collected before anything is closed for the
+    same reason.
     """
     session = _sessions.pop(session_id, None)
     if not session:
         return
-    closed_index = session["tab_index"]
-    if chrome.is_cdp_connected():
-        try:
-            page = chrome.get_page_by_index(closed_index)
-            if not page:
-                return
-            # record=False: this whole block is best-effort teardown behind
-            # `except Exception: pass`, and it runs from _cleanup_expired() at
-            # the top of every endpoint -- including ones that then return 404
-            # without ever making a CDP call of their own, so nothing here can
-            # ever produce a compensating success. Counting it let three
-            # /interact calls with stale session ids restart the container
-            # (ISSUE-384 review).
-            ctx = chrome.get_context(record=False)
-            if len(ctx.pages) <= 1:
-                # Last tab — navigate to blank instead of closing
-                page.goto("about:blank", timeout=5000)
-                return
-            page.close()
-        except Exception:
-            pass
-    # Shift down indices above the closed tab
-    for s in _sessions.values():
-        if s["tab_index"] > closed_index:
-            s["tab_index"] -= 1
+    page = session.get("page")
+    if page is None or not chrome.is_cdp_connected():
+        return
+    try:
+        # record=False: this whole block is best-effort teardown, and it runs
+        # from _cleanup_expired() at the top of every endpoint -- including ones
+        # that then return 404 without ever making a CDP call of their own, so
+        # nothing here can ever produce a compensating success. Counting it let
+        # three /interact calls with stale session ids restart the container
+        # (ISSUE-384 review).
+        ctx = chrome.get_context(record=False)
+        owned = _opened_by(page, list(ctx.pages))
+    except Exception:
+        return
+    if owned:
+        log.info(
+            "Session %s opened %d tab(s) of its own -- closing them with it",
+            session_id, len(owned),
+        )
+    # Deepest first, so a popup is gone before the popup that opened it.
+    for extra in reversed(owned):
+        _close_page(extra, ctx)
+    _close_page(page, ctx)
 
 
 def _close_session(session_id):
@@ -373,16 +501,160 @@ def _evict_expired():
         _close_session_unlocked(sid)
 
 
-def _get_page(tab_index):
-    """Get the Patchright page for a tab index (CDP must be connected)."""
-    return chrome.get_page_by_index(tab_index)
+def _sweep_unclaimed_pages_unlocked():
+    """Close tabs no session can name. Caller must hold lock. Never raises.
+
+    The backstop behind _close_session_unlocked, and the only thing that clears
+    what a deployment has already accumulated: a popup whose opener has gone
+    answers opener() with None for ever after, so once its session is closed
+    nothing links it to anything and no reaper over _sessions can see it
+    (ISSUE-535). Before this, the only thing that cleared one was a watchdog
+    Chrome relaunch, which threw away the live sessions with it.
+
+    Three kinds of tab are kept, and the middle one is why this is not
+    reap-on-sight:
+
+      * the base tab, which Chrome exits without;
+      * a live session's own tab;
+      * a tab opened by a live session's tab, transitively -- an OAuth popup
+        mid-dance is unreachable through the API and is not garbage, and
+        closing it would break the flow the session is in the middle of.
+
+    **How the tab was opened decides whether that middle rule can apply**,
+    measured against the shipped image rather than assumed: `window.open`
+    (with or without `noopener`) and a `target="_blank"` anchor click both
+    report an opener, so those are kept while their session lives. A **middle
+    click** reports none, so such a tab is indistinguishable from an orphan and
+    is swept on the next request even while its session is live. That is a
+    narrowing of the guarantee and not of the leak fix -- no endpoint can
+    address such a tab either way.
+
+    Everything else is unreachable by construction: every endpoint resolves a
+    page from a session, and no session names these.
+    """
+    if not chrome.is_cdp_connected():
+        return 0
+    try:
+        # record=False for the reason _close_session_unlocked gives: this runs
+        # at the top of every endpoint and can produce no compensating success.
+        ctx = chrome.get_context(record=False)
+        pages = list(ctx.pages)
+    except Exception:
+        return 0
+    if len(pages) <= 1:
+        return 0
+
+    live = {id(p) for p in pages}
+    keep = {id(pages[0])}
+    for session in _sessions.values():
+        page = session.get("page")
+        if page is None:
+            continue
+        if session.get("context") is not ctx:
+            # This session was built against a different Patchright stack, so
+            # every wrapper it holds is from a connection that has since been
+            # rebuilt -- connect_cdp() does that on a failed liveness probe,
+            # with Chrome still up and chrome.launch_generation() unchanged, so
+            # _get_session's generation check does not catch it. Those wrappers
+            # match nothing in `pages`, so a sweep would find every session's
+            # tab unclaimed and close all of them. Stand down for this pass:
+            # the rows are dropped by _get_session as endpoints touch them, and
+            # the tabs are collected once they are.
+            log.info(
+                "Sweep stood down: a session predates this CDP connection, so "
+                "tab identity cannot be trusted this pass",
+            )
+            return 0
+        if id(page) not in live:
+            # Same connection, and the tab is simply not there any more -- it
+            # was closed out of band, by the page itself or at the noVNC
+            # console. The session names nothing, so it protects nothing; it is
+            # dropped by _get_session when an endpoint next asks for it. Not a
+            # stand-down: treating it as one blocks the sweep for the whole
+            # 600s TTL whenever any tab dies this way, which is ordinary rather
+            # than exceptional, and is how the accumulated-orphan case failed.
+            continue
+        keep.add(id(page))
+        for owned in _opened_by(page, pages):
+            keep.add(id(owned))
+
+    # A page that will not say who opened it is kept, not closed. _opened_by
+    # skips such a candidate, which is right where it is used to *close* a
+    # session's own popups -- one it cannot attribute is left for this sweep --
+    # and inverted here, where skipping means the page never reaches `keep` and
+    # is closed as an orphan. It may be a live session's popup, so the unknown
+    # answer has to fail toward keeping it; a genuinely abandoned tab whose
+    # opener() is unreadable stays until Chrome is relaunched, which is the leak
+    # this sweep exists for and is still better than closing live work.
+    for candidate in pages:
+        if id(candidate) in keep:
+            continue
+        try:
+            candidate.opener()
+        except Exception:
+            keep.add(id(candidate))
+
+    unclaimed = [p for p in pages if id(p) not in keep]
+    if not unclaimed:
+        return 0
+    log.warning(
+        "Closing %d tab(s) no session can name (%d page(s), %d session(s))",
+        len(unclaimed), len(pages), len(_sessions),
+    )
+    for page in unclaimed:
+        _close_page(page, ctx)
+    return len(unclaimed)
+
+
+def _session_page(session):
+    """The Patchright page this session named, or None if it is gone.
+
+    Replaces _get_page(tab_index). The rename is deliberate: a fixture stubbing
+    the old name as `lambda idx: page` keeps working when handed a session dict
+    and silently returns the wrong tab, so changing the argument's meaning under
+    the same name would have been a quiet break rather than a loud one.
+    """
+    if session is None:
+        return None
+    page = session.get("page")
+    return None if _page_is_gone(page) else page
+
+
+def _tab_index_of(page):
+    """Where this page currently sits in the context, or None. Never raises.
+
+    For a log line or a response field, derived at the moment it is read. It is
+    not stored, because a stored one goes stale the next time any tab closes --
+    which is the whole of ISSUE-535's second half.
+
+    Reads chrome._pw_context directly rather than calling get_context(), which
+    is what interact() already does for its `others` list. get_context() reaches
+    connect_cdp(), which probes the socket with a real round trip and on a stale
+    one tears the connection down and rebuilds it with up to two 1s sleeps --
+    so formatting a refusal message could invalidate the very page the caller is
+    holding and add seconds to the response, with the try/except swallowing any
+    sign of it. Both call sites replaced a plain dict lookup, so the cost has to
+    stay in that class.
+    """
+    if page is None:
+        return None
+    try:
+        ctx = chrome._pw_context
+        if not ctx:
+            return None
+        for i, candidate in enumerate(ctx.pages):
+            if candidate is page:
+                return i
+    except Exception:
+        return None
+    return None
 
 
 # ---------------------------------------------------------------------------
 # Navigation flow: disconnect CDP -> xdotool -> reconnect CDP
 # ---------------------------------------------------------------------------
 
-def _navigate_and_wait(tab_index, url, timeout_ms=30000):
+def _navigate_and_wait(page, url, timeout_ms=30000):
     """Navigate via xdotool and wait for challenges.
 
     Chrome was launched with --remote-debugging-port (not --remote-debugging-pipe).
@@ -406,10 +678,8 @@ def _navigate_and_wait(tab_index, url, timeout_ms=30000):
 
     # Focus the right tab if multiple exist
     ctx = chrome.get_context()
-    if ctx and len(ctx.pages) > 1:
-        page = chrome.get_page_by_index(tab_index)
-        if page:
-            page.bring_to_front()
+    if ctx and len(ctx.pages) > 1 and page:
+        page.bring_to_front()
 
     # Navigate via pure X11 input (not CDP Page.navigate)
     xdotool.navigate(url, timeout_s=timeout_ms // 1000)
@@ -506,13 +776,22 @@ def browse():
             return jsonify({
                 "error": f"session {session_id} not found or expired",
             }), 404
-        tab_index = session["tab_index"]
+        page = _session_page(session)
+        if not page:
+            # Before navigating, not after. _navigate_and_wait focuses the
+            # session's tab and then types the URL over X11, so a None page
+            # skips the focus and types into whatever tab is in front -- which
+            # is another session's. The _page_is_gone check below the navigation
+            # catches a tab that died *during* it; this catches one already gone.
+            return jsonify({
+                "error": f"session {session_id} not found or expired",
+            }), 404
     else:
-        session_id, tab_index = _create_session()
+        session_id, page = _create_session()
         created_new = True
 
     try:
-        challenge = _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+        challenge = _navigate_and_wait(page, url, timeout_ms=timeout)
         if challenge:
             # Answered from the window title, before anything reads the page.
             # Every call below this line goes over CDP -- the DataDome
@@ -521,8 +800,11 @@ def browse():
             # is exactly the window BOT_DETECTION.md says not to do that in.
             return _captcha_response(session_id, challenge)
 
-        page = _get_page(tab_index)
-        if not page:
+        # Re-checked after navigating, not just on the way in. _navigate_and_wait
+        # can span a watchdog Chrome relaunch, which takes every tab with it --
+        # the index model re-resolved here and got None, and holding the object
+        # would otherwise carry a dead page straight into the CDP calls below.
+        if _page_is_gone(page):
             raise RuntimeError("Tab not found after reconnection")
 
         browsing.wait_for_datadome(page)
@@ -585,7 +867,7 @@ def screenshot():
         return refusal
 
     created_new = False
-    tab_index = None
+    page = None
     challenge = None
 
     if session_id:
@@ -594,13 +876,12 @@ def screenshot():
             return jsonify({
                 "error": f"session {session_id} not found or expired",
             }), 404
-        tab_index = session["tab_index"]
+        page = _session_page(session)
     elif url:
-        session_id, tab_index = _create_session()
+        session_id, page = _create_session()
         created_new = True
         try:
-            challenge = _navigate_and_wait(tab_index, url, timeout_ms=timeout)
-            page = _get_page(tab_index)
+            challenge = _navigate_and_wait(page, url, timeout_ms=timeout)
             if page:
                 # No CDP evaluate while a challenge is still up. Unlike
                 # /browse this does not answer `captcha` and return: a
@@ -618,8 +899,10 @@ def screenshot():
 
     try:
         chrome.connect_cdp()
-        page = _get_page(tab_index)
-        if not page:
+        # _page_is_gone rather than a falsy test: the page object outlives the
+        # tab, so a session that survived a watchdog Chrome relaunch holds one
+        # that is not None and is not usable either.
+        if _page_is_gone(page):
             raise RuntimeError("Tab not found")
         # The capture's own tab switch (ISSUE-536). Every other path that needs
         # the right tab already takes one -- _navigate_and_wait,
@@ -708,7 +991,7 @@ def extract():
         return refusal
 
     created_new = False
-    tab_index = None
+    page = None
 
     if session_id:
         session = _get_session(session_id)
@@ -716,13 +999,12 @@ def extract():
             return jsonify({
                 "error": f"session {session_id} not found or expired",
             }), 404
-        tab_index = session["tab_index"]
+        page = _session_page(session)
     elif url:
-        session_id, tab_index = _create_session()
+        session_id, page = _create_session()
         created_new = True
         try:
-            challenge = _navigate_and_wait(tab_index, url, timeout_ms=timeout)
-            page = _get_page(tab_index)
+            challenge = _navigate_and_wait(page, url, timeout_ms=timeout)
             if page:
                 # No CDP evaluate while a challenge is still up. This endpoint
                 # has no `captcha` shape to answer with, so unlike /browse it
@@ -741,8 +1023,10 @@ def extract():
 
     try:
         chrome.connect_cdp()
-        page = _get_page(tab_index)
-        if not page:
+        # _page_is_gone rather than a falsy test: the page object outlives the
+        # tab, so a session that survived a watchdog Chrome relaunch holds one
+        # that is not None and is not usable either.
+        if _page_is_gone(page):
             raise RuntimeError("Tab not found")
 
         elements = page.query_selector_all(selector)
@@ -873,16 +1157,16 @@ def render_page():
             return jsonify({
                 "error": f"session {session_id} not found or expired",
             }), 404
-        tab_index = session["tab_index"]
+        page = _session_page(session)
     elif url:
-        session_id, tab_index = _create_session()
+        session_id, page = _create_session()
         created_new = True
     else:
         return jsonify({"error": "url or session_id is required"}), 400
 
     try:
         if url:
-            challenge = _navigate_and_wait(tab_index, url, timeout_ms=timeout)
+            challenge = _navigate_and_wait(page, url, timeout_ms=timeout)
             if challenge:
                 # From the window title, before anything reads the page --
                 # page.content() below is as much a CDP call as the DataDome
@@ -891,8 +1175,10 @@ def render_page():
                 return _captcha_response(session_id, challenge)
 
         chrome.connect_cdp()
-        page = _get_page(tab_index)
-        if not page:
+        # _page_is_gone rather than a falsy test: the page object outlives the
+        # tab, so a session that survived a watchdog Chrome relaunch holds one
+        # that is not None and is not usable either.
+        if _page_is_gone(page):
             raise RuntimeError("Tab not found")
 
         if url:
@@ -1136,15 +1422,38 @@ def _foreground_headers(verdict):
 def _header_safe(value):
     """A detail string fit for an HTTP header value.
 
-    The detail is built from `page.title()` and `xdotool.window_title()`, which
-    are a page's own text and a window title derived from it -- so both are
-    chosen by whatever page is loaded. A bare newline in a header value is a
-    header injection, and a very long title is a response nobody wants; werkzeug
-    would refuse the first outright and turn a reported foreground into a 500 on
-    the capture itself.
+    The detail embeds `page.title()` and `xdotool.window_title()` -- a page's
+    own text and a window title derived from it -- so every byte of it is
+    chosen by whatever page is loaded. Three separate hazards, and only the
+    first is the obvious one:
+
+    * **A line break is a header injection.** `str.split()` removes every one
+      Python calls whitespace, which is wider than CRLF: NEL, LS and PS go too.
+    * **Anything above U+00FF cannot be sent at all.** The response goes out
+      through werkzeug, which encodes each header line `latin-1, strict`, and
+      `visual.bring_to_front` builds this string with `{title!r}` -- `repr`
+      does not escape non-ASCII printables. So a page (or a sibling tab) whose
+      title carries CJK, an emoji or a curly quote raised `UnicodeEncodeError`
+      inside `send_header` and the client got a dropped connection: no picture,
+      no status, no headers. That is strictly worse than the silence this
+      header replaced, and on far commoner input than a newline -- the capture
+      was lost in exactly the degraded case the header exists to report.
+      `backslashreplace` keeps the title legible as an escape rather than
+      dropping it.
+    * **A long title is a response nobody wants.** Capped *after* the escape,
+      since escaping lengthens and a cap applied first would not bind.
+
+    `unicode_escape` rather than `ascii`/`backslashreplace`, and the difference
+    is the third hazard rather than a style: ESC and NUL *are* ASCII, so
+    `backslashreplace` has nothing to replace and leaves them in -- they
+    survive `str.split()` and werkzeug's CRLF check alike, and go out on the
+    wire. `unicode_escape` escapes the C0 set as well as everything above
+    U+00FF, so the result is printable ASCII whatever went in. It escapes a
+    literal backslash too, which is what keeps the escaping unambiguous.
     """
     collapsed = " ".join(str(value).split())
-    return collapsed[:_MAX_HEADER_DETAIL_CHARS]
+    escaped = collapsed.encode("unicode_escape").decode("ascii")
+    return escaped[:_MAX_HEADER_DETAIL_CHARS]
 
 
 _MAX_HEADER_DETAIL_CHARS = 300
@@ -1217,7 +1526,7 @@ def _coordinate_action(session, page, action, others=()):
         code, detail = visual.staleness(record, page) or (None, None)
         if code:
             log.info("Refusing %s on %s: %s -- %s",
-                     action_type, session.get("tab_index"), code, detail)
+                     action_type, _tab_index_of(page), code, detail)
             return {
                 "action": action_type, "ok": False,
                 "error": code, "detail": detail,
@@ -1288,7 +1597,7 @@ def _coordinate_action(session, page, action, others=()):
         code, detail = visual.staleness(record, page) or (None, None)
         if code:
             log.info("Refusing click_challenge on %s: %s -- %s",
-                     session.get("tab_index"), code, detail)
+                     _tab_index_of(page), code, detail)
             return {
                 "action": "click_challenge", "ok": False,
                 "error": code, "detail": detail,
@@ -1737,7 +2046,7 @@ def interact():
         }), 404
 
     chrome.connect_cdp()
-    page = _get_page(session["tab_index"])
+    page = _session_page(session)
     if not page:
         return jsonify({"error": "tab not found"}), 500
 
@@ -1841,7 +2150,7 @@ def evaluate():
         }), 404
 
     chrome.connect_cdp()
-    page = _get_page(session["tab_index"])
+    page = _session_page(session)
     if not page:
         return jsonify({"error": "tab not found"}), 500
 
@@ -1874,7 +2183,7 @@ def challenge():
         }), 404
 
     chrome.connect_cdp()
-    page = _get_page(session["tab_index"])
+    page = _session_page(session)
     if not page:
         return jsonify({"error": "tab not found"}), 500
 
@@ -1936,7 +2245,7 @@ def get_session_info(session_id):
     # Try to get URL if CDP is connected
     url = ""
     if chrome.is_cdp_connected():
-        page = chrome.get_page_by_index(session["tab_index"])
+        page = _session_page(session)
         if page:
             try:
                 url = page.url
@@ -2108,9 +2417,25 @@ def _cleanup_expired():
     Called at the top of every endpoint, so this is where the monitor thread's
     deferred work actually happens -- on the Flask thread, which owns the
     Patchright connection the eviction has to go through.
+
+    The sweep runs between the two. What that buys is **ordering, not relief on
+    this request**, and the difference is worth stating because the obvious
+    reading is wrong: `page.close()` does not free the renderer synchronously,
+    and `_drain_evict_request_unlocked` re-reads the cgroup microseconds later,
+    so a request that sheds ten orphans still sees the pre-sweep figure and
+    still evicts a live session. What it does deliver is that the orphans are
+    gone from then on, so the *next* pressure cycle is measured against a
+    browser holding only tabs somebody can name -- which is ISSUE-535's second
+    consequence (eviction counted sessions, not tabs, so the tabs that caused
+    the pressure were never the ones closed).
+
+    It follows the TTL pass because an expired session's popups are closed by
+    _close_session_unlocked itself, so what reaches the sweep from that pass is
+    only the remainder: a popup _opened_by could not attribute.
     """
     with _sessions_lock:
         _evict_expired()
+        _sweep_unclaimed_pages_unlocked()
         evicted = _drain_evict_request_unlocked()
     if evicted:
         log.info("Evicted session %s before serving this request", evicted)
