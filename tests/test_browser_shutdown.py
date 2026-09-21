@@ -139,4 +139,5 @@ def test_pool_shutdown_signals_every_browser_before_waiting_for_cdp(runtime):  #
     assert observed == [True]
     assert pool.live() == []
     for proc in procs:
+        proc.terminate.assert_called_once()
         proc.wait.assert_called()

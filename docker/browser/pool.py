@@ -46,6 +46,7 @@ class BrowserInstance:
     launch_generation: int = 0
     launching: bool = False
     retired: bool = False
+    term_sent: bool = False
     cdp_wedge_reported: bool = False
     wedge_loop_reported: bool = False
     last_used: float = 0.0
@@ -314,6 +315,7 @@ def cleanup():
             if inst.proc is not None:
                 try:
                     inst.proc.terminate()
+                    inst.term_sent = True
                 except OSError:
                     pass
     for inst in instances:

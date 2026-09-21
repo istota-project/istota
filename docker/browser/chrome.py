@@ -325,7 +325,7 @@ def _signal_group(proc, sig):
         return False
 
 
-def _kill_chrome_proc(proc, timeout=5, *, graceful=False):
+def _kill_chrome_proc(proc, timeout=5, *, graceful=False, term_sent=False):
     """Stop Chrome and reap it. Never raises.
 
     The reap is the part that was missing. The old shape was ``terminate()``,
@@ -344,8 +344,9 @@ def _kill_chrome_proc(proc, timeout=5, *, graceful=False):
     try:
         # Normal retirement lets the browser ask its renderers to flush before
         # they exit. Wedge recovery still signals the whole process group.
-        if graceful or not _signal_group(proc, signal.SIGTERM):
-            proc.terminate()
+        if not term_sent:
+            if graceful or not _signal_group(proc, signal.SIGTERM):
+                proc.terminate()
     except Exception:
         pass
     try:
@@ -858,5 +859,7 @@ def cleanup(inst):
     # Only bounded process work belongs under the lifecycle lock.
     with _chrome_lock:
         proc, inst.proc = inst.proc, None
-        _kill_chrome_proc(proc, graceful=True)
+        # Chrome restores its default TERM action after the first signal.
+        # A second signal during shutdown would cut its profile flush short.
+        _kill_chrome_proc(proc, graceful=True, term_sent=inst.term_sent)
     disconnect_cdp(inst)
