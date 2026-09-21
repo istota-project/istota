@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Deleting a browser profile no longer refuses because a session’s tab has already closed. State inspection and deletion refusals now list your live sessions and their ages; `forget --all --profile --force` closes them before resetting your profile. Closing an unknown session reports that it was not found, and CAPTCHA responses say when they retain a session.
+
 - Scheduled jobs targeting a web room now warn when their `room` setting is missing or names another room. The warning explains how to make the result appear as an assistant turn instead of a standalone note.
 
 - Browse can now drag sliders, pan maps and select regions on a canvas with `--drag-at X1,Y1 X2,Y2`. Both points use the screenshot coordinates, and a stale picture is refused before the drag begins. Requires a rebuilt browser image.

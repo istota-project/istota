@@ -153,7 +153,8 @@ def test_session_endpoints_echo_applied_scope(api, endpoint):
 
 def test_close_missing_session_does_not_launch(api):
     response = api.app.test_client().delete("/sessions/missing", headers={"X-Istota-User": "alice"})
-    assert response.status_code == 200
+    assert response.status_code == 404
+    assert response.json["status"] == "not_found"
     assert response.json["user_scope"] == "alice"
     assert api.pool.live() == []
 
@@ -420,7 +421,7 @@ def test_state_cold_sizes_only_own_profile_without_launch(api, monkeypatch):
     response = api.app.test_client().get("/state", headers={"X-Istota-User": "alice"})
     assert response.status_code == 200
     assert response.json == {"status": "ok", "user_scope": "alice", "profile_exists": True,
-                             "profile_size_bytes": 5, "live": False, "cookie_domains": None}
+                             "profile_size_bytes": 5, "live": False, "cookie_domains": None, "sessions": [], "session_count": 0}
 
 
 def test_state_live_returns_domains_never_cookie_details(api):
@@ -598,6 +599,193 @@ def test_state_disconnected_context_does_not_reconnect(api, monkeypatch):
     assert response.json["cookie_domains"] is None
     assert response.json["live"] is True
     reconnect.assert_not_called()
+
+
+@pytest.mark.parametrize("stale", ["closed", "expired", "generation", "context", "reaped"])
+def test_profile_delete_ignores_unaddressable_sessions(api, monkeypatch, stale):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    session = api._sessions[sid]
+    inst = api.pool.instance_for("alice")
+    if stale == "closed":
+        session["page"].is_closed.return_value = True
+    elif stale == "expired":
+        session["last_used_at"] -= api.SESSION_TTL + 1
+    elif stale == "generation":
+        session["generation"] -= 1
+    elif stale == "context":
+        session["context"] = object()
+    else:
+        api.pool._instances.clear()
+    release = api.pool.release_slot
+    def stop(instance, **kwargs):
+        instance.proc.poll.return_value = 0
+        release(instance, **kwargs)
+    monkeypatch.setattr(api.pool, "release_slot", stop)
+    response = api.app.test_client().delete(
+        "/state", headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True},
+    )
+    assert response.status_code == 200
+    assert response.json["profile_deleted"] is True
+    assert sid not in api._sessions
+    assert not Path(inst.profile_dir).exists()
+
+
+def test_state_and_refusal_report_own_sessions_without_renewing(api, monkeypatch):
+    alice = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    bob = post(api, "/browse", "bob", url="https://example.org/", keep_session=True).json["session_id"]
+    session = api._sessions[alice]
+    now = session["created_at"] + 50
+    session["last_used_at"] = now - 40
+    monkeypatch.setattr(api.time, "time", lambda: now)
+    foreign = api._sessions[bob]["page"]
+    foreign.reset_mock()
+    expected = [{"session_id": alice, "age_seconds": 50, "idle_seconds": 40,
+                 "ttl_seconds": api.SESSION_TTL - 40}]
+    client = api.app.test_client()
+    for response in (
+        client.get("/state", headers={"X-Istota-User": "alice"}),
+        client.delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True}),
+    ):
+        assert response.json["sessions"] == expected
+        assert response.json["session_count"] == 1
+        assert bob not in response.text
+    assert response.status_code == 409
+    assert session["last_used_at"] == now - 40
+    assert foreign.mock_calls == []
+
+
+def test_force_profile_delete_closes_only_own_sessions(api, monkeypatch):
+    alice = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    bob = post(api, "/browse", "bob", url="https://example.org/", keep_session=True).json["session_id"]
+    own = api.pool.instance_for("alice")
+    other = api.pool.instance_for("bob")
+    foreign = api._sessions[bob]["page"]
+    foreign.reset_mock()
+    release = api.pool.release_slot
+    def stop(instance, **kwargs):
+        instance.proc.poll.return_value = 0
+        release(instance, **kwargs)
+    monkeypatch.setattr(api.pool, "release_slot", stop)
+    response = api.app.test_client().delete(
+        "/state", headers={"X-Istota-User": "alice"},
+        json={"all": True, "profile": True, "force": True},
+    )
+    assert response.status_code == 200
+    assert response.json["closed_sessions"] == [alice]
+    assert set(api._sessions) == {bob}
+    assert not Path(own.profile_dir).exists()
+    assert Path(other.profile_dir).exists()
+    assert foreign.mock_calls == []
+
+
+@pytest.mark.parametrize("body", [
+    {"all": True, "force": True},
+    {"origin": "https://example.com", "force": True},
+    {"all": True, "profile": True, "force": "false"},
+])
+def test_force_requires_explicit_profile_selection(api, body):
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json=body)
+    assert response.status_code == 400
+    assert api.pool.live() == []
+
+
+def test_captcha_reports_retained_session_without_keep_session(api, monkeypatch):
+    monkeypatch.setattr(api.browsing, "detect_captcha", lambda page: True)
+    response = post(api, "/browse", url="https://example.com/")
+    assert response.json["session_retained"] is True
+    assert response.json["session_id"] in api._sessions
+    assert "close" in response.json["message"].lower()
+
+
+def test_force_still_preserves_profile_when_browser_cannot_stop(api, monkeypatch):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    inst = api.pool.instance_for("alice")
+    monkeypatch.setattr(api.chrome, "_kill_chrome_proc", lambda *args, **kwargs: None)
+    response = api.app.test_client().delete(
+        "/state", headers={"X-Istota-User": "alice"},
+        json={"all": True, "profile": True, "force": True},
+    )
+    assert response.status_code == 502
+    assert Path(inst.profile_dir).exists()
+    assert api.pool.instance_for("alice") is inst
+    assert sid not in api._sessions
+
+
+@pytest.mark.parametrize("method", ["GET", "DELETE"])
+def test_state_drains_pending_tab_close_events_before_counting(api, monkeypatch, method):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    inst = api.pool.instance_for("alice")
+    page = api._sessions[sid]["page"]
+    def round_trip():
+        page.is_closed.return_value = True
+        return []
+    inst.pw_context.cookies.side_effect = round_trip
+    release = api.pool.release_slot
+    def stop(instance, **kwargs):
+        instance.proc.poll.return_value = 0
+        release(instance, **kwargs)
+    monkeypatch.setattr(api.pool, "release_slot", stop)
+    response = api.app.test_client().open(
+        "/state", method=method, headers={"X-Istota-User": "alice"},
+        json={"all": True, "profile": True},
+    )
+    assert response.status_code == 200
+    assert sid not in api._sessions
+    if method == "GET":
+        assert response.json["sessions"] == []
+
+
+def test_profile_delete_preserves_profile_if_session_inspection_fails(api):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    inst = api.pool.instance_for("alice")
+    inst.pw_context.cookies.side_effect = RuntimeError("private browser data")
+    response = api.app.test_client().delete(
+        "/state", headers={"X-Istota-User": "alice"},
+        json={"all": True, "profile": True, "force": True},
+    )
+    assert response.status_code == 502
+    assert "private browser data" not in response.text
+    assert Path(inst.profile_dir).exists()
+    assert sid in api._sessions
+
+
+@pytest.mark.parametrize("stale", ["stopped", "generation", "context", "expired"])
+def test_profile_delete_prunes_stale_records_before_protocol_call(api, monkeypatch, stale):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    inst = api.pool.instance_for("alice")
+    session = api._sessions[sid]
+    if stale == "stopped":
+        inst.proc.poll.return_value = 0
+    elif stale == "generation":
+        session["generation"] -= 1
+    elif stale == "context":
+        session["context"] = object()
+    else:
+        session["last_used_at"] -= api.SESSION_TTL + 1
+    inst.pw_context.cookies.side_effect = RuntimeError("dead connection")
+    release = api.pool.release_slot
+    def stop(instance, **kwargs):
+        instance.proc.poll.return_value = 0
+        release(instance, **kwargs)
+    monkeypatch.setattr(api.pool, "release_slot", stop)
+    response = api.app.test_client().delete(
+        "/state", headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True},
+    )
+    assert response.status_code == 200
+    assert sid not in api._sessions
+    assert not Path(inst.profile_dir).exists()
+
+
+def test_state_stopped_chrome_discards_sessions_without_protocol_call(api):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    inst = api.pool.instance_for("alice")
+    inst.proc.poll.return_value = 0
+    inst.pw_context.cookies.side_effect = RuntimeError("dead connection")
+    response = api.app.test_client().get("/state", headers={"X-Istota-User": "alice"})
+    assert response.status_code == 200
+    assert response.json["sessions"] == []
+    assert response.json["live"] is False
+    assert sid not in api._sessions
 
 
 def test_instance_discovery_is_read_only(api, monkeypatch):

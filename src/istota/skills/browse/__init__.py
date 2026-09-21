@@ -1630,10 +1630,13 @@ def cmd_forget(args):
     """Clear selected state from the requesting user's browser profile."""
     if args.profile and not args.all:
         return {"status": "error", "error": "--profile requires --all"}
+    if args.force and not (args.all and args.profile):
+        return {"status": "error", "error": "--force requires --all --profile"}
+    selection = {"origin": args.origin, "all": args.all, "profile": args.profile}
+    if args.force:
+        selection["force"] = True
     resp = browser_request("delete", f"{get_api_url()}/state", timeout=REQUEST_TIMEOUT,
-                           headers=browser_headers(), json={
-                               "origin": args.origin, "all": args.all, "profile": args.profile,
-                           })
+                           headers=browser_headers(), json=selection)
     return _decode(resp)
 
 
@@ -1841,6 +1844,8 @@ def build_parser():
     selection.add_argument("--origin", help="HTTP(S) origin to clear")
     selection.add_argument("--all", action="store_true", help="Clear cookies and storage for all origins")
     p_forget.add_argument("--profile", action="store_true", help="With --all, delete your entire profile after closing sessions")
+
+    p_forget.add_argument("--force", action="store_true", help="With --all --profile, close your live sessions before deleting")
 
     return parser
 
