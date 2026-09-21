@@ -76,6 +76,7 @@ def _reset_chrome_globals():
     def _reset():
         INSTANCE.proc = None
         chrome._pw = None
+        chrome._connections.clear()
         chrome._driver_thread_id = None
         INSTANCE.pw_browser = None
         INSTANCE.pw_context = None

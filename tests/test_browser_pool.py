@@ -21,6 +21,7 @@ def runtime(monkeypatch, tmp_path):
     chrome = importlib.import_module("chrome")
     monkeypatch.setattr(pool, "PROFILE_ROOT", str(tmp_path))
     monkeypatch.setattr(pool, "_instances", {})
+    monkeypatch.setattr(chrome, "_connections", {})
     monkeypatch.setattr(chrome, "_pw", None)
     monkeypatch.setattr(chrome, "_driver_thread_id", None)
     processes = []
@@ -149,3 +150,108 @@ def test_display_start_failure_reaps_its_child(runtime, monkeypatch):
     assert pool.live() == []
     assert len(processes) == 1
     processes[0][2].wait.assert_called()
+
+
+def test_dead_driver_is_replaced_and_all_its_connections_are_invalidated(runtime, monkeypatch):
+    pool, chrome, _, start = runtime
+    alice = pool.acquire("alice")
+    bob = pool.acquire("bob")
+    dead = chrome._pw
+    dead._impl_obj._connection._transport = types.SimpleNamespace(
+        _proc=types.SimpleNamespace(returncode=1),
+        on_error_future=types.SimpleNamespace(done=lambda: True),
+    )
+    alice.pw_browser.new_browser_cdp_session.side_effect = RuntimeError("driver closed")
+    dead.chromium.connect_over_cdp.side_effect = RuntimeError("driver closed")
+    replacement = mock.Mock()
+    replacement.chromium.connect_over_cdp.side_effect = lambda *a, **k: mock.Mock(contexts=[mock.Mock(pages=[])])
+    start.return_value.start.return_value = replacement
+    monkeypatch.setattr(chrome.time, "sleep", lambda _: None)
+
+    chrome.connect_cdp(alice)
+
+    assert chrome._pw is replacement
+    assert start.call_count == 2
+    assert bob.pw_browser is None
+    assert bob.pw_context is None
+    assert bob.pw_thread_id is None
+    chrome.get_context(bob)
+    assert bob.pw_context is not alice.pw_context
+
+
+def test_one_failed_browser_connection_does_not_reset_a_healthy_driver(runtime, monkeypatch):
+    pool, chrome, _, start = runtime
+    alice = pool.acquire("alice")
+    driver = chrome._pw
+    driver._impl_obj._connection._transport = types.SimpleNamespace(
+        _proc=types.SimpleNamespace(returncode=None),
+        on_error_future=types.SimpleNamespace(done=lambda: False),
+    )
+    context = alice.pw_context
+    driver.chromium.connect_over_cdp.side_effect = RuntimeError("CDP port refused")
+    monkeypatch.setattr(chrome.time, "sleep", lambda _: None)
+    with pytest.raises(RuntimeError, match="CDP port refused"):
+        pool.acquire("bob")
+    assert chrome._pw is driver
+    assert start.call_count == 1
+    driver.stop.assert_not_called()
+    assert chrome.get_context(alice) is context
+
+
+def test_launch_failure_has_a_distinct_exception_and_reusable_slot(runtime, monkeypatch):
+    pool, chrome, _, _ = runtime
+    launch = chrome.launch_chrome
+    monkeypatch.setattr(chrome, "launch_chrome", mock.Mock(side_effect=FileNotFoundError("missing executable")))
+    with pytest.raises(pool.LaunchFailed) as error:
+        pool.acquire("alice")
+    assert isinstance(error.value.__cause__, FileNotFoundError)
+    assert pool.live() == []
+    monkeypatch.setattr(chrome, "launch_chrome", launch)
+    assert pool.acquire("bob").slot == 0
+
+
+@pytest.mark.parametrize("already_reaped", [False, True])
+def test_driver_exit_is_detected_before_asyncio_dispatches_its_status(runtime, monkeypatch, already_reaped):
+    pool, chrome, _, start = runtime
+    alice = pool.acquire("alice")
+    driver = chrome._pw
+    driver._impl_obj._connection._transport = types.SimpleNamespace(
+        _proc=types.SimpleNamespace(pid=99999, returncode=None),
+        on_error_future=types.SimpleNamespace(done=lambda: False),
+    )
+    # waitid observes the dead child without stealing asyncio's wait/reap.
+    for name in ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT"):
+        monkeypatch.setattr(chrome.os, name, getattr(chrome.os, name, 1), raising=False)
+    waitid = mock.Mock(
+        return_value=types.SimpleNamespace(si_pid=99999),
+        side_effect=ChildProcessError() if already_reaped else None,
+    )
+    monkeypatch.setattr(chrome.os, "waitid", waitid, raising=False)
+    replacement = mock.Mock()
+    replacement.chromium.connect_over_cdp.return_value = mock.Mock(contexts=[mock.Mock(pages=[])])
+    start.return_value.start.return_value = replacement
+
+    chrome.connect_cdp(alice)
+
+    assert chrome._pw is replacement
+    waitid.assert_called_once_with(
+        chrome.os.P_PID, 99999,
+        chrome.os.WEXITED | chrome.os.WNOHANG | chrome.os.WNOWAIT,
+    )
+
+
+def test_release_after_driver_exit_does_not_call_a_dead_browser(runtime):
+    pool, chrome, _, _ = runtime
+    alice = pool.acquire("alice")
+    bob = pool.acquire("bob")
+    dead_browser = alice.pw_browser
+    driver = chrome._pw
+    driver._impl_obj._connection._transport = types.SimpleNamespace(
+        _proc=types.SimpleNamespace(returncode=1),
+        on_error_future=types.SimpleNamespace(done=lambda: True),
+    )
+    pool.release_slot(alice)
+    dead_browser.close.assert_not_called()
+    assert chrome._pw is None
+    assert bob.pw_context is None
+    assert pool.live() == [bob]

@@ -6,6 +6,7 @@ be read by the monitor; Chrome's lifecycle lock serializes watchdog recovery.
 
 from dataclasses import dataclass, field
 import os
+import logging
 from pathlib import Path
 import socket
 import subprocess
@@ -13,6 +14,8 @@ import threading
 import time
 
 import chrome
+
+log = logging.getLogger(__name__)
 
 PROFILE_ROOT = chrome.PROFILE_ROOT
 MAX_INSTANCES = int(os.environ.get("BROWSER_MAX_INSTANCES", "2"))
@@ -47,6 +50,10 @@ class BrowserInstance:
 
 class PoolFull(RuntimeError):
     """No free browser slot."""
+
+
+class LaunchFailed(RuntimeError):
+    """A browser instance could not start."""
 
 
 _instances: dict[str, BrowserInstance] = {}
@@ -147,8 +154,11 @@ def acquire(user_id):
         _start_display(inst)
         chrome.launch_chrome(inst)
         chrome.connect_cdp(inst)
-    except BaseException:
+    except BaseException as exc:
         release_slot(inst)
+        if isinstance(exc, Exception):
+            log.warning("Browser instance launch failed for slot %d: %s", slot, exc)
+            raise LaunchFailed(f"Browser instance failed to start: {exc}") from exc
         raise
     with _registry_lock:
         _instances[user_id] = inst

@@ -97,6 +97,8 @@ _wedge_lock = threading.Lock()
 
 # Patchright CDP connection (lazy)
 _pw = None
+# Attached connections, including a new instance not yet published by the pool.
+_connections = {}
 
 # The thread that opened the current CDP connection, and the only one allowed
 # to touch it. Patchright's sync API drives a process-global asyncio loop
@@ -621,6 +623,49 @@ def _assert_pw_thread(inst, op, record=True):
     raise err
 
 
+def _discard_failed_driver():
+    """Drop a terminated driver's connections, leaving Chrome processes alive.
+
+    Patchright 1.50 has no public driver-liveness API. Its PipeTransport records
+    process exit and pipe EOF separately; either means this driver cannot serve
+    another connection. A browser's CDP refusal sets neither, so healthy browser
+    connections remain intact. Called only on the driver's owning thread.
+    """
+    global _pw, _driver_thread_id
+    if _pw is None:
+        return
+    transport = _pw._impl_obj._connection._transport
+    exited = isinstance(transport._proc.returncode, int)
+    # The asyncio child watcher may not have dispatched its exit notification
+    # yet. Observe the Linux child without reaping it, which would steal the
+    # watcher's status. The browser container is Linux; non-Linux tests can use
+    # the transport's own flags instead.
+    if (not exited and hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
+            and isinstance(transport._proc.pid, int)):
+        try:
+            exited = os.waitid(
+                os.P_PID, transport._proc.pid,
+                os.WEXITED | os.WNOHANG | os.WNOWAIT,
+            ) is not None
+        except ChildProcessError:
+            # Already reaped, with the asyncio callback still pending.
+            exited = True
+    if not exited and transport.on_error_future.done() is not True:
+        return
+    log.warning("Patchright driver stopped; reconnecting browser instances")
+    for connected in _connections.values():
+        connected.pw_browser = None
+        connected.pw_context = None
+        connected.pw_thread_id = None
+    _connections.clear()
+    try:
+        _pw.stop()
+    except Exception:
+        pass
+    _pw = None
+    _driver_thread_id = None
+
+
 def connect_cdp(inst, retries=3, record=True):
     """Connect Patchright to Chrome via CDP (lazy, idempotent).
 
@@ -635,6 +680,7 @@ def connect_cdp(inst, retries=3, record=True):
     """
     global _pw, _driver_thread_id
     _assert_pw_thread(inst, "connect_cdp", record=record)
+    _discard_failed_driver()
     if inst.pw_browser is not None:
         # Verify the existing CDP connection is genuinely live before reusing it.
         # Neither `.contexts` nor is_connected() is reliable here: both read
@@ -677,6 +723,7 @@ def connect_cdp(inst, retries=3, record=True):
             contexts = inst.pw_browser.contexts
             inst.pw_context = contexts[0] if contexts else inst.pw_browser.new_context()
             _install_dialog_guards(inst.pw_context)
+            _connections[id(inst)] = inst
             log.debug("CDP connected")
             _record_cdp_success(inst)
             return
@@ -687,6 +734,7 @@ def connect_cdp(inst, retries=3, record=True):
                 attempt + 1, retries, e,
             )
             disconnect_cdp(inst)
+            _discard_failed_driver()
             if attempt < retries - 1:
                 time.sleep(1)
     # Carry the last attempt's cause into the message. Without it the only thing
@@ -714,6 +762,7 @@ def disconnect_cdp(inst):
     # failure paths, from _close_session_unlocked() and from cleanup(inst), and in
     # each the caller either records the real outcome itself or does not care.
     _assert_pw_thread(inst, "disconnect_cdp", record=False)
+    _discard_failed_driver()
     try:
         if inst.pw_browser:
             inst.pw_browser.close()
@@ -722,6 +771,7 @@ def disconnect_cdp(inst):
     inst.pw_browser = None
     inst.pw_context = None
     inst.pw_thread_id = None
+    _connections.pop(id(inst), None)
     log.debug("CDP disconnected")
 
 

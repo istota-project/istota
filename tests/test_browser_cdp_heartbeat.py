@@ -117,6 +117,7 @@ def _reset_module_globals():
     def _reset():
         browse_api._instance.proc = None
         chrome._pw = None
+        chrome._connections.clear()
         chrome._driver_thread_id = None
         browse_api._instance.pw_browser = None
         browse_api._instance.pw_context = None
