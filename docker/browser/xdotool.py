@@ -336,12 +336,14 @@ def clamp_to_screen(x, y):
     and both callers are written for that answer: the skip below declines to
     skip, and the reporting sites name the point that was asked for.
 
-    That includes a read that *fails*, which is why the catch is here and
-    not left to the caller. Unlike pointer_landed(), this now runs on the
-    ordinary move path, where the stall that makes the geometry unreadable
-    is exactly the stall the caller is about to handle -- so raising out of
-    it would turn a move that had an answer into an exception, from a
-    helper whose whole job is arithmetic.
+    That includes a read that *fails*, and the caller that needs the catch
+    is _landed_point() in browse_api rather than the skip below: on the move
+    path mouse_location() is the left operand of the same comparison and
+    evaluates first, so a stalled server raises there, uncaught, before this
+    is reached. (That exposure is the old skip's too, and is not this
+    helper's to close.) _landed_point has no pointer read in front of it and
+    runs while a result is being assembled, where raising would lose a click
+    that had already happened, from a helper whose whole job is arithmetic.
     """
     try:
         screen = display_geometry()
