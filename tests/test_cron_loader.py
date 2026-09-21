@@ -60,6 +60,40 @@ def _write_cron_md(mount_path, user_id, content):
 
 
 class TestLoadCronJobs:
+    @pytest.mark.parametrize("room", ["", "other-room", "web-alice-digest"])
+    @pytest.mark.parametrize("target", [
+        "web:web-alice-digest", "web:web-alice-digest,talk:talk-ref",
+    ])
+    def test_web_target_room_pairing(
+        self, mount_path, make_config_with_mount, caplog, room, target,
+    ):
+        config = make_config_with_mount()
+        room_line = f'room = "{room}"' if room else ""
+        _write_cron_md(mount_path, "alice", f'''```toml
+[[jobs]]
+name = "digest"
+cron = "0 9 * * *"
+prompt = "Write a digest"
+target = "{target}"
+{room_line}
+```''')
+        with caplog.at_level(logging.WARNING, logger="istota.cron_loader"):
+            jobs = load_cron_jobs(config, "alice")
+        assert len(jobs) == 1
+        assert jobs[0].target == target
+        assert jobs[0].room == room
+        warnings = [
+            record.getMessage() for record in caplog.records
+            if "standalone note" in record.getMessage()
+        ]
+        if room == "web-alice-digest":
+            assert warnings == []
+        else:
+            assert len(warnings) == 1
+            assert "Job 'digest' (user alice)" in warnings[0]
+            assert 'Set room = "web-alice-digest".' in warnings[0]
+            assert (repr(room) if room else "unset") in warnings[0]
+
     def test_parse_valid_file(self, mount_path, make_config_with_mount):
         config = make_config_with_mount()
         _write_cron_md(mount_path, "alice", """\

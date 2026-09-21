@@ -239,7 +239,7 @@ _KNOWN_TARGET_SURFACES = frozenset({
 
 
 def _validate_room_pairing(name: str, user_id: str, target: str, room: str) -> None:
-    """Warn when a ``room:`` target and the job's ``room`` field name different
+    """Warn when a ``room:`` or ``web:`` target and the job's ``room`` field name different
     rooms; never reject.
 
     ``room`` is the job's ``conversation_token``, and it is what
@@ -253,7 +253,10 @@ def _validate_room_pairing(name: str, user_id: str, target: str, room: str) -> N
     from .transport import parse_output_target
 
     for dest in parse_output_target(target):
-        if dest.surface != "room" or not dest.channel:
+        # Both descriptors carry the canonical room token. Talk channels may
+        # instead be binding refs, so comparing them to `room` would warn on
+        # correctly paired promoted rooms.
+        if dest.surface not in ("room", "web") or not dest.channel:
             continue
         if room.strip() == dest.channel:
             continue

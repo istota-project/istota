@@ -548,6 +548,11 @@ class TestTheCronLoaderStopsCallingItATypo:
                 "digest", "alice", f"room:{WEB_ROOM}", WEB_ROOM,
             )
             _validate_room_pairing("digest", "alice", "talk", "")
+            _validate_room_pairing("digest", "alice", "web", "")
+            _validate_room_pairing("digest", "alice", "talk:talk-ref", WEB_ROOM)
+            _validate_room_pairing(
+                "digest", "alice", "email:alice@example.com", "",
+            )
             _validate_room_pairing("digest", "alice", "room", "")
         assert not caplog.records, [r.getMessage() for r in caplog.records]
 
