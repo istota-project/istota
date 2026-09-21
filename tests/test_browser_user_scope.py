@@ -402,3 +402,134 @@ def test_global_budget_prefers_own_session_even_if_other_user_is_older(api, monk
     assert response.status_code == 200
     assert set(api._sessions) == {alice, response.json["session_id"]}
     assert bob not in api._sessions
+
+
+
+def test_state_cold_sizes_only_own_profile_without_launch(api, monkeypatch):
+    own = Path(api.pool.PROFILE_ROOT) / "users/alice"
+    own.mkdir(parents=True)
+    (own / "data").write_bytes(b"12345")
+    other = own.parent / "bob"
+    other.mkdir()
+    (other / "private").write_bytes(b"x" * 100)
+    (own / "link").symlink_to(other, target_is_directory=True)
+    monkeypatch.setattr(api.pool, "acquire", MagicMock(side_effect=AssertionError("started Chrome")))
+    response = api.app.test_client().get("/state", headers={"X-Istota-User": "alice"})
+    assert response.status_code == 200
+    assert response.json == {"status": "ok", "user_scope": "alice", "profile_exists": True,
+                             "profile_size_bytes": 5, "live": False, "cookie_domains": None}
+
+
+def test_state_live_returns_domains_never_cookie_details(api):
+    post(api, "/browse", url="https://example.com/", keep_session=True)
+    ctx = api.pool.instance_for("alice").pw_context
+    ctx.cookies.return_value = [{"domain": ".example.com", "name": "private", "value": "secret"}]
+    response = api.app.test_client().get("/state", headers={"X-Istota-User": "alice"})
+    assert response.status_code == 200
+    assert response.json["cookie_domains"] == [".example.com"]
+    assert response.json["live"] is True
+    assert "secret" not in response.text and "private" not in response.text
+
+
+@pytest.mark.parametrize("body", [{}, {"origin": ""}, {"origin": "https://example.com/path"},
+    {"origin": "https://example.com?x"}, {"origin": "https://user@example.com"},
+    {"origin": "file:///"}, {"origin": "https://example.com\\evil"},
+    {"origin": " https://example.com"}, {"origin": "https://example.com:bad"},
+    {"origin": "https://example.com", "all": True}, {"all": "true"}, {"profile": True}])
+def test_forget_invalid_selection_never_starts_browser(api, monkeypatch, body):
+    acquire = MagicMock(side_effect=AssertionError("started Chrome"))
+    monkeypatch.setattr(api.pool, "acquire", acquire)
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json=body)
+    assert response.status_code == 400
+    acquire.assert_not_called()
+
+
+@pytest.mark.parametrize("all_state", [False, True])
+def test_forget_clears_own_cookies_and_persistent_storage(api, all_state):
+    for user in ("alice", "bob"):
+        post(api, "/browse", user, url="https://example.com/", keep_session=True)
+    own = api.pool.instance_for("alice").pw_context
+    other = api.pool.instance_for("bob").pw_context
+    own.cookies.return_value = [{"domain": d} for d in ["login.example.com", ".example.com", "example.com", "notexample.com", "child.login.example.com"]]
+    other.reset_mock()
+    body = {"all": True} if all_state else {"origin": "https://login.example.com"}
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json=body)
+    assert response.status_code == 200
+    if all_state:
+        own.clear_cookies.assert_called_once_with()
+    else:
+        assert {call.kwargs["domain"] for call in own.clear_cookies.call_args_list} == {"login.example.com", ".example.com", "example.com"}
+    own.new_cdp_session.return_value.send.assert_called_once_with("Storage.clearDataForOrigin", {
+        "origin": "" if all_state else "https://login.example.com",
+        "storageTypes": "local_storage,indexeddb,websql,service_workers,cache_storage",
+    })
+    own.new_cdp_session.return_value.detach.assert_called_once()
+    assert other.mock_calls == []
+
+
+def test_forget_profile_refuses_live_session_then_stops_before_deletion(api, monkeypatch):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    inst = api.pool.instance_for("alice")
+    own = Path(inst.profile_dir)
+    (own / "data").write_text("own")
+    other = own.parent / "bob"
+    other.mkdir()
+    (other / "data").write_text("other")
+    client = api.app.test_client()
+    response = client.delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True})
+    assert response.status_code == 409
+    assert own.exists()
+    client.delete(f"/sessions/{sid}", headers={"X-Istota-User": "alice"})
+    release = api.pool.release_slot
+    stopped = []
+    def stop(instance):
+        assert own.exists()
+        release(instance)
+        stopped.append(instance)
+    monkeypatch.setattr(api.pool, "release_slot", stop)
+    inst.proc.poll.return_value = 0
+    response = client.delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True})
+    assert response.status_code == 200
+    assert stopped == [inst]
+    assert not own.exists()
+    assert (other / "data").read_text() == "other"
+    assert api.pool.instance_for("alice") is None
+
+
+@pytest.mark.parametrize("origin", ["https://..", "https://-bad.example", "https://999.999.999.999", "https://example.999"])
+def test_forget_rejects_invalid_hosts_before_cdp(api, origin):
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json={"origin": origin})
+    assert response.status_code == 400
+    assert api.pool.live() == []
+
+
+def test_forget_partial_failure_is_error_and_does_not_disclose_cdp_data(api):
+    post(api, "/browse", url="https://example.com/")
+    ctx = api.pool.instance_for("alice").pw_context
+    ctx.new_cdp_session.return_value.send.side_effect = RuntimeError("private cookie data")
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True})
+    assert response.status_code == 502
+    assert "private cookie data" not in response.text
+    assert "some state may already be cleared" in response.json["error"]
+    ctx.new_cdp_session.return_value.detach.assert_called_once()
+
+
+def test_forget_profile_preserved_when_chrome_cannot_stop(api, monkeypatch):
+    post(api, "/browse", url="https://example.com/")
+    inst = api.pool.instance_for("alice")
+    profile = Path(inst.profile_dir)
+    monkeypatch.setattr(api.pool, "release_slot", lambda inst: None)
+    response = api.app.test_client().delete("/state", headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True})
+    assert response.status_code == 502
+    assert profile.exists()
+
+
+def test_state_scope_rejects_profile_symlink_to_other_user(api):
+    users = Path(api.pool.PROFILE_ROOT) / "users"
+    (users / "bob").mkdir(parents=True)
+    (users / "alice").symlink_to(users / "bob", target_is_directory=True)
+    client = api.app.test_client()
+    for method in ("GET", "DELETE"):
+        response = client.open("/state", method=method, headers={"X-Istota-User": "alice"}, json={"all": True, "profile": True})
+        assert response.status_code == 400
+    assert (users / "bob").is_dir()

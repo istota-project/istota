@@ -3719,3 +3719,20 @@ class TestProfileHandshake:
             result = cmd_interact(args)
         assert result["status"] == "ok"
         assert "alice" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("argv,method,payload", [
+    (["state"], "get", None),
+    (["forget", "--origin", "https://example.com"], "delete", {"origin": "https://example.com", "all": False, "profile": False}),
+    (["forget", "--all", "--profile"], "delete", {"origin": None, "all": True, "profile": True}),
+])
+def test_state_and_forget_wire(argv, method, payload, monkeypatch, capsys):
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    with patch(f"istota.skills.browse.httpx.{'request' if method == 'delete' else method}", return_value=httpx.Response(200, json={"status": "ok", "user_scope": "alice"})) as call:
+        main(argv)
+    assert call.call_args.args[-1].endswith("/state")
+    if method == "delete":
+        assert call.call_args.args[0] == "delete"
+    assert call.call_args.kwargs["headers"] == {"X-Istota-User": "alice"}
+    assert call.call_args.kwargs.get("json") == payload
+    assert json.loads(capsys.readouterr().out)["user_scope"] == "alice"

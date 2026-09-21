@@ -10,8 +10,12 @@ import atexit
 from contextlib import contextmanager
 from html import escape
 import json
+import ipaddress
 import logging
 import os
+import re
+import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -2794,6 +2798,151 @@ def _cleanup_expired(allow_pressure_eviction=True):
         evicted = _drain_evict_request_unlocked() if allow_pressure_eviction else None
     if evicted:
         log.info("Evicted session %s before serving this request", evicted)
+
+
+def _state_profile():
+    return scoped_user_dir(scoped_user_dir(pool.PROFILE_ROOT, "users"), request.user_scope)
+
+
+def _profile_size(profile):
+    """Count regular file bytes without following profile symlinks."""
+    total = 0
+    for directory, _, files in os.walk(profile, followlinks=False):
+        for name in files:
+            try:
+                info = os.lstat(os.path.join(directory, name))
+            except FileNotFoundError:
+                continue  # Chrome may replace a cache file during inspection.
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
+
+
+def _forget_origin(value):
+    """Reject URLs and malformed origins before CDP's empty-origin sentinel."""
+    if (not isinstance(value, str) or not value or not value.isascii()
+            or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
+            or "\\" in value or "?" in value or "#" in value):
+        raise ValueError("origin must be an http(s) origin without a path, query or credentials")
+    parsed = urlsplit(value)
+    host = parsed.hostname
+    if (parsed.scheme not in {"http", "https"} or not host
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or not re.fullmatch(r"[A-Za-z0-9.:-]+", host)):
+        raise ValueError("origin must be an http(s) origin without a path, query or credentials")
+    if ":" in host or host.rsplit(".", 1)[-1].isdigit():
+        ipaddress.ip_address(host)
+    elif (len(host) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                                  for label in host.rstrip(".").split("."))):
+        raise ValueError("origin has an invalid host")
+    port = parsed.port  # Raises on invalid and out-of-range ports.
+    if parsed.netloc.endswith(":"):
+        raise ValueError("origin has an invalid port")
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None and (parsed.scheme, port) not in {("http", 80), ("https", 443)}:
+        authority += f":{port}"
+    return f"{parsed.scheme}://{authority}", host
+
+
+@app.route("/state", methods=["GET"])
+def browser_state():
+    profile = _state_profile()
+    if profile is None:
+        return jsonify({"status": "error", "error": "user_scope_required"}), 400
+    inst = request.browser_instance
+    domains = None
+    live = inst is not None and chrome.is_chrome_running(inst)
+    try:
+        size = _profile_size(profile)
+        # Inspection never launches Chrome or reconnects a cold context.
+        if live and inst.pw_context is not None:
+            domains = sorted({cookie["domain"] for cookie in inst.pw_context.cookies()})
+    except Exception:
+        return jsonify({"status": "error", "error": "Could not inspect browser state"}), 502
+    return jsonify({"status": "ok", "profile_exists": profile.is_dir(),
+                    "profile_size_bytes": size, "live": live, "cookie_domains": domains})
+
+
+@app.route("/state", methods=["DELETE"])
+def forget_browser_state():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "error": "Expected a state selection"}), 400
+    all_state, whole_profile = body.get("all", False), body.get("profile", False)
+    origin = body.get("origin")
+    if (type(all_state) is not bool or type(whole_profile) is not bool
+            or (all_state and origin is not None) or (whole_profile and not all_state)):
+        return jsonify({"status": "error", "error": "Select origin or all; profile requires all"}), 400
+    host = None
+    if not all_state:
+        try:
+            origin, host = _forget_origin(origin)
+        except ValueError as exc:
+            return jsonify({"status": "error", "error": str(exc)}), 400
+    profile = _state_profile()
+    if profile is None:
+        return jsonify({"status": "error", "error": "user_scope_required"}), 400
+    inst = request.browser_instance
+    if whole_profile:
+        with _sessions_lock:
+            if request.user_scope in _live_session_users():
+                return jsonify({"status": "error", "error": "Close your live browser sessions first"}), 409
+        try:
+            if inst is not None:
+                proc = inst.proc
+                pool.release_slot(inst)
+                if proc is not None and proc.poll() is None:
+                    return jsonify({"status": "error", "error": "Browser did not stop; profile retained"}), 502
+            # Recheck canonical containment after teardown before deleting.
+            profile = _state_profile()
+            if profile is None:
+                return jsonify({"status": "error", "error": "user_scope_required"}), 400
+            if profile.exists():
+                shutil.rmtree(profile)
+        except OSError:
+            return jsonify({"status": "error", "error": "Could not remove browser profile"}), 502
+        return jsonify({"status": "ok", "profile_deleted": True})
+    if inst is None and not profile.exists():
+        return jsonify({"status": "ok", "cleared": "all" if all_state else origin})
+    try:
+        with _sessions_lock:
+            busy_users = _live_session_users()
+        inst = pool.acquire(request.user_scope, on_acquire=_track_request_instance,
+                            exclude=busy_users, memory_pct=_get_memory_pct,
+                            memory_reject_pct=MEMORY_REJECT_PCT)
+        chrome.ensure_chrome(inst)
+        context = chrome.get_context(inst)
+        if all_state:
+            context.clear_cookies()
+        else:
+            domains = {cookie["domain"] for cookie in context.cookies()
+                       if host == cookie["domain"].lstrip(".")
+                       or host.endswith("." + cookie["domain"].lstrip("."))}
+            for domain in sorted(domains):
+                context.clear_cookies(domain=domain)
+        temporary = not context.pages
+        page = context.new_page() if temporary else context.pages[0]
+        try:
+            cdp = context.new_cdp_session(page)
+            try:
+                # Chromium treats the empty origin as all origins. Only the
+                # explicit all selection may reach that sentinel.
+                cdp.send("Storage.clearDataForOrigin", {
+                    "origin": "" if all_state else origin,
+                    "storageTypes": "local_storage,indexeddb,websql,service_workers,cache_storage",
+                })
+            finally:
+                cdp.detach()
+        finally:
+            if temporary:
+                page.close()
+    except (pool.PoolFull, pool.MemoryRejected) as exc:
+        return _capacity_response(SessionCapacityError(str(exc), 30))
+    except Exception:
+        # CDP errors may contain browser data. Report partial failure without it.
+        return jsonify({"status": "error", "error": "Browser state clearing failed; some state may already be cleared"}), 502
+    return jsonify({"status": "ok", "cleared": "all" if all_state else origin})
 
 
 def _track_request_instance(inst):

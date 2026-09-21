@@ -324,3 +324,12 @@ When WebSearch or WebFetch aren't available, use `istota-skill browse` as a fall
 - Budgets are caller-raisable: `render --max-chars` (default 100,000), `get --max-chars` / `--max-links` and `links --max-links` (50,000 / 100), `extract --max-chars` / `--limit` (25,000 per element / 20 elements). The link budget counts links returned rather than anchors examined, and a clipped list says so — see `links_truncated` above.
 
 Browser calls share one queue with briefing sources and FinViz. A call waits up to 90 seconds for the browser before its HTTP timeout starts. A busy-queue error means no request was sent; retry later.
+
+
+### Persistent browser state
+
+`browse state` reports your profile's file size and, when Chrome and its connection are live, its distinct cookie domains. A cold profile reports `cookie_domains: null`; inspecting it does not start Chrome. Cookie names and values are never returned.
+
+`browse forget --origin https://example.com` clears cookies for that host and its parent domains, plus that exact origin's local storage, IndexedDB, WebSQL, service workers and cache storage. Pass an HTTP(S) origin without a path or credentials. Parent-domain cookies can also authenticate sibling sites.
+
+`browse forget --all` clears cookies and persistent origin storage throughout your profile. It may start Chrome to clear a cold profile. History, permissions and other profile data remain. Close your sessions first, then use `browse forget --all --profile` to stop your browser and delete the whole profile. Your next browse starts fresh. These commands affect only your profile; no profile is removed automatically because of its age.

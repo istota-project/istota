@@ -1619,6 +1619,24 @@ def cmd_close(args):
     return _decode(resp)
 
 
+def cmd_state(args):
+    """Inspect the requesting user's persistent browser profile."""
+    resp = browser_request("get", f"{get_api_url()}/state", timeout=REQUEST_TIMEOUT,
+                           headers=browser_headers())
+    return _decode(resp)
+
+
+def cmd_forget(args):
+    """Clear selected state from the requesting user's browser profile."""
+    if args.profile and not args.all:
+        return {"status": "error", "error": "--profile requires --all"}
+    resp = browser_request("delete", f"{get_api_url()}/state", timeout=REQUEST_TIMEOUT,
+                           headers=browser_headers(), json={
+                               "origin": args.origin, "all": args.all, "profile": args.profile,
+                           })
+    return _decode(resp)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="python -m istota.skills.browse",
@@ -1817,6 +1835,13 @@ def build_parser():
     p_close = sub.add_parser("close", help="Close a session")
     p_close.add_argument("session_id", help="Session ID to close")
 
+    sub.add_parser("state", help="Inspect your persistent browser profile")
+    p_forget = sub.add_parser("forget", help="Clear your browser cookies and persistent origin storage")
+    selection = p_forget.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--origin", help="HTTP(S) origin to clear")
+    selection.add_argument("--all", action="store_true", help="Clear cookies and storage for all origins")
+    p_forget.add_argument("--profile", action="store_true", help="With --all, delete your entire profile after closing sessions")
+
     return parser
 
 
@@ -1833,6 +1858,8 @@ def main(argv=None):
         "links": cmd_links,
         "challenge": cmd_challenge,
         "close": cmd_close,
+        "state": cmd_state,
+        "forget": cmd_forget,
     }
 
     def describe(exc: BaseException) -> dict:
