@@ -907,9 +907,21 @@ def _interact_actions(args):
     name, since typing a name into a password box is a failed login whose cause
     is invisible from the result.
     """
-    values = {
-        dest: list(getattr(args, dest, None) or []) for dest in ORDERED_ACTION_DESTS
-    }
+    values = {}
+    for dest in ORDERED_ACTION_DESTS:
+        raw = getattr(args, dest, None) or []
+        if not isinstance(raw, (list, tuple)):
+            # Named rather than left to `list(True)`'s raw TypeError, which
+            # reads as a browser failure rather than as a malformed call.
+            # `--click-challenge` is the one that invites it: a hand-built
+            # namespace naturally spells a valueless option `True`, where
+            # `OrderedFlag` appends one marker per occurrence so that the
+            # order record keeps a slot to count (ISSUE-531).
+            raise ValueError(
+                f"{dest} must be a list of values, not {type(raw).__name__}; "
+                f"a valueless action is recorded as one marker per occurrence"
+            )
+        values[dest] = list(raw)
     order = list(getattr(args, ACTION_ORDER_DEST, None) or [])
     if not order:
         # A caller that built the namespace itself has no order record —

@@ -548,6 +548,7 @@ def screenshot():
 
     created_new = False
     tab_index = None
+    challenge = None
 
     if session_id:
         session = _get_session(session_id)
@@ -599,7 +600,18 @@ def screenshot():
 
         headers = {}
         record, why = visual.build_capture(
-            img_bytes, page=page, full_page=full_page, measure=measure,
+            img_bytes, page=page, full_page=full_page,
+            # `measure` runs one CDP evaluate for the page's own url, scroll
+            # and viewport, which is the same vector as the DataDome evaluate
+            # skipped above -- so skipping one and not the other left the
+            # documented call going into the live challenge anyway, inside
+            # the request whose comment says it does not (ISSUE-531). It
+            # costs nothing here: a challenged capture only arrives through
+            # the `url` form, which closes its own session, so the page half
+            # of the record would serve one response header and be discarded
+            # with the session. The X11 half is unaffected and the picture is
+            # still clickable against it.
+            measure=measure and not challenge,
         )
         if record is None:
             log.info("No capture frame recorded for %s: %s", session_id, why)

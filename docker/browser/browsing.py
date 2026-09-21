@@ -461,16 +461,39 @@ def is_blocking_challenge_box(url, box):
 
     A frame with no measurable box is blocking. That is what the frame walk
     already did, and a challenge that cannot be measured is the wrong one to
-    wave through.
+    wave through. The Cloudflare arm keeps the old size test beside its own,
+    rather than replacing it: the old rule was an OR, so a frame 400 or more
+    wide and under 40 tall was detected before and would otherwise stop being
+    (ISSUE-531). No known widget has that shape; it costs one clause to not
+    find out the hard way.
+
+    **What this deliberately does not catch, named rather than left to be
+    discovered.** The reCAPTCHA v2 checkbox anchor and the hCaptcha checkbox
+    are each about 300x78 -- a widget a person must click, on a host that
+    keeps the 400x200 test, so the frame arm reads both as passive badges.
+    That was equally true before ISSUE-526, but until ISSUE-518 the subject
+    words backstopped it: a short Google "sorry" page, a stuck DataDome page
+    or a generic short "Access Denied" said `captcha` in its text and was
+    caught that way. Those now come back `ok` with the block page's text.
+
+    The per-host seam is right here and a line around 70 would separate a
+    78-pixel checkbox from the 256x60 v3 badge -- but no such measurement
+    exists in this repository, and the Cloudflare threshold does (see
+    CF_CHECKBOX_INSET_X's note, taken off a real widget). Guessing the other
+    two wrong in the permissive direction reports a challenge on every page
+    carrying reCAPTCHA v3, which is ISSUE-518's failure at scale, so the
+    guess is not made. Measure a real v2 anchor and a real hCaptcha checkbox
+    and this arm can have its own constant.
     """
     if not box:
         return True
-    if CLOUDFLARE_FRAME_URL in url:
-        return box["height"] >= CF_CHECKBOX_MIN_HEIGHT
-    return (
+    large = (
         box["width"] >= PASSIVE_BADGE_MAX_WIDTH
         or box["height"] >= PASSIVE_BADGE_MAX_HEIGHT
     )
+    if CLOUDFLARE_FRAME_URL in url:
+        return large or box["height"] >= CF_CHECKBOX_MIN_HEIGHT
+    return large
 
 
 def cloudflare_checkbox_point(page):

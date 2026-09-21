@@ -458,13 +458,42 @@ CHALLENGE_TITLE_PATTERNS = (
 )
 
 
-def challenge_phrase(title):
-    """Which challenge phrase this window title shows, or None.
+# Titles a challenge sets, matched as a *whole* title rather than as a
+# substring. Cloudflare's interstitial is "Just a moment...", which
+# BOT_DETECTION.md names by that title.
+#
+# This is a second, stricter list because the two questions asked of a title
+# have very different costs (ISSUE-531). Deciding to *wait* on a substring
+# costs the wait and nothing else, which is what the patterns above have
+# always done. Deciding that a challenge is still up after the wait
+# short-circuits the endpoint and returns no page content at all, and on that
+# question a substring is ISSUE-518's failure shape arriving through the
+# title instead of the body: a lyrics or review page for a work called "Just
+# a Moment" carries the phrase in its title, never changes it, and would be
+# answered as a challenge -- stickily, since a retry renavigates into the
+# same verdict, with `browse challenge` reporting no frames.
+#
+# The same severity rule ISSUE-518 was settled on decides it here: a false
+# positive discards a page silently, a false negative is visible and
+# recoverable. So only a title a challenge demonstrably sets is allowed to
+# discard anything, and the other two patterns wait without ever reaching a
+# verdict -- which is exactly what they did before ISSUE-526.
+CHALLENGE_TITLES = (
+    "just a moment",
+)
 
-    The phrase rather than a bool, and the phrase rather than the title: the
-    title is page-controlled text, while every string in
-    CHALLENGE_TITLE_PATTERNS is one this file wrote. A caller that puts the
-    verdict in a response therefore quotes itself and not the page.
+# Trailing punctuation a title may or may not carry: "Just a moment..." and
+# "Just a moment…" are the same title.
+_TITLE_TRIM = " .\u2026"
+
+
+def challenge_phrase(title):
+    """Which challenge phrase this window title *contains*, or None.
+
+    Drives the wait, not the verdict. Substring, and deliberately loose: a
+    challenge title carries a site name often enough ("Checking your browser
+    before accessing example.com") that an exact test would stop waiting on
+    real challenges, and over-waiting costs only the wait.
     """
     lowered = (title or "").lower()
     for pattern in CHALLENGE_TITLE_PATTERNS:
@@ -473,11 +502,30 @@ def challenge_phrase(title):
     return None
 
 
+def challenge_title_verdict(title):
+    """The title a challenge set, whole, or None -- what may discard a page.
+
+    Returns a member of CHALLENGE_TITLES, so a caller putting the verdict in
+    a response body quotes this file rather than page-controlled text.
+
+    Whole rather than substring, for the reason CHALLENGE_TITLES states: this
+    answer is allowed to throw a page's content away, and a page that merely
+    mentions the phrase is not a challenge.
+    """
+    normalised = (title or "").strip().lower().rstrip(_TITLE_TRIM)
+    return normalised if normalised in CHALLENGE_TITLES else None
+
+
 def wait_for_challenges(timeout_s=15):
     """Wait for a Cloudflare/security challenge to clear, by X11 title polling.
 
-    Returns the challenge phrase still showing when the wait ran out, and None
-    when there was no challenge or it resolved.
+    Returns the challenge title still showing when the wait ran out, and None
+    when there was no challenge, it resolved, or the title is not one a
+    challenge sets. Those last two are the same answer on purpose: the
+    verdict discards a page, so it takes `challenge_title_verdict`'s whole
+    title test rather than the substring that decided to wait. A page whose
+    title merely contains a challenge phrase is waited out exactly as before
+    ISSUE-526 and then read normally.
 
     The verdict is the point. BOT_DETECTION.md names "CDP Runtime.evaluate
     during challenge window" as the second detection vector on the Cloudflare
@@ -501,8 +549,16 @@ def wait_for_challenges(timeout_s=15):
         if not phrase:
             log.info("Challenge resolved (title=%r)", title)
             return None
+    verdict = challenge_title_verdict(title)
+    if not verdict:
+        log.warning(
+            "Challenge phrase %r did not clear within %ds (title=%r), but "
+            "that is not a title a challenge sets -- reading the page",
+            phrase, timeout_s, title,
+        )
+        return None
     log.warning(
         "Challenge did not resolve within %ds (title=%r) -- "
         "skipping the CDP calls that read the page", timeout_s, title,
     )
-    return phrase
+    return verdict

@@ -694,6 +694,19 @@ class TestTheActionOrderRecord:
             {"type": "fill", "selector": "#email", "value": "me@example.com"},
         ]
 
+    def test_a_flag_dest_holding_a_bare_true_is_named(self):
+        """ISSUE-531: `list(True)` raised a bare TypeError, which reads as a
+        browser failure rather than as a malformed call.
+
+        Unreachable from argv -- `OrderedFlag` appends one marker per
+        occurrence -- but a hand-built namespace naturally spells a valueless
+        option as `True`, which is exactly what the fallback order below is
+        for.
+        """
+        args = _interact_namespace(click_challenge=True)
+        with pytest.raises(ValueError, match="must be a list of values"):
+            _interact_actions(args)
+
     def test_an_order_record_naming_an_unknown_dest_is_refused(self):
         """A dest declared nowhere — the only drift the table above allows."""
         args = _interact_namespace()
