@@ -368,10 +368,13 @@ class TestTheFetchCap:
             })
         assert reply == {"value": VAULT["github_pat"]}
 
-    def test_the_cap_holds_under_concurrent_connections(self, sock_path):
+    def test_the_cap_holds_under_concurrent_connections(self, sock_path, monkeypatch):
         """`unix_server` runs one thread per connection, so the counter is
         locked. Without the lock two threads can read the same value and both
         pass a budget of one."""
+        client_count = 16
+        # Exercise the credential cap without overflowing the listen backlog.
+        monkeypatch.setattr("istota.skill_proxy.LISTEN_BACKLOG", client_count)
         results: list[dict] = []
         lock = threading.Lock()
 
@@ -383,14 +386,14 @@ class TestTheFetchCap:
                 results.append(reply)
 
         with proxy(sock_path, vault_fetch_limit=4):
-            threads = [threading.Thread(target=_fetch) for _ in range(16)]
+            threads = [threading.Thread(target=_fetch) for _ in range(client_count)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join(timeout=20)
 
         served = [r for r in results if "value" in r]
-        assert len(results) == 16
+        assert len(results) == client_count
         assert len(served) == 4
 
     def test_the_cap_logs_the_count_and_the_limit_and_no_name(
