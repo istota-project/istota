@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Admin browser links now open the VNC viewer when the configured address omits its filename. The browser list stays available during browser activity instead of timing out behind a long-running operation. Requires a rebuilt browser image.
+
 - Deleting a browser profile no longer refuses because a session’s tab has already closed. State inspection and deletion refusals now list your live sessions and their ages; `forget --all --profile --force` closes them before resetting your profile. Closing an unknown session reports that it was not found, and CAPTCHA responses say when they retain a session.
 
 - Scheduled jobs targeting a web room now warn when their `room` setting is missing or names another room. The warning explains how to make the result appear as an assistant turn instead of a standalone note.

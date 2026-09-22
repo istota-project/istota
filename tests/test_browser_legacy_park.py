@@ -1,6 +1,7 @@
 """Legacy profile parking uses real files and never supplies a user's jar."""
 import ast
 import logging
+import sys
 import types
 from pathlib import Path
 from unittest import mock
@@ -118,7 +119,7 @@ def test_park_destination_cannot_be_a_symlink(runtime, tmp_path):
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_boot_parks_before_starting_any_service(runtime, fails):
+def test_boot_parks_before_starting_any_service(runtime, fails, monkeypatch):
     _, chrome, _, _ = runtime
     # Execute the actual startup block without importing Flask or starting servers.
     module = types.ModuleType("browser_boot_source")
@@ -127,6 +128,10 @@ def test_boot_parks_before_starting_any_service(runtime, fails):
     startup = tree.body[-1]
     assert isinstance(startup, ast.If)
     calls = mock.Mock()
+    calls.make_server.return_value = ("server", "pending")
+    monkeypatch.setitem(sys.modules, "browser_server", types.SimpleNamespace(
+        make_browser_server=calls.make_server, serve_browser_requests=calls.serve,
+    ))
     calls.chrome.PROFILE_ROOT = chrome.PROFILE_ROOT
     if fails:
         calls.chrome.migrate_legacy_profile.side_effect = OSError("park failed")
@@ -143,4 +148,5 @@ def test_boot_parks_before_starting_any_service(runtime, fails):
     else:
         exec(code, namespace)
         assert calls.mock_calls[0] == mock.call.chrome.migrate_legacy_profile(chrome.PROFILE_ROOT)
-        calls.app.run.assert_called_once()
+        calls.make_server.assert_called_once_with(calls.app)
+        calls.serve.assert_called_once_with("server", "pending")

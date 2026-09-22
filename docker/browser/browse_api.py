@@ -3085,12 +3085,17 @@ def _clear_inflight(_exc=None):
     # (once the watchdog kills Chrome and the CDP call raises) always clears the
     # slot, and the next request gets a fresh start timestamp.
     global _inflight
+    if request.path == "/instances":
+        return
     with _inflight_lock:
         _inflight = None
 
 
 @app.after_request
 def _log_request_end(response):
+    # Status reads must not wait for a browser operation's session lock.
+    if request.path == "/instances":
+        return response
     scope = getattr(request, "user_scope", None)
     if scope is not None:
         if response.is_json:
@@ -3419,6 +3424,8 @@ if __name__ == "__main__":
     mon.start()
     _start_liveness_server()
     _start_browse_watchdog()
-    # threaded=False: Playwright sync API uses greenlets that can't
-    # switch threads. All requests run on the main thread.
-    app.run(host="0.0.0.0", port=9223, threaded=False)
+    from browser_server import make_browser_server, serve_browser_requests
+    # Patchright operations and shutdown stay on the main thread. Only the
+    # instance list can respond while a browser operation is in progress.
+    server, pending = make_browser_server(app)
+    serve_browser_requests(server, pending)

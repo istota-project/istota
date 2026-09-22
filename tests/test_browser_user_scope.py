@@ -788,16 +788,19 @@ def test_state_stopped_chrome_discards_sessions_without_protocol_call(api):
     assert sid not in api._sessions
 
 
-def test_instance_discovery_is_read_only(api, monkeypatch):
+@pytest.mark.parametrize("viewer_path", ["", "/", "/vnc.html"])
+def test_instance_discovery_is_read_only(api, monkeypatch, viewer_path):
     from urllib.parse import parse_qs, urlsplit, unquote
+    from tests.support.monotonic_spy import monotonic_spy
     inst = api.pool.acquire("alice+test@example.com")
     inst.last_used = 100.0
-    monkeypatch.setattr(api.pool.time, "monotonic", lambda: 142.0)
-    base = "https://console.example.com/vnc.html?autoconnect=1&resize=scale&path=old&view_only="
+    monotonic_spy(monkeypatch, api.pool, lambda: 142.0)
+    base = f"https://console.example.com{viewer_path}?autoconnect=1&resize=scale&path=old&view_only="
     client = api.app.test_client()
     response = client.get("/instances", query_string={"vnc_url": base})
     assert response.status_code == 200
     row = response.json["instances"][0]
+    assert urlsplit(row["url"]).path == "/vnc.html"
     assert (row["user"], row["slot"], row["idle_seconds"]) == (inst.user_id, inst.slot, 42.0)
     query = parse_qs(urlsplit(row["url"]).query, keep_blank_values=True)
     assert query["resize"] == ["scale"]
@@ -815,3 +818,66 @@ def test_instance_discovery_is_read_only(api, monkeypatch):
     assert row["user"] == "bob"
     assert "alice" not in row["url"]
     assert client.get("/instances").json["instances"][0]["url"] == ""
+
+
+def test_instance_discovery_preserves_active_watchdog(api):
+    active = {"path": "/browse", "started": 123}
+    api._inflight = active
+    assert api.app.test_client().get("/instances").status_code == 200
+    assert api._inflight is active
+
+
+@pytest.mark.parametrize("operation_fails", [False, True])
+def test_instance_discovery_responds_during_browser_activity(api, operation_fails):
+    import concurrent.futures
+    import threading
+    import httpx
+    from browser_server import make_browser_server, serve_browser_requests
+
+    entered = threading.Event()
+    release = threading.Event()
+    stopping = threading.Event()
+    operation_threads = []
+
+    @api.app.route("/test-block", methods=["POST"])
+    def block():
+        operation_threads.append(threading.get_ident())
+        api._inflight = {"path": "/test-block", "started": 123}
+        with api._sessions_lock:
+            entered.set()
+            assert release.wait(5)
+        if operation_fails:
+            raise RuntimeError("browser operation failed")
+        return {"ok": True}
+
+    @api.app.route("/test-thread", methods=["POST"])
+    def thread_id():
+        operation_threads.append(threading.get_ident())
+        return {"ok": True}
+
+    server, pending = make_browser_server(api.app, host="127.0.0.1", port=0)
+    worker = threading.Thread(target=serve_browser_requests, args=(server, pending, stopping))
+    worker.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with concurrent.futures.ThreadPoolExecutor() as clients:
+            browsing = clients.submit(httpx.post, base + "/test-block",
+                                      headers={"X-Istota-User": "alice"}, timeout=10)
+            try:
+                assert entered.wait(5)
+                response = httpx.get(base + "/instances", timeout=1)
+                assert response.status_code == 200
+                assert response.json() == {"instances": []}
+                assert response.headers["cache-control"] == "no-store"
+                assert api._inflight["path"] == "/test-block"
+                assert not browsing.done()
+            finally:
+                release.set()
+            assert browsing.result().status_code == (500 if operation_fails else 200)
+        assert httpx.post(base + "/test-thread", headers={"X-Istota-User": "alice"}).status_code == 200
+        assert operation_threads == [worker.ident, worker.ident]
+    finally:
+        release.set()
+        stopping.set()
+        worker.join(5)
+        assert not worker.is_alive()

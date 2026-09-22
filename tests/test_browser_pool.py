@@ -352,7 +352,12 @@ def test_console_publication_failure_cleans_processes_and_registry(runtime, monk
     assert pool.acquire("bob").slot == 0
 
 
-@pytest.mark.parametrize("base", ["", "https://console.example/vnc.html?resize=scale&path=old#view"])
+@pytest.mark.parametrize("base", [
+    "",
+    "https://console.example/vnc.html?resize=scale&path=old#view",
+    "https://console.example?resize=scale&path=old#view",
+    "https://console.example/?resize=scale&path=old#view",
+])
 def test_console_url_preserves_configuration(runtime, base):
     pool, _, _, _ = runtime
     inst = pool.acquire("alice")
@@ -366,6 +371,17 @@ def test_console_url_preserves_configuration(runtime, base):
         assert parts.path == "/vnc.html"
         assert parts.fragment == "view"
         assert parse_qs(parts.query) == {"resize": ["scale"], "path": ["websockify/?token=alice"]}
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("/console/", "/console/vnc.html"),
+    ("/console/vnc_lite.html", "/console/vnc_lite.html"),
+])
+def test_console_url_preserves_viewer_prefix_and_filename(runtime, path, expected):
+    pool, _, _, _ = runtime
+    inst = pool.acquire("alice")
+    url = pool.console_url(inst, "https://console.example" + path)
+    assert urlsplit(url).path == expected
 
 
 

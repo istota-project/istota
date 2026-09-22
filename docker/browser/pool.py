@@ -91,6 +91,8 @@ def console_url(inst, base="vnc.html"):
     token = quote(inst.user_id, safe="")
     websocket_path = "websockify/?" + urlencode({"token": token})
     parts = urlsplit(base)
+    if not parts.path or parts.path.endswith("/"):
+        parts = parts._replace(path=(parts.path or "/") + "vnc.html")
     query = [(name, value) for name, value in parse_qsl(parts.query, keep_blank_values=True)
              if name != "path"]
     query.append(("path", websocket_path))

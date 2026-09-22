@@ -29,9 +29,6 @@ def test_sigterm_runs_cleanup_on_the_main_thread(tmp_path, repeat_signal):
             def before_request(self, fn): return fn
             def after_request(self, fn): return fn
             def teardown_request(self, fn): return fn
-            def run(self, **kwargs):
-                ready.touch()
-                while True: signal.pause()
         flask = types.ModuleType('flask')
         flask.Flask, flask.Response, flask.request = App, object, object()
         flask.jsonify = lambda value: value
@@ -45,6 +42,13 @@ def test_sigterm_runs_cleanup_on_the_main_thread(tmp_path, repeat_signal):
             time.sleep(0.2)
             cleaned.write_text(str(threading.current_thread() is threading.main_thread()))
         sys.modules['pool'] = types.SimpleNamespace(cleanup=cleanup)
+        import browser_server
+        make_server = browser_server.make_browser_server
+        def make_test_server(app):
+            server, pending = make_server(app, host="127.0.0.1", port=0)
+            ready.touch()
+            return server, pending
+        browser_server.make_browser_server = make_test_server
         os.environ['BROWSER_LIVENESS_PORT'] = '0'
         os.environ['BROWSE_WATCHDOG_DEADLINE_S'] = '0'
         runpy.run_path(str(root / 'browse_api.py'), run_name='__main__')
