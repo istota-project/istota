@@ -322,6 +322,15 @@ describe('RoomSettings — brain', () => {
     }
   });
 
+  it('keeps listing a pin no alias targets any more', async () => {
+    // A room pinned to the previous Opus before the aliases moved on still
+    // runs it; the select has to say so rather than show an unlisted value.
+    models.mockResolvedValue([{ value: 'claude-opus-5-5', label: 'opus' }]);
+    await mountSettled(room({ brain: 'claude_code', model: 'claude-opus-5' }));
+    expect(screen.getByRole('button', { name: MODEL })).toHaveTextContent('claude-opus-5');
+    expect(screen.getByRole('button', { name: MODEL })).not.toHaveTextContent('opus (');
+  });
+
   it('resets a stale pin to the brain default as the list changes', async () => {
     // The select must not go on showing an id the new list does not hold.
     offer([CLAUDE, NATIVE]);

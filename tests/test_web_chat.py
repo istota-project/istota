@@ -2496,6 +2496,9 @@ class TestRoomModelAllowed:
         assert mod._room_model_allowed(anthropic, OPUS)
         assert not mod._room_model_allowed(native, OPUS)
         assert mod._room_model_allowed(native, "endpoint/m")
+        # Native has no canonical passthrough: an id it was not configured with
+        # resolves to nothing, so the second half cannot widen the PATCH there.
+        assert not mod._room_model_allowed(native, "vendor/other-model")
 
     def test_a_canonical_id_no_alias_targets_is_accepted(self, tmp_path):
         """#548: a deployment default no alias pointed at could not be pinned

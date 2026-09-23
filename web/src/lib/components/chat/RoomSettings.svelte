@@ -63,9 +63,17 @@
       // is unambiguous (e.g. `opus (claude-opus-4-8)`). The default names its
       // id too: without it the picker could not show the default had moved
       // past every alias (#548).
+      // A pin no alias targets any more (the previous release, or an id set
+      // with `!room model`) stays listed under its own id, so the select shows
+      // what the room runs rather than a value it does not offer. Not for a
+      // crossing brain, which clears the pin below.
+      const pin = room.model;
+      const keepPin =
+        pin && !choices.some((c) => c.value === pin) && !untrack(() => crossesNamespace);
       modelOptions = [
         { value: '', label: defaultModel ? `Default model (${defaultModel})` : 'Default model' },
         ...choices.map((c) => ({ value: c.value, label: `${c.label} (${c.value})` })),
+        ...(keepPin ? [{ value: pin, label: pin }] : []),
       ];
     });
   });
