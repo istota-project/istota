@@ -6913,7 +6913,7 @@ def adopt_legacy_email_namespace(
 @dataclass(frozen=True)
 class SignupFiled:
     task_id: int | None
-    later: bool
+    notify: bool
 
 
 def reserve_signup_tag(conn: sqlite3.Connection, user_id: str, slug: str) -> bool:
@@ -7055,7 +7055,7 @@ def file_signup_email(
             (tail,),
         )
         return SignupFiled(task_id, False)
-    return SignupFiled(None, not inside_window)
+    return SignupFiled(None, True)
 
 
 def prune_signup_bodies(conn: sqlite3.Connection, retention_days: int) -> int:

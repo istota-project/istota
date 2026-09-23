@@ -1859,12 +1859,16 @@ def poll_emails(config: Config) -> list[int]:
                     exact_users = exact_recipient_users(config, email)
                     exact_user = exact_users[0] if exact_users else None
                     open_tags = []
-                    for tail in signup_recipient_tails(config, email):
+                    signup_tails = signup_recipient_tails(config, email)
+                    for tail in signup_tails:
                         tag = db.signup_tag(conn, tail)
                         if tag is not None:
                             open_tags.append((tail, tag))
                     if len(open_tags) > 1 or (
                         open_tags and any(user != open_tags[0][1]["user_id"] for user in exact_users)
+                    ) or (
+                        exact_users and not open_tags
+                        and any(tail not in config.users for tail in signup_tails)
                     ):
                         logger.warning("Discarding mail with ambiguous signup recipients")
                         db.mark_email_processed(
@@ -1896,7 +1900,7 @@ def poll_emails(config: Config) -> list[int]:
                         )
                         if filed.task_id is not None:
                             created_tasks.append(filed.task_id)
-                        elif filed.later:
+                        elif filed.notify:
                             pending_signup_notices.append(task_alert_source.write(
                                 conn, tag["user_id"],
                                 dedup_key=f"signup-later:{task_alert_source._slug(tag['slug'], limit=64)}",

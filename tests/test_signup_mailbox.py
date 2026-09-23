@@ -123,6 +123,29 @@ def test_unknown_and_closed_tags_do_not_file(tmp_path):
         assert routes == ["discarded", "discarded"]
 
 
+def test_closed_or_pending_signup_tail_with_exact_user_is_discarded(tmp_path):
+    path = tmp_path / "bot.db"
+    db.init_db(path)
+    config = _config(path, tmp_path)
+    config.users["bob"] = UserConfig(email_addresses=["bob@example.com"])
+    with db.get_db(path) as conn:
+        _open_tag(conn, "bob", "closed")
+        db.close_signup_tag(conn, "bob", "closed")
+        assert db.reserve_signup_tag(conn, "bob", "pending")
+
+    for uid, slug in (("1", "closed"), ("2", "pending")):
+        assert _poll(config, uid, (
+            f"bot+bob+{slug}@example.com", "bot+alice@example.com",
+        )) == []
+
+    with db.get_db(path) as conn:
+        routes = [row[0] for row in conn.execute(
+            "SELECT routing_method FROM processed_emails ORDER BY id"
+        )]
+        assert routes == ["discarded", "discarded"]
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
 def test_multiple_recipient_tags_do_not_cross_user_boundary(tmp_path):
     path = tmp_path / "bot.db"
     db.init_db(path)
@@ -223,6 +246,24 @@ def test_later_mail_notifies_without_minting_and_bodies_expire(tmp_path):
         conn.execute("UPDATE signup_emails SET received_at = datetime('now', '-15 days')")
         assert db.prune_signup_bodies(conn, 14) == 1
         assert db.signup_inbox(conn, "alice", "acme")[0]["body"] == ""
+
+
+def test_second_signup_message_inside_window_raises_notice(tmp_path):
+    path = tmp_path / "bot.db"
+    db.init_db(path)
+    config = _config(path, tmp_path)
+    with db.get_db(path) as conn:
+        _open_tag(conn, "alice", "acme")
+    assert len(_poll(config, "1", "bot+alice+acme@example.com")) == 1
+    with patch("istota.transport.email.inbound.deliver_pending"):
+        assert _poll(config, "2", "bot+alice+acme@example.com") == []
+    with db.get_db(path) as conn:
+        assert len(db.signup_inbox(conn, "alice", "acme")) == 2
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = 'alice' "
+            "AND source = 'task_alert' AND title LIKE 'Mail arrived for signup%'"
+        ).fetchone()[0] == 1
 
 
 def test_signup_inbox_is_user_scoped_and_framed(tmp_path, monkeypatch):
