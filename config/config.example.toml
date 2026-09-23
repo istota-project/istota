@@ -474,6 +474,10 @@ features = []
 #                                  # listing the names costs nothing. A legitimate loop
 #                                  # over several credentials is the first thing to
 #                                  # trip it, which is why it is a setting at all.
+# vault_writes_per_task = 3        # how many create requests one task attempt may
+#                                  # make against the user's KDBX. Refusals count.
+#                                  # Set 0 to disable task-requested writes;
+#                                  # unlike the fetch limit, 0 is not unlimited.
 # passthrough_env_vars = ["LANG", "LC_ALL", "LC_CTYPE", "TZ"]
 # sandbox_ro_paths = []            # extra RO bind-mounts in sandbox, for co-located services the
 #                                  # agent needs to read. Keep entries narrow — a broad path sweeps

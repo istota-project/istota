@@ -2,6 +2,7 @@
 
 import json
 import socket
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -96,3 +97,67 @@ def test_shim_new_sends_only_policy_and_names(monkeypatch, capsys):
     assert credential_shim.main(["new", "acme", "--url", "https://acme.example", "--length", "18", "--no-symbols"]) == 0
     assert seen == [{"type": "vault_create", "slug": "acme", "url": "https://acme.example", "length": 18, "symbols": False}]
     assert json.loads(capsys.readouterr().out)["name"] == "generated_acme"
+
+
+def test_a_failed_apply_after_replace_still_returns_the_committed_entry(
+    tmp_path, monkeypatch, sock,
+):
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    path = tmp_path / "vault.kdbx"
+    create_database(str(path), password="test-passphrase")
+    config = Config(
+        db_path=tmp_path / "daemon" / "test.db",
+        workspace_path=tmp_path / "workspace",
+        users={"alice": UserConfig(vault_path=str(path), email_addresses=["alice@example.com"])},
+    )
+    config.db_path.parent.mkdir()
+    db.init_db(config.db_path)
+    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
+    monkeypatch.setattr("istota.notification_store.deliver_pending", lambda *_: None)
+
+    def fail_apply(*_):
+        raise sqlite3.OperationalError("database busy")
+
+    original_apply = secrets_vault.apply_vault
+    monkeypatch.setattr(secrets_vault, "apply_vault", fail_apply)
+    secrets_vault.reset_sync_state("alice")
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1) as proxy:
+        reply = _request(sock, {"type": "vault_create", "slug": "acme"})
+        assert reply["name"] == "generated_acme"
+        assert proxy.vault_credentials[reply["name"]]
+        assert secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").services[
+            reply["name"]
+        ] == proxy.vault_credentials[reply["name"]]
+        assert "alice" not in secrets_vault._SYNC_STATE
+    monkeypatch.setattr(secrets_vault, "apply_vault", original_apply)
+    secrets_vault.sync_user(config, "alice", deliver=False)
+    assert secrets_store.get_secret(
+        config.db_path, "alice", "vault_entries", "generated_acme",
+    ) == proxy.vault_credentials["generated_acme"]
+
+
+def test_generated_count_comes_from_the_group_not_a_flat_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    path = tmp_path / "vault.kdbx"
+    kp = create_database(str(path), password="test-passphrase")
+    kp.add_entry(kp.root_group, "generated_acme", "alice@example.com", "old-value")
+    kp.save()
+    read = secrets_vault.parse_vault(path.read_bytes(), "test-passphrase")
+    assert read.generated_count == 0
+    config = Config(
+        db_path=tmp_path / "daemon" / "test.db",
+        workspace_path=tmp_path / "workspace",
+        users={"alice": UserConfig(vault_path=str(path))},
+    )
+    config.db_path.parent.mkdir()
+    db.init_db(config.db_path)
+    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
+    secrets_vault.sync_user(config, "alice", force=True, deliver=False)
+    assert secrets_vault.vault_status(config, "alice", parse=False).generated_count == 0
+
+    group = kp.add_group(kp.root_group, "generated")
+    kp.add_entry(group, "other", "alice@example.com", "new-value")
+    kp.save()
+    assert secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").generated_count == 1
+    secrets_vault.sync_user(config, "alice", force=True, deliver=False)
+    assert secrets_vault.vault_status(config, "alice", parse=False).generated_count == 1

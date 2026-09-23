@@ -427,6 +427,7 @@ class VaultRead:
     truncated: str
     scoped: bool
     skipped: tuple[tuple[str, str], ...] = ()
+    generated_count: int = 0
 
     def __repr__(self) -> str:
         """Everything but the values.
@@ -690,8 +691,26 @@ def create_entry(
                 raise VaultChanged("the vault changed during the write")
             os.replace(temp_leaf, leaf, src_dir_fd=location.dir_fd, dst_dir_fd=location.dir_fd)
             if db_path is not None and user_id is not None:
-                apply_vault(db_path, user_id, verified)
-                _SYNC_STATE[user_id] = (temp_digest, OUTCOME_OK)
+                try:
+                    apply_vault(db_path, user_id, verified)
+                except Exception as exc:  # noqa: BLE001 - the file is already replaced
+                    # The valid KDBX entry is committed. Return its names so
+                    # this task can use them; the next sync retries the apply.
+                    # Never cache the new digest when the apply did not finish.
+                    logger.warning(
+                        "vault: %s: apply after create failed (%s); sync will retry",
+                        _label(user_id), type(exc).__name__,
+                    )
+                else:
+                    recorded = _record_sync_state(
+                        db_path, user_id, OUTCOME_OK, "",
+                        unscoped=not verified.scoped,
+                        generated_count=verified.generated_count,
+                    )
+                    if recorded:
+                        _SYNC_STATE[user_id] = (temp_digest, OUTCOME_OK)
+                    else:
+                        reset_sync_state(user_id)
             return VaultWrite(names[0], names[1], names[2], temp_digest)
         finally:
             try:
@@ -1225,7 +1244,15 @@ def _map_groups(kp, digest: str) -> VaultRead:
     # `istota/`, so `<root>/aws/key` produces `aws_key` exactly as
     # `istota/aws/key` does. Its own entries are read too: a KDBX exported out
     # of a password manager commonly has entries sitting at the top level.
-    for root in roots if scoped else [kp.root_group]:
+    starting_roots = roots if scoped else [kp.root_group]
+    generated_count = sum(
+        len(group.entries)
+        for root in starting_roots
+        for group in root.subgroups
+        if str(group.name or "").strip().casefold() == VAULT_WRITE_GROUP
+        and group.uuid != walk.recyclebin
+    )
+    for root in starting_roots:
         _visit_group(walk, root, (), 0)
 
     if not scoped:
@@ -1349,6 +1376,7 @@ def _map_groups(kp, digest: str) -> VaultRead:
         truncated=walk.stopped if walk.stopped in _TRUNCATING_CAPS else "",
         scoped=scoped,
         skipped=tuple(walk.skipped),
+        generated_count=generated_count,
     )
 
 
@@ -1817,6 +1845,7 @@ def encode_sync_state(
     now: str,
     previous: dict | None,
     unscoped: bool | None = None,
+    generated_count: int | None = None,
 ) -> str:
     """The row body for the cycle that just settled.
 
@@ -1842,10 +1871,16 @@ def encode_sync_state(
     ``reason`` is the ``NOTIFICATION_REASONS`` sentence rather than the
     exception's, for the reason that table gives: this row is read by the web
     tier and snapshotted by ``db_backup`` onto the mount.
+
+    ``generated_count`` comes from the parsed group, not flattened names. A
+    failed read carries the last proven count forward.
     """
     carried = (previous or {}).get("ok_at")
     if unscoped is None:
         unscoped = bool((previous or {}).get("unscoped"))
+    if generated_count is None:
+        prior_count = (previous or {}).get("generated_count")
+        generated_count = prior_count if isinstance(prior_count, int) and prior_count >= 0 else 0
     return json.dumps(
         {
             "at": now,
@@ -1853,6 +1888,7 @@ def encode_sync_state(
             "reason": reason,
             "ok_at": now if outcome == OUTCOME_OK else (carried or None),
             "unscoped": bool(unscoped),
+            "generated_count": generated_count,
         },
         sort_keys=True,
     )
@@ -1907,8 +1943,9 @@ _RECORD_BUSY_TIMEOUT_MS = 2000
 
 
 def _record_sync_state(
-    db_path, user_id: str, outcome: str, reason: str, *, unscoped: bool | None = None
-) -> None:
+    db_path, user_id: str, outcome: str, reason: str, *,
+    unscoped: bool | None = None, generated_count: int | None = None,
+) -> bool:
     """Write down what this cycle settled, for the processes that never see it.
 
     ``unscoped`` rides along for the surfaces that never open the file — the
@@ -1956,6 +1993,7 @@ def _record_sync_state(
                 now=db.iso_utc_now(),
                 previous=previous,
                 unscoped=unscoped,
+                generated_count=generated_count,
             )
             db.kv_set(
                 conn,
@@ -1964,11 +2002,13 @@ def _record_sync_state(
                 VAULT_SYNC_STATE_KEY,
                 body,
             )
+        return True
     except Exception:  # noqa: BLE001 - a record of the work, not the work
         logger.warning(
             "vault: %s: the sync record was not written", _label(user_id),
             exc_info=True,
         )
+        return False
 
 
 #: ``user_id -> (digest, outcome)``. In memory, never persisted: a restart
@@ -2062,6 +2102,7 @@ class VaultSyncResult:
     unscoped: bool = False
     #: How many names the cycle read, for the notice's count. Names never.
     names: int = 0
+    generated_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -2360,6 +2401,7 @@ def _sync_resolved(config, user_id, location, path) -> VaultSyncResult:
         applied=applied,
         unscoped=not read.scoped,
         names=len(read.services),
+        generated_count=read.generated_count,
     )
 
 
@@ -2518,6 +2560,7 @@ def _publish(config, result: VaultSyncResult, *, deliver: bool) -> VaultSyncResu
         result.outcome,
         "" if result.outcome == OUTCOME_OK else notification_reason(result.outcome),
         unscoped=result.unscoped if result.outcome == OUTCOME_OK else None,
+        generated_count=result.generated_count if result.outcome == OUTCOME_OK else None,
     )
     _report(
         config,
@@ -2638,6 +2681,7 @@ def _settle(
     applied: VaultApplyResult | None = None,
     unscoped: bool = False,
     names: int = 0,
+    generated_count: int = 0,
 ) -> VaultSyncResult:
     """Record the outcome, decide whether it is a transition, and say so once.
 
@@ -2695,6 +2739,7 @@ def _settle(
         last_outcome=previous,
         unscoped=unscoped,
         names=names,
+        generated_count=generated_count,
     )
 
 
@@ -2739,16 +2784,6 @@ def sync_all(
                 )
             )
     return results
-
-
-def count_generated_credentials(names) -> int:
-    """Count generated entries from their password and username field names."""
-    produced = set(names)
-    return sum(
-        name.startswith(f"{VAULT_WRITE_GROUP}_")
-        and f"{name}_{_USERNAME_SEGMENT}" in produced
-        for name in produced
-    )
 
 
 def vault_status(
@@ -2801,15 +2836,6 @@ def vault_status(
     from . import db  # noqa: PLC0415 - see `sync_user`
     from . import storage  # noqa: PLC0415
 
-    def stored_generated_count() -> int:
-        try:
-            rows = secrets_store.list_user_services(config.db_path, user_id).get(
-                VAULT_ENTRY_SERVICE, []
-            )
-            return count_generated_credentials(str(row["key"]) for row in rows)
-        except Exception:  # noqa: BLE001 - a status report, never the work
-            return 0
-
     last = _SYNC_STATE.get(user_id, (None, ""))[1]
     # `configured` is the enable itself — `_vault_is_enabled`, the predicate
     # the cycle gates on — rather than a second opinion beside it. A file in
@@ -2832,6 +2858,10 @@ def vault_status(
     except Exception:  # noqa: BLE001 - a report, never the work
         logger.warning("vault: could not open the database for the sync record")
     recorded = recorded or {}
+    count_value = recorded.get("generated_count")
+    stored_generated_count = (
+        count_value if isinstance(count_value, int) and count_value >= 0 else 0
+    )
 
     def _with_record(report: VaultStatusReport) -> VaultStatusReport:
         return dataclasses.replace(
@@ -2841,6 +2871,7 @@ def vault_status(
             recorded_outcome=str(recorded.get("outcome") or ""),
             recorded_reason=str(recorded.get("reason") or ""),
             recorded_unscoped=bool(recorded.get("unscoped")),
+            generated_count=stored_generated_count,
         )
 
     if resolution.location is None:
@@ -2878,7 +2909,7 @@ def vault_status(
             # what this call found, the other is what a past cycle settled — and
             # a renderer that could not tell them apart would report a week-old
             # failure as the current state of a file it never looked at.
-            return dataclasses.replace(report, generated_count=stored_generated_count())
+            return report
         try:
             data, _digest = read_vault_bytes(
                 location.path, dir_fd=location.dir_fd
@@ -2906,7 +2937,7 @@ def vault_status(
         outcome=OUTCOME_OK,
         parsed=True,
         names=tuple(sorted(read.services)),
-        generated_count=count_generated_credentials(set(read.services) | set(read.held)),
+        generated_count=read.generated_count,
         skipped=read.skipped,
         scoped=read.scoped,
         truncated=read.truncated,
