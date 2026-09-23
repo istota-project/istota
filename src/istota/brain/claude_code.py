@@ -1049,9 +1049,15 @@ assert set(CANONICAL_ROLES) <= set(DEFAULT_ALIASES), (
 _SHORTCUT_NAMES: frozenset[str] = frozenset(set(DEFAULT_ALIASES) - set(CANONICAL_ROLES))
 
 
+_CANONICAL_MODEL_ID = re.compile(
+    r"claude-(?:[a-z][a-z0-9-]*-\d+(?:-\d+)?(?:-\d{8})?|"
+    r"\d+(?:-\d+)?-[a-z][a-z0-9-]*-\d{8})\Z"
+)
+
+
 def _looks_canonical(name: str) -> bool:
-    """Whether ``name`` is a raw Anthropic model id (passthrough target)."""
-    return name.startswith("claude-")
+    """Shape check for a versioned Claude ID, including older dated IDs."""
+    return _CANONICAL_MODEL_ID.fullmatch(name) is not None
 
 
 def _resolve_target_with_effort(target: str) -> tuple[str, str | None]:
@@ -1119,6 +1125,10 @@ class ClaudeCodeBrain:
     def default_effort(self) -> str:
         return (getattr(self._config, "effort", "") or "").strip()
 
+    def effective_default_model(self) -> str:
+        """The configured default after alias resolution; empty means CLI default."""
+        return self.resolve_model_name(self.default_model)
+
     def with_defaults(self, req: BrainRequest) -> BrainRequest:
         """Fill an unpinned request from this brain's own configured default.
 
@@ -1180,8 +1190,8 @@ class ClaudeCodeBrain:
         """Resolve a `!model <alias>` (with optional ``:effort``) to (model_id, effort).
 
         Splits a ``:effort`` modifier first, then the base name resolves:
-        operator override > ``DEFAULT_ALIASES`` (tiers + shortcuts) > canonical
-        id passthrough (``claude-*``) > None (unknown). Effort precedence: the
+        operator override > ``DEFAULT_ALIASES`` (tiers + shortcuts) > shaped
+        canonical id passthrough > None (unknown). Effort precedence: the
         ``:effort`` suffix wins over the entry's own default effort. A role
         override's target is itself resolved through this brain's alias table
         (``smart = "opus"`` → ``OPUS``), and an explicit
@@ -1221,6 +1231,13 @@ class ClaudeCodeBrain:
             return resolved[0]
         return split_effort(name)[0]
 
+    def is_valid_model_reference(self, name: str) -> bool:
+        """Whether a reference resolves to a concrete model in this namespace."""
+        if not name or any(char.isspace() for char in name):
+            return False
+        pair = self.resolve_alias(name)
+        return pair is not None and bool(pair[0]) and _looks_canonical(pair[0])
+
     def validate_alias_override(self, name: str, target: str) -> list[str]:
         """Surface operator typos at load time.
 
@@ -1229,8 +1246,8 @@ class ClaudeCodeBrain:
            ``[models.aliases] opus = "haiku"`` silently makes ``!model opus``
            resolve to Haiku — usually a typo for a tier override). Overriding a
            tier is the normal case and never warns.
-        2. Override target is neither a known alias nor a canonical ``claude-*``
-           id (it'd pass through to the CLI and fail at task time). A ``:effort``
+        2. Override target is neither a known alias nor a shaped canonical id
+           (it'd pass through to the CLI and fail at task time). A ``:effort``
            modifier on the target is stripped before the check.
         """
         warnings: list[str] = []

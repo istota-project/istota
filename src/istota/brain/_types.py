@@ -461,6 +461,14 @@ class Brain(Protocol):
         """
         ...
 
+    def effective_default_model(self) -> str:
+        """Resolved configured default, or empty for the backend default."""
+        ...
+
+    def is_valid_model_reference(self, name: str) -> bool:
+        """Whether a reference is usable in this brain's model namespace."""
+        ...
+
     def list_aliases(self) -> list[tuple[str, str | None, str | None]]:
         """Return the merged alias table (roles + provider aliases) for display."""
         ...

@@ -23,7 +23,7 @@ bot_name = "Istota"
 #   3. Otherwise — brain default.
 #
 # Effort is an ORTHOGONAL :effort modifier on any reference (opus:high,
-# smart:low, claude-opus-5:xhigh) — it is no longer baked into an alias name.
+# smart:low, opus:xhigh) — it is no longer baked into an alias name.
 # So `model = "opus:high"` here sets BOTH the model and the effort in one token
 # (no need to also set `effort =`); the modifier's effort wins.
 # =============================================================================

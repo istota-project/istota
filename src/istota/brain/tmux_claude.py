@@ -630,6 +630,12 @@ class TmuxClaudeBrain:
     def resolve_model_name(self, name):
         return self._cli.resolve_model_name(name)
 
+    def effective_default_model(self):
+        return self._cli.effective_default_model()
+
+    def is_valid_model_reference(self, name):
+        return self._cli.is_valid_model_reference(name)
+
     def list_aliases(self):
         return self._cli.list_aliases()
 

@@ -907,6 +907,15 @@ class NativeBrain:
     def default_effort(self) -> str:
         return (getattr(self._config, "effort", "") or "").strip()
 
+    def effective_default_model(self) -> str:
+        return self.resolve_model_name(self.default_model)
+
+    @staticmethod
+    def is_valid_model_reference(name: str) -> bool:
+        # The endpoint owns its model namespace, so only a malformed value is
+        # knowable here without querying that endpoint.
+        return bool(name) and not any(char.isspace() for char in name)
+
     def with_defaults(self, req):
         """``req`` with this brain's configured model/effort where it pinned none.
 

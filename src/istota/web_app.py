@@ -1820,7 +1820,7 @@ def _admin_models_section() -> dict:
         # top-level `model`, which was claude_code's own and which this card
         # therefore reported as the deployment's on a native deployment too
         # (ISSUE-418). Empty = the backend's own default.
-        default_model = brain.resolve_model_name(brain.default_model)
+        default_model = brain.effective_default_model()
         if not default_model:
             default_model = (
                 "endpoint default" if brain_config.kind == "native" else "CLI default"
@@ -7248,7 +7248,7 @@ async def chat_commands(
             {"alias": alias, "target": model, "effort": effort}
             for alias, model, effort in model_brain.list_aliases()
         ]
-        default_model = model_brain.resolve_model_name(model_brain.default_model) or None
+        default_model = model_brain.effective_default_model() or None
     except Exception as e:  # noqa: BLE001 — aliases degrade independently
         logger.warning("chat_commands: model aliases unavailable: %s", e)
     return {

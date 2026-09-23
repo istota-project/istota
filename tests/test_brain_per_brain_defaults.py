@@ -479,6 +479,14 @@ class TestTheProtocolAndTheLookupAgree:
         """`BRAIN_CONFIG_BLOCK` must cover what `make_brain` can build."""
         assert set(BRAIN_CONFIG_BLOCK) == set(KNOWN_BRAIN_KINDS)
 
+    @pytest.mark.parametrize("kind", sorted(KNOWN_BRAIN_KINDS))
+    def test_effective_default_resolves_from_the_brain(self, kind):
+        cfg = BrainConfig(kind=kind)
+        block = BRAIN_CONFIG_BLOCK[kind]
+        getattr(cfg, block).model = "smart" if kind != "native" else "vendor/model"
+        brain = make_brain(cfg)
+        assert brain.effective_default_model() == brain.resolve_model_name(brain.default_model)
+
 
 class TestTheTmuxBrainBorrowsOnlyModelAndEffort:
     """`TmuxClaudeBrain` hands its own `[brain.tmux]` block to `ClaudeCodeBrain`.

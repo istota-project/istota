@@ -60,6 +60,22 @@ def _write_cron_md(mount_path, user_id, content):
 
 
 class TestLoadCronJobs:
+    def test_mistyped_model_warns_when_cron_file_loads(
+        self, mount_path, make_config_with_mount, caplog,
+    ):
+        config = make_config_with_mount()
+        _write_cron_md(mount_path, "alice", '''```toml
+[[jobs]]
+name = "digest"
+cron = "0 9 * * *"
+prompt = "Summarize"
+model = "claude-opus-typo"
+```''')
+        with caplog.at_level(logging.WARNING):
+            jobs = load_cron_jobs(config, "alice")
+        assert jobs is not None and jobs[0].model == "claude-opus-typo"
+        assert any("invalid model" in r.message for r in caplog.records)
+
     @pytest.mark.parametrize("room", ["", "other-room", "web-alice-digest"])
     @pytest.mark.parametrize("target", [
         "web:web-alice-digest", "web:web-alice-digest,talk:talk-ref",
@@ -2139,6 +2155,21 @@ class TestValidateModel:
     def test_canonical_id_passes_silently(self, caplog):
         with caplog.at_level("WARNING"):
             _validate_model("job", "alice", "claude-opus-4-7")
+        assert not caplog.records
+
+    def test_malformed_canonical_id_warns(self, caplog):
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "claude-opus-typo")
+        assert any("invalid model" in r.message for r in caplog.records)
+
+    def test_validation_does_not_construct_a_broken_native_client(
+        self, make_config_with_mount, caplog,
+    ):
+        config = make_config_with_mount()
+        config.brain.kind = "native"
+        config.brain.native.base_url = "http://[::1"
+        with caplog.at_level("WARNING"):
+            _validate_model("job", "alice", "vendor/model", config)
         assert not caplog.records
 
     def test_shortcut_passes_silently(self, caplog):

@@ -142,17 +142,13 @@ def fj_brain_or_none(job: "CronJob", is_admin: bool) -> str | None:
     return job.brain
 
 
-def _validate_model(name: str, user_id: str, model: str) -> None:
+def _validate_model(name: str, user_id: str, model: str, config=None, pinned_brain: str = "") -> None:
     """Warn on suspicious model names; never reject.
 
-    Catches obvious typos (no canonical prefix, embedded whitespace) without
-    hardcoding a model allowlist that goes stale every release. Provider
-    shortcuts (``opus``), role tiers (``smart``), an optional ``:effort``
-    modifier (``opus:high``), and operator-defined custom aliases are all
-    accepted: anything the active brain or the operator alias-override table
-    knows about passes silently.
+    Select the scheduled brain's namespace without constructing its runtime
+    client. A malformed endpoint must not abort loading the whole CRON.md file.
     """
-    from .brain import BrainConfig, get_alias_overrides, make_brain, split_effort
+    from .brain import BrainConfig, resolve_brain_kind
 
     if any(c.isspace() for c in model):
         logger.warning(
@@ -161,23 +157,24 @@ def _validate_model(name: str, user_id: str, model: str) -> None:
         )
         return
 
-    if model.startswith("claude-"):
-        return
+    brain_config = config.brain if config is not None else BrainConfig()
+    resolved_config = resolve_brain_kind(
+        "scheduled", brain_config, override=pinned_brain or None,
+    )
+    if resolved_config.kind == "native":
+        from .brain.native import NativeBrain
 
-    # Known to the active brain? Defaults to claude_code at module import time;
-    # the actual brain config isn't available to cron_loader, but every brain
-    # exposes the same alias surface so this is good enough for warn-only.
-    brain = make_brain(BrainConfig())
-    if brain.resolve_alias(model) is not None:
-        return
-    # Custom operator alias (strip any :effort modifier) known to the override
-    # table but not to the default brain's own table.
-    if split_effort(model)[0].lower() in get_alias_overrides():
+        valid = NativeBrain.is_valid_model_reference(model)
+    else:
+        from .brain.claude_code import ClaudeCodeBrain
+
+        valid = ClaudeCodeBrain().is_valid_model_reference(model)
+    if valid:
         return
 
     logger.warning(
-        "Job '%s' (user %s): model %r is neither a canonical id, alias, nor role — likely a typo",
-        name, user_id, model,
+        "Job '%s' (user %s): invalid model reference %r for %s — likely a typo",
+        name, user_id, model, resolved_config.kind,
     )
 
 
@@ -612,8 +609,6 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
             continue
         model = _str_field(name, user_id, "model", j.get("model", ""))
         effort = _str_field(name, user_id, "effort", j.get("effort", ""))
-        if model:
-            _validate_model(name, user_id, model)
         if effort:
             _validate_effort(name, user_id, effort)
         # Through `_str_field` like `model` and `effort` beside it. Read as
@@ -626,6 +621,11 @@ def _parse_jobs(data: dict, config, user_id: str) -> tuple[list[CronJob], int]:
         brain = _str_field(name, user_id, "brain", j.get("brain", ""))
         if brain:
             _validate_brain(name, user_id, brain)
+        if model:
+            _validate_model(
+                name, user_id, model, config,
+                brain if config.is_admin(user_id) else "",
+            )
         target = _str_field(name, user_id, "target", j.get("target", ""))
         if target:
             _validate_target(name, user_id, target)

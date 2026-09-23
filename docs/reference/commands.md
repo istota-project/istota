@@ -91,7 +91,7 @@ Settable from the web room settings too, under the same admin gate and the same 
 
 `!model <alias> <prompt>` is a per-task model override parsed before task creation on Talk and web chat. It is not a `!command` — it resolves the alias, sets the model (and optionally effort) on the task row, and passes the remaining text as the prompt. If the alias is unknown, it replies with usage help instead of creating a task.
 
-Aliases are base names: role tiers (`fast`, `general`, `smart`, plus any operator-defined custom aliases from `[models.aliases]`), provider shortcuts (`opus`, `sonnet`, `haiku`), and `default`. Bare `opus` resolves to the current-latest Opus. Effort is an orthogonal `:effort` modifier appended to any name — `opus:high`, `smart:low`, `claude-opus-5:xhigh`, with `:effort` ∈ `low|medium|high|xhigh|max`. A prior-version pin is the canonical id plus the modifier (`claude-opus-4-7:high`). Use `!models` to see the resolved alias table.
+Aliases are base names: role tiers (`fast`, `general`, `smart`, plus any operator-defined custom aliases from `[models.aliases]`), provider shortcuts (`opus`, `sonnet`, `haiku`), and `default`. Bare `opus` resolves to the current-latest Opus. Effort is an orthogonal `:effort` modifier appended to any name — `opus:high`, `smart:low`, `opus:xhigh`, with `:effort` ∈ `low|medium|high|xhigh|max`. A prior-version pin is the canonical id plus the modifier (`claude-opus-4-7:high`). Use `!models` to see the resolved alias table.
 
 ## Export
 

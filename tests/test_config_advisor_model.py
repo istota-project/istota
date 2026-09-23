@@ -25,6 +25,20 @@ class TestAdvisorModelParses:
         config = load_config(cfg)
         assert config.advisor_model == "claude-opus-4-8"
 
+    def test_mistyped_advisor_warns_at_load(self, tmp_path, caplog):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('advisor_model = "claude-opus-typo"\n')
+        with caplog.at_level(logging.WARNING):
+            load_config(cfg)
+        assert any("advisor_model" in r.message and "invalid model" in r.message for r in caplog.records)
+
+    def test_mistyped_cli_default_warns_at_load(self, tmp_path, caplog):
+        cfg = tmp_path / "config.toml"
+        cfg.write_text('[brain.claude_code]\nmodel = "claude-opus-typo"\n')
+        with caplog.at_level(logging.WARNING):
+            load_config(cfg)
+        assert any("brain.claude_code" in r.message and "invalid model" in r.message for r in caplog.records)
+
 
 class TestAdvisorModelNonStringWarnsNotFails:
     def test_int_value_does_not_raise_and_is_ignored(self, tmp_path, caplog):

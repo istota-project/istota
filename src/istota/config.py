@@ -4411,6 +4411,7 @@ def load_config(config_path: Path | None = None) -> Config:
     _validate_brain_fallback(config)
     _validate_room_selectable(config)
     _validate_claude_code_brain(config)
+    _validate_configured_model_references(config)
     _validate_advisor_model(config)
     _validate_sms(config)
     _validate_whatsapp(config)
@@ -5073,6 +5074,20 @@ def _validate_forge_clis(config: "Config") -> None:
 _ANTHROPIC_BRAIN_KINDS = frozenset({"claude_code", "tmux_claude"})
 
 
+def _validate_configured_model_references(config: "Config") -> None:
+    """Warn about CLI defaults that cannot resolve in the Anthropic namespace."""
+    from .brain.claude_code import ClaudeCodeBrain
+
+    brain = ClaudeCodeBrain()
+    logger = logging.getLogger("istota.config")
+    for block, model in (
+        ("brain.claude_code", config.brain.claude_code.model),
+        ("brain.tmux", config.brain.tmux.model),
+    ):
+        if model and not brain.is_valid_model_reference(model):
+            logger.warning("[%s] invalid model reference %r", block, model)
+
+
 def _validate_advisor_model(config: "Config") -> None:
     """Warn-and-ignore checks for ``advisor_model`` — never fails load, matching
     ``[models]``. Three independent traps, each a WARNING only:
@@ -5115,7 +5130,10 @@ def _validate_advisor_model(config: "Config") -> None:
 
     from .brain.claude_code import ClaudeCodeBrain
 
-    pair = ClaudeCodeBrain().resolve_alias(base)
+    brain = ClaudeCodeBrain()
+    pair = brain.resolve_alias(base)
+    if not brain.is_valid_model_reference(base):
+        _logger.warning("advisor_model=%r is an invalid model reference", raw)
     if pair is not None and pair[0] is None:
         _logger.warning(
             "advisor_model=%r resolves to no concrete model (e.g. the "

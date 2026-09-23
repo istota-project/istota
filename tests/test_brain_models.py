@@ -88,6 +88,15 @@ class TestBrainResolveModelName:
     def test_canonical_id_passes_through(self, brain):
         assert brain.resolve_model_name(OPUS) == OPUS
 
+    def test_canonical_shape_rejects_a_prefix_only_typo(self, brain):
+        assert brain.resolve_alias("claude-opus-typo") is None
+        assert brain.resolve_alias("claude-opus-5-typo") is None
+        assert brain.resolve_alias("claude-opus-5") == ("claude-opus-5", None)
+        assert brain.resolve_alias("claude-haiku-4-5-20251001") == (
+            "claude-haiku-4-5-20251001", None,
+        )
+        assert not brain.is_valid_model_reference("default")
+
     def test_unknown_name_passes_through(self, brain):
         # Pass-through preserves backward compat for raw model IDs typed
         # directly into config (e.g., a future model not yet in the table).

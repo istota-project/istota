@@ -74,7 +74,7 @@ All job types go through the same task queue with retry logic, `!stop` support, 
 | `once` | no | Auto-delete after successful execution |
 | `silent_unless_action` | no | Suppress output unless response has `ACTION:` prefix |
 | `skip_log_channel` | no | Suppress log channel output for frequent jobs |
-| `model` | no | Claude model override for this job (e.g. `"claude-sonnet-4-6"`) |
+| `model` | no | Model override for this job (e.g. `"general"` for the active brain's current general model) |
 | `effort` | no | Effort override: `low`, `medium`, `high`, `xhigh`, or `max` |
 | `brain` | no | Brain kind this job runs on: `claude_code`, `native` or `tmux_claude`. Admin-only, and bounded by `[brain] room_selectable`. See below |
 | `publish_shared_kv` | no | On success, publish the result text to the shared KV store as `"<namespace>/<key>"` (a bare key means the `briefing_shared_blocks` namespace) |
