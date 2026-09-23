@@ -213,6 +213,7 @@ CREATE TABLE IF NOT EXISTS signup_tags (
     tag TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
     slug TEXT NOT NULL,
+    reserved_at TEXT NOT NULL DEFAULT (datetime('now')),
     opened_at TEXT DEFAULT (datetime('now')),
     task_minted_at TEXT,
     closed_at TEXT,

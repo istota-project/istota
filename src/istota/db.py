@@ -1120,6 +1120,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS signup_tags (
             tag TEXT PRIMARY KEY, user_id TEXT NOT NULL, slug TEXT NOT NULL,
+            reserved_at TEXT NOT NULL DEFAULT (datetime('now')),
             opened_at TEXT DEFAULT (datetime('now')),
             task_minted_at TEXT, closed_at TEXT, UNIQUE(user_id, slug)
         );
@@ -1131,6 +1132,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_signup_emails_tag ON signup_emails(tag, id);
     """)
+    if "reserved_at" not in {row[1] for row in conn.execute("PRAGMA table_info(signup_tags)")}:
+        conn.execute("ALTER TABLE signup_tags ADD COLUMN reserved_at TEXT")
+        conn.execute("UPDATE signup_tags SET reserved_at = datetime('now')")
     # Pure DDL with no marker — see the docstring. Last because it depends on
     # nothing above it.
     _migrate_notifications(conn)
@@ -6924,6 +6928,30 @@ def reserve_signup_tag(conn: sqlite3.Connection, user_id: str, slug: str) -> boo
     except sqlite3.IntegrityError:
         return False
     return True
+
+
+def reconcile_stale_signup_tag(
+    conn: sqlite3.Connection, user_id: str, slug: str, *, present_in_vault: bool,
+) -> bool:
+    """Recover a pending reservation after its lease, under the private vault lock.
+
+    Return whether this call acquired a fresh reservation. A prior completed
+    vault write opens the old tag, so its address remains able to receive mail.
+    """
+    row = conn.execute(
+        "SELECT reserved_at FROM signup_tags WHERE user_id = ? AND slug = ? "
+        "AND opened_at IS NULL AND closed_at IS NULL",
+        (user_id, slug),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return False
+    if conn.execute("SELECT ? <= datetime('now', '-5 minutes')", (row[0],)).fetchone()[0] != 1:
+        return False
+    if present_in_vault:
+        activate_signup_tag(conn, user_id, slug)
+        return False
+    cancel_signup_tag(conn, user_id, slug)
+    return reserve_signup_tag(conn, user_id, slug)
 
 
 def activate_signup_tag(conn: sqlite3.Connection, user_id: str, slug: str) -> bool:

@@ -582,6 +582,9 @@ class SkillProxy:
         if username is None and config.email.enabled and config.email.bot_email:
             bot_address = email_support.per_user_address(config, user_id)
             if bot_address:
+                if f"{user_id}+{slug}" in config.users:
+                    refuse("vault_write_refused", "Signup address belongs to another user")
+                    return
                 local, domain = bot_address.rsplit("@", 1)
                 signup_address = f"{local}+{slug}@{domain}"
                 username = signup_address
@@ -618,7 +621,31 @@ class SkillProxy:
                         with db.get_db(config.db_path) as db_conn:
                             reserved_tag = db.reserve_signup_tag(db_conn, user_id, slug)
                         if not reserved_tag:
-                            raise secrets_vault.VaultWriteRefused("signup address already used")
+                            # A killed task can leave the pre-write reservation
+                            # pending. After five minutes, inspect the vault
+                            # under the same lock as a write before reclaiming
+                            # it. A live writer still holding the lock is busy.
+                            with secrets_vault._vault_file_lock(
+                                location, lock_root=config.db_path.parent, blocking=False,
+                            ):
+                                current, _ = secrets_vault.read_vault_bytes(
+                                    location.path, dir_fd=location.dir_fd,
+                                )
+                                current_read = secrets_vault.parse_vault(current, passphrase)
+                                if current_read.truncated:
+                                    raise secrets_vault.VaultWriteRefused(
+                                        "the vault read stopped at a cap"
+                                    )
+                                present = f"generated_{slug}" in (
+                                    set(current_read.services) | current_read.held
+                                    | {name for name, _ in current_read.skipped}
+                                )
+                                with db.get_db(config.db_path) as db_conn:
+                                    reserved_tag = db.reconcile_stale_signup_tag(
+                                        db_conn, user_id, slug, present_in_vault=present,
+                                    )
+                            if not reserved_tag:
+                                raise secrets_vault.VaultWriteRefused("signup address already used")
                     try:
                         write = secrets_vault.create_entry(
                             location, passphrase, slug=slug, username=username,

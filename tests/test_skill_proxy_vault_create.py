@@ -86,6 +86,95 @@ def test_zero_budget_disables_writes(sock):
         assert _request(sock, {"type": "vault_create", "slug": "acme"})["reason"] == "vault_write_limit"
 
 
+def test_signup_address_must_not_name_another_user(tmp_path, monkeypatch, sock):
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    path = tmp_path / "vault.kdbx"
+    create_database(str(path), password="test-passphrase")
+    config = Config(
+        db_path=tmp_path / "daemon" / "test.db",
+        workspace_path=tmp_path / "workspace",
+        users={
+            "alice": UserConfig(vault_path=str(path)),
+            "alice+team": UserConfig(),
+        },
+    )
+    config.email.enabled = True
+    config.email.bot_email = "bot@example.com"
+    config.db_path.parent.mkdir()
+    db.init_db(config.db_path)
+    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
+
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+        reply = _request(sock, {"type": "vault_create", "slug": "team"})
+    assert reply["reason"] == "vault_write_refused"
+    assert "generated_team" not in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").services
+
+
+@pytest.mark.parametrize("vault_has_entry", [False, True])
+def test_stale_pending_signup_tag_recovers_from_the_vault(
+    tmp_path, monkeypatch, sock, vault_has_entry,
+):
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    path = tmp_path / "vault.kdbx"
+    kp = create_database(str(path), password="test-passphrase")
+    if vault_has_entry:
+        group = kp.add_group(kp.root_group, "generated")
+        kp.add_entry(group, "acme", "bot+alice+acme@example.com", "saved-password")
+        kp.save()
+    config = Config(
+        db_path=tmp_path / "daemon" / "test.db",
+        workspace_path=tmp_path / "workspace",
+        users={"alice": UserConfig(vault_path=str(path))},
+    )
+    config.email.enabled = True
+    config.email.bot_email = "bot@example.com"
+    config.db_path.parent.mkdir()
+    db.init_db(config.db_path)
+    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
+    with db.get_db(config.db_path) as conn:
+        assert db.reserve_signup_tag(conn, "alice", "acme")
+        conn.execute(
+            "UPDATE signup_tags SET reserved_at = datetime('now', '-10 minutes') WHERE tag = ?",
+            ("alice+acme",),
+        )
+
+    monkeypatch.setattr("istota.notification_store.deliver_pending", lambda *_: None)
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+        reply = _request(sock, {"type": "vault_create", "slug": "acme"})
+    with db.get_db(config.db_path) as conn:
+        tag = db.signup_tag(conn, "alice+acme")
+    assert tag is not None
+    assert ("name" in reply) is (not vault_has_entry)
+    assert "generated_acme" in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").services
+
+
+def test_recent_pending_signup_tag_remains_busy(tmp_path, monkeypatch, sock):
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    path = tmp_path / "vault.kdbx"
+    create_database(str(path), password="test-passphrase")
+    config = Config(
+        db_path=tmp_path / "daemon" / "test.db",
+        workspace_path=tmp_path / "workspace",
+        users={"alice": UserConfig(vault_path=str(path))},
+    )
+    config.email.enabled = True
+    config.email.bot_email = "bot@example.com"
+    config.db_path.parent.mkdir()
+    db.init_db(config.db_path)
+    secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
+    with db.get_db(config.db_path) as conn:
+        assert db.reserve_signup_tag(conn, "alice", "acme")
+
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+        reply = _request(sock, {"type": "vault_create", "slug": "acme"})
+    assert reply["reason"] == "VaultWriteRefused"
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute(
+            "SELECT opened_at FROM signup_tags WHERE tag = ?", ("alice+acme",),
+        ).fetchone()[0] is None
+    assert "generated_acme" not in secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").services
+
+
 def test_shim_new_sends_only_policy_and_names(monkeypatch, capsys):
     seen = []
 

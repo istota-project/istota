@@ -1,5 +1,6 @@
 """A signup address is a filing route, never an email task prompt."""
 
+import sqlite3
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -16,6 +17,24 @@ from istota.transport.email.inbound import poll_emails
 def _open_tag(conn, user_id, slug):
     assert db.reserve_signup_tag(conn, user_id, slug)
     assert db.activate_signup_tag(conn, user_id, slug)
+
+
+def test_existing_signup_table_gains_reservation_lease(tmp_path):
+    path = tmp_path / "bot.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE signup_tags (tag TEXT PRIMARY KEY, user_id TEXT NOT NULL, "
+            "slug TEXT NOT NULL, opened_at TEXT, task_minted_at TEXT, closed_at TEXT, "
+            "UNIQUE(user_id, slug))"
+        )
+        conn.execute(
+            "INSERT INTO signup_tags (tag, user_id, slug) VALUES ('alice+acme', 'alice', 'acme')"
+        )
+    db.init_db(path)
+    with db.get_db(path) as conn:
+        assert conn.execute(
+            "SELECT reserved_at FROM signup_tags WHERE tag = 'alice+acme'"
+        ).fetchone()[0]
 
 
 def test_signup_mail_is_filed_and_mints_only_an_authored_prompt(tmp_path):
@@ -125,6 +144,65 @@ def test_multiple_recipient_tags_do_not_cross_user_boundary(tmp_path):
         assert len(db.signup_inbox(conn, "bob", "other")) == 0
 
 
+def test_mixed_exact_user_and_signup_recipients_cannot_become_ordinary_prompt(tmp_path):
+    path = tmp_path / "bot.db"
+    db.init_db(path)
+    config = _config(path, tmp_path)
+    config.users["bob"] = UserConfig(email_addresses=["bob@example.com"])
+    with db.get_db(path) as conn:
+        _open_tag(conn, "bob", "acme")
+        _open_tag(conn, "alice", "other")
+
+    assert _poll(config, "1", (
+        "bot+alice@example.com", "bot+bob+acme@example.com",
+    )) == []
+    assert len(_poll(config, "2", (
+        "bot+alice@example.com", "bot+alice+other@example.com",
+    ))) == 1
+    with db.get_db(path) as conn:
+        assert conn.execute(
+            "SELECT routing_method FROM processed_emails WHERE email_id = '1'"
+        ).fetchone()[0] == "discarded"
+        assert len(db.signup_inbox(conn, "bob", "acme")) == 0
+        assert len(db.signup_inbox(conn, "alice", "other")) == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE prompt LIKE '%ignore previous instructions%'"
+        ).fetchone()[0] == 0
+
+
+def test_existing_signup_tag_cannot_become_another_users_exact_address(tmp_path):
+    path = tmp_path / "bot.db"
+    db.init_db(path)
+    config = _config(path, tmp_path)
+    with db.get_db(path) as conn:
+        _open_tag(conn, "alice", "team")
+    config.users["alice+team"] = UserConfig(email_addresses=["team@example.com"])
+
+    assert _poll(config, "1", "bot+alice+team@example.com") == []
+    with db.get_db(path) as conn:
+        assert conn.execute(
+            "SELECT routing_method FROM processed_emails WHERE email_id = '1'"
+        ).fetchone()[0] == "discarded"
+        assert len(db.signup_inbox(conn, "alice", "team")) == 0
+
+
+def test_mixed_signup_mail_is_hidden_from_the_ordinary_mailbox(tmp_path):
+    path = tmp_path / "bot.db"
+    db.init_db(path)
+    config = _config(path, tmp_path)
+    config.users["bob"] = UserConfig(email_addresses=["bob@example.com"])
+    message = Email(
+        id="1", subject="Confirm", sender="site@example.com",
+        date="Mon, 01 Jun 2026 00:00:00 +0000", body="private code", attachments=[],
+        to=("bot+alice@example.com", "bot+bob+acme@example.com"), cc=(),
+    )
+    with db.get_db(path) as conn:
+        _open_tag(conn, "bob", "acme")
+        owner = resolve_email_owner(config, conn, message)
+    assert not owner_in_scope(owner, "all", "alice")
+    assert not owner_in_scope(owner, "all", "bob")
+
+
 def test_later_mail_notifies_without_minting_and_bodies_expire(tmp_path):
     path = tmp_path / "bot.db"
     db.init_db(path)
@@ -136,7 +214,12 @@ def test_later_mail_notifies_without_minting_and_bodies_expire(tmp_path):
         assert _poll(config, "1", "bot+alice+acme@example.com") == []
     with db.get_db(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM notifications WHERE source = 'task_alert'").fetchone()[0] == 1
+        notice = conn.execute(
+            "SELECT title, params FROM notifications WHERE source = 'task_alert'"
+        ).fetchone()
+        assert notice is not None
+        assert "acme" in notice["title"]
+        assert "acme" in notice["params"]
         conn.execute("UPDATE signup_emails SET received_at = datetime('now', '-15 days')")
         assert db.prune_signup_bodies(conn, 14) == 1
         assert db.signup_inbox(conn, "alice", "acme")[0]["body"] == ""
@@ -206,6 +289,12 @@ def test_exact_user_id_with_plus_keeps_ordinary_route(tmp_path):
     )
     with db.get_db(path) as conn:
         assert resolve_email_owner(config, conn, message) == "alice+team"
+    ids = _poll(config, "1", "bot+alice+team@example.com")
+    assert len(ids) == 1
+    with db.get_db(path) as conn:
+        assert conn.execute(
+            "SELECT routing_method FROM processed_emails WHERE email_id = '1'"
+        ).fetchone()[0] == "plus_address"
 
 
 def test_signup_task_delivers_only_daemon_authored_status(tmp_path):

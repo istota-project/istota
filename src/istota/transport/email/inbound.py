@@ -24,6 +24,7 @@ from imap_tools import AND, U
 from ... import confirmations, db
 from ...config import CONFIRM_SENDER_MATCH_POLICIES, Config
 from ...email_ownership import (
+    exact_recipient_users,
     extract_user_from_recipient,
     match_thread,
     signup_recipient_tails,
@@ -1852,57 +1853,59 @@ def poll_emails(config: Config) -> list[int]:
                         # mail on a single dropped socket.
                         raise _MessageFailed(str(e)) from e
 
-                    # Exact user plus-addresses retain their old route. A second
-                    # tag is a table lookup before sender and thread matching:
-                    # neither of those paths may turn signup mail into a prompt.
-                    exact_user = _extract_user_from_recipient(config, email)
-                    if not exact_user:
-                        open_tags = []
-                        for tail in signup_recipient_tails(config, email):
-                            tag = db.signup_tag(conn, tail)
-                            if tag is not None:
-                                open_tags.append((tail, tag))
-                        if len(open_tags) > 1:
-                            logger.warning("Discarding mail addressed to multiple open signup tags")
+                    # A matching signup tag takes precedence over an exact user
+                    # recipient only when both name the same owner. An ambiguous
+                    # recipient set cannot enter the ordinary prompt route.
+                    exact_users = exact_recipient_users(config, email)
+                    exact_user = exact_users[0] if exact_users else None
+                    open_tags = []
+                    for tail in signup_recipient_tails(config, email):
+                        tag = db.signup_tag(conn, tail)
+                        if tag is not None:
+                            open_tags.append((tail, tag))
+                    if len(open_tags) > 1 or (
+                        open_tags and any(user != open_tags[0][1]["user_id"] for user in exact_users)
+                    ):
+                        logger.warning("Discarding mail with ambiguous signup recipients")
+                        db.mark_email_processed(
+                            conn, email_id=envelope.id, sender_email=envelope.sender,
+                            subject=envelope.subject, routing_method="discarded",
+                            uidvalidity=uidvalidity,
+                        )
+                        continue
+                    if open_tags:
+                        tail, tag = open_tags[0]
+                        if tag["user_id"] not in config.users:
+                            logger.warning("Discarding signup mail for a user no longer configured")
                             db.mark_email_processed(
                                 conn, email_id=envelope.id, sender_email=envelope.sender,
                                 subject=envelope.subject, routing_method="discarded",
                                 uidvalidity=uidvalidity,
                             )
                             continue
-                        if open_tags:
-                            tail, tag = open_tags[0]
-                            if tag["user_id"] not in config.users:
-                                logger.warning("Discarding signup mail for a user no longer configured")
-                                db.mark_email_processed(
-                                    conn, email_id=envelope.id, sender_email=envelope.sender,
-                                    subject=envelope.subject, routing_method="discarded",
-                                    uidvalidity=uidvalidity,
-                                )
-                                continue
-                            filed = db.file_signup_email(
-                                conn, tail, sender=envelope.sender,
-                                subject=envelope.subject or "", body=email.body or "",
-                                window_minutes=config.email.signup_task_window_minutes,
-                            )
-                            db.mark_email_processed(
-                                conn, email_id=envelope.id, sender_email=envelope.sender,
-                                subject=envelope.subject, user_id=tag["user_id"],
-                                task_id=filed.task_id, routing_method="signup",
-                                uidvalidity=uidvalidity,
-                            )
-                            if filed.task_id is not None:
-                                created_tasks.append(filed.task_id)
-                            elif filed.later:
-                                pending_signup_notices.append(task_alert_source.write(
-                                    conn, tag["user_id"],
-                                    dedup_key=f"signup-later:{task_alert_source._slug(tag['slug'], limit=64)}",
-                                    title="Mail arrived for a signup address",
-                                    body="Read the signup inbox before taking any action.",
-                                    severity="warning", actionable=True,
-                                    params={"status": "signup_mail"},
-                                ))
-                            continue
+                        filed = db.file_signup_email(
+                            conn, tail, sender=envelope.sender,
+                            subject=envelope.subject or "", body=email.body or "",
+                            window_minutes=config.email.signup_task_window_minutes,
+                        )
+                        db.mark_email_processed(
+                            conn, email_id=envelope.id, sender_email=envelope.sender,
+                            subject=envelope.subject, user_id=tag["user_id"],
+                            task_id=filed.task_id, routing_method="signup",
+                            uidvalidity=uidvalidity,
+                        )
+                        if filed.task_id is not None:
+                            created_tasks.append(filed.task_id)
+                        elif filed.later:
+                            pending_signup_notices.append(task_alert_source.write(
+                                conn, tag["user_id"],
+                                dedup_key=f"signup-later:{task_alert_source._slug(tag['slug'], limit=64)}",
+                                title=f"Mail arrived for signup {tag['slug']}",
+                                body="Read the signup inbox before taking any action.",
+                                severity="warning", actionable=True,
+                                params={"status": "signup_mail", "slug": tag["slug"]},
+                            ))
+                        continue
 
                     # Route: plus-address → sender → thread → discard
                     routing_method = None
