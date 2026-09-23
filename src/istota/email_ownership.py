@@ -258,11 +258,15 @@ def resolve_email_owner(config: Config, conn, email) -> str | None:
     is skipped in that case. Never raises.
     """
     tails = signup_recipient_tails(config, email)
-    # A message addressed to an open signup tag belongs only in the filed
-    # store, even when another To/Cc also names an exact user. Otherwise the
-    # ordinary mailbox could expose one user's confirmation to another.
-    if conn is not None and any(db.signup_tag(conn, tail) is not None for tail in tails):
-        return _SIGNUP_PRIVATE_OWNER
+    # Only an exact user ID with a plus sign may use the ordinary mailbox.
+    # Known signup tags stay private after they close or while they are pending.
+    for tail in tails:
+        if tail not in config.users:
+            return _SIGNUP_PRIVATE_OWNER
+        if conn is not None and conn.execute(
+            "SELECT 1 FROM signup_tags WHERE tag = ?", (tail,),
+        ).fetchone() is not None:
+            return _SIGNUP_PRIVATE_OWNER
     uid = extract_user_from_recipient(config, email)
     if uid:
         return uid

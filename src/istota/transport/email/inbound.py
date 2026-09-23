@@ -1859,16 +1859,20 @@ def poll_emails(config: Config) -> list[int]:
                     exact_users = exact_recipient_users(config, email)
                     exact_user = exact_users[0] if exact_users else None
                     open_tags = []
+                    unavailable_tails = []
                     signup_tails = signup_recipient_tails(config, email)
                     for tail in signup_tails:
                         tag = db.signup_tag(conn, tail)
                         if tag is not None:
                             open_tags.append((tail, tag))
+                        elif tail not in config.users or conn.execute(
+                            "SELECT 1 FROM signup_tags WHERE tag = ?", (tail,),
+                        ).fetchone() is not None:
+                            unavailable_tails.append(tail)
                     if len(open_tags) > 1 or (
                         open_tags and any(user != open_tags[0][1]["user_id"] for user in exact_users)
                     ) or (
-                        not open_tags
-                        and any(tail not in config.users for tail in signup_tails)
+                        not open_tags and unavailable_tails
                     ):
                         logger.warning("Discarding mail with unavailable or ambiguous signup recipients")
                         db.mark_email_processed(
