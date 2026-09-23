@@ -1195,6 +1195,8 @@ export interface VaultStatus {
   /** How many shared credentials istota holds for this user, right now, from
    *  the `secrets` table rather than from the file. */
   entry_count?: number;
+  /** Credentials in the vault's generated/ group. */
+  generated_count?: number;
   /** Their names, sorted, capped by the server. Names only — no value reaches
    *  this payload — and this user's own, which is why the card may show them
    *  where `doctor` reports counts to every admin. */

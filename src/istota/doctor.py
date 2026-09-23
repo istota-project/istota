@@ -3497,7 +3497,10 @@ def _vault_contents_result(config, secrets_vault, name: str, users) -> CheckResu
         # posture rather than a user preference: a vault reading its whole
         # file shares everything in it.
         scope = "" if report.scoped else ", whole file shared (no istota group)"
-        counts.append(f"{label}: {len(report.names)} credential(s){scope}")
+        counts.append(
+            f"{label}: {len(report.names)} credential(s), "
+            f"{report.generated_count} in generated/{scope}"
+        )
 
     if failures:
         return CheckResult(

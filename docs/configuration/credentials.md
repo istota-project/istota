@@ -94,7 +94,11 @@ Users connect their Google account through the web dashboard at `/istota/` (the 
 
 A user who keeps their credentials in a password manager otherwise maintains two copies of every key, and the copy Istota reads is the one they cannot see, search or back up. The credential vault removes the second edit: a KeePass (KDBX) file the user maintains on their own devices, which Istota reads on a schedule and copies into the `secrets` table. Off for every user until somebody puts a file in the folder and generates a passphrase.
 
-It is **provisioning input, not a storage backend**. The table stays the live store, `resolve_secret`'s order is unchanged, and a vault that is missing, half-synced or locked leaves every credential working. Istota never writes the file.
+It is **provisioning input, not a storage backend**. The table stays the live store, `resolve_secret`'s order is unchanged, and a vault that is missing, half-synced or locked leaves every credential working. Istota can create entries only in `generated/`; it cannot change or delete existing entries.
+
+When a task needs a new site credential, it can run `istota-credential new acme --url https://acme.example`. Istota generates the password inside the daemon, writes it to the user's KDBX, and returns the three credential names and the username, never the password. The username defaults to the user's own first configured email address; `--username` overrides it. The task can fill a form with `browse interact --fill-credential "#password=generated_acme"` and `"#email=generated_acme_username"`. For a site that rejects symbols, pass `--no-symbols`; `--length N` sets the password length. The entry is under `istota/generated/` when the file has a top-level `istota` group, or under root `generated/` otherwise. The latter never creates a top-level `istota` group, since that would narrow the next read and remove the other credentials from Istota's live namespace.
+
+The default write budget is three requests per task attempt, including refusals. Set `[security] vault_writes_per_task = 0` to disable model-requested writes. Istota sends a notice for each credential it creates. A password manager that already has the database open may overwrite a new entry on its next save; check for the entry in the password manager after a task creates it.
 
 What it holds is **shared credentials**: a flat namespace of name-to-value pairs the user chooses, stored under the `vault_entries` service and readable by that user's own tasks by name. It does not provision the typed services above — those are edited in the settings page and nothing here overwrites them.
 
@@ -225,7 +229,7 @@ A task holding the socket can still read a value deliberately (`istota-credentia
 
 ### What the settings UI does
 
-The "Connected services" heading carries a status line for a user who has a vault: where the file is read from, how many shared credentials Istota holds and what they are called, when it was last applied, and the error class when it is failing. It also says when the last read was unscoped.
+The "Connected services" heading carries a status line for a user who has a vault: where the file is read from, how many shared credentials Istota holds and what they are called, how many were created under `generated/`, when it was last applied, and the error class when it is failing. It also says when the last read was unscoped.
 
 Under it is the card that sets the vault up: the folder to put the file in, the files found there, and the passphrase. It renders for a user who has no vault at all, which is who it is for. What it does not offer is a path of any kind — see [turning it on](#turning-it-on) — and the file half is withheld for a vault a `vault_path` already names, which it says instead. The passphrase half renders either way: it is a credential the user owns rather than a setting an operator made.
 

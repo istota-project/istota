@@ -24,13 +24,14 @@ duplication ``AGENTS.md`` opens with, so the developer skill's git credential
 helper now shells out to the ``env`` verb here, which is that generated
 program's behaviour byte for byte.
 
-Four verbs::
+Six verbs::
 
     istota-credential list                       # shared credential names
     istota-credential run VAR=name [...] -- cmd  # exec cmd with those set
     istota-credential run --stdin name -- cmd    # value on the child's stdin
     istota-credential get <name>                 # the value on stdout
     istota-credential env <VAR>                  # a manifest-declared var
+    istota-credential new <slug> [options]        # create a vault entry
 
 ``run`` is the verb this exists for. It resolves each name over the proxy
 socket and ``execvpe``s the given argv with those variables added to its own
@@ -80,12 +81,10 @@ SHIM_PROGRAM_NAME = "istota-credential"
 #: about other local users rather than about the task.
 SHIM_MODE = 0o700
 
-#: The socket-level wait. Every request this program makes is answered from a
-#: dict in the daemon's memory — no subprocess, no file, no network — so the
-#: long ``ISTOTA_SKILL_CLIENT_WAIT`` budget ``skill_client`` arms for a skill
-#: *command* is the wrong number here. The generated client this replaces armed
-#: none at all and would hang for ever against a wedged proxy.
+#: Fetches answer from the proxy's memory. A create unlocks and saves a KDBX
+#: file, so it gets its own longer socket wait below.
 SOCKET_TIMEOUT_SECONDS = 30
+CREATE_TIMEOUT_SECONDS = 120
 
 #: Cap on a value delivered through ``--stdin``. The bytes are written into a
 #: pipe *before* the exec, so a payload past the kernel's pipe buffer would
@@ -145,6 +144,7 @@ USAGE = (
     "  istota-credential run VAR=NAME [VAR2=NAME2 ...] [--stdin NAME] -- CMD [ARGS...]\n"
     "  istota-credential get NAME\n"
     "  istota-credential env VAR\n"
+    "  istota-credential new SLUG [--username USER] [--url URL] [--length N] [--no-symbols]\n"
 )
 
 
@@ -164,19 +164,19 @@ class ProxyError(Exception):
     """
 
 
-def _request(payload: dict) -> dict:
+def _request(payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS) -> dict:
     """One JSON line to the proxy, one JSON line back.
 
-    Raises ``ProxyError`` for anything that is not a well-formed reply. Nothing
-    here retries: every request is answered from memory, so a failure is the
-    proxy being gone rather than busy.
+    Raises ``ProxyError`` for anything that is not a well-formed reply. The
+    client does not retry a create, since the file may have been replaced before
+    a response was lost.
     """
     sock_path = os.environ.get("ISTOTA_SKILL_PROXY_SOCK", "")
     if not sock_path:
         raise ProxyError("ISTOTA_SKILL_PROXY_SOCK is not set")
 
     conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.settimeout(SOCKET_TIMEOUT_SECONDS)
+    conn.settimeout(timeout)
     try:
         conn.connect(sock_path)
         conn.sendall(json.dumps(payload).encode("utf-8") + b"\n")
@@ -253,6 +253,40 @@ def _cmd_get(args: list[str]) -> int:
     # `end=""`: a caller substituting this into a header or a git credential
     # line wants the bytes verbatim, and a trailing newline is not in them.
     print(fetch_credential(args[0], "read"), end="")
+    return 0
+
+
+def _cmd_new(args: list[str]) -> int:
+    if not args or args[0].startswith("--"):
+        print(USAGE, file=sys.stderr)
+        return EXIT_REFUSED
+    payload: dict = {"type": "vault_create", "slug": args[0]}
+    index = 1
+    while index < len(args):
+        flag = args[index]
+        if flag == "--no-symbols":
+            payload["symbols"] = False
+            index += 1
+            continue
+        if flag not in ("--username", "--url", "--length") or index + 1 >= len(args):
+            print(USAGE, file=sys.stderr)
+            return EXIT_REFUSED
+        value = args[index + 1]
+        if flag == "--length":
+            try:
+                value = int(value)
+            except ValueError:
+                print("istota-credential: length must be an integer", file=sys.stderr)
+                return EXIT_REFUSED
+        payload[flag[2:]] = value
+        index += 2
+    reply = _request(payload, timeout=CREATE_TIMEOUT_SECONDS)
+    for field in ("name", "username_name", "url_name", "username"):
+        if not isinstance(reply.get(field), str):
+            raise ProxyError("the credential proxy answered unparseably")
+    print(json.dumps({field: reply[field] for field in (
+        "name", "username_name", "url_name", "username",
+    )}))
     return 0
 
 
@@ -387,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": lambda: _cmd_run(rest),
         "get": lambda: _cmd_get(rest),
         "env": lambda: _cmd_env(rest),
+        "new": lambda: _cmd_new(rest),
     }
     handler = handlers.get(verb)
     if handler is None:

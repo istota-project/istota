@@ -2094,6 +2094,7 @@ class VaultStatusReport:
     outcome: str = ""
     reason: str = ""
     names: tuple[str, ...] = ()
+    generated_count: int = 0
     skipped: tuple[tuple[str, str], ...] = ()
     scoped: bool = True
     truncated: str = ""
@@ -2740,6 +2741,16 @@ def sync_all(
     return results
 
 
+def count_generated_credentials(names) -> int:
+    """Count generated entries from their password and username field names."""
+    produced = set(names)
+    return sum(
+        name.startswith(f"{VAULT_WRITE_GROUP}_")
+        and f"{name}_{_USERNAME_SEGMENT}" in produced
+        for name in produced
+    )
+
+
 def vault_status(
     config, user_id: str, *, parse: bool = True
 ) -> VaultStatusReport:
@@ -2789,6 +2800,15 @@ def vault_status(
     """
     from . import db  # noqa: PLC0415 - see `sync_user`
     from . import storage  # noqa: PLC0415
+
+    def stored_generated_count() -> int:
+        try:
+            rows = secrets_store.list_user_services(config.db_path, user_id).get(
+                VAULT_ENTRY_SERVICE, []
+            )
+            return count_generated_credentials(str(row["key"]) for row in rows)
+        except Exception:  # noqa: BLE001 - a status report, never the work
+            return 0
 
     last = _SYNC_STATE.get(user_id, (None, ""))[1]
     # `configured` is the enable itself — `_vault_is_enabled`, the predicate
@@ -2858,7 +2878,7 @@ def vault_status(
             # what this call found, the other is what a past cycle settled — and
             # a renderer that could not tell them apart would report a week-old
             # failure as the current state of a file it never looked at.
-            return report
+            return dataclasses.replace(report, generated_count=stored_generated_count())
         try:
             data, _digest = read_vault_bytes(
                 location.path, dir_fd=location.dir_fd
@@ -2886,6 +2906,7 @@ def vault_status(
         outcome=OUTCOME_OK,
         parsed=True,
         names=tuple(sorted(read.services)),
+        generated_count=count_generated_credentials(set(read.services) | set(read.held)),
         skipped=read.skipped,
         scoped=read.scoped,
         truncated=read.truncated,

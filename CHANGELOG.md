@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tasks can create credentials in the `generated` group of a configured password vault and use them in a signup form without receiving the password. The vault is no longer read-only to Istota; set `[security] vault_writes_per_task = 0` to disable task-requested writes. A password manager already holding the file open can overwrite a new entry on its next save.
+
 - Admins can find live browsers under Browsers and open each user’s VNC viewer directly. The list refreshes without starting browsers or keeping idle sessions alive.
 
 - Users can inspect their saved browser state and clear a site, all site data or their complete profile with `browse state` and `browse forget`. Closing a browsing session keeps their logins for later tasks.

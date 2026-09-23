@@ -3434,6 +3434,27 @@ class TestTheVaultSettingsEndpoint:
                 ),
             )
 
+    async def test_it_counts_created_vault_credentials_without_opening_the_file(
+        self, tmp_path, client, app,
+    ):
+        from istota import secrets_store
+
+        secrets_store.set_secret(self._db_path, "alice", "vault", "passphrase", "x" * 40)
+        secrets_store.set_secret(
+            self._db_path, "alice", "vault_entries", "generated_acme", "hidden-value",
+        )
+        secrets_store.set_secret(
+            self._db_path, "alice", "vault_entries", "generated_acme_username",
+            "alice@example.com",
+        )
+        _patch_app(self._config(tmp_path))
+        cookies = await self._login_alice(client, app)
+
+        body = (await client.get("/istota/api/settings/vault", cookies=cookies)).json()
+
+        assert body["generated_count"] == 1
+        assert "hidden-value" not in json.dumps(body)
+
     async def test_an_unconfigured_user_gets_a_bare_no(self, tmp_path, client, app):
         """The default for everyone, and the shape the page renders nothing for.
 

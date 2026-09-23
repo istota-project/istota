@@ -482,6 +482,9 @@ def build_task_runtime(
             task_id=task.id,
             vault_credentials=vault_credentials,
             vault_fetch_limit=config.security.vault_fetch_limit_per_task,
+            vault_write_limit=config.security.vault_writes_per_task,
+            config=config,
+            user_id=task.user_id,
         )
         # The program that reaches that socket, written whether or not the
         # namespace has anything in it: writing it is cheaper than deciding not
