@@ -15,6 +15,7 @@ from istota.brain.claude_code import ClaudeCodeBrain
 from istota.brain.native import NativeBrain
 from istota.brain.tmux_claude import TmuxClaudeBrain
 from istota.config import NativeBrainConfig
+from istota.brain.claude_code import OPUS
 
 
 def _make_brain(kind):
@@ -87,7 +88,7 @@ class TestSharedDefaultBlockResolves:
         cli = ClaudeCodeBrain()
         native = NativeBrain(NativeBrainConfig(model="native-floor"))
         # claude_code resolves the anthropic slugs to canonical ids.
-        assert cli.resolve_model_name("smart") == "claude-opus-5"
+        assert cli.resolve_model_name("smart") == OPUS
         assert cli.resolve_alias("smart")[1] == "high"
         # native resolves its own openai_compat slugs verbatim.
         assert native.resolve_model_name("smart") == "anthropic/claude-opus-4.8"

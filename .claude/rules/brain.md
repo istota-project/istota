@@ -224,7 +224,7 @@ load. **Hard rename:** the old `[models.roles]` key is no longer read — a stal
 one present logs a one-time migration WARNING (detection only).
 
 ClaudeCodeBrain pins to versioned IDs, base names only:
-- `OPUS = "claude-opus-5"` (current default Opus)
+- `OPUS = "claude-opus-5-5"` (current default Opus)
 - `SONNET = "claude-sonnet-5"`
 - `HAIKU = "claude-haiku-4-5"`
 
@@ -233,9 +233,15 @@ prior-version pin is the canonical id plus the modifier (`claude-opus-4-7:high`)
 which resolves via the `claude-*` passthrough in `resolve_alias`.
 
 Convention: bare alias names (`opus`, `sonnet`, `haiku`) always resolve to the
-*current latest* version constant. Bumping `OPUS = "claude-opus-5-0"` ripples
-through every consumer + alias automatically — a model release is one constant
-edit, no effort variants to enumerate.
+*current latest* version constant. Bumping `OPUS` ripples through every
+consumer + alias automatically, no effort variants to enumerate. The ids are
+also restated in three documented tables — the list above,
+`docs/architecture/brain.md` and the shipped-defaults table in
+`config/config.example.toml` — and `tests/test_model_id_docs.py` fails until
+those match the constants, so a release is one constant edit plus whatever that
+test names. It was a constant edit alone on paper only: `claude-opus-5-5` became
+the deployment default while `OPUS` still read `claude-opus-5`, so every alias
+and the web room picker stayed a release behind (#548).
 
 `Config.advisor_model` (top-level TOML `advisor_model`, `[brain.advisor_model]`
 does NOT exist — it lives beside `model`/`effort`, not under `[brain]`) resolves

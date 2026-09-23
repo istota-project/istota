@@ -45,14 +45,14 @@ bot_name = "Istota"
 #
 # Set the per-brain keys instead. Each brain's block takes the same values this
 # one did:
-#   - canonical IDs    "claude-opus-5", "claude-opus-4-7", "claude-sonnet-5"
+#   - canonical IDs    "claude-opus-5-5", "claude-opus-4-7", "claude-sonnet-5"
 #   - shortcuts        "opus", "sonnet", "haiku"
 #   - role tiers       "smart", "general", "fast", or any custom alias from
 #                      [models.aliases] below
 #   - any of the above + an optional :effort modifier ("opus:high")
 # Bare shortcuts ("opus", "sonnet") float to the current latest version each
 # release; canonical IDs are immutable. Pin to a versioned ID for stability.
-# model = "claude-opus-5"
+# model = "claude-opus-5-5"
 # effort = "high"
 
 # Use config/system-prompt.md instead of Claude Code's default system prompt.
@@ -372,7 +372,7 @@ features = []
 # readiness detection is a config hotfix (override the relevant marker), not a
 # code release.
 # [brain.tmux]
-# model = "claude-opus-5"           # this brain's own default model (ISSUE-418);
+# model = "claude-opus-5-5"         # this brain's own default model (ISSUE-418);
 # effort = "high"                   #   same values as [brain.claude_code] above,
 #                                   #   same anthropic namespace, same binary.
 #                                   #   "" = the CLI's own default
@@ -402,7 +402,7 @@ features = []
 # task (ISSUE-418). Read whatever `kind` is set to -- a native primary with a
 # claude_code fallback, or a source_type_overrides entry, routes here.
 # Empty or omitted = the CLI's own default.
-# model = "claude-opus-5"
+# model = "claude-opus-5-5"
 # effort = "high"
 #
 # Poll https://api.anthropic.com/api/oauth/usage for plan utilization and show it
@@ -1282,7 +1282,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # Shipped defaults:
 #   fast    → claude-haiku-4-5    (used by: context triage, skill classification)
 #   general → claude-sonnet-5     (used by: sleep cycle extraction + USER.md curation)
-#   smart   → claude-opus-5     (exists for `!model smart` from Talk + any code
+#   smart   → claude-opus-5-5     (exists for `!model smart` from Talk + any code
 #                                  path that wants "the best model")
 #   opus / sonnet / haiku         (shortcuts → the current latest of each)
 #

@@ -15,6 +15,7 @@ from istota.config import (
     Config, NextcloudConfig, SchedulerConfig, TalkConfig, UserConfig,
 )
 from istota.transport.ingest import record_inbound
+from istota.brain.claude_code import OPUS
 
 
 @pytest.fixture
@@ -427,7 +428,7 @@ class TestRoomCommand:
             db.add_room_binding(conn, "room1", "web", "room1")
             out = await cmd_room(_ctx(config, conn, "model opus"))
             room = db.get_room(conn, "room1")
-        assert room.model == "claude-opus-5"
+        assert room.model == OPUS
         assert "opus" in out.lower()
 
     async def test_set_model_with_effort_modifier(self, config, db_path):
@@ -436,7 +437,7 @@ class TestRoomCommand:
             db.add_room_binding(conn, "room1", "web", "room1")
             await cmd_room(_ctx(config, conn, "model opus:high"))
             room = db.get_room(conn, "room1")
-        assert room.model == "claude-opus-5"
+        assert room.model == OPUS
         assert room.effort == "high"
 
     async def test_model_alias_preserves_separate_effort(self, config, db_path):
@@ -448,7 +449,7 @@ class TestRoomCommand:
             await cmd_room(_ctx(config, conn, "effort high"))
             await cmd_room(_ctx(config, conn, "model opus"))
             room = db.get_room(conn, "room1")
-        assert room.model == "claude-opus-5"
+        assert room.model == OPUS
         assert room.effort == "high"
 
     async def test_unknown_alias_shows_usage(self, config, db_path):

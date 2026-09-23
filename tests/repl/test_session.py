@@ -26,6 +26,7 @@ from istota.events import TaskEvent
 from istota.repl import run_session
 from istota.repl.terminal import TerminalSubscriber
 from istota.scheduler import run_task_inline
+from istota.brain.claude_code import OPUS
 
 
 def _ev(kind, payload=None, seq=1):
@@ -195,7 +196,7 @@ class TestTheModelPinIsResolvedInTheReplLane:
         stopped resolving aliases at all.
         """
         cfg.brain = BrainConfig(kind="claude_code")
-        assert self._model_after(cfg, monkeypatch, "smart") == "claude-opus-5"
+        assert self._model_after(cfg, monkeypatch, "smart") == OPUS
 
 
 class TestRunTaskInline:
