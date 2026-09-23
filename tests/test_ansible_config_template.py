@@ -40,6 +40,7 @@ import yaml
 from jinja2 import Environment, StrictUndefined
 
 from istota import config as config_module
+from istota.brain.claude_code import HAIKU, OPUS, SONNET
 from istota.config import Config, devbox_container_backend, load_config
 
 REPO = Path(__file__).resolve().parent.parent
@@ -146,6 +147,15 @@ def rendered() -> str:
 @pytest.fixture(scope="module")
 def parsed(rendered: str) -> dict:
     return tomllib.loads(rendered)
+
+
+def test_shipped_anthropic_aliases_match_brain_defaults(parsed):
+    aliases = parsed["models"]["aliases"]
+    actual = {
+        name: aliases[name]["anthropic"]["model"]
+        for name in ("fast", "general", "smart")
+    }
+    assert actual == {"fast": HAIKU, "general": SONNET, "smart": OPUS}
 
 
 class TestItRendersSomethingTheLoaderAccepts:
