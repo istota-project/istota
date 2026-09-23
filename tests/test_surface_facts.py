@@ -29,16 +29,16 @@ from tests.support.drift import source_of
 # enumeration is to state what they are and check each one; a list generated
 # from the same place the code reads would assert nothing.
 #
-# Thirteen of these are values `tasks.source_type` actually holds. `playbook` is
+# Fourteen of these are values `tasks.source_type` actually holds. `playbook` is
 # not — every `playbook` literal in `src/` is a `memory_chunks.source_type`
 # (`executor._recall_playbooks`, `memory/sleep_cycle.py`) and no `create_task`
 # call passes it. It is kept because an extra unrecognised value costs one
 # parametrized case and must answer None either way. It is why the flip list
-# below carries eight names against the seven `origin_surface_for_source_type`
+# below carries nine names against the seven `origin_surface_for_source_type`
 # documents.
 SHIPPED_SOURCE_TYPES = (
     "briefing", "cli", "doctor", "email", "heartbeat", "istota_file",
-    "playbook", "repl", "scheduled", "sms", "subtask", "talk", "web",
+    "playbook", "repl", "scheduled", "signup", "sms", "subtask", "talk", "web",
     "whatsapp",
 )
 
@@ -233,9 +233,9 @@ class TestOriginSurfaceForSourceType:
     def test_it_is_not_the_delivery_mapping(self):
         # The defect this function exists to avoid, asserted rather than
         # described: `_surface_for_source_type` maps every non-surface source
-        # type to "talk", so asking it the origin question flips eight of the
-        # fourteen values enumerated above from "no surface" to "a room surface"
-        # — seven of them real task source types. At the confirmation gate
+        # type to "talk", so asking it the origin question flips nine of the
+        # fifteen values enumerated above from "no surface" to "a room surface"
+        # — eight of them real task source types. At the confirmation gate
         # the predicate is negated, which is what suppressed the prompt on the
         # mirror leg for cron, briefing and heartbeat tasks. (The spec says six;
         # measured, it is eight — `istota_file` and `doctor` flip too.)
@@ -246,7 +246,7 @@ class TestOriginSurfaceForSourceType:
         ]
         assert sorted(flipped) == [
             "briefing", "cli", "doctor", "heartbeat", "istota_file",
-            "playbook", "scheduled", "subtask",
+            "playbook", "scheduled", "signup", "subtask",
         ]
 
     def test_an_empty_source_type_originates_nowhere(self):

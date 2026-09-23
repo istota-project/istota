@@ -3197,6 +3197,14 @@ def process_one_task(
             else:
                 db.update_task_status(conn, task_id, "completed", result=result, actions_taken=actions_taken, execution_trace=execution_trace)
                 db.log_task(conn, task_id, "info", "Task completed successfully")
+                if task.source_type == "signup":
+                    notification_results.append(task_alert_source.write(
+                        conn, task.user_id, dedup_key=f"signup-followup:{task.id}",
+                        title="Signup follow-up finished",
+                        body=f"Task #{task.id} finished. Open the task log for its result.",
+                        severity="info", actionable=False,
+                        params={"task_id": task.id, "status": "completed"},
+                    ))
 
                 # Persist the assistant turn into the canonical messages store
                 # for room-surface tasks (Talk/web), so the unified history
@@ -3538,6 +3546,14 @@ def process_one_task(
                     actions_taken=actions_taken, execution_trace=execution_trace,
                 )
                 db.log_task(conn, task_id, "error", f"Task failed permanently: {result[:500]}")
+                if task.source_type == "signup":
+                    notification_results.append(task_alert_source.write(
+                        conn, task.user_id, dedup_key=f"signup-followup:{task.id}",
+                        title="Signup follow-up failed",
+                        body=f"Task #{task.id} failed. Open the task log for details.",
+                        severity="warning", actionable=True,
+                        params={"task_id": task.id, "status": "failed"},
+                    ))
 
                 if task.source_type in ("briefing", "scheduled"):
                     # Suppress user-facing error delivery for automated tasks.
@@ -6988,6 +7004,7 @@ def run_cleanup_checks(config: Config) -> None:
         )
         if email_rows > 0:
             logger.info(f"Pruned {email_rows} processed-email row(s)")
+        db.prune_signup_bodies(conn, config.email.signup_body_retention_days)
 
         # 4b. Age out the per-message deletion ledger. It exists only to tell a
         # live client what vanished; one further behind than this reloaded from

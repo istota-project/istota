@@ -275,6 +275,9 @@ class SkillProxy:
         task_id: int | None = None,
         vault_credentials: dict[str, str] | None = None,
         vault_fetch_limit: int = 0,
+        vault_write_limit: int = 0,
+        config=None,
+        user_id: str | None = None,
     ):
         self.credential_env = credential_env
         self.base_env = base_env
@@ -317,6 +320,11 @@ class SkillProxy:
         # the model can overwrite and a hand-rolled five-line client speaks the
         # same protocol — the proxy is the only thing that sees every request.
         self.vault_fetch_limit = vault_fetch_limit
+        self.vault_write_limit = vault_write_limit
+        self.config = config
+        self.user_id = user_id
+        self._vault_writes = 0
+        self._vault_write_lock = threading.Lock()
         # Per task attempt, and that is the whole lifetime: `build_task_runtime`
         # constructs one proxy per attempt, so the counter starts at zero with
         # the attempt and is gone with it. A retry gets a fresh budget, which is
@@ -431,6 +439,10 @@ class SkillProxy:
                 self._serve_vault_credential(conn, request)
                 return
 
+            if req_type == "vault_create":
+                self._serve_vault_create(conn, request)
+                return
+
             skill = request.get("skill", "")
             args = request.get("args", [])
 
@@ -534,6 +546,164 @@ class SkillProxy:
             count = self._vault_fetches
         limit = self.vault_fetch_limit
         return count, not limit or count <= limit
+
+    def _serve_vault_create(self, conn: socket.socket, request: dict) -> None:
+        """Create one entry from a host-only passphrase and return names only."""
+        from . import db, email_support, secrets_vault, storage
+        from .notification_resolvers import task_alert
+        from .notification_store import deliver_pending
+
+        with self._vault_write_lock:
+            self._vault_writes += 1
+            count = self._vault_writes
+        if self.vault_write_limit <= 0 or count > self.vault_write_limit:
+            self._send_response(conn, {
+                "error": "Vault write limit reached or writes disabled",
+                "reason": "vault_write_limit",
+            })
+            return
+
+        def refuse(reason: str, message: str) -> None:
+            self._send_response(conn, {"error": message, "reason": reason})
+
+        config, user_id = self.config, self.user_id
+        if config is None or not user_id or not secrets_vault._vault_is_enabled(config, user_id):
+            refuse("vault_not_configured", "No credential vault is configured")
+            return
+        slug = request.get("slug")
+        username = request.get("username")
+        url = request.get("url", "")
+        length = request.get("length", 24)
+        symbols = request.get("symbols", True)
+        if not isinstance(slug, str) or not slug or not isinstance(url, str):
+            refuse("vault_write_refused", "A slug and string URL are required")
+            return
+        signup_address = None
+        if username is None and config.email.enabled and config.email.bot_email:
+            bot_address = email_support.per_user_address(config, user_id)
+            if bot_address:
+                if f"{user_id}+{slug}" in config.users:
+                    refuse("vault_write_refused", "Signup address belongs to another user")
+                    return
+                local, domain = bot_address.rsplit("@", 1)
+                signup_address = f"{local}+{slug}@{domain}"
+                username = signup_address
+        if username is None:
+            user = config.users.get(user_id)
+            addresses = getattr(user, "email_addresses", ()) if user else ()
+            username = next((address for address in addresses if address), None)
+        if not isinstance(username, str) or not username:
+            refuse("username_required", "Give a username or configure the user's email address")
+            return
+        if isinstance(length, bool) or not isinstance(length, int) or not isinstance(symbols, bool):
+            refuse("vault_write_refused", "Invalid password policy")
+            return
+        reserved_tag = False
+        try:
+            password = secrets_vault.generate_password(secrets_vault.PasswordPolicy(
+                length=length, require_symbols=symbols, allow_symbols=symbols,
+            ))
+            resolution = storage.vault_location_for(config, user_id)
+            location = resolution.location
+            if location is None:
+                refuse("vault_not_configured", "Credential vault cannot be opened")
+                return
+            try:
+                passphrase = secrets_vault._resolve_passphrase(config.db_path, user_id)
+                for attempt in range(2):
+                    data, digest = secrets_vault.read_vault_bytes(
+                        location.path, dir_fd=location.dir_fd,
+                    )
+                    read = secrets_vault.parse_vault(data, passphrase)
+                    if read.truncated:
+                        raise secrets_vault.VaultWriteRefused("the vault read stopped at a cap")
+                    if signup_address and not reserved_tag:
+                        with db.get_db(config.db_path) as db_conn:
+                            reserved_tag = db.reserve_signup_tag(db_conn, user_id, slug)
+                        if not reserved_tag:
+                            # A killed task can leave the pre-write reservation
+                            # pending. After five minutes, inspect the vault
+                            # under the same lock as a write before reclaiming
+                            # it. A live writer still holding the lock is busy.
+                            with secrets_vault._vault_file_lock(
+                                location, lock_root=config.db_path.parent, blocking=False,
+                            ):
+                                current, _ = secrets_vault.read_vault_bytes(
+                                    location.path, dir_fd=location.dir_fd,
+                                )
+                                current_read = secrets_vault.parse_vault(current, passphrase)
+                                if current_read.truncated:
+                                    raise secrets_vault.VaultWriteRefused(
+                                        "the vault read stopped at a cap"
+                                    )
+                                present = f"generated_{slug}" in (
+                                    set(current_read.services) | current_read.held
+                                    | {name for name, _ in current_read.skipped}
+                                )
+                                with db.get_db(config.db_path) as db_conn:
+                                    reserved_tag = db.reconcile_stale_signup_tag(
+                                        db_conn, user_id, slug, present_in_vault=present,
+                                    )
+                            if not reserved_tag:
+                                raise secrets_vault.VaultWriteRefused("signup address already used")
+                    try:
+                        write = secrets_vault.create_entry(
+                            location, passphrase, slug=slug, username=username,
+                            password=password, url=url, expected_digest=digest,
+                            lock_root=config.db_path.parent, db_path=config.db_path,
+                            user_id=user_id,
+                        )
+                        break
+                    except secrets_vault.VaultChanged:
+                        if attempt:
+                            raise
+            finally:
+                if location.dir_fd is not None:
+                    import os
+                    os.close(location.dir_fd)
+        except secrets_vault.VaultError as exc:
+            if reserved_tag:
+                with db.get_db(config.db_path) as db_conn:
+                    db.cancel_signup_tag(db_conn, user_id, slug)
+            refuse(type(exc).__name__, str(exc))
+            return
+        except Exception:
+            if reserved_tag:
+                with db.get_db(config.db_path) as db_conn:
+                    db.cancel_signup_tag(db_conn, user_id, slug)
+            raise
+
+        # A successful replace already wrote the vault. Notification failure
+        # cannot turn it into a refusal inviting the model to retry the create.
+        self.vault_credentials.update({
+            write.name: password, write.username_name: username, write.url_name: url,
+        })
+        confirmation_readable = False
+        if signup_address:
+            try:
+                with db.get_db(config.db_path) as db_conn:
+                    confirmation_readable = db.activate_signup_tag(db_conn, user_id, slug)
+            except Exception:
+                logger.exception("vault_create task_id=%s: signup tag could not be opened", self.task_id)
+        try:
+            with db.get_db(config.db_path) as db_conn:
+                raised = task_alert.write(
+                    db_conn, user_id,
+                    dedup_key=f"vault-created:{task_alert._slug(write.name, limit=64)}",
+                    title=f"Istota created {write.name}",
+                    body="A credential was added under generated/ in your vault.",
+                    severity="warning", actionable=True,
+                    params={"task_id": self.task_id, "status": "vault_created"},
+                )
+            if raised is not None:
+                deliver_pending(config, [raised])
+        except Exception:
+            logger.warning("vault_create task_id=%s: notice could not be sent", self.task_id)
+        self._send_response(conn, {
+            "name": write.name, "username_name": write.username_name,
+            "url_name": write.url_name, "username": username,
+            "confirmation_readable": confirmation_readable,
+        })
 
     def _serve_vault_credential(self, conn: socket.socket, request: dict) -> None:
         """One shared credential, by name, under the per-attempt cap.

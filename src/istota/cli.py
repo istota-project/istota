@@ -869,6 +869,9 @@ def cmd_secret(args):
     config = load_config(Path(args.config) if args.config else None)
     db_path = config.db_path
 
+    if args.action == "vault-new":
+        _cmd_secret_vault_new(config, args)
+        return
     if args.action in ("vault-sync", "vault-status"):
         _cmd_secret_vault(config, args)
         return
@@ -1044,6 +1047,55 @@ def _secret_ensure_value(config, args) -> str:
             )
             sys.exit(1)
     return args.value
+
+
+def _cmd_secret_vault_new(config, args) -> None:
+    """Create one vault entry from an operator shell without printing values."""
+    from . import secrets_vault, storage
+
+    if not args.user or args.user not in config.users or not args.slug:
+        print("Error: vault-new needs a configured --user and --slug", file=sys.stderr)
+        sys.exit(1)
+    if not secrets_vault._vault_is_enabled(config, args.user):
+        print("Error: vault is not configured for this user", file=sys.stderr)
+        sys.exit(1)
+    resolution = storage.vault_location_for(config, args.user)
+    if resolution.location is None:
+        print(f"Error: vault location unavailable ({resolution.refusal})", file=sys.stderr)
+        sys.exit(1)
+    location = resolution.location
+    try:
+        passphrase = secrets_vault._resolve_passphrase(config.db_path, args.user)
+        data, digest = secrets_vault.read_vault_bytes(location.path, dir_fd=location.dir_fd)
+        secrets_vault.parse_vault(data, passphrase)
+        policy = secrets_vault.PasswordPolicy(
+            length=args.length,
+            require_symbols=not args.no_symbols,
+            allow_symbols=not args.no_symbols,
+        )
+        password = secrets_vault.generate_password(policy)
+        addresses = config.users[args.user].email_addresses
+        username = args.username if args.username is not None else (addresses[0] if addresses else "")
+        result = secrets_vault.create_entry(
+            location, passphrase, slug=args.slug, username=username,
+            password=password, url=args.url or "", expected_digest=digest,
+            lock_root=config.db_path.parent,
+            db_path=config.db_path, user_id=args.user,
+        )
+    except secrets_vault.VaultError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        if location.dir_fd is not None:
+            os.close(location.dir_fd)
+    print(f"Created vault credential: {result.name}")
+    print(f"Username name: {result.username_name}")
+    print(f"URL name: {result.url_name}")
+    print(
+        "Warning: a password manager that already has this vault open may "
+        "overwrite the new entry on its next save.",
+        file=sys.stderr,
+    )
 
 
 def _cmd_secret_vault(config, args) -> None:
@@ -4506,10 +4558,15 @@ def main():
     )
     secret_parser.add_argument(
         "action",
-        choices=["ensure", "list", "remove", "vault-sync", "vault-status"],
+        choices=["ensure", "list", "remove", "vault-sync", "vault-status", "vault-new"],
         help="Action",
     )
     secret_parser.add_argument("-u", "--user", help="User id")
+    secret_parser.add_argument("--slug", help="Generated credential title (vault-new only)")
+    secret_parser.add_argument("--username", help="Username (vault-new only)")
+    secret_parser.add_argument("--url", help="Site URL (vault-new only)")
+    secret_parser.add_argument("--length", type=int, default=24, help="Generated password length")
+    secret_parser.add_argument("--no-symbols", action="store_true", help="Omit symbols from the generated password")
     secret_parser.add_argument(
         "--service",
         help="Service name (karakeep, monarch, overland, feeds, ...)",

@@ -7,8 +7,11 @@ Istota polls an IMAP inbox for incoming messages and sends replies via SMTP.
 The email poller checks the configured IMAP folder (default: `INBOX`) at regular intervals. Routing precedence for incoming mail:
 
 1. **Recipient plus-address**: `bot+user_id@domain` routes directly to the specified user
-2. **Sender match**: sender email matched against user `email_addresses` config
-3. **Thread match**: `References` header matched against `sent_emails` table (emissary thread replies)
+2. **Signup address**: `bot+user_id+slug@domain` files mail only while that credential's tag is open. The address is looked up as a whole tag, so user IDs containing `+` work.
+3. **Sender match**: sender email matched against user `email_addresses` config
+4. **Thread match**: `References` header matched against `sent_emails` table (emissary thread replies)
+
+When Istota creates a credential, its username defaults to a signup address if the bot mailbox is configured. The MTA must deliver addresses with two plus tags to that mailbox. A message to an open signup address is stored separately and marked `routing_method="signup"`; it is never used as a task prompt or sent through the sender confirmation gate. Read it with `istota-skill email signup-inbox --slug SLUG`. The returned content is untrusted, and ordinary mailbox reads exclude signup addresses. A message addressed to both an exact user and an unknown, pending, or closed signup tail is discarded. The first message within `[email] signup_task_window_minutes` (30 by default) creates one follow-up task with an Istota-authored prompt; setting it to 0 only files mail. Any later message, including one within the window after a task was minted, is filed and raises a notification for the user to inspect. Deleting the credential from the vault closes the tag. Filed bodies are cleared after `[email] signup_body_retention_days` (14 by default); the message rows remain.
 
 Attachments are downloaded to `/Users/{user_id}/inbox/`.
 

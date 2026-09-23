@@ -327,6 +327,13 @@ describe('a user whose vault is working', () => {
     const line = await findHeading();
     expect(line.textContent).toContain('1 shared credential from this file');
   });
+
+  it('shows the generated group count', async () => {
+    api.getVaultStatus.mockResolvedValue(configured({ generated_count: 1 }));
+    await mount();
+
+    expect((await findHeading()).textContent).toContain('1 credential in generated/');
+  });
 });
 
 describe('the scope notice', () => {

@@ -31,6 +31,29 @@ from .config import Config
 
 logger = logging.getLogger("istota.email_ownership")
 
+_SIGNUP_PRIVATE_OWNER = "\x00signup-private"
+
+
+def signup_recipient_tails(config: Config, email) -> list[str]:
+    """Whole second plus tails, never split at a user-name separator."""
+    bot = config.email.bot_email
+    if not bot or "@" not in bot:
+        return []
+    local, domain = bot.rsplit("@", 1)
+    if not local or not domain or "+" in local:
+        return []
+    addresses = list(getattr(email, "to", ()) or ()) + list(getattr(email, "cc", ()) or ())
+    tails: list[str] = []
+    for _, address in getaddresses(addresses):
+        if "@" not in address:
+            continue
+        recipient_local, recipient_domain = address.rsplit("@", 1)
+        if recipient_domain.lower() == domain.lower() and recipient_local.lower().startswith(local.lower() + "+"):
+            tail = recipient_local[len(local) + 1:].lower()
+            if "+" in tail and tail not in tails:
+                tails.append(tail)
+    return tails
+
 
 def extract_user_from_recipient(config: Config, email) -> str | None:
     """Extract user_id from a plus-addressed recipient.
@@ -39,8 +62,14 @@ def extract_user_from_recipient(config: Config, email) -> str | None:
     user_id when the plus-tag names a known user, else None. An unknown plus
     tag is logged and ignored (not treated as ownership).
     """
+    users = exact_recipient_users(config, email)
+    return users[0] if users else None
+
+
+def exact_recipient_users(config: Config, email) -> list[str]:
+    """All configured users named by exact bot plus addresses in To or Cc."""
     if not config.email.bot_email or "@" not in config.email.bot_email:
-        return None
+        return []
 
     bot_local, bot_domain = config.email.bot_email.split("@", 1)
 
@@ -49,18 +78,20 @@ def extract_user_from_recipient(config: Config, email) -> str | None:
         re.IGNORECASE,
     )
 
+    users: list[str] = []
     for addr in list(getattr(email, "to", ()) or ()) + list(getattr(email, "cc", ()) or ()):
         match = pattern.match(addr)
         if match:
             candidate = match.group(1).lower()
             if candidate in config.users:
-                return candidate
+                if candidate not in users:
+                    users.append(candidate)
             else:
                 logger.warning(
                     "Plus-address user '%s' not found in config (from %s)",
                     candidate, addr,
                 )
-    return None
+    return users
 
 
 # A msg-id as RFC 5322 writes it: angle-bracketed, no whitespace inside. Used to
@@ -226,9 +257,18 @@ def resolve_email_owner(config: Config, conn, email) -> str | None:
     ``conn`` may be ``None`` (e.g. a caller without DB access); the thread arm
     is skipped in that case. Never raises.
     """
+    tails = signup_recipient_tails(config, email)
+    # A message addressed to an open signup tag belongs only in the filed
+    # store, even when another To/Cc also names an exact user. Otherwise the
+    # ordinary mailbox could expose one user's confirmation to another.
+    if conn is not None and any(db.signup_tag(conn, tail) is not None for tail in tails):
+        return _SIGNUP_PRIVATE_OWNER
     uid = extract_user_from_recipient(config, email)
     if uid:
         return uid
+    # Unknown or closed double tags are never part of the shared mailbox.
+    if tails:
+        return _SIGNUP_PRIVATE_OWNER
 
     sender = getattr(email, "sender", "") or ""
     uid = config.find_user_by_email(sender)

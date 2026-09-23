@@ -10138,6 +10138,7 @@ def _vault_settings_payload(username: str) -> dict:
         # pykeepass in the web process. It is what makes the unscoped line
         # actionable: "all 412 of them" is a different sentence from "all 3".
         "entry_count": entries.count,
+        "generated_count": report.generated_count,
         # The names themselves, which is the feedback this feature has never
         # had: after dropping a file in and generating a passphrase, the user
         # can see which names arrived, and a name they expected and cannot see

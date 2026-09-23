@@ -144,6 +144,8 @@ class EmailConfig:
     # Polling settings
     poll_folder: str = "INBOX"
     bot_email: str = ""  # bot's email address (to skip own messages)
+    signup_task_window_minutes: int = 30  # 0 files mail without minting a task
+    signup_body_retention_days: int = 14
     # What an own-address claim buys. SMTP `From:` is unauthenticated, so "this
     # came from the user's own address" is a claim, not evidence (ISSUE-227).
     # Three states, weakest first:
@@ -1430,6 +1432,9 @@ class SecurityConfig:
     # Counted per request whether or not the name resolves, so probing for
     # absent names is not free; `vault_list` is not counted.
     vault_fetch_limit_per_task: int = 10
+    # This is a capability gate: 0 disables model-requested vault writes.
+    # Unlike the fetch limit above, it never means unlimited.
+    vault_writes_per_task: int = 3
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])
@@ -3948,6 +3953,7 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # so clamping a negative value to it would remove the cap on shared-credential
     # fetches rather than tighten it. `_non_negative_int` keeps the shipped 10.
     "security.vault_fetch_limit_per_task": _non_negative_int,
+    "security.vault_writes_per_task": _non_negative_int,
     # A brain name is compared literally downstream, so surrounding whitespace
     # in a rendered config is a name that matches nothing.
     "brain.fallback": lambda raw, key: (

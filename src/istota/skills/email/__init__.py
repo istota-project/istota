@@ -1745,6 +1745,27 @@ def cmd_read(args):
     }
 
 
+def cmd_signup_inbox(args):
+    """Read only this user's filed signup mail, with untrusted content framed."""
+    app_config, user_id = _scope_context()
+    if not re.fullmatch(r"[a-z0-9_]+", args.slug):
+        return {"status": "error", "error": "Invalid signup slug"}
+    from ... import db
+    with db.get_db(app_config.db_path) as conn:
+        rows = db.signup_inbox(conn, user_id, args.slug)
+    if rows is None:
+        return {"status": "not_found"}
+    return {
+        "status": "ok", "untrusted": True, "notice": _UNTRUSTED_NOTICE,
+        "emails": [{
+            "sender": _frame_untrusted(row["sender"]),
+            "subject": _frame_untrusted(row["subject"]),
+            "body": _frame_untrusted(row["body"]),
+            "received_at": row["received_at"],
+        } for row in rows],
+    }
+
+
 def cmd_search(args):
     """Run a raw IMAP SEARCH string, scoped. Malformed criteria errors out."""
     app_config, user_id = _scope_context()
@@ -2655,6 +2676,9 @@ def build_parser():
     p_read.add_argument("id", help="Email UID")
     _add_scope(p_read)
 
+    p_signup = sub.add_parser("signup-inbox", help="Read filed signup mail for your own credential")
+    p_signup.add_argument("--slug", required=True)
+
     # search
     p_search = sub.add_parser("search", help="Raw IMAP SEARCH (scoped)")
     p_search.add_argument("query", help="Raw IMAP SEARCH criteria string")
@@ -2760,6 +2784,7 @@ def main(argv=None):
     commands = {
         "list": cmd_list,
         "read": cmd_read,
+        "signup-inbox": cmd_signup_inbox,
         "search": cmd_search,
         "thread": cmd_thread,
         "attachments": cmd_attachments,

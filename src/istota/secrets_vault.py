@@ -3,8 +3,8 @@
 A user who keeps their credentials in a password manager otherwise maintains two
 copies of every key, and the copy istota reads is the one they cannot see,
 search or back up. This module is the answer's provisioning half: a KDBX file in
-the user's own workspace that istota decrypts and never writes, and the pass
-that copies what it holds into the encrypted ``secrets`` table.
+the user's own workspace that istota reads and may add a credential to, and
+the pass that copies what it holds into the encrypted ``secrets`` table.
 
 **The file is the consent boundary; the ``istota`` group is an optional
 narrowing inside it.** A top-level group of that name — matched
@@ -55,12 +55,18 @@ touched, so nobody has to write a logging call to leak it.
 from __future__ import annotations
 
 import dataclasses
+import contextlib
+import fcntl
 import hashlib
 import io
 import json
 import logging
 import os
 import re
+import secrets
+import stat
+import string
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,6 +74,9 @@ from pathlib import Path
 from . import secrets_store
 
 logger = logging.getLogger(__name__)
+
+VAULT_WRITE_GROUP = "generated"
+_VAULT_LOCK_WAIT_SECONDS = 2.0
 
 #: The size above which the file is refused unread. A vault is a few kilobytes
 #: of credentials; 8 MiB is slack for attachments the user kept in the same
@@ -271,6 +280,67 @@ class VaultLibraryMissing(VaultError):
     """The ``vault`` extra is not installed on this host. An operator remedy."""
 
 
+class VaultChanged(VaultError):
+    """The file changed after the caller made its collision decision."""
+
+
+class VaultWriteRefused(VaultError):
+    """The requested create cannot preserve the vault's existing namespace."""
+
+
+@dataclass(frozen=True)
+class PasswordPolicy:
+    length: int = 24
+    require_lower: bool = True
+    require_upper: bool = True
+    require_digits: bool = True
+    require_symbols: bool = True
+    allow_lower: bool = True
+    allow_upper: bool = True
+    allow_digits: bool = True
+    allow_symbols: bool = True
+
+
+def generate_password(policy: PasswordPolicy = PasswordPolicy()) -> str:
+    """Generate a password with every required class, or refuse the policy."""
+    classes = (
+        (string.ascii_lowercase, policy.require_lower, policy.allow_lower),
+        (string.ascii_uppercase, policy.require_upper, policy.allow_upper),
+        (string.digits, policy.require_digits, policy.allow_digits),
+        ("!@#$%^&*-_=+?", policy.require_symbols, policy.allow_symbols),
+    )
+    if policy.length < 1 or policy.length > VAULT_MAX_VALUE_BYTES:
+        raise VaultWriteRefused("password length is outside the allowed range")
+    required = []
+    alphabet = ""
+    for characters, need, allowed in classes:
+        if need and not allowed:
+            raise VaultWriteRefused("password policy requires a forbidden class")
+        if allowed:
+            alphabet += characters
+        if need:
+            required.append(secrets.choice(characters))
+    if not alphabet or len(required) > policy.length:
+        raise VaultWriteRefused("password policy cannot fit the requested length")
+    result = required + [secrets.choice(alphabet) for _ in range(policy.length - len(required))]
+    secrets.SystemRandom().shuffle(result)
+    return "".join(result)
+
+
+@dataclass(frozen=True)
+class VaultWrite:
+    name: str
+    username_name: str
+    url_name: str
+    digest: str
+
+    def __repr__(self) -> str:
+        return (
+            f"VaultWrite(name={self.name!r}, username_name={self.username_name!r}, "
+            f"url_name={self.url_name!r}, digest={self.digest!r})"
+        )
+
+
 @dataclass(frozen=True)
 class VaultRead:
     """One parsed vault: the names it holds, and what it will not say about.
@@ -357,6 +427,7 @@ class VaultRead:
     truncated: str
     scoped: bool
     skipped: tuple[tuple[str, str], ...] = ()
+    generated_count: int = 0
 
     def __repr__(self) -> str:
         """Everything but the values.
@@ -460,6 +531,192 @@ def read_vault_bytes(path: Path, *, dir_fd: int | None = None) -> tuple[bytes, s
     if not data:
         raise VaultCorrupt("the vault file is empty")
     return data, _digest(data)
+
+
+def _vault_lock_path(location, lock_root: Path) -> Path:
+    """One host-private lock name for all processes resolving this vault."""
+    if location.dir_fd is None:
+        identity = str(location.path.resolve(strict=False))
+    else:
+        parent = os.fstat(location.dir_fd)
+        identity = f"{parent.st_dev}:{parent.st_ino}:{location.path.name}"
+    name = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return lock_root / f".istota-vault-{name}.lock"
+
+
+@contextlib.contextmanager
+def _vault_file_lock(location, *, lock_root: Path, blocking: bool):
+    """Serialize writes with syncs through a daemon-owned lock directory."""
+    name = _vault_lock_path(location, lock_root)
+    flags = os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, 0o600)
+    except OSError as exc:
+        raise VaultUnreadable("the vault lock cannot be opened") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise VaultUnreadable("the vault lock is not a regular file")
+        deadline = time.monotonic() + _VAULT_LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if not blocking:
+                    raise VaultWriteRefused("another vault operation holds the lock") from exc
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("vault lock busy") from None
+                time.sleep(0.05)
+            except OSError as exc:
+                raise VaultUnreadable("the vault lock cannot be acquired") from exc
+        yield
+    finally:
+        os.close(fd)
+
+
+def _vault_leaf(location):
+    return location.path.name if location.dir_fd is not None else location.path
+
+
+def _preserve_vault_metadata(fd: int, original) -> None:
+    """Keep the original access and refuse a write that would change its owner."""
+    saved = os.fstat(fd)
+    if (saved.st_uid, saved.st_gid) != (original.st_uid, original.st_gid):
+        try:
+            os.fchown(fd, original.st_uid, original.st_gid)
+        except OSError:
+            raise VaultWriteRefused("the vault file owner cannot be preserved") from None
+    os.fchmod(fd, stat.S_IMODE(original.st_mode) or 0o600)
+
+
+def create_entry(
+    location,
+    passphrase: str,
+    *,
+    slug: str,
+    username: str,
+    password: str,
+    url: str,
+    expected_digest: str,
+    lock_root: Path,
+    db_path: Path | None = None,
+    user_id: str | None = None,
+) -> VaultWrite:
+    """Add one entry under the read's current root, then verify before replace."""
+    # The supplied title must already be canonical; silent cleaning could turn
+    # two caller choices into one vault name.
+    if slug_name((slug,)) != slug:
+        raise VaultWriteRefused("slug must contain lowercase letters, digits or underscores")
+    names = (
+        slug_name((VAULT_WRITE_GROUP, slug)),
+        slug_name((VAULT_WRITE_GROUP, slug, _USERNAME_SEGMENT)),
+        slug_name((VAULT_WRITE_GROUP, slug, _URL_SEGMENT)),
+    )
+    if any(name is None for name in names):
+        raise VaultWriteRefused("slug is too long for the generated credential names")
+    try:
+        password_size = len(password.encode("utf-8"))
+        username_size = len(username.encode("utf-8"))
+        url_size = len(url.encode("utf-8"))
+    except UnicodeError:
+        raise VaultWriteRefused("a credential field is not valid UTF-8") from None
+    if not password.strip() or password_size > VAULT_MAX_VALUE_BYTES:
+        raise VaultWriteRefused("password is empty or too large")
+    if username_size > VAULT_MAX_VALUE_BYTES or url_size > VAULT_MAX_VALUE_BYTES:
+        raise VaultWriteRefused("username or URL is too large")
+    if any(value != value.strip() for value in (password, username, url)):
+        raise VaultWriteRefused("credential fields cannot have surrounding whitespace")
+
+    with _vault_file_lock(location, lock_root=lock_root, blocking=False):
+        data, digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
+        if digest != expected_digest:
+            raise VaultChanged("the vault changed since it was read")
+        read = parse_vault(data, passphrase)
+        if read.truncated:
+            raise VaultWriteRefused("the vault read stopped at a cap")
+        produced = set(read.services) | set(read.held) | {name for name, _ in read.skipped}
+        collision = next((name for name in names if name in produced), None)
+        if collision:
+            raise VaultWriteRefused(f"credential name already exists: {_label(collision)}")
+
+        try:
+            from pykeepass import PyKeePass
+        except ImportError as exc:
+            raise VaultLibraryMissing("the 'vault' extra is not installed on this host") from exc
+        kp = PyKeePass(io.BytesIO(data), password=passphrase)
+        if len(kp.entries) >= VAULT_MAX_ENTRIES:
+            raise VaultWriteRefused("the vault is at its entry cap")
+        found, live = _root_groups(kp, _recyclebin_uuid(kp))
+        if len(found) > 1 or (found and not live):
+            raise VaultWriteRefused("the vault has an ambiguous top-level istota group")
+        root = live[0] if live else kp.root_group
+        groups = [
+            group for group in root.subgroups
+            if str(group.name or "").strip().casefold() == VAULT_WRITE_GROUP
+        ]
+        if len(groups) > 1 or (groups and groups[0].uuid == _recyclebin_uuid(kp)):
+            raise VaultWriteRefused("the vault has ambiguous generated groups")
+        group = groups[0] if groups else kp.add_group(root, VAULT_WRITE_GROUP)
+        kp.add_entry(group, slug, username, password, url=url)
+
+        leaf = _vault_leaf(location)
+        original = os.stat(leaf, dir_fd=location.dir_fd, follow_symlinks=False)
+        if not stat.S_ISREG(original.st_mode):
+            raise VaultUnreadable("the vault is not a regular file")
+        temp_name = f".{location.path.name}.{secrets.token_hex(12)}.tmp"
+        temp_leaf = Path(temp_name) if location.dir_fd is not None else location.path.parent / temp_name
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temp_leaf, flags, 0o600, dir_fd=location.dir_fd)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                try:
+                    kp.save(stream)
+                except Exception:  # noqa: BLE001 - pykeepass can reject malformed XML text
+                    raise VaultWriteRefused("the vault library could not save this entry") from None
+                _preserve_vault_metadata(stream.fileno(), original)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temp_data, temp_digest = read_vault_bytes(temp_leaf, dir_fd=location.dir_fd)
+            verified = parse_vault(temp_data, passphrase)
+            checked = set(verified.services) | set(verified.held)
+            expected_values = (password, username, url)
+            values_match = all(
+                verified.services.get(name) == value if value.strip() else name in verified.held
+                for name, value in zip(names, expected_values, strict=True)
+            )
+            if verified.truncated or any(name not in checked for name in names) or not values_match:
+                raise VaultWriteRefused("the saved vault did not verify")
+            latest, latest_digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
+            if latest_digest != digest or latest != data:
+                raise VaultChanged("the vault changed during the write")
+            os.replace(temp_leaf, leaf, src_dir_fd=location.dir_fd, dst_dir_fd=location.dir_fd)
+            if db_path is not None and user_id is not None:
+                try:
+                    apply_vault(db_path, user_id, verified)
+                except Exception as exc:  # noqa: BLE001 - the file is already replaced
+                    # The valid KDBX entry is committed. Return its names so
+                    # this task can use them; the next sync retries the apply.
+                    # Never cache the new digest when the apply did not finish.
+                    logger.warning(
+                        "vault: %s: apply after create failed (%s); sync will retry",
+                        _label(user_id), type(exc).__name__,
+                    )
+                else:
+                    recorded = _record_sync_state(
+                        db_path, user_id, OUTCOME_OK, "",
+                        unscoped=not verified.scoped,
+                        generated_count=verified.generated_count,
+                    )
+                    if recorded:
+                        _SYNC_STATE[user_id] = (temp_digest, OUTCOME_OK)
+                    else:
+                        reset_sync_state(user_id)
+            return VaultWrite(names[0], names[1], names[2], temp_digest)
+        finally:
+            try:
+                os.unlink(temp_leaf, dir_fd=location.dir_fd)
+            except FileNotFoundError:
+                pass
 
 
 def parse_vault(data: bytes, passphrase: str) -> VaultRead:
@@ -743,6 +1000,13 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
         if secrets_store.delete_secret(db_path, user_id, VAULT_ENTRY_SERVICE, name):
             result.deleted += 1
             result.deleted_keys.append(name)
+    # The tag store must only consume a complete read. This repeats the early
+    # `read.truncated` return above so a later refactor cannot move the closure
+    # into the prefix-read path and permanently shut an address off.
+    if not read.truncated:
+        from . import db
+        with db.get_db(db_path) as conn:
+            db.close_missing_signup_tags(conn, user_id, set(read.services) | read.held)
     return result
 
 
@@ -987,7 +1251,15 @@ def _map_groups(kp, digest: str) -> VaultRead:
     # `istota/`, so `<root>/aws/key` produces `aws_key` exactly as
     # `istota/aws/key` does. Its own entries are read too: a KDBX exported out
     # of a password manager commonly has entries sitting at the top level.
-    for root in roots if scoped else [kp.root_group]:
+    starting_roots = roots if scoped else [kp.root_group]
+    generated_count = sum(
+        len(group.entries)
+        for root in starting_roots
+        for group in root.subgroups
+        if str(group.name or "").strip().casefold() == VAULT_WRITE_GROUP
+        and group.uuid != walk.recyclebin
+    )
+    for root in starting_roots:
         _visit_group(walk, root, (), 0)
 
     if not scoped:
@@ -1111,6 +1383,7 @@ def _map_groups(kp, digest: str) -> VaultRead:
         truncated=walk.stopped if walk.stopped in _TRUNCATING_CAPS else "",
         scoped=scoped,
         skipped=tuple(walk.skipped),
+        generated_count=generated_count,
     )
 
 
@@ -1367,6 +1640,8 @@ def passphrase_refusal(value: str) -> str | None:
 OUTCOME_OK = "ok"
 #: The digest matched a cached one, so nothing was parsed and nothing written.
 OUTCOME_UNCHANGED = "unchanged"
+#: The host-private lock stayed held, so this cycle deferred without a read.
+OUTCOME_BUSY = "busy"
 #: No ``vault_path`` for this user — the feature is off, which is the default.
 OUTCOME_NOT_CONFIGURED = "not_configured"
 #: ``sync_all``'s containment: something outside the closed set of vault errors
@@ -1466,7 +1741,7 @@ VAULT_NOTIFICATION_SERVICE = "vault"
 #: and raises a fixed sentence instead. A table makes the property structural
 #: rather than a rule each raise site has to keep.
 #:
-#: **Eight classes, where §8 enumerates four and Stage 4 named three more.**
+#: **The read's eight classes and the write's two classes.**
 #: ``VaultUnreadable`` is in neither enumeration and reaches ``_settle`` by
 #: exactly the route ``VaultMissing`` does, so it gets a sentence here and
 #: ``test_every_vault_error_class_has_a_sentence`` walks the subclasses rather
@@ -1509,6 +1784,13 @@ NOTIFICATION_REASONS: dict[str, str] = {
     VaultPathRefused.__name__: (
         "the configured vault_path is not one the daemon may open — an operator "
         "corrects it in config.toml"
+    ),
+    VaultChanged.__name__: (
+        "the vault changed during a credential write — read it again before retrying"
+    ),
+    VaultWriteRefused.__name__: (
+        "the requested credential could not be created without changing the "
+        "vault's existing namespace"
     ),
 }
 
@@ -1570,6 +1852,7 @@ def encode_sync_state(
     now: str,
     previous: dict | None,
     unscoped: bool | None = None,
+    generated_count: int | None = None,
 ) -> str:
     """The row body for the cycle that just settled.
 
@@ -1595,10 +1878,16 @@ def encode_sync_state(
     ``reason`` is the ``NOTIFICATION_REASONS`` sentence rather than the
     exception's, for the reason that table gives: this row is read by the web
     tier and snapshotted by ``db_backup`` onto the mount.
+
+    ``generated_count`` comes from the parsed group, not flattened names. A
+    failed read carries the last proven count forward.
     """
     carried = (previous or {}).get("ok_at")
     if unscoped is None:
         unscoped = bool((previous or {}).get("unscoped"))
+    if generated_count is None:
+        prior_count = (previous or {}).get("generated_count")
+        generated_count = prior_count if isinstance(prior_count, int) and prior_count >= 0 else 0
     return json.dumps(
         {
             "at": now,
@@ -1606,6 +1895,7 @@ def encode_sync_state(
             "reason": reason,
             "ok_at": now if outcome == OUTCOME_OK else (carried or None),
             "unscoped": bool(unscoped),
+            "generated_count": generated_count,
         },
         sort_keys=True,
     )
@@ -1660,8 +1950,9 @@ _RECORD_BUSY_TIMEOUT_MS = 2000
 
 
 def _record_sync_state(
-    db_path, user_id: str, outcome: str, reason: str, *, unscoped: bool | None = None
-) -> None:
+    db_path, user_id: str, outcome: str, reason: str, *,
+    unscoped: bool | None = None, generated_count: int | None = None,
+) -> bool:
     """Write down what this cycle settled, for the processes that never see it.
 
     ``unscoped`` rides along for the surfaces that never open the file — the
@@ -1709,6 +2000,7 @@ def _record_sync_state(
                 now=db.iso_utc_now(),
                 previous=previous,
                 unscoped=unscoped,
+                generated_count=generated_count,
             )
             db.kv_set(
                 conn,
@@ -1717,11 +2009,13 @@ def _record_sync_state(
                 VAULT_SYNC_STATE_KEY,
                 body,
             )
+        return True
     except Exception:  # noqa: BLE001 - a record of the work, not the work
         logger.warning(
             "vault: %s: the sync record was not written", _label(user_id),
             exc_info=True,
         )
+        return False
 
 
 #: ``user_id -> (digest, outcome)``. In memory, never persisted: a restart
@@ -1815,6 +2109,7 @@ class VaultSyncResult:
     unscoped: bool = False
     #: How many names the cycle read, for the notice's count. Names never.
     names: int = 0
+    generated_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -1847,6 +2142,7 @@ class VaultStatusReport:
     outcome: str = ""
     reason: str = ""
     names: tuple[str, ...] = ()
+    generated_count: int = 0
     skipped: tuple[tuple[str, str], ...] = ()
     scoped: bool = True
     truncated: str = ""
@@ -2054,7 +2350,13 @@ def sync_user(
     location = resolution.location
     path = str(location.path)
     try:
-        result = _sync_resolved(config, user_id, location, path)
+        try:
+            with _vault_file_lock(location, lock_root=config.db_path.parent, blocking=True):
+                result = _sync_resolved(config, user_id, location, path)
+        except TimeoutError:
+            return VaultSyncResult(user_id=user_id, outcome=OUTCOME_BUSY, reason="vault lock busy")
+        except VaultError as exc:
+            result = _settle(user_id, exc, digest=None, path=path)
     finally:
         if location.dir_fd is not None:
             os.close(location.dir_fd)
@@ -2106,6 +2408,7 @@ def _sync_resolved(config, user_id, location, path) -> VaultSyncResult:
         applied=applied,
         unscoped=not read.scoped,
         names=len(read.services),
+        generated_count=read.generated_count,
     )
 
 
@@ -2264,6 +2567,7 @@ def _publish(config, result: VaultSyncResult, *, deliver: bool) -> VaultSyncResu
         result.outcome,
         "" if result.outcome == OUTCOME_OK else notification_reason(result.outcome),
         unscoped=result.unscoped if result.outcome == OUTCOME_OK else None,
+        generated_count=result.generated_count if result.outcome == OUTCOME_OK else None,
     )
     _report(
         config,
@@ -2384,6 +2688,7 @@ def _settle(
     applied: VaultApplyResult | None = None,
     unscoped: bool = False,
     names: int = 0,
+    generated_count: int = 0,
 ) -> VaultSyncResult:
     """Record the outcome, decide whether it is a transition, and say so once.
 
@@ -2441,6 +2746,7 @@ def _settle(
         last_outcome=previous,
         unscoped=unscoped,
         names=names,
+        generated_count=generated_count,
     )
 
 
@@ -2559,6 +2865,10 @@ def vault_status(
     except Exception:  # noqa: BLE001 - a report, never the work
         logger.warning("vault: could not open the database for the sync record")
     recorded = recorded or {}
+    count_value = recorded.get("generated_count")
+    stored_generated_count = (
+        count_value if isinstance(count_value, int) and count_value >= 0 else 0
+    )
 
     def _with_record(report: VaultStatusReport) -> VaultStatusReport:
         return dataclasses.replace(
@@ -2568,6 +2878,7 @@ def vault_status(
             recorded_outcome=str(recorded.get("outcome") or ""),
             recorded_reason=str(recorded.get("reason") or ""),
             recorded_unscoped=bool(recorded.get("unscoped")),
+            generated_count=stored_generated_count,
         )
 
     if resolution.location is None:
@@ -2633,6 +2944,7 @@ def vault_status(
         outcome=OUTCOME_OK,
         parsed=True,
         names=tuple(sorted(read.services)),
+        generated_count=read.generated_count,
         skipped=read.skipped,
         scoped=read.scoped,
         truncated=read.truncated,

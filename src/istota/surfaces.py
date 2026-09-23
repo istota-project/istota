@@ -264,10 +264,10 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
     **This is not `transport.registry._surface_for_source_type` and must not be
     routed through it.** That one answers "where do I deliver this task's
     result", and to do so maps everything that is not ``email`` / ``repl`` /
-    ``web`` to ``"talk"`` — ``briefing``, ``scheduled``, ``subtask``,
+    ``web`` to ``"talk"`` — ``briefing``, ``scheduled``, ``signup``, ``subtask``,
     ``heartbeat``, ``cli``, ``istota_file``, ``doctor`` and the empty string
-    included. Asking it *this* question flips False to True for seven of the
-    thirteen shipped source types and for the empty string besides, and at the
+    included. Asking it *this* question flips False to True for eight of the
+    fourteen shipped source types and for the empty string besides, and at the
     scheduler's confirmation gate the predicate is negated: the prompt would be
     suppressed on the mirror leg for cron, briefing and heartbeat tasks, which
     parks them with the question delivered nowhere until
@@ -277,13 +277,13 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
     (The spec that called for this module says six of twelve, and both numbers
     are wrong. Measured: ``istota_file`` and ``doctor`` flip too, and
     ``playbook`` is a ``memory_chunks.source_type`` rather than a task one — no
-    ``create_task`` call passes it — so the denominator is thirteen.
+    ``create_task`` call passes it — so the denominator is fourteen.
     `tests/test_surface_facts.py` keeps ``playbook`` in its enumeration anyway,
     since an unrecognised value costs one parametrized case and must answer
-    None either way, which is why its flip list carries eight names.)
+    None either way, which is why its flip list carries nine names.)
 
-    A scheduled task originates on no surface at all, so the answer is None
-    and both room predicates answer False for it. Across all thirteen shipped
+    A scheduled or signup task originates on no surface at all, so the answer is None
+    and both room predicates answer False for it. Across all fourteen shipped
     source types that pair answered exactly what the **two** literals at the two
     scheduler gates answered before the conversion replaced them — they were not
     one literal spelled twice: the `store_turn_message` gate read a bare
@@ -293,8 +293,8 @@ def origin_surface_for_source_type(source_type: object) -> str | None:
     separately by `tests/test_surface_model_equivalence.py`, which was written
     and run against those literals. The seven that are also surface names
     (``talk``, ``web``, ``email``, ``repl``, ``istota_file``, ``sms``,
-    ``whatsapp``) pass through; the other six (``briefing``, ``cli``, ``doctor``, ``heartbeat``, ``scheduled``,
-    ``subtask``) do not.
+    ``whatsapp``) pass through; the other seven (``briefing``, ``cli``, ``doctor``, ``heartbeat``, ``scheduled``,
+    ``signup``, ``subtask``) do not.
 
     Derived from `SURFACES` rather than from a second list so the two cannot
     drift. A surface name that is never a source type (``ntfy``) would pass

@@ -1155,6 +1155,12 @@
                   Nothing has been shared from this file yet.
                 {/if}
               </p>
+              <p class="vault-line">
+                Istota created {vault.generated_count ?? 0} credential{(vault.generated_count ??
+                  0) === 1
+                  ? ''
+                  : 's'} in <code>generated/</code>.
+              </p>
               <!--
                 The scope notice. A file with no top-level `istota` group is read
                 in full, which is how it is meant to work for a file put in the
