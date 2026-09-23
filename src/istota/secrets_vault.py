@@ -66,6 +66,7 @@ import re
 import secrets
 import stat
 import string
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,7 +76,7 @@ from . import secrets_store
 logger = logging.getLogger(__name__)
 
 VAULT_WRITE_GROUP = "generated"
-_VAULT_LOCK_FILE = ".istota-vault-lock"
+_VAULT_LOCK_WAIT_SECONDS = 2.0
 
 #: The size above which the file is refused unread. A vault is a few kilobytes
 #: of credentials; 8 MiB is slack for attachments the user kept in the same
@@ -531,25 +532,42 @@ def read_vault_bytes(path: Path, *, dir_fd: int | None = None) -> tuple[bytes, s
     return data, _digest(data)
 
 
+def _vault_lock_path(location, lock_root: Path) -> Path:
+    """One host-private lock name for all processes resolving this vault."""
+    if location.dir_fd is None:
+        identity = str(location.path.resolve(strict=False))
+    else:
+        parent = os.fstat(location.dir_fd)
+        identity = f"{parent.st_dev}:{parent.st_ino}:{location.path.name}"
+    name = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return lock_root / f".istota-vault-{name}.lock"
+
+
 @contextlib.contextmanager
-def _vault_file_lock(location, *, blocking: bool):
-    """Serialize writes with syncs using a lock beside the resolved vault."""
-    name = _VAULT_LOCK_FILE if location.dir_fd is not None else location.path.parent / _VAULT_LOCK_FILE
+def _vault_file_lock(location, *, lock_root: Path, blocking: bool):
+    """Serialize writes with syncs through a daemon-owned lock directory."""
+    name = _vault_lock_path(location, lock_root)
     flags = os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(name, flags, 0o600, dir_fd=location.dir_fd)
+        fd = os.open(name, flags, 0o600)
     except OSError as exc:
         raise VaultUnreadable("the vault lock cannot be opened") from exc
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise VaultUnreadable("the vault lock is not a regular file")
-        mode = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
-        try:
-            fcntl.flock(fd, mode)
-        except BlockingIOError as exc:
-            raise VaultWriteRefused("another vault operation holds the lock") from exc
-        except OSError as exc:
-            raise VaultUnreadable("the vault lock cannot be acquired") from exc
+        deadline = time.monotonic() + _VAULT_LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if not blocking:
+                    raise VaultWriteRefused("another vault operation holds the lock") from exc
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("vault lock busy") from None
+                time.sleep(0.05)
+            except OSError as exc:
+                raise VaultUnreadable("the vault lock cannot be acquired") from exc
         yield
     finally:
         os.close(fd)
@@ -557,6 +575,17 @@ def _vault_file_lock(location, *, blocking: bool):
 
 def _vault_leaf(location):
     return location.path.name if location.dir_fd is not None else location.path
+
+
+def _preserve_vault_metadata(fd: int, original) -> None:
+    """Keep the original access and refuse a write that would change its owner."""
+    saved = os.fstat(fd)
+    if (saved.st_uid, saved.st_gid) != (original.st_uid, original.st_gid):
+        try:
+            os.fchown(fd, original.st_uid, original.st_gid)
+        except OSError:
+            raise VaultWriteRefused("the vault file owner cannot be preserved") from None
+    os.fchmod(fd, stat.S_IMODE(original.st_mode) or 0o600)
 
 
 def create_entry(
@@ -568,6 +597,7 @@ def create_entry(
     password: str,
     url: str,
     expected_digest: str,
+    lock_root: Path,
     db_path: Path | None = None,
     user_id: str | None = None,
 ) -> VaultWrite:
@@ -593,8 +623,10 @@ def create_entry(
         raise VaultWriteRefused("password is empty or too large")
     if username_size > VAULT_MAX_VALUE_BYTES or url_size > VAULT_MAX_VALUE_BYTES:
         raise VaultWriteRefused("username or URL is too large")
+    if any(value != value.strip() for value in (password, username, url)):
+        raise VaultWriteRefused("credential fields cannot have surrounding whitespace")
 
-    with _vault_file_lock(location, blocking=False):
+    with _vault_file_lock(location, lock_root=lock_root, blocking=False):
         data, digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
         if digest != expected_digest:
             raise VaultChanged("the vault changed since it was read")
@@ -640,7 +672,7 @@ def create_entry(
                     kp.save(stream)
                 except Exception:  # noqa: BLE001 - pykeepass can reject malformed XML text
                     raise VaultWriteRefused("the vault library could not save this entry") from None
-                os.fchmod(stream.fileno(), stat.S_IMODE(original.st_mode) or 0o600)
+                _preserve_vault_metadata(stream.fileno(), original)
                 stream.flush()
                 os.fsync(stream.fileno())
             temp_data, temp_digest = read_vault_bytes(temp_leaf, dir_fd=location.dir_fd)
@@ -1573,6 +1605,8 @@ def passphrase_refusal(value: str) -> str | None:
 OUTCOME_OK = "ok"
 #: The digest matched a cached one, so nothing was parsed and nothing written.
 OUTCOME_UNCHANGED = "unchanged"
+#: The host-private lock stayed held, so this cycle deferred without a read.
+OUTCOME_BUSY = "busy"
 #: No ``vault_path`` for this user — the feature is off, which is the default.
 OUTCOME_NOT_CONFIGURED = "not_configured"
 #: ``sync_all``'s containment: something outside the closed set of vault errors
@@ -2268,8 +2302,10 @@ def sync_user(
     path = str(location.path)
     try:
         try:
-            with _vault_file_lock(location, blocking=True):
+            with _vault_file_lock(location, lock_root=config.db_path.parent, blocking=True):
                 result = _sync_resolved(config, user_id, location, path)
+        except TimeoutError:
+            return VaultSyncResult(user_id=user_id, outcome=OUTCOME_BUSY, reason="vault lock busy")
         except VaultError as exc:
             result = _settle(user_id, exc, digest=None, path=path)
     finally:

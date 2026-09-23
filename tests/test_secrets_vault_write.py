@@ -3,8 +3,10 @@
 import dataclasses
 import fcntl
 import os
+import stat
 import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 from pykeepass import create_database
@@ -23,12 +25,15 @@ from istota.secrets_vault import (
 from istota.storage import VaultLocation
 
 
-def _create(path, slug="example", *, username="bot@example.com", url="https://example.com", digest=None):
+def _create(path, slug="example", *, username="bot@example.com", url="https://example.com", digest=None, lock_root=None):
     if digest is None:
         _, digest = read_vault_bytes(path)
+    lock_root = lock_root or path.parent / "daemon-state"
+    lock_root.mkdir(exist_ok=True)
     return create_entry(
         VaultLocation(path=path, dir_fd=None), "test-passphrase", slug=slug,
         username=username, password="new-value", url=url, expected_digest=digest,
+        lock_root=lock_root,
     )
 
 
@@ -138,6 +143,42 @@ def test_entry_cap_and_unencodable_field_refuse(tmp_path, monkeypatch):
     assert path.read_bytes() == before
 
 
+def test_surrounding_whitespace_refuses_before_writing(tmp_path):
+    path = tmp_path / "vault.kdbx"
+    create_database(str(path), password="test-passphrase")
+    before = path.read_bytes()
+    with pytest.raises(VaultWriteRefused, match="whitespace"):
+        _create(path, username=" alice ")
+    assert path.read_bytes() == before
+
+
+def test_file_mode_and_owner_survive_replace(tmp_path):
+    path = tmp_path / "vault.kdbx"
+    create_database(str(path), password="test-passphrase")
+    os.chmod(path, 0o640)
+    before = path.stat()
+    _create(path)
+    after = path.stat()
+    assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+    assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode)
+
+
+def test_unpreservable_owner_refuses(tmp_path, monkeypatch):
+    path = tmp_path / "file"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+
+    def denied(*_):
+        raise PermissionError()
+
+    monkeypatch.setattr(secrets_vault.os, "fchown", denied)
+    try:
+        original = SimpleNamespace(st_uid=os.getuid() + 1, st_gid=os.getgid(), st_mode=0o600)
+        with pytest.raises(VaultWriteRefused, match="owner"):
+            secrets_vault._preserve_vault_metadata(fd, original)
+    finally:
+        os.close(fd)
+
+
 def test_changed_digest_and_failed_temp_parse_leave_original_bytes(tmp_path, monkeypatch):
     path = tmp_path / "vault.kdbx"
     kp = create_database(str(path), password="test-passphrase")
@@ -166,14 +207,21 @@ def test_changed_digest_and_failed_temp_parse_leave_original_bytes(tmp_path, mon
 
 
 def test_contended_lock_refuses(tmp_path):
-    path = tmp_path / "vault.kdbx"
+    vault_dir = tmp_path / "vault"
+    vault_dir.mkdir()
+    path = vault_dir / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
-    lock = tmp_path / ".istota-vault-lock"
+    lock_root = tmp_path / "state"
+    lock_root.mkdir()
+    lock = secrets_vault._vault_lock_path(VaultLocation(path, None), lock_root)
+    assert lock.parent == lock_root
+    assert lock.parent != path.parent
     fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (vault_dir / ".istota-vault-lock").touch()
         with pytest.raises(VaultWriteRefused, match="holds the lock"):
-            _create(path)
+            _create(path, lock_root=lock_root)
     finally:
         os.close(fd)
 
@@ -272,6 +320,7 @@ def test_dir_fd_selects_the_vault_parent(tmp_path):
             VaultLocation(path=wrong_path, dir_fd=fd), "test-passphrase",
             slug="example", username="bot@example.com", password="new-value",
             url="https://example.com", expected_digest=digest,
+            lock_root=tmp_path,
         )
     finally:
         os.close(fd)
@@ -284,7 +333,8 @@ def test_operator_cli_creates_and_applies_without_printing_password(tmp_path, mo
 
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
-    db_path = tmp_path / "state.db"
+    db_path = tmp_path / "state" / "state.db"
+    db_path.parent.mkdir()
     db.init_db(db_path)
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
     secrets_store.set_secret(db_path, "alice", "vault", "passphrase", "test-passphrase")
@@ -312,7 +362,8 @@ def test_operator_cli_creates_and_applies_without_printing_password(tmp_path, mo
 def test_sync_holds_same_lock_as_create(tmp_path, monkeypatch):
     path = tmp_path / "vault.kdbx"
     create_database(str(path), password="test-passphrase")
-    db_path = tmp_path / "state.db"
+    db_path = tmp_path / "state" / "state.db"
+    db_path.parent.mkdir()
     db.init_db(db_path)
     monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
     secrets_store.set_secret(db_path, "alice", "vault", "passphrase", "test-passphrase")
@@ -334,7 +385,7 @@ def test_sync_holds_same_lock_as_create(tmp_path, monkeypatch):
     try:
         assert entered.wait(10)
         with pytest.raises(VaultWriteRefused, match="holds the lock"):
-            _create(path)
+            _create(path, lock_root=db_path.parent)
     finally:
         release.set()
         thread.join()
@@ -342,6 +393,30 @@ def test_sync_holds_same_lock_as_create(tmp_path, monkeypatch):
     result = create_entry(
         VaultLocation(path=path, dir_fd=None), "test-passphrase", slug="example",
         username="bot@example.com", password="new-value", url="https://example.com",
-        expected_digest=digest, db_path=db_path, user_id="alice",
+        expected_digest=digest, lock_root=db_path.parent, db_path=db_path, user_id="alice",
     )
     assert secrets_store.get_secret(db_path, "alice", "vault_entries", result.name) == "new-value"
+
+
+def test_sync_returns_busy_without_applying_when_lock_is_held(tmp_path, monkeypatch):
+    path = tmp_path / "vault.kdbx"
+    create_database(str(path), password="test-passphrase")
+    db_path = tmp_path / "state" / "state.db"
+    db_path.parent.mkdir()
+    db.init_db(db_path)
+    monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+    secrets_store.set_secret(db_path, "alice", "vault", "passphrase", "test-passphrase")
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(f'db_path = "{db_path}"\n[users.alice]\nvault_path = "{path}"\n')
+    config = load_config(config_file)
+    location = VaultLocation(path, None)
+    lock_path = secrets_vault._vault_lock_path(location, db_path.parent)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    monkeypatch.setattr(secrets_vault, "_VAULT_LOCK_WAIT_SECONDS", 0.1)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = secrets_vault.sync_user(config, "alice", deliver=False)
+    finally:
+        os.close(fd)
+    assert result.outcome == secrets_vault.OUTCOME_BUSY
+    assert secrets_store.get_secret(db_path, "alice", "vault_entries", "generated_example") is None

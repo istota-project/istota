@@ -1079,6 +1079,7 @@ def _cmd_secret_vault_new(config, args) -> None:
         result = secrets_vault.create_entry(
             location, passphrase, slug=args.slug, username=username,
             password=password, url=args.url or "", expected_digest=digest,
+            lock_root=config.db_path.parent,
             db_path=config.db_path, user_id=args.user,
         )
     except secrets_vault.VaultError as exc:
