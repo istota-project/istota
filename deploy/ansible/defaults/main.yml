@@ -215,7 +215,7 @@ istota_brain_tmux_fallback_trip_threshold: 5       # launch failures before the 
 istota_brain_tmux_fallback_cooldown_seconds: 300   # seconds the circuit stays open; 0 = no cooldown
 istota_brain_tmux_ready_timeout_seconds: 30        # REPL-ready deadline (0 is not a value: nothing would ever come ready)
 istota_brain_tmux_command_timeout: 10              # per-tmux-subprocess timeout (0 is not a value: every call would time out)
-istota_brain_tmux_cli_version_pin: "2.1.168"       # supported claude CLI version
+istota_brain_tmux_cli_version_pin: "2.1.280"       # supported claude CLI version
 istota_brain_tmux_ready_markers: []                # [] → code defaults
 istota_brain_tmux_trust_markers: []                # [] → code defaults
 istota_brain_tmux_theme_markers: []                # [] → code defaults (first-run theme picker)

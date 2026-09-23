@@ -1296,7 +1296,7 @@ class TestThePerBrainModelDefaults:
         assert rendered.count("\n[brain.tmux]") == 1
         config = load_config_from(rendered)
         assert config.brain.tmux.model == "claude-opus-5"
-        assert config.brain.tmux.cli_version_pin == "2.1.168"
+        assert config.brain.tmux.cli_version_pin == "2.1.280"
 
     def test_the_rendered_blocks_pass_the_play_validator(self):
         """`validate_config.py` allowlists keys per brain sub-table.
