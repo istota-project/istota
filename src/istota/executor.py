@@ -1552,7 +1552,7 @@ def _request_model(task, config, brain) -> str:
     not ask for and is worth a note; this is a pin that was never runnable on
     the brain the room or the routing selected, and the note has no action
     behind it — the model surfaces already refuse an id the room's brain cannot
-    run (`_known_room_models`), so this is the residue of a room whose brain
+    run (`_room_model_allowed`), so this is the residue of a room whose brain
     moved out from under a stored pin. It is logged by the rule itself.
     """
     raw = (task.model or "").strip()

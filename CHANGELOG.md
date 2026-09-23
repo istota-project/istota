@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `opus` and `smart` aliases now point at Claude Opus 5.5, so picking either in a room's model setting, or `!model opus`, no longer runs the previous Opus. The room model setting also names the model an unpinned room runs ("Default model (claude-opus-5-5)"), and accepts any full Claude model id, matching what `!room model` already allowed.
+
 - Admin browser links now open the VNC viewer when the configured address omits its filename. The browser list stays available during browser activity instead of timing out behind a long-running operation. Requires a rebuilt browser image.
 
 - Deleting a browser profile no longer refuses because a session’s tab has already closed. State inspection and deletion refusals now list your live sessions and their ages; `forget --all --profile --force` closes them before resetting your profile. Closing an unknown session reports that it was not found, and CAPTCHA responses say when they retain a session.

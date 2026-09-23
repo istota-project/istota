@@ -959,7 +959,7 @@ without the second:
    `!room model sonnet` writes an anthropic id back into a native room and
    undoes the clear permanently. Seven surfaces over six call expressions: the
    `!model` prefix on Talk (`transport/talk/inbound.py`) and on web
-   (`chat_send_message`), `!room model`, `_known_room_models` — which gates the
+   (`chat_send_message`), `!room model`, `_room_model_allowed` — which gates the
    web PATCH — `/chat/commands`, which takes an optional `room_id` for this and
    nothing else, and then `!models` and `!help`, which share
    `commands._ctx_brain`. A surface added through that helper costs no new call

@@ -2962,6 +2962,9 @@ export interface ChatCommands {
   commands: ChatCommand[];
   command_aliases?: ChatCommandAlias[];
   model_aliases: ChatModelAlias[];
+  /** The canonical id an unpinned room runs, resolved through its brain.
+   *  `null` when the brain names none and the backend picks its own. */
+  default_model?: string | null;
   /** What a room may be pinned to. */
   selectable_brains?: SelectableBrain[];
   /** Every *known* kind's model namespace, not only the offered ones — the

@@ -7,6 +7,7 @@ import { render, cleanup, screen, fireEvent } from '@testing-library/svelte';
 // where the operator has listed no selectable kinds.
 vi.mock('$lib/components/chat/autocomplete/providers', () => ({
   getBaseModelChoices: vi.fn(async () => []),
+  getDefaultModel: vi.fn(async () => null),
   getSelectableBrains: vi.fn(async () => []),
   getBrainNamespaces: vi.fn(async () => ({})),
   getInheritedBrain: vi.fn(async () => null),
@@ -16,6 +17,7 @@ import RoomSettings from './RoomSettings.svelte';
 import {
   getBaseModelChoices,
   getBrainNamespaces,
+  getDefaultModel,
   getInheritedBrain,
   getSelectableBrains,
 } from './autocomplete/providers';
@@ -300,6 +302,24 @@ describe('RoomSettings — brain', () => {
     models.mockClear();
     await pick(BRAIN, 'Native');
     expect(models).toHaveBeenCalledWith(7, 'native');
+  });
+
+  it('names the model an unpinned room runs', async () => {
+    // #548: a bare "Default model" hid that the default had moved past every
+    // alias the list offered.
+    const defaultModel = vi.mocked(getDefaultModel);
+    defaultModel.mockResolvedValue('claude-opus-5-5');
+    try {
+      models.mockResolvedValue([{ value: 'claude-opus-5', label: 'opus' }]);
+      await mountSettled(room({ brain: 'claude_code' }));
+      expect(screen.getByRole('button', { name: MODEL })).toHaveTextContent(
+        'Default model (claude-opus-5-5)',
+      );
+      expect(defaultModel).toHaveBeenCalledWith(1, undefined);
+    } finally {
+      defaultModel.mockReset();
+      defaultModel.mockResolvedValue(null);
+    }
   });
 
   it('resets a stale pin to the brain default as the list changes', async () => {

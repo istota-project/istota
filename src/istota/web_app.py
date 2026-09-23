@@ -4691,9 +4691,16 @@ def _pin_namespace_for_room(conn, room_token: str) -> str | None:
         return None
 
 
-def _known_room_models(brain_config) -> set[str]:
-    """Canonical model ids a room default may be set to — the distinct targets
-    the brain exposes via its alias table. Used to validate the PATCH.
+def _room_model_allowed(brain_config, model: str) -> bool:
+    """Whether `model` may be written as a room's default under `brain_config`.
+
+    Accepted: any id the brain's alias table targets, or an id the brain's own
+    `resolve_alias` passes through unchanged as a canonical id. The second half
+    is what `!room model` has always accepted (#548) — without it the PATCH
+    could only write ids some alias happened to point at, so a deployment
+    default no alias targeted could not be pinned from web at all while Talk
+    pinned it fine. A value carrying an effort modifier resolves to something
+    other than itself and is refused; effort is its own field on the PATCH.
 
     `brain_config` is **required**, and is the *room's* own resolved brain
     (`_brain_for_room_token`). It used to be implicit and was the deployment
@@ -4704,14 +4711,13 @@ def _known_room_models(brain_config) -> set[str]:
     would be a path nothing exercises and the wrong one if somebody took it.
     """
     try:
-        return {
-            model
-            for _alias, model, _effort in make_brain(brain_config).list_aliases()
-            if model
-        }
+        brain = make_brain(brain_config)
+        if any(target == model for _alias, target, _effort in brain.list_aliases()):
+            return True
+        return brain.resolve_alias(model) == (model, None)
     except Exception:  # noqa: BLE001 — validation degrades to "reject all" safely
-        logger.warning("known_room_models: brain aliases unavailable", exc_info=True)
-        return set()
+        logger.warning("room_model_allowed: brain aliases unavailable", exc_info=True)
+        return False
 
 
 def _chat_list_rooms(username: str) -> list[dict]:
@@ -7232,17 +7238,24 @@ async def chat_commands(
         else:
             logger.debug("chat_commands: ignoring brain=%r", brain)
     aliases: list[dict] = []
+    # What an unpinned room runs, resolved the way the admin Models card
+    # resolves it, so the room picker can name it instead of the bare "Default
+    # model" that hid #548. None = the backend's own default.
+    default_model: str | None = None
     try:
+        model_brain = make_brain(brain_config)
         aliases = [
             {"alias": alias, "target": model, "effort": effort}
-            for alias, model, effort in make_brain(brain_config).list_aliases()
+            for alias, model, effort in model_brain.list_aliases()
         ]
+        default_model = model_brain.resolve_model_name(model_brain.default_model) or None
     except Exception as e:  # noqa: BLE001 — aliases degrade independently
         logger.warning("chat_commands: model aliases unavailable: %s", e)
     return {
         "commands": cmds,
         "command_aliases": cmd_aliases,
         "model_aliases": aliases,
+        "default_model": default_model,
         **_brain_catalogue(user["username"]),
     }
 
@@ -7492,7 +7505,7 @@ async def chat_update_room(
                 model_brain = await asyncio.to_thread(
                     _brain_for_room_token, room.token, "web",
                 )
-            if model not in _known_room_models(model_brain):
+            if not _room_model_allowed(model_brain, model):
                 return JSONResponse({"error": "unknown model"}, status_code=400)
     updated = await asyncio.to_thread(
         _chat_update_room, user["username"], room_id, name, archived, model, effort,

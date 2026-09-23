@@ -260,6 +260,15 @@ export async function getBaseModelChoices(
   return [...labelByTarget].map(([value, label]) => ({ value, label }));
 }
 
+/** The model an unpinned room runs, for labelling the picker's "Default model"
+ *  option. Same scoping as `getBaseModelChoices`, and read off the same cached
+ *  catalogue, so the two never describe different brains. */
+export async function getDefaultModel(roomId?: number, brain?: string): Promise<string | null> {
+  const catalogue =
+    roomId === undefined ? await loadCatalogue() : await loadRoomCatalogue(roomId, brain);
+  return catalogue.default_model ?? null;
+}
+
 /** Prefix matches first, then substring matches; input order preserved within
  *  each group (the catalogue is already sorted server-side). */
 function rank<T>(items: T[], query: string, keyOf: (item: T) => string): T[] {

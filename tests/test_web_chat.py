@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from istota import db
+from istota.brain.claude_code import OPUS
 from istota.config import (
     Config,
     SiteConfig,
@@ -2484,19 +2485,40 @@ class TestTheRoomPatchValidatesInTheRoomsNamespace:
 
 
 @_needs_web_deps
-class TestKnownRoomModels:
-    def test_it_lists_the_brain_it_is_given(self, tmp_path):
+class TestRoomModelAllowed:
+    def test_it_answers_for_the_brain_it_is_given(self, tmp_path):
         import istota.web_app as mod
         from istota.config import BrainConfig, NativeBrainConfig
 
         _patch_app(_make_config(tmp_path))
-        anthropic = mod._known_room_models(BrainConfig(kind="claude_code"))
-        native = mod._known_room_models(
-            BrainConfig(kind="native", native=NativeBrainConfig(model="endpoint/m")),
-        )
-        assert "claude-opus-5" in anthropic
-        assert "claude-opus-5" not in native
-        assert "endpoint/m" in native
+        anthropic = BrainConfig(kind="claude_code")
+        native = BrainConfig(kind="native", native=NativeBrainConfig(model="endpoint/m"))
+        assert mod._room_model_allowed(anthropic, OPUS)
+        assert not mod._room_model_allowed(native, OPUS)
+        assert mod._room_model_allowed(native, "endpoint/m")
+
+    def test_a_canonical_id_no_alias_targets_is_accepted(self, tmp_path):
+        """#548: a deployment default no alias pointed at could not be pinned
+        from web, while `!room model` accepted it through the same brain's
+        canonical passthrough. The two writers now agree."""
+        import istota.web_app as mod
+        from istota.config import BrainConfig
+
+        _patch_app(_make_config(tmp_path))
+        anthropic = BrainConfig(kind="claude_code")
+        assert "claude-opus-4-7" != OPUS
+        assert mod._room_model_allowed(anthropic, "claude-opus-4-7")
+
+    def test_alias_names_and_effort_suffixes_are_refused(self, tmp_path):
+        """The PATCH stores a canonical id; effort is its own field."""
+        import istota.web_app as mod
+        from istota.config import BrainConfig
+
+        _patch_app(_make_config(tmp_path))
+        anthropic = BrainConfig(kind="claude_code")
+        assert not mod._room_model_allowed(anthropic, "opus")
+        assert not mod._room_model_allowed(anthropic, f"{OPUS}:high")
+        assert not mod._room_model_allowed(anthropic, "gpt-4o")
 
     def test_an_unbuildable_brain_rejects_everything(self, tmp_path):
         """The validator degrades to "reject all" rather than to "accept all" —
@@ -2505,7 +2527,7 @@ class TestKnownRoomModels:
         from istota.config import BrainConfig
 
         _patch_app(_make_config(tmp_path))
-        assert mod._known_room_models(BrainConfig(kind="no-such-brain")) == set()
+        assert not mod._room_model_allowed(BrainConfig(kind="no-such-brain"), OPUS)
 
 
 @_needs_web_deps

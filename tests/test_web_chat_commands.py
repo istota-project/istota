@@ -6,6 +6,7 @@ import pytest
 
 from istota import db
 from istota.config import Config, SiteConfig, UserConfig, WebConfig
+from istota.brain.claude_code import OPUS
 
 try:
     import authlib  # noqa: F401
@@ -407,7 +408,7 @@ class TestModelAliasesFollowTheRoom:
         # aliases having gone missing entirely — indistinguishable from the
         # scoping having worked.
         assert "endpoint/m" in targets
-        assert "claude-opus-5" not in targets
+        assert OPUS not in targets
 
     async def test_the_same_room_unpinned_gets_the_deployments(self, chat_client):
         """The control. Same request, same deployment; only the room's brain
@@ -422,7 +423,7 @@ class TestModelAliasesFollowTheRoom:
             f"/istota/api/chat/commands?room_id={room['id']}", cookies=cookies,
         )
         targets = {a["target"] for a in resp.json()["model_aliases"]}
-        assert "claude-opus-5" in targets
+        assert OPUS in targets
 
     async def test_no_room_id_is_the_deployment_default(self, chat_client):
         """The composer's own autocomplete asks without a room, and that is
@@ -437,7 +438,28 @@ class TestModelAliasesFollowTheRoom:
             db.set_room_brain(conn, room["token"], "native")
         resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
         targets = {a["target"] for a in resp.json()["model_aliases"]}
-        assert "claude-opus-5" in targets
+        assert OPUS in targets
+
+    async def test_the_effective_default_model_is_published(self, chat_client):
+        """#548: the room picker labelled the unpinned choice "Default model"
+        with no id, so nothing on it showed the default had moved past what
+        the aliases pointed at. Resolved the way the admin Models card does."""
+        import istota.web_app as mod
+        from istota.config import ClaudeCodeBrainConfig
+
+        mod._config.brain = _brain_config(
+            kind="claude_code", claude_code=ClaudeCodeBrainConfig(model="smart"),
+        )
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
+        assert resp.json()["default_model"] == OPUS
+
+    async def test_no_configured_default_publishes_none(self, chat_client):
+        import istota.web_app as mod
+        mod._config.brain = _brain_config(kind="claude_code")
+        cookies = await _login(chat_client, "alice")
+        resp = await chat_client.get("/istota/api/chat/commands", cookies=cookies)
+        assert resp.json()["default_model"] is None
 
     async def test_an_unowned_room_falls_back_rather_than_404ing(
         self, chat_client,

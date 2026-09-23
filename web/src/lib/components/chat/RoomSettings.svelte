@@ -5,6 +5,7 @@
   import { ROOM_COLORS, ROOM_COLOR_LABELS, roomColorVar } from '$lib/roomColors';
   import {
     getBaseModelChoices,
+    getDefaultModel,
     getBrainNamespaces,
     getInheritedBrain,
     getSelectableBrains,
@@ -53,12 +54,17 @@
     // otherwise paint one selection's aliases under another.
     const forRoom = room.id;
     const forBrain = brainValue;
-    getBaseModelChoices(forRoom, forBrain || undefined).then((choices) => {
+    Promise.all([
+      getBaseModelChoices(forRoom, forBrain || undefined),
+      getDefaultModel(forRoom, forBrain || undefined),
+    ]).then(([choices, defaultModel]) => {
       if (room.id !== forRoom || brainValue !== forBrain) return;
       // Show the canonical model id in parens next to the alias, so the pick
-      // is unambiguous (e.g. `opus (claude-opus-4-8)`).
+      // is unambiguous (e.g. `opus (claude-opus-4-8)`). The default names its
+      // id too: without it the picker could not show the default had moved
+      // past every alias (#548).
       modelOptions = [
-        { value: '', label: 'Default model' },
+        { value: '', label: defaultModel ? `Default model (${defaultModel})` : 'Default model' },
         ...choices.map((c) => ({ value: c.value, label: `${c.label} (${c.value})` })),
       ];
     });
