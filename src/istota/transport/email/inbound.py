@@ -1905,7 +1905,11 @@ def poll_emails(config: Config) -> list[int]:
                                 conn, tag["user_id"],
                                 dedup_key=f"signup-later:{task_alert_source._slug(tag['slug'], limit=64)}",
                                 title=f"Mail arrived for signup {tag['slug']}",
-                                body="Read the signup inbox before taking any action.",
+                                body=(
+                                    "A new email was saved for this signup. It did not start a task. "
+                                    "To read it, ask your assistant: "
+                                    f"Show me the signup email for {tag['slug']}."
+                                ),
                                 severity="warning", actionable=True,
                                 params={"status": "signup_mail", "slug": tag["slug"]},
                             ))
