@@ -1867,10 +1867,10 @@ def poll_emails(config: Config) -> list[int]:
                     if len(open_tags) > 1 or (
                         open_tags and any(user != open_tags[0][1]["user_id"] for user in exact_users)
                     ) or (
-                        exact_users and not open_tags
+                        not open_tags
                         and any(tail not in config.users for tail in signup_tails)
                     ):
-                        logger.warning("Discarding mail with ambiguous signup recipients")
+                        logger.warning("Discarding mail with unavailable or ambiguous signup recipients")
                         db.mark_email_processed(
                             conn, email_id=envelope.id, sender_email=envelope.sender,
                             subject=envelope.subject, routing_method="discarded",
