@@ -47,6 +47,8 @@ def test_create_is_available_in_the_same_task_and_never_returns_password(tmp_pat
         workspace_path=tmp_path / "workspace",
         users={"alice": UserConfig(vault_path=str(path), email_addresses=["alice@example.com"])},
     )
+    config.email.enabled = True
+    config.email.bot_email = "bot@example.com"
     config.db_path.parent.mkdir()
     db.init_db(config.db_path)
     secrets_store.upsert_secret(config.db_path, "alice", "vault", "passphrase", "test-passphrase")
@@ -55,7 +57,8 @@ def test_create_is_available_in_the_same_task_and_never_returns_password(tmp_pat
         reply = _request(sock, {"type": "vault_create", "slug": "acme", "url": "https://acme.example"})
         assert reply == {
             "name": "generated_acme", "username_name": "generated_acme_username",
-            "url_name": "generated_acme_url", "username": "alice@example.com",
+            "url_name": "generated_acme_url", "username": "bot+alice+acme@example.com",
+            "confirmation_readable": True,
         }
         assert _request(sock, {"type": "vault_credential", "name": reply["name"]})["value"] == proxy.vault_credentials[reply["name"]]
         assert proxy.vault_credentials[reply["name"]] not in json.dumps(reply)
@@ -67,6 +70,7 @@ def test_create_is_available_in_the_same_task_and_never_returns_password(tmp_pat
         report = doctor._vault_contents_result(config, secrets_vault, "security.vault_contents", ["alice"])
         assert "1 in generated/" in report.detail
         with db.get_db(config.db_path) as conn:
+            assert db.signup_tag(conn, "alice+acme")["user_id"] == "alice"
             notice = conn.execute(
                 "SELECT dedup_key, severity FROM notifications WHERE user_id = ? AND source = ?",
                 ("alice", "task_alert"),

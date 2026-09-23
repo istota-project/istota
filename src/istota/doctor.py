@@ -3018,6 +3018,32 @@ def check_credential_vault(config: "Config", probe: bool) -> list[CheckResult]:
     ]
 
 
+def check_signup_tags(config: "Config", probe: bool) -> CheckResult:
+    """Warn if a receiving address is open after its credential was removed."""
+    name = "security.signup_tags"
+    try:
+        from . import db
+        with db.get_db(config.db_path) as conn:
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM signup_tags WHERE opened_at IS NULL"
+            ).fetchone()[0]
+            missing = conn.execute(
+                "SELECT COUNT(*) FROM signup_tags AS t WHERE t.closed_at IS NULL "
+                "AND t.opened_at IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM secrets AS s WHERE s.user_id = t.user_id "
+                "AND s.service = 'vault_entries' AND s.key = 'generated_' || t.slug)"
+            ).fetchone()[0]
+    except Exception as exc:
+        return CheckResult(name, WARN, f"could not inspect signup tags: {type(exc).__name__}", scope=DEPLOYMENT)
+    if missing or pending:
+        return CheckResult(
+            name, WARN,
+            f"{missing} open signup address(es) have no credential; {pending} pending tag(s)",
+            scope=DEPLOYMENT,
+        )
+    return CheckResult(name, OK, "open signup addresses have credentials", scope=DEPLOYMENT)
+
+
 def check_vault_contents(config: "Config", probe: bool) -> CheckResult:
     """Under ``probe``: open each configured vault and report what it holds, as counts.
 
@@ -8873,6 +8899,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.secret_key", check_secret_key),
     ("security.credential_vault", check_credential_vault),
     ("security.vault_contents", check_vault_contents),
+    ("security.signup_tags", check_signup_tags),
     ("security.devbox_netfilter", check_devbox_netfilter),
     ("developer.forge_binaries", check_forge_binaries),
     ("developer.forge_config_drift", check_forge_config_drift),
@@ -8982,6 +9009,7 @@ CHECK_SCOPES: dict[str, str] = {
     # `only` and `skip` match by prefix, so a dotted child could not be skipped
     # without taking the four cheap arms with it. See `check_vault_contents`.
     "security.vault_contents": DEPLOYMENT,
+    "security.signup_tags": DEPLOYMENT,
     "security.devbox_netfilter": DEPLOYMENT,
     "developer.forge_binaries": IMAGE,
     "developer.forge_config_drift": DEPLOYMENT,

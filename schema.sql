@@ -209,6 +209,29 @@ CREATE TABLE IF NOT EXISTS task_events (
 CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events (task_id, seq);
 
 -- Processed emails (to avoid duplicate processing)
+CREATE TABLE IF NOT EXISTS signup_tags (
+    tag TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    opened_at TEXT DEFAULT (datetime('now')),
+    task_minted_at TEXT,
+    closed_at TEXT,
+    UNIQUE(user_id, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_signup_tags_user ON signup_tags(user_id, slug);
+
+CREATE TABLE IF NOT EXISTS signup_emails (
+    id INTEGER PRIMARY KEY,
+    tag TEXT NOT NULL REFERENCES signup_tags(tag),
+    user_id TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    received_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_signup_emails_tag ON signup_emails(tag, id);
+
+-- Processed emails (to avoid duplicate processing)
 CREATE TABLE IF NOT EXISTS processed_emails (
     id INTEGER PRIMARY KEY,
     -- An IMAP UID is unique only within a folder's UIDVALIDITY. Keyed on the
@@ -225,7 +248,7 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     "references" TEXT,  -- RFC 5322 References header for thread chain
     user_id TEXT,
     task_id INTEGER,
-    routing_method TEXT,  -- plus_address, sender_match, thread_match, discarded, quiet, read_error, throttled
+    routing_method TEXT,  -- plus_address, signup, sender_match, thread_match, discarded, quiet, read_error, throttled
     processed_at TEXT DEFAULT (datetime('now')),
     UNIQUE (uidvalidity, email_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id)

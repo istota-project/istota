@@ -31,6 +31,29 @@ from .config import Config
 
 logger = logging.getLogger("istota.email_ownership")
 
+_SIGNUP_PRIVATE_OWNER = "\x00signup-private"
+
+
+def signup_recipient_tails(config: Config, email) -> list[str]:
+    """Whole second plus tails, never split at a user-name separator."""
+    bot = config.email.bot_email
+    if not bot or "@" not in bot:
+        return []
+    local, domain = bot.rsplit("@", 1)
+    if not local or not domain or "+" in local:
+        return []
+    addresses = list(getattr(email, "to", ()) or ()) + list(getattr(email, "cc", ()) or ())
+    tails: list[str] = []
+    for _, address in getaddresses(addresses):
+        if "@" not in address:
+            continue
+        recipient_local, recipient_domain = address.rsplit("@", 1)
+        if recipient_domain.lower() == domain.lower() and recipient_local.lower().startswith(local.lower() + "+"):
+            tail = recipient_local[len(local) + 1:].lower()
+            if "+" in tail and tail not in tails:
+                tails.append(tail)
+    return tails
+
 
 def extract_user_from_recipient(config: Config, email) -> str | None:
     """Extract user_id from a plus-addressed recipient.
@@ -229,6 +252,10 @@ def resolve_email_owner(config: Config, conn, email) -> str | None:
     uid = extract_user_from_recipient(config, email)
     if uid:
         return uid
+    # Signup mail is read through the separate, user-scoped filed store. Even
+    # an unknown or closed double tag must not become shared mailbox mail.
+    if signup_recipient_tails(config, email):
+        return _SIGNUP_PRIVATE_OWNER
 
     sender = getattr(email, "sender", "") or ""
     uid = config.find_user_by_email(sender)

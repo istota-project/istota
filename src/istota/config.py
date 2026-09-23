@@ -144,6 +144,8 @@ class EmailConfig:
     # Polling settings
     poll_folder: str = "INBOX"
     bot_email: str = ""  # bot's email address (to skip own messages)
+    signup_task_window_minutes: int = 30  # 0 files mail without minting a task
+    signup_body_retention_days: int = 14
     # What an own-address claim buys. SMTP `From:` is unauthenticated, so "this
     # came from the user's own address" is a claim, not evidence (ISSUE-227).
     # Three states, weakest first:

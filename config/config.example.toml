@@ -673,6 +673,8 @@ smtp_port = 587
 # Polling settings
 poll_folder = "INBOX"
 bot_email = "istota@example.com"  # bot's email address (to skip own messages)
+# signup_task_window_minutes = 30  # first signup message may mint one follow-up task; 0 only files mail
+# signup_body_retention_days = 14  # blank old filed bodies, retain message rows
 # imap_timeout_seconds = 30  # socket timeout for IMAP connections (fail fast on a dead host)
 # A declaration about your inbound mail path, not a safety switch to flip on.
 # SMTP From: is unauthenticated, so a From: naming a user's own address is a

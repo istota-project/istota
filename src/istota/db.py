@@ -1117,6 +1117,20 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # notice and the user re-auths).
     _migrate_google_oauth_encryption(conn)
 
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS signup_tags (
+            tag TEXT PRIMARY KEY, user_id TEXT NOT NULL, slug TEXT NOT NULL,
+            opened_at TEXT DEFAULT (datetime('now')),
+            task_minted_at TEXT, closed_at TEXT, UNIQUE(user_id, slug)
+        );
+        CREATE INDEX IF NOT EXISTS idx_signup_tags_user ON signup_tags(user_id, slug);
+        CREATE TABLE IF NOT EXISTS signup_emails (
+            id INTEGER PRIMARY KEY, tag TEXT NOT NULL REFERENCES signup_tags(tag),
+            user_id TEXT NOT NULL, sender TEXT NOT NULL, subject TEXT NOT NULL,
+            body TEXT NOT NULL, received_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_signup_emails_tag ON signup_emails(tag, id);
+    """)
     # Pure DDL with no marker — see the docstring. Last because it depends on
     # nothing above it.
     _migrate_notifications(conn)
@@ -6890,6 +6904,139 @@ def adopt_legacy_email_namespace(
         (uidvalidity,),
     )
     return cursor.rowcount or 0
+
+
+@dataclass(frozen=True)
+class SignupFiled:
+    task_id: int | None
+    later: bool
+
+
+def reserve_signup_tag(conn: sqlite3.Connection, user_id: str, slug: str) -> bool:
+    """Claim a tail before vault I/O; pending rows never accept inbound mail."""
+    if not is_scopable_user_id(user_id) or not re.fullmatch(r"[a-z0-9_]+", slug):
+        return False
+    try:
+        conn.execute(
+            "INSERT INTO signup_tags (tag, user_id, slug, opened_at) VALUES (?, ?, ?, NULL)",
+            (f"{user_id}+{slug}", user_id, slug),
+        )
+    except sqlite3.IntegrityError:
+        return False
+    return True
+
+
+def activate_signup_tag(conn: sqlite3.Connection, user_id: str, slug: str) -> bool:
+    cursor = conn.execute(
+        "UPDATE signup_tags SET opened_at = datetime('now') "
+        "WHERE user_id = ? AND slug = ? AND opened_at IS NULL AND closed_at IS NULL",
+        (user_id, slug),
+    )
+    return cursor.rowcount == 1
+
+
+def cancel_signup_tag(conn: sqlite3.Connection, user_id: str, slug: str) -> None:
+    conn.execute(
+        "DELETE FROM signup_tags WHERE user_id = ? AND slug = ? AND opened_at IS NULL",
+        (user_id, slug),
+    )
+
+
+def close_signup_tag(conn: sqlite3.Connection, user_id: str, slug: str) -> None:
+    conn.execute(
+        "UPDATE signup_tags SET closed_at = datetime('now') "
+        "WHERE user_id = ? AND slug = ? AND closed_at IS NULL",
+        (user_id, slug),
+    )
+
+
+def close_missing_signup_tags(conn: sqlite3.Connection, user_id: str, present: set[str]) -> int:
+    """Close tags whose password name a complete vault read no longer holds."""
+    rows = list(conn.execute(
+        "SELECT slug FROM signup_tags WHERE user_id = ? AND opened_at IS NOT NULL "
+        "AND closed_at IS NULL", (user_id,),
+    ))
+    closed = 0
+    for row in rows:
+        if f"generated_{row['slug']}" not in present:
+            close_signup_tag(conn, user_id, row["slug"])
+            closed += 1
+    return closed
+
+
+def signup_tag(conn: sqlite3.Connection, tail: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT tag, user_id, slug, opened_at, task_minted_at FROM signup_tags "
+        "WHERE tag = ? AND opened_at IS NOT NULL AND closed_at IS NULL", (tail,),
+    ).fetchone()
+
+
+def signup_inbox(conn: sqlite3.Connection, user_id: str, slug: str) -> list[sqlite3.Row] | None:
+    tag = conn.execute(
+        "SELECT tag FROM signup_tags WHERE user_id = ? AND slug = ?",
+        (user_id, slug),
+    ).fetchone()
+    if tag is None:
+        return None
+    return list(conn.execute(
+        "SELECT sender, subject, body, received_at FROM signup_emails "
+        "WHERE tag = ? ORDER BY id", (tag[0],),
+    ))
+
+
+def file_signup_email(
+    conn: sqlite3.Connection, tail: str, *, sender: str, subject: str,
+    body: str, window_minutes: int,
+) -> SignupFiled | None:
+    """File a message and mint at most one task, inside the opening window."""
+    tag = signup_tag(conn, tail)
+    if tag is None:
+        return None
+    count = conn.execute(
+        "SELECT COUNT(*) FROM signup_emails WHERE tag = ?", (tail,),
+    ).fetchone()[0]
+    if count >= 100:
+        raise ValueError("signup inbox is full")
+    # Cap both characters and bytes; malformed MIME and long subjects cannot
+    # turn the framework DB into an unbounded message store.
+    def bounded(value: str) -> str:
+        return value.encode("utf-8", "replace")[:65536].decode("utf-8", "ignore")
+
+    conn.execute(
+        "INSERT INTO signup_emails (tag, user_id, sender, subject, body) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (tail, tag["user_id"], bounded(sender), bounded(subject), bounded(body)),
+    )
+    opened = datetime.fromisoformat(tag["opened_at"])
+    inside_window = (
+        window_minutes > 0
+        and datetime.now(timezone.utc).replace(tzinfo=None) - opened
+        < timedelta(minutes=window_minutes)
+    )
+    if inside_window and tag["task_minted_at"] is None:
+        # `slug` was checked before opening the tag. The prompt carries no
+        # header or body field from the inbound message.
+        slug = tag["slug"]
+        task_id = create_task(
+            conn, user_id=tag["user_id"], source_type="signup",
+            prompt=f"A confirmation arrived for signup {slug}. Read it with "
+                   f"email signup-inbox --slug {slug} and complete the confirmation.",
+        )
+        conn.execute(
+            "UPDATE signup_tags SET task_minted_at = datetime('now') WHERE tag = ?",
+            (tail,),
+        )
+        return SignupFiled(task_id, False)
+    return SignupFiled(None, not inside_window)
+
+
+def prune_signup_bodies(conn: sqlite3.Connection, retention_days: int) -> int:
+    cursor = conn.execute(
+        "UPDATE signup_emails SET body = '' WHERE body != '' "
+        "AND received_at < datetime('now', ?)",
+        (f"-{max(0, retention_days)} days",),
+    )
+    return cursor.rowcount
 
 
 def mark_email_processed(

@@ -549,7 +549,7 @@ class SkillProxy:
 
     def _serve_vault_create(self, conn: socket.socket, request: dict) -> None:
         """Create one entry from a host-only passphrase and return names only."""
-        from . import db, secrets_vault, storage
+        from . import db, email_support, secrets_vault, storage
         from .notification_resolvers import task_alert
         from .notification_store import deliver_pending
 
@@ -578,6 +578,13 @@ class SkillProxy:
         if not isinstance(slug, str) or not slug or not isinstance(url, str):
             refuse("vault_write_refused", "A slug and string URL are required")
             return
+        signup_address = None
+        if username is None and config.email.enabled and config.email.bot_email:
+            bot_address = email_support.per_user_address(config, user_id)
+            if bot_address:
+                local, domain = bot_address.rsplit("@", 1)
+                signup_address = f"{local}+{slug}@{domain}"
+                username = signup_address
         if username is None:
             user = config.users.get(user_id)
             addresses = getattr(user, "email_addresses", ()) if user else ()
@@ -588,6 +595,7 @@ class SkillProxy:
         if isinstance(length, bool) or not isinstance(length, int) or not isinstance(symbols, bool):
             refuse("vault_write_refused", "Invalid password policy")
             return
+        reserved_tag = False
         try:
             password = secrets_vault.generate_password(secrets_vault.PasswordPolicy(
                 length=length, require_symbols=symbols, allow_symbols=symbols,
@@ -606,6 +614,11 @@ class SkillProxy:
                     read = secrets_vault.parse_vault(data, passphrase)
                     if read.truncated:
                         raise secrets_vault.VaultWriteRefused("the vault read stopped at a cap")
+                    if signup_address and not reserved_tag:
+                        with db.get_db(config.db_path) as db_conn:
+                            reserved_tag = db.reserve_signup_tag(db_conn, user_id, slug)
+                        if not reserved_tag:
+                            raise secrets_vault.VaultWriteRefused("signup address already used")
                     try:
                         write = secrets_vault.create_entry(
                             location, passphrase, slug=slug, username=username,
@@ -622,14 +635,29 @@ class SkillProxy:
                     import os
                     os.close(location.dir_fd)
         except secrets_vault.VaultError as exc:
+            if reserved_tag:
+                with db.get_db(config.db_path) as db_conn:
+                    db.cancel_signup_tag(db_conn, user_id, slug)
             refuse(type(exc).__name__, str(exc))
             return
+        except Exception:
+            if reserved_tag:
+                with db.get_db(config.db_path) as db_conn:
+                    db.cancel_signup_tag(db_conn, user_id, slug)
+            raise
 
         # A successful replace already wrote the vault. Notification failure
         # cannot turn it into a refusal inviting the model to retry the create.
         self.vault_credentials.update({
             write.name: password, write.username_name: username, write.url_name: url,
         })
+        confirmation_readable = False
+        if signup_address:
+            try:
+                with db.get_db(config.db_path) as db_conn:
+                    confirmation_readable = db.activate_signup_tag(db_conn, user_id, slug)
+            except Exception:
+                logger.exception("vault_create task_id=%s: signup tag could not be opened", self.task_id)
         try:
             with db.get_db(config.db_path) as db_conn:
                 raised = task_alert.write(
@@ -647,6 +675,7 @@ class SkillProxy:
         self._send_response(conn, {
             "name": write.name, "username_name": write.username_name,
             "url_name": write.url_name, "username": username,
+            "confirmation_readable": confirmation_readable,
         })
 
     def _serve_vault_credential(self, conn: socket.socket, request: dict) -> None:

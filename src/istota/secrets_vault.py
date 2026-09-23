@@ -1000,6 +1000,13 @@ def apply_vault(db_path: Path, user_id: str, read: VaultRead) -> VaultApplyResul
         if secrets_store.delete_secret(db_path, user_id, VAULT_ENTRY_SERVICE, name):
             result.deleted += 1
             result.deleted_keys.append(name)
+    # The tag store must only consume a complete read. This repeats the early
+    # `read.truncated` return above so a later refactor cannot move the closure
+    # into the prefix-read path and permanently shut an address off.
+    if not read.truncated:
+        from . import db
+        with db.get_db(db_path) as conn:
+            db.close_missing_signup_tags(conn, user_id, set(read.services) | read.held)
     return result
 
 

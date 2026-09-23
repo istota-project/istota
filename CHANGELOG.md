@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- New accounts can use an address in Istota's mailbox, so confirmation mail is filed for the account and can be read during signup. Mail arriving later raises a notification instead of starting another task.
+
 - Tasks can create credentials in the `generated` group of a configured password vault and use them in a signup form without receiving the password. The vault is no longer read-only to Istota; set `[security] vault_writes_per_task = 0` to disable task-requested writes. A password manager already holding the file open can overwrite a new entry on its next save.
 
 - Admins can find live browsers under Browsers and open each user’s VNC viewer directly. The list refreshes without starting browsers or keeping idle sessions alive.
