@@ -6,11 +6,14 @@ the session layer rather than inside a specific brain. Extracted verbatim from
 ``executor.py`` in Phase 0 of the agent-loop migration; the executor re-exports
 every public symbol for backward compatibility.
 
-Two mechanisms share one ``_last_substantial_region()`` walker. Both
-**replace** ``result_text`` outright — never prepend or glue. (The one path
-that synthesizes text rather than choosing between candidates is
-``_ensure_final_answer``, and only when there is no answer at all to protect;
-see the finality rule below.)
+Notification turns (ISSUE-551) are composed separately: preserve each completed
+answer before the notification, then append the final follow-up. This is the
+only joining exception for non-empty answers and excludes automated output.
+
+Two recovery mechanisms share one ``_last_substantial_region()`` walker. Both
+**replace** ``result_text`` outright within each turn. The empty-answer path,
+``_ensure_final_answer``, can synthesize a notice when there is no answer to
+protect; see the finality rule below.
 
 - **Mechanism A — CM-aware (ISSUE-026):** runs whenever ``cm_boundary`` events
   exist in the trace. Segments by ``cm_boundary`` and returns the last region
@@ -330,11 +333,37 @@ def _compose_full_result(
     status fragment.
 
     Returns ``result_text`` unchanged when no override is justified. Override
-    or trust — never glue; the sole synthesis path is ``_ensure_final_answer``,
-    reached only when there is no answer to protect. Logs every override for
-    calibration.
+    or trust within a turn; notification-delimited turns are joined for
+    interactive tasks so a late follow-up cannot replace the answer. Logs
+    every override for calibration.
     """
     trace = execution_trace or []
+    if not _is_automated_task(task):
+        # A notification starts a separate turn. Tools in that follow-up do
+        # not make the preceding answer narration, but tools *before* the
+        # notification still do. Apply finality inside each turn.
+        answers = []
+        start = 0
+        for i, entry in enumerate(trace):
+            if entry.get("type") != "notification":
+                continue
+            answer = _last_substantial_region(
+                trace[start:i], {"cm_boundary"}, 1, trailing_only=True,
+            )
+            if answer:
+                answers.append(_compose_full_result(answer, trace[start:i], task))
+            start = i + 1
+        if start:
+            followup = _compose_full_result(result_text, trace[start:], task)
+            # Recovery can replace the result, so deduplicate against what
+            # will actually be delivered, not the incoming result frame.
+            answers = [answer for answer in answers if answer not in followup]
+            if answers:
+                composed = "\n\n".join([*answers, followup.strip()])
+                _log_compose_override(task, "notification", result_text, composed)
+                return composed
+            return followup
+
     # A back-reference is the model pointing at its own earlier text, which is
     # the only case where mid-turn text may be adopted as the answer.
     reach_back = _is_back_reference(result_text)

@@ -121,6 +121,12 @@ class ContextManagementEvent:
 
 
 @dataclass
+class TaskNotificationEvent:
+    """A background-task notification started a new main-agent turn."""
+    pass
+
+
+@dataclass
 class ToolEndEvent:
     """A tool call finished. NativeBrain only — ClaudeCodeBrain's stream-json
     has no tool-completion frame, so it never emits this."""
@@ -165,6 +171,7 @@ StreamEvent = (
     | TextDeltaEvent
     | ResultEvent
     | ContextManagementEvent
+    | TaskNotificationEvent
     | ToolEndEvent
     | ToolProgressEvent
     | ThinkingEvent
@@ -272,6 +279,29 @@ def parse_stream_line(
         success = data.get("subtype") == "success"
         text = data.get("result", "")
         return ResultEvent(success=success, text=text, raw=data)
+
+    if (event_type == "user" and data.get("parent_tool_use_id") is None
+            and not data.get("isReplay")):
+        message = data.get("message")
+        content = message.get("content", []) if isinstance(message, dict) else []
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [block.get("text", "") for block in content
+                     if isinstance(block, dict) and block.get("type") == "text"]
+        else:
+            texts = []
+        for text in texts:
+            if not isinstance(text, str):
+                continue
+            text = text.strip()
+            direct = text.startswith("<task-notification>")
+            wrapped = (text.startswith("<system-reminder>")
+                       and text.endswith("</system-reminder>")
+                       and "<task-notification>" in text)
+            if (direct or wrapped) and "</task-notification>" in text:
+                return TaskNotificationEvent()
+        return None
 
     if event_type == "rate_limit_event":
         info = data.get("rate_limit_info")

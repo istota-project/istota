@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A late background-job notification could replace a completed answer with a follow-up about the job. The reply now keeps the answer followed by the update, and the saved web transcript shows it once.
+
 - Mail sent to a closed or unknown signup address is now discarded even when the sender is a configured user. It no longer starts an ordinary email task after the credential is deleted.
 
 - Invalid Claude model references in brain defaults, advisor settings and CRON.md jobs now warn when loaded. Canonical ids need a versioned shape; known aliases and valid future ids still work.
