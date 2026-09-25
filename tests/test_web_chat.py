@@ -1083,6 +1083,41 @@ class TestChatMessagesApi:
         assert "notif_id" in sys_msgs[0]
         assert "task_id" not in sys_msgs[0]
 
+    async def test_notification_answer_is_preserved_once_in_history(self, chat_client):
+        import json
+        import istota.web_app as mod
+        from istota.session.result import _compose_full_result
+
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        answer = "The completed analysis supports the current plan. " * 12
+        note = "The background lookup returned no usable data. " * 5
+        trace = [
+            {"type": "tool", "text": "Read inputs"},
+            {"type": "text", "text": answer},
+            {"type": "notification"},
+            {"type": "text", "text": note},
+        ]
+        result = _compose_full_result(note, trace)
+        with db.get_db(mod._config.db_path) as conn:
+            tid = db.create_task(
+                conn, prompt="analyze inputs", user_id="alice", source_type="web",
+                conversation_token=room["token"], output_target="web",
+            )
+            db.update_task_status(
+                conn, tid, "completed", result=result, execution_trace=json.dumps(trace),
+            )
+        data = (await chat_client.get(
+            f"/istota/api/chat/rooms/{room['id']}/messages", cookies=cookies,
+        )).json()
+        assistant = next(m for m in data["messages"] if m["role"] == "assistant")
+        expected = answer.strip() + "\n\n" + note.strip()
+        assert assistant["text"] == expected
+        assert assistant["segments"] == [
+            {"kind": "tool", "text": "Read inputs"},
+            {"kind": "text", "text": expected},
+        ]
+
     async def test_completed_task_history_carries_trace_and_duration(self, chat_client):
         """A completed web task surfaces its tool trace and wall-clock duration
         in history, so the action strip and timing persist as an inspectable

@@ -28,6 +28,7 @@ from ._events import (
     RateLimitEvent,
     RequestUsageEvent,
     ResultEvent,
+    TaskNotificationEvent,
     TextDeltaEvent,
     TextEvent,
     ThinkingDeltaEvent,
@@ -2004,6 +2005,9 @@ class ClaudeCodeBrain:
                 elif isinstance(event, ContextManagementEvent):
                     execution_trace.append({"type": "cm_boundary"})
                     continue  # don't stream CM markers
+                elif isinstance(event, TaskNotificationEvent):
+                    execution_trace.append({"type": "notification"})
+                    continue  # trace boundary only, never notification payload
                 elif isinstance(event, ToolUseEvent):
                     actions_descriptions.append(event.description)
                     tool_entry = {"type": "tool", "text": event.description}

@@ -5689,11 +5689,22 @@ def _trace_segments(
             entries = json.loads(execution_trace)
             if isinstance(entries, list):
                 parsed_trace = True
+                notification_answer = (
+                    status == "completed" and result and any(
+                        isinstance(e, dict) and e.get("type") == "notification"
+                        for e in entries
+                    )
+                )
                 for e in entries:
                     if not isinstance(e, dict):
                         continue
                     etype = e.get("type")
                     if etype == "text":
+                        # Composition already carries these completed turns.
+                        # Keep tools and any narration outside the final reply.
+                        text = e.get("text") or ""
+                        if notification_answer and text.strip() and text.strip() in result:
+                            continue
                         segments.append({"kind": "text", "text": e.get("text") or ""})
                     elif etype == "tool":
                         segments.append({"kind": "tool", "text": e.get("text") or ""})
