@@ -69,12 +69,14 @@ def exclusive_lock(
     if nofollow:
         raw = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
         try:
-            if not stat.S_ISREG(os.fstat(raw).st_mode):
-                raise OSError(errno.EINVAL, "lock anchor is not a regular file", str(lock_path))
-            fd = os.fdopen(raw, "a+")
+            regular = stat.S_ISREG(os.fstat(raw).st_mode)
         except BaseException:
             os.close(raw)
             raise
+        if not regular:
+            os.close(raw)
+            raise OSError(errno.EINVAL, "lock anchor is not a regular file", str(lock_path))
+        fd = os.fdopen(raw, "a+")
     else:
         fd = open(lock_path, "a+")
     try:

@@ -268,4 +268,6 @@ class TestNoSecondCopy:
         """A stale exemption is how a guard quietly stops guarding."""
         for rel in _NOT_A_COPY:
             text = (SRC / rel).read_text(encoding="utf-8")
-            assert "os.replace(" in text, f"{rel} no longer renames; drop it from _NOT_A_COPY"
+            count = text.count("os.replace(")
+            assert count, f"{rel} no longer renames; drop it from _NOT_A_COPY"
+            assert count == 1, f"{rel} grew a second rename; the exemption covers one writer"

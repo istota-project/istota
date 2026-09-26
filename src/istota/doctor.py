@@ -3036,17 +3036,18 @@ def check_signup_tags(config: "Config", probe: bool) -> CheckResult:
     except Exception as exc:
         return CheckResult(
             name, WARN, f"could not inspect signup tags: {type(exc).__name__}",
-            remedy="check that the framework database is readable and migrated: "
-                   "`istota doctor --only runtime.framework_db`",
+            remedy="restart the scheduler (or run `istota init`) so the framework database "
+                   "has the signup_tags table, then `istota doctor --only runtime.framework_db` "
+                   "if it still fails",
             scope=DEPLOYMENT,
         )
     if missing or pending:
         return CheckResult(
             name, WARN,
             f"{missing} open signup address(es) have no credential; {pending} pending tag(s)",
-            remedy="run `istota secret vault-sync --user <id>` for the owning user: a complete "
-                   "vault read closes an address whose credential is gone, and a pending tag "
-                   "older than five minutes is reconciled on the next create for that name",
+            remedy="for open addresses with no credential, run `istota secret vault-sync`: a "
+                   "complete vault read closes them. A pending tag older than five minutes is "
+                   "reconciled on the next create for that name",
             scope=DEPLOYMENT,
         )
     return CheckResult(name, OK, "open signup addresses have credentials", scope=DEPLOYMENT)

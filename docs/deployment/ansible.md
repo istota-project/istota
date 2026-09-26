@@ -109,10 +109,10 @@ istota_users:
     whatsapp_bsuid: "US.1234567890"   # optional explicit WhatsApp enrollment
     trusted_email_senders: ["*@example.com", "bob@example.net"]
     quiet_email_senders: ["*@newsletter.example"]
-    max_foreground_workers: 2       # 0 or omit = the global default
+    max_foreground_workers: 2       # 0 = the global default
     max_background_workers: 1
-    disabled_skills: []
-    disabled_modules: []            # feeds, money, location
+    disabled_skills: ["whisper"]
+    disabled_modules: ["money"]     # feeds, money, location
     routing:                        # listed purposes replace the stored table
       alert: "ntfy"
       log: "talk:room123"
@@ -125,11 +125,13 @@ istota_users:
         path: "/shared/Projects"
         name: "Projects"
         permissions: "write"
-    vault_path: "istota/vault/credentials.kdbx"
+    vault_path: "/srv/vaults/alice.kdbx"  # only for a file outside istota/vault/
     default_briefings: false
     briefing_email_html: false
     timezone_follow_location: true
 ```
+
+An empty list for `disabled_skills` or `disabled_modules` is the same as omitting it and leaves the stored list alone. `istota user ensure --name <id> --disabled-module ""` clears the module list; the skill list is changed from the web UI.
 
 `routing` maps a purpose (`reply`, `alert`, `log`, `briefing`, `notification`) to an output target. A `web:<room>` token exists only once the room has been created, so inventory can name only a room that is already there; a bare `web` lands in the user's default room.
 

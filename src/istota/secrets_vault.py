@@ -551,9 +551,14 @@ def _vault_file_lock(location, *, lock_root: Path, blocking: bool):
     """
     name = _vault_lock_path(location, lock_root)
 
+    # A private subclass, so an ETIMEDOUT from the open (itself a TimeoutError)
+    # still reads as an unreadable lock rather than a busy one.
+    class _Busy(TimeoutError):
+        pass
+
     def refused(_anchor: str) -> BaseException:
         if blocking:
-            return TimeoutError("vault lock busy")
+            return _Busy("vault lock busy")
         return VaultWriteRefused("another vault operation holds the lock")
 
     with contextlib.ExitStack() as stack:
@@ -564,7 +569,7 @@ def _vault_file_lock(location, *, lock_root: Path, blocking: bool):
                 on_timeout=refused,
                 nofollow=True,
             ))
-        except (TimeoutError, VaultWriteRefused):
+        except (_Busy, VaultWriteRefused):
             raise
         except OSError as exc:
             raise VaultUnreadable("the vault lock cannot be acquired") from exc
