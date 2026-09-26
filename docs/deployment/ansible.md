@@ -25,8 +25,9 @@ The Ansible role at `deploy/ansible/` is the canonical provisioning tool. It han
           alice:
             display_name: "Alice"
             email_addresses: ["alice@example.com"]
-            timezone: "America/New_York"
 ```
+
+The full set of per-user keys is under [Per-user inventory](#per-user-inventory).
 
 ## Using the role
 
@@ -91,6 +92,50 @@ A per-user `whatsapp_number` carries the same authority for the same reason, and
 The role starts one webhook receiver and one `/webhooks/` nginx block for location, SMS and WhatsApp together, derived in `Resolve webhook receiver need`. `/webhooks/whatsapp` gets its own tighter location: the access log is off there, because Meta sends the verify token as a query value on the subscription handshake, and the body limit sits just above the application's own so an oversized POST is answered by istota rather than by nginx.
 
 Per-user `outbound_approval` / `external_turn_display` under `istota_users` are passed to `istota user ensure`, not templated into `[users.X]` — the TOML keys seed only a user with no profile row yet, while the CLI flags update an existing one.
+
+### Per-user inventory
+
+Every key is optional. An omitted key leaves whatever is already stored alone, so the web UI and the CLI keep ownership of anything inventory does not name. `timezone` is deliberately absent: it is a user preference owned by Nextcloud and the web UI, and inventory would overwrite it on every deploy.
+
+```yaml
+istota_users:
+  alice:
+    display_name: "Alice"
+    email_addresses: ["alice@example.com"]
+    log_channel: ""                 # empty lets istota_provision_talk_rooms fill it in
+    alerts_channel: ""              # empty auto-provisions #alerts
+    sms_phone_number: "+15551234567"  # a credential; "" revokes it
+    whatsapp_number: "+15551234567"   # a credential; "" clears the binding
+    whatsapp_bsuid: "US.1234567890"   # optional explicit WhatsApp enrollment
+    trusted_email_senders: ["*@example.com", "bob@example.net"]
+    quiet_email_senders: ["*@newsletter.example"]
+    max_foreground_workers: 2       # 0 or omit = the global default
+    max_background_workers: 1
+    disabled_skills: []
+    disabled_modules: []            # feeds, money, location
+    routing:                        # listed purposes replace the stored table
+      alert: "ntfy"
+      log: "talk:room123"
+    default_destination: "talk"
+    email_reply_routing: "origin+thread"  # origin+thread | origin | thread
+    outbound_approval: "all"        # off | untrusted | all; quote it
+    external_turn_display: "collapsed"    # full | collapsed | hidden
+    resources:
+      - type: "folder"
+        path: "/shared/Projects"
+        name: "Projects"
+        permissions: "write"
+    vault_path: "istota/vault/credentials.kdbx"
+    default_briefings: false
+    briefing_email_html: false
+    timezone_follow_location: true
+```
+
+`routing` maps a purpose (`reply`, `alert`, `log`, `briefing`, `notification`) to an output target. A `web:<room>` token exists only once the room has been created, so inventory can name only a room that is already there; a bare `web` lands in the user's default room.
+
+`vault_path` is needed only for a KDBX file outside the user's own `istota/vault/` folder, which is where the ordinary route puts it and which needs no inventory entry. A relative path is under the user's workspace. An absolute path is a host path and must resolve outside every tree a task sandbox can write. The passphrase goes in `istota_user_secrets` as service `vault`, key `passphrase`. See [the credential vault](../configuration/credentials.md#credential-vault).
+
+`briefings` takes a list of block briefings, seeded once into the user's module database; see [Briefings](../features/briefings.md).
 
 Two web variables are worth knowing about before changing them:
 
