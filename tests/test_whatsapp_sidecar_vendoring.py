@@ -2870,6 +2870,94 @@ class TestAReplacedConnectionIsBounded:
         assert out["kept"] is True
         assert out["state"] is None
 
+    @pytest.mark.requires_dac
+    def test_an_unreadable_credential_at_a_probe_ends_the_run(self, tmp_path):
+        """Branch review: a mode change moves no `mtime:size` stamp, so the run
+        survived, each refused probe counted as spent, and it reached a
+        give-up for the wrong cause while the real verdict was never sent."""
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "creds.json").write_text('{"registered": true}')
+        out = self._go(tmp_path, (
+            "const s = make(); s.start = m.Session.prototype.start;"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "fs.chmodSync(process.env.ISTOTA_BAILEYS_SESSION_DIR + '/creds.json', 0);"
+            "s.waits.at(-1).onDeadline();"
+            + self._out("{run: m.readReplacedState(), last: fatals().at(-1)}")
+        ))
+
+        assert out["last"]["reason"] == "credential_unreadable"
+        assert out["run"] is None
+
+    @pytest.mark.requires_dac
+    def test_a_restart_with_an_unreadable_credential_does_not_resume_the_hold(
+        self, tmp_path,
+    ):
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "creds.json").write_text('{"registered": true}')
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "fs.chmodSync(process.env.ISTOTA_BAILEYS_SESSION_DIR + '/creds.json', 0);"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            + self._out("{holding, run: m.readReplacedState()}")
+        ))
+
+        assert out["holding"] is False
+        assert out["run"] is None
+
+    def test_a_probe_that_cannot_start_holds_again(self, tmp_path):
+        """Branch review: `bad_session` reached from inside a probe left no hold
+        and no timer, so the sidecar re-announced a transient latch for ever
+        while doctor said it would retry on its own."""
+        out = self._go(tmp_path, (
+            "(async () => {"
+            "const flush = () => new Promise((r) => setImmediate(r));"
+            "const s = make(); s.start = m.Session.prototype.start;"
+            "s.open_ = async () => { throw new Error('x'); };"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "const before = s.waits.length;"
+            "s.waits.at(-1).onDeadline(); await flush();"
+            "for (let i = 0; i < 4; i++) { timers.at(-1).fn(); await flush(); }"
+            + self._out(
+                "{before, waits: waitsOf(s), stopping: s.stopping,"
+                " bad: fatals().filter((f) => f.reason === 'bad_session').length,"
+                " run: m.readReplacedState(), hour: m.REPLACED_PROBE_DELAYS_MS[1]}"
+            )
+            + "})();"
+        ))
+
+        assert len(out["waits"]) == out["before"] + 1
+        assert out["waits"][-1] == out["hour"]
+        assert out["stopping"] is True
+        assert out["bad"] == 0
+        assert out["run"]["probes"] == 1
+
+    def test_a_restart_just_after_a_probe_opens_does_not_spend_it(self, tmp_path):
+        """Branch review: the probe was counted before it opened and nothing
+        was saved at the open, so a restart read an open probe as a failed one.
+        After the third that gave up a working session."""
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "for (let i = 0; i < 2; i++) { s.waits.at(-1).onDeadline(); open(s); close(s, 440); }"
+            "s.waits.at(-1).onDeadline(); open(s);"
+            "const s2 = make(); const holding = s2.restoreReplacedRun();"
+            "const stable = timers.filter((t) => t.ms > 0 && t.ms <= m.REPLACED_STABLE_MS);"
+            + self._out(
+                "{holding, run: m.readReplacedState(), probing: s2.probing,"
+                " remaining: s2.stableRemainingMs}"
+            )
+        ))
+
+        assert out["holding"] is False
+        assert out["run"]["given_up"] is False
+        assert out["run"]["probes"] == 3
+        assert out["probing"] is True
+        assert 0 < out["remaining"] <= 300_000
+
     def test_closes_outside_the_window_do_not_latch(self):
         out = TestTheLoggedOutBackoff._run(
             f"const m = require({json.dumps(str(PROGRAM))});"

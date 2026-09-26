@@ -8208,6 +8208,23 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
             remedy=REPLACED_GIVE_UP_REMEDY,
             scope=DEPLOYMENT,
         )
+    if (
+        status.get("fatal_is_permanent")
+        and status.get("fatal_reason") == "credential_unreadable"
+    ):
+        # Not the unlink arm (ISSUE-552): the device is linked and the local
+        # credential cannot be read. The remedy is the alert's own text.
+        from .transport.whatsapp.baileys_runtime import (
+            CREDENTIAL_UNREADABLE_REMEDY,
+        )
+
+        return CheckResult(
+            name, FAIL,
+            "the saved WhatsApp credential cannot be read, so the sidecar "
+            "opens nothing and every send is refused.",
+            remedy=CREDENTIAL_UNREADABLE_REMEDY,
+            scope=DEPLOYMENT,
+        )
     if status.get("fatal_is_permanent"):
         # Bounded through the same slug the alert body uses, and for the same
         # reason: the reason comes from the sidecar, a `CheckResult` is

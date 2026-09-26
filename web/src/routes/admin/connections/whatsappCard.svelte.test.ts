@@ -242,6 +242,17 @@ describe('the WhatsApp card — which control each state offers', () => {
     expect(screen.getByText(/does not revoke the copied credential/)).toBeInTheDocument();
   });
 
+  it('does not call an unreadable credential "unlinked"', async () => {
+    await mount({
+      link: linkState({ fatal_is_permanent: true, fatal_reason: 'credential_unreadable' }),
+    });
+
+    expect(screen.queryByText('unlinked')).toBeNull();
+    expect(screen.getByText('credential unreadable')).toBeInTheDocument();
+    expect(screen.getByText(/owner and mode/)).toBeInTheDocument();
+    expect(screen.queryByText(/will not come back without a re-pair/)).toBeNull();
+  });
+
   it('offers one control on a working session, and it is the confirmed one', async () => {
     await mount({ link: linkState({ ready: true }) });
 

@@ -210,6 +210,9 @@
       if (link.connection_replaced_latched && !link.ready) {
         return { variant: 'danger', label: 'in use elsewhere' };
       }
+      if (link.fatal_is_permanent && link.fatal_reason === 'credential_unreadable') {
+        return { variant: 'danger', label: 'credential unreadable' };
+      }
       if (link.fatal_is_permanent) return { variant: 'danger', label: 'unlinked' };
       if (link.ready) return { variant: 'success', label: 'linked' };
       if (link.connected) return { variant: 'warn', label: 'connecting' };
@@ -248,6 +251,14 @@
         'Another client is using this WhatsApp session, so the sidecar has stopped reconnecting ' +
         'and sends are refused. It retries after 15 minutes and then after an hour twice more; ' +
         'stop the other client and the next retry brings the session back.'
+      );
+    }
+    if (link.fatal_is_permanent && link.fatal_reason === 'credential_unreadable') {
+      // ISSUE-552. The device is still linked; the local file cannot be read.
+      return (
+        'The saved credential cannot be read, so nothing is opened and sends are refused. ' +
+        'Check the owner and mode of creds.json and restart the sidecar first. Re-pair below ' +
+        'only if the file itself is empty or corrupt and creds.json.bak is not usable.'
       );
     }
     if (link.fatal_is_permanent) {

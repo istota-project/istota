@@ -1167,6 +1167,7 @@ function parseReplacedState(text) {
     latched_at: Number.isFinite(parsed.latched_at) ? parsed.latched_at : null,
     probes: count(parsed.probes),
     next_probe_at: Number.isFinite(parsed.next_probe_at) ? parsed.next_probe_at : null,
+    probe_opened_at: Number.isFinite(parsed.probe_opened_at) ? parsed.probe_opened_at : null,
     given_up: parsed.given_up === true,
     stamp: typeof parsed.stamp === 'string' ? parsed.stamp : '',
     announced: Math.min(announced, 2),
@@ -1176,7 +1177,7 @@ function parseReplacedState(text) {
 function emptyReplacedState() {
   return {
     times: [], total: 0, latched_at: null, probes: 0, next_probe_at: null,
-    given_up: false, stamp: '', announced: 0,
+    probe_opened_at: null, given_up: false, stamp: '', announced: 0,
   };
 }
 
@@ -1573,6 +1574,9 @@ class Session {
     // The timer that ends a latched run once a probe has stayed open for
     // `REPLACED_STABLE_MS`, and the cancel handle of the hold's wait.
     this.stableTimer = null;
+    // Set by a restore that resumes an open probe: what is left of its
+    // stable window for the next open.
+    this.stableRemainingMs = null;
     this.cancelReplacedWait = null;
     // Seams for the tests, which drive a whole run without real timers or a
     // real exit.
@@ -1768,6 +1772,10 @@ class Session {
   refuseUnreadableCredential(kind) {
     if (this.credentialUnreadable) return;
     this.credentialUnreadable = true;
+    // Outranks a replaced-connection run (ISSUE-553): a mode or owner change
+    // moves no stamp, so the run would otherwise survive, spend its probes
+    // on refusals and give up for the wrong cause.
+    this.endReplacedRun('the stored credential cannot be read');
     this.stopping = true;
     this.sock = null;
     log('error', 'creds.json cannot be read and there is no usable backup; '
@@ -2039,16 +2047,27 @@ class Session {
   armStableTimer() {
     this.cancelStableTimer();
     if (replacedLevel(this.replaced) === 0) return;
+    // A restart during an open probe resumes the time it had left rather
+    // than starting over; otherwise the full window, from this open.
+    const wait = this.stableRemainingMs !== null
+      ? this.stableRemainingMs : REPLACED_STABLE_MS;
+    this.stableRemainingMs = null;
+    this.replaced.probe_opened_at = Date.now() - (REPLACED_STABLE_MS - wait);
+    writeReplacedState(this.replaced);
     this.stableTimer = setTimeout(() => {
       this.stableTimer = null;
       if (this.open) this.endReplacedRun('the session stayed open');
-    }, REPLACED_STABLE_MS);
+    }, wait);
   }
 
   cancelStableTimer() {
     if (this.stableTimer !== null) {
       clearTimeout(this.stableTimer);
       this.stableTimer = null;
+    }
+    if (this.replaced && this.replaced.probe_opened_at !== null) {
+      this.replaced.probe_opened_at = null;
+      writeReplacedState(this.replaced);
     }
   }
 
@@ -2094,6 +2113,12 @@ class Session {
     const now = nowMs === undefined ? Date.now() : nowMs;
     const state = readReplacedState();
     if (!state) return false;
+    // The credential's own verdict first: an unreadable one is reported by
+    // `start()`, and a hold resumed ahead of it would hide it.
+    if (storedCredentialVerdict(SESSION_DIR).verdict === 'unreadable') {
+      clearReplacedState();
+      return false;
+    }
     if (state.stamp !== credentialStamp()) {
       log('info', 'the credential changed since the replaced-connection run '
         + 'was recorded; ending the run');
@@ -2104,6 +2129,19 @@ class Session {
     if (state.given_up) {
       this.giveUp();
       return true;
+    }
+    if (state.latched_at !== null && state.probe_opened_at !== null) {
+      // The previous process died with a probe open. That probe has not
+      // failed: reconnect and give it the rest of its stable window, rather
+      // than counting it spent. Past the window, it already held.
+      const elapsed = now - state.probe_opened_at;
+      if (elapsed >= REPLACED_STABLE_MS) {
+        this.endReplacedRun('the probe had stayed open before the restart');
+        return false;
+      }
+      this.probing = true;
+      this.stableRemainingMs = REPLACED_STABLE_MS - Math.max(0, elapsed);
+      return false;
     }
     if (state.latched_at !== null) {
       this.holdOrGiveUp(now);
@@ -2147,6 +2185,17 @@ class Session {
     log('error', 'the WhatsApp session could not be started', {
       kind: err && err.name, attempts: this.startFailures,
     });
+    if (this.probing && replacedLevel(this.replaced) > 0) {
+      // A probe that cannot even start has not shown the other client is
+      // gone, and a hold is what keeps the run on its schedule. Reporting
+      // `bad_session` here left no hold and no timer (ISSUE-553).
+      this.startFailures = 0;
+      this.probing = false;
+      this.replaced.next_probe_at = null;
+      this.holdOrGiveUp(Date.now());
+      return;
+    }
+    this.endReplacedRun('the session could not be started');
     this.link.send(MSG_FATAL, { reason: FATAL_BAD_SESSION, permanent: true });
   }
 

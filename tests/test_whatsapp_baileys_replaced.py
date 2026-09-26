@@ -370,6 +370,49 @@ class TestTheAlerts:
         assert callable(seen.get("on_replaced"))
 
 
+class TestAnUnreadableCredentialSaysOneThing:
+    """Branch review: the alert's title said "unlinked", its body said fix the
+    owner or mode, doctor said `pair --reset`, and the card said "unlinked".
+    One remedy now, fix-and-restart first and a re-pair only for a damaged
+    file with no usable backup."""
+
+    def test_the_alert_has_a_title_and_key_of_its_own(self, tmp_path):
+        config = _config(tmp_path)
+
+        asyncio.run(baileys_runtime._announce_unlink(config, "credential_unreadable"))
+
+        with db.get_db(config.db_path) as conn:
+            rows = [tuple(r) for r in conn.execute(
+                "SELECT dedup_key, title, body FROM notifications"
+            )]
+        assert len(rows) == 1
+        key, title, body = rows[0]
+        assert key == "whatsapp:baileys-credential-unreadable"
+        assert "unlinked" not in title.lower()
+        # Stored bodies are flattened (backticks go), so compare that form.
+        from istota.notification_resolvers.task_alert import flatten_body
+
+        assert flatten_body(baileys_runtime.CREDENTIAL_UNREADABLE_REMEDY) in body
+
+    def test_doctor_gives_the_same_remedy(self, tmp_path):
+        baileys_bridge.set_active_bridge(_Status(
+            listening=True, connected=True, ready=False,
+            fatal_reason="credential_unreadable", fatal_is_permanent=True,
+        ))
+
+        result = _doctor_run(_doctor_config(tmp_path), "whatsapp.baileys_bridge")
+
+        assert result.status == doctor.FAIL
+        assert result.remedy == baileys_runtime.CREDENTIAL_UNREADABLE_REMEDY
+        assert "session ended" not in result.detail
+
+    def test_the_remedy_restarts_before_it_re_pairs(self):
+        remedy = baileys_runtime.CREDENTIAL_UNREADABLE_REMEDY
+
+        assert remedy.index("restart") < remedy.index("pair --reset")
+        assert "creds.json.bak" in remedy
+
+
 class TestDoctor:
     def test_a_latched_run_fails_without_a_re_pair(self, tmp_path):
         baileys_bridge.set_active_bridge(_Status(

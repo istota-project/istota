@@ -64,6 +64,27 @@ _ALERT_TITLE = "WhatsApp is unlinked — the paired session needs re-pairing"
 #: axis would be one durable row and one push per spelling.
 _ALERT_DEDUP_KEY = "whatsapp:baileys-unlinked"
 
+#: A lost local credential is not an unlinked device (ISSUE-552): WhatsApp
+#: still has the device, and the first fix is usually a `chown` or `chmod`.
+#: Its own title and key, so the row does not say "unlinked".
+_UNREADABLE_ALERT_TITLE = "The saved WhatsApp credential cannot be read"
+_UNREADABLE_DEDUP_KEY = "whatsapp:baileys-credential-unreadable"
+
+#: What an operator does about an unreadable credential, shared by the alert
+#: and doctor so the two cannot give different instructions. Fix and restart
+#: first; a re-pair archives the directory and is only for a damaged file.
+CREDENTIAL_UNREADABLE_REMEDY = (
+    "Check `sidecar.log` in the session directory for the error. If the "
+    "owner or mode of `creds.json` is wrong, fix it and restart the sidecar. "
+    "Re-pair only if the file itself is empty or corrupt and "
+    "`creds.json.bak` is not usable: from Admin, Connections, or by stopping "
+    "the istota daemon and any sidecar running as a unit of its own, running "
+    "`istota whatsapp pair --reset`, scanning the code and starting them "
+    "again, then removing the old entry from WhatsApp's Linked Devices "
+    "screen. The unreadable session is kept as a timestamped sibling "
+    "directory, not deleted."
+)
+
 #: The replaced-connection alerts (ISSUE-553). Keys and titles of their own,
 #: since the condition is not an unlinked device: the device is linked and
 #: another client is using it. Two keys rather than one, because the latch
@@ -290,13 +311,7 @@ def _alert_body(reason: str) -> str:
         return (
             "The saved WhatsApp credential cannot be read, so every WhatsApp "
             "send is refused and nothing is opened until it is repaired. "
-            "Check `sidecar.log` in the session directory: if the file's "
-            "owner or mode is wrong, fix that and restart the sidecar. "
-            "Otherwise stop the istota daemon and any sidecar running as a "
-            "unit of its own, run `istota whatsapp pair --reset`, scan the "
-            "code, then start them again, and remove the old entry from "
-            "WhatsApp's Linked Devices screen. The unreadable session is kept "
-            "as a timestamped sibling directory, not deleted."
+            + CREDENTIAL_UNREADABLE_REMEDY
         )
     return (
         f"The WhatsApp device link ended ({_slug(reason, fallback='unknown')}), so every "
@@ -310,7 +325,13 @@ def _alert_body(reason: str) -> str:
 
 def _write_unlink_alerts(config: "Config", reason: str) -> tuple[object, ...]:
     return _write_baileys_alerts(
-        config, _ALERT_DEDUP_KEY, _ALERT_TITLE, _alert_body(reason),
+        config,
+        *(
+            (_UNREADABLE_DEDUP_KEY, _UNREADABLE_ALERT_TITLE)
+            if reason == "credential_unreadable"
+            else (_ALERT_DEDUP_KEY, _ALERT_TITLE)
+        ),
+        _alert_body(reason),
         "session_unlinked",
     )
 
