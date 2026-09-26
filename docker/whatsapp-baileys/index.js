@@ -1007,9 +1007,9 @@ function credentialStamp() {
  * moving the directory aside is the documented remedy.
  *
  * **The baseline is taken at the first poll rather than here**, and that is
- * the one subtle thing in this function. `saveCreds` is an async write, so
- * one started by the login that has just failed can land *after* this is
- * called — and a baseline taken before it lands reads our own write as a
+ * the one subtle thing in this function. `saveCreds` runs off a
+ * `creds.update` event, so one raised by the login that has just failed can
+ * land *after* this is called — and a baseline taken before it lands reads our own write as a
  * re-pair, ends the wait at the first poll on every rung, and leaves a
  * `logout-backoff.json` whose climbing count says the backoff is working.
  * That is the whole defect wearing a label. What the later baseline costs is
@@ -1049,6 +1049,275 @@ function scheduleLogoutExit(delayMs, onExit, pollMs) {
   // Not `unref()`ed: the wait is the only thing holding this process open,
   // and an unreferenced timer would let Node exit immediately instead.
   setTimeout(tick, Math.min(delayMs, poll));
+}
+
+// --- the auth state --------------------------------------------------------
+
+/*
+ * The paired credential and its Signal keys, written so that a stop at any
+ * instant leaves either the old file or the new one (ISSUE-554).
+ *
+ * Baileys' `useMultiFileAuthState` writes each file with `writeFile` in
+ * place, which truncates and then writes. `creds.json` is rewritten on every
+ * connection open, so a process stopped between the two left a 0-byte file,
+ * and the library reads an unparseable file as no credential at all: a fresh,
+ * unregistered one, a QR, and a session that is simply gone. Observed once,
+ * 7ms after an open, during a replaced-connection loop that was opening every
+ * few seconds.
+ *
+ * This is that function's logic with the one change it needs: every write
+ * goes to a temp file in the same directory, is fsynced, and is renamed over
+ * the target, and the directory is fsynced after. The file names are
+ * Baileys' own (`authFileName`), so a directory written by the library reads
+ * back unchanged. Writes are synchronous, which is what makes the library's
+ * per-file mutex unnecessary: nothing can interleave inside one.
+ *
+ * The three library helpers it needs are passed in rather than imported, so
+ * the default suite can drive it with no `node_modules` present.
+ */
+const AUTH_TEMP_PREFIX = '.istota-tmp-';
+const CREDS_FILE = 'creds.json';
+const CREDS_BACKUP_FILE = 'creds.json.bak';
+
+function authFileName(file) {
+  return String(file).replace(/\//g, '__').replace(/:/g, '-');
+}
+
+/*
+ * Write `text` to `target` so that no reader ever sees a partial file.
+ *
+ * `O_EXCL` with `O_NOFOLLOW` on the temp name, so the create cannot land on
+ * something planted there, and `rename(2)` replaces a symlink at `target`
+ * rather than writing through it. 0600 at creation, whatever the umask. A
+ * failure before the rename removes the temp file and raises; the target is
+ * untouched. The directory fsync is what makes the rename itself survive a
+ * power loss, and its failure is logged rather than raised because by then
+ * the new contents are already in place.
+ *
+ * `durable: false` keeps the temp-and-rename and skips both fsyncs. The
+ * Signal keys take it: Baileys writes 812 pre-keys in one batch at pairing,
+ * and two synchronous fsyncs each would hold the event loop, and with it the
+ * WhatsApp socket, for seconds. The rename alone is what protects a key file
+ * from a process stopped mid-write, which is the failure that was observed;
+ * `creds.json` and its backup keep the full sync, since losing either is
+ * losing the session.
+ */
+function writeFileAtomic(target, text, options) {
+  const durable = !options || options.durable !== false;
+  const dir = path.dirname(target);
+  const temp = path.join(
+    dir,
+    `${AUTH_TEMP_PREFIX}${path.basename(target)}.${crypto.randomBytes(6).toString('hex')}`,
+  );
+  const flags =
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+    (fs.constants.O_NOFOLLOW || 0);
+  const fd = fs.openSync(temp, flags, 0o600);
+  try {
+    fs.writeFileSync(fd, text);
+    if (durable) fs.fsyncSync(fd);
+  } catch (err) {
+    try { fs.closeSync(fd); } catch (ignored) {}
+    try { fs.unlinkSync(temp); } catch (ignored) {}
+    throw err;
+  }
+  fs.closeSync(fd);
+  try {
+    fs.renameSync(temp, target);
+  } catch (err) {
+    try { fs.unlinkSync(temp); } catch (ignored) {}
+    throw err;
+  }
+  if (!durable) return;
+  try {
+    const dirFd = fs.openSync(dir, 'r');
+    try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+  } catch (err) {
+    log('warn', 'the session directory could not be synced', { kind: err && err.code });
+  }
+}
+
+/*
+ * Read one stored credential. `absent`, `unreadable` or `ok`, never a raise.
+ *
+ * `unreadable` covers empty, whitespace, truncated JSON and a value that is
+ * not an object, which are the shapes an interrupted write or a full disk
+ * leaves. It is kept apart from `absent` because the two mean opposite
+ * things: no file is a session that has never paired, and a broken one is a
+ * session that did and was lost.
+ */
+function readStoredJson(file, reviver) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    return { status: err && err.code === 'ENOENT' ? 'absent' : 'unreadable' };
+  }
+  try {
+    return { status: 'ok', value: JSON.parse(text, reviver) };
+  } catch (err) {
+    return { status: 'unreadable' };
+  }
+}
+
+function readStoredCreds(file, reviver) {
+  const stored = readStoredJson(file, reviver);
+  if (stored.status !== 'ok') return stored;
+  const value = stored.value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { status: 'unreadable' };
+  }
+  return stored;
+}
+
+// Temp files a killed writer left behind. They hold a half-written copy of a
+// full-account credential and are never read, so they go at load.
+function sweepAuthTempFiles(folder) {
+  let names = [];
+  try {
+    names = fs.readdirSync(folder);
+  } catch (err) {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(AUTH_TEMP_PREFIX)) continue;
+    try {
+      fs.unlinkSync(path.join(folder, name));
+    } catch (err) {
+      log('warn', 'a stray auth temp file could not be removed', { kind: err && err.code });
+    }
+  }
+}
+
+/*
+ * Baileys' `useMultiFileAuthState`, with atomic writes and a backup.
+ *
+ * `source` says where the credential came from: `main`, `backup`, `fresh`
+ * (nothing on disk, a first pairing) or `unreadable` (a credential that
+ * existed and cannot be read, with no usable backup). The backup is written
+ * after every save, so it is the last credential that saved successfully;
+ * it is read when `creds.json` is broken, and restored over it at
+ * once so the daemon's `session_is_registered` reads what the sidecar is
+ * acting on.
+ */
+async function useAtomicAuthState(folder, lib) {
+  const { initAuthCreds, BufferJSON, proto } = lib || {};
+  // Refused rather than degraded: without the library's replacer and reviver
+  // the Buffers in a credential are written in a form nothing revives, which
+  // corrupts the session quietly instead of failing.
+  if (
+    typeof initAuthCreds !== 'function' ||
+    !BufferJSON || typeof BufferJSON.replacer !== 'function' ||
+    typeof BufferJSON.reviver !== 'function' ||
+    !proto || !proto.Message || !proto.Message.AppStateSyncKeyData
+  ) {
+    throw new Error('the Baileys auth helpers are missing');
+  }
+  const replacer = BufferJSON.replacer;
+  const reviver = BufferJSON.reviver;
+
+  let info = null;
+  try {
+    info = fs.statSync(folder);
+  } catch (err) {
+    info = null;
+  }
+  if (info && !info.isDirectory()) {
+    throw new Error('the session path is not a directory');
+  }
+  if (!info) fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+  sweepAuthTempFiles(folder);
+
+  const fileFor = (name) => path.join(folder, authFileName(name));
+  const writeData = (value, name, options) => {
+    writeFileAtomic(fileFor(name), JSON.stringify(value, replacer), options);
+  };
+  const readData = (name) => {
+    // Whatever the file parses to, as the library did: a key's value is not
+    // always an object.
+    const stored = readStoredJson(fileFor(name), reviver);
+    return stored.status === 'ok' ? stored.value : null;
+  };
+  const removeData = (name) => {
+    try {
+      fs.unlinkSync(fileFor(name));
+    } catch (err) {
+      // Absent is the goal.
+    }
+  };
+
+  const main = readStoredCreds(fileFor(CREDS_FILE), reviver);
+  let creds;
+  let source;
+  if (main.status === 'ok') {
+    creds = main.value;
+    source = 'main';
+  } else if (main.status === 'absent') {
+    // Not the backup. The writer never leaves `creds.json` missing once it
+    // has written one, so an absent file beside a backup is somebody's
+    // deliberate removal, and restoring the credential they removed would
+    // undo it.
+    creds = initAuthCreds();
+    source = 'fresh';
+  } else {
+    const backup = readStoredCreds(fileFor(CREDS_BACKUP_FILE), reviver);
+    if (backup.status === 'ok') {
+      creds = backup.value;
+      source = 'backup';
+      log('warn', 'creds.json is unreadable; starting from creds.json.bak', {
+        main: main.status,
+      });
+      try {
+        writeData(creds, CREDS_FILE);
+      } catch (err) {
+        log('warn', 'creds.json could not be restored from the backup', {
+          kind: err && err.code,
+        });
+      }
+    } else {
+      log('error', 'creds.json is unreadable and there is no usable backup', {
+        backup: backup.status,
+      });
+      creds = initAuthCreds();
+      source = 'unreadable';
+    }
+  }
+
+  return {
+    source,
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          for (const id of ids) {
+            let value = readData(`${type}-${id}.json`);
+            if (type === 'app-state-sync-key' && value) {
+              value = proto.Message.AppStateSyncKeyData.fromObject(value);
+            }
+            data[id] = value;
+          }
+          return data;
+        },
+        set: async (data) => {
+          for (const category of Object.keys(data)) {
+            for (const id of Object.keys(data[category])) {
+              const value = data[category][id];
+              const name = `${category}-${id}.json`;
+              if (value) writeData(value, name, { durable: false });
+              else removeData(name);
+            }
+          }
+        },
+      },
+    },
+    saveCreds: async () => {
+      writeData(creds, CREDS_FILE);
+      // Second, so a stop between the two leaves a new main and an old
+      // backup, both readable.
+      writeData(creds, CREDS_BACKUP_FILE);
+    },
+  };
 }
 
 class Session {
@@ -1122,10 +1391,10 @@ class Session {
 
   async open_() {
     const baileys = await loadBaileys();
-    const { state, saveCreds } = await baileys.useMultiFileAuthState(SESSION_DIR);
+    const { state, saveCreds } = await useAtomicAuthState(SESSION_DIR, baileys);
     const logger = silentLogger();
     const sock = baileys.makeWASocket({
-      // **Not `auth: state` directly.** `useMultiFileAuthState` reads each
+      // **Not `auth: state` directly.** The auth state reads each
       // Signal key back off the disk on demand, so a key written and then
       // immediately read again can miss — and a session that reads as absent
       // is a session Baileys re-establishes with a fresh PreKey handshake it
@@ -1169,7 +1438,7 @@ class Session {
     // is nulled — so this guard is what stops a late save from moving
     // `creds.json` under a wait that fingerprints it to notice a re-pair.
     sock.ev.on('creds.update', () => {
-      if (mine()) saveCreds();
+      if (mine()) saveCreds().catch((err) => this.onSaveFailed(err));
     });
     sock.ev.on('connection.update', (update) => {
       if (mine()) this.onConnection(update, baileys);
@@ -1180,6 +1449,13 @@ class Session {
     sock.ev.on('messages.update', (updates) => {
       if (mine()) this.onReceipts(updates);
     });
+  }
+
+  // A save that failed leaves the previous `creds.json` in place, which is
+  // the point of writing it atomically; the next `creds.update` tries again.
+  // Caught because an unhandled rejection ends a Node process.
+  onSaveFailed(err) {
+    log('warn', 'the credential could not be saved', { kind: err && err.code });
   }
 
   onConnection(update, baileys) {
@@ -1859,6 +2135,11 @@ module.exports = {
   rememberSent,
   recallSent,
   SENT_CACHE_LIMIT,
+  AUTH_TEMP_PREFIX,
+  authFileName,
+  writeFileAtomic,
+  readStoredCreds,
+  useAtomicAuthState,
   logoutExitDelayMs,
   LOGOUT_UNKNOWN_RUN,
   logoutWaitMs,

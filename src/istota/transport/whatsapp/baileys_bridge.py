@@ -788,8 +788,9 @@ def dir_holds_a_session(path: Path) -> bool:
     the credential it just restored, and refuse an archive that is only logs.
 
     **An allowlist of files to ignore, not one of files to count.**
-    `useMultiFileAuthState` writes `creds.json` plus a `.json` per Signal key,
-    with names this module has no business enumerating, so anything
+    The sidecar's auth state (Baileys' own layout, written atomically since
+    ISSUE-554) is `creds.json`, its `creds.json.bak`, and a `.json` per Signal
+    key, with names this module has no business enumerating, so anything
     unrecognised counts as auth state.
 
     **Fails toward "there is a session"** for the same reason at both callers:
@@ -814,7 +815,7 @@ def dir_holds_a_session(path: Path) -> bool:
         return True
 
 
-#: What `useMultiFileAuthState` calls the file holding the account's own
+#: What Baileys' auth-state layout calls the file holding the account's own
 #: credential, as opposed to the per-key files beside it. Restated from the
 #: library rather than shared, for `_SIDECAR_OWN_FILES`' reason.
 _CREDS_FILE = "creds.json"

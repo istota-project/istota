@@ -2164,7 +2164,7 @@ class TestTheLoggedOutBackoff:
         body = _js_body("async open_()")
 
         assert "sock.ev.on('creds.update', () => {" in body
-        assert "if (mine()) saveCreds();" in body
+        assert "if (mine()) saveCreds().catch(" in body
 
 
 class TestTheSidecarCreatesPrivateFiles:
@@ -2231,6 +2231,214 @@ class TestTheSidecarCreatesPrivateFiles:
         ]
 
         assert statements[0] == "applyPrivateUmask();"
+
+
+class TestTheCredentialWritesAreAtomic:
+    """A stop mid-write must not empty the paired credential (ISSUE-554).
+
+    Baileys' `useMultiFileAuthState` writes `creds.json` with `writeFile` in
+    place, which truncates and then writes, and the sidecar rewrites it on
+    every connection open. A process stopped between the two left a 0-byte
+    file, which Baileys then read as no credential at all: the session was
+    gone, and nothing said so. The sidecar now carries its own auth state
+    (`useAtomicAuthState`) whose every write goes to a private temp file,
+    is fsynced, and is renamed over the target, and which keeps the last good
+    `creds.json` as `creds.json.bak` to start from when the main file is
+    unreadable.
+
+    Executed through `node` with a stand-in for the three library helpers the
+    auth state needs, so no `node_modules` is required.
+    """
+
+    _LIB = (
+        "{initAuthCreds: () => ({registered: false, fresh: true}),"
+        " BufferJSON: {replacer: (k, v) => v, reviver: (k, v) => v},"
+        " proto: {Message: {AppStateSyncKeyData: {fromObject: (x) => x}}}}"
+    )
+
+    @staticmethod
+    def _run(script: str) -> object:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        wrapped = (
+            "process.umask(0o022);"
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "const fs = require('fs');"
+            f"(async () => {{ {script} }})()"
+            ".then((r) => process.stdout.write(JSON.stringify(r === undefined ? null : r)))"
+            ".catch((e) => { process.stderr.write(String(e && e.stack)); process.exit(1); });"
+        )
+        result = subprocess.run(
+            [node, "-e", wrapped], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    # --- the write -------------------------------------------------------
+
+    def test_an_interrupted_write_leaves_the_previous_contents(self, tmp_path):
+        """The reported failure, reproduced: the writer dies after its temp
+        file exists and before the rename. The target still reads as it did,
+        and the temp file does not survive to be mistaken for anything."""
+        target = tmp_path / "creds.json"
+        target.write_text('{"registered": true}')
+
+        outcome = self._run(
+            "const real = fs.fsyncSync;"
+            "fs.fsyncSync = () => { throw new Error('stopped mid-write'); };"
+            "let threw = false;"
+            f"try {{ m.writeFileAtomic({json.dumps(str(target))}, 'NEW'); }}"
+            " catch (e) { threw = true; }"
+            "fs.fsyncSync = real;"
+            "return threw;"
+        )
+
+        assert outcome is True
+        assert target.read_text() == '{"registered": true}'
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["creds.json"]
+
+    def test_a_completed_write_replaces_the_file_at_0600(self, tmp_path):
+        """The child runs under a 022 umask, so 0600 can only have come from
+        the writer."""
+        target = tmp_path / "creds.json"
+        target.write_text("old")
+        target.chmod(0o644)
+
+        self._run(f"m.writeFileAtomic({json.dumps(str(target))}, 'new');")
+
+        assert target.read_text() == "new"
+        assert target.stat().st_mode & 0o777 == 0o600
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["creds.json"]
+
+    def test_a_symlink_at_the_target_is_replaced_rather_than_followed(
+        self, tmp_path
+    ):
+        outside = tmp_path / "outside"
+        outside.write_text("untouched")
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "creds.json").symlink_to(outside)
+
+        self._run(
+            f"m.writeFileAtomic({json.dumps(str(session / 'creds.json'))}, 'new');"
+        )
+
+        assert outside.read_text() == "untouched"
+        assert not (session / "creds.json").is_symlink()
+        assert (session / "creds.json").read_text() == "new"
+
+    # --- the auth state --------------------------------------------------
+
+    def _state(self, session: Path, then: str = "return {source: a.source, creds: a.state.creds};"):
+        return self._run(
+            f"const a = await m.useAtomicAuthState({json.dumps(str(session))}, {self._LIB});"
+            + then
+        )
+
+    def test_saving_writes_the_credential_and_its_backup(self, tmp_path):
+        out = self._state(
+            tmp_path,
+            "a.state.creds.registered = true; await a.saveCreds();"
+            "return a.source;",
+        )
+
+        assert out == "fresh"
+        assert json.loads((tmp_path / "creds.json").read_text())["registered"] is True
+        assert (tmp_path / "creds.json.bak").read_text() == (
+            tmp_path / "creds.json"
+        ).read_text()
+        for name in ("creds.json", "creds.json.bak"):
+            assert (tmp_path / name).stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.parametrize("damage", ["", "   \n", '{"registered": tr', "[]"])
+    def test_an_unreadable_credential_starts_from_the_backup(
+        self, tmp_path, damage
+    ):
+        (tmp_path / "creds.json").write_text(damage)
+        (tmp_path / "creds.json.bak").write_text('{"registered": true, "me": "x"}')
+
+        out = self._state(tmp_path)
+
+        assert out == {"source": "backup", "creds": {"registered": True, "me": "x"}}
+        # Restored on disk at once, so `session_is_registered` on the daemon's
+        # side reads the same answer the sidecar is acting on.
+        assert json.loads((tmp_path / "creds.json").read_text())["registered"] is True
+
+    def test_an_unreadable_credential_with_no_backup_is_reported(
+        self, tmp_path
+    ):
+        """Every deployment upgraded onto this has no backup yet, so this is
+        the reported outage exactly. It must not read as a first pairing."""
+        (tmp_path / "creds.json").write_text("")
+
+        assert self._state(tmp_path)["source"] == "unreadable"
+        assert (tmp_path / "creds.json").read_text() == ""
+
+    def test_a_missing_credential_is_not_restored_from_the_backup(
+        self, tmp_path
+    ):
+        """The writer never leaves `creds.json` missing, so a missing one
+        beside a backup was removed on purpose."""
+        (tmp_path / "creds.json.bak").write_text('{"registered": true}')
+
+        assert self._state(tmp_path)["source"] == "fresh"
+        assert not (tmp_path / "creds.json").exists()
+
+    def test_it_refuses_to_run_without_the_library_helpers(self, tmp_path):
+        """Without the replacer and reviver the Buffers in a credential are
+        written in a form nothing revives; refusing is the safe direction."""
+        assert self._run(
+            f"try {{ await m.useAtomicAuthState({json.dumps(str(tmp_path))},"
+            " {initAuthCreds: () => ({}), BufferJSON: {}, proto: null});"
+            " return 'ran'; } catch (e) { return 'refused'; }"
+        ) == "refused"
+
+    def test_a_readable_credential_is_preferred_to_the_backup(self, tmp_path):
+        (tmp_path / "creds.json").write_text('{"me": "main"}')
+        (tmp_path / "creds.json.bak").write_text('{"me": "bak"}')
+
+        assert self._state(tmp_path) == {"source": "main", "creds": {"me": "main"}}
+
+    def test_no_credential_at_all_is_a_fresh_pairing(self, tmp_path):
+        assert self._state(tmp_path) == {
+            "source": "fresh", "creds": {"registered": False, "fresh": True},
+        }
+
+    def test_signal_keys_round_trip_through_the_atomic_writer(self, tmp_path):
+        out = self._state(
+            tmp_path,
+            "await a.state.keys.set({'pre-key': {'1': {k: 1}, '2': {k: 2}},"
+            " 'sender-key': {'g/a:b': {k: 3}}});"
+            "await a.state.keys.set({'pre-key': {'2': null}});"
+            "return await a.state.keys.get('pre-key', ['1', '2']);",
+        )
+
+        assert out == {"1": {"k": 1}, "2": None}
+        # Baileys' own file-name rule, so an existing session directory reads
+        # back under the new writer.
+        assert (tmp_path / "sender-key-g__a-b.json").exists()
+        assert (tmp_path / "pre-key-1.json").stat().st_mode & 0o777 == 0o600
+
+    def test_a_temp_file_left_by_a_killed_writer_is_swept_at_load(
+        self, tmp_path
+    ):
+        prefix = self._run("return m.AUTH_TEMP_PREFIX;")
+        stray = tmp_path / f"{prefix}creds.json.deadbeef"
+        stray.write_text("half")
+
+        self._state(tmp_path)
+
+        assert not stray.exists()
+
+    def test_the_session_opens_through_the_local_auth_state(self):
+        """Pinned as the absence of the library's own writer as well as the
+        presence of this one, since that is what it would silently revert
+        to."""
+        body = _js_body("async open_()")
+
+        assert "useAtomicAuthState(SESSION_DIR, baileys)" in body
+        assert "useMultiFileAuthState" not in body
 
 
 class TestThePinnedLibrary:

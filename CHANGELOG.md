@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Baileys WhatsApp sidecar no longer loses its paired session when it is stopped while saving it. Credential and key files are written to a temp file and renamed into place, and the last good `creds.json` is kept as `creds.json.bak` and used at start when the main file is empty or unreadable.
+
 - A late background-job notification could replace a completed answer with a follow-up about the job. The reply now keeps the answer followed by the update, and the saved web transcript shows it once.
 
 - Mail sent to a closed or unknown signup address is now discarded even when the sender is a configured user. It no longer starts an ordinary email task after the credential is deleted.
