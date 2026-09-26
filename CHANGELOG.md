@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When another client logs in with the same Baileys WhatsApp session, the sidecar no longer reconnects every few seconds against it. After five replaced connections in ten minutes it stops, refuses sends and alerts admins once; it retries after 15 minutes and then after an hour twice more, and if the other client is still there it gives up and a second alert says to re-pair from Admin, Connections, unlinking the old device on the phone first if the other client is unknown. `istota doctor` reports recent replaced connections and the latched or given-up state.
+
 - A Baileys WhatsApp session whose saved credential is empty or unreadable now alerts admins and refuses sends until it is re-paired, instead of quietly starting a new pairing that nobody sees. A pairing code offered while no re-pair is in progress also stops sends from being attempted against the unpaired session.
 
 - The Baileys WhatsApp sidecar no longer loses its paired session when it is stopped while saving it. Credential and key files are written to a temp file and renamed into place, and the last good `creds.json` is kept as `creds.json.bak` and used at start when the main file is empty or unreadable.

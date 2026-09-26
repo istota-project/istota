@@ -64,6 +64,29 @@ _ALERT_TITLE = "WhatsApp is unlinked — the paired session needs re-pairing"
 #: axis would be one durable row and one push per spelling.
 _ALERT_DEDUP_KEY = "whatsapp:baileys-unlinked"
 
+#: The replaced-connection alerts (ISSUE-553). Keys and titles of their own,
+#: since the condition is not an unlinked device: the device is linked and
+#: another client is using it. Two keys rather than one, because the latch
+#: row is usually still open when the sidecar gives up, and a write under an
+#: open row's key bumps it without delivering.
+_REPLACED_DEDUP_KEY = "whatsapp:baileys-replaced"
+_REPLACED_GAVE_UP_DEDUP_KEY = "whatsapp:baileys-replaced-gave-up"
+_REPLACED_TITLES = {
+    1: "Another client is using this WhatsApp session",
+    2: "WhatsApp stopped retrying: another client holds the session",
+}
+
+#: What an operator does once the sidecar has given up. Shared with doctor's
+#: remedy for the same state, so the two cannot give different instructions.
+#: The unlink comes first because a re-pair makes a new device and leaves the
+#: copied credential valid: whoever holds it keeps a working session.
+REPLACED_GIVE_UP_REMEDY = (
+    "Re-pair from Admin, Connections. If you do not know what the other "
+    "client is, first remove the old device under Linked Devices in WhatsApp "
+    "on the phone: a re-pair does not revoke the copied credential, so "
+    "whoever holds it can keep using the session."
+)
+
 
 def baileys_bridge_wanted(config: "Config") -> bool:
     """Whether this deployment's WhatsApp surface runs on a paired session.
@@ -116,6 +139,7 @@ def start_baileys_bridge(config: "Config") -> bool:
         ),
         restart_interval_seconds=config.whatsapp.baileys.restart_interval_seconds,
         on_fatal=lambda reason: _announce_unlink(config, reason),
+        on_replaced=lambda level, count: _announce_replaced(config, level, count),
     )
     try:
         run_coro(bridge.start())
@@ -170,6 +194,50 @@ async def _announce_unlink(config: "Config", reason: str) -> None:
             await asyncio.to_thread(_push_baileys_alert, config, item)
     except Exception:
         logger.warning("whatsapp.baileys.unlink_alert_failed", exc_info=True)
+
+
+async def _announce_replaced(config: "Config", level: int, count: int) -> None:
+    """Raise and push the replaced-connection alert for `level`.
+
+    The sidecar asks for this once per outage per level and persists that it
+    asked, so this keeps no once-flag of its own. Never raises, for
+    `_announce_unlink`'s reason.
+    """
+    try:
+        dedup_key = (
+            _REPLACED_GAVE_UP_DEDUP_KEY if level == 2 else _REPLACED_DEDUP_KEY
+        )
+        raised = await asyncio.to_thread(
+            _write_baileys_alerts, config,
+            dedup_key, _REPLACED_TITLES.get(level, _REPLACED_TITLES[1]),
+            _replaced_alert_body(level, count), "session_replaced",
+        )
+        for item in raised:
+            await asyncio.to_thread(_push_baileys_alert, config, item)
+    except Exception:
+        logger.warning("whatsapp.baileys.replaced_alert_failed", exc_info=True)
+
+
+def _replaced_alert_body(level: int, count: int) -> str:
+    """What an operator is told when another client holds the session."""
+    times = max(int(count), 0)
+    if level == 2:
+        return (
+            f"Another client kept replacing this deployment's WhatsApp "
+            f"connection ({times} times) and was still there on every retry, "
+            "so the sidecar has stopped trying and every WhatsApp send is "
+            "refused. " + REPLACED_GIVE_UP_REMEDY
+        )
+    return (
+        f"WhatsApp closed this deployment's connection {times} times in a few "
+        "minutes because another client logged in with the same session, "
+        "often a copy of the session directory running on another host. The "
+        "sidecar has stopped reconnecting and every WhatsApp send is refused. "
+        "It will try again after 15 minutes, then after an hour twice more; "
+        "stop the other client and the next try succeeds. If the other client "
+        "is still there after the last try, a second notice says how to "
+        "re-pair."
+    )
 
 
 def _unlink_readers(config: "Config") -> list[str]:
@@ -241,19 +309,27 @@ def _alert_body(reason: str) -> str:
 
 
 def _write_unlink_alerts(config: "Config", reason: str) -> tuple[object, ...]:
+    return _write_baileys_alerts(
+        config, _ALERT_DEDUP_KEY, _ALERT_TITLE, _alert_body(reason),
+        "session_unlinked",
+    )
+
+
+def _write_baileys_alerts(
+    config: "Config", dedup_key: str, title: str, body: str, status: str,
+) -> tuple[object, ...]:
     from ... import db  # noqa: PLC0415
     from ...notification_resolvers import task_alert  # noqa: PLC0415
 
-    body = _alert_body(reason)
     raised = []
     with db.get_db(config.db_path) as conn:
         for reader in _unlink_readers(config):
             raised.append(task_alert.write(
                 conn, reader,
-                dedup_key=_ALERT_DEDUP_KEY,
-                title=_ALERT_TITLE,
+                dedup_key=dedup_key,
+                title=title,
                 body=body,
-                params={"task_id": None, "status": "session_unlinked"},
+                params={"task_id": None, "status": status},
             ))
     return tuple(item for item in raised if item is not None)
 

@@ -551,6 +551,10 @@ export interface AdminConnectionLink {
   fatal_reason: string | null;
   /** The session is unlinked and will not come back without a re-pair. */
   fatal_is_permanent: boolean;
+  /** Another client keeps replacing the connection and the sidecar has
+   *  stopped reconnecting (ISSUE-553). With `fatal_is_permanent` it has also
+   *  given up retrying. */
+  connection_replaced_latched: boolean;
   restarts: number | null;
 }
 

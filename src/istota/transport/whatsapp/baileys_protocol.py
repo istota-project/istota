@@ -193,6 +193,11 @@ REASON_ENCODE_FAILED = "the send could not be encoded"
 #: the supervisor can resume, and without a refusal of its own every send in
 #: the window would be written to an unpaired sidecar and settle `unknown`.
 REASON_PAIRING = "the WhatsApp session is being re-paired"
+#: What a send is refused with while the sidecar has stopped reconnecting
+#: because another client keeps replacing the connection (ISSUE-553). Its own
+#: string, because the remedy is to stop the other client rather than to
+#: re-pair.
+REASON_CONNECTION_REPLACED = "another client is using the WhatsApp session"
 #: The catch-all for a send that failed before its line entered the socket and
 #: for no reason above. It is its own string rather than `REASON_LINK_LOST`
 #: because the two settle the ledger differently — this one is `definite`, so
@@ -639,6 +644,7 @@ __all__ = [
     "MSG_SHUTDOWN",
     "NO_CLOUD_ACCOUNT",
     "PROTOCOL_VERSION",
+    "REASON_CONNECTION_REPLACED",
     "REASON_ENCODE_FAILED",
     "REASON_LINK_LOST",
     "REASON_NOT_WRITTEN",

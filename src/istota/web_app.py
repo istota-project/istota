@@ -4221,6 +4221,9 @@ def _whatsapp_connection_payload() -> dict:
             "ready": bool(status.get("ready")),
             "fatal_reason": status.get("fatal_reason"),
             "fatal_is_permanent": bool(status.get("fatal_is_permanent")),
+            "connection_replaced_latched": bool(
+                status.get("connection_replaced_latched")
+            ),
             "restarts": status.get("restarts"),
         }
     if payload["pairing_enabled"]:

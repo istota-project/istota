@@ -92,6 +92,10 @@ const FATAL_BAD_SESSION = 'bad_session';
 // (ISSUE-552). The session was paired and is lost; starting the library on it
 // would begin a fresh pairing instead and say nothing.
 const FATAL_CREDENTIAL_UNREADABLE = 'credential_unreadable';
+// Another client logged in with the same credential and WhatsApp closed this
+// connection with 440 (ISSUE-553). Transient while the sidecar is still
+// reconnecting or probing, permanent once it has given up.
+const FATAL_CONNECTION_REPLACED = 'connection_replaced';
 
 // --- inbound media ---------------------------------------------------------
 
@@ -1038,28 +1042,201 @@ function credentialStamp() {
  * all stay green.
  */
 function scheduleLogoutExit(delayMs, onExit, pollMs) {
+  watchCredential(delayMs, onExit, onExit, pollMs);
+}
+
+/*
+ * The wait behind `scheduleLogoutExit`, with the two endings kept apart.
+ *
+ * `onDeadline` runs when `delayMs` has passed and `onChange` when the
+ * credential's stamp moved first; the logout wait exits on either, while the
+ * replaced-connection hold probes on the first and exits on the second.
+ * `baseline`, when given, is compared from the first poll rather than
+ * adopted there. The replaced hold passes the stamp it recorded after its own
+ * last save, so a change landing before the first poll is still seen. The
+ * logout wait passes none, for the reason above. An infinite `delayMs` is a
+ * wait with no deadline. Returns a cancel function.
+ */
+function watchCredential(delayMs, onDeadline, onChange, pollMs, baseline) {
   const poll = pollMs || CREDENTIAL_POLL_MS;
   const deadline = Date.now() + delayMs;
-  let baseline = null;
+  let seen = typeof baseline === 'string' ? baseline : null;
+  let cancelled = false;
+  let timer = null;
   const tick = () => {
+    if (cancelled) return;
     const stamp = credentialStamp();
-    if (baseline === null) {
-      baseline = stamp;
-    } else if (stamp !== baseline) {
-      log('info', 'the credential changed during the wait; exiting now');
-      onExit();
+    if (seen === null) {
+      seen = stamp;
+    } else if (stamp !== seen) {
+      log('info', 'the credential changed during the wait');
+      onChange();
       return;
     }
     const left = deadline - Date.now();
     if (left <= 0) {
-      onExit();
+      onDeadline();
       return;
     }
-    setTimeout(tick, Math.min(left, poll));
+    timer = setTimeout(tick, Math.min(left, poll));
   };
   // Not `unref()`ed: the wait is the only thing holding this process open,
   // and an unreferenced timer would let Node exit immediately instead.
-  setTimeout(tick, Math.min(delayMs, poll));
+  timer = setTimeout(tick, Math.min(delayMs, poll));
+  return () => {
+    cancelled = true;
+    if (timer !== null) clearTimeout(timer);
+  };
+}
+
+// --- a replaced connection -------------------------------------------------
+
+/*
+ * Two clients on one credential (ISSUE-553).
+ *
+ * WhatsApp closes a connection with 440 (`connectionReplaced`) when another
+ * client logs in with the same credential. The sidecar used to reconnect
+ * three seconds later like any transient close, so two clients knocked each
+ * other off every few seconds for hours, each reopen a credential save. Every
+ * local guard against a second client (the socket probe, the role's refusal)
+ * is blind to a copy of the session directory on another machine, and 440 is
+ * the only signal that reaches this one.
+ *
+ * So the sidecar yields. A single 440 waits `REPLACED_RECONNECT_MS` before
+ * reconnecting. `REPLACED_LATCH_COUNT` of them inside `REPLACED_WINDOW_MS`
+ * latch: the sidecar stops reconnecting, tells the daemon, and probes at most
+ * `REPLACED_PROBE_DELAYS_MS.length` times on that schedule. A probe that meets
+ * a 440 before `REPLACED_STABLE_MS` of open connection re-latches at once.
+ * After the last failed probe the fault is permanent and a re-pair from Admin,
+ * Connections is what brings the session back, as for a logged-out one.
+ * Nothing is moved or deleted here.
+ *
+ * The run lives in `connection-replaced.json` beside `logout-backoff.json`,
+ * so a supervisor restart neither resumes reconnecting nor earns a free
+ * probe. It ends on a stable open, and on a `creds.json` stamp this process
+ * did not write: a replaced or restored credential is a different session,
+ * and the run was about the old one.
+ */
+const REPLACED_STATE_PATH =
+  SESSION_DIR ? path.join(SESSION_DIR, 'connection-replaced.json') : '';
+const REPLACED_LATCH_COUNT = 5;
+const REPLACED_WINDOW_MS = 600_000;
+const REPLACED_RECONNECT_MS = 30_000;
+const REPLACED_PROBE_DELAYS_MS = [900_000, 3_600_000, 3_600_000];
+const REPLACED_STABLE_MS = 300_000;
+const TRANSIENT_RECONNECT_MS = 3000;
+
+// Add a replacement at `nowMs` to the recent ones, drop those outside the
+// window, and say whether the run has reached the latch.
+function recordReplacement(times, nowMs) {
+  const recent = (Array.isArray(times) ? times : [])
+    .filter((t) => Number.isFinite(t) && nowMs - t < REPLACED_WINDOW_MS);
+  recent.push(nowMs);
+  return {
+    times: recent,
+    count: recent.length,
+    latched: recent.length >= REPLACED_LATCH_COUNT,
+  };
+}
+
+/*
+ * Read the run out of the file's text, or `null`. Never raises.
+ *
+ * Anything unreadable is no run, which errs toward reconnecting: the cost of
+ * a wrong `null` is at most five more replaced connections before the next
+ * latch, and the cost of a wrong hold is a working session kept down.
+ */
+function parseReplacedState(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const count = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  };
+  const announced = count(parsed.announced);
+  return {
+    times: Array.isArray(parsed.times)
+      ? parsed.times.filter((t) => Number.isFinite(t))
+      : [],
+    total: count(parsed.total),
+    latched_at: Number.isFinite(parsed.latched_at) ? parsed.latched_at : null,
+    probes: count(parsed.probes),
+    next_probe_at: Number.isFinite(parsed.next_probe_at) ? parsed.next_probe_at : null,
+    given_up: parsed.given_up === true,
+    stamp: typeof parsed.stamp === 'string' ? parsed.stamp : '',
+    announced: Math.min(announced, 2),
+  };
+}
+
+function emptyReplacedState() {
+  return {
+    times: [], total: 0, latched_at: null, probes: 0, next_probe_at: null,
+    given_up: false, stamp: '', announced: 0,
+  };
+}
+
+// What the daemon should have alerted on: 2 once the sidecar has given up,
+// 1 while it is latched, 0 otherwise.
+function replacedLevel(state) {
+  if (!state) return 0;
+  if (state.given_up) return 2;
+  return state.latched_at !== null ? 1 : 0;
+}
+
+// The delay before probe `n` (1-based), or `null` when there is none left.
+function replacedProbeDelayMs(n) {
+  const k = Number(n);
+  if (!Number.isInteger(k) || k < 1 || k > REPLACED_PROBE_DELAYS_MS.length) {
+    return null;
+  }
+  return REPLACED_PROBE_DELAYS_MS[k - 1];
+}
+
+function readReplacedState() {
+  if (!REPLACED_STATE_PATH) return null;
+  try {
+    return parseReplacedState(fs.readFileSync(REPLACED_STATE_PATH, 'utf8'));
+  } catch (err) {
+    if (err && err.code !== 'ENOENT') {
+      log('warn', 'the replaced-connection run could not be read', {
+        kind: err && err.code,
+      });
+    }
+    return null;
+  }
+}
+
+// Returns whether the run reached disk. A failed write keeps the in-memory
+// run, so this process still behaves; a restart then starts the run afresh.
+function writeReplacedState(state) {
+  if (!REPLACED_STATE_PATH) return false;
+  try {
+    writeFileAtomic(REPLACED_STATE_PATH, JSON.stringify(state) + '\n');
+    return true;
+  } catch (err) {
+    log('warn', 'the replaced-connection run could not be recorded', {
+      kind: err && err.code,
+    });
+    return false;
+  }
+}
+
+function clearReplacedState() {
+  if (!REPLACED_STATE_PATH) return;
+  try {
+    fs.unlinkSync(REPLACED_STATE_PATH);
+  } catch (err) {
+    if (err && err.code !== 'ENOENT') {
+      log('warn', 'the replaced-connection run could not be cleared', {
+        kind: err && err.code,
+      });
+    }
+  }
 }
 
 // --- the auth state --------------------------------------------------------
@@ -1388,12 +1565,33 @@ class Session {
     // verdict to re-announce on every daemon-link reconnect, since the
     // daemon's latch is in memory.
     this.credentialUnreadable = false;
+    // The replaced-connection run (ISSUE-553), mirrored to
+    // `connection-replaced.json`, or `null` when there is none.
+    this.replaced = null;
+    // Whether the current connection attempt is a probe out of a latched run.
+    this.probing = false;
+    // The timer that ends a latched run once a probe has stayed open for
+    // `REPLACED_STABLE_MS`, and the cancel handle of the hold's wait.
+    this.stableTimer = null;
+    this.cancelReplacedWait = null;
+    // Seams for the tests, which drive a whole run without real timers or a
+    // real exit.
+    this.watch = watchCredential;
+    this.exit = (code) => process.exit(code);
     // The tail of the serialized inbound chain. See `onMessages`: a batch is
     // appended to it rather than handled where it arrives, so a photo's
     // download cannot be overtaken by the text message behind it.
     this.inbound = Promise.resolve();
     this.inboundDepth = 0;
     this.inboundDropped = 0;
+  }
+
+  // Whether this process is holding a verdict the daemon must be told on
+  // every reconnect: a logged-out device, an unreadable credential, or a
+  // latched or abandoned replaced connection. The daemon link keeps
+  // reconnecting for these and not for a deliberate shutdown.
+  holdsVerdict() {
+    return this.loggedOut || this.credentialUnreadable || replacedLevel(this.replaced) > 0;
   }
 
   announceReady() {
@@ -1418,7 +1616,39 @@ class Session {
       });
       return;
     }
+    if (!this.open && replacedLevel(this.replaced) > 0) {
+      this.sendReplaced();
+      return;
+    }
     if (this.open) this.link.send(MSG_READY, {});
+  }
+
+  /*
+   * Tell the daemon where the replaced-connection run stands.
+   *
+   * `announce` asks the daemon to raise an alert, and is set only for a level
+   * the run has not yet announced: 1 when it latches, 2 when it gives up. The
+   * level is persisted once the frame is written, so a scheduler restart
+   * (which re-reads the verdict through `announceReady`) or a sidecar restart
+   * does not page anybody twice for one outage. The bridge alerts on
+   * `announce` alone, never on the frame's arrival.
+   */
+  sendReplaced() {
+    const state = this.replaced;
+    if (!state || !this.link.greeted) return;
+    const level = replacedLevel(state);
+    const announce = level > state.announced ? level : 0;
+    const sent = this.link.send(MSG_FATAL, {
+      reason: FATAL_CONNECTION_REPLACED,
+      permanent: state.given_up,
+      replacements: state.total,
+      latched: level > 0,
+      announce: announce,
+    });
+    if (sent && announce) {
+      state.announced = announce;
+      writeReplacedState(state);
+    }
   }
 
   async start() {
@@ -1500,7 +1730,11 @@ class Session {
     // is nulled — so this guard is what stops a late save from moving
     // `creds.json` under a wait that fingerprints it to notice a re-pair.
     sock.ev.on('creds.update', () => {
-      if (mine()) saveCreds().catch((err) => this.onSaveFailed(err));
+      if (mine()) {
+        saveCreds()
+          .then(() => this.refreshReplacedStamp())
+          .catch((err) => this.onSaveFailed(err));
+      }
     });
     sock.ev.on('connection.update', (update) => {
       if (mine()) this.onConnection(update, baileys);
@@ -1571,6 +1805,7 @@ class Session {
       clearLogoutState();
       this.open = true;
       this.link.send(MSG_READY, {});
+      this.armStableTimer();
       return;
     }
     // **Below the guard, not above it.** `connection.update` is a partial:
@@ -1582,6 +1817,7 @@ class Session {
     // reached by another route.
     if (connection !== 'close') return;
     this.open = false;
+    this.cancelStableTimer();
 
     const status =
       lastDisconnect &&
@@ -1601,6 +1837,9 @@ class Session {
       // not fail in.
       if (this.loggedOut) return;
       this.loggedOut = true;
+      // A probe meeting a 401 is an unlinked device, not the other client,
+      // and the unlink's remedy is the one that works (ISSUE-553).
+      this.endReplacedRun('the device was logged out');
       // Permanent: the credential on disk names a device WhatsApp has
       // unlinked, and reconnecting with it will be refused for ever. The
       // daemon latches this, refuses every send definitely and alerts.
@@ -1655,12 +1894,226 @@ class Session {
       return;
     }
     if (this.stopping) return;
+    if (status === baileys.DisconnectReason.connectionReplaced) {
+      this.onReplaced(Date.now());
+      return;
+    }
     // Transient. Reconnecting is this process's job, not the daemon's: the
     // daemon's supervisor respawns a sidecar that *exits*, and exiting here
     // would throw away a live socket and a warm session for a blip.
     setTimeout(() => {
       this.start().catch((err) => this.reportStartFailure(err));
-    }, 3000);
+    }, TRANSIENT_RECONNECT_MS);
+  }
+
+  // --- a replaced connection (ISSUE-553) ---------------------------------
+
+  /*
+   * Another client took the connection. See `REPLACED_STATE_PATH`.
+   *
+   * The socket is dropped as the logged-out branch drops it, so a send in
+   * the gap is answered `not_connected` definitely rather than reaching a
+   * socket WhatsApp has closed, and a late event from it is ignored.
+   */
+  onReplaced(nowMs) {
+    this.sock = null;
+    const state = this.replaced || emptyReplacedState();
+    this.replaced = state;
+    const wasProbe = this.probing;
+    this.probing = false;
+    if (state.latched_at !== null) {
+      // A probe met the other client again before the session held: the run
+      // is still on, so re-latch without counting to five again.
+      state.total += 1;
+      state.stamp = credentialStamp();
+      // Measured from this close. The time `probe` recorded is only for a
+      // restart that lands mid-probe.
+      state.next_probe_at = null;
+      log('warn', 'a probe was replaced by the other client again', {
+        probes: state.probes, probe: wasProbe,
+      });
+      this.holdOrGiveUp(nowMs);
+      return;
+    }
+    const run = recordReplacement(state.times, nowMs);
+    state.times = run.times;
+    state.total = run.count;
+    state.stamp = credentialStamp();
+    if (!run.latched) {
+      writeReplacedState(state);
+      log('warn', 'another client replaced this WhatsApp connection', {
+        replacements: run.count,
+      });
+      this.sendReplaced();
+      setTimeout(() => {
+        this.start().catch((err) => this.reportStartFailure(err));
+      }, REPLACED_RECONNECT_MS);
+      return;
+    }
+    state.latched_at = nowMs;
+    state.probes = 0;
+    log('error', 'another client keeps replacing this WhatsApp connection; '
+      + 'no longer reconnecting', { replacements: run.count });
+    this.holdOrGiveUp(nowMs);
+  }
+
+  /*
+   * Hold until the next probe, or give up once the probes are spent.
+   *
+   * `stopping` is what keeps every other reconnect path (a transient close's
+   * timer, a start failure's retry) from opening a connection during the
+   * hold. The wait watches `creds.json` from the stamp this run recorded,
+   * so a foreign change ends the process and the next start clears the run.
+   */
+  holdOrGiveUp(nowMs) {
+    const state = this.replaced;
+    this.stopping = true;
+    this.sock = null;
+    const delay = replacedProbeDelayMs(state.probes + 1);
+    if (delay === null) {
+      this.giveUp();
+      return;
+    }
+    if (state.next_probe_at === null || state.next_probe_at < nowMs) {
+      state.next_probe_at = nowMs + delay;
+    }
+    writeReplacedState(state);
+    this.sendReplaced();
+    this.waitThen(Math.max(0, state.next_probe_at - nowMs), () => this.probe());
+  }
+
+  giveUp() {
+    const state = this.replaced;
+    state.given_up = true;
+    state.next_probe_at = null;
+    this.stopping = true;
+    this.sock = null;
+    writeReplacedState(state);
+    log('error', 'another client still holds this WhatsApp session after '
+      + 'every probe; not reconnecting until it is re-paired', {
+      probes: state.probes,
+    });
+    this.sendReplaced();
+    this.waitThen(Infinity, () => {});
+  }
+
+  waitThen(delayMs, onDeadline) {
+    if (this.cancelReplacedWait) this.cancelReplacedWait();
+    this.cancelReplacedWait = this.watch(
+      delayMs,
+      onDeadline,
+      () => {
+        log('info', 'the credential changed during a replaced-connection '
+          + 'hold; exiting so the next start reads it');
+        this.exit(1);
+      },
+      undefined,
+      this.replaced.stamp,
+    );
+  }
+
+  /*
+   * One attempt at the connection, out of a latched run.
+   *
+   * The probe is counted and the following probe's time recorded *before*
+   * anything is opened, so a restart partway through spends the probe rather
+   * than earning a free one. A 440 before the session has been open for
+   * `REPLACED_STABLE_MS` re-latches through `onReplaced`.
+   */
+  probe() {
+    const state = this.replaced;
+    if (!state || state.given_up) return;
+    this.cancelReplacedWait = null;
+    state.probes += 1;
+    const following = replacedProbeDelayMs(state.probes + 1);
+    state.next_probe_at = following === null ? null : Date.now() + following;
+    writeReplacedState(state);
+    log('info', 'probing whether the other client has gone', {
+      probe: state.probes,
+    });
+    this.probing = true;
+    this.stopping = false;
+    this.start().catch((err) => this.reportStartFailure(err));
+  }
+
+  armStableTimer() {
+    this.cancelStableTimer();
+    if (replacedLevel(this.replaced) === 0) return;
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      if (this.open) this.endReplacedRun('the session stayed open');
+    }, REPLACED_STABLE_MS);
+  }
+
+  cancelStableTimer() {
+    if (this.stableTimer !== null) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
+    }
+  }
+
+  endReplacedRun(why) {
+    if (!this.replaced) return;
+    log('info', 'the replaced-connection run is over', { why });
+    this.replaced = null;
+    this.probing = false;
+    clearReplacedState();
+  }
+
+  // After our own save: the credential stamp moved because of this process,
+  // so the run records it and only a change this process did not make ends
+  // the run.
+  refreshReplacedStamp() {
+    if (!this.replaced) return;
+    if (replacedLevel(this.replaced) === 0) {
+      const now = Date.now();
+      this.replaced.times = this.replaced.times.filter(
+        (t) => now - t < REPLACED_WINDOW_MS,
+      );
+      if (!this.replaced.times.length) {
+        this.endReplacedRun('the recent closes have aged out');
+        return;
+      }
+    }
+    this.replaced.stamp = credentialStamp();
+    writeReplacedState(this.replaced);
+  }
+
+  /*
+   * Pick up a run a previous process left on disk. Returns whether this
+   * process is now holding rather than opening a connection.
+   *
+   * A stamp that differs from the one the run recorded means the credential
+   * was replaced or restored by something other than this sidecar, and the
+   * run ends. A latched run resumes its hold until the recorded probe time;
+   * one whose probes are spent gives up, since the last probe's outcome is
+   * unknown and a restart must not buy another. An unlatched run keeps its
+   * recent closes, so a restart does not reset the count toward the latch.
+   */
+  restoreReplacedRun(nowMs) {
+    const now = nowMs === undefined ? Date.now() : nowMs;
+    const state = readReplacedState();
+    if (!state) return false;
+    if (state.stamp !== credentialStamp()) {
+      log('info', 'the credential changed since the replaced-connection run '
+        + 'was recorded; ending the run');
+      clearReplacedState();
+      return false;
+    }
+    this.replaced = state;
+    if (state.given_up) {
+      this.giveUp();
+      return true;
+    }
+    if (state.latched_at !== null) {
+      this.holdOrGiveUp(now);
+      return true;
+    }
+    state.times = state.times.filter((t) => now - t < REPLACED_WINDOW_MS);
+    if (!state.times.length) {
+      this.endReplacedRun('the recent closes have aged out');
+    }
+    return false;
   }
 
   reportStartFailure(err) {
@@ -2185,15 +2638,17 @@ function main() {
     // inside one and leave a sidecar that neither reconnects nor exits, with
     // the unlinked-device verdict reaching nobody. A logout wait reconnects
     // and re-announces the fatal; a deliberate shutdown still does not.
-    if (session.stopping && !session.loggedOut && !session.credentialUnreadable) {
-      return;
-    }
+    if (session.stopping && !session.holdsVerdict()) return;
     log('warn', 'the daemon link closed; reconnecting');
     setTimeout(() => link.connect(), 2000);
   };
 
   link.connect();
-  session.start().catch((err) => session.reportStartFailure(err));
+  // A replaced-connection run left by the previous process holds here rather
+  // than opening a connection the other client would knock off again.
+  if (!session.restoreReplacedRun()) {
+    session.start().catch((err) => session.reportStartFailure(err));
+  }
 
   for (const signal of ['SIGTERM', 'SIGINT']) {
     process.on(signal, () => {
@@ -2253,6 +2708,19 @@ module.exports = {
   clearLogoutState,
   credentialStamp,
   scheduleLogoutExit,
+  watchCredential,
+  Session,
+  FATAL_CONNECTION_REPLACED,
+  REPLACED_LATCH_COUNT,
+  REPLACED_WINDOW_MS,
+  REPLACED_RECONNECT_MS,
+  REPLACED_PROBE_DELAYS_MS,
+  REPLACED_STABLE_MS,
+  recordReplacement,
+  parseReplacedState,
+  replacedLevel,
+  replacedProbeDelayMs,
+  readReplacedState,
   messageShape,
   receiptStatus,
   sendFailureReason,

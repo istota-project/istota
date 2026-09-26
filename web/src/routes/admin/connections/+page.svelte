@@ -207,6 +207,9 @@
       if (!whatsapp.enabled) return { variant: 'neutral', label: 'disabled' };
       if (!whatsapp.pairing_supported) return { variant: 'info', label: 'cloud api' };
       if (link === null) return { variant: 'neutral', label: 'not readable here' };
+      if (link.connection_replaced_latched && !link.ready) {
+        return { variant: 'danger', label: 'in use elsewhere' };
+      }
       if (link.fatal_is_permanent) return { variant: 'danger', label: 'unlinked' };
       if (link.ready) return { variant: 'success', label: 'linked' };
       if (link.connected) return { variant: 'warn', label: 'connecting' };
@@ -227,6 +230,24 @@
       return (
         'The bridge runs in the scheduler process, so this page cannot read the live link. ' +
         'The pairing record below crosses processes and is the part that is authoritative here.'
+      );
+    }
+    if (link.connection_replaced_latched && !link.ready) {
+      // ISSUE-553. The device is still linked; somebody else holds the
+      // credential. Given up, the only way back is a re-pair, and the phone
+      // has to drop the old device first or the copy keeps working.
+      if (link.fatal_is_permanent) {
+        return (
+          'Another client kept replacing this session’s connection and was still there on every ' +
+          'retry, so the sidecar has stopped trying. Re-pair below. If you do not know what the ' +
+          'other client is, first remove the old device under Linked Devices in WhatsApp on the ' +
+          'phone: a re-pair does not revoke the copied credential.'
+        );
+      }
+      return (
+        'Another client is using this WhatsApp session, so the sidecar has stopped reconnecting ' +
+        'and sends are refused. It retries after 15 minutes and then after an hour twice more; ' +
+        'stop the other client and the next retry brings the session back.'
       );
     }
     if (link.fatal_is_permanent) {

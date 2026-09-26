@@ -722,6 +722,7 @@ class TestTheSidecarsPayloadsAreReadable:
             assert keys in (
                 {"reason", "permanent"},
                 {"reason", "permanent", "run_unrecorded"},
+                {"reason", "permanent", "replacements", "latched", "announce"},
             ), keys
 
     def test_the_hello_frame_carries_the_version_field_the_bridge_reads(self):
@@ -1486,7 +1487,12 @@ class TestTheSidecarsControlFlow:
         branch = branch[branch.index("reason: FATAL_LOGGED_OUT"):]
 
         assert "scheduleLogoutExit(" in branch
-        assert "onExit();" in _js_function("scheduleLogoutExit")
+        # Both endings of the credential watch are the exit on this path.
+        assert "watchCredential(delayMs, onExit, onExit, pollMs);" in _js_function(
+            "scheduleLogoutExit"
+        )
+        watch = _js_function("watchCredential")
+        assert "onDeadline();" in watch and "onChange();" in watch
 
     def test_starting_a_session_is_guarded_against_reentry(self):
         """Two `connection: close` events before the reconnect timer fires
@@ -2121,7 +2127,11 @@ class TestTheLoggedOutBackoff:
         sidecar that neither reconnects nor exits."""
         source = PROGRAM.read_text()
 
-        assert "if (session.stopping && !session.loggedOut && !session.credentialUnreadable) {" in source
+        assert "if (session.stopping && !session.holdsVerdict()) return;" in source
+        assert (
+            "return this.loggedOut || this.credentialUnreadable || "
+            "replacedLevel(this.replaced) > 0;"
+        ) in source
 
     def test_the_verdict_is_re_announced_on_a_reconnected_link(self):
         """The daemon's permanent-fatal latch is in memory and only this frame
@@ -2166,7 +2176,7 @@ class TestTheLoggedOutBackoff:
         body = _js_body("async open_()")
 
         assert "sock.ev.on('creds.update', () => {" in body
-        assert "if (mine()) saveCreds().catch(" in body
+        assert "if (mine()) {\n        saveCreds()" in body
 
 
 class TestTheSidecarCreatesPrivateFiles:
@@ -2565,6 +2575,362 @@ class TestALostCredentialIsAFatalOfItsOwn:
         from istota.transport.whatsapp.baileys_bridge import _PERMANENT_FATALS
 
         assert _js_string_const("FATAL_CREDENTIAL_UNREADABLE") in _PERMANENT_FATALS
+
+
+class TestAReplacedConnectionIsBounded:
+    """A second client on the same credential must not churn for hours
+    (ISSUE-553).
+
+    WhatsApp closes a connection with 440 (`connectionReplaced`) when another
+    client logs in with the same credential. The sidecar read that as any
+    transient close and reconnected three seconds later, so two clients
+    knocked each other off every few seconds: 2,538 closes in five and a half
+    hours on the reported outage, each reopen a credential save, with no
+    alert. Now five in ten minutes latch the run, the sidecar yields, probes
+    three times at 15 minutes, an hour and an hour, and then gives up for
+    good. The run is on disk, so a restart neither resumes reconnecting nor
+    earns a probe, and it ends on a stable open or on a credential change this
+    process did not make.
+
+    Driven through `Session` with a stand-in daemon link, a captured
+    `setTimeout`, and the hold's credential watch replaced by a recorder, so a
+    whole run executes in milliseconds with no `node_modules`.
+    """
+
+    _PRELUDE = (
+        "const m = require({program});"
+        "const fs = require('fs');"
+        "const sent = [];"
+        "const link = {{greeted: true, send: (t, f) => {{"
+        " sent.push(Object.assign({{type: t}}, f)); return true; }}}};"
+        "const timers = [];"
+        "global.setTimeout = (fn, ms) => {{ timers.push({{fn, ms}}); return timers.length; }};"
+        "global.clearTimeout = () => {{}};"
+        "const baileys = {{DisconnectReason: {{loggedOut: 401, connectionReplaced: 440}}}};"
+        "const make = () => {{"
+        "  const s = new m.Session(link);"
+        "  s.waits = []; s.exits = []; s.starts = 0;"
+        "  s.watch = (delay, onDeadline, onChange, poll, baseline) => {{"
+        "    s.waits.push({{delay, onDeadline, onChange, baseline}}); return () => {{}}; }};"
+        "  s.exit = (c) => s.exits.push(c);"
+        "  s.start = async () => {{ s.starts += 1; }};"
+        "  return s;"
+        "}};"
+        "const close = (s, code) => {{ s.sock = {{}};"
+        "  s.onConnection({{connection: 'close',"
+        "  lastDisconnect: {{error: {{output: {{statusCode: code}}}}}}}}, baileys); }};"
+        "const open = (s) => {{ s.sock = {{}}; s.onConnection({{connection: 'open'}}, baileys); }};"
+        "const fatals = () => sent.filter((f) => f.type === 'fatal');"
+        "const waitsOf = (s) => s.waits.map((w) => w.delay);"
+    )
+
+    def _go(self, tmp_path, body: str):
+        session = tmp_path / "session"
+        session.mkdir(exist_ok=True)
+        script = (
+            self._PRELUDE.format(program=json.dumps(str(PROGRAM)))
+            + body
+        )
+        return TestTheLoggedOutBackoff._run(script, session_dir=session)
+
+    @staticmethod
+    def _out(expression: str) -> str:
+        return f"process.stdout.write(JSON.stringify({expression}));"
+
+    def test_one_replacement_is_reported_and_retried_later(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make(); close(s, 440);"
+            + self._out(
+                "{sent, delays: timers.map((t) => t.ms), stopping: s.stopping,"
+                " sock: s.sock, state: m.readReplacedState(),"
+                " wait: m.REPLACED_RECONNECT_MS}"
+            )
+        ))
+
+        assert out["sent"] == [{
+            "type": "fatal", "reason": "connection_replaced",
+            "permanent": False, "replacements": 1, "latched": False,
+            "announce": 0,
+        }]
+        assert out["delays"] == [out["wait"]]
+        assert out["stopping"] is False
+        # Dropped, so a send in the gap is answered `not_connected` definitely
+        # rather than reaching a socket WhatsApp has closed.
+        assert out["sock"] is None
+        assert len(out["state"]["times"]) == 1
+        assert out["state"]["latched_at"] is None
+
+    def test_five_latch_and_the_alert_is_asked_for_once(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "const latchedFrames = fatals().length;"
+            "s.announceReady();"
+            + self._out(
+                "{fatals: fatals(), latchedFrames, waits: waitsOf(s),"
+                " stopping: s.stopping, starts: s.starts,"
+                " reconnects: timers.length, state: m.readReplacedState(),"
+                " probe: m.REPLACED_PROBE_DELAYS_MS[0]}"
+            )
+        ))
+
+        fatals = out["fatals"]
+        latch = out["latchedFrames"]
+        assert [f["latched"] for f in fatals[:latch]] == [False] * (latch - 1) + [True]
+        assert fatals[latch - 1]["replacements"] == latch
+        assert fatals[latch - 1]["announce"] == 1
+        # Re-announced on a reconnected link, without asking for the alert again.
+        assert fatals[-1]["latched"] is True and fatals[-1]["announce"] == 0
+        assert out["stopping"] is True
+        assert out["reconnects"] == latch - 1
+        assert out["waits"] == [out["probe"]]
+        assert out["state"]["announced"] == 1
+
+    def test_the_probes_run_on_their_schedule_and_then_it_gives_up(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "const probes = [];"
+            "for (let i = 0; i < 3; i++) {"
+            "  s.waits[s.waits.length - 1].onDeadline();"
+            "  probes.push({starts: s.starts, stopping: s.stopping,"
+            "    probes: m.readReplacedState().probes});"
+            "  open(s); close(s, 440);"
+            "}"
+            + self._out(
+                "{probes, waits: waitsOf(s), fatals: fatals(),"
+                " state: m.readReplacedState(), stopping: s.stopping,"
+                " delays: m.REPLACED_PROBE_DELAYS_MS}"
+            )
+        ))
+
+        assert [p["starts"] for p in out["probes"]] == [1, 2, 3]
+        assert [p["probes"] for p in out["probes"]] == [1, 2, 3]
+        assert all(p["stopping"] is False for p in out["probes"])
+        # 15 minutes, then an hour, then an hour, then no deadline at all.
+        assert out["waits"][:3] == out["delays"]
+        assert out["waits"][3] is None  # Infinity serializes as null
+        last = out["fatals"][-1]
+        assert last["permanent"] is True and last["announce"] == 2
+        announces = [f["announce"] for f in out["fatals"] if f["announce"]]
+        assert announces == [1, 2]
+        assert out["state"]["given_up"] is True
+        assert out["stopping"] is True
+
+    def test_a_stable_open_ends_the_run(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "s.waits[0].onDeadline(); open(s);"
+            "const stable = timers.filter((t) => t.ms === m.REPLACED_STABLE_MS);"
+            "const before = m.readReplacedState() !== null;"
+            "stable[0].fn();"
+            + self._out(
+                "{stable: stable.length, before, after: m.readReplacedState(),"
+                " ready: sent.filter((f) => f.type === 'ready').length,"
+                " memory: s.replaced}"
+            )
+        ))
+
+        assert out["stable"] == 1
+        assert out["ready"] == 1
+        assert out["before"] is True
+        assert out["after"] is None and out["memory"] is None
+
+    def test_an_open_that_closes_before_it_is_stable_does_not_end_it(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "s.waits[0].onDeadline(); open(s);"
+            "const stable = timers.filter((t) => t.ms === m.REPLACED_STABLE_MS)[0];"
+            "close(s, 440); stable.fn();"
+            + self._out("{state: m.readReplacedState(), stopping: s.stopping}")
+        ))
+
+        assert out["state"]["latched_at"] is not None
+        assert out["stopping"] is True
+
+    def test_a_restart_holds_rather_than_reconnecting(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "sent.length = 0;"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            "b.announceReady();"
+            + self._out(
+                "{holding, starts: b.starts, waits: waitsOf(b), sent,"
+                " probe: m.REPLACED_PROBE_DELAYS_MS[0]}"
+            )
+        ))
+
+        assert out["holding"] is True
+        assert out["starts"] == 0
+        assert 0 < out["waits"][0] <= out["probe"]
+        # Told again, and not paged again.
+        assert out["sent"][-1]["latched"] is True
+        assert out["sent"][-1]["announce"] == 0
+
+    def test_a_restart_mid_way_through_the_last_probe_gives_up(self, tmp_path):
+        """The probe is counted before anything opens, so a restart does not
+        buy a fourth."""
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "for (let i = 0; i < 2; i++) { a.waits[a.waits.length - 1].onDeadline(); close(a, 440); }"
+            "a.waits[a.waits.length - 1].onDeadline();"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            + self._out("{holding, starts: b.starts, state: m.readReplacedState()}")
+        ))
+
+        assert out["holding"] is True
+        assert out["starts"] == 0
+        assert out["state"]["given_up"] is True
+
+    def test_a_credential_this_process_did_not_write_ends_the_run(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "fs.writeFileSync(process.env.ISTOTA_BAILEYS_SESSION_DIR + '/creds.json', '{}');"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            + self._out("{holding, state: m.readReplacedState()}")
+        ))
+
+        assert out["holding"] is False
+        assert out["state"] is None
+
+    def test_a_credential_this_process_saved_does_not(self, tmp_path):
+        """Every open saves the credential, a probe's included. Refreshing the
+        recorded stamp after our own save is what keeps that from reading as
+        a re-pair."""
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "fs.writeFileSync(process.env.ISTOTA_BAILEYS_SESSION_DIR + '/creds.json', '{}');"
+            "a.refreshReplacedStamp();"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            + self._out("{holding}")
+        ))
+
+        assert out["holding"] is True
+
+    def test_the_hold_watches_from_the_recorded_stamp_and_exits_on_a_change(
+        self, tmp_path,
+    ):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "s.waits[0].onChange();"
+            + self._out(
+                "{baseline: s.waits[0].baseline, stamp: m.credentialStamp(),"
+                " exits: s.exits}"
+            )
+        ))
+
+        assert out["baseline"] == out["stamp"]
+        assert out["exits"] == [1]
+
+    def test_recent_closes_survive_a_restart(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT - 1; i++) close(a, 440);"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            "close(b, 440);"
+            + self._out("{holding, last: fatals()[fatals().length - 1]}")
+        ))
+
+        assert out["holding"] is False
+        assert out["last"]["latched"] is True
+
+    def test_a_logout_during_a_probe_ends_the_run(self, tmp_path):
+        """The unlink's backoff and alert take over; the run would otherwise
+        resume on restart and end in a give-up naming the wrong cause."""
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "s.waits[0].onDeadline(); close(s, 401);"
+            + self._out("{state: m.readReplacedState(), memory: s.replaced}")
+        ))
+
+        assert out["state"] is None and out["memory"] is None
+
+    def test_an_unlatched_run_ends_once_its_closes_age_out(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make(); close(s, 440);"
+            "const kept = m.readReplacedState() !== null;"
+            "s.replaced.times = [Date.now() - m.REPLACED_WINDOW_MS - 1];"
+            "s.refreshReplacedStamp();"
+            + self._out("{kept, state: m.readReplacedState()}")
+        ))
+
+        assert out["kept"] is True
+        assert out["state"] is None
+
+    def test_closes_outside_the_window_do_not_latch(self):
+        out = TestTheLoggedOutBackoff._run(
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "let times = []; let r;"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) {"
+            "  r = m.recordReplacement(times, i * m.REPLACED_WINDOW_MS); times = r.times;"
+            "}"
+            "process.stdout.write(JSON.stringify(r));"
+        )
+
+        assert out["latched"] is False
+        assert out["count"] == 1
+
+    def test_an_unreadable_run_is_no_run(self):
+        out = TestTheLoggedOutBackoff._call(
+            "[m.parseReplacedState(''), m.parseReplacedState('[]'),"
+            " m.parseReplacedState('{\"announced\": 9}').announced]"
+        )
+
+        assert out == [None, None, 2]
+
+    def test_another_close_is_unchanged(self, tmp_path):
+        """The control: an ordinary transient close still reconnects at once
+        and reports nothing."""
+        out = self._go(tmp_path, (
+            "const s = make(); close(s, 428);"
+            + self._out("{sent, delays: timers.map((t) => t.ms)}")
+        ))
+
+        assert out["sent"] == []
+        assert out["delays"] == [3000]
+
+    def test_an_explicit_baseline_sees_a_change_before_the_first_poll(
+        self, tmp_path,
+    ):
+        """`watchCredential` with a baseline compares at the first tick,
+        where the logout wait adopts whatever it finds there."""
+        session = tmp_path / "session"
+        session.mkdir()
+        out = TestTheLoggedOutBackoff._run(
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "const seen = [];"
+            "m.watchCredential(10000, () => seen.push('deadline'),"
+            "  () => seen.push('change'), 20, 'not-the-stamp');"
+            "m.watchCredential(60, () => seen.push('control-deadline'),"
+            "  () => seen.push('control-change'), 20);"
+            "setTimeout(() => process.stdout.write(JSON.stringify(seen)), 200);",
+            session_dir=session,
+        )
+
+        assert out == ["change", "control-deadline"]
+
+    def test_the_bridge_does_not_read_the_reason_as_permanent(self):
+        from istota.transport.whatsapp.baileys_bridge import (
+            _PERMANENT_FATALS, _SIDECAR_OWN_FILES, FATAL_CONNECTION_REPLACED,
+        )
+
+        assert _js_string_const("FATAL_CONNECTION_REPLACED") == FATAL_CONNECTION_REPLACED
+        assert FATAL_CONNECTION_REPLACED not in _PERMANENT_FATALS
+        # Or `dir_holds_a_session` reads the run file as a paired session.
+        assert "connection-replaced.json" in _SIDECAR_OWN_FILES
 
 
 class TestThePinnedLibrary:
