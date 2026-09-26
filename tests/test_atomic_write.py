@@ -233,6 +233,17 @@ class TestTheStagingName:
         assert names[0] != names[1]
 
 
+#: Files that publish with `os.replace` and are deliberately not copies of
+#: `atomic_writer`, each with what it needs that the helper does not do.
+_NOT_A_COPY = {
+    # A KDBX create: the staging file is opened relative to a directory fd,
+    # parsed back and verified before the rename, and the rename is refused if
+    # the live file changed underneath it. `atomic_writer` takes a path and
+    # publishes whatever the body wrote.
+    "secrets_vault.py",
+}
+
+
 class TestNoSecondCopy:
     """Grep guard. Nine hand-rolled writers were replaced; a tenth must not appear.
 
@@ -248,7 +259,13 @@ class TestNoSecondCopy:
             for p in SRC.rglob("*.py")
             if "os.replace(" in p.read_text(encoding="utf-8")
         )
-        assert hits == ["atomic_write.py"], (
+        assert [h for h in hits if h not in _NOT_A_COPY] == ["atomic_write.py"], (
             "a new temp-file-then-rename writer appeared; call "
             "atomic_write.write_text_atomic / write_bytes_atomic instead"
         )
+
+    def test_every_exemption_still_renames(self):
+        """A stale exemption is how a guard quietly stops guarding."""
+        for rel in _NOT_A_COPY:
+            text = (SRC / rel).read_text(encoding="utf-8")
+            assert "os.replace(" in text, f"{rel} no longer renames; drop it from _NOT_A_COPY"
