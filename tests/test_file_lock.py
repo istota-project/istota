@@ -206,6 +206,31 @@ _SINGLE_SHOT = {
 }
 
 
+class TestNofollow:
+    def test_a_symlinked_anchor_is_refused_and_its_target_untouched(self, tmp_path):
+        target = tmp_path / "elsewhere"
+        target.write_text("keep")
+        anchor = tmp_path / "vault.lock"
+        anchor.symlink_to(target)
+        with pytest.raises(OSError):
+            with exclusive_lock(anchor, timeout_seconds=0.0, nofollow=True):
+                pass
+        assert target.read_text() == "keep"
+
+    def test_a_directory_anchor_is_refused(self, tmp_path):
+        anchor = tmp_path / "vault.lock"
+        anchor.mkdir()
+        with pytest.raises(OSError):
+            with exclusive_lock(anchor, timeout_seconds=0.0, nofollow=True):
+                pass
+
+    def test_a_fresh_anchor_is_created_private(self, tmp_path):
+        anchor = tmp_path / "vault.lock"
+        with exclusive_lock(anchor, timeout_seconds=0.0, nofollow=True):
+            pass
+        assert anchor.stat().st_mode & 0o777 == 0o600
+
+
 class TestNoSecondCopy:
     """Grep guard. The polling acquisition loop lives in one module.
 

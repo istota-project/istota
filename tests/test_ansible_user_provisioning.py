@@ -705,12 +705,12 @@ class TestAnsibleSmsNumberBinding:
         assert "sms-number" not in rendered
 
     def test_the_documented_example_key_matches_what_the_task_reads(self):
-        """The inventory block is the only place an operator learns the key
-        exists, and it is hand-maintained beside a template that reads a
-        different string just as happily."""
-        defaults = DEFAULTS_FILE.read_text()
-        assert "sms_phone_number:" in defaults, (
-            "istota_users documents no sms_phone_number key"
+        """The inventory example in the deployment docs is the only place an
+        operator learns the key exists, and it is hand-maintained beside a
+        template that reads a different string just as happily."""
+        docs = (REPO / "docs" / "deployment" / "ansible.md").read_text()
+        assert "sms_phone_number:" in docs, (
+            "the istota_users example documents no sms_phone_number key"
         )
         assert "user_item.value.sms_phone_number" in _ensure_profiles_command()
 

@@ -27,6 +27,11 @@ once the descriptor closes — the OS releases the flock on context exit and
 unconditionally on process death — so the anchor file is left in place rather
 than unlinked, which is what keeps two processes agreeing on one inode.
 
+``nofollow=True`` opens the anchor ``O_NOFOLLOW`` at 0600 and refuses one
+that is not a regular file, for an anchor in a directory where a planted
+symlink matters (``secrets_vault``'s lock beside the database). A refusal is
+an ``OSError``, the same as a failed open.
+
 Linux and macOS. Windows is not a supported deployment for istota and this
 does not paper over that.
 
@@ -37,6 +42,8 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import os
+import stat
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -50,6 +57,7 @@ def exclusive_lock(
     timeout_seconds: float,
     poll_seconds: float = 0.05,
     on_timeout: Callable[[str], BaseException] | None = None,
+    nofollow: bool = False,
 ) -> Iterator[None]:
     """Hold an exclusive flock on ``lock_path`` for the duration of the context.
 
@@ -58,7 +66,19 @@ def exclusive_lock(
     directory; nothing here creates it.
     """
     lock_path = Path(lock_path)
-    fd = open(lock_path, "a+")
+    if nofollow:
+        raw = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW, 0o600)
+        try:
+            regular = stat.S_ISREG(os.fstat(raw).st_mode)
+        except BaseException:
+            os.close(raw)
+            raise
+        if not regular:
+            os.close(raw)
+            raise OSError(errno.EINVAL, "lock anchor is not a regular file", str(lock_path))
+        fd = os.fdopen(raw, "a+")
+    else:
+        fd = open(lock_path, "a+")
     try:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
         while True:

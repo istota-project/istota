@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import dataclasses
 import contextlib
-import fcntl
 import hashlib
 import io
 import json
@@ -66,12 +65,11 @@ import re
 import secrets
 import stat
 import string
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import secrets_store
+from . import file_lock, secrets_store
 
 logger = logging.getLogger(__name__)
 
@@ -546,32 +544,36 @@ def _vault_lock_path(location, lock_root: Path) -> Path:
 
 @contextlib.contextmanager
 def _vault_file_lock(location, *, lock_root: Path, blocking: bool):
-    """Serialize writes with syncs through a daemon-owned lock directory."""
+    """Serialize writes with syncs through a daemon-owned lock directory.
+
+    A non-blocking caller (a create) is refused at once while another vault
+    operation holds the lock; a blocking one (a sync) waits a bounded time.
+    """
     name = _vault_lock_path(location, lock_root)
-    flags = os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(name, flags, 0o600)
-    except OSError as exc:
-        raise VaultUnreadable("the vault lock cannot be opened") from exc
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise VaultUnreadable("the vault lock is not a regular file")
-        deadline = time.monotonic() + _VAULT_LOCK_WAIT_SECONDS
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError as exc:
-                if not blocking:
-                    raise VaultWriteRefused("another vault operation holds the lock") from exc
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("vault lock busy") from None
-                time.sleep(0.05)
-            except OSError as exc:
-                raise VaultUnreadable("the vault lock cannot be acquired") from exc
+
+    # A private subclass, so an ETIMEDOUT from the open (itself a TimeoutError)
+    # still reads as an unreadable lock rather than a busy one.
+    class _Busy(TimeoutError):
+        pass
+
+    def refused(_anchor: str) -> BaseException:
+        if blocking:
+            return _Busy("vault lock busy")
+        return VaultWriteRefused("another vault operation holds the lock")
+
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(file_lock.exclusive_lock(
+                name,
+                timeout_seconds=_VAULT_LOCK_WAIT_SECONDS if blocking else 0.0,
+                on_timeout=refused,
+                nofollow=True,
+            ))
+        except (_Busy, VaultWriteRefused):
+            raise
+        except OSError as exc:
+            raise VaultUnreadable("the vault lock cannot be acquired") from exc
         yield
-    finally:
-        os.close(fd)
 
 
 def _vault_leaf(location):
@@ -689,6 +691,8 @@ def create_entry(
             latest, latest_digest = read_vault_bytes(location.path, dir_fd=location.dir_fd)
             if latest_digest != digest or latest != data:
                 raise VaultChanged("the vault changed during the write")
+            # Not atomic_write: this rename is dir_fd-relative and only runs
+            # after the staged file verified and the live one did not change.
             os.replace(temp_leaf, leaf, src_dir_fd=location.dir_fd, dst_dir_fd=location.dir_fd)
             if db_path is not None and user_id is not None:
                 try:
