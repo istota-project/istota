@@ -224,12 +224,14 @@ class TestTheSidecarSpeaksTheSameProtocol:
 
     def test_the_permanent_fatals_are_ones_the_bridge_latches(self):
         """A `fatal` reason the bridge does not recognise is only permanent if
-        the sidecar also sets `permanent: true`; these are the two it sends,
-        and both are in the bridge's own set, so the latch does not depend on
+        the sidecar also sets `permanent: true`; these are the ones it sends,
+        and all are in the bridge's own set, so the latch does not depend on
         that flag surviving a refactor."""
         from istota.transport.whatsapp.baileys_bridge import _PERMANENT_FATALS
 
-        for name in ("FATAL_LOGGED_OUT", "FATAL_BAD_SESSION"):
+        for name in (
+            "FATAL_LOGGED_OUT", "FATAL_BAD_SESSION", "FATAL_CREDENTIAL_UNREADABLE",
+        ):
             assert _js_string_const(name) in _PERMANENT_FATALS
 
     def test_it_reads_the_two_environment_variables_the_bridge_sets(self):
@@ -2119,7 +2121,7 @@ class TestTheLoggedOutBackoff:
         sidecar that neither reconnects nor exits."""
         source = PROGRAM.read_text()
 
-        assert "if (session.stopping && !session.loggedOut) return;" in source
+        assert "if (session.stopping && !session.loggedOut && !session.credentialUnreadable) {" in source
 
     def test_the_verdict_is_re_announced_on_a_reconnected_link(self):
         """The daemon's permanent-fatal latch is in memory and only this frame
@@ -2439,6 +2441,130 @@ class TestTheCredentialWritesAreAtomic:
 
         assert "useAtomicAuthState(SESSION_DIR, baileys)" in body
         assert "useMultiFileAuthState" not in body
+
+
+class TestALostCredentialIsAFatalOfItsOwn:
+    """An unreadable `creds.json` with no usable backup is a lost session, not
+    a first pairing (ISSUE-552).
+
+    The library reads an unparseable `creds.json` as no credential and starts
+    a fresh, unregistered one, which offers a QR. On the reported outage that
+    ran for fifteen hours: codes offered with no pairing window open, every
+    close an ordinary 408, no `fatal`, so no latch, no alert and no doctor
+    change. The sidecar now checks the stored credential before it opens
+    anything and answers with a permanent `fatal` of its own, which reuses
+    the unlinked-device path on the daemon's side.
+
+    Driven through the whole program against a stand-in daemon socket that
+    refuses a connection whose first line is not `hello`, as the bridge does.
+    With no `node_modules` in the tree a program that reached `loadBaileys`
+    would exit 3 and send no fatal, which is what the unfixed program does.
+    """
+
+    @staticmethod
+    def _frames(tmp_path, creds: str | None, backup: str | None = None,
+                listen_for: float = 3.0) -> tuple[list[dict], int | None]:
+        import socket
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        # A short directory for the socket: AF_UNIX paths are capped near 104
+        # bytes on macOS and pytest's tmp_path can exceed that.
+        import tempfile
+        sock_dir = Path(tempfile.mkdtemp(prefix="wa-"))
+        sock_path = sock_dir / "s"
+        session = tmp_path / "session"
+        session.mkdir()
+        if creds is not None:
+            (session / "creds.json").write_text(creds)
+        if backup is not None:
+            (session / "creds.json.bak").write_text(backup)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock_path))
+        server.listen(1)
+        server.settimeout(10)
+        env = dict(os.environ)
+        env["ISTOTA_BAILEYS_SOCKET"] = str(sock_path)
+        env["ISTOTA_BAILEYS_SESSION_DIR"] = str(session)
+        env["ISTOTA_BAILEYS_MEDIA_DIR"] = str(tmp_path / "media")
+        proc = subprocess.Popen(
+            [node, str(PROGRAM)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        frames: list[dict] = []
+        try:
+            conn, _ = server.accept()
+            conn.settimeout(0.2)
+            buffer = b""
+            deadline = time.monotonic() + listen_for
+            while time.monotonic() < deadline:
+                try:
+                    chunk = conn.recv(65536)
+                except TimeoutError:
+                    continue
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buffer += chunk
+            frames = [json.loads(line) for line in buffer.splitlines() if line.strip()]
+            # The bridge's `_negotiate` drops a connection whose first line is
+            # not `hello`, so a frame sent ahead of it would never be read.
+            assert not frames or frames[0]["type"] == "hello", frames
+            conn.close()
+            returncode = proc.poll()
+        finally:
+            proc.kill()
+            proc.communicate(timeout=15)
+            server.close()
+            shutil.rmtree(sock_dir, ignore_errors=True)
+        return frames, returncode
+
+    @pytest.mark.parametrize("damage", ["", "{\"registered\": tr"])
+    def test_an_unreadable_credential_is_a_permanent_fatal_and_never_a_qr(
+        self, tmp_path, damage
+    ):
+        frames, returncode = self._frames(tmp_path, damage)
+
+        fatals = [f for f in frames if f["type"] == "fatal"]
+        assert fatals and all(
+            f["reason"] == _js_string_const("FATAL_CREDENTIAL_UNREADABLE")
+            and f["permanent"] is True
+            for f in fatals
+        ), frames
+        assert not [f for f in frames if f["type"] == "qr"]
+        # Still up and holding the verdict, rather than exiting into a
+        # supervisor's restart loop.
+        assert returncode is None
+        # The damaged file is evidence and is left as it was.
+        assert (tmp_path / "session" / "creds.json").read_text() == damage
+
+    def test_a_usable_backup_is_not_a_fatal(self, tmp_path):
+        """The control. With a good backup the program goes on to open the
+        library, and sends no fatal of this kind."""
+        frames, _ = self._frames(
+            tmp_path, "", backup='{"registered": true}', listen_for=2.0,
+        )
+
+        assert not [f for f in frames if f["type"] == "fatal"]
+
+    def test_a_missing_dependency_tree_exits_rather_than_paging(self, tmp_path):
+        """`loadBaileys` is a dynamic `import()`, which rejects with
+        `ERR_MODULE_NOT_FOUND`. Matching only `require`'s `MODULE_NOT_FOUND`
+        sent a missing tree down the retry path to a permanent `bad_session`,
+        whose alert tells an operator to archive a credential that works."""
+        if (SIDECAR_DIR / "node_modules").exists():
+            pytest.skip("the dependency tree is installed here")
+        frames, returncode = self._frames(tmp_path, None, listen_for=3.0)
+
+        assert returncode == 3
+        assert not [f for f in frames if f["type"] == "fatal"]
+
+    def test_the_bridge_reads_it_as_permanent(self):
+        from istota.transport.whatsapp.baileys_bridge import _PERMANENT_FATALS
+
+        assert _js_string_const("FATAL_CREDENTIAL_UNREADABLE") in _PERMANENT_FATALS
 
 
 class TestThePinnedLibrary:

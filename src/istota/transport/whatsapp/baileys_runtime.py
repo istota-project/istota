@@ -204,7 +204,8 @@ def _alert_body(reason: str) -> str:
     """What the operator is told, with the sidecar's own words left out.
 
     `reason` is a small vocabulary this side defines (`logged_out`,
-    `unpaired`, `bad_session`) plus whatever else a sidecar sends, so it is
+    `unpaired`, `bad_session`, `credential_unreadable`) plus whatever else a
+    sidecar sends, so it is
     reported as a bounded label and never as prose: Baileys' error text is one
     of the places a JID or a message body turns up, and this string reaches a
     notification panel and every alert route the user has configured.
@@ -214,6 +215,21 @@ def _alert_body(reason: str) -> str:
     """
     from ...notification_resolvers.task_alert import _slug  # noqa: PLC0415
 
+    if reason == "credential_unreadable":
+        # The device is still linked on WhatsApp's side; it is the local copy
+        # of the credential that cannot be read (ISSUE-552). A permission or
+        # ownership error reads the same from here, so the check comes first.
+        return (
+            "The saved WhatsApp credential cannot be read, so every WhatsApp "
+            "send is refused and nothing is opened until it is repaired. "
+            "Check `sidecar.log` in the session directory: if the file's "
+            "owner or mode is wrong, fix that and restart the sidecar. "
+            "Otherwise stop the istota daemon and any sidecar running as a "
+            "unit of its own, run `istota whatsapp pair --reset`, scan the "
+            "code, then start them again, and remove the old entry from "
+            "WhatsApp's Linked Devices screen. The unreadable session is kept "
+            "as a timestamped sibling directory, not deleted."
+        )
     return (
         f"The WhatsApp device link ended ({_slug(reason, fallback='unknown')}), so every "
         "WhatsApp send is refused until the session is paired again. Stop the "

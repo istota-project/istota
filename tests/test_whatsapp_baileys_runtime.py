@@ -455,6 +455,33 @@ class TestTheUnlinkAlert:
         bridge._handle_fatal({"reason": "logged_out"})
         assert seen == ["logged_out"]
 
+    def test_an_unreadable_credential_is_announced_once_as_permanent(
+        self, tmp_path,
+    ):
+        """ISSUE-552: the sidecar's own reason for a lost credential latches
+        without relying on the frame's `permanent` flag."""
+        seen = []
+        bridge = baileys_bridge.BaileysBridge(
+            _config(tmp_path), on_fatal=seen.append,
+        )
+
+        bridge._handle_fatal({"reason": "credential_unreadable"})
+        bridge._handle_fatal({"reason": "credential_unreadable"})
+
+        assert bridge.status.fatal_is_permanent is True
+        assert seen == ["credential_unreadable"]
+
+    def test_its_alert_does_not_claim_the_device_link_ended(self):
+        """The device is still linked on WhatsApp's side, and a permission
+        error reads the same as a lost file, so the body names both fixes."""
+        body = baileys_runtime._alert_body("credential_unreadable")
+
+        assert "device link ended" not in body
+        assert "cannot be read" in body
+        assert "pair --reset" in body
+        assert "Linked Devices" in body
+        assert "device link ended" in baileys_runtime._alert_body("logged_out")
+
     def test_a_transient_fatal_announces_nothing(self, tmp_path):
         """`_send`'s gate is `fatal_is_permanent` alone, so a transient fatal
         refuses no send — alerting on one would put an operator's real outage

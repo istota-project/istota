@@ -88,6 +88,10 @@ const SEND_REASONS = new Set([
 // states is gone until somebody re-pairs, so it stops respawning.
 const FATAL_LOGGED_OUT = 'logged_out';
 const FATAL_BAD_SESSION = 'bad_session';
+// A `creds.json` that exists and cannot be read, with no usable backup
+// (ISSUE-552). The session was paired and is lost; starting the library on it
+// would begin a fresh pairing instead and say nothing.
+const FATAL_CREDENTIAL_UNREADABLE = 'credential_unreadable';
 
 // --- inbound media ---------------------------------------------------------
 
@@ -272,6 +276,11 @@ class Link {
     this.socketPath = socketPath;
     this.socket = null;
     this.buffer = '';
+    // Whether `hello` has gone on the current connection. The daemon refuses
+    // a connection whose first line is anything else, so a frame written to a
+    // socket that is still connecting gets the link dropped rather than
+    // delivered.
+    this.greeted = false;
     this.onMessage = () => {};
     this.onClose = () => {};
     // Called after every `hello`. The daemon clears `ready` whenever the link
@@ -288,6 +297,7 @@ class Link {
     socket.on('connect', () => {
       log('info', 'connected to the daemon');
       this.send(MSG_HELLO, { protocol_version: PROTOCOL_VERSION });
+      this.greeted = true;
       this.onReady();
     });
     socket.on('data', (chunk) => this.feed(chunk));
@@ -295,6 +305,7 @@ class Link {
     socket.on('close', () => {
       this.socket = null;
       this.buffer = '';
+      this.greeted = false;
       this.onClose();
     });
   }
@@ -1151,12 +1162,13 @@ function readStoredJson(file, reviver) {
   try {
     text = fs.readFileSync(file, 'utf8');
   } catch (err) {
-    return { status: err && err.code === 'ENOENT' ? 'absent' : 'unreadable' };
+    if (err && err.code === 'ENOENT') return { status: 'absent' };
+    return { status: 'unreadable', kind: (err && err.code) || 'read_failed' };
   }
   try {
     return { status: 'ok', value: JSON.parse(text, reviver) };
   } catch (err) {
-    return { status: 'unreadable' };
+    return { status: 'unreadable', kind: text.trim() ? 'unparseable' : 'empty' };
   }
 }
 
@@ -1165,7 +1177,7 @@ function readStoredCreds(file, reviver) {
   if (stored.status !== 'ok') return stored;
   const value = stored.value;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return { status: 'unreadable' };
+    return { status: 'unreadable', kind: 'not_an_object' };
   }
   return stored;
 }
@@ -1188,6 +1200,32 @@ function sweepAuthTempFiles(folder) {
     }
   }
 }
+
+/*
+ * What the stored credential is, read before anything is opened: `absent`,
+ * `ok`, `backup` (the main file is broken and the backup is usable) or
+ * `unreadable` (broken, and no usable backup), with `kind` saying how the
+ * main file failed — an errno for a read that failed, or `empty`,
+ * `unparseable`, `not_an_object`. Plain `JSON.parse`, so it needs no
+ * library: the reviver only turns encoded Buffers back into Buffers, and a
+ * file that parses without it parses with it.
+ */
+function storedCredentialVerdict(folder) {
+  if (!folder) return { verdict: 'absent' };
+  const main = readStoredCreds(path.join(folder, CREDS_FILE));
+  if (main.status === 'ok') return { verdict: 'ok' };
+  if (main.status === 'absent') return { verdict: 'absent' };
+  const backup = readStoredCreds(path.join(folder, CREDS_BACKUP_FILE));
+  return {
+    verdict: backup.status === 'ok' ? 'backup' : 'unreadable',
+    kind: main.kind,
+  };
+}
+
+// How long a process holding an unreadable credential waits before exiting.
+// It opens nothing while it waits, so the wait costs no login; it bounds how
+// long a repaired directory goes unnoticed if the credential watch misses it.
+const CREDENTIAL_UNREADABLE_WAIT_MS = 3_600_000;
 
 /*
  * Baileys' `useMultiFileAuthState`, with atomic writes and a backup.
@@ -1346,6 +1384,10 @@ class Session {
     // during the wait would otherwise re-learn the logout and not that the
     // backoff behind it is running on a guess.
     this.runUnrecorded = false;
+    // Whether the stored credential is lost (ISSUE-552). Like `loggedOut`, a
+    // verdict to re-announce on every daemon-link reconnect, since the
+    // daemon's latch is in memory.
+    this.credentialUnreadable = false;
     // The tail of the serialized inbound chain. See `onMessages`: a batch is
     // appended to it rather than handled where it arrives, so a photo's
     // download cannot be overtaken by the text message behind it.
@@ -1355,6 +1397,12 @@ class Session {
   }
 
   announceReady() {
+    if (this.credentialUnreadable) {
+      this.link.send(MSG_FATAL, {
+        reason: FATAL_CREDENTIAL_UNREADABLE, permanent: true,
+      });
+      return;
+    }
     if (this.loggedOut) {
       // **The verdict, not the readiness.** The daemon's permanent-fatal
       // latch is in memory and is set only by this frame, so a scheduler that
@@ -1390,8 +1438,22 @@ class Session {
   }
 
   async open_() {
+    // **Before the library is loaded or anything is opened.** The library
+    // would read the broken file as no credential and offer a QR, and its
+    // first save would rename a fresh credential over the evidence.
+    const stored = storedCredentialVerdict(SESSION_DIR);
+    if (stored.verdict === 'unreadable') {
+      this.refuseUnreadableCredential(stored.kind);
+      return;
+    }
     const baileys = await loadBaileys();
-    const { state, saveCreds } = await useAtomicAuthState(SESSION_DIR, baileys);
+    const auth = await useAtomicAuthState(SESSION_DIR, baileys);
+    if (auth.source === 'unreadable') {
+      // The file broke between the check above and the read. Same answer.
+      this.refuseUnreadableCredential('changed_during_load');
+      return;
+    }
+    const { state, saveCreds } = auth;
     const logger = silentLogger();
     const sock = baileys.makeWASocket({
       // **Not `auth: state` directly.** The auth state reads each
@@ -1449,6 +1511,41 @@ class Session {
     sock.ev.on('messages.update', (updates) => {
       if (mine()) this.onReceipts(updates);
     });
+  }
+
+  /*
+   * Report a lost credential and hold, opening nothing (ISSUE-552).
+   *
+   * Permanent, so the daemon latches it, refuses every send definitely and
+   * alerts once, through the path an unlinked device already takes; the
+   * remedy is the same `istota whatsapp pair --reset`, which moves the
+   * damaged directory aside rather than deleting it. Sent here only on a
+   * link that has already said `hello`: on a cold start this runs before the
+   * link connects, and a frame written ahead of `hello` gets the connection
+   * refused. `announceReady` sends it on every connect instead.
+   *
+   * `kind` is logged because "cannot be read" covers a permission or type
+   * error as well as a lost file, and the fix for those is a `chown`.
+   *
+   * Then it waits rather than exiting, so a supervisor does not restart it
+   * every thirty seconds into the same answer. The wait watches `creds.json`
+   * as the logged-out one does, so a re-pair or a restore ends it early.
+   */
+  refuseUnreadableCredential(kind) {
+    if (this.credentialUnreadable) return;
+    this.credentialUnreadable = true;
+    this.stopping = true;
+    this.sock = null;
+    log('error', 'creds.json cannot be read and there is no usable backup; '
+      + 'nothing will be opened until it is repaired or re-paired', {
+      kind: kind || 'unknown',
+    });
+    if (this.link.greeted) {
+      this.link.send(MSG_FATAL, {
+        reason: FATAL_CREDENTIAL_UNREADABLE, permanent: true,
+      });
+    }
+    scheduleLogoutExit(CREDENTIAL_UNREADABLE_WAIT_MS, () => process.exit(1));
   }
 
   // A save that failed leaves the previous `creds.json` in place, which is
@@ -1573,7 +1670,10 @@ class Session {
     // reporting that permanent pages every admin that "the device link ended"
     // on a deployment that has never paired. It exits instead, which the
     // daemon's supervisor reports as a sidecar that will not stay up.
-    if (err && err.code === 'MODULE_NOT_FOUND') {
+    // Both spellings: `require` says `MODULE_NOT_FOUND` and the dynamic
+    // `import()` in `loadBaileys` says `ERR_MODULE_NOT_FOUND`, so matching the
+    // first alone left this branch unreachable once the library became ESM.
+    if (err && (err.code === 'MODULE_NOT_FOUND' || err.code === 'ERR_MODULE_NOT_FOUND')) {
       log('error', 'the Baileys library is not installed', { kind: err.code });
       process.exit(3);
     }
@@ -2085,7 +2185,9 @@ function main() {
     // inside one and leave a sidecar that neither reconnects nor exits, with
     // the unlinked-device verdict reaching nobody. A logout wait reconnects
     // and re-announces the fatal; a deliberate shutdown still does not.
-    if (session.stopping && !session.loggedOut) return;
+    if (session.stopping && !session.loggedOut && !session.credentialUnreadable) {
+      return;
+    }
     log('warn', 'the daemon link closed; reconnecting');
     setTimeout(() => link.connect(), 2000);
   };
@@ -2140,6 +2242,7 @@ module.exports = {
   writeFileAtomic,
   readStoredCreds,
   useAtomicAuthState,
+  storedCredentialVerdict,
   logoutExitDelayMs,
   LOGOUT_UNKNOWN_RUN,
   logoutWaitMs,

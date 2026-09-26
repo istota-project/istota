@@ -228,7 +228,9 @@ _ARCHIVE_SUFFIX_RE = re.compile(r"\.(\d{8}T\d{6}Z)(?:-\d+)?\Z")
 #: loop would burn a process every few seconds while changing nothing. An explicit
 #: ``"permanent": true`` on the line says the same thing without this table
 #: having to know the name.
-_PERMANENT_FATALS = frozenset({"logged_out", "unpaired", "bad_session"})
+_PERMANENT_FATALS = frozenset(
+    {"logged_out", "unpaired", "bad_session", "credential_unreadable"}
+)
 
 #: What the sidecar's process is handed. An allowlist rather than
 #: `os.environ`: the daemon's own environment carries every credential on the
@@ -1517,7 +1519,10 @@ class BaileysBridge:
         # that expired unscanned and then a restart left the new bridge
         # writing sends at a sidecar with no credential, settling `unknown`
         # for the life of the deployment (ISSUE-506). A host that has never
-        # paired is the same state with nothing behind it.
+        # paired is the same state with nothing behind it. The fifth is
+        # `_handle_qr`: a code offered is the sidecar's own evidence that it
+        # holds no registered credential, which covers a credential lost after
+        # `start()` read the disk (ISSUE-552).
         self._session_unpaired = False
         # Loop-monotonic, and `None` until a restart has been spent on this
         # bridge. See `RESET_COOLDOWN`.
@@ -3482,7 +3487,7 @@ class BaileysBridge:
             self._permanent_fatal.clear()
             # The session is open, so it is paired — the one thing that can
             # say so, and therefore the only thing that lifts `_send`'s
-            # unpaired refusal, whichever of its four producers set it.
+            # unpaired refusal, whichever of its five producers set it.
             # That includes the one `start()` sets from a directory holding no
             # credential: a host pairing for the first time sends the moment
             # the code lands rather than waiting for a restart. Cleared here
@@ -3558,6 +3563,13 @@ class BaileysBridge:
         if not isinstance(value, str) or not value:
             self._status.malformed_lines += 1
             return
+        # **A code is evidence the sidecar holds no registered credential**
+        # (ISSUE-552), whichever branch below takes it. `start()` reads the
+        # disk once, so a credential lost after the scheduler started left
+        # this clear while the sidecar offered codes nobody saw, and every
+        # send reached `writer.write` against an unpaired session and settled
+        # `unknown`. A `ready` lifts it, as it lifts every other producer.
+        self._session_unpaired = True
         window = self._pairing_window
         if window is not None and asyncio.get_running_loop().time() < window.expires_at:
             # Stamped on the loop, in order, so the sequence a queued write
