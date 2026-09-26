@@ -8189,6 +8189,42 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
             scope=DEPLOYMENT,
         )
 
+    replaced = _as_count(status.get("connection_replaced_recent"))
+    if (
+        status.get("fatal_is_permanent")
+        and status.get("fatal_reason") == "connection_replaced"
+    ):
+        # **Ahead of the unlink arm, whose remedy is wrong here** (ISSUE-553).
+        # The device is still linked; another client holds the credential and
+        # was there on every probe. The remedy is the give-up alert's own text.
+        from .transport.whatsapp.baileys_runtime import REPLACED_GIVE_UP_REMEDY
+
+        return CheckResult(
+            name, FAIL,
+            "another client is using this WhatsApp session: WhatsApp replaced "
+            f"the connection {replaced} times and the other client was still "
+            "there on every retry, so the sidecar has stopped trying and every "
+            "send is refused until the session is re-paired.",
+            remedy=REPLACED_GIVE_UP_REMEDY,
+            scope=DEPLOYMENT,
+        )
+    if (
+        status.get("fatal_is_permanent")
+        and status.get("fatal_reason") == "credential_unreadable"
+    ):
+        # Not the unlink arm (ISSUE-552): the device is linked and the local
+        # credential cannot be read. The remedy is the alert's own text.
+        from .transport.whatsapp.baileys_runtime import (
+            CREDENTIAL_UNREADABLE_REMEDY,
+        )
+
+        return CheckResult(
+            name, FAIL,
+            "the saved WhatsApp credential cannot be read, so the sidecar "
+            "opens nothing and every send is refused.",
+            remedy=CREDENTIAL_UNREADABLE_REMEDY,
+            scope=DEPLOYMENT,
+        )
     if status.get("fatal_is_permanent"):
         # Bounded through the same slug the alert body uses, and for the same
         # reason: the reason comes from the sidecar, a `CheckResult` is
@@ -8279,6 +8315,25 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
         # remedy ("check the sidecar process is running") that is wrong for it.
         # Behind `listening`, because a bridge with no socket can pair nothing.
         return _baileys_pairing_window(name, pairing, status, counters)
+    if status.get("connection_replaced_latched") and not status.get("ready"):
+        # A single 440 never reaches here: the sidecar latches at five inside
+        # ten minutes. Ahead of `connected` and `ready`, whose remedies read
+        # this state as a sidecar that is down or reconnecting.
+        return CheckResult(
+            name, FAIL,
+            "another client is using this WhatsApp session: WhatsApp replaced "
+            f"the connection {replaced} times, the sidecar has stopped "
+            f"reconnecting and every send is refused; {counters}",
+            remedy=(
+                "Find and stop the other client, usually a copy of the "
+                "session directory running on another host. The sidecar "
+                "retries on its own after 15 minutes and then after an hour "
+                "twice more, and the session comes back on the first retry "
+                "that stays connected. Do not re-pair yet: the session is "
+                "still valid."
+            ),
+            scope=DEPLOYMENT,
+        )
     if not status.get("connected"):
         return CheckResult(
             name, WARN,
@@ -8340,6 +8395,21 @@ def check_whatsapp_baileys_bridge(config: "Config", probe: bool) -> CheckResult:
                 "paired credential. Check whether both [whatsapp.baileys] "
                 "sidecar_command and a separate unit or compose service are "
                 "running one, and leave exactly one."
+            ),
+            scope=DEPLOYMENT,
+        )
+
+    if replaced:
+        return CheckResult(
+            name, WARN,
+            f"the WhatsApp session is open, and WhatsApp recently replaced "
+            f"the connection ({replaced} times in the sidecar's current run); "
+            f"{counters}",
+            remedy=(
+                "Another client is logging in with this session. Stop it: at "
+                "five replacements in ten minutes the sidecar stops "
+                "reconnecting and sends are refused. `sidecar.log` in the "
+                "session directory records each close as status 440."
             ),
             scope=DEPLOYMENT,
         )

@@ -106,6 +106,7 @@ function linkState(over: Partial<AdminConnectionLink> = {}): AdminConnectionLink
     ready: false,
     fatal_reason: null,
     fatal_is_permanent: false,
+    connection_replaced_latched: false,
     restarts: 0,
     ...over,
   };
@@ -212,6 +213,44 @@ describe('the WhatsApp card — which control each state offers', () => {
     expect(screen.queryByTestId('forced-zone')).toBeNull();
     expect(screen.queryByLabelText('Type to confirm')).toBeNull();
     expect(screen.getByText(/will not come back without a re-pair/)).toBeInTheDocument();
+  });
+
+  it('names another client while the sidecar has yielded, rather than "connecting"', async () => {
+    // ISSUE-553: the draft rendered this as a sidecar mid-reconnect.
+    await mount({
+      link: linkState({ fatal_reason: 'connection_replaced', connection_replaced_latched: true }),
+    });
+
+    expect(screen.getByText('in use elsewhere')).toBeInTheDocument();
+    expect(screen.getByText(/Another client is using this WhatsApp session/)).toBeInTheDocument();
+    expect(screen.queryByText(/may be mid-reconnect/)).toBeNull();
+    // Still retrying on its own, so no one-click re-pair.
+    expect(screen.queryByRole('button', { name: REPAIR })).toBeNull();
+  });
+
+  it('offers the re-pair once the sidecar gives up, and says to unlink first', async () => {
+    await mount({
+      link: linkState({
+        fatal_reason: 'connection_replaced',
+        fatal_is_permanent: true,
+        connection_replaced_latched: true,
+      }),
+    });
+
+    expect(screen.getByRole('button', { name: REPAIR })).toBeInTheDocument();
+    expect(screen.getByText(/Linked Devices/)).toBeInTheDocument();
+    expect(screen.getByText(/does not revoke the copied credential/)).toBeInTheDocument();
+  });
+
+  it('does not call an unreadable credential "unlinked"', async () => {
+    await mount({
+      link: linkState({ fatal_is_permanent: true, fatal_reason: 'credential_unreadable' }),
+    });
+
+    expect(screen.queryByText('unlinked')).toBeNull();
+    expect(screen.getByText('credential unreadable')).toBeInTheDocument();
+    expect(screen.getByText(/owner and mode/)).toBeInTheDocument();
+    expect(screen.queryByText(/will not come back without a re-pair/)).toBeNull();
   });
 
   it('offers one control on a working session, and it is the confirmed one', async () => {

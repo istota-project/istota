@@ -1068,6 +1068,24 @@ class TestTheConnectionsIndex:
         card = (await _get(client, INDEX, cookies=cookies)).json()["connections"][0]
         assert card["link"]["fatal_is_permanent"] is True
         assert card["link"]["fatal_reason"] == "logged_out"
+        assert card["link"]["connection_replaced_latched"] is False
+
+    async def test_it_carries_a_latched_replaced_connection(
+        self, env, publish_status
+    ):
+        """ISSUE-553. Without the field the card rendered a sidecar that had
+        yielded to another client as one that was reconnecting."""
+        _, client, cookies = env
+        status = _Status(fatal_is_permanent=False)
+        status.payload.update(
+            ready=False, fatal_reason="connection_replaced",
+            connection_replaced_latched=True,
+        )
+        publish_status(status)
+
+        card = (await _get(client, INDEX, cookies=cookies)).json()["connections"][0]
+
+        assert card["link"]["connection_replaced_latched"] is True
 
     async def test_it_carries_the_durable_row_either_way(self, env):
         config, client, cookies = env

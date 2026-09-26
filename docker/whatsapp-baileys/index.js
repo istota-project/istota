@@ -88,6 +88,14 @@ const SEND_REASONS = new Set([
 // states is gone until somebody re-pairs, so it stops respawning.
 const FATAL_LOGGED_OUT = 'logged_out';
 const FATAL_BAD_SESSION = 'bad_session';
+// A `creds.json` that exists and cannot be read, with no usable backup
+// (ISSUE-552). The session was paired and is lost; starting the library on it
+// would begin a fresh pairing instead and say nothing.
+const FATAL_CREDENTIAL_UNREADABLE = 'credential_unreadable';
+// Another client logged in with the same credential and WhatsApp closed this
+// connection with 440 (ISSUE-553). Transient while the sidecar is still
+// reconnecting or probing, permanent once it has given up.
+const FATAL_CONNECTION_REPLACED = 'connection_replaced';
 
 // --- inbound media ---------------------------------------------------------
 
@@ -272,6 +280,11 @@ class Link {
     this.socketPath = socketPath;
     this.socket = null;
     this.buffer = '';
+    // Whether `hello` has gone on the current connection. The daemon refuses
+    // a connection whose first line is anything else, so a frame written to a
+    // socket that is still connecting gets the link dropped rather than
+    // delivered.
+    this.greeted = false;
     this.onMessage = () => {};
     this.onClose = () => {};
     // Called after every `hello`. The daemon clears `ready` whenever the link
@@ -288,6 +301,7 @@ class Link {
     socket.on('connect', () => {
       log('info', 'connected to the daemon');
       this.send(MSG_HELLO, { protocol_version: PROTOCOL_VERSION });
+      this.greeted = true;
       this.onReady();
     });
     socket.on('data', (chunk) => this.feed(chunk));
@@ -295,6 +309,7 @@ class Link {
     socket.on('close', () => {
       this.socket = null;
       this.buffer = '';
+      this.greeted = false;
       this.onClose();
     });
   }
@@ -1007,9 +1022,9 @@ function credentialStamp() {
  * moving the directory aside is the documented remedy.
  *
  * **The baseline is taken at the first poll rather than here**, and that is
- * the one subtle thing in this function. `saveCreds` is an async write, so
- * one started by the login that has just failed can land *after* this is
- * called — and a baseline taken before it lands reads our own write as a
+ * the one subtle thing in this function. `saveCreds` runs off a
+ * `creds.update` event, so one raised by the login that has just failed can
+ * land *after* this is called — and a baseline taken before it lands reads our own write as a
  * re-pair, ends the wait at the first poll on every rung, and leaves a
  * `logout-backoff.json` whose climbing count says the backoff is working.
  * That is the whole defect wearing a label. What the later baseline costs is
@@ -1027,28 +1042,498 @@ function credentialStamp() {
  * all stay green.
  */
 function scheduleLogoutExit(delayMs, onExit, pollMs) {
+  watchCredential(delayMs, onExit, onExit, pollMs);
+}
+
+/*
+ * The wait behind `scheduleLogoutExit`, with the two endings kept apart.
+ *
+ * `onDeadline` runs when `delayMs` has passed and `onChange` when the
+ * credential's stamp moved first; the logout wait exits on either, while the
+ * replaced-connection hold probes on the first and exits on the second.
+ * `baseline`, when given, is compared from the first poll rather than
+ * adopted there. The replaced hold passes the stamp it recorded after its own
+ * last save, so a change landing before the first poll is still seen. The
+ * logout wait passes none, for the reason above. An infinite `delayMs` is a
+ * wait with no deadline. Returns a cancel function.
+ */
+function watchCredential(delayMs, onDeadline, onChange, pollMs, baseline) {
   const poll = pollMs || CREDENTIAL_POLL_MS;
   const deadline = Date.now() + delayMs;
-  let baseline = null;
+  let seen = typeof baseline === 'string' ? baseline : null;
+  let cancelled = false;
+  let timer = null;
   const tick = () => {
+    if (cancelled) return;
     const stamp = credentialStamp();
-    if (baseline === null) {
-      baseline = stamp;
-    } else if (stamp !== baseline) {
-      log('info', 'the credential changed during the wait; exiting now');
-      onExit();
+    if (seen === null) {
+      seen = stamp;
+    } else if (stamp !== seen) {
+      log('info', 'the credential changed during the wait');
+      onChange();
       return;
     }
     const left = deadline - Date.now();
     if (left <= 0) {
-      onExit();
+      onDeadline();
       return;
     }
-    setTimeout(tick, Math.min(left, poll));
+    timer = setTimeout(tick, Math.min(left, poll));
   };
   // Not `unref()`ed: the wait is the only thing holding this process open,
   // and an unreferenced timer would let Node exit immediately instead.
-  setTimeout(tick, Math.min(delayMs, poll));
+  timer = setTimeout(tick, Math.min(delayMs, poll));
+  return () => {
+    cancelled = true;
+    if (timer !== null) clearTimeout(timer);
+  };
+}
+
+// --- a replaced connection -------------------------------------------------
+
+/*
+ * Two clients on one credential (ISSUE-553).
+ *
+ * WhatsApp closes a connection with 440 (`connectionReplaced`) when another
+ * client logs in with the same credential. The sidecar used to reconnect
+ * three seconds later like any transient close, so two clients knocked each
+ * other off every few seconds for hours, each reopen a credential save. Every
+ * local guard against a second client (the socket probe, the role's refusal)
+ * is blind to a copy of the session directory on another machine, and 440 is
+ * the only signal that reaches this one.
+ *
+ * So the sidecar yields. A single 440 waits `REPLACED_RECONNECT_MS` before
+ * reconnecting. `REPLACED_LATCH_COUNT` of them inside `REPLACED_WINDOW_MS`
+ * latch: the sidecar stops reconnecting, tells the daemon, and probes at most
+ * `REPLACED_PROBE_DELAYS_MS.length` times on that schedule. A probe that meets
+ * a 440 before `REPLACED_STABLE_MS` of open connection re-latches at once.
+ * After the last failed probe the fault is permanent and a re-pair from Admin,
+ * Connections is what brings the session back, as for a logged-out one.
+ * Nothing is moved or deleted here.
+ *
+ * The run lives in `connection-replaced.json` beside `logout-backoff.json`,
+ * so a supervisor restart neither resumes reconnecting nor earns a free
+ * probe. It ends on a stable open, and on a `creds.json` stamp this process
+ * did not write: a replaced or restored credential is a different session,
+ * and the run was about the old one.
+ */
+const REPLACED_STATE_PATH =
+  SESSION_DIR ? path.join(SESSION_DIR, 'connection-replaced.json') : '';
+const REPLACED_LATCH_COUNT = 5;
+const REPLACED_WINDOW_MS = 600_000;
+const REPLACED_RECONNECT_MS = 30_000;
+const REPLACED_PROBE_DELAYS_MS = [900_000, 3_600_000, 3_600_000];
+const REPLACED_STABLE_MS = 300_000;
+const TRANSIENT_RECONNECT_MS = 3000;
+
+// Add a replacement at `nowMs` to the recent ones, drop those outside the
+// window, and say whether the run has reached the latch.
+function recordReplacement(times, nowMs) {
+  const recent = (Array.isArray(times) ? times : [])
+    .filter((t) => Number.isFinite(t) && nowMs - t < REPLACED_WINDOW_MS);
+  recent.push(nowMs);
+  return {
+    times: recent,
+    count: recent.length,
+    latched: recent.length >= REPLACED_LATCH_COUNT,
+  };
+}
+
+/*
+ * Read the run out of the file's text, or `null`. Never raises.
+ *
+ * Anything unreadable is no run, which errs toward reconnecting: the cost of
+ * a wrong `null` is at most five more replaced connections before the next
+ * latch, and the cost of a wrong hold is a working session kept down.
+ */
+function parseReplacedState(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const count = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  };
+  const announced = count(parsed.announced);
+  return {
+    times: Array.isArray(parsed.times)
+      ? parsed.times.filter((t) => Number.isFinite(t))
+      : [],
+    total: count(parsed.total),
+    latched_at: Number.isFinite(parsed.latched_at) ? parsed.latched_at : null,
+    probes: count(parsed.probes),
+    next_probe_at: Number.isFinite(parsed.next_probe_at) ? parsed.next_probe_at : null,
+    probe_opened_at: Number.isFinite(parsed.probe_opened_at) ? parsed.probe_opened_at : null,
+    given_up: parsed.given_up === true,
+    stamp: typeof parsed.stamp === 'string' ? parsed.stamp : '',
+    announced: Math.min(announced, 2),
+  };
+}
+
+function emptyReplacedState() {
+  return {
+    times: [], total: 0, latched_at: null, probes: 0, next_probe_at: null,
+    probe_opened_at: null, given_up: false, stamp: '', announced: 0,
+  };
+}
+
+// What the daemon should have alerted on: 2 once the sidecar has given up,
+// 1 while it is latched, 0 otherwise.
+function replacedLevel(state) {
+  if (!state) return 0;
+  if (state.given_up) return 2;
+  return state.latched_at !== null ? 1 : 0;
+}
+
+// The delay before probe `n` (1-based), or `null` when there is none left.
+function replacedProbeDelayMs(n) {
+  const k = Number(n);
+  if (!Number.isInteger(k) || k < 1 || k > REPLACED_PROBE_DELAYS_MS.length) {
+    return null;
+  }
+  return REPLACED_PROBE_DELAYS_MS[k - 1];
+}
+
+function readReplacedState() {
+  if (!REPLACED_STATE_PATH) return null;
+  try {
+    return parseReplacedState(fs.readFileSync(REPLACED_STATE_PATH, 'utf8'));
+  } catch (err) {
+    if (err && err.code !== 'ENOENT') {
+      log('warn', 'the replaced-connection run could not be read', {
+        kind: err && err.code,
+      });
+    }
+    return null;
+  }
+}
+
+// Returns whether the run reached disk. A failed write keeps the in-memory
+// run, so this process still behaves; a restart then starts the run afresh.
+function writeReplacedState(state) {
+  if (!REPLACED_STATE_PATH) return false;
+  try {
+    writeFileAtomic(REPLACED_STATE_PATH, JSON.stringify(state) + '\n');
+    return true;
+  } catch (err) {
+    log('warn', 'the replaced-connection run could not be recorded', {
+      kind: err && err.code,
+    });
+    return false;
+  }
+}
+
+function clearReplacedState() {
+  if (!REPLACED_STATE_PATH) return;
+  try {
+    fs.unlinkSync(REPLACED_STATE_PATH);
+  } catch (err) {
+    if (err && err.code !== 'ENOENT') {
+      log('warn', 'the replaced-connection run could not be cleared', {
+        kind: err && err.code,
+      });
+    }
+  }
+}
+
+// --- the auth state --------------------------------------------------------
+
+/*
+ * The paired credential and its Signal keys, written so that a stop at any
+ * instant leaves either the old file or the new one (ISSUE-554).
+ *
+ * Baileys' `useMultiFileAuthState` writes each file with `writeFile` in
+ * place, which truncates and then writes. `creds.json` is rewritten on every
+ * connection open, so a process stopped between the two left a 0-byte file,
+ * and the library reads an unparseable file as no credential at all: a fresh,
+ * unregistered one, a QR, and a session that is simply gone. Observed once,
+ * 7ms after an open, during a replaced-connection loop that was opening every
+ * few seconds.
+ *
+ * This is that function's logic with the one change it needs: every write
+ * goes to a temp file in the same directory, is fsynced, and is renamed over
+ * the target, and the directory is fsynced after. The file names are
+ * Baileys' own (`authFileName`), so a directory written by the library reads
+ * back unchanged. Writes are synchronous, which is what makes the library's
+ * per-file mutex unnecessary: nothing can interleave inside one.
+ *
+ * The three library helpers it needs are passed in rather than imported, so
+ * the default suite can drive it with no `node_modules` present.
+ */
+const AUTH_TEMP_PREFIX = '.istota-tmp-';
+const CREDS_FILE = 'creds.json';
+const CREDS_BACKUP_FILE = 'creds.json.bak';
+
+function authFileName(file) {
+  return String(file).replace(/\//g, '__').replace(/:/g, '-');
+}
+
+/*
+ * Write `text` to `target` so that no reader ever sees a partial file.
+ *
+ * `O_EXCL` with `O_NOFOLLOW` on the temp name, so the create cannot land on
+ * something planted there, and `rename(2)` replaces a symlink at `target`
+ * rather than writing through it. 0600 at creation, whatever the umask. A
+ * failure before the rename removes the temp file and raises; the target is
+ * untouched. The directory fsync is what makes the rename itself survive a
+ * power loss, and its failure is logged rather than raised because by then
+ * the new contents are already in place.
+ *
+ * `durable: false` keeps the temp-and-rename and skips both fsyncs. The
+ * Signal keys take it: Baileys writes 812 pre-keys in one batch at pairing,
+ * and two synchronous fsyncs each would hold the event loop, and with it the
+ * WhatsApp socket, for seconds. The rename alone is what protects a key file
+ * from a process stopped mid-write, which is the failure that was observed;
+ * `creds.json` and its backup keep the full sync, since losing either is
+ * losing the session.
+ */
+function writeFileAtomic(target, text, options) {
+  const durable = !options || options.durable !== false;
+  const dir = path.dirname(target);
+  const temp = path.join(
+    dir,
+    `${AUTH_TEMP_PREFIX}${path.basename(target)}.${crypto.randomBytes(6).toString('hex')}`,
+  );
+  const flags =
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL |
+    (fs.constants.O_NOFOLLOW || 0);
+  const fd = fs.openSync(temp, flags, 0o600);
+  try {
+    fs.writeFileSync(fd, text);
+    if (durable) fs.fsyncSync(fd);
+  } catch (err) {
+    try { fs.closeSync(fd); } catch (ignored) {}
+    try { fs.unlinkSync(temp); } catch (ignored) {}
+    throw err;
+  }
+  fs.closeSync(fd);
+  try {
+    fs.renameSync(temp, target);
+  } catch (err) {
+    try { fs.unlinkSync(temp); } catch (ignored) {}
+    throw err;
+  }
+  if (!durable) return;
+  try {
+    const dirFd = fs.openSync(dir, 'r');
+    try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+  } catch (err) {
+    log('warn', 'the session directory could not be synced', { kind: err && err.code });
+  }
+}
+
+/*
+ * Read one stored credential. `absent`, `unreadable` or `ok`, never a raise.
+ *
+ * `unreadable` covers empty, whitespace, truncated JSON and a value that is
+ * not an object, which are the shapes an interrupted write or a full disk
+ * leaves. It is kept apart from `absent` because the two mean opposite
+ * things: no file is a session that has never paired, and a broken one is a
+ * session that did and was lost.
+ */
+function readStoredJson(file, reviver) {
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { status: 'absent' };
+    return { status: 'unreadable', kind: (err && err.code) || 'read_failed' };
+  }
+  try {
+    return { status: 'ok', value: JSON.parse(text, reviver) };
+  } catch (err) {
+    return { status: 'unreadable', kind: text.trim() ? 'unparseable' : 'empty' };
+  }
+}
+
+function readStoredCreds(file, reviver) {
+  const stored = readStoredJson(file, reviver);
+  if (stored.status !== 'ok') return stored;
+  const value = stored.value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { status: 'unreadable', kind: 'not_an_object' };
+  }
+  return stored;
+}
+
+// Temp files a killed writer left behind. They hold a half-written copy of a
+// full-account credential and are never read, so they go at load.
+function sweepAuthTempFiles(folder) {
+  let names = [];
+  try {
+    names = fs.readdirSync(folder);
+  } catch (err) {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(AUTH_TEMP_PREFIX)) continue;
+    try {
+      fs.unlinkSync(path.join(folder, name));
+    } catch (err) {
+      log('warn', 'a stray auth temp file could not be removed', { kind: err && err.code });
+    }
+  }
+}
+
+/*
+ * What the stored credential is, read before anything is opened: `absent`,
+ * `ok`, `backup` (the main file is broken and the backup is usable) or
+ * `unreadable` (broken, and no usable backup), with `kind` saying how the
+ * main file failed — an errno for a read that failed, or `empty`,
+ * `unparseable`, `not_an_object`. Plain `JSON.parse`, so it needs no
+ * library: the reviver only turns encoded Buffers back into Buffers, and a
+ * file that parses without it parses with it.
+ */
+function storedCredentialVerdict(folder) {
+  if (!folder) return { verdict: 'absent' };
+  const main = readStoredCreds(path.join(folder, CREDS_FILE));
+  if (main.status === 'ok') return { verdict: 'ok' };
+  if (main.status === 'absent') return { verdict: 'absent' };
+  const backup = readStoredCreds(path.join(folder, CREDS_BACKUP_FILE));
+  return {
+    verdict: backup.status === 'ok' ? 'backup' : 'unreadable',
+    kind: main.kind,
+  };
+}
+
+// How long a process holding an unreadable credential waits before exiting.
+// It opens nothing while it waits, so the wait costs no login; it bounds how
+// long a repaired directory goes unnoticed if the credential watch misses it.
+const CREDENTIAL_UNREADABLE_WAIT_MS = 3_600_000;
+
+/*
+ * Baileys' `useMultiFileAuthState`, with atomic writes and a backup.
+ *
+ * `source` says where the credential came from: `main`, `backup`, `fresh`
+ * (nothing on disk, a first pairing) or `unreadable` (a credential that
+ * existed and cannot be read, with no usable backup). The backup is written
+ * after every save, so it is the last credential that saved successfully;
+ * it is read when `creds.json` is broken, and restored over it at
+ * once so the daemon's `session_is_registered` reads what the sidecar is
+ * acting on.
+ */
+async function useAtomicAuthState(folder, lib) {
+  const { initAuthCreds, BufferJSON, proto } = lib || {};
+  // Refused rather than degraded: without the library's replacer and reviver
+  // the Buffers in a credential are written in a form nothing revives, which
+  // corrupts the session quietly instead of failing.
+  if (
+    typeof initAuthCreds !== 'function' ||
+    !BufferJSON || typeof BufferJSON.replacer !== 'function' ||
+    typeof BufferJSON.reviver !== 'function' ||
+    !proto || !proto.Message || !proto.Message.AppStateSyncKeyData
+  ) {
+    throw new Error('the Baileys auth helpers are missing');
+  }
+  const replacer = BufferJSON.replacer;
+  const reviver = BufferJSON.reviver;
+
+  let info = null;
+  try {
+    info = fs.statSync(folder);
+  } catch (err) {
+    info = null;
+  }
+  if (info && !info.isDirectory()) {
+    throw new Error('the session path is not a directory');
+  }
+  if (!info) fs.mkdirSync(folder, { recursive: true, mode: 0o700 });
+  sweepAuthTempFiles(folder);
+
+  const fileFor = (name) => path.join(folder, authFileName(name));
+  const writeData = (value, name, options) => {
+    writeFileAtomic(fileFor(name), JSON.stringify(value, replacer), options);
+  };
+  const readData = (name) => {
+    // Whatever the file parses to, as the library did: a key's value is not
+    // always an object.
+    const stored = readStoredJson(fileFor(name), reviver);
+    return stored.status === 'ok' ? stored.value : null;
+  };
+  const removeData = (name) => {
+    try {
+      fs.unlinkSync(fileFor(name));
+    } catch (err) {
+      // Absent is the goal.
+    }
+  };
+
+  const main = readStoredCreds(fileFor(CREDS_FILE), reviver);
+  let creds;
+  let source;
+  if (main.status === 'ok') {
+    creds = main.value;
+    source = 'main';
+  } else if (main.status === 'absent') {
+    // Not the backup. The writer never leaves `creds.json` missing once it
+    // has written one, so an absent file beside a backup is somebody's
+    // deliberate removal, and restoring the credential they removed would
+    // undo it.
+    creds = initAuthCreds();
+    source = 'fresh';
+  } else {
+    const backup = readStoredCreds(fileFor(CREDS_BACKUP_FILE), reviver);
+    if (backup.status === 'ok') {
+      creds = backup.value;
+      source = 'backup';
+      log('warn', 'creds.json is unreadable; starting from creds.json.bak', {
+        main: main.status,
+      });
+      try {
+        writeData(creds, CREDS_FILE);
+      } catch (err) {
+        log('warn', 'creds.json could not be restored from the backup', {
+          kind: err && err.code,
+        });
+      }
+    } else {
+      log('error', 'creds.json is unreadable and there is no usable backup', {
+        backup: backup.status,
+      });
+      creds = initAuthCreds();
+      source = 'unreadable';
+    }
+  }
+
+  return {
+    source,
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          for (const id of ids) {
+            let value = readData(`${type}-${id}.json`);
+            if (type === 'app-state-sync-key' && value) {
+              value = proto.Message.AppStateSyncKeyData.fromObject(value);
+            }
+            data[id] = value;
+          }
+          return data;
+        },
+        set: async (data) => {
+          for (const category of Object.keys(data)) {
+            for (const id of Object.keys(data[category])) {
+              const value = data[category][id];
+              const name = `${category}-${id}.json`;
+              if (value) writeData(value, name, { durable: false });
+              else removeData(name);
+            }
+          }
+        },
+      },
+    },
+    saveCreds: async () => {
+      writeData(creds, CREDS_FILE);
+      // Second, so a stop between the two leaves a new main and an old
+      // backup, both readable.
+      writeData(creds, CREDS_BACKUP_FILE);
+    },
+  };
 }
 
 class Session {
@@ -1077,6 +1562,26 @@ class Session {
     // during the wait would otherwise re-learn the logout and not that the
     // backoff behind it is running on a guess.
     this.runUnrecorded = false;
+    // Whether the stored credential is lost (ISSUE-552). Like `loggedOut`, a
+    // verdict to re-announce on every daemon-link reconnect, since the
+    // daemon's latch is in memory.
+    this.credentialUnreadable = false;
+    // The replaced-connection run (ISSUE-553), mirrored to
+    // `connection-replaced.json`, or `null` when there is none.
+    this.replaced = null;
+    // Whether the current connection attempt is a probe out of a latched run.
+    this.probing = false;
+    // The timer that ends a latched run once a probe has stayed open for
+    // `REPLACED_STABLE_MS`, and the cancel handle of the hold's wait.
+    this.stableTimer = null;
+    // Set by a restore that resumes an open probe: what is left of its
+    // stable window for the next open.
+    this.stableRemainingMs = null;
+    this.cancelReplacedWait = null;
+    // Seams for the tests, which drive a whole run without real timers or a
+    // real exit.
+    this.watch = watchCredential;
+    this.exit = (code) => process.exit(code);
     // The tail of the serialized inbound chain. See `onMessages`: a batch is
     // appended to it rather than handled where it arrives, so a photo's
     // download cannot be overtaken by the text message behind it.
@@ -1085,7 +1590,21 @@ class Session {
     this.inboundDropped = 0;
   }
 
+  // Whether this process is holding a verdict the daemon must be told on
+  // every reconnect: a logged-out device, an unreadable credential, or a
+  // latched or abandoned replaced connection. The daemon link keeps
+  // reconnecting for these and not for a deliberate shutdown.
+  holdsVerdict() {
+    return this.loggedOut || this.credentialUnreadable || replacedLevel(this.replaced) > 0;
+  }
+
   announceReady() {
+    if (this.credentialUnreadable) {
+      this.link.send(MSG_FATAL, {
+        reason: FATAL_CREDENTIAL_UNREADABLE, permanent: true,
+      });
+      return;
+    }
     if (this.loggedOut) {
       // **The verdict, not the readiness.** The daemon's permanent-fatal
       // latch is in memory and is set only by this frame, so a scheduler that
@@ -1101,7 +1620,39 @@ class Session {
       });
       return;
     }
+    if (!this.open && replacedLevel(this.replaced) > 0) {
+      this.sendReplaced();
+      return;
+    }
     if (this.open) this.link.send(MSG_READY, {});
+  }
+
+  /*
+   * Tell the daemon where the replaced-connection run stands.
+   *
+   * `announce` asks the daemon to raise an alert, and is set only for a level
+   * the run has not yet announced: 1 when it latches, 2 when it gives up. The
+   * level is persisted once the frame is written, so a scheduler restart
+   * (which re-reads the verdict through `announceReady`) or a sidecar restart
+   * does not page anybody twice for one outage. The bridge alerts on
+   * `announce` alone, never on the frame's arrival.
+   */
+  sendReplaced() {
+    const state = this.replaced;
+    if (!state || !this.link.greeted) return;
+    const level = replacedLevel(state);
+    const announce = level > state.announced ? level : 0;
+    const sent = this.link.send(MSG_FATAL, {
+      reason: FATAL_CONNECTION_REPLACED,
+      permanent: state.given_up,
+      replacements: state.total,
+      latched: level > 0,
+      announce: announce,
+    });
+    if (sent && announce) {
+      state.announced = announce;
+      writeReplacedState(state);
+    }
   }
 
   async start() {
@@ -1121,11 +1672,25 @@ class Session {
   }
 
   async open_() {
+    // **Before the library is loaded or anything is opened.** The library
+    // would read the broken file as no credential and offer a QR, and its
+    // first save would rename a fresh credential over the evidence.
+    const stored = storedCredentialVerdict(SESSION_DIR);
+    if (stored.verdict === 'unreadable') {
+      this.refuseUnreadableCredential(stored.kind);
+      return;
+    }
     const baileys = await loadBaileys();
-    const { state, saveCreds } = await baileys.useMultiFileAuthState(SESSION_DIR);
+    const auth = await useAtomicAuthState(SESSION_DIR, baileys);
+    if (auth.source === 'unreadable') {
+      // The file broke between the check above and the read. Same answer.
+      this.refuseUnreadableCredential('changed_during_load');
+      return;
+    }
+    const { state, saveCreds } = auth;
     const logger = silentLogger();
     const sock = baileys.makeWASocket({
-      // **Not `auth: state` directly.** `useMultiFileAuthState` reads each
+      // **Not `auth: state` directly.** The auth state reads each
       // Signal key back off the disk on demand, so a key written and then
       // immediately read again can miss — and a session that reads as absent
       // is a session Baileys re-establishes with a fresh PreKey handshake it
@@ -1169,7 +1734,11 @@ class Session {
     // is nulled — so this guard is what stops a late save from moving
     // `creds.json` under a wait that fingerprints it to notice a re-pair.
     sock.ev.on('creds.update', () => {
-      if (mine()) saveCreds();
+      if (mine()) {
+        saveCreds()
+          .then(() => this.refreshReplacedStamp())
+          .catch((err) => this.onSaveFailed(err));
+      }
     });
     sock.ev.on('connection.update', (update) => {
       if (mine()) this.onConnection(update, baileys);
@@ -1180,6 +1749,52 @@ class Session {
     sock.ev.on('messages.update', (updates) => {
       if (mine()) this.onReceipts(updates);
     });
+  }
+
+  /*
+   * Report a lost credential and hold, opening nothing (ISSUE-552).
+   *
+   * Permanent, so the daemon latches it, refuses every send definitely and
+   * alerts once, through the path an unlinked device already takes; the
+   * remedy is the same `istota whatsapp pair --reset`, which moves the
+   * damaged directory aside rather than deleting it. Sent here only on a
+   * link that has already said `hello`: on a cold start this runs before the
+   * link connects, and a frame written ahead of `hello` gets the connection
+   * refused. `announceReady` sends it on every connect instead.
+   *
+   * `kind` is logged because "cannot be read" covers a permission or type
+   * error as well as a lost file, and the fix for those is a `chown`.
+   *
+   * Then it waits rather than exiting, so a supervisor does not restart it
+   * every thirty seconds into the same answer. The wait watches `creds.json`
+   * as the logged-out one does, so a re-pair or a restore ends it early.
+   */
+  refuseUnreadableCredential(kind) {
+    if (this.credentialUnreadable) return;
+    this.credentialUnreadable = true;
+    // Outranks a replaced-connection run (ISSUE-553): a mode or owner change
+    // moves no stamp, so the run would otherwise survive, spend its probes
+    // on refusals and give up for the wrong cause.
+    this.endReplacedRun('the stored credential cannot be read');
+    this.stopping = true;
+    this.sock = null;
+    log('error', 'creds.json cannot be read and there is no usable backup; '
+      + 'nothing will be opened until it is repaired or re-paired', {
+      kind: kind || 'unknown',
+    });
+    if (this.link.greeted) {
+      this.link.send(MSG_FATAL, {
+        reason: FATAL_CREDENTIAL_UNREADABLE, permanent: true,
+      });
+    }
+    scheduleLogoutExit(CREDENTIAL_UNREADABLE_WAIT_MS, () => process.exit(1));
+  }
+
+  // A save that failed leaves the previous `creds.json` in place, which is
+  // the point of writing it atomically; the next `creds.update` tries again.
+  // Caught because an unhandled rejection ends a Node process.
+  onSaveFailed(err) {
+    log('warn', 'the credential could not be saved', { kind: err && err.code });
   }
 
   onConnection(update, baileys) {
@@ -1198,6 +1813,7 @@ class Session {
       clearLogoutState();
       this.open = true;
       this.link.send(MSG_READY, {});
+      this.armStableTimer();
       return;
     }
     // **Below the guard, not above it.** `connection.update` is a partial:
@@ -1209,6 +1825,7 @@ class Session {
     // reached by another route.
     if (connection !== 'close') return;
     this.open = false;
+    this.cancelStableTimer();
 
     const status =
       lastDisconnect &&
@@ -1228,6 +1845,9 @@ class Session {
       // not fail in.
       if (this.loggedOut) return;
       this.loggedOut = true;
+      // A probe meeting a 401 is an unlinked device, not the other client,
+      // and the unlink's remedy is the one that works (ISSUE-553).
+      this.endReplacedRun('the device was logged out');
       // Permanent: the credential on disk names a device WhatsApp has
       // unlinked, and reconnecting with it will be refused for ever. The
       // daemon latches this, refuses every send definitely and alerts.
@@ -1282,12 +1902,256 @@ class Session {
       return;
     }
     if (this.stopping) return;
+    if (status === baileys.DisconnectReason.connectionReplaced) {
+      this.onReplaced(Date.now());
+      return;
+    }
     // Transient. Reconnecting is this process's job, not the daemon's: the
     // daemon's supervisor respawns a sidecar that *exits*, and exiting here
     // would throw away a live socket and a warm session for a blip.
     setTimeout(() => {
       this.start().catch((err) => this.reportStartFailure(err));
-    }, 3000);
+    }, TRANSIENT_RECONNECT_MS);
+  }
+
+  // --- a replaced connection (ISSUE-553) ---------------------------------
+
+  /*
+   * Another client took the connection. See `REPLACED_STATE_PATH`.
+   *
+   * The socket is dropped as the logged-out branch drops it, so a send in
+   * the gap is answered `not_connected` definitely rather than reaching a
+   * socket WhatsApp has closed, and a late event from it is ignored.
+   */
+  onReplaced(nowMs) {
+    this.sock = null;
+    const state = this.replaced || emptyReplacedState();
+    this.replaced = state;
+    const wasProbe = this.probing;
+    this.probing = false;
+    if (state.latched_at !== null) {
+      // A probe met the other client again before the session held: the run
+      // is still on, so re-latch without counting to five again.
+      state.total += 1;
+      state.stamp = credentialStamp();
+      // Measured from this close. The time `probe` recorded is only for a
+      // restart that lands mid-probe.
+      state.next_probe_at = null;
+      log('warn', 'a probe was replaced by the other client again', {
+        probes: state.probes, probe: wasProbe,
+      });
+      this.holdOrGiveUp(nowMs);
+      return;
+    }
+    const run = recordReplacement(state.times, nowMs);
+    state.times = run.times;
+    state.total = run.count;
+    state.stamp = credentialStamp();
+    if (!run.latched) {
+      writeReplacedState(state);
+      log('warn', 'another client replaced this WhatsApp connection', {
+        replacements: run.count,
+      });
+      this.sendReplaced();
+      setTimeout(() => {
+        this.start().catch((err) => this.reportStartFailure(err));
+      }, REPLACED_RECONNECT_MS);
+      return;
+    }
+    state.latched_at = nowMs;
+    state.probes = 0;
+    log('error', 'another client keeps replacing this WhatsApp connection; '
+      + 'no longer reconnecting', { replacements: run.count });
+    this.holdOrGiveUp(nowMs);
+  }
+
+  /*
+   * Hold until the next probe, or give up once the probes are spent.
+   *
+   * `stopping` is what keeps every other reconnect path (a transient close's
+   * timer, a start failure's retry) from opening a connection during the
+   * hold. The wait watches `creds.json` from the stamp this run recorded,
+   * so a foreign change ends the process and the next start clears the run.
+   */
+  holdOrGiveUp(nowMs) {
+    const state = this.replaced;
+    this.stopping = true;
+    this.sock = null;
+    const delay = replacedProbeDelayMs(state.probes + 1);
+    if (delay === null) {
+      this.giveUp();
+      return;
+    }
+    if (state.next_probe_at === null || state.next_probe_at < nowMs) {
+      state.next_probe_at = nowMs + delay;
+    }
+    writeReplacedState(state);
+    this.sendReplaced();
+    this.waitThen(Math.max(0, state.next_probe_at - nowMs), () => this.probe());
+  }
+
+  giveUp() {
+    const state = this.replaced;
+    state.given_up = true;
+    state.next_probe_at = null;
+    this.stopping = true;
+    this.sock = null;
+    writeReplacedState(state);
+    log('error', 'another client still holds this WhatsApp session after '
+      + 'every probe; not reconnecting until it is re-paired', {
+      probes: state.probes,
+    });
+    this.sendReplaced();
+    this.waitThen(Infinity, () => {});
+  }
+
+  waitThen(delayMs, onDeadline) {
+    if (this.cancelReplacedWait) this.cancelReplacedWait();
+    this.cancelReplacedWait = this.watch(
+      delayMs,
+      onDeadline,
+      () => {
+        log('info', 'the credential changed during a replaced-connection '
+          + 'hold; exiting so the next start reads it');
+        this.exit(1);
+      },
+      undefined,
+      this.replaced.stamp,
+    );
+  }
+
+  /*
+   * One attempt at the connection, out of a latched run.
+   *
+   * The probe is counted and the following probe's time recorded *before*
+   * anything is opened, so a restart partway through spends the probe rather
+   * than earning a free one. A 440 before the session has been open for
+   * `REPLACED_STABLE_MS` re-latches through `onReplaced`.
+   */
+  probe() {
+    const state = this.replaced;
+    if (!state || state.given_up) return;
+    this.cancelReplacedWait = null;
+    state.probes += 1;
+    const following = replacedProbeDelayMs(state.probes + 1);
+    state.next_probe_at = following === null ? null : Date.now() + following;
+    writeReplacedState(state);
+    log('info', 'probing whether the other client has gone', {
+      probe: state.probes,
+    });
+    this.probing = true;
+    this.stopping = false;
+    this.start().catch((err) => this.reportStartFailure(err));
+  }
+
+  armStableTimer() {
+    this.cancelStableTimer();
+    if (replacedLevel(this.replaced) === 0) return;
+    // A restart during an open probe resumes the time it had left rather
+    // than starting over; otherwise the full window, from this open.
+    const wait = this.stableRemainingMs !== null
+      ? this.stableRemainingMs : REPLACED_STABLE_MS;
+    this.stableRemainingMs = null;
+    this.replaced.probe_opened_at = Date.now() - (REPLACED_STABLE_MS - wait);
+    writeReplacedState(this.replaced);
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      if (this.open) this.endReplacedRun('the session stayed open');
+    }, wait);
+  }
+
+  cancelStableTimer() {
+    if (this.stableTimer !== null) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
+    }
+    if (this.replaced && this.replaced.probe_opened_at !== null) {
+      this.replaced.probe_opened_at = null;
+      writeReplacedState(this.replaced);
+    }
+  }
+
+  endReplacedRun(why) {
+    if (!this.replaced) return;
+    log('info', 'the replaced-connection run is over', { why });
+    this.replaced = null;
+    this.probing = false;
+    clearReplacedState();
+  }
+
+  // After our own save: the credential stamp moved because of this process,
+  // so the run records it and only a change this process did not make ends
+  // the run.
+  refreshReplacedStamp() {
+    if (!this.replaced) return;
+    if (replacedLevel(this.replaced) === 0) {
+      const now = Date.now();
+      this.replaced.times = this.replaced.times.filter(
+        (t) => now - t < REPLACED_WINDOW_MS,
+      );
+      if (!this.replaced.times.length) {
+        this.endReplacedRun('the recent closes have aged out');
+        return;
+      }
+    }
+    this.replaced.stamp = credentialStamp();
+    writeReplacedState(this.replaced);
+  }
+
+  /*
+   * Pick up a run a previous process left on disk. Returns whether this
+   * process is now holding rather than opening a connection.
+   *
+   * A stamp that differs from the one the run recorded means the credential
+   * was replaced or restored by something other than this sidecar, and the
+   * run ends. A latched run resumes its hold until the recorded probe time;
+   * one whose probes are spent gives up, since the last probe's outcome is
+   * unknown and a restart must not buy another. An unlatched run keeps its
+   * recent closes, so a restart does not reset the count toward the latch.
+   */
+  restoreReplacedRun(nowMs) {
+    const now = nowMs === undefined ? Date.now() : nowMs;
+    const state = readReplacedState();
+    if (!state) return false;
+    // The credential's own verdict first: an unreadable one is reported by
+    // `start()`, and a hold resumed ahead of it would hide it.
+    if (storedCredentialVerdict(SESSION_DIR).verdict === 'unreadable') {
+      clearReplacedState();
+      return false;
+    }
+    if (state.stamp !== credentialStamp()) {
+      log('info', 'the credential changed since the replaced-connection run '
+        + 'was recorded; ending the run');
+      clearReplacedState();
+      return false;
+    }
+    this.replaced = state;
+    if (state.given_up) {
+      this.giveUp();
+      return true;
+    }
+    if (state.latched_at !== null && state.probe_opened_at !== null) {
+      // The previous process died with a probe open. That probe has not
+      // failed: reconnect and give it the rest of its stable window, rather
+      // than counting it spent. Past the window, it already held.
+      const elapsed = now - state.probe_opened_at;
+      if (elapsed >= REPLACED_STABLE_MS) {
+        this.endReplacedRun('the probe had stayed open before the restart');
+        return false;
+      }
+      this.probing = true;
+      this.stableRemainingMs = REPLACED_STABLE_MS - Math.max(0, elapsed);
+      return false;
+    }
+    if (state.latched_at !== null) {
+      this.holdOrGiveUp(now);
+      return true;
+    }
+    state.times = state.times.filter((t) => now - t < REPLACED_WINDOW_MS);
+    if (!state.times.length) {
+      this.endReplacedRun('the recent closes have aged out');
+    }
+    return false;
   }
 
   reportStartFailure(err) {
@@ -1297,7 +2161,10 @@ class Session {
     // reporting that permanent pages every admin that "the device link ended"
     // on a deployment that has never paired. It exits instead, which the
     // daemon's supervisor reports as a sidecar that will not stay up.
-    if (err && err.code === 'MODULE_NOT_FOUND') {
+    // Both spellings: `require` says `MODULE_NOT_FOUND` and the dynamic
+    // `import()` in `loadBaileys` says `ERR_MODULE_NOT_FOUND`, so matching the
+    // first alone left this branch unreachable once the library became ESM.
+    if (err && (err.code === 'MODULE_NOT_FOUND' || err.code === 'ERR_MODULE_NOT_FOUND')) {
       log('error', 'the Baileys library is not installed', { kind: err.code });
       process.exit(3);
     }
@@ -1318,6 +2185,17 @@ class Session {
     log('error', 'the WhatsApp session could not be started', {
       kind: err && err.name, attempts: this.startFailures,
     });
+    if (this.probing && replacedLevel(this.replaced) > 0) {
+      // A probe that cannot even start has not shown the other client is
+      // gone, and a hold is what keeps the run on its schedule. Reporting
+      // `bad_session` here left no hold and no timer (ISSUE-553).
+      this.startFailures = 0;
+      this.probing = false;
+      this.replaced.next_probe_at = null;
+      this.holdOrGiveUp(Date.now());
+      return;
+    }
+    this.endReplacedRun('the session could not be started');
     this.link.send(MSG_FATAL, { reason: FATAL_BAD_SESSION, permanent: true });
   }
 
@@ -1809,13 +2687,17 @@ function main() {
     // inside one and leave a sidecar that neither reconnects nor exits, with
     // the unlinked-device verdict reaching nobody. A logout wait reconnects
     // and re-announces the fatal; a deliberate shutdown still does not.
-    if (session.stopping && !session.loggedOut) return;
+    if (session.stopping && !session.holdsVerdict()) return;
     log('warn', 'the daemon link closed; reconnecting');
     setTimeout(() => link.connect(), 2000);
   };
 
   link.connect();
-  session.start().catch((err) => session.reportStartFailure(err));
+  // A replaced-connection run left by the previous process holds here rather
+  // than opening a connection the other client would knock off again.
+  if (!session.restoreReplacedRun()) {
+    session.start().catch((err) => session.reportStartFailure(err));
+  }
 
   for (const signal of ['SIGTERM', 'SIGINT']) {
     process.on(signal, () => {
@@ -1859,6 +2741,12 @@ module.exports = {
   rememberSent,
   recallSent,
   SENT_CACHE_LIMIT,
+  AUTH_TEMP_PREFIX,
+  authFileName,
+  writeFileAtomic,
+  readStoredCreds,
+  useAtomicAuthState,
+  storedCredentialVerdict,
   logoutExitDelayMs,
   LOGOUT_UNKNOWN_RUN,
   logoutWaitMs,
@@ -1869,6 +2757,19 @@ module.exports = {
   clearLogoutState,
   credentialStamp,
   scheduleLogoutExit,
+  watchCredential,
+  Session,
+  FATAL_CONNECTION_REPLACED,
+  REPLACED_LATCH_COUNT,
+  REPLACED_WINDOW_MS,
+  REPLACED_RECONNECT_MS,
+  REPLACED_PROBE_DELAYS_MS,
+  REPLACED_STABLE_MS,
+  recordReplacement,
+  parseReplacedState,
+  replacedLevel,
+  replacedProbeDelayMs,
+  readReplacedState,
   messageShape,
   receiptStatus,
   sendFailureReason,

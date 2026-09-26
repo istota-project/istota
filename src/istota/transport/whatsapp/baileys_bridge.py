@@ -199,12 +199,18 @@ PAIRING_RELAY_NAME = "whatsapp-pairing.json"
 
 #: What the sidecar writes into the session directory that is **not** auth
 #: state: its own log, appended on every boot before the daemon link is up,
-#: and the logged-out backoff's run record. Neither is a credential and
-#: neither says a session is there, so `_session_dir_holds_a_session` ignores
-#: both. Restated from `docker/whatsapp-baileys/index.js` rather than shared,
+#: the logged-out backoff's run record, and the replaced-connection run
+#: (ISSUE-553). None is a credential and none says a session is there, so
+#: `_session_dir_holds_a_session` ignores all three. Restated from `docker/whatsapp-baileys/index.js` rather than shared,
 #: since nothing crosses between a Node program and this module; the cost of
 #: drift is a needless archive, which is the safe direction.
-_SIDECAR_OWN_FILES = frozenset({"sidecar.log", "logout-backoff.json"})
+#: The sidecar's replaced-connection run (ISSUE-553). `restore_session_archive`
+#: drops it from a restored archive.
+REPLACED_RUN_FILE = "connection-replaced.json"
+
+_SIDECAR_OWN_FILES = frozenset(
+    {"sidecar.log", "logout-backoff.json", REPLACED_RUN_FILE}
+)
 
 #: How many names `_reset_destination` will probe before giving up. The stamp
 #: is one second wide, so a collision means two resets inside one second and a
@@ -228,7 +234,20 @@ _ARCHIVE_SUFFIX_RE = re.compile(r"\.(\d{8}T\d{6}Z)(?:-\d+)?\Z")
 #: loop would burn a process every few seconds while changing nothing. An explicit
 #: ``"permanent": true`` on the line says the same thing without this table
 #: having to know the name.
-_PERMANENT_FATALS = frozenset({"logged_out", "unpaired", "bad_session"})
+_PERMANENT_FATALS = frozenset(
+    {"logged_out", "unpaired", "bad_session", "credential_unreadable"}
+)
+
+#: The sidecar's reason for a connection WhatsApp closed because another
+#: client logged in with the same credential (ISSUE-553). Deliberately not in
+#: `_PERMANENT_FATALS`: it is transient while the sidecar is reconnecting or
+#: probing, and permanent only when a frame says the sidecar has given up.
+FATAL_CONNECTION_REPLACED = "connection_replaced"
+
+#: How long an unlatched replaced-connection count stays reportable after the
+#: frame that carried it. The sidecar's own window, restated because the two
+#: ends are different languages; a drift changes only what doctor reports.
+CONNECTION_REPLACED_WINDOW_SECONDS = 600.0
 
 #: What the sidecar's process is handed. An allowlist rather than
 #: `os.environ`: the daemon's own environment carries every credential on the
@@ -788,8 +807,9 @@ def dir_holds_a_session(path: Path) -> bool:
     the credential it just restored, and refuse an archive that is only logs.
 
     **An allowlist of files to ignore, not one of files to count.**
-    `useMultiFileAuthState` writes `creds.json` plus a `.json` per Signal key,
-    with names this module has no business enumerating, so anything
+    The sidecar's auth state (Baileys' own layout, written atomically since
+    ISSUE-554) is `creds.json`, its `creds.json.bak`, and a `.json` per Signal
+    key, with names this module has no business enumerating, so anything
     unrecognised counts as auth state.
 
     **Fails toward "there is a session"** for the same reason at both callers:
@@ -814,7 +834,7 @@ def dir_holds_a_session(path: Path) -> bool:
         return True
 
 
-#: What `useMultiFileAuthState` calls the file holding the account's own
+#: What Baileys' auth-state layout calls the file holding the account's own
 #: credential, as opposed to the per-key files beside it. Restated from the
 #: library rather than shared, for `_SIDECAR_OWN_FILES`' reason.
 _CREDS_FILE = "creds.json"
@@ -987,6 +1007,11 @@ def restore_session_archive(
     """
     # Before anything moves, so a refusal leaves both directories alone.
     ensure_session_dir(archive)
+    # A restored credential is a deliberate choice, and a replaced-connection
+    # run carried in with it would resume a hold or a give-up with no probe
+    # and no alert, since `rename(2)` keeps the stamp it compares (ISSUE-553).
+    with contextlib.suppress(FileNotFoundError):
+        (archive / REPLACED_RUN_FILE).unlink()
 
     parked: Path | None = None
     if os.path.lexists(session_dir):
@@ -1227,6 +1252,17 @@ class BridgeStatus:
     session_files_hardened: int = 0
     session_files_unfixed: int = 0
     rejected_connections: int = 0
+    #: How many times WhatsApp replaced the connection in the sidecar's
+    #: current run (ISSUE-553), as the sidecar counted it. A second client on
+    #: the same credential is otherwise invisible here: each reopen sends a
+    #: `ready`, so `connected` and `ready` read healthy between closes.
+    #: Derived in the `status` property, which holds it while the run is
+    #: latched and lets an unlatched one age out.
+    connection_replaced_recent: int = 0
+    #: Whether the sidecar has stopped reconnecting because of them. Cleared
+    #: by `ready`, which a probe that opens sends; set again by the next
+    #: latched frame. `_send` refuses definitely while it is set.
+    connection_replaced_latched: bool = False
     socket_path: str = ""
     session_dir: str = ""
     protocol_version: int | None = None
@@ -1461,6 +1497,7 @@ class BaileysBridge:
         reset_cooldown: float = RESET_COOLDOWN,
         on_qr=None,
         on_fatal=None,
+        on_replaced=None,
     ) -> None:
         self._config = config
         self._sidecar_argv = tuple(sidecar_argv)
@@ -1516,7 +1553,10 @@ class BaileysBridge:
         # that expired unscanned and then a restart left the new bridge
         # writing sends at a sidecar with no credential, settling `unknown`
         # for the life of the deployment (ISSUE-506). A host that has never
-        # paired is the same state with nothing behind it.
+        # paired is the same state with nothing behind it. The fifth is
+        # `_handle_qr`: a code offered is the sidecar's own evidence that it
+        # holds no registered credential, which covers a credential lost after
+        # `start()` read the disk (ISSUE-552).
         self._session_unpaired = False
         # Loop-monotonic, and `None` until a restart has been spent on this
         # bridge. See `RESET_COOLDOWN`.
@@ -1548,6 +1588,15 @@ class BaileysBridge:
         # and a notification write opens a database connection and delivers to
         # a surface. The owner that started the bridge does that work.
         self._on_fatal = on_fatal
+        # Called with `(level, count)` when the sidecar asks for a
+        # replaced-connection alert (ISSUE-553): 1 when its run latches, 2
+        # when it gives up. The sidecar decides once per outage and persists
+        # that, so the bridge keeps no once-flag of its own for this.
+        self._on_replaced = on_replaced
+        # When the last replaced-connection frame arrived, on the monotonic
+        # clock, so an unlatched count can age out of the status.
+        self._replaced_seen_at: float | None = None
+        self._replaced_count = 0
 
         self._status = BridgeStatus(
             socket_path=str(self._socket_path), session_dir=str(self._session_dir),
@@ -1613,7 +1662,22 @@ class BaileysBridge:
             None if window is None else window.expires_at_wall
         )
         self._status.session_unpaired = self._session_unpaired
+        self._status.connection_replaced_recent = self._replaced_recent()
         return self._status
+
+    def _replaced_recent(self) -> int:
+        """The sidecar's replaced-connection count, while it still describes
+        something. Held for a latched or given-up run, whatever its age; an
+        unlatched one ages out one window after the frame that carried it."""
+        if self._replaced_seen_at is None:
+            return 0
+        if self._status.connection_replaced_latched or (
+            self._status.fatal_is_permanent
+            and self._status.fatal_reason == FATAL_CONNECTION_REPLACED
+        ):
+            return self._replaced_count
+        age = time.monotonic() - self._replaced_seen_at
+        return self._replaced_count if age < CONNECTION_REPLACED_WINDOW_SECONDS else 0
 
     # -- pairing window -----------------------------------------------------
 
@@ -2492,6 +2556,11 @@ class BaileysBridge:
         self._status.fatal_reason = None
         self._status.fatal_is_permanent = False
         self._status.fatal_run_unrecorded = False
+        # A re-pair is a new session; the old run was about the credential
+        # it just moved aside (ISSUE-553).
+        self._status.connection_replaced_latched = False
+        self._replaced_count = 0
+        self._replaced_seen_at = None
         self._permanent_fatal.clear()
 
     def _session_dir_holds_a_session(self) -> bool:
@@ -3478,10 +3547,11 @@ class BaileysBridge:
             self._status.fatal_reason = None
             self._status.fatal_is_permanent = False
             self._status.fatal_run_unrecorded = False
+            self._status.connection_replaced_latched = False
             self._permanent_fatal.clear()
             # The session is open, so it is paired — the one thing that can
             # say so, and therefore the only thing that lifts `_send`'s
-            # unpaired refusal, whichever of its four producers set it.
+            # unpaired refusal, whichever of its five producers set it.
             # That includes the one `start()` sets from a directory holding no
             # credential: a host pairing for the first time sends the moment
             # the code lands rather than waiting for a restart. Cleared here
@@ -3557,6 +3627,13 @@ class BaileysBridge:
         if not isinstance(value, str) or not value:
             self._status.malformed_lines += 1
             return
+        # **A code is evidence the sidecar holds no registered credential**
+        # (ISSUE-552), whichever branch below takes it. `start()` reads the
+        # disk once, so a credential lost after the scheduler started left
+        # this clear while the sidecar offered codes nobody saw, and every
+        # send reached `writer.write` against an unpaired session and settled
+        # `unknown`. A `ready` lifts it, as it lifts every other producer.
+        self._session_unpaired = True
         window = self._pairing_window
         if window is not None and asyncio.get_running_loop().time() < window.expires_at:
             # Stamped on the loop, in order, so the sequence a queued write
@@ -3606,9 +3683,88 @@ class BaileysBridge:
             self._qr_tasks.add(task)
             task.add_done_callback(self._qr_tasks.discard)
 
+    def _handle_replaced(self, payload: dict) -> None:
+        """A replaced-connection frame from the sidecar (ISSUE-553).
+
+        The count is the frame's, never one appended per frame here: the
+        sidecar re-announces its verdict on every link reconnect, and counting
+        frames reported more replacements than happened.
+
+        **Permanent only when the frame says the sidecar gave up**, and then it
+        goes through the same latch as a logged-out session, so the send gate,
+        the supervisor, `pair --reset` and both web re-pairs treat it as a
+        session that needs re-pairing. It does not call `_on_fatal`: that
+        alert says the device link ended, and here the device is linked and
+        somebody else is using it.
+
+        The alert follows the sidecar's `announce` alone. The sidecar persists
+        the level it has announced, which is what keeps it to once per outage
+        across a scheduler restart as well as across a reconnect.
+        """
+        if (
+            self._status.fatal_is_permanent
+            and self._status.fatal_reason != FATAL_CONNECTION_REPLACED
+        ):
+            # A logged-out or lost credential outranks this: its remedy is
+            # the one that works, and a probe meeting a 401 lands here.
+            logger.warning(
+                "whatsapp.baileys.connection_replaced_ignored: a %s fault is "
+                "already latched", self._status.fatal_reason,
+            )
+            return
+        count = payload.get("replacements")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            count = self._replaced_count
+        self._replaced_count = min(count, 100_000)
+        self._replaced_seen_at = time.monotonic()
+        latched = payload.get("latched") is True
+        permanent = payload.get("permanent") is True
+        self._status.fatal_reason = FATAL_CONNECTION_REPLACED
+        self._status.fatal_run_unrecorded = False
+        self._status.ready = False
+        if latched or permanent:
+            self._status.connection_replaced_latched = True
+        # Never cleared here: only `ready` clears a permanent latch, whatever
+        # reason set it.
+        if permanent:
+            self._status.fatal_is_permanent = True
+            self._permanent_fatal.set()
+        announce = payload.get("announce")
+        if (
+            self._on_replaced is not None
+            and not isinstance(announce, bool)
+            and announce in (1, 2)
+        ):
+            self._call_back(
+                self._on_replaced, announce, self._replaced_count,
+                label="replaced",
+            )
+        if permanent:
+            logger.error(
+                "whatsapp.baileys.connection_replaced replacements=%s: another "
+                "client still holds this WhatsApp session after every probe; "
+                "sends are refused until it is re-paired",
+                self._replaced_count,
+            )
+        elif latched:
+            logger.error(
+                "whatsapp.baileys.connection_replaced replacements=%s: another "
+                "client is using this WhatsApp session; the sidecar has "
+                "stopped reconnecting and sends are refused",
+                self._replaced_count,
+            )
+        else:
+            logger.warning(
+                "whatsapp.baileys.connection_replaced replacements=%s",
+                self._replaced_count,
+            )
+
     def _handle_fatal(self, payload: dict) -> None:
         reason = payload.get("reason")
         reason = reason if isinstance(reason, str) and reason else "unknown"
+        if reason == FATAL_CONNECTION_REPLACED:
+            self._handle_replaced(payload)
+            return
         permanent = payload.get("permanent") is True or reason in _PERMANENT_FATALS
         already = self._status.fatal_is_permanent
         self._status.fatal_reason = reason
@@ -3629,6 +3785,9 @@ class BaileysBridge:
         # other sidecar has one.
         if permanent:
             self._status.fatal_is_permanent = True
+            # A logged-out or lost credential supersedes a replaced-connection
+            # run (ISSUE-553): the card and doctor read the latch first.
+            self._status.connection_replaced_latched = False
             self._permanent_fatal.set()
             if self._on_fatal is not None and not already:
                 # **Only the first of a run.** A sidecar reporting `logged_out`
@@ -3914,6 +4073,15 @@ class BaileysBridge:
         # states share one answer rather than acquiring a third string.
         if self._status.fatal_is_permanent or self._session_unpaired:
             return proto.local_failure(proto.REASON_SESSION_FATAL, definite=True)
+        # **A latched replaced connection** (ISSUE-553). The sidecar holds no
+        # socket during the hold and answers `not_connected` itself, but a
+        # probe assigns its socket before the connection opens, and a send
+        # reaching that one is answered ambiguously and settles `unknown`. A
+        # probe that opens sends `ready`, which lifts this.
+        if self._status.connection_replaced_latched and not self._status.ready:
+            return proto.local_failure(
+                proto.REASON_CONNECTION_REPLACED, definite=True,
+            )
         request_id = secrets.token_hex(8)
         try:
             line = proto.encode(

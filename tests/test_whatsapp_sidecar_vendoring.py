@@ -224,12 +224,14 @@ class TestTheSidecarSpeaksTheSameProtocol:
 
     def test_the_permanent_fatals_are_ones_the_bridge_latches(self):
         """A `fatal` reason the bridge does not recognise is only permanent if
-        the sidecar also sets `permanent: true`; these are the two it sends,
-        and both are in the bridge's own set, so the latch does not depend on
+        the sidecar also sets `permanent: true`; these are the ones it sends,
+        and all are in the bridge's own set, so the latch does not depend on
         that flag surviving a refactor."""
         from istota.transport.whatsapp.baileys_bridge import _PERMANENT_FATALS
 
-        for name in ("FATAL_LOGGED_OUT", "FATAL_BAD_SESSION"):
+        for name in (
+            "FATAL_LOGGED_OUT", "FATAL_BAD_SESSION", "FATAL_CREDENTIAL_UNREADABLE",
+        ):
             assert _js_string_const(name) in _PERMANENT_FATALS
 
     def test_it_reads_the_two_environment_variables_the_bridge_sets(self):
@@ -720,6 +722,7 @@ class TestTheSidecarsPayloadsAreReadable:
             assert keys in (
                 {"reason", "permanent"},
                 {"reason", "permanent", "run_unrecorded"},
+                {"reason", "permanent", "replacements", "latched", "announce"},
             ), keys
 
     def test_the_hello_frame_carries_the_version_field_the_bridge_reads(self):
@@ -1484,7 +1487,12 @@ class TestTheSidecarsControlFlow:
         branch = branch[branch.index("reason: FATAL_LOGGED_OUT"):]
 
         assert "scheduleLogoutExit(" in branch
-        assert "onExit();" in _js_function("scheduleLogoutExit")
+        # Both endings of the credential watch are the exit on this path.
+        assert "watchCredential(delayMs, onExit, onExit, pollMs);" in _js_function(
+            "scheduleLogoutExit"
+        )
+        watch = _js_function("watchCredential")
+        assert "onDeadline();" in watch and "onChange();" in watch
 
     def test_starting_a_session_is_guarded_against_reentry(self):
         """Two `connection: close` events before the reconnect timer fires
@@ -2119,7 +2127,11 @@ class TestTheLoggedOutBackoff:
         sidecar that neither reconnects nor exits."""
         source = PROGRAM.read_text()
 
-        assert "if (session.stopping && !session.loggedOut) return;" in source
+        assert "if (session.stopping && !session.holdsVerdict()) return;" in source
+        assert (
+            "return this.loggedOut || this.credentialUnreadable || "
+            "replacedLevel(this.replaced) > 0;"
+        ) in source
 
     def test_the_verdict_is_re_announced_on_a_reconnected_link(self):
         """The daemon's permanent-fatal latch is in memory and only this frame
@@ -2164,7 +2176,7 @@ class TestTheLoggedOutBackoff:
         body = _js_body("async open_()")
 
         assert "sock.ev.on('creds.update', () => {" in body
-        assert "if (mine()) saveCreds();" in body
+        assert "if (mine()) {\n        saveCreds()" in body
 
 
 class TestTheSidecarCreatesPrivateFiles:
@@ -2231,6 +2243,782 @@ class TestTheSidecarCreatesPrivateFiles:
         ]
 
         assert statements[0] == "applyPrivateUmask();"
+
+
+class TestTheCredentialWritesAreAtomic:
+    """A stop mid-write must not empty the paired credential (ISSUE-554).
+
+    Baileys' `useMultiFileAuthState` writes `creds.json` with `writeFile` in
+    place, which truncates and then writes, and the sidecar rewrites it on
+    every connection open. A process stopped between the two left a 0-byte
+    file, which Baileys then read as no credential at all: the session was
+    gone, and nothing said so. The sidecar now carries its own auth state
+    (`useAtomicAuthState`) whose every write goes to a private temp file,
+    is fsynced, and is renamed over the target, and which keeps the last good
+    `creds.json` as `creds.json.bak` to start from when the main file is
+    unreadable.
+
+    Executed through `node` with a stand-in for the three library helpers the
+    auth state needs, so no `node_modules` is required.
+    """
+
+    _LIB = (
+        "{initAuthCreds: () => ({registered: false, fresh: true}),"
+        " BufferJSON: {replacer: (k, v) => v, reviver: (k, v) => v},"
+        " proto: {Message: {AppStateSyncKeyData: {fromObject: (x) => x}}}}"
+    )
+
+    @staticmethod
+    def _run(script: str) -> object:
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        wrapped = (
+            "process.umask(0o022);"
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "const fs = require('fs');"
+            f"(async () => {{ {script} }})()"
+            ".then((r) => process.stdout.write(JSON.stringify(r === undefined ? null : r)))"
+            ".catch((e) => { process.stderr.write(String(e && e.stack)); process.exit(1); });"
+        )
+        result = subprocess.run(
+            [node, "-e", wrapped], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    # --- the write -------------------------------------------------------
+
+    def test_an_interrupted_write_leaves_the_previous_contents(self, tmp_path):
+        """The reported failure, reproduced: the writer dies after its temp
+        file exists and before the rename. The target still reads as it did,
+        and the temp file does not survive to be mistaken for anything."""
+        target = tmp_path / "creds.json"
+        target.write_text('{"registered": true}')
+
+        outcome = self._run(
+            "const real = fs.fsyncSync;"
+            "fs.fsyncSync = () => { throw new Error('stopped mid-write'); };"
+            "let threw = false;"
+            f"try {{ m.writeFileAtomic({json.dumps(str(target))}, 'NEW'); }}"
+            " catch (e) { threw = true; }"
+            "fs.fsyncSync = real;"
+            "return threw;"
+        )
+
+        assert outcome is True
+        assert target.read_text() == '{"registered": true}'
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["creds.json"]
+
+    def test_a_completed_write_replaces_the_file_at_0600(self, tmp_path):
+        """The child runs under a 022 umask, so 0600 can only have come from
+        the writer."""
+        target = tmp_path / "creds.json"
+        target.write_text("old")
+        target.chmod(0o644)
+
+        self._run(f"m.writeFileAtomic({json.dumps(str(target))}, 'new');")
+
+        assert target.read_text() == "new"
+        assert target.stat().st_mode & 0o777 == 0o600
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["creds.json"]
+
+    def test_a_symlink_at_the_target_is_replaced_rather_than_followed(
+        self, tmp_path
+    ):
+        outside = tmp_path / "outside"
+        outside.write_text("untouched")
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "creds.json").symlink_to(outside)
+
+        self._run(
+            f"m.writeFileAtomic({json.dumps(str(session / 'creds.json'))}, 'new');"
+        )
+
+        assert outside.read_text() == "untouched"
+        assert not (session / "creds.json").is_symlink()
+        assert (session / "creds.json").read_text() == "new"
+
+    # --- the auth state --------------------------------------------------
+
+    def _state(self, session: Path, then: str = "return {source: a.source, creds: a.state.creds};"):
+        return self._run(
+            f"const a = await m.useAtomicAuthState({json.dumps(str(session))}, {self._LIB});"
+            + then
+        )
+
+    def test_saving_writes_the_credential_and_its_backup(self, tmp_path):
+        out = self._state(
+            tmp_path,
+            "a.state.creds.registered = true; await a.saveCreds();"
+            "return a.source;",
+        )
+
+        assert out == "fresh"
+        assert json.loads((tmp_path / "creds.json").read_text())["registered"] is True
+        assert (tmp_path / "creds.json.bak").read_text() == (
+            tmp_path / "creds.json"
+        ).read_text()
+        for name in ("creds.json", "creds.json.bak"):
+            assert (tmp_path / name).stat().st_mode & 0o777 == 0o600
+
+    @pytest.mark.parametrize("damage", ["", "   \n", '{"registered": tr', "[]"])
+    def test_an_unreadable_credential_starts_from_the_backup(
+        self, tmp_path, damage
+    ):
+        (tmp_path / "creds.json").write_text(damage)
+        (tmp_path / "creds.json.bak").write_text('{"registered": true, "me": "x"}')
+
+        out = self._state(tmp_path)
+
+        assert out == {"source": "backup", "creds": {"registered": True, "me": "x"}}
+        # Restored on disk at once, so `session_is_registered` on the daemon's
+        # side reads the same answer the sidecar is acting on.
+        assert json.loads((tmp_path / "creds.json").read_text())["registered"] is True
+
+    def test_an_unreadable_credential_with_no_backup_is_reported(
+        self, tmp_path
+    ):
+        """Every deployment upgraded onto this has no backup yet, so this is
+        the reported outage exactly. It must not read as a first pairing."""
+        (tmp_path / "creds.json").write_text("")
+
+        assert self._state(tmp_path)["source"] == "unreadable"
+        assert (tmp_path / "creds.json").read_text() == ""
+
+    def test_a_missing_credential_is_not_restored_from_the_backup(
+        self, tmp_path
+    ):
+        """The writer never leaves `creds.json` missing, so a missing one
+        beside a backup was removed on purpose."""
+        (tmp_path / "creds.json.bak").write_text('{"registered": true}')
+
+        assert self._state(tmp_path)["source"] == "fresh"
+        assert not (tmp_path / "creds.json").exists()
+
+    def test_it_refuses_to_run_without_the_library_helpers(self, tmp_path):
+        """Without the replacer and reviver the Buffers in a credential are
+        written in a form nothing revives; refusing is the safe direction."""
+        assert self._run(
+            f"try {{ await m.useAtomicAuthState({json.dumps(str(tmp_path))},"
+            " {initAuthCreds: () => ({}), BufferJSON: {}, proto: null});"
+            " return 'ran'; } catch (e) { return 'refused'; }"
+        ) == "refused"
+
+    def test_a_readable_credential_is_preferred_to_the_backup(self, tmp_path):
+        (tmp_path / "creds.json").write_text('{"me": "main"}')
+        (tmp_path / "creds.json.bak").write_text('{"me": "bak"}')
+
+        assert self._state(tmp_path) == {"source": "main", "creds": {"me": "main"}}
+
+    def test_no_credential_at_all_is_a_fresh_pairing(self, tmp_path):
+        assert self._state(tmp_path) == {
+            "source": "fresh", "creds": {"registered": False, "fresh": True},
+        }
+
+    def test_signal_keys_round_trip_through_the_atomic_writer(self, tmp_path):
+        out = self._state(
+            tmp_path,
+            "await a.state.keys.set({'pre-key': {'1': {k: 1}, '2': {k: 2}},"
+            " 'sender-key': {'g/a:b': {k: 3}}});"
+            "await a.state.keys.set({'pre-key': {'2': null}});"
+            "return await a.state.keys.get('pre-key', ['1', '2']);",
+        )
+
+        assert out == {"1": {"k": 1}, "2": None}
+        # Baileys' own file-name rule, so an existing session directory reads
+        # back under the new writer.
+        assert (tmp_path / "sender-key-g__a-b.json").exists()
+        assert (tmp_path / "pre-key-1.json").stat().st_mode & 0o777 == 0o600
+
+    def test_a_temp_file_left_by_a_killed_writer_is_swept_at_load(
+        self, tmp_path
+    ):
+        prefix = self._run("return m.AUTH_TEMP_PREFIX;")
+        stray = tmp_path / f"{prefix}creds.json.deadbeef"
+        stray.write_text("half")
+
+        self._state(tmp_path)
+
+        assert not stray.exists()
+
+    def test_the_session_opens_through_the_local_auth_state(self):
+        """Pinned as the absence of the library's own writer as well as the
+        presence of this one, since that is what it would silently revert
+        to."""
+        body = _js_body("async open_()")
+
+        assert "useAtomicAuthState(SESSION_DIR, baileys)" in body
+        assert "useMultiFileAuthState" not in body
+
+
+class TestALostCredentialIsAFatalOfItsOwn:
+    """An unreadable `creds.json` with no usable backup is a lost session, not
+    a first pairing (ISSUE-552).
+
+    The library reads an unparseable `creds.json` as no credential and starts
+    a fresh, unregistered one, which offers a QR. On the reported outage that
+    ran for fifteen hours: codes offered with no pairing window open, every
+    close an ordinary 408, no `fatal`, so no latch, no alert and no doctor
+    change. The sidecar now checks the stored credential before it opens
+    anything and answers with a permanent `fatal` of its own, which reuses
+    the unlinked-device path on the daemon's side.
+
+    Driven through the whole program against a stand-in daemon socket that
+    refuses a connection whose first line is not `hello`, as the bridge does.
+    With no `node_modules` in the tree a program that reached `loadBaileys`
+    would exit 3 and send no fatal, which is what the unfixed program does.
+    """
+
+    @staticmethod
+    def _frames(tmp_path, creds: str | None, backup: str | None = None,
+                listen_for: float = 3.0) -> tuple[list[dict], int | None]:
+        import socket
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        # A short directory for the socket: AF_UNIX paths are capped near 104
+        # bytes on macOS and pytest's tmp_path can exceed that.
+        import tempfile
+        sock_dir = Path(tempfile.mkdtemp(prefix="wa-"))
+        sock_path = sock_dir / "s"
+        session = tmp_path / "session"
+        session.mkdir()
+        if creds is not None:
+            (session / "creds.json").write_text(creds)
+        if backup is not None:
+            (session / "creds.json.bak").write_text(backup)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(sock_path))
+        server.listen(1)
+        server.settimeout(10)
+        env = dict(os.environ)
+        env["ISTOTA_BAILEYS_SOCKET"] = str(sock_path)
+        env["ISTOTA_BAILEYS_SESSION_DIR"] = str(session)
+        env["ISTOTA_BAILEYS_MEDIA_DIR"] = str(tmp_path / "media")
+        proc = subprocess.Popen(
+            [node, str(PROGRAM)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        frames: list[dict] = []
+        try:
+            conn, _ = server.accept()
+            conn.settimeout(0.2)
+            buffer = b""
+            deadline = time.monotonic() + listen_for
+            while time.monotonic() < deadline:
+                try:
+                    chunk = conn.recv(65536)
+                except TimeoutError:
+                    continue
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buffer += chunk
+            frames = [json.loads(line) for line in buffer.splitlines() if line.strip()]
+            # The bridge's `_negotiate` drops a connection whose first line is
+            # not `hello`, so a frame sent ahead of it would never be read.
+            assert not frames or frames[0]["type"] == "hello", frames
+            conn.close()
+            returncode = proc.poll()
+        finally:
+            proc.kill()
+            proc.communicate(timeout=15)
+            server.close()
+            shutil.rmtree(sock_dir, ignore_errors=True)
+        return frames, returncode
+
+    @pytest.mark.parametrize("damage", ["", "{\"registered\": tr"])
+    def test_an_unreadable_credential_is_a_permanent_fatal_and_never_a_qr(
+        self, tmp_path, damage
+    ):
+        frames, returncode = self._frames(tmp_path, damage)
+
+        fatals = [f for f in frames if f["type"] == "fatal"]
+        assert fatals and all(
+            f["reason"] == _js_string_const("FATAL_CREDENTIAL_UNREADABLE")
+            and f["permanent"] is True
+            for f in fatals
+        ), frames
+        assert not [f for f in frames if f["type"] == "qr"]
+        # Still up and holding the verdict, rather than exiting into a
+        # supervisor's restart loop.
+        assert returncode is None
+        # The damaged file is evidence and is left as it was.
+        assert (tmp_path / "session" / "creds.json").read_text() == damage
+
+    def test_a_usable_backup_is_not_a_fatal(self, tmp_path):
+        """The control. With a good backup the program goes on to open the
+        library, and sends no fatal of this kind."""
+        frames, _ = self._frames(
+            tmp_path, "", backup='{"registered": true}', listen_for=2.0,
+        )
+
+        assert not [f for f in frames if f["type"] == "fatal"]
+
+    def test_a_missing_dependency_tree_exits_rather_than_paging(self, tmp_path):
+        """`loadBaileys` is a dynamic `import()`, which rejects with
+        `ERR_MODULE_NOT_FOUND`. Matching only `require`'s `MODULE_NOT_FOUND`
+        sent a missing tree down the retry path to a permanent `bad_session`,
+        whose alert tells an operator to archive a credential that works."""
+        if (SIDECAR_DIR / "node_modules").exists():
+            pytest.skip("the dependency tree is installed here")
+        frames, returncode = self._frames(tmp_path, None, listen_for=3.0)
+
+        assert returncode == 3
+        assert not [f for f in frames if f["type"] == "fatal"]
+
+    def test_the_bridge_reads_it_as_permanent(self):
+        from istota.transport.whatsapp.baileys_bridge import _PERMANENT_FATALS
+
+        assert _js_string_const("FATAL_CREDENTIAL_UNREADABLE") in _PERMANENT_FATALS
+
+
+class TestAReplacedConnectionIsBounded:
+    """A second client on the same credential must not churn for hours
+    (ISSUE-553).
+
+    WhatsApp closes a connection with 440 (`connectionReplaced`) when another
+    client logs in with the same credential. The sidecar read that as any
+    transient close and reconnected three seconds later, so two clients
+    knocked each other off every few seconds: 2,538 closes in five and a half
+    hours on the reported outage, each reopen a credential save, with no
+    alert. Now five in ten minutes latch the run, the sidecar yields, probes
+    three times at 15 minutes, an hour and an hour, and then gives up for
+    good. The run is on disk, so a restart neither resumes reconnecting nor
+    earns a probe, and it ends on a stable open or on a credential change this
+    process did not make.
+
+    Driven through `Session` with a stand-in daemon link, a captured
+    `setTimeout`, and the hold's credential watch replaced by a recorder, so a
+    whole run executes in milliseconds with no `node_modules`.
+    """
+
+    _PRELUDE = (
+        "const m = require({program});"
+        "const fs = require('fs');"
+        "const sent = [];"
+        "const link = {{greeted: true, send: (t, f) => {{"
+        " sent.push(Object.assign({{type: t}}, f)); return true; }}}};"
+        "const timers = [];"
+        "global.setTimeout = (fn, ms) => {{ timers.push({{fn, ms}}); return timers.length; }};"
+        "global.clearTimeout = () => {{}};"
+        "const baileys = {{DisconnectReason: {{loggedOut: 401, connectionReplaced: 440}}}};"
+        "const make = () => {{"
+        "  const s = new m.Session(link);"
+        "  s.waits = []; s.exits = []; s.starts = 0;"
+        "  s.watch = (delay, onDeadline, onChange, poll, baseline) => {{"
+        "    s.waits.push({{delay, onDeadline, onChange, baseline}}); return () => {{}}; }};"
+        "  s.exit = (c) => s.exits.push(c);"
+        "  s.start = async () => {{ s.starts += 1; }};"
+        "  return s;"
+        "}};"
+        "const close = (s, code) => {{ s.sock = {{}};"
+        "  s.onConnection({{connection: 'close',"
+        "  lastDisconnect: {{error: {{output: {{statusCode: code}}}}}}}}, baileys); }};"
+        "const open = (s) => {{ s.sock = {{}}; s.onConnection({{connection: 'open'}}, baileys); }};"
+        "const fatals = () => sent.filter((f) => f.type === 'fatal');"
+        "const waitsOf = (s) => s.waits.map((w) => w.delay);"
+    )
+
+    def _go(self, tmp_path, body: str):
+        session = tmp_path / "session"
+        session.mkdir(exist_ok=True)
+        script = (
+            self._PRELUDE.format(program=json.dumps(str(PROGRAM)))
+            + body
+        )
+        return TestTheLoggedOutBackoff._run(script, session_dir=session)
+
+    @staticmethod
+    def _out(expression: str) -> str:
+        return f"process.stdout.write(JSON.stringify({expression}));"
+
+    def test_one_replacement_is_reported_and_retried_later(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make(); close(s, 440);"
+            + self._out(
+                "{sent, delays: timers.map((t) => t.ms), stopping: s.stopping,"
+                " sock: s.sock, state: m.readReplacedState(),"
+                " wait: m.REPLACED_RECONNECT_MS}"
+            )
+        ))
+
+        assert out["sent"] == [{
+            "type": "fatal", "reason": "connection_replaced",
+            "permanent": False, "replacements": 1, "latched": False,
+            "announce": 0,
+        }]
+        assert out["delays"] == [out["wait"]]
+        assert out["stopping"] is False
+        # Dropped, so a send in the gap is answered `not_connected` definitely
+        # rather than reaching a socket WhatsApp has closed.
+        assert out["sock"] is None
+        assert len(out["state"]["times"]) == 1
+        assert out["state"]["latched_at"] is None
+
+    def test_five_latch_and_the_alert_is_asked_for_once(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "const latchedFrames = fatals().length;"
+            "s.announceReady();"
+            + self._out(
+                "{fatals: fatals(), latchedFrames, waits: waitsOf(s),"
+                " stopping: s.stopping, starts: s.starts,"
+                " reconnects: timers.length, state: m.readReplacedState(),"
+                " probe: m.REPLACED_PROBE_DELAYS_MS[0]}"
+            )
+        ))
+
+        fatals = out["fatals"]
+        latch = out["latchedFrames"]
+        assert [f["latched"] for f in fatals[:latch]] == [False] * (latch - 1) + [True]
+        assert fatals[latch - 1]["replacements"] == latch
+        assert fatals[latch - 1]["announce"] == 1
+        # Re-announced on a reconnected link, without asking for the alert again.
+        assert fatals[-1]["latched"] is True and fatals[-1]["announce"] == 0
+        assert out["stopping"] is True
+        assert out["reconnects"] == latch - 1
+        assert out["waits"] == [out["probe"]]
+        assert out["state"]["announced"] == 1
+
+    def test_the_probes_run_on_their_schedule_and_then_it_gives_up(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "const probes = [];"
+            "for (let i = 0; i < 3; i++) {"
+            "  s.waits[s.waits.length - 1].onDeadline();"
+            "  probes.push({starts: s.starts, stopping: s.stopping,"
+            "    probes: m.readReplacedState().probes});"
+            "  open(s); close(s, 440);"
+            "}"
+            + self._out(
+                "{probes, waits: waitsOf(s), fatals: fatals(),"
+                " state: m.readReplacedState(), stopping: s.stopping,"
+                " delays: m.REPLACED_PROBE_DELAYS_MS}"
+            )
+        ))
+
+        assert [p["starts"] for p in out["probes"]] == [1, 2, 3]
+        assert [p["probes"] for p in out["probes"]] == [1, 2, 3]
+        assert all(p["stopping"] is False for p in out["probes"])
+        # 15 minutes, then an hour, then an hour, then no deadline at all.
+        assert out["waits"][:3] == out["delays"]
+        assert out["waits"][3] is None  # Infinity serializes as null
+        last = out["fatals"][-1]
+        assert last["permanent"] is True and last["announce"] == 2
+        announces = [f["announce"] for f in out["fatals"] if f["announce"]]
+        assert announces == [1, 2]
+        assert out["state"]["given_up"] is True
+        assert out["stopping"] is True
+
+    def test_a_stable_open_ends_the_run(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "s.waits[0].onDeadline(); open(s);"
+            "const stable = timers.filter((t) => t.ms === m.REPLACED_STABLE_MS);"
+            "const before = m.readReplacedState() !== null;"
+            "stable[0].fn();"
+            + self._out(
+                "{stable: stable.length, before, after: m.readReplacedState(),"
+                " ready: sent.filter((f) => f.type === 'ready').length,"
+                " memory: s.replaced}"
+            )
+        ))
+
+        assert out["stable"] == 1
+        assert out["ready"] == 1
+        assert out["before"] is True
+        assert out["after"] is None and out["memory"] is None
+
+    def test_an_open_that_closes_before_it_is_stable_does_not_end_it(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "s.waits[0].onDeadline(); open(s);"
+            "const stable = timers.filter((t) => t.ms === m.REPLACED_STABLE_MS)[0];"
+            "close(s, 440); stable.fn();"
+            + self._out("{state: m.readReplacedState(), stopping: s.stopping}")
+        ))
+
+        assert out["state"]["latched_at"] is not None
+        assert out["stopping"] is True
+
+    def test_a_restart_holds_rather_than_reconnecting(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "sent.length = 0;"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            "b.announceReady();"
+            + self._out(
+                "{holding, starts: b.starts, waits: waitsOf(b), sent,"
+                " probe: m.REPLACED_PROBE_DELAYS_MS[0]}"
+            )
+        ))
+
+        assert out["holding"] is True
+        assert out["starts"] == 0
+        assert 0 < out["waits"][0] <= out["probe"]
+        # Told again, and not paged again.
+        assert out["sent"][-1]["latched"] is True
+        assert out["sent"][-1]["announce"] == 0
+
+    def test_a_restart_mid_way_through_the_last_probe_gives_up(self, tmp_path):
+        """The probe is counted before anything opens, so a restart does not
+        buy a fourth."""
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "for (let i = 0; i < 2; i++) { a.waits[a.waits.length - 1].onDeadline(); close(a, 440); }"
+            "a.waits[a.waits.length - 1].onDeadline();"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            + self._out("{holding, starts: b.starts, state: m.readReplacedState()}")
+        ))
+
+        assert out["holding"] is True
+        assert out["starts"] == 0
+        assert out["state"]["given_up"] is True
+
+    def test_a_credential_this_process_did_not_write_ends_the_run(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "fs.writeFileSync(process.env.ISTOTA_BAILEYS_SESSION_DIR + '/creds.json', '{}');"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            + self._out("{holding, state: m.readReplacedState()}")
+        ))
+
+        assert out["holding"] is False
+        assert out["state"] is None
+
+    def test_a_credential_this_process_saved_does_not(self, tmp_path):
+        """Every open saves the credential, a probe's included. Refreshing the
+        recorded stamp after our own save is what keeps that from reading as
+        a re-pair."""
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "fs.writeFileSync(process.env.ISTOTA_BAILEYS_SESSION_DIR + '/creds.json', '{}');"
+            "a.refreshReplacedStamp();"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            + self._out("{holding}")
+        ))
+
+        assert out["holding"] is True
+
+    def test_the_hold_watches_from_the_recorded_stamp_and_exits_on_a_change(
+        self, tmp_path,
+    ):
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "s.waits[0].onChange();"
+            + self._out(
+                "{baseline: s.waits[0].baseline, stamp: m.credentialStamp(),"
+                " exits: s.exits}"
+            )
+        ))
+
+        assert out["baseline"] == out["stamp"]
+        assert out["exits"] == [1]
+
+    def test_recent_closes_survive_a_restart(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT - 1; i++) close(a, 440);"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            "close(b, 440);"
+            + self._out("{holding, last: fatals()[fatals().length - 1]}")
+        ))
+
+        assert out["holding"] is False
+        assert out["last"]["latched"] is True
+
+    def test_a_logout_during_a_probe_ends_the_run(self, tmp_path):
+        """The unlink's backoff and alert take over; the run would otherwise
+        resume on restart and end in a give-up naming the wrong cause."""
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "s.waits[0].onDeadline(); close(s, 401);"
+            + self._out("{state: m.readReplacedState(), memory: s.replaced}")
+        ))
+
+        assert out["state"] is None and out["memory"] is None
+
+    def test_an_unlatched_run_ends_once_its_closes_age_out(self, tmp_path):
+        out = self._go(tmp_path, (
+            "const s = make(); close(s, 440);"
+            "const kept = m.readReplacedState() !== null;"
+            "s.replaced.times = [Date.now() - m.REPLACED_WINDOW_MS - 1];"
+            "s.refreshReplacedStamp();"
+            + self._out("{kept, state: m.readReplacedState()}")
+        ))
+
+        assert out["kept"] is True
+        assert out["state"] is None
+
+    @pytest.mark.requires_dac
+    def test_an_unreadable_credential_at_a_probe_ends_the_run(self, tmp_path):
+        """Branch review: a mode change moves no `mtime:size` stamp, so the run
+        survived, each refused probe counted as spent, and it reached a
+        give-up for the wrong cause while the real verdict was never sent."""
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "creds.json").write_text('{"registered": true}')
+        out = self._go(tmp_path, (
+            "const s = make(); s.start = m.Session.prototype.start;"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "fs.chmodSync(process.env.ISTOTA_BAILEYS_SESSION_DIR + '/creds.json', 0);"
+            "s.waits.at(-1).onDeadline();"
+            + self._out("{run: m.readReplacedState(), last: fatals().at(-1)}")
+        ))
+
+        assert out["last"]["reason"] == "credential_unreadable"
+        assert out["run"] is None
+
+    @pytest.mark.requires_dac
+    def test_a_restart_with_an_unreadable_credential_does_not_resume_the_hold(
+        self, tmp_path,
+    ):
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "creds.json").write_text('{"registered": true}')
+        out = self._go(tmp_path, (
+            "const a = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(a, 440);"
+            "fs.chmodSync(process.env.ISTOTA_BAILEYS_SESSION_DIR + '/creds.json', 0);"
+            "const b = make();"
+            "const holding = b.restoreReplacedRun();"
+            + self._out("{holding, run: m.readReplacedState()}")
+        ))
+
+        assert out["holding"] is False
+        assert out["run"] is None
+
+    def test_a_probe_that_cannot_start_holds_again(self, tmp_path):
+        """Branch review: `bad_session` reached from inside a probe left no hold
+        and no timer, so the sidecar re-announced a transient latch for ever
+        while doctor said it would retry on its own."""
+        out = self._go(tmp_path, (
+            "(async () => {"
+            "const flush = () => new Promise((r) => setImmediate(r));"
+            "const s = make(); s.start = m.Session.prototype.start;"
+            "s.open_ = async () => { throw new Error('x'); };"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "const before = s.waits.length;"
+            "s.waits.at(-1).onDeadline(); await flush();"
+            "for (let i = 0; i < 4; i++) { timers.at(-1).fn(); await flush(); }"
+            + self._out(
+                "{before, waits: waitsOf(s), stopping: s.stopping,"
+                " bad: fatals().filter((f) => f.reason === 'bad_session').length,"
+                " run: m.readReplacedState(), hour: m.REPLACED_PROBE_DELAYS_MS[1]}"
+            )
+            + "})();"
+        ))
+
+        assert len(out["waits"]) == out["before"] + 1
+        assert out["waits"][-1] == out["hour"]
+        assert out["stopping"] is True
+        assert out["bad"] == 0
+        assert out["run"]["probes"] == 1
+
+    def test_a_restart_just_after_a_probe_opens_does_not_spend_it(self, tmp_path):
+        """Branch review: the probe was counted before it opened and nothing
+        was saved at the open, so a restart read an open probe as a failed one.
+        After the third that gave up a working session."""
+        out = self._go(tmp_path, (
+            "const s = make();"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) close(s, 440);"
+            "for (let i = 0; i < 2; i++) { s.waits.at(-1).onDeadline(); open(s); close(s, 440); }"
+            "s.waits.at(-1).onDeadline(); open(s);"
+            "const s2 = make(); const holding = s2.restoreReplacedRun();"
+            "const stable = timers.filter((t) => t.ms > 0 && t.ms <= m.REPLACED_STABLE_MS);"
+            + self._out(
+                "{holding, run: m.readReplacedState(), probing: s2.probing,"
+                " remaining: s2.stableRemainingMs}"
+            )
+        ))
+
+        assert out["holding"] is False
+        assert out["run"]["given_up"] is False
+        assert out["run"]["probes"] == 3
+        assert out["probing"] is True
+        assert 0 < out["remaining"] <= 300_000
+
+    def test_closes_outside_the_window_do_not_latch(self):
+        out = TestTheLoggedOutBackoff._run(
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "let times = []; let r;"
+            "for (let i = 0; i < m.REPLACED_LATCH_COUNT; i++) {"
+            "  r = m.recordReplacement(times, i * m.REPLACED_WINDOW_MS); times = r.times;"
+            "}"
+            "process.stdout.write(JSON.stringify(r));"
+        )
+
+        assert out["latched"] is False
+        assert out["count"] == 1
+
+    def test_an_unreadable_run_is_no_run(self):
+        out = TestTheLoggedOutBackoff._call(
+            "[m.parseReplacedState(''), m.parseReplacedState('[]'),"
+            " m.parseReplacedState('{\"announced\": 9}').announced]"
+        )
+
+        assert out == [None, None, 2]
+
+    def test_another_close_is_unchanged(self, tmp_path):
+        """The control: an ordinary transient close still reconnects at once
+        and reports nothing."""
+        out = self._go(tmp_path, (
+            "const s = make(); close(s, 428);"
+            + self._out("{sent, delays: timers.map((t) => t.ms)}")
+        ))
+
+        assert out["sent"] == []
+        assert out["delays"] == [3000]
+
+    def test_an_explicit_baseline_sees_a_change_before_the_first_poll(
+        self, tmp_path,
+    ):
+        """`watchCredential` with a baseline compares at the first tick,
+        where the logout wait adopts whatever it finds there."""
+        session = tmp_path / "session"
+        session.mkdir()
+        out = TestTheLoggedOutBackoff._run(
+            f"const m = require({json.dumps(str(PROGRAM))});"
+            "const seen = [];"
+            "m.watchCredential(10000, () => seen.push('deadline'),"
+            "  () => seen.push('change'), 20, 'not-the-stamp');"
+            "m.watchCredential(60, () => seen.push('control-deadline'),"
+            "  () => seen.push('control-change'), 20);"
+            "setTimeout(() => process.stdout.write(JSON.stringify(seen)), 200);",
+            session_dir=session,
+        )
+
+        assert out == ["change", "control-deadline"]
+
+    def test_the_bridge_does_not_read_the_reason_as_permanent(self):
+        from istota.transport.whatsapp.baileys_bridge import (
+            _PERMANENT_FATALS, _SIDECAR_OWN_FILES, FATAL_CONNECTION_REPLACED,
+        )
+
+        assert _js_string_const("FATAL_CONNECTION_REPLACED") == FATAL_CONNECTION_REPLACED
+        assert FATAL_CONNECTION_REPLACED not in _PERMANENT_FATALS
+        # Or `dir_holds_a_session` reads the run file as a paired session.
+        assert "connection-replaced.json" in _SIDECAR_OWN_FILES
 
 
 class TestThePinnedLibrary:

@@ -18,7 +18,11 @@ Two environment variables, and nothing else:
 - `ISTOTA_BAILEYS_SESSION_DIR` — the 0700 directory holding the paired
   credential. The sidecar's own log is `sidecar.log` inside it, and
   `logout-backoff.json` beside it is how long a run of logged-out starts has
-  been going — see below.
+  been going — see below. `connection-replaced.json` records a run of
+  connections WhatsApp closed because another client logged in with the same
+  session (status 440): after five in ten minutes the sidecar stops
+  reconnecting, retries after 15 minutes and then after an hour twice more,
+  and then gives up until the session is re-paired.
 
 Both are set by the daemon when it spawns the sidecar itself, and have to be
 set by the unit or the compose service otherwise. `ISTOTA_BAILEYS_LOG_LEVEL`

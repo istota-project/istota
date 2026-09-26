@@ -1374,6 +1374,44 @@ class TestTheQrPayload:
         assert "qr_offered" in caplog.text
 
 
+class TestAQrMeansTheSessionIsUnpaired:
+    """A sidecar offering a code holds no registered credential (ISSUE-552).
+
+    `start()` is the only other place the bridge learns the directory is
+    unpaired, and it reads the disk once. On the reported outage the scheduler
+    had started hours before `creds.json` was emptied, so the latch was clear
+    for the fifteen hours the sidecar spent offering codes nobody saw, and any
+    send in that span would have reached `writer.write` and settled `unknown`.
+    """
+
+    async def test_a_qr_with_no_window_open_refuses_later_sends_definitely(
+        self, bridge, sidecar, config, monkeypatch
+    ):
+        bind_user(config)
+        use_bridge_as_adapter(monkeypatch, bridge)
+        assert bridge.status.session_unpaired is False
+
+        await sidecar.say(proto.MSG_QR, qr="2@SECRETPAIRINGPAYLOAD==")
+        await wait_for(lambda: bridge.status.session_unpaired is True)
+
+        record = await outbound.deliver_whatsapp(
+            config, logical_key="task-result:552", user_id=USER, text="done",
+        )
+
+        assert record.status == "failed"
+        assert ledger_row(config, "task-result:552")["status"] == "failed"
+
+    async def test_a_ready_after_the_qr_lifts_it(self, bridge, sidecar):
+        """The control: a code that was scanned is a session that is up."""
+        await sidecar.say(proto.MSG_QR, qr="2@SECRETPAIRINGPAYLOAD==")
+        await wait_for(lambda: bridge.status.session_unpaired is True)
+
+        await sidecar.say(proto.MSG_READY)
+        await wait_for(lambda: bridge.status.ready is True)
+
+        assert bridge.status.session_unpaired is False
+
+
 class TestWhatALogLineMaySay:
     async def test_a_refused_message_is_not_logged_with_its_text(
         self, bridge, sidecar, config, caplog
