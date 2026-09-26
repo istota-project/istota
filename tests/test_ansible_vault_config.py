@@ -255,14 +255,15 @@ def test_the_filter_is_registered():
     assert "istota_vault_users_toml" in _custom_filters()
 
 
-def test_the_defaults_document_the_key():
-    """`istota_users` is documented by a commented example, not a schema.
+def test_the_docs_document_the_key():
+    """`istota_users` is documented by an example, not a schema.
 
-    A key nothing in `defaults/main.yml` mentions is a key no operator finds.
-    This is the only place the role can say it exists.
+    The role defaults point at `docs/deployment/ansible.md` for the per-user
+    keys, so a key that page does not show is a key no operator finds.
     """
-    text = (ANSIBLE / "defaults" / "main.yml").read_text()
+    text = (ANSIBLE.parent.parent / "docs" / "deployment" / "ansible.md").read_text()
     assert "vault_path:" in text
+    assert "docs/deployment/ansible.md" in (ANSIBLE / "defaults" / "main.yml").read_text()
 
 
 class TestTheInstallerPathReachesBothSettings:
