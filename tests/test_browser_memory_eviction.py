@@ -661,3 +661,73 @@ def test_eviction_prefers_idle_session_over_older_active_session(monkeypatch, pr
     assert idle not in browse_api._sessions
     ctx.pages[1].close.assert_called_once()
     ctx.pages[0].close.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# The gate reads the working set, not memory.current (ISSUE-555)
+# ---------------------------------------------------------------------------
+
+_GIB = 1024 ** 3
+_MIB = 1024 ** 2
+
+
+def _cgroup(tmp_path, monkeypatch, current, limit, stat=None):
+    """Point the cgroup reads at a fake tree. `stat=None` writes no memory.stat."""
+    (tmp_path / "memory.current").write_text(f"{current}\n")
+    (tmp_path / "memory.max").write_text(f"{limit}\n")
+    if stat is not None:
+        (tmp_path / "memory.stat").write_text(
+            "".join(f"{key} {value}\n" for key, value in stat.items()),
+        )
+    monkeypatch.setattr(browse_api, "CGROUP_DIR", str(tmp_path))
+
+
+class TestTheGateReadsTheWorkingSet:
+    """The shape from production: 84% charged, most of it inactive page cache."""
+
+    CACHE_HEAVY = {
+        "anon": 700 * _MIB, "file": 1900 * _MIB, "shmem": 32 * _MIB,
+        "active_file": 300 * _MIB, "inactive_file": 1600 * _MIB,
+    }
+
+    def test_inactive_cache_does_not_refuse_a_session(self, tmp_path, monkeypatch):
+        ctx = _claim_connection_on_this_thread(monkeypatch)
+        _cgroup(tmp_path, monkeypatch, current=2580 * _MIB, limit=3 * _GIB,
+                stat=self.CACHE_HEAVY)
+
+        assert browse_api._get_memory_pct() == round(980 / 3072 * 100, 1)
+        browse_api._create_session(owner="new")
+        ctx.new_page.assert_called_once()
+
+    def test_real_pressure_still_refuses(self, tmp_path, monkeypatch):
+        ctx = _claim_connection_on_this_thread(monkeypatch)
+        _cgroup(tmp_path, monkeypatch, current=2700 * _MIB, limit=3 * _GIB,
+                stat={"anon": 2500 * _MIB, "shmem": 100 * _MIB,
+                      "inactive_file": 50 * _MIB})
+
+        with pytest.raises(browse_api.SessionCapacityError, match="Memory pressure"):
+            browse_api._create_session(owner="new")
+        ctx.new_page.assert_not_called()
+
+    def test_shmem_is_not_discounted(self, tmp_path, monkeypatch):
+        """Without swap shmem is not reclaimable, so it stays in the number."""
+        _cgroup(tmp_path, monkeypatch, current=2600 * _MIB, limit=3 * _GIB,
+                stat={"anon": 400 * _MIB, "shmem": 2100 * _MIB,
+                      "inactive_file": 0})
+
+        assert browse_api._get_memory_pct() > browse_api.MEMORY_EVICT_PCT
+
+    def test_an_unreadable_memory_stat_falls_back_to_the_charge(
+        self, tmp_path, monkeypatch,
+    ):
+        _cgroup(tmp_path, monkeypatch, current=2580 * _MIB, limit=3 * _GIB)
+
+        assert browse_api._read_container_memory_mb() == (2580, 3072)
+
+    def test_the_monitor_line_carries_the_breakdown(self, tmp_path, monkeypatch):
+        _cgroup(tmp_path, monkeypatch, current=2580 * _MIB, limit=3 * _GIB,
+                stat=self.CACHE_HEAVY)
+
+        assert browse_api._memory_breakdown() == (
+            "charged=2580MB anon=700MB file=1900MB shmem=32MB inactive_file=1600MB"
+        )

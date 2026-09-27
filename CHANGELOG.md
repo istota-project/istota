@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The browser container no longer refuses new sessions or evicts live ones because of page cache it could give back. Its memory check counted reclaimable file cache as usage, so a long-running container stayed above the limit and a scheduled job could fail every page fetch while the host had memory to spare. The monitor's high-memory line now also shows how the memory splits between anonymous memory, file cache and shared memory.
+
+- A crashing Chrome renderer no longer leaves a core dump of about 1 GB inside the browser container, where dumps piled up across restarts until they filled the host disk. Core dumps are now switched off for the browser service in both the Ansible and Docker deployments. The first deploy recreates the container, which also frees the dumps already there.
+
 - When another client logs in with the same Baileys WhatsApp session, the sidecar no longer reconnects every few seconds against it. After five replaced connections in ten minutes it stops, refuses sends and alerts admins once; it retries after 15 minutes and then after an hour twice more, and if the other client is still there it gives up and a second alert says to re-pair from Admin, Connections, unlinking the old device on the phone first if the other client is unknown. `istota doctor` reports recent replaced connections and the latched or given-up state.
 
 - A Baileys WhatsApp session whose saved credential is empty or unreadable now alerts admins and refuses sends until it is re-paired, instead of quietly starting a new pairing that nobody sees. A pairing code offered while no re-pair is in progress also stops sends from being attempted against the unpaired session.
