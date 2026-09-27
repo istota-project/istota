@@ -109,6 +109,8 @@ room = "web-alice-3f21c4d90ab7"
 
 One spelling that does not do what it looks like: bare `web` is the user's default `general` room, not the job's `room` field.
 
+When a `web:` or `room:` target names a different room from the job's `room` field, the loader logs a warning and loads the job anyway. A `talk:` target is not compared, since a Talk descriptor can be a binding reference rather than the canonical token.
+
 `room:<token>` is the third form, and it means "this room, whichever surfaces it is on when the job runs" — the bindings are re-read at every delivery rather than baked into the descriptor. The token must be the room's canonical one — the value `istota-skill rooms list` reports as `token`, and the same string you put in the job's `room` field — rather than a per-surface reference such as a promoted room's Talk conversation id. That is what the form is for: a web-only room later opened in Talk starts reaching the room's Talk members with no edit to the job, where `web:<token>` written months earlier goes on reaching the web leg alone. The surface-qualified forms in the table are still the better default, because they say which surfaces the job was written for, so a room that loses a binding is legible instead of quietly narrowing.
 
 Until ISSUE-511 this form delivered nothing at all from a scheduled job. The expansion assumed the task had originated on one of the room's own surfaces and skipped both of its bindings as legs that origin had already covered; a scheduled task originates on none, so the plan came out empty, the job reported success and the only trace was one line in the daemon log. A deployment running an older release should keep to the surface-qualified forms.
@@ -123,7 +125,7 @@ The sync answers who may write the field, not what they may write. `!cron` shows
 
 **A pinned job does not fail over.** If the pinned brain is unavailable — a usage limit, a missing binary, a tmux launch failure — the run fails with that brain's own reason instead of being answered by the deployment's backup brain, which for unattended work is the safer of the two. The failure is not silent: the task's retries run out, at 1, 4 and 16 minutes or immediately for an error that cannot be retried, `consecutive_failures` climbs, the job auto-disables at five and raises a notice in the inbox. `!cron enable <name>` restarts it once the brain is back.
 
-`model` is resolved by whichever brain the job will actually run. A portable name like `smart` therefore lands on that brain's own model rather than on the deployment default's, which is what makes a per-job brain and a per-job model usable together.
+`model` is resolved by whichever brain the job will actually run. A portable name like `smart` therefore lands on that brain's own model rather than on the deployment default's, which is what makes a per-job brain and a per-job model usable together. The loader checks the name in that brain's namespace and logs a warning for one that cannot resolve (usually a typo); the job still loads. An admin's `brain` pin selects the namespace checked; for anyone else it is the scheduled default brain's.
 
 ## Publishing to shared content
 
