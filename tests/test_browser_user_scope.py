@@ -369,7 +369,7 @@ def test_monitor_attributes_descendant_rss_without_browser_calls(api, monkeypatc
     # Grandchild first, plus a separate chrome tree that belongs to nobody.
     rows = "103 102 1024 chrome --type=renderer\n102 100 2048 chrome --type=zygote\n100 1 4096 chrome\n201 200 8192 chrome --type=renderer\n200 1 1024 chrome\n999 1 65536 chrome\n"
     monkeypatch.setattr(api.subprocess, "run", lambda *a, **kw: types.SimpleNamespace(stdout=rows))
-    monkeypatch.setattr(api, "_get_memory_pct", lambda: 90)
+    monkeypatch.setattr(api, "_get_memory_pct", lambda figures=None: 90)
     monkeypatch.setattr(api.chrome, "get_context", MagicMock(side_effect=AssertionError("monitor touched browser")))
     with caplog.at_level(logging.WARNING):
         thread = threading.Thread(target=api._monitor_tick)

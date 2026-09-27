@@ -696,6 +696,10 @@ services:
     # whatever still escapes, since a container without an init has no reaper at
     # all and the pids cgroup limit is finite.
     init: true
+    # A host whose core_pattern is plain `core` has each crashed renderer dump
+    # ~1.1G into /app in the writable layer, which a restart keeps.
+    ulimits:
+      core: 0
     profiles:
       - browser
     ports:

@@ -215,28 +215,78 @@ RENDER_MAX_CHARS = 500000
 # Session helpers
 # ---------------------------------------------------------------------------
 
-def _read_container_memory_mb():
-    """Return (current_mb, limit_mb) from the cgroup, either may be None.
+CGROUP_DIR = "/sys/fs/cgroup"
+_MEMORY_STAT_KEYS = ("anon", "file", "shmem", "inactive_file")
+
+
+def _read_container_memory():
+    """Return the cgroup's memory figures in bytes, each None when unreadable.
+
+    `used` is the working set, `memory.current` minus `inactive_file` -- the
+    definition `docker stats` uses. `memory.current` alone counts page cache,
+    which the kernel reclaims only as the cgroup nears `memory.max`, so a
+    long-lived container sits near the limit on cache it would give back on
+    demand and the gate refused sessions at 84% (ISSUE-555). Shmem is not
+    subtracted: with no swap it is not reclaimable.
+    """
+    figures = {"current": None, "limit": None, "used": None}
+    figures.update({key: None for key in _MEMORY_STAT_KEYS})
+    try:
+        with open(f"{CGROUP_DIR}/memory.current") as f:
+            figures["current"] = int(f.read().strip())
+        with open(f"{CGROUP_DIR}/memory.max") as f:
+            v = f.read().strip()
+            figures["limit"] = int(v) if v != "max" else None
+    except Exception:
+        pass
+    try:
+        with open(f"{CGROUP_DIR}/memory.stat") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 2 and parts[0] in _MEMORY_STAT_KEYS:
+                    figures[parts[0]] = int(parts[1])
+    except Exception:
+        pass
+    if figures["current"] is not None:
+        reclaimable = figures["inactive_file"] or 0
+        figures["used"] = max(figures["current"] - reclaimable, 0)
+    return figures
+
+
+def _to_mb(value):
+    return value // (1024 * 1024) if value is not None else None
+
+
+def _read_container_memory_mb(figures=None):
+    """Return (used_mb, limit_mb) from the cgroup, either may be None.
 
     Split out so the monitor's log line and _get_memory_pct read the same two
     numbers through the same code, and so a test can steer both at once.
+    `used_mb` is the working set, not `memory.current`. Pass `figures` from
+    one `_read_container_memory()` call to keep several readers on one sample.
     """
-    current_mb = None
-    limit_mb = None
-    try:
-        with open("/sys/fs/cgroup/memory.current") as f:
-            current_mb = int(f.read().strip()) // (1024 * 1024)
-        with open("/sys/fs/cgroup/memory.max") as f:
-            v = f.read().strip()
-            limit_mb = int(v) // (1024 * 1024) if v != "max" else None
-    except Exception:
-        pass
-    return current_mb, limit_mb
+    if figures is None:
+        figures = _read_container_memory()
+    return _to_mb(figures["used"]), _to_mb(figures["limit"])
 
 
-def _get_memory_pct():
+def _memory_breakdown(figures):
+    """memory.stat's composition for the monitor line, in MB.
+
+    So a HIGH MEMORY report says from the log alone whether the pressure is
+    anon, shmem left behind by renderers, or cache the gate discounted.
+    """
+    parts = []
+    for key in ("current",) + _MEMORY_STAT_KEYS:
+        value = _to_mb(figures[key])
+        label = "charged" if key == "current" else key
+        parts.append(f"{label}={'?' if value is None else value}MB")
+    return " ".join(parts)
+
+
+def _get_memory_pct(figures=None):
     """Return container memory usage percentage, or 0 if unavailable."""
-    current_mb, limit_mb = _read_container_memory_mb()
+    current_mb, limit_mb = _read_container_memory_mb(figures)
     if current_mb and limit_mb:
         return round(current_mb / limit_mb * 100, 1)
     return 0
@@ -2649,20 +2699,16 @@ def _get_chrome_diagnostics(inst, rows=None):
     diag = {}
     diag.update(_process_diagnostics(inst, _read_process_rows() if rows is None else rows))
 
-    try:
-        with open("/sys/fs/cgroup/memory.current", "r") as f:
-            current_bytes = int(f.read().strip())
-        with open("/sys/fs/cgroup/memory.max", "r") as f:
-            max_val = f.read().strip()
-        max_bytes = int(max_val) if max_val != "max" else None
-        diag["container_memory_mb"] = current_bytes // (1024 * 1024)
-        if max_bytes:
-            diag["container_memory_limit_mb"] = max_bytes // (1024 * 1024)
-            diag["container_memory_pct"] = round(
-                current_bytes / max_bytes * 100, 1,
-            )
-    except Exception:
-        pass
+    # The same working set the gate reads, so /health cannot report a
+    # percentage the gate is not acting on; the raw charge rides beside it.
+    figures = _read_container_memory()
+    used_mb, limit_mb = _read_container_memory_mb(figures)
+    if used_mb is not None:
+        diag["container_memory_mb"] = used_mb
+        diag["container_memory_charged_mb"] = _to_mb(figures["current"])
+        if limit_mb:
+            diag["container_memory_limit_mb"] = limit_mb
+            diag["container_memory_pct"] = _get_memory_pct(figures)
 
     try:
         diag["chrome_running"] = chrome.is_chrome_running(inst)
@@ -3140,7 +3186,9 @@ def _monitor_tick():
         f"slot={inst.slot}:rss={diag['chrome_rss_mb']}MB" for inst, diag in diagnostics
     )
 
-    container_mb, limit_mb = _read_container_memory_mb()
+    # One sample for the whole line, so its figures cannot disagree.
+    figures = _read_container_memory()
+    container_mb, limit_mb = _read_container_memory_mb(figures)
 
     # One source of truth for "what percent are we at". This used to recompute
     # it from the two numbers above, which is a second copy of _get_memory_pct's
@@ -3148,7 +3196,7 @@ def _monitor_tick():
     # made from this value and the drain's re-check is made from the other, a
     # divergence would mean the monitor and the Flask thread disagreeing about
     # whether the container is under pressure.
-    pct = _get_memory_pct()
+    pct = _get_memory_pct(figures)
 
     # Request an eviction under memory pressure -- never perform one. Evicting
     # here would reach Patchright from this thread and wedge the process
@@ -3165,7 +3213,7 @@ def _monitor_tick():
     msg = (
         f"sessions={sessions} "
         f"chrome_procs={chrome_count} chrome_rss={chrome_rss_mb}MB {instance_usage} "
-        f"container={container_mb}MB/{limit_mb}MB ({pct}%)"
+        f"container={container_mb}MB/{limit_mb}MB ({pct}%) {_memory_breakdown(figures)}"
     )
     if pct > MEMORY_EVICT_PCT:
         log.warning("HIGH MEMORY: %s", msg)
