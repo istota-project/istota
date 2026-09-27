@@ -369,7 +369,8 @@ class TestMemoryPressureIsDeferredToTheFlaskThread:
         re-check -- sees one consistent number and none of them is stubbed out.
         """
         monkeypatch.setattr(
-            browse_api, "_read_container_memory_mb", lambda: (pct * 10, 1000),
+            browse_api, "_read_container_memory_mb",
+            lambda figures=None: (pct * 10, 1000),
         )
 
     # -- the monitor thread asks -------------------------------------------
@@ -724,10 +725,32 @@ class TestTheGateReadsTheWorkingSet:
 
         assert browse_api._read_container_memory_mb() == (2580, 3072)
 
-    def test_the_monitor_line_carries_the_breakdown(self, tmp_path, monkeypatch):
+    def test_the_monitor_line_carries_the_breakdown(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        _cgroup(tmp_path, monkeypatch, current=2580 * _MIB, limit=3 * _GIB,
+                stat={"anon": 2500 * _MIB, "file": 80 * _MIB,
+                      "shmem": 30 * _MIB, "inactive_file": 50 * _MIB})
+        monkeypatch.setattr(browse_api, "_read_process_rows", lambda: {})
+
+        with caplog.at_level("WARNING"):
+            browse_api._monitor_tick()
+
+        line = next(r.getMessage() for r in caplog.records
+                    if r.getMessage().startswith("HIGH MEMORY"))
+        assert "container=2530MB/3072MB (82.4%)" in line
+        assert line.endswith(
+            "charged=2580MB anon=2500MB file=80MB shmem=30MB inactive_file=50MB"
+        )
+
+    def test_health_reports_the_number_the_gate_acts_on(
+        self, tmp_path, monkeypatch,
+    ):
         _cgroup(tmp_path, monkeypatch, current=2580 * _MIB, limit=3 * _GIB,
                 stat=self.CACHE_HEAVY)
 
-        assert browse_api._memory_breakdown() == (
-            "charged=2580MB anon=700MB file=1900MB shmem=32MB inactive_file=1600MB"
-        )
+        diag = browse_api._get_chrome_diagnostics(browse_api._instance, rows={})
+
+        assert diag["container_memory_pct"] == browse_api._get_memory_pct()
+        assert diag["container_memory_mb"] == 980
+        assert diag["container_memory_charged_mb"] == 2580
