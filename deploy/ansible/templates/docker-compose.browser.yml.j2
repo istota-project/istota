@@ -11,6 +11,11 @@ services:
     # ISSUE-394. The API now kills Chrome's whole process group and waits on it;
     # this is the backstop for whatever still escapes.
     init: true
+    # core_pattern is host-wide and plain `core`, so a crashed renderer dumped
+    # ~1.1G into /app in the writable layer, which a restart keeps: 24 of them
+    # filled 7G of the host disk unnoticed while the API kept answering 200.
+    ulimits:
+      core: 0
     ports:
       - "127.0.0.1:{{ istota_browser_api_port }}:9223"
       # Compose requires an IPv6 host address to be bracketed, so a bare `::1`
