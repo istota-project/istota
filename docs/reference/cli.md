@@ -142,6 +142,7 @@ istota secret remove -u USER --service SERVICE --key KEY
 istota secret ensure -u USER --service vault --key passphrase --generate [--force]
 istota secret vault-status [-u USER]                                     # resolved path, passphrase, scope, names
 istota secret vault-sync   [-u USER]                                     # one sync pass by hand, cached hash ignored
+istota secret vault-new    -u USER --slug SLUG [--username USER] [--url URL] [--length N] [--no-symbols]
 ```
 
 Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are long-only (`-v` is the global verbose flag).
@@ -149,6 +150,8 @@ Only `-u`/`--user` has a short form. `--service`, `--key`, and `--value` are lon
 `--generate` mints the value instead of taking one, stores it and prints it once. It applies to the vault passphrase only, and refuses to replace a passphrase that is already there unless you pass `--force` — minting a second one destroys the only copy of the value the KDBX file is encrypted under.
 
 The two `vault-*` actions default to every configured user and take `-u` for one; `-u` with an unknown id is an error rather than "no vault configured". Neither prints a credential value — counts, service names, key names and group names only. `vault-sync` ignores the file-digest cache the daemon's own cycles use, so it is the way to force a read after an edit rather than waiting out `[scheduler] vault_sync_interval`; it writes a notification row for a failure but pushes nothing, since the operator is reading the failure off their own terminal. See [credential vault](../configuration/credentials.md#credential-vault).
+
+`vault-new` is the operator's counterpart to a task's `istota-credential new`. It needs `-u` and `--slug`, generates a password (24 characters by default, symbols unless `--no-symbols`), writes the entry under `generated/` in that user's KDBX, and prints the three credential names. It never prints the password. The username defaults to the user's first configured email address. The file is unlocked and checked before the write, and a name collision is refused. It warns on stderr that a password manager holding the file open may overwrite the new entry on its next save. It is not counted against `[security] vault_writes_per_task`, which bounds tasks.
 
 ### Ensure-CLI state contract
 

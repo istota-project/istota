@@ -189,7 +189,7 @@ The two resolution layers, top to bottom:
    old split `MODEL_ALIASES` + `DEFAULT_ROLE_TARGETS`.
 
 `Brain.resolve_alias` (per brain): `split_effort` → resolve the base
-(override → `DEFAULT_ALIASES` → canonical `claude-*` id passthrough → `None`) →
+(override → `DEFAULT_ALIASES` → shaped canonical Claude id passthrough → `None`) →
 merge effort (the `:effort` suffix wins over the entry's own default effort). An
 override target is itself resolved through the brain's `DEFAULT_ALIASES`, and an
 explicit `RoleTarget.effort` wins over the target's alias-derived effort. Returns
@@ -230,7 +230,7 @@ ClaudeCodeBrain pins to versioned IDs, base names only:
 
 `OPUS_46` / `OPUS_47` and their effort-variant aliases were deleted — a
 prior-version pin is the canonical id plus the modifier (`claude-opus-4-7:high`),
-which resolves via the `claude-*` passthrough in `resolve_alias`.
+which resolves via the canonical-id passthrough in `resolve_alias`.
 
 Convention: bare alias names (`opus`, `sonnet`, `haiku`) always resolve to the
 *current latest* version constant. Bumping `OPUS` ripples through every
