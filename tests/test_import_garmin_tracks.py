@@ -113,6 +113,17 @@ class TestParsePolyline:
         pts = igt.parse_polyline(details, "running")
         assert len(pts) == 1
 
+    def test_a_repeated_timestamp_is_kept_once(self):
+        """A track carrying its final point twice stored it twice (#558 follow-up)."""
+        details = {"geoPolylineDTO": {"polyline": [
+            {"lat": 34.0, "lon": -118.0, "time": 1_700_000_000_000},
+            {"lat": 34.1, "lon": -118.1, "speed": 2.0, "time": 1_700_000_010_000},
+            {"lat": 34.1, "lon": -118.1, "speed": 0.0, "time": 1_700_000_010_000},
+        ]}}
+        pts = igt.parse_polyline(details, "running")
+        assert [p.timestamp for p in pts] == ["2023-11-14T22:13:20Z", "2023-11-14T22:13:30Z"]
+        assert pts[-1].speed == 2.0
+
     def test_a_non_finite_time_skips_the_point_rather_than_the_activity(self):
         """``fromtimestamp`` answers inf with OverflowError or OSError, which
         the caller's ``except ValueError`` does not catch — so one malformed

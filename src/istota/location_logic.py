@@ -21,6 +21,10 @@ from types import SimpleNamespace
 from .geo import MAX_STOP_EXTENSION_SECONDS, _parse_ts, haversine, resolve_place
 from .location import db as location_db
 
+# The radius the day summary clusters a stop at, and so how far from a stop
+# a point can sit and still be read as being there.
+STOP_CLUSTER_RADIUS_M = 250
+
 
 def _location_place_stats(db_path: str | Path, place_id: int) -> dict | None:
     """Visit statistics for a place, derived from ping data.
@@ -779,8 +783,21 @@ def location_day_summary(
         s["duration_minutes"] = _duration_minutes(s["first_ts"], s["last_ts"])
 
     activities = []
-    for seg in segments:
-        start_place = _place_at(seg["first"]["lat"], seg["first"]["lon"], saved_places)
+    for k, seg in enumerate(segments):
+        # Only a stop in the stretch just before this activity can be the one
+        # it left from; an earlier one is on the far side of another activity.
+        stretch_start = _parse_ts(segments[k - 1]["last_ts"]) if k > 0 else None
+        before = [
+            s for s in merged
+            if _parse_ts(s["first_ts"]) < _parse_ts(seg["first_ts"])
+            and (stretch_start is None or _parse_ts(s["first_ts"]) >= stretch_start)
+        ]
+        start_place = _activity_start_place(
+            seg["first"], before[-1] if before else None, saved_places,
+        )
+        # The end takes the ingest rule alone: it is the rule the stop
+        # resuming after an activity is opened on, so a named end_place
+        # always has that stop behind it.
         end_place = _place_at(seg["last"]["lat"], seg["last"]["lon"], saved_places)
         activities.append({
             "type": "activity",
@@ -791,7 +808,7 @@ def location_day_summary(
             "duration_minutes": _duration_minutes(seg["first_ts"], seg["last_ts"]),
             "distance_km": round(seg["distance_m"] / 1000, 2),
             "ping_count": seg["ping_count"],
-            "start_place": start_place["name"] if start_place else None,
+            "start_place": start_place,
             "end_place": end_place["name"] if end_place else None,
             "start_lat": round(seg["first"]["lat"], 5),
             "start_lon": round(seg["first"]["lon"], 5),
@@ -843,6 +860,31 @@ def _place_at(lat: float, lon: float, saved_places: list[dict]) -> dict | None:
     views = [SimpleNamespace(**sp) for sp in saved_places]
     match = resolve_place(lat, lon, views)
     return vars(match) if match is not None else None
+
+
+def _activity_start_place(
+    point: dict, previous_stop: dict | None, saved_places: list[dict],
+) -> str | None:
+    """The saved place an activity started at, by name.
+
+    The ingest rule first. Failing that, the stop the activity left from,
+    when that stop is at a saved place and the point is within the stop
+    clustering radius of it: a run from the door can start a few metres
+    outside a tight place radius while the stop before it says plainly where
+    it was. That stop always closes on the activity's first point, so the
+    name and the stop agree.
+    """
+    place = _place_at(point["lat"], point["lon"], saved_places)
+    if place is not None:
+        return place["name"]
+    if previous_stop is None or previous_stop.get("location_source") not in (
+        "saved_place", "saved_place_proximity",
+    ):
+        return None
+    distance = haversine(point["lat"], point["lon"], previous_stop["lat"], previous_stop["lon"])
+    if distance > STOP_CLUSTER_RADIUS_M:
+        return None
+    return previous_stop["location"]
 
 
 def _local_hhmm(ts: str, zone: tzinfo) -> str:
@@ -912,7 +954,7 @@ def _stops_around_activities(
                 clusters.append(reopened)
         if stretch:
             clusters.extend(
-                cluster_pings(stretch, radius_m=250, closing_ping=stretch_closing)
+                cluster_pings(stretch, radius_m=STOP_CLUSTER_RADIUS_M, closing_ping=stretch_closing)
             )
 
         stretch_stops, stretch_transit = filter_transit_clusters(clusters)
