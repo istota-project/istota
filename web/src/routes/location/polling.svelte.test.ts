@@ -24,6 +24,7 @@ const PING: LocationPing = {
   speed: 0,
   battery: 0.8,
   activity_type: 'stationary',
+  source: 'overland',
 };
 
 function summary(date: string, stops = 0): DaySummary {
@@ -35,6 +36,7 @@ function summary(date: string, stops = 0): DaySummary {
     stops: stops
       ? [
           {
+            type: 'stop',
             location: 'Home',
             location_source: 'place',
             arrived: `${date}T00:00:00Z`,
@@ -45,6 +47,7 @@ function summary(date: string, stops = 0): DaySummary {
           },
         ]
       : [],
+    activities: [],
   };
 }
 

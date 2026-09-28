@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A run, hike or walk imported from a Garmin watch now shows up in the location day summary as its own activity, with start and end times, distance and where it began and ended. A loop that started and ended at home used to be folded into the home stop, which moved the departure from home to the end of the run; the stop is now split around the activity, and home resumes from the end of the run until the phone is next seen leaving. `location history` returns each ping's `source` (`overland` or `garmin`) and takes `--source` to filter on it.
+
 - The browser container no longer refuses new sessions or evicts live ones because of page cache it could give back. Its memory check counted reclaimable file cache as usage, so a long-running container stayed above the limit and a scheduled job could fail every page fetch while the host had memory to spare. The monitor's high-memory line now also shows how the memory splits between anonymous memory, file cache and shared memory.
 
 - A crashing Chrome renderer no longer leaves a core dump of about 1 GB inside the browser container, where dumps piled up across restarts until they filled the host disk. Core dumps are now switched off for the browser service in both the Ansible and Docker deployments. The first deploy recreates the container, which also frees the dumps already there.

@@ -30,6 +30,25 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return _EARTH_RADIUS_M * c
 
 
+def resolve_place(lat: float, lon: float, places: list) -> object | None:
+    """The nearest place whose own radius holds the point, or None.
+
+    This is the rule ingest tags a ping's ``place_id`` with, so anything
+    comparing a place it resolves against a stored ``place_id`` has to use
+    it too. Places are read by attribute (``lat``, ``lon``, ``radius_meters``).
+    """
+    best = None
+    best_dist = float("inf")
+
+    for place in places:
+        dist = haversine(lat, lon, place.lat, place.lon)
+        if dist <= place.radius_meters and dist < best_dist:
+            best = place
+            best_dist = dist
+
+    return best
+
+
 def reverse_geocode(lat: float, lon: float, conn: sqlite3.Connection) -> dict:
     """Reverse geocode coordinates, using DB cache when available."""
     from istota.db import get_reverse_geocode, cache_reverse_geocode
@@ -306,6 +325,75 @@ def _finalize_cluster(cluster: dict, next_ping: dict | None = None) -> dict:
     }
 
 
+# Sources whose pings are a recorded activity rather than ambient tracking.
+# A watch track is imported only where the phone has no coverage, and only
+# for the activity types the importer asks for, so its pings are exact.
+ACTIVITY_SOURCES = frozenset({"garmin"})
+
+# A longer silence inside one source's pings starts a new activity. The
+# importer drops points the phone already covered, which can leave holes in
+# a track; ten minutes keeps those holes inside one activity.
+ACTIVITY_SEGMENT_GAP_SECONDS = 600
+
+# Below this a run of watch pings is a stray fix, not an activity, and is
+# left to the stop clustering like any other ping rather than splitting a stop.
+ACTIVITY_MIN_PINGS = 3
+ACTIVITY_MIN_SECONDS = 120
+
+
+def is_activity(segment: dict) -> bool:
+    """Whether a segment from ``activity_segments`` is long enough to report."""
+    if segment["ping_count"] < ACTIVITY_MIN_PINGS:
+        return False
+    return _timestamp_gap_seconds(segment["first_ts"], segment["last_ts"]) >= ACTIVITY_MIN_SECONDS
+
+
+def activity_segments(pings: list[dict]) -> list[dict]:
+    """Group activity-source pings into contiguous activity segments.
+
+    ``pings`` must be sorted by timestamp and hold only pings whose
+    ``source`` is in ``ACTIVITY_SOURCES``. A segment breaks on a change of
+    source or ``activity_type``, or on a gap over
+    ``ACTIVITY_SEGMENT_GAP_SECONDS``. Distance is the length of the
+    polyline through the segment's pings.
+    """
+    segments: list[dict] = []
+    current: list[dict] = []
+
+    def flush():
+        if not current:
+            return
+        distance = 0.0
+        for a, b in zip(current, current[1:]):
+            distance += haversine(a["lat"], a["lon"], b["lat"], b["lon"])
+        segments.append({
+            "activity": current[0].get("activity_type"),
+            "source": current[0].get("source"),
+            "pings": list(current),
+            "first": current[0],
+            "last": current[-1],
+            "first_ts": current[0]["timestamp"],
+            "last_ts": current[-1]["timestamp"],
+            "ping_count": len(current),
+            "distance_m": distance,
+        })
+
+    for ping in pings:
+        if current:
+            prev = current[-1]
+            same_kind = (
+                ping.get("source") == prev.get("source")
+                and ping.get("activity_type") == prev.get("activity_type")
+            )
+            gap = _timestamp_gap_seconds(prev["timestamp"], ping["timestamp"])
+            if not same_kind or gap > ACTIVITY_SEGMENT_GAP_SECONDS:
+                flush()
+                current = []
+        current.append(ping)
+    flush()
+    return segments
+
+
 # Max transit pings between same-location stops before they're treated as
 # separate visits.  1-3 stray pings are GPS glitches; 4+ indicates a real trip.
 MERGE_TRANSIT_THRESHOLD = 3
@@ -374,7 +462,13 @@ def merge_consecutive_stops(stops: list[dict], proximity_radius_m: float = MERGE
     """
     merged: list[dict] = []
     for stop in stops:
-        if not merged or stop.get("_transit_pings_before", 0) > MERGE_TRANSIT_THRESHOLD:
+        # Two stops at one place either side of a recorded activity are two
+        # visits, however few transit pings separate them (ISSUE-558).
+        if (
+            not merged
+            or stop.get("_transit_pings_before", 0) > MERGE_TRANSIT_THRESHOLD
+            or stop.get("_follows_activity")
+        ):
             merged.append(stop)
             continue
 

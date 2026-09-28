@@ -2,7 +2,7 @@
 
 CLI:
     python -m istota.skills.location current
-    python -m istota.skills.location history [--limit N] [--date YYYY-MM-DD] [--tz TZ]
+    python -m istota.skills.location history [--limit N] [--date YYYY-MM-DD] [--tz TZ] [--source overland|garmin]
     python -m istota.skills.location places
     python -m istota.skills.location learn NAME [--lat N --lon N] [--from-cluster] [--backfill] [--category CAT] [--radius N] [--notes TXT]
     python -m istota.skills.location update (--name NAME | --id ID) [--rename NEW] [--category CAT] [--radius N] [--notes TXT] [--lat N] [--lon N] [--backfill]
@@ -113,6 +113,7 @@ def cmd_history(args):
         # Newest first, matching the undated branch. The map reads the same
         # window forwards; see location_history for why that is a parameter.
         order="desc",
+        source=getattr(args, "source", None),
     )
     print(json.dumps(result["pings"]))
 
@@ -771,6 +772,8 @@ def build_parser():
     hist.add_argument("--limit", type=int, default=0)
     hist.add_argument("--date", help="Filter by date (YYYY-MM-DD)")
     hist.add_argument("--tz", help="Timezone (default: TZ env var or America/Los_Angeles)")
+    hist.add_argument("--source", choices=["overland", "garmin"],
+                      help="Only pings from this source (phone or imported watch track)")
 
     sub.add_parser("places", help="List known places")
 

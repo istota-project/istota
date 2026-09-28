@@ -4,7 +4,7 @@ import io
 import json
 import sys
 from types import SimpleNamespace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1050,6 +1050,7 @@ class TestLocationCLI:
             from unittest.mock import MagicMock
 
             args = MagicMock()
+            args.source = None
             args.limit = 10
             args.date = None
             captured = io.StringIO()
@@ -1092,6 +1093,7 @@ class TestLocationCLI:
             from istota.skills.location import cmd_history
 
             args = MagicMock()
+            args.source = None
             args.limit = 0
             args.date = "2026-03-16"
             args.tz = "America/Los_Angeles"
@@ -1126,6 +1128,7 @@ class TestLocationCLI:
             from istota.skills.location import cmd_history
 
             args = MagicMock()
+            args.source = None
             args.limit = 0
             args.date = "2026-03-16"
             args.tz = "America/Los_Angeles"
@@ -1156,6 +1159,7 @@ class TestLocationCLI:
             from istota.skills.location import cmd_history
 
             args = MagicMock()
+            args.source = None
             args.limit = 5
             args.date = "2026-03-16"
             args.tz = "America/Los_Angeles"
@@ -2969,6 +2973,8 @@ class TestCmdDaySummary:
                     speed=ping.get("speed"),
                     activity_type=ping.get("activity_type"),
                     place_id=place_id,
+                    wifi_zone=ping.get("wifi_zone", False),
+                    source=ping.get("source", "overland"),
                 )
             conn.commit()
 
@@ -4010,3 +4016,244 @@ class TestGarminImportSkill:
         code, out = self._run(args, env, monkeypatch)
         assert code == 1
         assert "web UI" in json.loads(out)["error"]
+
+
+# ---------------------------------------------------------------------------
+# ISSUE-558 — imported watch activities in history and day-summary
+# ---------------------------------------------------------------------------
+
+_HOME = (34.0500, -118.2500)
+_FRIENDS = (34.0300, -118.3000)
+
+
+def _run_from_home_pings(start="2026-03-08T21:34:20Z", count=148):
+    """A watch-recorded loop that leaves home and comes back, every 10 s.
+
+    Out west along one street, back along a parallel one ~170 m north, so
+    the track starts and ends within a few tens of metres of the door.
+    """
+    t0 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    half = count // 2
+    pings = []
+    for i in range(count):
+        if i < half:
+            lat, lon = _HOME[0] + 0.0003, _HOME[1] - 0.0005 - 0.013 * i / (half - 1)
+        else:
+            j = i - half
+            lat = _HOME[0] + 0.0003 + 0.0015 * min(1.0, j / 4)
+            lon = _HOME[1] - 0.0135 + 0.013 * j / (count - half - 1)
+            if j >= count - half - 4:
+                lat = _HOME[0] + 0.0002
+        ts = t0 + timedelta(seconds=10 * i)
+        pings.append({
+            "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lat": lat, "lon": lon, "place_id": None,
+            "activity_type": "running", "source": "garmin", "accuracy": None,
+        })
+    return pings
+
+
+def _run_day_pings(*, interleave_wifi_zone=False):
+    """The 2026-09-27 day from ISSUE-558, moved to a fixture date.
+
+    Home from 12:05 to 14:13 local, a phone that goes quiet while it sits
+    there, a watch-only run 14:34-14:58, the phone silent again until a
+    wifi-zone home ping at 16:23 and a drive to a friend's at 17:16.
+    """
+    home = [
+        {"timestamp": f"2026-03-08T{19 + (5 + 4 * i) // 60:02d}:{(5 + 4 * i) % 60:02d}:00Z",
+         "lat": _HOME[0], "lon": _HOME[1], "place_id": 1}
+        for i in range(33)  # 19:05 .. 21:13 UTC
+    ]
+    run = _run_from_home_pings()
+    wifi = []
+    if interleave_wifi_zone:
+        # A phone left on the home network keeps declaring home through the run.
+        wifi = [
+            {"timestamp": f"2026-03-08T21:{m:02d}:05Z", "lat": _HOME[0], "lon": _HOME[1],
+             "place_id": 1, "wifi_zone": True, "activity_type": "stationary"}
+            for m in range(35, 58, 5)
+        ]
+    leave = [
+        {"timestamp": "2026-03-08T23:23:41Z", "lat": _HOME[0], "lon": _HOME[1],
+         "place_id": 1, "wifi_zone": True, "activity_type": "driving"},
+        *[
+            {"timestamp": f"2026-03-08T23:{24 + i:02d}:00Z",
+             "lat": _HOME[0] - 0.0009, "lon": _HOME[1] - 0.002 - 0.004 * i,
+             "speed": 8.0, "activity_type": "driving"}
+            for i in range(20)
+        ],
+    ]
+    friends = [
+        {"timestamp": f"2026-03-09T00:{16 + 4 * i:02d}:00Z",
+         "lat": _FRIENDS[0], "lon": _FRIENDS[1], "place_id": 2}
+        for i in range(10)
+    ]
+    return sorted(home + run + wifi + leave + friends, key=lambda p: p["timestamp"])
+
+
+_RUN_DAY_PLACES = [
+    {"name": "Home", "lat": _HOME[0], "lon": _HOME[1], "radius_meters": 100},
+    {"name": "Friends", "lat": _FRIENDS[0], "lon": _FRIENDS[1], "radius_meters": 100},
+]
+
+
+class TestDaySummaryActivities:
+    """A tracked activity that leaves a place and returns is its own segment."""
+
+    def _summary(self, tmp_path, **kw):
+        return TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=_run_day_pings(**kw), places=_RUN_DAY_PLACES,
+        )
+
+    def test_the_run_is_reported_as_an_activity(self, tmp_path):
+        result = self._summary(tmp_path)
+
+        assert len(result["activities"]) == 1
+        run = result["activities"][0]
+        assert run["type"] == "activity"
+        assert run["activity"] == "running"
+        assert run["source"] == "garmin"
+        assert (run["start"], run["end"]) == ("14:34", "14:58")
+        assert run["duration_minutes"] == 24
+        assert run["ping_count"] == 148
+        assert 2.0 < run["distance_km"] < 3.5
+        assert run["start_place"] == "Home"
+        assert run["end_place"] == "Home"
+
+    def test_the_home_stop_is_split_around_the_run(self, tmp_path):
+        result = self._summary(tmp_path)
+
+        spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
+        assert spans == [
+            ("Home", "12:05", "14:34"),
+            ("Home", "14:58", "16:23"),
+            ("Friends", "17:16", "17:52"),
+        ]
+
+    def test_run_pings_do_not_count_toward_the_stops(self, tmp_path):
+        result = self._summary(tmp_path)
+
+        assert result["stops"][0]["ping_count"] == 33
+        assert result["stops"][1]["ping_count"] == 1
+
+    def test_wifi_zone_pings_during_the_run_do_not_bridge_the_stop(self, tmp_path):
+        """A phone left home declares home all through the run; the watch says otherwise."""
+        result = self._summary(tmp_path, interleave_wifi_zone=True)
+
+        spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
+        assert spans[:2] == [("Home", "12:05", "14:34"), ("Home", "14:58", "16:23")]
+        assert len(result["activities"]) == 1
+
+    def test_backfilled_watch_pings_near_the_door_still_end_the_stop(self, tmp_path):
+        """Backfilling a place tags the run's first and last points with it."""
+        pings = _run_day_pings()
+        for p in pings:
+            if p.get("source") == "garmin" and haversine(p["lat"], p["lon"], *_HOME) <= 100:
+                p["place_id"] = 1
+        assert any(p.get("source") == "garmin" and p["place_id"] == 1 for p in pings)
+
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=pings, places=_RUN_DAY_PLACES,
+        )
+
+        spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
+        assert spans[:2] == [("Home", "12:05", "14:34"), ("Home", "14:58", "16:23")]
+
+    def test_a_late_return_is_not_bridged_back_to_the_run(self, tmp_path):
+        """A run ending home at 06:34, and the phone next heard at home ten hours later."""
+        pings = [p for p in _run_day_pings() if not (
+            p.get("source") == "garmin" or p["timestamp"] < "2026-03-08T21:30:00Z"
+        )]
+        pings = sorted(pings + _run_from_home_pings(start="2026-03-08T13:10:00Z"),
+                       key=lambda p: p["timestamp"])
+
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=pings, places=_RUN_DAY_PLACES,
+        )
+
+        assert result["activities"][0]["end"] == "06:34"
+        assert "06:34" not in [s["arrived"] for s in result["stops"]]
+
+    def test_a_stray_watch_fix_does_not_split_a_stop(self, tmp_path):
+        stray = {"timestamp": "2026-03-08T20:30:05Z", "lat": _HOME[0] + 0.0001,
+                 "lon": _HOME[1], "place_id": None, "activity_type": "running",
+                 "source": "garmin", "accuracy": None}
+        base = [p for p in _run_day_pings() if p.get("source") != "garmin"]
+
+        without = TestCmdDaySummary._run_day_summary(
+            self, tmp_path / "a", pings=base, places=_RUN_DAY_PLACES,
+        )
+        with_stray = TestCmdDaySummary._run_day_summary(
+            self, tmp_path / "b", pings=sorted(base + [stray], key=lambda p: p["timestamp"]),
+            places=_RUN_DAY_PLACES,
+        )
+
+        assert with_stray["activities"] == []
+        spans = lambda r: [(s["location"], s["arrived"], s["departed"]) for s in r["stops"]]  # noqa: E731
+        assert spans(with_stray) == spans(without)
+
+    def test_the_run_ends_at_the_nearest_place_not_the_first_listed(self, tmp_path):
+        """Ingest tags a ping with the nearest place; the reopen has to agree with it."""
+        gym = {"name": "Gym", "lat": _HOME[0] + 0.0009, "lon": _HOME[1] - 0.0010,
+               "radius_meters": 150}
+        places = [gym, *_RUN_DAY_PLACES]  # Gym is id 1, Home 2, Friends 3
+        pings = _run_day_pings()
+        for p in pings:
+            if p.get("place_id"):
+                p["place_id"] += 1
+
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=pings, places=places,
+        )
+
+        assert result["activities"][0]["end_place"] == "Home"
+        spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
+        assert spans[:2] == [("Home", "12:05", "14:34"), ("Home", "14:58", "16:23")]
+
+    def test_a_day_without_imported_tracks_has_no_activities(self, tmp_path):
+        pings = [p for p in _run_day_pings() if p.get("source") != "garmin"]
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=pings, places=_RUN_DAY_PLACES,
+        )
+
+        assert result["activities"] == []
+
+
+class TestHistoryCarriesSource:
+    def _seed(self, tmp_path):
+        db_path = _init_loc_db(tmp_path)
+        with location_db.connect(db_path) as conn:
+            location_db.insert_ping(conn, "2026-03-16T20:00:00Z", 34.0, -118.0,
+                                    activity_type="running", source="garmin")
+            location_db.insert_ping(conn, "2026-03-16T20:01:00Z", 34.0, -118.0,
+                                    accuracy=5.0, activity_type="running")
+            conn.commit()
+        return db_path
+
+    def test_each_ping_names_its_source(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_history
+
+            output = _run_cmd(cmd_history, limit=10, date=None)
+
+        by_ts = {p["timestamp"]: p["source"] for p in output}
+        assert by_ts == {
+            "2026-03-16T20:00:00Z": "garmin",
+            "2026-03-16T20:01:00Z": "overland",
+        }
+
+    def test_source_filters_the_history(self, tmp_path):
+        db_path = self._seed(tmp_path)
+        env = {"LOCATION_DB_PATH": str(db_path), "ISTOTA_DB_PATH": str(db_path)}
+        with patch.dict("os.environ", env):
+            from istota.skills.location import cmd_history
+
+            dated = _run_cmd(cmd_history, limit=0, date="2026-03-16",
+                             tz="America/Los_Angeles", source="garmin")
+            undated = _run_cmd(cmd_history, limit=10, date=None, source="overland")
+
+        assert [p["source"] for p in dated] == ["garmin"]
+        assert [p["source"] for p in undated] == ["overland"]

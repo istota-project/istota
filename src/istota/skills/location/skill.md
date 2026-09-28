@@ -44,6 +44,7 @@ istota-skill location history
 istota-skill location history --limit 50
 istota-skill location history --date 2026-02-15
 istota-skill location history --date 2026-02-15 --tz America/New_York
+istota-skill location history --date 2026-02-15 --source garmin   # imported watch tracks only
 
 # List known places (each entry includes id, name, lat, lon, radius_meters, category, notes)
 istota-skill location places
@@ -166,10 +167,17 @@ Aliased as `last` (`istota-skill location last`).
     "altitude": 12.4,
     "accuracy": 5,
     "place": "home",
-    "activity_type": "stationary"
+    "activity_type": "stationary",
+    "source": "overland"
   }
 ]
 ```
+
+`source` is `overland` for the phone and `garmin` for an imported watch
+track. Check it rather than `activity_type` when you need to know where a
+ping came from: the phone tags activities too (`walking`, `cycling`,
+`driving`), and a `running` ping from the phone and one from the watch look
+the same otherwise.
 
 `altitude` is metres as the device reported them, and is `null` on the ~5% of
 pings that got a horizontal fix without a vertical one, on a fix the device
@@ -321,6 +329,10 @@ change `lat`, `lon` or `radius` — there is nothing to reassign. Otherwise
 
 Clusters the day's pings into stops. Resolves location names by: (1) direct place match from ping data, (2) proximity match against saved places (100m minimum radius), (3) reverse geocoding via Nominatim. Filters out transit clusters (1-2 pings without a place match). Merges consecutive stops at the same location.
 
+Imported watch tracks (`source: garmin`) are reported under `activities`, not as stops. A run, hike or walk that leaves a place and comes back splits the stop around it: home until the run started, the run, then home again from the moment it ended until the phone is next seen leaving. Read the two lists together in time order. A gap between one stop's `departed` and the next stop's `arrived` that an activity fills is not time on the road.
+
+An activity is only the part of the watch track the import kept: points where the phone already had a fix nearby are dropped. If the phone was carried, the activity is just the stretches where it lost signal, and its times, distance and places describe those fragments rather than the whole workout. If the phone stayed home and kept reporting, the track starts and ends away from the door, so `start_place` and `end_place` can be `null` and home only resumes at the phone's next ping.
+
 ```json
 {
   "date": "2026-03-08",
@@ -329,6 +341,7 @@ Clusters the day's pings into stops. Resolves location names by: (1) direct plac
   "transit_pings": 8,
   "stops": [
     {
+      "type": "stop",
       "location": "home",
       "location_source": "saved_place",
       "arrived": "08:00",
@@ -338,6 +351,7 @@ Clusters the day's pings into stops. Resolves location names by: (1) direct plac
       "lon": -74.01
     },
     {
+      "type": "stop",
       "location": "Magnolia Park",
       "location_source": "nominatim",
       "road": "Elm St",
@@ -348,6 +362,24 @@ Clusters the day's pings into stops. Resolves location names by: (1) direct plac
       "ping_count": 25,
       "lat": 40.78,
       "lon": -73.96
+    }
+  ],
+  "activities": [
+    {
+      "type": "activity",
+      "activity": "running",
+      "source": "garmin",
+      "start": "14:34",
+      "end": "14:58",
+      "duration_minutes": 24,
+      "distance_km": 4.4,
+      "ping_count": 148,
+      "start_place": "home",
+      "end_place": "home",
+      "start_lat": 40.71,
+      "start_lon": -74.01,
+      "end_lat": 40.71,
+      "end_lon": -74.01
     }
   ]
 }

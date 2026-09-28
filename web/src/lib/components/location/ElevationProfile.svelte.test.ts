@@ -17,6 +17,7 @@ function ping(timestamp: string, altitude: number | null): LocationPing {
     speed: null,
     battery: null,
     activity_type: 'driving',
+    source: 'overland',
   };
 }
 
