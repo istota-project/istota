@@ -930,6 +930,11 @@ export interface LocationPing {
   speed: number | null;
   battery: number | null;
   activity_type: string | null;
+  /**
+   * 'overland' for the phone, 'garmin' for an imported watch track. Present on
+   * `history` pings; the current-location payload does not carry it.
+   */
+  source?: string;
 }
 
 export interface CurrentLocation {
@@ -943,6 +948,7 @@ export interface CurrentLocation {
 }
 
 export interface DaySummaryStop {
+  type: 'stop';
   location: string;
   location_source: string | null;
   arrived: string;
@@ -952,12 +958,31 @@ export interface DaySummaryStop {
   lon: number;
 }
 
+/** A recorded activity (an imported watch track), kept out of the stops. */
+export interface DaySummaryActivity {
+  type: 'activity';
+  activity: string | null;
+  source: string;
+  start: string;
+  end: string;
+  duration_minutes: number | null;
+  distance_km: number;
+  ping_count: number;
+  start_place: string | null;
+  end_place: string | null;
+  start_lat: number;
+  start_lon: number;
+  end_lat: number;
+  end_lon: number;
+}
+
 export interface DaySummary {
   date: string;
   timezone: string;
   ping_count: number;
   transit_pings: number;
   stops: DaySummaryStop[];
+  activities: DaySummaryActivity[];
 }
 
 export interface PingsResponse {

@@ -12,6 +12,7 @@ function ping(partial: Partial<LocationPing> & { timestamp: string }): LocationP
     speed: null,
     battery: null,
     activity_type: 'driving',
+    source: 'overland',
     ...partial,
   };
 }

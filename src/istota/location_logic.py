@@ -16,7 +16,9 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .geo import haversine
+from types import SimpleNamespace
+
+from .geo import MAX_STOP_EXTENSION_SECONDS, _parse_ts, haversine, resolve_place
 from .location import db as location_db
 
 
@@ -508,7 +510,7 @@ def location_current(db_path: str | Path, *, tz: str | tzinfo | None = None) -> 
 
 _PING_COLUMNS = """
     SELECT lp.timestamp, lp.lat, lp.lon, lp.altitude, lp.accuracy,
-           lp.activity_type, lp.speed, lp.battery,
+           lp.activity_type, lp.speed, lp.battery, lp.source,
            p.name as place_name
     FROM location_pings lp
     LEFT JOIN places p ON lp.place_id = p.id
@@ -522,6 +524,7 @@ def location_history(
     until: str | None,
     limit: int,
     order: str = "asc",
+    source: str | None = None,
 ) -> dict:
     """Pings across ``[since, until)``, or the most recent ``limit`` of them.
 
@@ -542,26 +545,34 @@ def location_history(
     ``LIMIT`` the direction selects a different set of rows, so a typo
     silently answering with the other end of the day is the one failure
     here that reads as data rather than as a bug.
+
+    ``source`` keeps only pings from that source (``overland``, ``garmin``).
+    Each ping carries its source either way: ``activity_type`` alone does not
+    tell an imported watch track from the phone, which tags activities too.
     """
     if order not in ("asc", "desc"):
         raise ValueError(f"order must be 'asc' or 'desc', got {order!r}")
     direction = "ASC" if order == "asc" else "DESC"
     with location_db.connect(Path(db_path)) as conn:
+        source_clause = " AND lp.source = ?" if source else ""
+        source_params = [source] if source else []
         if since and until:
             query = (
                 _PING_COLUMNS
                 + " WHERE lp.timestamp >= ? AND lp.timestamp < ?"
+                + source_clause
                 + f" ORDER BY lp.timestamp {direction}"
             )
-            params: list = [since, until]
+            params: list = [since, until, *source_params]
             if limit:
                 query += " LIMIT ?"
                 params.append(limit)
             rows = conn.execute(query, params).fetchall()
         else:
+            where = " WHERE lp.source = ?" if source else ""
             rows = conn.execute(
-                _PING_COLUMNS + " ORDER BY lp.timestamp DESC LIMIT ?",
-                (limit or 100,),
+                _PING_COLUMNS + where + " ORDER BY lp.timestamp DESC LIMIT ?",
+                (*source_params, limit or 100),
             ).fetchall()
 
         pings = [
@@ -576,6 +587,7 @@ def location_history(
                 "activity_type": r["activity_type"],
                 "speed": r["speed"],
                 "battery": r["battery"],
+                "source": r["source"],
             }
             for r in rows
         ]
@@ -625,9 +637,10 @@ def location_day_summary(
     available and an unnamed stop is reported as ``unknown``.
     """
     from .geo import (
-        cluster_pings,
+        ACTIVITY_SOURCES,
+        activity_segments,
         dedupe_near_duplicate_pings,
-        filter_transit_clusters,
+        is_activity,
         merge_consecutive_stops,
     )
 
@@ -645,7 +658,7 @@ def location_day_summary(
         rows = conn.execute(
             """
             SELECT lp.timestamp, lp.lat, lp.lon, lp.activity_type, lp.accuracy, lp.speed,
-                   lp.place_id, p.name as place_name
+                   lp.place_id, lp.source, p.name as place_name
             FROM location_pings lp
             LEFT JOIN places p ON lp.place_id = p.id
             WHERE lp.timestamp >= ? AND lp.timestamp < ?
@@ -661,30 +674,8 @@ def location_day_summary(
                 "ping_count": 0,
                 "transit_pings": 0,
                 "stops": [],
+                "activities": [],
             }
-
-        # A stop still running at local midnight has no departure inside
-        # the window; the first later ping somewhere else is what ends it.
-        closing_ping = None
-        last_place_id = rows[-1]["place_id"]
-        if last_place_id is not None:
-            closing_row = conn.execute(
-                """
-                SELECT lp.timestamp, lp.lat, lp.lon, lp.activity_type, lp.accuracy, lp.speed,
-                       lp.place_id, p.name as place_name
-                FROM location_pings lp
-                LEFT JOIN places p ON lp.place_id = p.id
-                WHERE lp.timestamp >= ? AND (lp.place_id IS NULL OR lp.place_id != ?)
-                ORDER BY lp.timestamp ASC
-                LIMIT 1
-                """,
-                (until_utc, last_place_id),
-            ).fetchone()
-            if closing_row is not None:
-                closing_ping = dict(closing_row)
-
-        pings = dedupe_near_duplicate_pings([dict(r) for r in rows])
-        clusters = cluster_pings(pings, radius_m=250, closing_ping=closing_ping)
 
         if saved_places is None:
             saved_places = [
@@ -694,7 +685,57 @@ def location_day_summary(
                 ).fetchall()
             ]
 
-    stops, transit_pings = filter_transit_clusters(clusters)
+        # A recorded activity is reported as its own segment and kept out of
+        # the stop clustering, which would otherwise absorb a loop that starts
+        # and ends at one place into the stop around it (ISSUE-558).
+        all_pings = [dict(r) for r in rows]
+        segments = []
+        others = []
+        for seg in activity_segments(
+            [p for p in all_pings if p["source"] in ACTIVITY_SOURCES]
+        ):
+            if is_activity(seg):
+                segments.append(seg)
+            else:
+                others.extend(seg["pings"])
+        others.extend(p for p in all_pings if p["source"] not in ACTIVITY_SOURCES)
+        others.sort(key=lambda p: _parse_ts(p["timestamp"]))
+        native = dedupe_near_duplicate_pings(others)
+
+        # Where the day's last observation left the user. After a trailing
+        # activity that is where the activity ended, not the stop before it.
+        tail_place_id = native[-1]["place_id"] if native else None
+        if segments and (
+            not native
+            or _parse_ts(segments[-1]["last_ts"]) > _parse_ts(native[-1]["timestamp"])
+        ):
+            end_place = _place_at(
+                segments[-1]["last"]["lat"], segments[-1]["last"]["lon"], saved_places,
+            )
+            tail_place_id = end_place.get("id") if end_place else None
+
+        # A stop still running at local midnight has no departure inside
+        # the window; the first later ping somewhere else is what ends it.
+        closing_ping = None
+        if tail_place_id is not None:
+            closing_row = conn.execute(
+                """
+                SELECT lp.timestamp, lp.lat, lp.lon, lp.activity_type, lp.accuracy, lp.speed,
+                       lp.place_id, lp.source, p.name as place_name
+                FROM location_pings lp
+                LEFT JOIN places p ON lp.place_id = p.id
+                WHERE lp.timestamp >= ? AND (lp.place_id IS NULL OR lp.place_id != ?)
+                ORDER BY lp.timestamp ASC
+                LIMIT 1
+                """,
+                (until_utc, tail_place_id),
+            ).fetchone()
+            if closing_row is not None:
+                closing_ping = dict(closing_row)
+
+    stops, transit_pings = _stops_around_activities(
+        native, segments, saved_places, closing_ping,
+    )
 
     for stop in stops:
         if stop["place_name"]:
@@ -709,18 +750,13 @@ def location_day_summary(
                     stop["lon"] = sp["lon"]
                     break
         else:
-            matched = False
-            for sp in saved_places:
-                dist = haversine(stop["lat"], stop["lon"], sp["lat"], sp["lon"])
-                if dist <= max(sp["radius_meters"], 100):
-                    stop["location"] = sp["name"]
-                    stop["location_source"] = "saved_place_proximity"
-                    stop["lat"] = sp["lat"]
-                    stop["lon"] = sp["lon"]
-                    matched = True
-                    break
-
-            if not matched:
+            sp = _saved_place_at(stop["lat"], stop["lon"], saved_places)
+            if sp is not None:
+                stop["location"] = sp["name"]
+                stop["location_source"] = "saved_place_proximity"
+                stop["lat"] = sp["lat"]
+                stop["lon"] = sp["lon"]
+            else:
                 geo = geocode(stop["lat"], stop["lon"]) if geocode else {}
                 stop["location"] = (
                     geo.get("suburb")
@@ -735,29 +771,42 @@ def location_day_summary(
                 stop["suburb"] = geo.get("suburb")
 
         for key in ("first_ts", "last_ts"):
-            try:
-                utc_dt = datetime.fromisoformat(stop[key]).replace(tzinfo=timezone.utc)
-                stop[key + "_local"] = utc_dt.astimezone(zone).strftime("%H:%M")
-            except Exception:
-                stop[key + "_local"] = stop[key]
+            stop[key + "_local"] = _local_hhmm(stop[key], zone)
 
     merged = merge_consecutive_stops(stops)
 
     for s in merged:
-        try:
-            first = datetime.fromisoformat(s["first_ts"]).replace(tzinfo=timezone.utc)
-            last = datetime.fromisoformat(s["last_ts"]).replace(tzinfo=timezone.utc)
-            s["duration_minutes"] = int((last - first).total_seconds() / 60)
-        except (ValueError, TypeError):
-            s["duration_minutes"] = None
+        s["duration_minutes"] = _duration_minutes(s["first_ts"], s["last_ts"])
+
+    activities = []
+    for seg in segments:
+        start_place = _place_at(seg["first"]["lat"], seg["first"]["lon"], saved_places)
+        end_place = _place_at(seg["last"]["lat"], seg["last"]["lon"], saved_places)
+        activities.append({
+            "type": "activity",
+            "activity": seg["activity"],
+            "source": seg["source"],
+            "start": _local_hhmm(seg["first_ts"], zone),
+            "end": _local_hhmm(seg["last_ts"], zone),
+            "duration_minutes": _duration_minutes(seg["first_ts"], seg["last_ts"]),
+            "distance_km": round(seg["distance_m"] / 1000, 2),
+            "ping_count": seg["ping_count"],
+            "start_place": start_place["name"] if start_place else None,
+            "end_place": end_place["name"] if end_place else None,
+            "start_lat": round(seg["first"]["lat"], 5),
+            "start_lon": round(seg["first"]["lon"], 5),
+            "end_lat": round(seg["last"]["lat"], 5),
+            "end_lon": round(seg["last"]["lon"], 5),
+        })
 
     return {
         "date": target_date,
         "timezone": tz_name,
-        "ping_count": len(pings),
+        "ping_count": len(native) + sum(seg["ping_count"] for seg in segments),
         "transit_pings": transit_pings,
         "stops": [
             {
+                "type": "stop",
                 "location": s["location"],
                 "location_source": s.get("location_source"),
                 "road": s.get("road"),
@@ -772,4 +821,164 @@ def location_day_summary(
             }
             for s in merged
         ],
+        "activities": activities,
     }
+
+
+def _saved_place_at(lat: float, lon: float, saved_places: list[dict]) -> dict | None:
+    """The first saved place whose radius (at least 100 m) holds the point."""
+    for sp in saved_places:
+        if haversine(lat, lon, sp["lat"], sp["lon"]) <= max(sp["radius_meters"], 100):
+            return sp
+    return None
+
+
+def _place_at(lat: float, lon: float, saved_places: list[dict]) -> dict | None:
+    """The saved place ingest would have tagged this point with, as a dict.
+
+    Nearest place inside its own radius: the rule that produced every stored
+    ``place_id``, so an answer here can be compared against one. The 100 m
+    floor in ``_saved_place_at`` is a naming convenience and is not that rule.
+    """
+    views = [SimpleNamespace(**sp) for sp in saved_places]
+    match = resolve_place(lat, lon, views)
+    return vars(match) if match is not None else None
+
+
+def _local_hhmm(ts: str, zone: tzinfo) -> str:
+    try:
+        return _parse_ts(ts).astimezone(zone).strftime("%H:%M")
+    except Exception:
+        return ts
+
+
+def _duration_minutes(first_ts: str, last_ts: str) -> int | None:
+    try:
+        return int((_parse_ts(last_ts) - _parse_ts(first_ts)).total_seconds() / 60)
+    except (ValueError, TypeError):
+        return None
+
+
+def _stops_around_activities(
+    native: list[dict],
+    segments: list[dict],
+    saved_places: list[dict],
+    closing_ping: dict | None,
+) -> tuple[list[dict], int]:
+    """Cluster the phone's pings into stops, one stretch between activities at a time.
+
+    Each stretch is clustered and transit-filtered on its own, so neither the
+    clustering nor the transit filter's absorb-a-nearby-fragment rule can join
+    a stop across an activity. A stretch ending in an activity closes on the
+    activity's first ping, which is the ISSUE-332 rule: the first observation
+    somewhere else is what bounds departure.
+
+    A phone ping falling inside an activity's span is dropped. The watch was
+    on the body; a phone left at home keeps declaring home (its wifi-zone
+    points) through the whole run, and those would otherwise hold the stop
+    open across it.
+    """
+    from .geo import cluster_pings, filter_transit_clusters
+
+    spans = [(_parse_ts(s["first_ts"]), _parse_ts(s["last_ts"])) for s in segments]
+    stretches: list[list[dict]] = [[] for _ in range(len(segments) + 1)]
+    k = 0
+    for ping in native:
+        t = _parse_ts(ping["timestamp"])
+        while k < len(spans) and t > spans[k][1]:
+            k += 1
+        if k < len(spans) and t >= spans[k][0]:
+            continue
+        stretches[k].append(ping)
+
+    stops: list[dict] = []
+    transit_pings = 0
+    for k, stretch in enumerate(stretches):
+        prev_seg = segments[k - 1] if k > 0 else None
+        # A watch ping near the door can carry the place's id once the place
+        # is backfilled, and a closing ping tagged with the stop's own place is
+        # ignored. Leaving on a run is leaving, whatever the ping is tagged.
+        if k < len(segments):
+            stretch_closing = {**segments[k]["first"], "place_id": None}
+        else:
+            stretch_closing = closing_ping
+
+        clusters: list[dict] = []
+        if prev_seg is not None:
+            reopened, stretch = _reopen_after_activity(
+                prev_seg, stretch, stretch_closing, saved_places,
+            )
+            if reopened is not None:
+                clusters.append(reopened)
+        if stretch:
+            clusters.extend(
+                cluster_pings(stretch, radius_m=250, closing_ping=stretch_closing)
+            )
+
+        stretch_stops, stretch_transit = filter_transit_clusters(clusters)
+        transit_pings += stretch_transit
+        if prev_seg is not None and stretch_stops:
+            stretch_stops[0]["_follows_activity"] = True
+        stops.extend(stretch_stops)
+    return stops, transit_pings
+
+
+def _reopen_after_activity(
+    segment: dict,
+    stretch: list[dict],
+    closing: dict | None,
+    saved_places: list[dict],
+) -> tuple[dict | None, list[dict]]:
+    """A stop at the place an activity ended, running until the user is seen leaving.
+
+    A phone that stays home through a run is usually silent until the next
+    departure, so after a run from the door there may be no ping at home for
+    hours. The activity ending inside a saved place is the arrival; pings
+    tagged with that place at the head of the next stretch are the stay;
+    the first ping anywhere else closes it, with the same travel-time
+    estimate a clustered stop gets.
+
+    Returns the stop, or ``None`` when the activity did not end at a saved
+    place or nothing after it says the user stayed, and the stretch with the
+    pings the stop consumed removed.
+    """
+    from .geo import _estimated_departure_timestamp
+
+    place = _place_at(segment["last"]["lat"], segment["last"]["lon"], saved_places)
+    if place is None or place.get("id") is None:
+        return None, stretch
+
+    i = 0
+    while i < len(stretch) and stretch[i].get("place_id") == place["id"]:
+        i += 1
+    consumed, rest = stretch[:i], stretch[i:]
+
+    # Bridging the silence back to the activity's end is the ISSUE-332
+    # extension run backwards, and it takes the same cap: a phone that next
+    # reports home eleven hours later says nothing about the hours between.
+    if consumed:
+        silence = (
+            _parse_ts(consumed[0]["timestamp"]) - _parse_ts(segment["last_ts"])
+        ).total_seconds()
+        if silence > MAX_STOP_EXTENSION_SECONDS:
+            return None, stretch
+    if rest:
+        closing = rest[0]
+    if not consumed and closing is None:
+        return None, stretch
+
+    anchor = consumed[-1] if consumed else segment["last"]
+    if closing is not None:
+        last_ts = _estimated_departure_timestamp(anchor, closing)
+    else:
+        last_ts = anchor["timestamp"]
+
+    return {
+        "lat": place["lat"],
+        "lon": place["lon"],
+        "ping_count": len(consumed),
+        "first_ts": segment["last_ts"],
+        "last_ts": last_ts,
+        "place_id": place["id"],
+        "place_name": place["name"],
+    }, rest

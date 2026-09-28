@@ -816,21 +816,7 @@ def _update_state_machine(
 
 
 # =============================================================================
-# Haversine distance
+# Place resolution (lives in geo, shared with the day summary)
 # =============================================================================
 
-from istota.geo import haversine  # noqa: E402
-
-
-def resolve_place(lat: float, lon: float, places: list) -> object | None:
-    """Find the nearest place within its radius. Returns Place or None."""
-    best = None
-    best_dist = float("inf")
-
-    for place in places:
-        dist = haversine(lat, lon, place.lat, place.lon)
-        if dist <= place.radius_meters and dist < best_dist:
-            best = place
-            best_dist = dist
-
-    return best
+from istota.geo import resolve_place  # noqa: E402

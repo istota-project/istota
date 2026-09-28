@@ -288,7 +288,7 @@ class TestDaySummaryParity:
         assert skill == web
         assert skill == {
             "date": "2026-03-01", "timezone": TZ,
-            "stops": [], "ping_count": 0, "transit_pings": 0,
+            "stops": [], "activities": [], "ping_count": 0, "transit_pings": 0,
         }
 
 
