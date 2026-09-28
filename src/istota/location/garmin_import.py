@@ -346,7 +346,8 @@ def nearest_elevation(
 def parse_polyline(details: dict, activity_type: str) -> list[TrackPoint]:
     """Extract normalized trackpoints from a ``get_activity_details``
     response. Empty / missing polyline → ``[]``. A point with a malformed
-    timestamp or missing lat/lon is skipped, not fatal.
+    timestamp or missing lat/lon is skipped, not fatal, and a point repeating
+    an earlier point's timestamp is dropped.
 
     Per-point keys (confirmed against the live API): ``lat``, ``lon``,
     ``altitude``, ``speed``, ``time`` (epoch ms, GMT). ``altitude`` is null
@@ -359,6 +360,7 @@ def parse_polyline(details: dict, activity_type: str) -> list[TrackPoint]:
     raw = dto.get("polyline") or []
     elevations = parse_elevation_series(details)
     out: list[TrackPoint] = []
+    seen: set[str] = set()
     joined = 0
     for pt in raw:
         if not isinstance(pt, dict):
@@ -372,6 +374,11 @@ def parse_polyline(details: dict, activity_type: str) -> list[TrackPoint]:
         except ValueError:
             logger.debug("skipping polyline point with bad time: %r", pt.get("time"))
             continue
+        # A track can carry its final point twice (a last record and a lap
+        # end), and nothing downstream compares points within one track.
+        if ts in seen:
+            continue
+        seen.add(ts)
         altitude = _opt_float(pt.get("altitude"))
         if altitude is None and elevations:
             altitude = nearest_elevation(elevations, float(pt["time"]) / 1000.0)

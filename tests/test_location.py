@@ -4211,6 +4211,99 @@ class TestDaySummaryActivities:
         spans = [(s["location"], s["arrived"], s["departed"]) for s in result["stops"]]
         assert spans[:2] == [("Home", "12:05", "14:34"), ("Home", "14:58", "16:23")]
 
+    def test_a_start_just_outside_a_tight_radius_takes_the_stop_it_leaves(self, tmp_path):
+        """The run's first point is ~57 m from the door and its last ~51 m (#558 follow-up)."""
+        places = [{**_RUN_DAY_PLACES[0], "radius_meters": 54}, _RUN_DAY_PLACES[1]]
+        run = [p for p in _run_day_pings() if p.get("source") == "garmin"]
+        assert haversine(run[0]["lat"], run[0]["lon"], *_HOME) > 54
+        assert haversine(run[-1]["lat"], run[-1]["lon"], *_HOME) <= 54
+
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=_run_day_pings(), places=places,
+        )
+
+        activity = result["activities"][0]
+        assert (activity["start_place"], activity["end_place"]) == ("Home", "Home")
+
+    def test_a_start_far_from_the_stop_before_it_has_no_place(self, tmp_path):
+        """A run from a trailhead a kilometre off is not named for the stop before it."""
+        pings = _run_day_pings()
+        for p in pings:
+            if p.get("source") == "garmin":
+                p["lon"] -= 0.012
+
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=pings, places=_RUN_DAY_PLACES,
+        )
+
+        assert result["stops"][0]["location"] == "Home"
+        activity = result["activities"][0]
+        assert (activity["start_place"], activity["end_place"]) == (None, None)
+
+    def test_a_start_takes_no_name_from_across_another_activity(self, tmp_path):
+        """A dropout splits a run in two; the second half did not leave from home."""
+        t0 = datetime.fromisoformat("2026-03-08T21:34:20+00:00")
+
+        def leg(start, lons, lat_off):
+            return [{
+                "timestamp": (start + timedelta(seconds=10 * i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "lat": _HOME[0] + lat_off, "lon": _HOME[1] + lon, "place_id": None,
+                "activity_type": "running", "source": "garmin", "accuracy": None,
+            } for i, lon in enumerate(lons)]
+
+        out = [-0.0005 - 0.004 * i / 9 for i in range(10)]
+        back = [-0.0045 + 0.003 * i / 9 for i in range(10)]
+        first = leg(t0, out + back, 0.0003)           # ends ~140 m from the door
+        second = leg(t0 + timedelta(seconds=190 + 720),
+                     [-0.0015 + 0.0010 * i / 19 for i in range(20)], 0.0003)
+        places = [{**_RUN_DAY_PLACES[0], "radius_meters": 54}, _RUN_DAY_PLACES[1]]
+        assert 54 < haversine(second[0]["lat"], second[0]["lon"], *_HOME) <= 250
+        pings = [p for p in _run_day_pings() if p.get("source") != "garmin"]
+
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=sorted(pings + first + second, key=lambda p: p["timestamp"]),
+            places=places,
+        )
+
+        a, b = result["activities"]
+        assert a["start_place"] == "Home"
+        assert (a["end_place"], b["start_place"]) == (None, None)
+
+    def test_an_end_just_outside_the_radius_is_not_named(self, tmp_path):
+        """No stop resumes there, so naming the place would leave its gap unexplained."""
+        places = [{**_RUN_DAY_PLACES[0], "radius_meters": 40}, _RUN_DAY_PLACES[1]]
+        run = [p for p in _run_day_pings() if p.get("source") == "garmin"]
+        assert 40 < haversine(run[-1]["lat"], run[-1]["lon"], *_HOME) <= 250
+        # The phone is next heard at home an hour on: a Home stop to borrow from.
+        later = [
+            {"timestamp": f"2026-03-08T22:{m:02d}:00Z", "lat": _HOME[0], "lon": _HOME[1],
+             "place_id": 1}
+            for m in range(0, 21, 4)
+        ]
+
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, places=places,
+            pings=sorted(_run_day_pings() + later, key=lambda p: p["timestamp"]),
+        )
+
+        activity = result["activities"][0]
+        assert (activity["start_place"], activity["end_place"]) == ("Home", None)
+        assert "14:58" not in [s["arrived"] for s in result["stops"]]
+        assert result["stops"][1]["location"] == "Home"
+
+    def test_a_start_takes_no_name_from_a_stop_that_is_not_a_saved_place(self, tmp_path):
+        """A geocoded neighbourhood is not a place an activity can start at."""
+        pings = _run_day_pings()
+        for p in pings:
+            p["place_id"] = 1 if p.get("place_id") == 2 else None
+
+        result = TestCmdDaySummary._run_day_summary(
+            self, tmp_path, pings=pings, places=[_RUN_DAY_PLACES[1]],
+        )
+
+        assert result["stops"][0]["location_source"] not in ("saved_place", "saved_place_proximity")
+        assert result["activities"][0]["start_place"] is None
+
     def test_a_day_without_imported_tracks_has_no_activities(self, tmp_path):
         pings = [p for p in _run_day_pings() if p.get("source") != "garmin"]
         result = TestCmdDaySummary._run_day_summary(
