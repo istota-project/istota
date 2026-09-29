@@ -1771,7 +1771,7 @@ async def handle_confirmation_reply(
         try:
             origin = message_relays.private_origin(conn, config, actor_user_id=actor_id,
                                                    surface="talk", conversation_token=room_token)
-            await message_relays.verify_origin(config, actor_user_id=actor_id, origin=origin)
+            await message_relays.verify_private_audience(config, actor_user_id=actor_id, origin=origin)
         except RequestError:
             await _post_ack(config, conversation_token, "Confirm relay questions from a verified private conversation.")
             return True

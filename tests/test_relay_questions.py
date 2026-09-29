@@ -341,7 +341,7 @@ def test_private_command_rechecks_audience_after_remote_check(setup, monkeypatch
     async def change_audience(*args, **kwargs):
         with db.get_db(config.db_path) as other:
             db.add_room_member(other, token, 'bob')
-    monkeypatch.setattr(relays, 'verify_origin', change_audience)
+    monkeypatch.setattr(relays, 'verify_private_audience', change_audience)
     with db.get_db(config.db_path) as conn:
         ctx = CommandContext(config, conn, 'alice', token, 'allow bob', surface='web')
         assert asyncio.run(cmd_relay(ctx)) == 'Relay commands require a verified private conversation.'

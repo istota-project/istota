@@ -37,7 +37,7 @@ def _dispatch(args):
         if args.command == "relays" or (row and row["kind"] == "relay_question"):
             origin = message_relays.private_origin(conn, config, actor_user_id=actor,
                                                    surface=owned_task["source_type"], conversation_token=owned_task["conversation_token"])
-            run_coro(message_relays.verify_origin(config, actor_user_id=actor, origin=origin))
+            run_coro(message_relays.verify_private_audience(config, actor_user_id=actor, origin=origin))
             with write_transaction(conn):
                 message_relays.validate_origin(conn, config, actor_user_id=actor, origin=origin)
                 if args.command == "relays":
@@ -48,7 +48,7 @@ def _dispatch(args):
         return {"status": "ok", "request": row}
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description="Send WhatsApp messages and manage approved relay questions")
     commands = parser.add_subparsers(dest="command", required=True)
     send = commands.add_parser("send")
@@ -61,5 +61,9 @@ def main(argv=None):
     commands.add_parser("relays")
     status = commands.add_parser("status")
     status.add_argument("request_id")
-    args = parse_and_resolve(parser, argv)
+    return parser
+
+
+def main(argv=None):
+    args = parse_and_resolve(build_parser(), argv)
     return run_skill_cli({name: _dispatch for name in ("send", "ask", "status", "relays")}, args)

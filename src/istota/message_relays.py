@@ -185,7 +185,7 @@ def private_origin(conn, config, *, actor_user_id: str, surface: str,
                    conversation_token: str | None) -> dict:
     """Resolve one private audience, with no output-plan fallback or fanout.
 
-    Talk participants require a fresh server check via verify_origin before
+    Talk participants require a fresh server check via verify_private_audience before
     displaying content. The local membership table alone omits unknown users.
     """
     from .transport.whatsapp import whatsapp_conversation_token
@@ -230,7 +230,7 @@ def validate_origin(conn, config, *, actor_user_id: str, origin: dict) -> None:
         raise RequestError("unsupported_origin")
 
 
-async def verify_origin(config, *, actor_user_id: str, origin: dict) -> None:
+async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -> None:
     """Fresh external audience check, called outside the claim transaction."""
     if not origin.get("talk_ref"):
         return
@@ -697,7 +697,7 @@ async def deliver_returns(config, *, limit: int = 20) -> int:
     rows = await asyncio.to_thread(_return_rows, config, limit)
     for row in rows:
         try:
-            await verify_origin(config, actor_user_id=row["asker_user_id"], origin=json.loads(row["origin"]))
+            await verify_private_audience(config, actor_user_id=row["asker_user_id"], origin=json.loads(row["origin"]))
         except RequestError:
             await asyncio.to_thread(_record_return, config, row["id"], "blocked", error="unsupported_origin")
             continue
@@ -761,7 +761,7 @@ async def deliver_relay_notices(config, *, limit: int = 20):
         try:
             if origin is None:
                 raise RequestError("unsupported_origin")
-            await verify_origin(config, actor_user_id=row["user_id"], origin=origin)
+            await verify_private_audience(config, actor_user_id=row["user_id"], origin=origin)
             with db.get_db(config.db_path) as conn:
                 validate_origin(conn, config, actor_user_id=row["user_id"], origin=origin)
         except RequestError:

@@ -839,7 +839,7 @@ async def cmd_confirm(ctx: CommandContext):
         try:
             origin = message_relays.private_origin(conn, ctx.config, actor_user_id=user_id,
                                                    surface=ctx.surface, conversation_token=ctx.conversation_token)
-            await message_relays.verify_origin(ctx.config, actor_user_id=user_id, origin=origin)
+            await message_relays.verify_private_audience(ctx.config, actor_user_id=user_id, origin=origin)
             message_relays.validate_origin(conn, ctx.config, actor_user_id=user_id, origin=origin)
         except RequestError:
             return "Confirm relay questions from a verified private conversation."
@@ -3596,7 +3596,7 @@ async def cmd_relay(ctx: CommandContext):
     try:
         origin = message_relays.private_origin(ctx.conn, ctx.config, actor_user_id=ctx.user_id,
                                                surface=ctx.surface, conversation_token=ctx.conversation_token)
-        await message_relays.verify_origin(ctx.config, actor_user_id=ctx.user_id, origin=origin)
+        await message_relays.verify_private_audience(ctx.config, actor_user_id=ctx.user_id, origin=origin)
     except RequestError:
         return "Relay commands require a verified private conversation."
     from .whatsapp_requests import write_transaction

@@ -445,7 +445,7 @@ async def drain_requests(config, *, limit: int = 20) -> int:
                 from . import message_relays
                 with db.get_db(config.db_path) as conn:
                     relay = conn.execute("SELECT origin FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
-                await message_relays.verify_origin(config, actor_user_id=row["requester_user_id"], origin=json.loads(relay["origin"]))
+                await message_relays.verify_private_audience(config, actor_user_id=row["requester_user_id"], origin=json.loads(relay["origin"]))
             record = await deliver_whatsapp(
                 config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
                 text="", task_id=None, request_id=row["id"],
@@ -501,7 +501,7 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
         raise RequestError("unsupported_origin")
     origin = message_relays.private_origin(conn, config, actor_user_id=actor_user_id,
                                            surface=task.source_type, conversation_token=task.conversation_token)
-    run_coro(message_relays.verify_origin(config, actor_user_id=actor_user_id, origin=origin))
+    run_coro(message_relays.verify_private_audience(config, actor_user_id=actor_user_id, origin=origin))
     with write_transaction(conn):
         message_relays.validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
         adapter = active_adapter(config)
@@ -613,7 +613,7 @@ async def present_question(config, *, task, success: bool) -> bool:
         return False
     origin = json.loads(row["origin"])
     try:
-        await message_relays.verify_origin(config, actor_user_id=task.user_id, origin=origin)
+        await message_relays.verify_private_audience(config, actor_user_id=task.user_id, origin=origin)
         with db.get_db(config.db_path) as conn:
             parked = park_question(conn, config, task=task)
             if parked is None:
@@ -627,7 +627,7 @@ async def present_question(config, *, task, success: bool) -> bool:
                                room_token=origin.get("room_token"))
             db.drop_pending_steers(conn, task.id)
         # Check again at delivery, after releasing the parking transaction.
-        await message_relays.verify_origin(config, actor_user_id=task.user_id, origin=origin)
+        await message_relays.verify_private_audience(config, actor_user_id=task.user_id, origin=origin)
         with db.get_db(config.db_path) as conn:
             message_relays.validate_origin(conn, config, actor_user_id=task.user_id, origin=origin)
             current = db.get_task(conn, task.id)

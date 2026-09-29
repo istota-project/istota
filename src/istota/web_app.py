@@ -4895,7 +4895,7 @@ def _chat_answer_confirmation(
             try:
                 origin = message_relays.private_origin(conn, _config, actor_user_id=username,
                                                        surface="web", conversation_token=token)
-                run_coro(message_relays.verify_origin(_config, actor_user_id=username, origin=origin))
+                run_coro(message_relays.verify_private_audience(_config, actor_user_id=username, origin=origin))
             except RequestError:
                 return {"ack": "Confirm relay questions from a verified private conversation.",
                         "user_msg_id": None, "system_msg_id": None}
