@@ -1079,3 +1079,35 @@ class TestThePromptGate:
         assert secrets_vault.has_shared_credentials(
             tmp_path / "nope.db", "alice",
         ) is False
+
+
+class TestThePromptStatesTheFetchBudget:
+    """A model that cannot see the cap spends it one `run` per command, each
+    re-resolving the same names, and finds out at the refusal."""
+
+    def _system(self, tmp_path, limit: int) -> str:
+        config = Config(
+            db_path=tmp_path / "t.db",
+            skills_dir=tmp_path / "skills",
+            bundled_skills_dir=tmp_path / "_empty",
+            temp_dir=tmp_path / "temp",
+        )
+        config.skills_dir.mkdir(parents=True, exist_ok=True)
+        config.security.vault_fetch_limit_per_task = limit
+        task = executor.db.Task(
+            id=1, status="running", source_type="talk", user_id="alice",
+            prompt="check the logs", conversation_token="room1",
+        )
+        return executor.build_prompt(
+            task, [], config, shared_credentials=True,
+        ).system
+
+    def test_the_configured_limit_is_named(self, tmp_path):
+        system = self._system(tmp_path, 7)
+        assert "budget of 7 fetches for this task" in system
+        assert "inside one `run ... -- sh -c '...'`" in system
+
+    def test_unlimited_says_nothing_about_a_budget(self, tmp_path):
+        system = self._system(tmp_path, 0)
+        assert "istota-credential run TOKEN=" in system
+        assert "budget of" not in system

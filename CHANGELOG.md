@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A task that uses shared credentials across several commands no longer runs out of credential fetches partway through. The prompt now says how many fetches a task may make and tells the model to put related commands in one `istota-credential run`, instead of one call per command, where every call fetched the same credentials again.
+
 - A reply that embeds a file web chat cannot serve, such as a browse screenshot taken without `-o`, now says the image is unavailable instead of showing a broken image. Each `/chat/files` link in an answer is checked against the endpoint's own rule before the answer is stored, and a refused one is logged with the task id. `browse screenshot` also prints its scratch note to stderr, for scripts that keep only `path`.
 
 - Switching to a long web chat room in the iOS app now opens it at the newest message instead of part way up the transcript. The room paints its saved copy first and the server page a moment later, and only the first paint got the scroll correction iOS needs, so the second one's pin to the bottom could be dropped and nothing moved the view afterwards. The transcript now also re-pins whenever its content grows while you are at the bottom, and loading older messages waits until that pin has landed.

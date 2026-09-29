@@ -6411,6 +6411,16 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             "load-bearing — the variable is set in the child process, so your own "
             "shell must not expand it first."
         )
+        # The cap is counted per name per request, so a model running one
+        # `run` per command spends it on repeats of the same few names.
+        fetch_limit = config.security.vault_fetch_limit_per_task
+        if fetch_limit > 0:
+            shared_credentials_line += (
+                f" Each name a `run` resolves counts against a budget of "
+                f"{fetch_limit} fetches for this task, repeats included, so put "
+                "several commands needing the same credentials inside one "
+                "`run ... -- sh -c '...'` rather than one `run` per command."
+            )
 
     group_chat_line = ""
     if task.is_group_chat:
