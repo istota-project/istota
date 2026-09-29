@@ -260,7 +260,7 @@ class DevboxConfig:
     """
     enabled: bool = False
     container_prefix: str = "devbox-"           # container name = f"{prefix}{user_id}"
-    docker_cli: str = "/usr/bin/docker"         # host path to the Docker CLI binary (`reset` only)
+    docker_cli: str = "/usr/bin/docker"         # host Docker CLI (`reset` and credential-proxy peer checks)
     max_output_bytes: int = 102_400             # stdout/stderr cap per stream in the JSON envelope
     #
     # **There is deliberately no `exec_socket_dir` here.** The skill CLI reads
