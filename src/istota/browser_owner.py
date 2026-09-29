@@ -13,9 +13,15 @@ def with_browser_owner(payload: dict) -> dict:
     return payload
 
 
-def browser_headers() -> dict[str, str]:
-    """Carry the original principal; refuse identities HTTP cannot represent."""
-    user_id = os.environ.get("ISTOTA_USER_ID")
+def browser_headers(user_id: str | None = None) -> dict[str, str]:
+    """Carry the original principal; refuse identities HTTP cannot represent.
+
+    A skill CLI takes the principal from its task's environment. The daemon
+    has no task environment, so a daemon-side caller such as a briefing
+    source passes the user it is acting for.
+    """
+    if user_id is None:
+        user_id = os.environ.get("ISTOTA_USER_ID")
     if not user_id:
         raise ValueError("ISTOTA_USER_ID is required for browser requests")
     # Raw header values are ASCII. Do not strip or encode a principal into a

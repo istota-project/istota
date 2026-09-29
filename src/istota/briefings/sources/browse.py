@@ -34,6 +34,7 @@ import httpx
 
 from istota.briefings.sources import GatheredSource, SourceContext
 from istota.browser_admission import browser_admission, BrowserQueueTimeout
+from istota.browser_owner import browser_headers
 
 
 logger = logging.getLogger(__name__)
@@ -98,8 +99,34 @@ _MODES = ("full", "article")
 _TRUNCATION_FOOTER_RE = re.compile(r"\n*\[Markdown truncated at [^\]]*\]\s*\Z")
 
 
+def _release_session(api_url: str, data: dict, headers: dict[str, str]) -> None:
+    """Close a session the browser kept open on a non-``ok`` answer.
+
+    A challenge answer retains its tab even under ``keep_session: False``, so
+    an operator or the interactive skill can press it and retry. Nobody does
+    either for a briefing, and the tab then sat on a news page's scripts for
+    the whole session TTL — long enough for its renderer to reach V8's heap
+    limit (ISSUE-557). Best effort: the TTL is still the backstop.
+    """
+    session_id = data.get("session_id")
+    if not session_id or not data.get("session_retained"):
+        return
+    try:
+        resp = httpx.delete(
+            f"{api_url}/sessions/{session_id}", headers=headers, timeout=5.0,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.info("browse source: could not close session %s: %s", session_id, e)
+        return
+    if resp.status_code != 200:
+        logger.info(
+            "browse source: closing session %s answered HTTP %s",
+            session_id, resp.status_code,
+        )
+
+
 def _render_markdown(
-    api_url: str, url: str, mode: str, max_chars: int,
+    api_url: str, url: str, mode: str, max_chars: int, headers: dict[str, str],
 ) -> tuple[str | None, bool]:
     """Page as markdown + whether it was cut.
 
@@ -114,6 +141,7 @@ def _render_markdown(
             "keep_session": False,
             "max_chars": max_chars,
         },
+        headers=headers,
         timeout=_FETCH_TIMEOUT,
     )
     if resp.status_code == 404:
@@ -122,26 +150,31 @@ def _render_markdown(
     data = resp.json()
     if data.get("status") != "ok":
         logger.warning(
-            "browse source: render returned status %s for %s", data.get("status"), url,
+            "browse source: render returned status %s for %s (session %s)",
+            data.get("status"), url, data.get("session_id"),
         )
+        _release_session(api_url, data, headers)
         return "", False
     markdown = data.get("markdown") or ""
     body = _TRUNCATION_FOOTER_RE.sub("", markdown).strip()
     return body, bool(data.get("truncated"))
 
 
-def _browse_text(api_url: str, url: str) -> str:
+def _browse_text(api_url: str, url: str, headers: dict[str, str]) -> str:
     """Legacy flattened-text path, for a browser image predating /render."""
     resp = httpx.post(
         f"{api_url}/browse",
         json={"url": url, "timeout": 30, "keep_session": False},
+        headers=headers,
         timeout=_FETCH_TIMEOUT,
     )
     data = resp.json()
     if data.get("status") != "ok":
         logger.warning(
-            "browse source: browse returned status %s for %s", data.get("status"), url,
+            "browse source: browse returned status %s for %s (session %s)",
+            data.get("status"), url, data.get("session_id"),
         )
+        _release_session(api_url, data, headers)
         return ""
     return (data.get("text") or "").strip()
 
@@ -185,10 +218,19 @@ def resolve(config: dict, ctx: SourceContext) -> GatheredSource:
 
     api_url = browser.api_url
     try:
+        # The browser refuses a request naming no user (user_scope_required),
+        # and the daemon has no task environment to take one from.
+        headers = browser_headers(ctx.user_id)
+    except ValueError as e:
+        logger.warning("browse source: no browser identity for %s: %s", url, e)
+        return GatheredSource(
+            kind="browse", title=title, provenance="(browse fetch failed)", ok=False,
+        )
+    try:
         with browser_admission(db_path=ctx.app_config.db_path, queue_timeout=_QUEUE_WAIT_TIMEOUT):
-            body, truncated = _render_markdown(api_url, url, mode, markdown_max)
+            body, truncated = _render_markdown(api_url, url, mode, markdown_max, headers)
             if body is None:
-                body = _browse_text(api_url, url)
+                body = _browse_text(api_url, url, headers)
                 if len(body) > text_max:
                     body = body[:text_max]
                     truncated = True

@@ -343,6 +343,7 @@ def _create_session(owner=None):
     page = ctx.new_page()
 
     session_id = str(uuid.uuid4())[:8]
+    page.on("crash", lambda crashed: _log_page_crash(session_id, crashed))
     now = time.time()
     with _sessions_lock:
         _sessions[session_id] = {
@@ -362,6 +363,32 @@ def _create_session(owner=None):
             "context": ctx,
         }
     return session_id, page
+
+
+def _log_page_crash(session_id, page):
+    """Name the tab whose renderer died, and why it was still open (ISSUE-557).
+
+    Chrome aborts a renderer on a V8 heap limit while every API call keeps
+    answering 200, so without this the only record is a minidump inside the
+    container. `last_challenge` says a challenge was met on this tab, not
+    that one was still showing when it died. Takes no lock: Patchright can dispatch the event while this
+    thread is inside a CDP call made under `_sessions_lock`, which is not
+    reentrant. A dict read is atomic, and a stale answer costs a log field.
+    """
+    session = _sessions.get(session_id) or {}
+    now = time.time()
+    created_at = session.get("created_at")
+    challenge_at = session.get("challenge_at")
+    try:
+        url = page.url
+    except Exception:
+        url = "?"
+    log.warning(
+        "Renderer crashed: session=%s user=%s owner=%s url=%s age=%s last_challenge=%s",
+        session_id, session.get("user_id"), session.get("owner"), url,
+        "%.0fs" % (now - created_at) if created_at else "?",
+        "%.0fs ago" % (now - challenge_at) if challenge_at else "none",
+    )
 
 
 def _get_session(session_id, *, touch=True):
@@ -957,7 +984,14 @@ def _captcha_response(session_id, challenge=None, **extra):
     there is no title, text or link list to be had and none is being withheld.
     The phrase comes from `xdotool.CHALLENGE_TITLE_PATTERNS`, so this quotes
     itself rather than page-controlled text.
+
+    Records when the tab last answered a challenge, so a renderer that later
+    dies on it says so in its crash line (`_log_page_crash`).
     """
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session is not None:
+            session["challenge_at"] = time.time()
     return jsonify({
         "status": "captcha",
         "session_id": session_id,
