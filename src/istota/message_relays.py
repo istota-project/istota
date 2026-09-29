@@ -341,11 +341,44 @@ def _quoted_relay(conn, *, actor_user_id: str, provider: str, quoted_id: str):
     ).fetchone()
 
 
-def accept_reply(conn, config, *, actor_user_id: str, relay_id: str,
-                 provider: str, inbound_id: str, text: str) -> str:
-    """Claim the first authorized answer; caller owns dedup and task creation."""
-    from .whatsapp_requests import binding_fingerprint
+# Which relay destination kind each answering surface belongs to. A room is
+# one conversation shown on web and Talk, so either may answer its question.
+_SURFACE_KIND = {"web": "room", "talk": "room", "whatsapp": "whatsapp", "sms": "sms"}
 
+
+def _destination_current(conn, config, relay, *, actor_user_id: str, surface: str) -> bool:
+    """Whether the answer arrived through the destination the question went to.
+
+    A room answer checks membership only: the reply was authored inside the
+    room, and the live Talk participant check runs at delivery.
+    """
+    from .whatsapp_requests import binding_fingerprint, text_hash
+
+    kind = _SURFACE_KIND.get(surface)
+    if kind is None or relay["surface"] != kind:
+        return False
+    if kind == "whatsapp":
+        provider = config.whatsapp.provider
+        binding = db.get_whatsapp_binding(conn, actor_user_id)
+        return bool(config.whatsapp.enabled and relay["provider"] == provider and binding is not None
+                    and binding.provider == provider
+                    and binding_fingerprint(provider, binding) == relay["binding_fingerprint"])
+    if kind == "sms":
+        number = config.sms_phone_number_for(actor_user_id)
+        return bool(config.sms.enabled and number and text_hash(number) == relay["binding_fingerprint"])
+    token = json.loads(relay["destination"] or "{}").get("room_token") or ""
+    room = db.get_room(conn, token)
+    return bool(relay["provider"] == "room" and room is not None and not room.archived
+                and db.list_room_members(conn, token) == [actor_user_id])
+
+
+def accept_reply(conn, config, *, actor_user_id: str, relay_id: str,
+                 surface: str, inbound_id: str | None, text: str) -> str:
+    """Claim the first authorized answer; caller owns dedup and task creation.
+
+    `inbound_id` is namespaced by surface (`web:<id>`, `talk:<id>`, a provider
+    id) so it stays unique across surfaces.
+    """
     relay = conn.execute("SELECT * FROM message_relays WHERE id=? AND recipient_user_id=?",
                          (relay_id, actor_user_id)).fetchone()
     if relay is None:
@@ -361,10 +394,7 @@ def accept_reply(conn, config, *, actor_user_id: str, relay_id: str,
     ).fetchone()[0]:
         _close_relay(conn, relay_id, state="expired", reason="expired")
         return "expired"
-    binding = db.get_whatsapp_binding(conn, actor_user_id)
-    if (not config.whatsapp.enabled or provider != config.whatsapp.provider
-            or relay["provider"] != provider or binding is None or binding.provider != provider
-            or binding_fingerprint(provider, binding) != relay["binding_fingerprint"]
+    if (not _destination_current(conn, config, relay, actor_user_id=actor_user_id, surface=surface)
             or actor_user_id not in config.users
             or is_blocked(conn, actor_user_id=actor_user_id, asker_user_id=relay["asker_user_id"])):
         return "unavailable"
@@ -385,6 +415,68 @@ def accept_reply(conn, config, *, actor_user_id: str, relay_id: str,
                      "WHERE relay_id=? AND state IN ('sending','uncertain')", (relay_id,))
         _resolve_recipient_notice(conn, relay)
     return "accepted" if changed else "expired"
+
+
+def relay_for_room_reply(conn, *, actor_user_id: str, room_token: str,
+                         message_id: int | None = None, talk_id: int | None = None):
+    """The room relay question a web or Talk reply names, or None.
+
+    Closed questions are recognized too, so a quoted YES to one can never fall
+    through to a parked confirmation; acceptance decides what it is worth.
+    """
+    if message_id is not None:
+        parent = conn.execute("SELECT room_token,delivery_reference FROM messages WHERE id=?",
+                              (message_id,)).fetchone()
+        reference = (parent["delivery_reference"] or "") if parent is not None else ""
+        if parent is None or parent["room_token"] != room_token or not reference.startswith("relay-question:"):
+            return None
+        relay = conn.execute(
+            "SELECT * FROM message_relays WHERE id=? AND recipient_user_id=? AND surface='room' "
+            "AND question_message_id=?",
+            (reference.removeprefix("relay-question:"), actor_user_id, message_id),
+        ).fetchone()
+    elif talk_id is not None:
+        relay = conn.execute(
+            "SELECT * FROM message_relays WHERE question_talk_id=? AND recipient_user_id=? AND surface='room'",
+            (int(talk_id), actor_user_id),
+        ).fetchone()
+    else:
+        return None
+    if relay is None or json.loads(relay["destination"] or "{}").get("room_token") != room_token:
+        return None
+    return relay
+
+
+def accept_room_reply(conn, config, *, actor_user_id: str, relay_id: str, surface: str,
+                      inbound_id: str | None, text: str, task_text: str | None = None,
+                      attachments: list[str] | None = None, **task_kwargs) -> tuple[str, int | None]:
+    """Accept a web or Talk reply and create the recipient's task, in the caller's transaction.
+
+    A rejected answer still creates the ordinary task, carrying the rejection
+    notice as relay context. A web reply's own message id is not known until
+    its task exists, so its `inbound_id` is stamped afterwards.
+    """
+    if surface not in ("web", "talk"):
+        raise ValueError("room replies arrive on web or talk")
+    relay = conn.execute("SELECT * FROM message_relays WHERE id=? AND recipient_user_id=?",
+                         (relay_id, actor_user_id)).fetchone()
+    if attachments:
+        outcome = "media"
+    else:
+        outcome = accept_reply(conn, config, actor_user_id=actor_user_id, relay_id=relay_id,
+                               surface=surface, inbound_id=inbound_id, text=text)
+    task_id = create_recipient_task(
+        conn, config, relay, surface=surface, actor_user_id=actor_user_id,
+        text=task_text if task_text is not None else text, outcome=outcome,
+        attachments=attachments, **task_kwargs,
+    )
+    if surface == "web" and outcome == "accepted" and inbound_id is None and task_id is not None:
+        row = conn.execute("SELECT id FROM messages WHERE task_id=? AND role='user' ORDER BY id LIMIT 1",
+                           (task_id,)).fetchone()
+        if row is not None:
+            conn.execute("UPDATE message_relays SET inbound_answer_id=? WHERE id=? AND inbound_answer_id IS NULL",
+                         (f"web:{row[0]}", relay_id))
+    return outcome, task_id
 
 
 def _context(relay, outcome: str) -> str:
@@ -408,27 +500,67 @@ def recipient_context(conn, *, actor_user_id: str, task_id: int) -> str:
     return _context(relay, "accepted") if relay else ""
 
 
-def _reply_task(conn, config, *, actor_user_id: str, inbound_id: str, text: str,
-                relay, outcome: str, attachments=None):
-    from .transport._types import IncomingMessage
-    from .transport.ingest import ingest_message
-    from .transport.whatsapp import whatsapp_conversation_token
-    from .transport.whatsapp.webhook import WhatsAppEventResult, MEDIA_ONLY_PROMPT
+def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: str, text: str,
+                          outcome: str, channel: str | None = None, attachments=None,
+                          attachment_names=None, platform_message_id=None, reply_to_id=None,
+                          channel_name=None, client_msg_id=None, model=None, effort=None,
+                          model_prefix_used: bool = False) -> int | None:
+    """The recipient's ordinary task for a relay reply, on the surface it arrived.
 
-    task_id = ingest_message(conn, config, IncomingMessage(
-        user_id=actor_user_id, text=text if text else MEDIA_ONLY_PROMPT,
-        source_type="whatsapp", surface="whatsapp",
-        channel_token=whatsapp_conversation_token(actor_user_id), output_target="whatsapp",
-        attachments=attachments or [], mirror_to_room=False, queue="foreground",
-        # Only one task owns the accepted association. Rejected replies retain
-        # a bounded snapshot of their own question/outcome in the user half.
-        reply_to_content=None if outcome == "accepted" else _context(relay, outcome),
-    ))
+    Only the accepted task owns the association, and `recipient_context` reads
+    it from there. A rejected reply carries a bounded snapshot of its own
+    question and outcome in the user half instead.
+    """
+    from .transport._types import IncomingMessage
+    from .transport.ingest import ingest_message, record_inbound
+
+    context = None if outcome == "accepted" else _context(relay, outcome)
+    if surface == "web":
+        _, task_id = record_inbound(
+            conn, config, surface="web", surface_ref=channel, user_id=actor_user_id, text=text,
+            source_type="web", output_target="room", priority=5, attachments=attachments or None,
+            attachment_names=attachment_names or None, client_msg_id=client_msg_id,
+            reply_to_canonical_id=reply_to_id, reply_to_content=context,
+            model=model, effort=effort, apply_room_default=not model_prefix_used,
+        )
+    elif surface == "talk":
+        task_id = ingest_message(conn, config, IncomingMessage(
+            user_id=actor_user_id, text=text, source_type="talk", surface="talk",
+            channel_token=channel, channel_name=channel_name, attachments=attachments or [],
+            platform_message_id=platform_message_id, reply_to_message_id=reply_to_id,
+            reply_to_content=context, model=model, effort=effort, model_prefix_used=model_prefix_used,
+        ))
+    elif surface == "whatsapp":
+        from .transport.whatsapp import whatsapp_conversation_token
+
+        task_id = ingest_message(conn, config, IncomingMessage(
+            user_id=actor_user_id, text=text, source_type="whatsapp", surface="whatsapp",
+            channel_token=whatsapp_conversation_token(actor_user_id), output_target="whatsapp",
+            attachments=attachments or [], mirror_to_room=False, queue="foreground",
+            reply_to_content=context,
+        ))
+    else:
+        raise ValueError("unsupported relay reply surface")
     if task_id is None:
+        if surface != "whatsapp":
+            # A room surface drops a known echo of a mirrored turn; raising
+            # here would roll back the whole Talk poll batch on every retry.
+            return None
         raise RuntimeError("relay recipient task was not created")
     if outcome == "accepted":
         conn.execute("UPDATE message_relays SET recipient_task_id=? WHERE id=? AND recipient_user_id=?",
                      (task_id, relay["id"], actor_user_id))
+    return task_id
+
+
+def _reply_task(conn, config, *, actor_user_id: str, inbound_id: str, text: str,
+                relay, outcome: str, attachments=None):
+    from .transport.whatsapp.webhook import WhatsAppEventResult, MEDIA_ONLY_PROMPT
+
+    task_id = create_recipient_task(
+        conn, config, relay, surface="whatsapp", actor_user_id=actor_user_id,
+        text=text if text else MEDIA_ONLY_PROMPT, outcome=outcome, attachments=attachments,
+    )
     disposition = "relay_answer" if outcome == "accepted" else "relay_rejected"
     conn.execute("UPDATE processed_whatsapp SET task_id=?,disposition=? WHERE message_id=? AND user_id=?",
                  (task_id, disposition, inbound_id, actor_user_id))
@@ -477,7 +609,7 @@ def match_whatsapp_reply(conn, config, *, actor_user_id: str, event):
         outcome = "unavailable"
     else:
         outcome = accept_reply(conn, config, actor_user_id=actor_user_id, relay_id=relay["id"],
-                               provider=config.whatsapp.provider, inbound_id=event.message_id, text=answer)
+                               surface="whatsapp", inbound_id=event.message_id, text=answer)
     return _reply_task(conn, config, actor_user_id=actor_user_id, inbound_id=event.message_id,
                        text=answer, relay=relay, outcome=outcome)
 
@@ -501,7 +633,7 @@ def reconcile_reply_candidates(config, *, limit: int = 20) -> list:
                                      (candidate["inbound_id"], actor)).fetchone()
                 if dedup is not None and dedup["task_id"] is None:
                     outcome = "unmatched" if candidate["expired"] else accept_reply(
-                        conn, config, actor_user_id=actor, relay_id=relay["id"], provider=candidate["provider"],
+                        conn, config, actor_user_id=actor, relay_id=relay["id"], surface="whatsapp",
                         inbound_id=candidate["inbound_id"], text=candidate["answer_text"],
                     )
                     results.append(_reply_task(conn, config, actor_user_id=actor, inbound_id=candidate["inbound_id"],

@@ -6571,6 +6571,20 @@ def _is_own_replay(conn, token: str, client_msg_id: str, username: str) -> bool:
     return prior is not None and prior[1] == username
 
 
+def _chat_relay_reply(username: str, token: str, reply_to_msg_id: int) -> bool:
+    """Whether a reply names a relay question addressed to this user here.
+
+    Routing only: it decides that the confirmation intercept is skipped. The
+    answer itself is decided again inside `_chat_create_web_task`'s write
+    transaction.
+    """
+    from . import db, message_relays
+    with db.get_db(_config.db_path) as conn:
+        return message_relays.relay_for_room_reply(
+            conn, actor_user_id=username, room_token=token, message_id=reply_to_msg_id,
+        ) is not None
+
+
 def _chat_create_web_task(
     username: str, token: str, text: str,
     attachments: list[str] | None = None,
@@ -6580,6 +6594,7 @@ def _chat_create_web_task(
     attachment_names: list[str] | None = None,
     client_msg_id: str | None = None,
     reply_to_msg_id: int | None = None,
+    relay_answer: str | None = None,
 ) -> tuple[str, int]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)``,
     ``("rate_limited", window_seconds)`` or ``("reply_target_gone", 0)``.
@@ -6587,8 +6602,12 @@ def _chat_create_web_task(
     A cited parent is resolved here, inside the same transaction as the create:
     it must be a message in *this* room, and its body — never a client-supplied
     quote — is what gets snapshotted onto the task.
+
+    A parent that is a relay question addressed to this user makes the send an
+    answer: `relay_answer` is the exact text offered, and the task is created
+    by `message_relays.accept_room_reply` in this same transaction.
     """
-    from . import confirmations, db
+    from . import confirmations, db, message_relays
     from .transport import record_inbound
     chat = _config.web.chat
     with db.get_db(_config.db_path) as conn:
@@ -6624,6 +6643,11 @@ def _chat_create_web_task(
             if target is None or target[0] != token:
                 return ("reply_target_gone", 0)
             reply_to_content = target[1][:_REPLY_SNAPSHOT_CHARS]
+        relay = None
+        if reply_to_msg_id is not None and not replaying:
+            relay = message_relays.relay_for_room_reply(
+                conn, actor_user_id=username, room_token=token, message_id=reply_to_msg_id,
+            )
         # Sending a new message in a room means the user has moved on from any
         # question parked in it — the rule the Talk poller has always applied
         # (`transport/talk/inbound.py`, before its own `ingest_message`). Web
@@ -6662,6 +6686,16 @@ def _chat_create_web_task(
                     "Cancelled %d pending confirmation(s) in %s for %s (new message)",
                     cancelled, token, username,
                 )
+        if relay is not None:
+            _outcome, task_id = message_relays.accept_room_reply(
+                conn, _config, actor_user_id=username, relay_id=relay["id"], surface="web",
+                inbound_id=None, text=relay_answer if relay_answer is not None else text,
+                task_text=text, channel=token, attachments=attachments or None,
+                attachment_names=attachment_names or None, client_msg_id=client_msg_id,
+                reply_to_id=reply_to_msg_id, model=model, effort=effort,
+                model_prefix_used=not apply_room_default,
+            )
+            return ("ok", task_id)
         # Route through the shared inbound helper so the web user turn lands in
         # the canonical `messages` store (and the room is registered) exactly
         # like Talk — instead of living only in tasks.prompt.
@@ -8096,6 +8130,7 @@ async def chat_send_message(
         return JSONResponse({"error": "room is archived"}, status_code=409)
 
     data = await request.json()
+    raw_text = data.get("text") if isinstance(data.get("text"), str) else ""
     text = (data.get("text") or "").strip()
     if len(text) > _config.web.chat.max_prompt_chars:
         return JSONResponse({"error": "message too long"}, status_code=400)
@@ -8210,7 +8245,14 @@ async def chat_send_message(
     # pending confirmations on any new message, so an answer that reached it
     # would cancel the question it is answering. Attachment-bearing sends are
     # excluded — the file is the message, whatever the caption says.
-    if not attachments:
+    #
+    # A reply to a relay question is checked first: a quoted "yes" to one
+    # answers the relay and must never approve a parked task. The WhatsApp
+    # path holds the same precedence.
+    relay_reply = reply_to_msg_id is not None and await asyncio.to_thread(
+        _chat_relay_reply, username, room.token, reply_to_msg_id,
+    )
+    if not attachments and not relay_reply:
         from . import confirmations
 
         answer = confirmations.parse_answer(text)
@@ -8235,6 +8277,9 @@ async def chat_send_message(
         _chat_create_web_task, username, room.token, text, attachments,
         model_override, effort_override, not model_prefix_used,
         attachment_names, client_msg_id, reply_to_msg_id,
+        # The exact answer, whitespace and all; a `!model` prefix already
+        # changed the text, so only an unprefixed send keeps its raw form.
+        text if model_prefix_used else raw_text,
     )
     if outcome == "rate_limited":
         return JSONResponse(

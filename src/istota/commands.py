@@ -3588,7 +3588,40 @@ async def cmd_untrust(ctx: CommandContext):
     return f"`{email}` is not in your trusted senders list. Note: senders in config files must be removed from the config."
 
 
-@command("relay", "Manage private relays: `!relay block USER_ID`, `!relay unblock USER_ID`, `!relay blocked`, `!relay list`, `!relay show RELAY_ID`, `!relay cancel RELAY_ID`")
+def _relay_reply_in_room(ctx: CommandContext, origin: dict) -> str:
+    """`!relay reply RELAY_ID <answer>` from the room a question was delivered to.
+
+    Only a room relay is answerable here, and only from its own room, so an
+    answer cannot arrive through a surface the question never went to. The
+    caller holds the write transaction.
+    """
+    import json
+    import uuid
+    from . import message_relays
+
+    parsed = re.match(r"^reply +(\S+)(?: (.*))?$", ctx.args, re.DOTALL)
+    if ctx.surface not in ("web", "talk") or parsed is None:
+        return "Use !relay reply RELAY_ID <answer>."
+    relay = ctx.conn.execute(
+        "SELECT surface,destination FROM message_relays WHERE id=? AND recipient_user_id=?",
+        (parsed[1], ctx.user_id),
+    ).fetchone()
+    if relay is None:
+        return message_relays._REPLY_NOTICES["unavailable"]
+    if relay["surface"] == "whatsapp":
+        return "Send !relay reply RELAY_ID <answer> from your bound WhatsApp conversation."
+    if relay["surface"] == "sms":
+        return "Send !relay reply RELAY_ID <answer> by SMS from your registered number."
+    if json.loads(relay["destination"] or "{}").get("room_token") != origin.get("room_token"):
+        return "Answer this relay in the room its question reached you."
+    outcome = message_relays.accept_reply(
+        ctx.conn, ctx.config, actor_user_id=ctx.user_id, relay_id=parsed[1], surface=ctx.surface,
+        inbound_id=f"{ctx.surface}:command:{uuid.uuid4().hex}", text=parsed[2] or "",
+    )
+    return message_relays._REPLY_NOTICES[outcome]
+
+
+@command("relay", "Manage private relays: `!relay reply RELAY_ID <answer>`, `!relay block USER_ID`, `!relay unblock USER_ID`, `!relay blocked`, `!relay list`, `!relay show RELAY_ID`, `!relay cancel RELAY_ID`")
 async def cmd_relay(ctx: CommandContext):
     from . import message_relays
     from .whatsapp_requests import RequestError
@@ -3607,7 +3640,7 @@ async def cmd_relay(ctx: CommandContext):
             return "Relay commands require a verified private conversation."
         words = ctx.args.split()
         if words and words[0] == "reply":
-            return "Send !relay reply RELAY_ID <answer> from your bound WhatsApp conversation."
+            return _relay_reply_in_room(ctx, origin)
         if words == ["list"]:
             rows = message_relays.list_relays(ctx.conn, actor_user_id=ctx.user_id)
             return "\n".join(f"{r['id']}: {r['state']} (return {r['return_state']})" for r in rows) or "No relays."
