@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- You can ask a consenting user a question on WhatsApp after approving its exact wording. Their explicit text reply returns unchanged to your original private conversation; blocked or uncertain returns remain available through private relay status for 30 days. Use `!relay allow` and `!relay revoke` to control who may ask you questions; ordinary messages and attachments are never forwarded as answers.
+
+- A running task can send a separate message to your own WhatsApp while keeping its final reply in the original conversation. Queued messages have a delivery status, and retrying the same request does not send it twice.
+
 - The browser now presses a Cloudflare challenge checkbox itself as soon as `render`, `get` or `interact` meets one, and returns the page with `challenge_solved: true` when it clears. Before, the challenge came back as `captcha` for the caller to press, which briefings and scheduled digests never did, and the tab crashed on V8's heap limit about ninety seconds later. A challenge the press does not clear still answers `captcha`, now with `challenge_press` saying what happened; it takes effect once an Ansible run rebuilds the browser image.
 
 - New accounts can use an address in Istota's mailbox, so confirmation mail is filed for the account and can be read during signup. Mail arriving later raises a notification instead of starting another task.

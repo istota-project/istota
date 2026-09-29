@@ -13,6 +13,8 @@ and ``AgentEventSink`` callback type that the native loop emits.
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
+import shlex
 from typing import Any
 
 _TOOL_EMOJI = {
@@ -36,12 +38,28 @@ _TOOL_EMOJI = {
 # one file, because a copied literal is how the audit would silently start
 # reporting every image unread.
 READ_DESCRIPTION_PREFIX = f"{_TOOL_EMOJI['Read']} Reading "
+PRIVATE_RELAY_TOOL_DESCRIPTION = "Private WhatsApp relay request"
+
+
+def _private_relay_tool(name: str, input_data: dict) -> bool:
+    """Keep relay arguments and model labels out of progress and execution traces."""
+    if name != "Bash" or not isinstance(input_data, dict):
+        return False
+    command = str(input_data.get("command", ""))
+    try:
+        # Shell quoting can split a word into adjacent quoted fragments.
+        command = " ".join(shlex.split(command))
+    except ValueError:
+        pass
+    return bool(re.search(r"\bwhatsapp\s+ask\b", command))
 
 
 def _describe_tool_use(name: str, input_data: dict) -> str:
     """Extract a human-readable description from a tool_use block."""
     emoji = _TOOL_EMOJI.get(name, "🔧")
 
+    if _private_relay_tool(name, input_data):
+        return PRIVATE_RELAY_TOOL_DESCRIPTION
     if name == "Bash":
         desc = input_data.get("description")
         if desc:
@@ -91,7 +109,7 @@ def _tool_invocation(name: str, input_data: dict) -> str | None:
     (ISSUE-174 fix 1). Only Bash carries a meaningful command; other tools
     return None and callers fall back to the description label.
     """
-    if not isinstance(input_data, dict):
+    if not isinstance(input_data, dict) or _private_relay_tool(name, input_data):
         return None
     if name == "Bash":
         cmd = str(input_data.get("command", "")).strip()

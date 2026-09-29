@@ -4887,7 +4887,18 @@ def _chat_answer_confirmation(
         if res.task is None:
             return None
 
-        ack = confirmations.apply_answer(conn, res.task, answer, _config, by="web")
+        if res.task.whatsapp_confirmation_request_id:
+            from . import message_relays
+            from .async_runtime import run_coro
+            from .whatsapp_requests import RequestError
+            try:
+                origin = message_relays.private_origin(conn, _config, actor_user_id=username,
+                                                       surface="web", conversation_token=token)
+                run_coro(message_relays.verify_origin(_config, actor_user_id=username, origin=origin))
+            except RequestError:
+                return {"ack": "Confirm relay questions from a verified private conversation.",
+                        "user_msg_id": None, "system_msg_id": None}
+        ack = confirmations.apply_answer(conn, res.task, answer, _config, by="web", conversation_token=token)
         user_msg_id, system_msg_id = confirmations.record_exchange(
             conn, token, answer_text=text, ack=ack, origin_surface="web",
             client_msg_id=client_msg_id, answered_by=username,
@@ -8253,7 +8264,7 @@ async def chat_send_message(
     }
 
 
-def _chat_confirm_task(task_id: int) -> None:
+def _chat_confirm_task(task_id: int, actor_user_id: str | None = None) -> None:
     from . import confirmations, db
     with db.get_db(_config.db_path) as conn:
         task = db.get_task(conn, task_id)
@@ -8264,6 +8275,9 @@ def _chat_confirm_task(task_id: int) -> None:
             # transcript-mirror restore all run unconditionally — so a stray
             # confirm (a duplicate click, a running re-run) has to stop here.
             return
+        if task.whatsapp_confirmation_request_id and actor_user_id != task.user_id:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=403, detail="not your relay question")
         # Shared with the Talk poller and `!confirm` so all three restore the
         # transcript mirror the gate withheld (ISSUE-241), and so all three
         # prune the parked attempt's terminal frames the same way (ISSUE-235).
@@ -8690,7 +8704,7 @@ async def chat_confirm_task(
     _csrf: None = Depends(_verify_origin),
 ):
     await _authorize_task_access(task_id, user)
-    await asyncio.to_thread(_chat_confirm_task, task_id)
+    await asyncio.to_thread(_chat_confirm_task, task_id, user["username"])
     return {"status": "ok"}
 
 

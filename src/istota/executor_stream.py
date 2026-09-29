@@ -16,6 +16,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from .agent.events import PRIVATE_RELAY_TOOL_DESCRIPTION
 from .brain._events import (
     ContextManagementEvent,
     StreamEvent,
@@ -66,6 +67,7 @@ class TaskStreamAdapter:
         self.event_writer = event_writer
         self.show_tool_use = config.scheduler.progress_show_tool_use
         self.show_text = config.scheduler.progress_show_text
+        self._private_tool_calls: set[str] = set()
 
         # Stream surfaces (web chat, repl) get the answer text streamed live as
         # ``text_delta`` events; push surfaces (Talk/email/ntfy/istota_file) are
@@ -249,6 +251,8 @@ class TaskStreamAdapter:
         if event_writer is None:
             return
         if isinstance(event, ToolUseEvent):
+            if event.tool_call_id and event.description == PRIVATE_RELAY_TOOL_DESCRIPTION:
+                self._private_tool_calls.add(event.tool_call_id)
             # A tool boundary settles the reasoning chip and drops any
             # pre-tool narration. This is a property of the STREAM SURFACE,
             # not of whether the tool row is shown — so it must run even when
@@ -272,6 +276,10 @@ class TaskStreamAdapter:
                 "duration_ms": event.duration_ms,
             })
         elif isinstance(event, ToolProgressEvent):
+            # A skill's JSON result carries the private preview too. Keep it
+            # out of the event log; normal tool output and task text are unchanged.
+            if event.tool_call_id in self._private_tool_calls:
+                return
             # Web SSE only; Talk/log subscribers ignore this kind.
             event_writer.emit("tool_progress", {
                 "tool_name": event.tool_name,

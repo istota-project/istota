@@ -115,6 +115,8 @@ def describe(conn, task: db.Task) -> str:
     line happens to be the bot's own ``<email_metadata>`` wrapper, but that is
     prompt-assembly detail and not something to rest the invariant on.
     """
+    if task.whatsapp_confirmation_request_id:
+        return "a private relay question"
     if task.source_type == "email":
         record = db.get_email_for_task(conn, task.id)
         if record is None:
@@ -221,7 +223,16 @@ def approve(
     so a caller that forgets is visibly unattributed instead of quietly filed
     under somebody else's.
     """
-    db.confirm_task(conn, task.id)
+    # Read the association under the writer lock, never trust a stale task
+    # object or a confirmed_at timestamp from an earlier action.
+    from .whatsapp_requests import approve_request, text_hash, write_transaction
+    with write_transaction(conn):
+        current = db.get_task(conn, task.id)
+        if current and current.whatsapp_confirmation_request_id:
+            approve_request(conn, task=current,
+                            request_id=current.whatsapp_confirmation_request_id,
+                            preview_digest=text_hash(current.confirmation_prompt or ""))
+        db.confirm_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User confirmed task")
 
     # Drop the parked attempt's two terminal frames, and nothing else
@@ -363,6 +374,7 @@ def resolve(
 
 def apply_answer(
     conn, task: db.Task, answer: Answer, config=None, *, by: str = "system",
+    conversation_token: str | None = None,
 ) -> str:
     """Act on ``answer`` and return the ack every surface posts.
 
@@ -374,6 +386,14 @@ def apply_answer(
 
     ``config`` is passed straight through to ``approve`` for attribution only.
     """
+    if task.whatsapp_confirmation_request_id and by in ("web", "talk"):
+        from .message_relays import private_origin
+        from .whatsapp_requests import RequestError
+        try:
+            private_origin(conn, config, actor_user_id=task.user_id,
+                           surface=by, conversation_token=conversation_token)
+        except RequestError:
+            return "Confirm relay questions from a verified private conversation."
     if not answer.approve:
         decline(conn, task, by=by)
         return "Task cancelled."

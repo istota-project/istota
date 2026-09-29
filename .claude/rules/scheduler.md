@@ -758,3 +758,8 @@ find_sent_email_by_references(conn, references: list[str]) -> SentEmail | None
 get_user_skills_fingerprint(conn, user_id) -> str | None
 set_user_skills_fingerprint(conn, user_id, fingerprint) -> None
 ```
+
+
+## WhatsApp request and relay polling
+
+The `whatsapp_requests` interval gate drains durable requests on the shared async runtime that owns Baileys. Self-sends can leave while the task runs; held questions cannot. After successful execution, `process_one_task` parks a stored question using its exact preview even without a model confirmation phrase. It routes that preview only to the verified private origin and closes unsurfaced holds after failed attempts. Approval releases the stored action independently of resumed model output. The poll also reconciles early inbound replies, returns exact answers, expires questions and sweeps retained content. All batches are bounded; local retries never bypass the outbound ledger's no-resend decision. See `.claude/rules/whatsapp.md` for the transaction and privacy rules.

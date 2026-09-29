@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     error TEXT,
 
     -- Confirmation flow
+    whatsapp_confirmation_request_id TEXT,
     confirmation_prompt TEXT,
     confirmed_at TEXT,
 
@@ -1258,6 +1259,7 @@ CREATE INDEX IF NOT EXISTS idx_room_bindings_ref ON room_bindings (surface, surf
 -- surface-neutral transcript. The FK cascade is decorative (PRAGMA
 -- foreign_keys is unset) — room deletion hand-deletes from here.
 CREATE TABLE IF NOT EXISTS messages (
+    delivery_reference TEXT,
     id            INTEGER PRIMARY KEY,
     room_token    TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
     role          TEXT NOT NULL,            -- 'user' | 'assistant' | 'system'
@@ -1642,3 +1644,120 @@ CREATE TABLE IF NOT EXISTS bot_avatar (
     image        BLOB NOT NULL,
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Durable WhatsApp skill requests and relays
+CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
+    id TEXT PRIMARY KEY,
+    requester_user_id TEXT NOT NULL,
+    origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    request_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question')),
+    recipient_user_id TEXT NOT NULL,
+    relay_id TEXT UNIQUE,
+    text TEXT,
+    content_hash TEXT NOT NULL,
+    service_body TEXT,
+    service_hash TEXT NOT NULL,
+    template_body TEXT,
+    template_hash TEXT,
+    preview TEXT,
+    preview_digest TEXT,
+    provider TEXT NOT NULL,
+    binding_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('held','queued','sending','sent','uncertain','failed','cancelled','expired')),
+    approved_at TEXT,
+    approved_digest TEXT,
+    queue_deadline TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at TEXT,
+    content_cleared_at TEXT,
+    error_code TEXT,
+    UNIQUE (requester_user_id, origin_task_id, request_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_request_held_task
+ON whatsapp_skill_requests(origin_task_id) WHERE state = 'held';
+CREATE INDEX IF NOT EXISTS idx_whatsapp_request_queue
+ON whatsapp_skill_requests(state, queue_deadline);
+
+CREATE TABLE IF NOT EXISTS relay_permissions (
+    recipient_user_id TEXT NOT NULL,
+    asker_user_id TEXT NOT NULL,
+    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    revoked_at TEXT,
+    PRIMARY KEY (recipient_user_id, asker_user_id),
+    CHECK (recipient_user_id != asker_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS message_relays (
+    id TEXT PRIMARY KEY,
+    asker_user_id TEXT NOT NULL,
+    recipient_user_id TEXT NOT NULL,
+    surface TEXT NOT NULL DEFAULT 'whatsapp' CHECK (surface = 'whatsapp'),
+    request_id TEXT NOT NULL UNIQUE REFERENCES whatsapp_skill_requests(id),
+    question TEXT,
+    asker_display TEXT,
+    origin TEXT,
+    audience TEXT,
+    provider TEXT NOT NULL,
+    binding_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('held','queued','sending','waiting','uncertain','answered','failed','cancelled','expired')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at TEXT,
+    expires_at TEXT,
+    answered_at TEXT,
+    closed_at TEXT,
+    inbound_answer_id TEXT,
+    answer_text TEXT,
+    recipient_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    return_state TEXT NOT NULL DEFAULT 'none' CHECK (return_state IN ('none','pending','sending','delivered','blocked','uncertain','expired')),
+    return_reference TEXT UNIQUE,
+    return_claimed_at TEXT,
+    return_message_id TEXT,
+    return_error TEXT,
+    content_expires_at TEXT,
+    content_cleared_at TEXT,
+    CHECK (asker_user_id != recipient_user_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_message_relay_open_pair
+ON message_relays(asker_user_id, recipient_user_id)
+WHERE state IN ('held','queued','sending','waiting','uncertain');
+CREATE INDEX IF NOT EXISTS idx_message_relay_expiry
+ON message_relays(state, expires_at);
+CREATE INDEX IF NOT EXISTS idx_message_relay_return
+ON message_relays(return_state, answered_at);
+
+CREATE TABLE IF NOT EXISTS relay_reply_candidates (
+    provider TEXT NOT NULL,
+    inbound_id TEXT NOT NULL,
+    recipient_user_id TEXT NOT NULL,
+    quoted_id TEXT NOT NULL,
+    answer_text TEXT NOT NULL,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (provider, inbound_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relay_candidate_expiry
+ON relay_reply_candidates(expires_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_delivery_reference
+ON messages(delivery_reference) WHERE delivery_reference IS NOT NULL;
+
+-- Runtime connections do not enable foreign_keys. Keep tombstones and sever
+-- task associations explicitly even on those connections. A held orphan must
+-- never become eligible for approval; accepted self-sends survive task loss.
+CREATE TRIGGER IF NOT EXISTS whatsapp_request_task_deleted
+BEFORE DELETE ON tasks
+BEGIN
+    UPDATE message_relays SET state='cancelled', closed_at=datetime('now'),
+        content_expires_at=datetime('now', '+30 days')
+    WHERE request_id IN (SELECT id FROM whatsapp_skill_requests
+                        WHERE origin_task_id=OLD.id AND state='held');
+    UPDATE whatsapp_skill_requests
+    SET state=CASE WHEN state='held' THEN 'cancelled' ELSE state END,
+        closed_at=CASE WHEN state='held' THEN datetime('now') ELSE closed_at END,
+        error_code=CASE WHEN state='held' THEN 'task_deleted' ELSE error_code END,
+        origin_task_id=NULL, updated_at=datetime('now')
+    WHERE origin_task_id=OLD.id;
+    UPDATE message_relays SET recipient_task_id=NULL WHERE recipient_task_id=OLD.id;
+END;

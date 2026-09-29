@@ -984,6 +984,12 @@ def _dispatch_inbound(
             response_logical_key=f"help:{event.message_id}",
         )
 
+    from ...message_relays import match_whatsapp_reply
+
+    relay_result = match_whatsapp_reply(conn, config, actor_user_id=user_id, event=event)
+    if relay_result is not None:
+        return relay_result
+
     # Above the opt-out gate, and on the same rule the callback branch is:
     # an answer to a question istota asked is a state change the user
     # deliberately made, so it is applied whatever their delivery preference —

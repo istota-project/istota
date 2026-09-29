@@ -833,6 +833,17 @@ async def cmd_confirm(ctx: CommandContext):
         # path on both surfaces.
         return confirmations.ambiguity_listing(conn, pending)
 
+    if task.whatsapp_confirmation_request_id:
+        from . import message_relays
+        from .whatsapp_requests import RequestError
+        try:
+            origin = message_relays.private_origin(conn, ctx.config, actor_user_id=user_id,
+                                                   surface=ctx.surface, conversation_token=ctx.conversation_token)
+            await message_relays.verify_origin(ctx.config, actor_user_id=user_id, origin=origin)
+            message_relays.validate_origin(conn, ctx.config, actor_user_id=user_id, origin=origin)
+        except RequestError:
+            return "Confirm relay questions from a verified private conversation."
+
     # The wording stays addressed — `#id` and a label — rather than adopting the
     # bare "Confirmed." a natural-language answer gets. This command exists to
     # answer a *named* question, most often one of several, so saying which one
@@ -3575,3 +3586,59 @@ async def cmd_untrust(ctx: CommandContext):
     if removed:
         return f"Removed `{email}` from trusted senders."
     return f"`{email}` is not in your trusted senders list. Note: senders in config files must be removed from the config."
+
+
+@command("relay", "Manage private relays: `!relay allow USER_ID`, `!relay revoke USER_ID`, `!relay permissions`, `!relay list`, `!relay show RELAY_ID`, `!relay cancel RELAY_ID`")
+async def cmd_relay(ctx: CommandContext):
+    from . import message_relays
+    from .whatsapp_requests import RequestError
+
+    try:
+        origin = message_relays.private_origin(ctx.conn, ctx.config, actor_user_id=ctx.user_id,
+                                               surface=ctx.surface, conversation_token=ctx.conversation_token)
+        await message_relays.verify_origin(ctx.config, actor_user_id=ctx.user_id, origin=origin)
+    except RequestError:
+        return "Relay commands require a verified private conversation."
+    from .whatsapp_requests import write_transaction
+    with write_transaction(ctx.conn):
+        try:
+            message_relays.validate_origin(ctx.conn, ctx.config, actor_user_id=ctx.user_id, origin=origin)
+        except RequestError:
+            return "Relay commands require a verified private conversation."
+        words = ctx.args.split()
+        if words and words[0] == "reply":
+            return "Send !relay reply RELAY_ID <answer> from your bound WhatsApp conversation."
+        if words == ["list"]:
+            rows = message_relays.list_relays(ctx.conn, actor_user_id=ctx.user_id)
+            return "\n".join(f"{r['id']}: {r['state']} (return {r['return_state']})" for r in rows) or "No relays."
+        if len(words) == 2 and words[0] == "show":
+            row = message_relays.get_relay(ctx.conn, actor_user_id=ctx.user_id, relay_id=words[1])
+            if row is None:
+                return "Relay unavailable."
+            result = f"Relay {row['id']}: {row['state']} (return {row['return_state']})."
+            if row['content_expires_at']:
+                result += f"\nContent retained until {row['content_expires_at']} UTC."
+            if row['question'] is not None:
+                result += f"\nQuestion: {row['question']}"
+            if row['answer_text'] is not None:
+                result += "\n\n" + message_relays.answer_body(row, row['answer_text'])
+            return result
+        if words == ["permissions"]:
+            allowed = message_relays.list_permissions(ctx.conn, actor_user_id=ctx.user_id)
+            return "Allowed senders: " + (", ".join(row["asker_user_id"] for row in allowed) or "none")
+        if len(words) != 2 or words[0] not in ("allow", "revoke", "cancel"):
+            return "Use !relay allow USER_ID, !relay revoke USER_ID, !relay permissions, !relay list, !relay show RELAY_ID, or !relay cancel RELAY_ID."
+        action, target = words
+        try:
+            if action == "cancel":
+                message_relays.cancel_relay(ctx.conn, actor_user_id=ctx.user_id, relay_id=target)
+                return "Relay cancelled."
+            if target not in ctx.config.users:
+                return "User unavailable."
+            if action == "allow":
+                message_relays.set_permission(ctx.conn, actor_user_id=ctx.user_id, asker_user_id=target)
+                return f"Allowed relay questions from {target}."
+            message_relays.revoke_permission(ctx.conn, actor_user_id=ctx.user_id, asker_user_id=target)
+            return f"Revoked relay permission for {target}."
+        except RequestError:
+            return "Relay unavailable."

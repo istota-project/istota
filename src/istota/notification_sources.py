@@ -270,6 +270,7 @@ def _register_all() -> None:
             "connected_service",
             "health_panel",
             "task_alert",
+            "message_relay",
         ):
             try:
                 module = importlib.import_module(

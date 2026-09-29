@@ -2674,6 +2674,10 @@ def process_one_task(
 
         # Update to running
         db.update_task_status(conn, task_id, "running")
+        # A held draft was never published. A reclaimed/retried attempt must
+        # not inherit it; approved requests are already queued and unaffected.
+        from .message_relays import close_task_questions
+        close_task_questions(conn, task_id, reason="attempt_restarted")
 
         # Get user resources
         user_resources = db.get_user_resources(conn, task.user_id)
@@ -3009,6 +3013,15 @@ def process_one_task(
             )
             success = False
             result = f"Malformed output: {malformed_reason}"
+
+    from .whatsapp_requests import held_question, present_question
+    with db.get_db(config.db_path) as conn:
+        relay_question = held_question(conn, task_id)
+    if relay_question and not dry_run:
+        if run_coro(present_question(config, task=task, success=success)):
+            if event_writer is not None:
+                event_writer.finish()
+            return (task_id, success)
 
     # Log result quality metrics
     if result:
@@ -8395,6 +8408,11 @@ def build_interval_gates(
             config, now, persisted, backup["alerted"]
         )
 
+    def _whatsapp_requests(now: float) -> None:
+        from .whatsapp_requests import drain_requests
+
+        run_coro(drain_requests(config))
+
     def _whatsapp_pairing(now: float) -> None:
         # Inline on the dispatch thread, deliberately: the poll's own cheap
         # read is what makes an every-tick gate affordable, and
@@ -8646,6 +8664,12 @@ def build_interval_gates(
         # CLI's attach mode, which writes the same request row and depends on
         # this poll — an operator who turned the web flow off is exactly the one
         # who will be on a terminal. That key gates the routes.
+        IntervalGate(
+            name="whatsapp-requests",
+            run=_whatsapp_requests,
+            fixed_interval=0,
+            background=True,
+        ),
         IntervalGate(
             name="whatsapp-pairing",
             run=_whatsapp_pairing,
