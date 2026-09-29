@@ -164,7 +164,7 @@ class ConfirmationResolver:
 
         return NotificationView(
             title=confirmations.describe(conn, task),
-            body=body_for(task.confirmation_prompt),
+            body="Open the private conversation to review this relay question." if task.whatsapp_confirmation_request_id else body_for(task.confirmation_prompt),
             severity=row.severity,
             actions=(
                 NotificationAction(

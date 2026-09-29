@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Private conversations can allow or revoke relay questions from a specific user with `!relay allow` and `!relay revoke`. Relay questions remain unavailable until the answer and return paths are enabled.
+
 - A running task can send a separate message to your own WhatsApp while keeping its final reply in the original conversation. Queued messages have a delivery status, and retrying the same request does not send it twice.
 
 - New accounts can use an address in Istota's mailbox, so confirmation mail is filed for the account and can be read during signup. Mail arriving later raises a notification instead of starting another task.

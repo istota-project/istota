@@ -106,6 +106,7 @@ class Task:
     execution_trace: str | None = None
     error: str | None = None
     confirmation_prompt: str | None = None
+    whatsapp_confirmation_request_id: str | None = None
     priority: int = 5
     attempt_count: int = 0
     max_attempts: int = 3
@@ -1360,7 +1361,7 @@ _TASK_COLUMNS = (
     "reply_to_content, reply_to_message_id, withheld_from_room, "
     "heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
-    "brain, model_namespace, talk_delivery_token, skill, skill_args"
+    "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
 )
 
 
@@ -1388,6 +1389,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         execution_trace=row["execution_trace"],
         error=row["error"],
         confirmation_prompt=row["confirmation_prompt"],
+        whatsapp_confirmation_request_id=row["whatsapp_confirmation_request_id"],
         priority=row["priority"],
         attempt_count=row["attempt_count"],
         max_attempts=row["max_attempts"],
@@ -1937,6 +1939,8 @@ def confirm_task(conn: sqlite3.Connection, task_id: int) -> None:
 
 def cancel_task(conn: sqlite3.Connection, task_id: int) -> None:
     """Cancel a task (sets status to 'cancelled')."""
+    from .message_relays import close_task_questions
+    close_task_questions(conn, task_id)
     conn.execute(
         """
         UPDATE tasks
@@ -1958,18 +1962,25 @@ def cancel_pending_confirmations(
     Called when a new task is created in the same conversation, indicating the
     user has moved on from the pending confirmation.
     """
-    cursor = conn.execute(
-        """
-        UPDATE tasks
-        SET status = 'cancelled',
-            updated_at = datetime('now')
-        WHERE conversation_token = ?
-          AND user_id = ?
-          AND status = 'pending_confirmation'
-        """,
-        (conversation_token, user_id),
-    )
-    return cursor.rowcount
+    from .message_relays import close_task_questions
+    from .whatsapp_requests import write_transaction
+    with write_transaction(conn):
+        held = conn.execute("SELECT id FROM tasks WHERE conversation_token=? AND user_id=? AND status='pending_confirmation'",
+                            (conversation_token, user_id)).fetchall()
+        for row in held:
+            close_task_questions(conn, row[0])
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'cancelled',
+                updated_at = datetime('now')
+            WHERE conversation_token = ?
+              AND user_id = ?
+              AND status = 'pending_confirmation'
+            """,
+            (conversation_token, user_id),
+        )
+        return len(held)
 
 
 def get_pending_confirmation(
@@ -7749,6 +7760,10 @@ def expire_stale_confirmations(conn: sqlite3.Connection, timeout_minutes: int) -
         """,
         (timeout_minutes,),
     )
+    rows = cursor.fetchall()
+    from .message_relays import close_task_questions
+    for row in rows:
+        close_task_questions(conn, row["id"], reason="confirmation_expired")
     return [
         {
             "id": row["id"],
@@ -7757,7 +7772,7 @@ def expire_stale_confirmations(conn: sqlite3.Connection, timeout_minutes: int) -
             "prompt": row["prompt"][:100] if row["prompt"] else None,
             "source_type": row["source_type"],
         }
-        for row in cursor.fetchall()
+        for row in rows
     ]
 
 

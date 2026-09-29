@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from . import db
+
 from .whatsapp_requests import CONTENT_RETENTION_DAYS, RequestError, write_transaction
 
 RELAY_LIFETIME_SECONDS = 24 * 60 * 60
@@ -129,7 +131,8 @@ def _close_relay(conn: sqlite3.Connection, relay_id: str, *, state: str, reason:
                updated_at=datetime('now') WHERE relay_id=?""", (state, reason, relay_id),
         )
         conn.execute(
-            """UPDATE tasks SET whatsapp_confirmation_request_id=NULL
+            """UPDATE tasks SET whatsapp_confirmation_request_id=NULL,
+               status=CASE WHEN status='pending_confirmation' THEN 'cancelled' ELSE status END
                WHERE whatsapp_confirmation_request_id IN
                (SELECT id FROM whatsapp_skill_requests WHERE relay_id=?)""", (relay_id,),
         )
@@ -172,3 +175,84 @@ def store_reply_candidate(
             (provider, inbound_id, actor_user_id, quoted_id, text, f"+{REPLY_CANDIDATE_SECONDS} seconds"),
         )
         return "pending"
+
+
+def private_origin(conn, config, *, actor_user_id: str, surface: str,
+                   conversation_token: str | None) -> dict:
+    """Resolve one private audience, with no output-plan fallback or fanout.
+
+    Talk participants require a fresh server check via verify_origin before
+    displaying content. The local membership table alone omits unknown users.
+    """
+    from .transport.whatsapp import whatsapp_conversation_token
+    from .transport.sms import sms_conversation_token
+    from .whatsapp_requests import binding_fingerprint, text_hash
+
+    if actor_user_id not in config.users:
+        raise RequestError("unsupported_origin")
+    if surface in ("web", "talk"):
+        room = db.get_room(conn, conversation_token or "")
+        if room is None and surface == "talk":
+            binding = conn.execute(
+                "SELECT room_token FROM room_bindings WHERE surface='talk' AND surface_ref=?",
+                (conversation_token,),
+            ).fetchone()
+            room = db.get_room(conn, binding[0]) if binding else None
+        if (room is None or room.archived
+                or db.list_room_members(conn, room.token) != [actor_user_id]):
+            raise RequestError("unsupported_origin")
+        talk = db.get_room_binding(conn, room.token, "talk")
+        if surface == "talk" and talk is None:
+            raise RequestError("unsupported_origin")
+        return {"surface": surface, "channel": talk.surface_ref if surface == "talk" else room.token,
+                "room_token": room.token, "talk_ref": talk.surface_ref if talk else None}
+    if surface == "whatsapp" and conversation_token == whatsapp_conversation_token(actor_user_id):
+        binding = db.get_whatsapp_binding(conn, actor_user_id)
+        if config.whatsapp.enabled and binding and binding.provider == config.whatsapp.provider:
+            return {"surface": surface, "channel": conversation_token,
+                    "binding": binding_fingerprint(config.whatsapp.provider, binding)}
+    if surface == "sms" and conversation_token == sms_conversation_token(actor_user_id):
+        number = config.sms_phone_number_for(actor_user_id)
+        if config.sms.enabled and number:
+            return {"surface": surface, "channel": conversation_token,
+                    "binding": text_hash(number)}
+    raise RequestError("unsupported_origin")
+
+
+def validate_origin(conn, config, *, actor_user_id: str, origin: dict) -> None:
+    current = private_origin(conn, config, actor_user_id=actor_user_id,
+                             surface=origin["surface"], conversation_token=origin.get("room_token") or origin["channel"])
+    if current != origin:
+        raise RequestError("unsupported_origin")
+
+
+async def verify_origin(config, *, actor_user_id: str, origin: dict) -> None:
+    """Fresh external audience check, called outside the claim transaction."""
+    if not origin.get("talk_ref"):
+        return
+    from .talk import TalkClient
+
+    client = TalkClient(config)
+    try:
+        participants = await client.get_participants(origin["talk_ref"])
+    except Exception:
+        raise RequestError("unsupported_origin") from None
+    finally:
+        await client.aclose()
+    actors = set()
+    for participant in participants:
+        if participant.get("actorType") != "users" or not participant.get("actorId"):
+            raise RequestError("unsupported_origin")
+        actors.add(participant["actorId"])
+    if actors != {actor_user_id, config.nextcloud.username}:
+        raise RequestError("unsupported_origin")
+
+
+def close_task_questions(conn, task_id: int, *, reason: str = "cancelled") -> None:
+    with write_transaction(conn):
+        rows = conn.execute(
+            "SELECT relay_id FROM whatsapp_skill_requests WHERE origin_task_id=? AND state='held'",
+            (task_id,),
+        ).fetchall()
+        for row in rows:
+            _close_relay(conn, row[0], state="expired" if reason == "confirmation_expired" else "cancelled", reason=reason)

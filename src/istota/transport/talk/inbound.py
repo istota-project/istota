@@ -1765,7 +1765,17 @@ async def handle_confirmation_reply(
     if res.task is None:
         return False
 
-    ack = confirmations.apply_answer(conn, res.task, answer, config, by="talk")
+    if res.task.whatsapp_confirmation_request_id:
+        from ... import message_relays
+        from ...whatsapp_requests import RequestError
+        try:
+            origin = message_relays.private_origin(conn, config, actor_user_id=actor_id,
+                                                   surface="talk", conversation_token=room_token)
+            await message_relays.verify_origin(config, actor_user_id=actor_id, origin=origin)
+        except RequestError:
+            await _post_ack(config, conversation_token, "Confirm relay questions from a verified private conversation.")
+            return True
+    ack = confirmations.apply_answer(conn, res.task, answer, config, by="talk", conversation_token=room_token)
     await _post_ack(config, conversation_token, ack)
     confirmations.record_exchange(
         conn, room_token, answer_text=content, ack=ack, origin_surface="talk",
