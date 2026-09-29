@@ -312,3 +312,11 @@ class TestTheInstallerPathReachesBothSettings:
         config = load_config_from(render(**variables))
         assert config.users["alice"].vault_path == ALICE["vault_path"]
         assert config.scheduler.vault_sync_interval == 900
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_unsandboxed_vault_opt_in_renders(allowed):
+    from tests.test_ansible_config_template import render, load_config_from
+
+    config = load_config_from(render(istota_security_allow_unsandboxed_multi_user_vaults=allowed))
+    assert config.security.allow_unsandboxed_multi_user_vaults is allowed

@@ -21,6 +21,14 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def authorized_container_peer(monkeypatch):
+    # These tests cover dispatch and lifecycle after authentication. Real
+    # socket peer checks and Docker identity live in test_devbox_proxy_peer.
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr("istota.devbox_proxy._peer_allowed", AsyncMock(return_value=True))
+
+
 @pytest.fixture()
 def sock_path():
     """Yield a short Unix-socket path.

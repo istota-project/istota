@@ -10434,6 +10434,12 @@ async def settings_vault_passphrase(
     if _config is None or not _config.db_path:
         raise HTTPException(status_code=503, detail="config not loaded")
 
+    refusal = await asyncio.to_thread(
+        secrets_vault.vault_isolation_refusal, _config, user["username"],
+    )
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+
     generate = bool(payload.get("generate"))
     supplied = payload.get("passphrase", "")
     replace = bool(payload.get("replace"))
@@ -10648,6 +10654,11 @@ async def settings_set_secret(
         )
 
     value = (payload.get("value") or "").strip() if isinstance(payload, dict) else ""
+
+    if value and service == "vault" and key == "passphrase":
+        # The generic route must enforce the same policy and passphrase floor.
+        await settings_vault_passphrase({"passphrase": value}, user=user, _csrf=None)
+        return {"ok": True, "service": service, "key": key, "configured": True}
 
     try:
         secrets_store.set_secret(_config.db_path, user["username"], service, key, value)

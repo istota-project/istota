@@ -45,6 +45,7 @@ ERR_UNKNOWN_ACTION = "unknown_action"
 ERR_BAD_REQUEST = "bad_request"
 ERR_UNKNOWN_PROVIDER = "unknown_provider"
 ERR_INTERNAL = "internal"
+ERR_FORBIDDEN = "forbidden"
 
 # ---- Size cap --------------------------------------------------------------
 

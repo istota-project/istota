@@ -35,11 +35,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from istota import peer_process
+from istota.devbox_peer import peer_in_devbox
 from istota.devbox_proxy_protocol import (
     ACTION_FORGE_TOKEN,
     ACTION_GIT_CREDENTIAL,
     ACTION_PING,
     ERR_BAD_REQUEST,
+    ERR_FORBIDDEN,
     ERR_INTERNAL,
     ERR_NO_TOKEN,
     ERR_UNKNOWN_ACTION,
@@ -77,6 +80,8 @@ class DevboxProxyContext:
     github_token: str
     gitlab_url: str
     github_url: str
+    container_name: str = ""
+    docker_cli: str = "/usr/bin/docker"
 
     @property
     def providers(self) -> list[str]:
@@ -399,6 +404,16 @@ _RETIRED_ACTIONS = {
 MAX_CONCURRENT_CONNECTIONS: int = 32
 
 
+async def _peer_allowed(writer: asyncio.StreamWriter, ctx: DevboxProxyContext) -> bool:
+    sock = writer.get_extra_info("socket")
+    pid = peer_process.peer_pid(sock) if sock is not None else None
+    started = peer_process.start_time(pid) if pid is not None else None
+    return await asyncio.to_thread(
+        peer_in_devbox, pid, started, user_id=ctx.user_id,
+        container_name=ctx.container_name, docker_cli=ctx.docker_cli,
+    )
+
+
 async def handle_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -410,15 +425,26 @@ async def handle_connection(
     the client always sees JSON.
     """
     try:
+        allowed = await _peer_allowed(writer, ctx)
+        # Drain one bounded request before closing, so Linux clients receive
+        # the refusal instead of a reset. Never parse an unauthorized request.
         try:
-            line_bytes = await reader.readline()
-        except (asyncio.LimitOverrunError, ValueError):
+            line_bytes = await asyncio.wait_for(reader.readline(), timeout=5)
+        except (asyncio.LimitOverrunError, ValueError, asyncio.TimeoutError):
             # Single-line payload exceeded the StreamReader limit
             # (MAX_REQUEST_BYTES + 4096). Same outcome as the protocol-
             # layer cap — fail with bad_request.
             await _write_line(
                 writer,
-                encode_error(ERR_BAD_REQUEST, "request exceeds maximum size"),
+                encode_error(ERR_BAD_REQUEST, "request too large or timed out")
+                if allowed else encode_error(ERR_FORBIDDEN, "peer is not in this user's devbox"),
+            )
+            return
+        if not allowed:
+            _audit(user_id=ctx.user_id, action="connection", result="forbidden",
+                   dur_ms=0, reason="peer")
+            await _write_line(
+                writer, encode_error(ERR_FORBIDDEN, "peer is not in this user's devbox"),
             )
             return
         if not line_bytes:
@@ -482,8 +508,11 @@ async def _write_line(writer: asyncio.StreamWriter, line: str) -> None:
 async def build_context(user_id: str, config) -> DevboxProxyContext:
     """Build a DevboxProxyContext from a loaded Config."""
     dev = config.developer
+    devbox = getattr(config, "devbox", None)
     return DevboxProxyContext(
         user_id=user_id,
+        container_name=f"{getattr(devbox, 'container_prefix', 'devbox-')}{user_id}",
+        docker_cli=getattr(devbox, "docker_cli", "/usr/bin/docker"),
         gitlab_token=getattr(dev, "gitlab_token", "") or "",
         github_token=getattr(dev, "github_token", "") or "",
         gitlab_url=getattr(dev, "gitlab_url", "https://gitlab.com") or "https://gitlab.com",
@@ -569,11 +598,9 @@ async def serve(
     # The explicit chmod afterwards is belt-and-suspenders for setups
     # with a wider umask (e.g. test harnesses).
     #
-    # Mode 0o660 + adding the devbox container's runtime group to the
-    # istota group (via Ansible) is the access boundary. 0o600 would
-    # leave the container's `dev` user (uid 1000) unable to connect
-    # through the bind-mounted socket since it runs as a different uid
-    # than the daemon (the istota system user).
+    # Group access permits container clients to connect; it authenticates
+    # no task sharing the daemon's uid. The kernel peer and Docker cgroup
+    # check in handle_connection decide whose credentials it may receive.
     previous_umask = os.umask(0o117)
     try:
         server = await asyncio.start_unix_server(

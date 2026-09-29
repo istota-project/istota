@@ -4,7 +4,7 @@
 # audit-log key and the suffix of the socket path it listens on.
 #
 # Tokens are read from the EnvironmentFile and held only in this process's
-# memory — the per-user devbox container never sees them. The proxy
+# memory until an authenticated container client requests one. The proxy
 # socket lives under /var/run/{namespace}/<user>/sock; the compose
 # template bind-mounts that per-user directory (not the file) into the
 # container at /run/istota-cred so a daemon restart can recreate the
@@ -13,9 +13,8 @@
 [Unit]
 Description=Istota devbox credential proxy ({{ istota_namespace }}, user %i)
 After=network.target
-# Keep this loose — the unit doesn't require docker to be up; the container
-# will fail to start if the socket file doesn't yet exist, which is the
-# cleaner failure mode.
+# The listener may start before Docker. Each connection checks the current
+# container identity through the local Docker CLI and refuses if unavailable.
 
 [Service]
 Type=simple
@@ -28,7 +27,8 @@ ExecStart={{ istota_home }}/.venv/bin/python -m {{ istota_package }}.devbox_prox
 Restart=on-failure
 RestartSec=5s
 # Limit blast radius. The proxy needs to read tokens, write to its socket
-# dir, and write to the audit log — nothing else.
+# dir, inspect the local container through Docker, read host /proc cgroups,
+# and write to the audit log.
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true

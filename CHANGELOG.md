@@ -55,6 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tasks can no longer request another user’s forge credentials directly from their devbox credential socket. The proxy now checks that the caller belongs to that user’s running container and refuses access when it cannot verify the container.
+
+- Credential vaults now require operator consent on deployments where several users share an unsandboxed runtime. Setup is refused, existing vaults stop syncing, and new tasks cannot use cached vault credentials until the operator enables isolation or accepts the exposure.
+
 - Asking another user a WhatsApp question from a web chat room that is also bound to Talk no longer fails with `unsupported_origin`. The Talk participant check now runs in the daemon, before the approval preview is shown, instead of in the skill process, which could not reach Talk.
 
 - A task that uses shared credentials across several commands no longer runs out of credential fetches partway through. The prompt now says how many fetches a task may make and tells the model to put related commands in one `istota-credential run`, instead of one call per command, where every call fetched the same credentials again.

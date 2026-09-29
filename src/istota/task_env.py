@@ -91,7 +91,10 @@ def _vault_credentials(config: Config, user_id: str) -> dict[str, str]:
         return {}
     try:
         from . import secrets_store
-        from .secrets_vault import VAULT_ENTRY_SERVICE
+        from .secrets_vault import VAULT_ENTRY_SERVICE, vault_isolation_refusal
+
+        if vault_isolation_refusal(config, user_id):
+            return {}
 
         return secrets_store.get_service_secrets(
             Path(config.db_path), user_id, VAULT_ENTRY_SERVICE,

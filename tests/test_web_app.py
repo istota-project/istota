@@ -2891,6 +2891,59 @@ class TestTheVaultWriteEndpoints:
         _patch_app(self._config(tmp_path, **kw))
         return await self._login_alice(client, app)
 
+    @pytest.mark.parametrize("allowed", [False, True])
+    async def test_multi_user_vault_opt_in(self, tmp_path, client, app, monkeypatch, allowed):
+        from istota import secrets_store
+
+        config = self._config(tmp_path, vault_path="config/vault.kdbx")
+        config.users["bob"] = UserConfig()
+        config.security.allow_unsandboxed_multi_user_vaults = allowed
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)
+        _patch_app(config)
+        cookies = await self._login_alice(client, app)
+        response = await client.put(
+            "/istota/api/settings/vault/passphrase", cookies=cookies, headers=ORIGIN,
+            json={"generate": True},
+        )
+        assert response.status_code == (200 if allowed else 403)
+        assert secrets_store.secret_exists(
+            config.db_path, "alice", "vault", "passphrase",
+        ) is allowed
+        if not allowed:
+            assert "allow_unsandboxed_multi_user_vaults" in response.json()["detail"]
+            status = await client.get("/istota/api/settings/vault", cookies=cookies)
+            assert "allow_unsandboxed_multi_user_vaults" in status.json()["problem"]
+
+    @pytest.mark.parametrize("allowed", [False, True])
+    async def test_generic_vault_policy(self, tmp_path, client, app, monkeypatch, allowed):
+        from istota import secrets_store
+
+        config = self._config(tmp_path)
+        config.users["bob"] = UserConfig()
+        config.security.allow_unsandboxed_multi_user_vaults = allowed
+        monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)
+        _patch_app(config)
+        cookies = await self._login_alice(client, app)
+        endpoint = "/istota/api/settings/secrets/vault/passphrase"
+        value = "generic-vault-fixture-passphrase-" * 2
+        response = await client.put(
+            endpoint, cookies=cookies, headers=ORIGIN, json={"value": value},
+        )
+        assert response.status_code == (200 if allowed else 403)
+        assert secrets_store.secret_exists(config.db_path, "alice", "vault", "passphrase") is allowed
+        if allowed:
+            weak = await client.put(
+                endpoint, cookies=cookies, headers=ORIGIN, json={"value": "short"},
+            )
+            assert weak.status_code == 400
+            assert secrets_store.get_secret(config.db_path, "alice", "vault", "passphrase") == value
+        config.security.allow_unsandboxed_multi_user_vaults = False
+        cleared = await client.put(
+            endpoint, cookies=cookies, headers=ORIGIN, json={"value": ""},
+        )
+        assert cleared.status_code == 200
+        assert not secrets_store.secret_exists(config.db_path, "alice", "vault", "passphrase")
+
     # -- the ordinary case ------------------------------------------------
 
     def _folder(self, tmp_path, *names):
