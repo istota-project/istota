@@ -43,12 +43,15 @@ def _dispatch(args):
             if row is None or row["kind"] != "relay_question":
                 raise RequestError("request_unavailable")
         # Relay content is readable only from a verified private conversation.
-        # The Talk half is a live call from this process; ISSUE-567's local
-        # participant store is what will replace it.
+        # The Talk half is a live call from this process, authenticated by the
+        # app password the manifest has the proxy inject (ISSUE-568).
         origin = message_relays.private_origin(conn, config, actor_user_id=actor,
                                                surface=owned_task["source_type"],
                                                conversation_token=owned_task["conversation_token"])
-        run_coro(message_relays.verify_private_audience(config, actor_user_id=actor, origin=origin))
+        try:
+            run_coro(message_relays.verify_private_audience(config, actor_user_id=actor, origin=origin))
+        except message_relays.AudienceUnavailable:
+            raise RequestError("audience_unavailable") from None
         with write_transaction(conn):
             message_relays.validate_origin(conn, config, actor_user_id=actor, origin=origin)
             if args.command == "list":

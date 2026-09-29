@@ -275,7 +275,11 @@ async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -
     client = TalkClient(config)
     try:
         participants = await client.get_participants(origin["talk_ref"])
-    except Exception:
+    except Exception as exc:
+        # The class only: a message can carry the request URL. Without this a
+        # lost credential and an outage read the same (ISSUE-568).
+        logger.warning("relay audience check could not fetch Talk participants: %s",
+                       type(exc).__name__)
         raise AudienceUnavailable() from None
     finally:
         await client.aclose()

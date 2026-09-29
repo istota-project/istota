@@ -34,6 +34,7 @@ Two variables belong to the daemon's own environment (`build_stripped_env`) rath
 | `NC_URL` | `config.nextcloud.url` |
 | `NC_USER` | `config.nextcloud.username` |
 | `NC_PASS` | `config.nextcloud.app_password` |
+| `ISTOTA_NEXTCLOUD_APP_PASSWORD` | `config.nextcloud.app_password`, handed to the relay skill only, which reads it back through `load_config` |
 | `ISTOTA_WORKSPACE_PATH` | `config.workspace_path` (scoped to user dir for non-admin) |
 | `NEXTCLOUD_MOUNT_PATH` | `config.workspace_path` (compatibility alias) |
 
@@ -143,7 +144,7 @@ There is deliberately **no** `ISTOTA_DEVBOX_EXEC_TIMEOUT`: the transport imposes
 When `skill_proxy_enabled = true`, every env var declared with `sensitive: true` in any skill manifest is stripped from the subprocess environment and injected server-side by the proxy. The set is computed at task time by `derive_credential_set(skill_index)`. Today's set:
 
 - `CALDAV_PASSWORD`
-- `NC_PASS`
+- `NC_PASS`, and `ISTOTA_NEXTCLOUD_APP_PASSWORD` (the same value, for the relay skill)
 - `SMTP_PASSWORD`
 - `IMAP_PASSWORD`
 - `KARAKEEP_API_KEY`

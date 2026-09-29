@@ -4,6 +4,7 @@ triggers: [ask, relay, question for, ask someone, ask another user]
 description: Ask another user of this deployment an approved question and receive their explicit reply
 cli: true
 companion_skills: [sensitive_actions, untrusted_input]
+env: [{"var":"ISTOTA_NEXTCLOUD_APP_PASSWORD","from":"config","config_path":"nextcloud.app_password","sensitive":true}]
 ---
 # Relay questions
 
@@ -30,6 +31,8 @@ Use `istota-skill relay list` or `istota-skill relay status REQUEST_ID` from a v
 - `recipient_not_on_whatsapp` / `recipient_not_on_sms`: the recipient has no WhatsApp or SMS binding for the `--via` you named.
 - `whatsapp_unavailable` / `sms_unavailable`: that transport is not enabled here.
 - `recipient_has_no_private_room`: the recipient has no default room only they belong to. No room is created for a question.
+- `unsupported_origin` from `list` or `status`: this conversation is not a private one between the user and you, so relay content cannot be shown here.
+- `audience_unavailable` from `list` or `status`: the Talk participant list could not be fetched, so privacy could not be checked. Say so; do not report the room as shared. Try again later rather than in a loop.
 
 ## Direct user controls
 
