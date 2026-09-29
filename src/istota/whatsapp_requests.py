@@ -432,6 +432,11 @@ async def drain_requests(config, *, limit: int = 20) -> int:
             await asyncio.to_thread(_finish_request, config, row["id"], reason=str(exc))
         else:
             await asyncio.to_thread(_finish_request, config, row["id"], record=record)
+    from .message_relays import reconcile_reply_candidates
+    from .transport.whatsapp.webhook import deliver_event_responses
+
+    replies = await asyncio.to_thread(reconcile_reply_candidates, config, limit=limit)
+    await deliver_event_responses(config, replies)
     return len(rows)
 
 

@@ -3605,6 +3605,8 @@ async def cmd_relay(ctx: CommandContext):
         except RequestError:
             return "Relay commands require a verified private conversation."
         words = ctx.args.split()
+        if words and words[0] == "reply":
+            return "Send !relay reply RELAY_ID <answer> from your bound WhatsApp conversation."
         if words == ["permissions"]:
             allowed = message_relays.list_permissions(ctx.conn, actor_user_id=ctx.user_id)
             return "Allowed senders: " + (", ".join(row["asker_user_id"] for row in allowed) or "none")

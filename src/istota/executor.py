@@ -6466,6 +6466,16 @@ You have access to:
     # carries its own leading and trailing newlines from the days when they sat
     # between fixed neighbours, and concatenating them raw now leaves a dropped
     # block's separators behind. One blank line between whatever is present.
+    relay_context = ""
+    if task.source_type == "whatsapp":
+        from .message_relays import recipient_context
+
+        if conn is not None:
+            relay_context = recipient_context(conn, actor_user_id=task.user_id, task_id=task.id)
+        elif config.db_path.exists():
+            with db.get_db(config.db_path) as relay_conn:
+                relay_context = recipient_context(relay_conn, actor_user_id=task.user_id, task_id=task.id)
+
     user_blocks = [
         memory_section,
         knowledge_facts_section,
@@ -6475,6 +6485,7 @@ You have access to:
         playbooks_section,
         context_section,
         confirmation_section,
+        relay_context,
     ]
     user = "".join(
         block.strip("\n") + "\n\n" for block in user_blocks if block.strip()

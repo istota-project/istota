@@ -256,3 +256,218 @@ def close_task_questions(conn, task_id: int, *, reason: str = "cancelled") -> No
         ).fetchall()
         for row in rows:
             _close_relay(conn, row[0], state="expired" if reason == "confirmation_expired" else "cancelled", reason=reason)
+
+
+# Replies never enter command or confirmation dispatch again, including when
+# correlation fails. These fixed notices carry no other user's content.
+_REPLY_NOTICES = {
+    "accepted": "Your answer was saved for return to the asker.",
+    "unavailable": "Answer not forwarded: relay unavailable.",
+    "closed": "Answer not forwarded: this relay is closed.",
+    "expired": "Answer not forwarded: this relay has expired.",
+    "answered": "Answer not forwarded: this relay already has an answer.",
+    "empty": "Answer not forwarded: send a non-empty text reply.",
+    "oversized": "Answer not forwarded: send a shorter explicit text reply.",
+    "media": "Answer not forwarded: send a separate text-only reply to share an answer.",
+    "unmatched": "Answer not forwarded: the quoted question could not be matched. Use !relay reply RELAY_ID <answer> to try again.",
+}
+
+
+def answer_body(relay, text: str) -> str:
+    """One stable attribution header outside the exact authorized answer."""
+    from .confirmations import flatten
+
+    return f"Answer from {flatten(relay['recipient_user_id'])}:\n\n{text}"
+
+
+def _answer_fits(config, relay, text: str) -> bool:
+    from .transport.whatsapp.outbound import WHATSAPP_TEXT_LIMIT
+    from .transport.sms.outbound import _gsm7_units, _utf16_units, _segment_count
+
+    body = answer_body(relay, text)
+    if len(body) > WHATSAPP_TEXT_LIMIT:
+        return False
+    origin = json.loads(relay["origin"])
+    if origin["surface"] == "sms":
+        gsm = _gsm7_units(body)
+        encoding = "gsm7" if gsm is not None else "ucs2"
+        units = gsm if gsm is not None else _utf16_units(body)
+        return _segment_count(units, encoding) <= config.sms.max_segments
+    return True
+
+
+def _quoted_relay(conn, *, actor_user_id: str, provider: str, quoted_id: str):
+    # Recognize closed or stale-binding questions too, so YES can never fall
+    # through to a different action. Acceptance checks the live binding below.
+    return conn.execute(
+        "SELECT r.* FROM message_relays r JOIN sent_whatsapp s "
+        "ON s.logical_key='relay-question:' || r.id "
+        "WHERE s.meta_message_id=? AND s.user_id=? AND r.recipient_user_id=? AND r.provider=?",
+        (quoted_id, actor_user_id, actor_user_id, provider),
+    ).fetchone()
+
+
+def accept_reply(conn, config, *, actor_user_id: str, relay_id: str,
+                 provider: str, inbound_id: str, text: str) -> str:
+    """Claim the first authorized answer; caller owns dedup and task creation."""
+    from .whatsapp_requests import binding_fingerprint
+
+    relay = conn.execute("SELECT * FROM message_relays WHERE id=? AND recipient_user_id=?",
+                         (relay_id, actor_user_id)).fetchone()
+    if relay is None:
+        return "unavailable"
+    if relay["state"] == "answered":
+        return "answered"
+    if relay["state"] == "expired":
+        return "expired"
+    if relay["state"] not in ("sending", "waiting", "uncertain"):
+        return "closed"
+    if not relay["expires_at"] or conn.execute(
+        "SELECT ? <= datetime('now')", (relay["expires_at"],),
+    ).fetchone()[0]:
+        _close_relay(conn, relay_id, state="expired", reason="expired")
+        return "expired"
+    binding = db.get_whatsapp_binding(conn, actor_user_id)
+    if (not config.whatsapp.enabled or provider != config.whatsapp.provider
+            or relay["provider"] != provider or binding is None or binding.provider != provider
+            or binding_fingerprint(provider, binding) != relay["binding_fingerprint"]
+            or actor_user_id not in config.users
+            or not has_permission(conn, actor_user_id=actor_user_id, asker_user_id=relay["asker_user_id"])):
+        return "unavailable"
+    if not text.strip():
+        return "empty"
+    if not _answer_fits(config, relay, text):
+        return "oversized"
+    changed = conn.execute(
+        """UPDATE message_relays SET state='answered',answer_text=?,inbound_answer_id=?,
+           answered_at=datetime('now'),return_state='pending',
+           content_expires_at=datetime('now',?)
+           WHERE id=? AND recipient_user_id=? AND state IN ('sending','waiting','uncertain')
+           AND expires_at>datetime('now')""",
+        (text, inbound_id, f"+{CONTENT_RETENTION_DAYS} days", relay_id, actor_user_id),
+    ).rowcount
+    return "accepted" if changed else "expired"
+
+
+def _context(relay, outcome: str) -> str:
+    from .untrusted import frame_untrusted
+
+    content = _REPLY_NOTICES[outcome]
+    if relay is not None and relay["question"] is not None:
+        content += (f"\nQuestion from {relay['asker_display']} ({relay['asker_user_id']}):"
+                    f"\n{relay['question']}")
+    return frame_untrusted(content, "RELAY CONTEXT")
+
+
+def recipient_context(conn, *, actor_user_id: str, task_id: int) -> str:
+    """Read only the recipient's associated question, never the asker's task."""
+    relay = conn.execute(
+        "SELECT r.question,r.asker_display,r.asker_user_id FROM message_relays r "
+        "JOIN tasks t ON t.id=r.recipient_task_id "
+        "WHERE r.recipient_task_id=? AND r.recipient_user_id=? AND t.user_id=?",
+        (task_id, actor_user_id, actor_user_id),
+    ).fetchone()
+    return _context(relay, "accepted") if relay else ""
+
+
+def _reply_task(conn, config, *, actor_user_id: str, inbound_id: str, text: str,
+                relay, outcome: str, attachments=None):
+    from .transport._types import IncomingMessage
+    from .transport.ingest import ingest_message
+    from .transport.whatsapp import whatsapp_conversation_token
+    from .transport.whatsapp.webhook import WhatsAppEventResult, MEDIA_ONLY_PROMPT
+
+    task_id = ingest_message(conn, config, IncomingMessage(
+        user_id=actor_user_id, text=text if text else MEDIA_ONLY_PROMPT,
+        source_type="whatsapp", surface="whatsapp",
+        channel_token=whatsapp_conversation_token(actor_user_id), output_target="whatsapp",
+        attachments=attachments or [], mirror_to_room=False, queue="foreground",
+        # Only one task owns the accepted association. Rejected replies retain
+        # a bounded snapshot of their own question/outcome in the user half.
+        reply_to_content=None if outcome == "accepted" else _context(relay, outcome),
+    ))
+    if task_id is None:
+        raise RuntimeError("relay recipient task was not created")
+    if outcome == "accepted":
+        conn.execute("UPDATE message_relays SET recipient_task_id=? WHERE id=? AND recipient_user_id=?",
+                     (task_id, relay["id"], actor_user_id))
+    disposition = "relay_answer" if outcome == "accepted" else "relay_rejected"
+    conn.execute("UPDATE processed_whatsapp SET task_id=?,disposition=? WHERE message_id=? AND user_id=?",
+                 (task_id, disposition, inbound_id, actor_user_id))
+    return WhatsAppEventResult(disposition, user_id=actor_user_id, task_id=task_id,
+                              response_text=_REPLY_NOTICES[outcome],
+                              response_logical_key=f"relay-reply:{inbound_id}")
+
+
+def match_whatsapp_reply(conn, config, *, actor_user_id: str, event):
+    """Handle only explicit relay replies, before bare YES/NO or commands."""
+    import re
+    from .transport.whatsapp.webhook import WhatsAppEventResult
+
+    text = event.text or ""
+    command = re.match(r"^\s*!relay\s+reply(?:\s|$)", text, re.IGNORECASE)
+    relay = None
+    answer = text
+    if command:
+        # Consume exactly one separator after the id, preserving the rest.
+        parsed = re.match(r"^\s*!relay\s+reply +([^\s]+)(?: (.*))?$", text, re.IGNORECASE | re.DOTALL)
+        if parsed:
+            relay = conn.execute("SELECT * FROM message_relays WHERE id=? AND recipient_user_id=?",
+                                 (parsed[1], actor_user_id)).fetchone()
+            answer = parsed[2] or ""
+    elif event.reply_to_message_id:
+        relay = _quoted_relay(conn, actor_user_id=actor_user_id, provider=config.whatsapp.provider,
+                              quoted_id=event.reply_to_message_id)
+    else:
+        return None
+    if event.media is not None or event.message_type != "text":
+        # A caption is never consent, even when its words are a relay command.
+        if relay is None and not command:
+            return None
+        paths = [event.media.staged_path] if event.media and event.media.staged_path and not event.media.error else []
+        return _reply_task(conn, config, actor_user_id=actor_user_id, inbound_id=event.message_id,
+                           text=text, relay=relay, outcome="media", attachments=paths)
+    if relay is None and not command:
+        stored = store_reply_candidate(conn, actor_user_id=actor_user_id, provider=config.whatsapp.provider,
+                                       inbound_id=event.message_id, quoted_id=event.reply_to_message_id, text=text)
+        if stored == "no_inflight":
+            return None
+        if stored == "pending":
+            return WhatsAppEventResult("relay_candidate", user_id=actor_user_id)
+        outcome = "unmatched"
+    elif relay is None:
+        outcome = "unavailable"
+    else:
+        outcome = accept_reply(conn, config, actor_user_id=actor_user_id, relay_id=relay["id"],
+                               provider=config.whatsapp.provider, inbound_id=event.message_id, text=answer)
+    return _reply_task(conn, config, actor_user_id=actor_user_id, inbound_id=event.message_id,
+                       text=answer, relay=relay, outcome=outcome)
+
+
+def reconcile_reply_candidates(config, *, limit: int = 20) -> list:
+    """Bounded restart-safe correlation; no confirmation/command replay."""
+    results = []
+    with db.get_db(config.db_path) as conn:
+        with write_transaction(conn):
+            candidates = conn.execute(
+                "SELECT *,expires_at<=datetime('now') AS expired FROM relay_reply_candidates "
+                "ORDER BY received_at,inbound_id LIMIT ?", (max(0, min(limit, 100)),),
+            ).fetchall()
+            for candidate in candidates:
+                actor = candidate["recipient_user_id"]
+                relay = _quoted_relay(conn, actor_user_id=actor, provider=candidate["provider"],
+                                      quoted_id=candidate["quoted_id"])
+                if relay is None and not candidate["expired"]:
+                    continue
+                dedup = conn.execute("SELECT task_id FROM processed_whatsapp WHERE message_id=? AND user_id=?",
+                                     (candidate["inbound_id"], actor)).fetchone()
+                if dedup is not None and dedup["task_id"] is None:
+                    outcome = "unmatched" if candidate["expired"] else accept_reply(
+                        conn, config, actor_user_id=actor, relay_id=relay["id"], provider=candidate["provider"],
+                        inbound_id=candidate["inbound_id"], text=candidate["answer_text"],
+                    )
+                    results.append(_reply_task(conn, config, actor_user_id=actor, inbound_id=candidate["inbound_id"],
+                                               text=candidate["answer_text"], relay=relay, outcome=outcome))
+                conn.execute("DELETE FROM relay_reply_candidates WHERE provider=? AND inbound_id=?",
+                             (candidate["provider"], candidate["inbound_id"]))
+    return results
