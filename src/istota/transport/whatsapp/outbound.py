@@ -1670,6 +1670,9 @@ def apply_delivery_event(
     ).fetchone()
     from ...message_relays import reconcile_question_delivery, reconcile_return_delivery
 
+    from ...whatsapp_requests import reconcile_self_send_delivery
+
+    reconcile_self_send_delivery(conn, logical_key=updated["logical_key"], status=updated["status"], error_code=updated["error_code"])
     reconcile_question_delivery(conn, logical_key=updated["logical_key"], status=updated["status"])
     reconcile_return_delivery(conn, logical_key=updated["logical_key"], status=updated["status"], message_id=updated["meta_message_id"])
     record = _record(updated)

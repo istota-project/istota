@@ -248,7 +248,9 @@ async def verify_origin(config, *, actor_user_id: str, origin: dict) -> None:
         if participant.get("actorType") != "users" or not participant.get("actorId"):
             raise RequestError("unsupported_origin")
         actors.add(participant["actorId"])
-    if actors != {actor_user_id, config.nextcloud.username}:
+    from .transport.talk import _bot_actor_ids
+
+    if actor_user_id not in actors or len(actors) != 2 or not (actors - {actor_user_id}) <= _bot_actor_ids(config):
         raise RequestError("unsupported_origin")
 
 

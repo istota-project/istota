@@ -405,6 +405,24 @@ def _finish_request(config, request_id: str, *, record=None, reason: str | None 
     push_off_surface(config, notice, exclude_surface="whatsapp", reference_prefix="whatsapp-request")
 
 
+def reconcile_self_send_delivery(conn, *, logical_key: str, status: str, error_code=None) -> None:
+    """Follow an applied ledger receipt without admitting another provider attempt."""
+    if not logical_key.startswith("skill-whatsapp:"):
+        return
+    if status == "failed":
+        state, reason = "failed", error_code or "delivery_failed"
+    elif status in ("accepted", "sent", "delivered", "read"):
+        state, reason = "sent", None
+    else:
+        return
+    conn.execute(
+        "UPDATE whatsapp_skill_requests SET state=?,error_code=?,closed_at=datetime('now'),"
+        "updated_at=datetime('now') WHERE id=? AND kind='self_send' "
+        "AND state IN ('sending','sent','uncertain')",
+        (state, reason, logical_key.removeprefix("skill-whatsapp:")),
+    )
+
+
 def _pending_requests(config, limit: int) -> list[dict]:
     with db.get_db(config.db_path) as conn:
         return [dict(row) for row in conn.execute(
@@ -534,7 +552,10 @@ def park_question(conn, config, *, task) -> dict | None:
             return None
         current = db.get_task(conn, task.id)
         cancelled = conn.execute("SELECT cancel_requested FROM tasks WHERE id=?", (task.id,)).fetchone()
-        if current is None or current.status != "running" or (cancelled and cancelled[0]):
+        if current is not None and current.status == "running" and cancelled and cancelled[0]:
+            db.cancel_task(conn, task.id)
+            return None
+        if current is None or current.status != "running":
             message_relays.close_task_questions(conn, task.id)
             return None
         relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
@@ -596,6 +617,9 @@ async def present_question(config, *, task, success: bool) -> bool:
         with db.get_db(config.db_path) as conn:
             parked = park_question(conn, config, task=task)
             if parked is None:
+                current = db.get_task(conn, task.id)
+                if current is not None and current.status == "cancelled":
+                    raise RequestError("cancelled")
                 return True
             confirmation.write(conn, task.user_id, task_id=task.id,
                                title="Private relay question awaiting approval",
@@ -628,16 +652,17 @@ async def present_question(config, *, task, success: bool) -> bool:
             if transport is None:
                 raise RequestError("unsupported_origin")
             await transport.deliver(origin["channel"], parked["preview"], task=task,
-                                    reference_id=f"confirmation-task:{task.id}")
+                                    reference_id=f"relay-preview:{parked['id']}")
             writer.emit("confirmation", {"prompt": "Private relay question awaiting approval."})
         writer.emit("done", {"stop_reason": "completed", "duration_seconds": 0})
         writer.finish()
-    except RequestError:
+    except RequestError as exc:
         with db.get_db(config.db_path) as conn:
             db.cancel_task(conn, task.id)
             confirmation.resolve_for_task(conn, task.user_id, task.id, by="system")
-            task_alert.write(conn, task.user_id, dedup_key=f"relay-preview:{row['id']}",
-                             title="Relay question cancelled", body="The private origin is no longer available.")
+            if str(exc) != "cancelled":
+                task_alert.write(conn, task.user_id, dedup_key=f"relay-preview:{row['id']}",
+                                 title="Relay question cancelled", body="The private origin is no longer available.")
         writer = EventWriter(task.id, config.db_path)
         writer.emit("cancelled")
         writer.emit("done", {"stop_reason": "cancelled", "duration_seconds": 0})
