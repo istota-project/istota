@@ -18,10 +18,10 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from . import db
+from . import db, user_profiles
 from .whatsapp_requests import RequestError, binding_fingerprint, text_hash
 
-KINDS = ("room", "whatsapp", "sms")
+KINDS = tuple(value for value in user_profiles.RELAY_DELIVERY_VALUES if value)
 
 _LABEL_MAX = 80
 
@@ -37,13 +37,9 @@ def display_name(config, user_id: str) -> str:
     return label_text((user.display_name if user else "") or user_id)
 
 
-def _stored_preference(conn: sqlite3.Connection, recipient_user_id: str) -> str:
-    # Read the column directly: `UserProfile` gains the field with the settings
-    # work, and the resolver must honour a value however it was written.
-    row = conn.execute(
-        "SELECT relay_delivery FROM user_profiles WHERE user_id=?", (recipient_user_id,),
-    ).fetchone()
-    value = row[0] if row is not None else ""
+def _stored_preference(conn: sqlite3.Connection, config, recipient_user_id: str) -> str:
+    profile = user_profiles.get_profile(config.db_path, recipient_user_id, conn=conn)
+    value = profile.relay_delivery if profile is not None else ""
     return value if value in KINDS else ""
 
 
@@ -107,7 +103,7 @@ def resolve_destination(conn: sqlite3.Connection, config, *, recipient_user_id: 
     """
     if requested is not None and requested not in KINDS:
         raise RequestError("invalid_via")
-    preference = _stored_preference(conn, recipient_user_id)
+    preference = _stored_preference(conn, config, recipient_user_id)
     if preference:
         try:
             return _RESOLVERS[preference](conn, config, recipient_user_id)
@@ -116,6 +112,26 @@ def resolve_destination(conn: sqlite3.Connection, config, *, recipient_user_id: 
     elif requested:
         return _RESOLVERS[requested](conn, config, recipient_user_id)
     return _room(conn, config, recipient_user_id)
+
+
+def relay_delivery_options(conn: sqlite3.Connection, config, *, user_id: str) -> list[dict]:
+    """Which `relay_delivery` values would reach `user_id` right now.
+
+    Each kind is asked of the resolver that `resolve_destination` would run for
+    it, so the settings page cannot offer a destination the resolver refuses or
+    grey out one it would use. '' is always available: it defers to the asker
+    and ends at the default room, whose own refusal the room entry reports.
+    """
+    options = [{"value": "", "available": True}]
+    for kind in KINDS:
+        try:
+            _RESOLVERS[kind](conn, config, user_id)
+        except RequestError:
+            available = False
+        else:
+            available = True
+        options.append({"value": kind, "available": available})
+    return options
 
 
 def check_room(conn: sqlite3.Connection, config, *, recipient_user_id: str, fingerprint: str) -> dict:

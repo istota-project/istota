@@ -20,8 +20,7 @@ def _bob_room(config, name='assistant'):
 
 def _prefer(config, value):
     user_profiles.ensure_profile(config.db_path, 'bob', display_name='Bob')
-    with db.get_db(config.db_path) as conn:
-        conn.execute("UPDATE user_profiles SET relay_delivery=? WHERE user_id='bob'", (value,))
+    user_profiles.update_profile(config.db_path, 'bob', relay_delivery=value)
 
 
 def _sms(config, number='+15557654321'):
@@ -235,3 +234,50 @@ class TestTheHoldGate:
         for via in (None, 'room', 'sms', 'whatsapp'):
             with pytest.raises(requests.RequestError, match='recipient_unavailable'):
                 hold(setup, via=via)
+
+
+def options(config, user_id='bob'):
+    with db.get_db(config.db_path) as conn:
+        found = dest.relay_delivery_options(conn, config, user_id=user_id)
+    return {entry['value']: entry['available'] for entry in found}
+
+
+class TestTheSettingsOptions:
+    """`relay_delivery_options` is the resolver asked kind by kind, not a copy of it."""
+
+    def test_every_value_is_offered_in_order(self, setup):
+        config = setup[0]
+        with db.get_db(config.db_path) as conn:
+            found = dest.relay_delivery_options(conn, config, user_id='bob')
+        assert [entry['value'] for entry in found] == list(user_profiles.RELAY_DELIVERY_VALUES)
+
+    def test_availability_follows_what_the_resolver_would_accept(self, setup):
+        config = setup[0]
+        # Bob has a WhatsApp binding from the fixture, no room and no SMS.
+        assert options(config) == {'': True, 'room': False, 'whatsapp': True, 'sms': False}
+        _bob_room(config)
+        _sms(config)
+        assert options(config) == {'': True, 'room': True, 'whatsapp': True, 'sms': True}
+
+    def test_a_surface_switched_off_greys_out_even_with_a_binding(self, setup):
+        config = setup[0]
+        _sms(config)
+        config.sms.enabled = False
+        config.whatsapp.enabled = False
+        found = options(config)
+        assert found['whatsapp'] is False and found['sms'] is False
+
+    def test_a_user_with_no_binding_cannot_pick_whatsapp(self, setup):
+        config = setup[0]
+        config.users['carol'] = UserConfig(display_name='Carol')
+        assert options(config, 'carol')['whatsapp'] is False
+
+    def test_an_available_option_is_one_the_resolver_then_honours(self, setup):
+        config = setup[0]
+        _bob_room(config)
+        _sms(config)
+        for kind, available in options(config).items():
+            if not kind or not available:
+                continue
+            _prefer(config, kind)
+            assert resolve(config)['kind'] == kind

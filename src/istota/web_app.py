@@ -10954,6 +10954,9 @@ _PROFILE_EDITABLE_FIELDS: dict[str, dict] = {
     "external_turn_display":  {
         "type": "enum", "values": user_profiles.EXTERNAL_TURN_DISPLAY_VALUES,
     },
+    "relay_delivery":         {
+        "type": "enum", "values": user_profiles.RELAY_DELIVERY_VALUES,
+    },
 }
 
 
@@ -11645,6 +11648,23 @@ def _coerce_profile_value(
     raise ValueError(f"unsupported field type: {t}")  # pragma: no cover
 
 
+def _relay_delivery_options(user_id: str) -> list[dict]:
+    """Which relay-question destinations reach this user, from the resolver's own checks.
+
+    A failure to answer greys out every destination but the default, rather
+    than failing the whole settings page over one control.
+    """
+    from .relay_destinations import relay_delivery_options
+
+    try:
+        with _db.get_db(_config.db_path) as conn:
+            return relay_delivery_options(conn, _config, user_id=user_id)
+    except Exception:
+        logger.warning("relay delivery options unavailable user=%s", user_id, exc_info=True)
+        return [{"value": value, "available": value == ""}
+                for value in user_profiles.RELAY_DELIVERY_VALUES]
+
+
 @api_router.get("/settings/profile")
 async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
     """Return the current user's profile fields (no plaintext secrets)."""
@@ -11679,6 +11699,8 @@ async def settings_profile(user: dict = Depends(_require_api_auth)) -> dict:
         "briefing_email_html": profile.briefing_email_html,
         "timezone_follow_location": profile.timezone_follow_location,
         "external_turn_display": profile.external_turn_display or "collapsed",
+        "relay_delivery": profile.relay_delivery,
+        "relay_delivery_options": _relay_delivery_options(user["username"]),
         "delivery_surfaces": _registered_delivery_surfaces(),
         "web_rooms": _user_web_rooms(user["username"]),
         # Which of this profile's own web pins are dead, asked of the server

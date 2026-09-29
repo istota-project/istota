@@ -37,6 +37,7 @@ function profile(routing: Record<string, string> = {}): UserProfile {
     briefing_email_html: true,
     timezone_follow_location: false,
     external_turn_display: 'collapsed',
+    relay_delivery: '',
     delivery_surfaces: ['talk', 'email', 'ntfy', 'web'],
     web_rooms: [],
     talk_rooms: [

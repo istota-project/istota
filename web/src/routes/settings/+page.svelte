@@ -23,6 +23,7 @@
     AVATAR_ACCEPT,
     type ServiceCard as ServiceCardData,
     type UserProfile,
+    type RelayDelivery,
     type NextcloudTokenStatus,
     type VaultStatus,
   } from '$lib/api';
@@ -242,6 +243,7 @@
         profile.routing = profile.routing || {};
         profile.default_destination = profile.default_destination || 'talk';
         profile.default_room = profile.default_room || '';
+        profile.relay_delivery = profile.relay_delivery || '';
       }
       initialProfileJson = profile ? JSON.stringify(profile) : '';
       allModules = modResp.modules;
@@ -446,6 +448,40 @@
     { value: 'collapsed', label: 'Sender, subject and first line (default)' },
     { value: 'hidden', label: 'Sender and subject only' },
   ];
+
+  // Relay questions from other users. The server says which destinations would
+  // reach this user now, from the relay resolver's own checks; an unavailable
+  // one is shown disabled rather than hidden, so the reader can see it exists
+  // and why they cannot pick it. The current value is never disabled, so a
+  // preference whose binding has since gone stays visible and changeable.
+  const RELAY_DELIVERY_LABELS: Record<RelayDelivery, string> = {
+    '': "Asker's choice (default room)",
+    room: 'My default room',
+    whatsapp: 'WhatsApp',
+    sms: 'SMS',
+  };
+
+  function relayDeliveryOptions(p: UserProfile): SelectOption[] {
+    const current = p.relay_delivery || '';
+    const offered = p.relay_delivery_options ?? [];
+    return (Object.keys(RELAY_DELIVERY_LABELS) as RelayDelivery[]).map((value) => {
+      const available = value === '' || offered.some((o) => o.value === value && o.available);
+      return {
+        value,
+        label: available
+          ? RELAY_DELIVERY_LABELS[value]
+          : `${RELAY_DELIVERY_LABELS[value]} (not set up)`,
+        disabled: !available && value !== current,
+      };
+    });
+  }
+
+  function relayDeliveryUnavailable(p: UserProfile): string[] {
+    const offered = p.relay_delivery_options ?? [];
+    return offered
+      .filter((o) => o.value !== '' && !o.available)
+      .map((o) => RELAY_DELIVERY_LABELS[o.value]);
+  }
 
   // Default destination dropdown: every surface, no no-op option (there is
   // always a default), plus the current value if it's a custom descriptor.
@@ -653,6 +689,7 @@
         routing: profile.routing || {},
         timezone_follow_location: profile.timezone_follow_location,
         external_turn_display: profile.external_turn_display || 'collapsed',
+        relay_delivery: profile.relay_delivery || '',
       };
       // Send only what changed on this page. The server writes each key it is
       // given, so sending the whole form makes an untouched field overwrite
@@ -971,6 +1008,26 @@
               />
             {/if}
           </div>
+        </SettingsField>
+        <SettingsField
+          labelled={false}
+          label="Questions from other users"
+          hint="Where a question another user asks you through Istota reaches you. Your choice here overrides theirs. If the one you pick stops working, questions go to your default room."
+        >
+          <Select
+            value={profile.relay_delivery || ''}
+            options={relayDeliveryOptions(profile)}
+            ariaLabel="Questions from other users"
+            fullWidth
+            onValueChange={(v) => {
+              if (profile) profile.relay_delivery = (v || '') as RelayDelivery;
+            }}
+          />
+          {#if relayDeliveryUnavailable(profile).length > 0}
+            <p class="hint">
+              Not set up for your account: {relayDeliveryUnavailable(profile).join(', ')}.
+            </p>
+          {/if}
         </SettingsField>
         <SettingsField
           labelled={false}
