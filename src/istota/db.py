@@ -377,6 +377,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     lose — the upgraded ones — and passes on a fresh install, which is how
     ISSUE-261 shipped green and killed inbound email for two days.
     """
+    _add_columns(conn, "message_relays", {"return_claimed_at": "TEXT"})
     # Tasks table migrations
     _add_columns(conn, "tasks", {
         "whatsapp_confirmation_request_id": "TEXT",
@@ -4693,6 +4694,7 @@ def add_message(
     reply_to_message_id: int | None = None,
     author_user_id: str | None = None,
     author_label: str | None = None,
+    delivery_reference: str | None = None,
 ) -> int:
     """Append a message to a room's canonical transcript. Returns the new id.
 
@@ -4705,12 +4707,17 @@ def add_message(
     owner", which is what every pre-migration row falls back to. Readers resolve
     in that order.
     """
+    if delivery_reference:
+        existing = conn.execute("SELECT id FROM messages WHERE delivery_reference=?",
+                                (delivery_reference,)).fetchone()
+        if existing:
+            return int(existing["id"])
     row = conn.execute(
         "INSERT INTO messages "
         "(room_token, role, body, title, task_id, origin_surface, external_ids, "
         " attachments, attachment_paths, client_msg_id, reply_to_message_id, "
-        " author_user_id, author_label) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        " author_user_id, author_label, delivery_reference) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         (
             room_token,
             role,
@@ -4728,6 +4735,7 @@ def add_message(
             reply_to_message_id,
             author_user_id or None,
             author_label or None,
+            delivery_reference or None,
         ),
     ).fetchone()
     return int(row["id"])

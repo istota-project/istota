@@ -156,6 +156,7 @@ async def deliver_sms(
     text: str,
     task_id: int | None = None,
     preferred_from_number: str | None = None,
+    relay_return_id: str | None = None,
 ) -> SmsDeliveryRecord:
     """Claim and perform one logical send, off whatever loop awaits it.
 
@@ -171,7 +172,7 @@ async def deliver_sms(
     return await asyncio.to_thread(
         _deliver_sms_blocking, config, providers,
         logical_key=logical_key, user_id=user_id, text=text, task_id=task_id,
-        preferred_from_number=preferred_from_number,
+        preferred_from_number=preferred_from_number, relay_return_id=relay_return_id,
     )
 
 
@@ -184,6 +185,7 @@ def _deliver_sms_blocking(
     text: str,
     task_id: int | None = None,
     preferred_from_number: str | None = None,
+    relay_return_id: str | None = None,
 ) -> SmsDeliveryRecord:
     """The body of :func:`deliver_sms`, on a worker thread. Never on the loop."""
     previous = _existing(config, logical_key)
@@ -194,8 +196,22 @@ def _deliver_sms_blocking(
     ):
         return _record(previous)
 
-    rendered = render_sms(text, config.sms.max_segments)
+    if relay_return_id is not None:
+        from ...message_relays import return_payload
+        from ...whatsapp_requests import RequestError, text_hash
+
+        if logical_key != "relay-return:" + relay_return_id:
+            raise RequestError("return_unavailable")
+        with db.get_db(config.db_path) as conn:
+            origin, text = return_payload(conn, config, relay_id=relay_return_id, actor_user_id=user_id, surface="sms")
+        gsm = _gsm7_units(text)
+        encoding = "gsm7" if gsm is not None else "ucs2"
+        rendered = RenderedSms(text, encoding, _segment_count(gsm if gsm is not None else _utf16_units(text), encoding))
+    else:
+        rendered = render_sms(text, config.sms.max_segments)
     number = config.sms_phone_number_for(user_id)
+    if relay_return_id is not None and text_hash(number or "") != origin["binding"]:
+        raise RequestError("unsupported_origin")
     sender = (
         preferred_from_number
         if preferred_from_number in config.sms.service_numbers
@@ -267,6 +283,8 @@ def _deliver_sms_blocking(
         _alert_failure(config, record, user_id, task_id)
         return record
     number = config.sms_phone_number_for(user_id)
+    if relay_return_id is not None and text_hash(number or "") != origin["binding"]:
+        raise RequestError("unsupported_origin")
     if not number:
         record = _set_outcome(config, logical_key, "unconfigured")
         _alert_failure(config, record, user_id, task_id)
@@ -921,6 +939,9 @@ def apply_delivery_event(conn, event):
             "VALUES (?, ?, ?) ON CONFLICT(phone_number) DO UPDATE SET updated_at = excluded.updated_at",
             (updated["to_number"], now, now),
         )
+    from ...message_relays import reconcile_return_delivery
+
+    reconcile_return_delivery(conn, logical_key=updated["logical_key"], status=updated["status"], message_id=updated["provider_message_id"])
     record = _record(updated)
     _log_transition_on_connection(conn, record, updated["task_id"])
     logger.info(

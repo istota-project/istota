@@ -136,6 +136,10 @@ def _close_relay(conn: sqlite3.Connection, relay_id: str, *, state: str, reason:
                WHERE whatsapp_confirmation_request_id IN
                (SELECT id FROM whatsapp_skill_requests WHERE relay_id=?)""", (relay_id,),
         )
+    if changed:
+        from .notification_resolvers.message_relay import write
+
+        write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone())
     return bool(changed)
 
 
@@ -288,6 +292,11 @@ def _answer_fits(config, relay, text: str) -> bool:
     if len(body) > WHATSAPP_TEXT_LIMIT:
         return False
     origin = json.loads(relay["origin"])
+    if origin["surface"] == "talk":
+        from .transport.talk import TalkTransport
+
+        if len(body) > (TalkTransport.capabilities.max_message_length or 4000):
+            return False
     if origin["surface"] == "sms":
         gsm = _gsm7_units(body)
         encoding = "gsm7" if gsm is not None else "ucs2"
@@ -346,6 +355,9 @@ def accept_reply(conn, config, *, actor_user_id: str, relay_id: str,
            AND expires_at>datetime('now')""",
         (text, inbound_id, f"+{CONTENT_RETENTION_DAYS} days", relay_id, actor_user_id),
     ).rowcount
+    if changed:
+        conn.execute("UPDATE whatsapp_skill_requests SET state='sent',error_code=NULL,closed_at=datetime('now'),updated_at=datetime('now') "
+                     "WHERE relay_id=? AND state IN ('sending','uncertain')", (relay_id,))
     return "accepted" if changed else "expired"
 
 
@@ -471,3 +483,294 @@ def reconcile_reply_candidates(config, *, limit: int = 20) -> list:
                 conn.execute("DELETE FROM relay_reply_candidates WHERE provider=? AND inbound_id=?",
                              (candidate["provider"], candidate["inbound_id"]))
     return results
+
+
+RETURN_RECOVERY_SECONDS = 120
+
+
+def expire_relays(conn, *, limit: int = 20) -> int:
+    """Expire a bounded batch under the same writer lock as answer acceptance."""
+    with write_transaction(conn):
+        rows = conn.execute(
+            f"SELECT id FROM message_relays WHERE state IN {_OPEN_SQL} AND expires_at<=datetime('now') "
+            "ORDER BY expires_at,id LIMIT ?", (max(0, min(limit, 100)),),
+        ).fetchall()
+        for row in rows:
+            _close_relay(conn, row["id"], state="expired", reason="expired")
+    return len(rows)
+
+
+def reconcile_question_delivery(conn, *, logical_key: str, status: str) -> None:
+    """Provider receipts cannot undo a recipient's already committed answer."""
+    if not logical_key.startswith("relay-question:"):
+        return
+    relay_id = logical_key.removeprefix("relay-question:")
+    if status == "failed":
+        _close_relay(conn, relay_id, state="failed", reason="delivery_failed")
+    elif status in ("accepted", "sent", "delivered", "read"):
+        conn.execute("UPDATE whatsapp_skill_requests SET state='sent',error_code=NULL,updated_at=datetime('now'),closed_at=datetime('now') "
+                     "WHERE relay_id=? AND state IN ('sending','uncertain')", (relay_id,))
+        conn.execute("UPDATE message_relays SET state='waiting' WHERE id=? AND state IN ('sending','uncertain')",
+                     (relay_id,))
+
+
+def reconcile_return_delivery(conn, *, logical_key: str, status: str, message_id=None) -> None:
+    if not logical_key.startswith("relay-return:"):
+        return
+    relay_id = logical_key.removeprefix("relay-return:")
+    if status == "failed":
+        changed = conn.execute(
+            "UPDATE message_relays SET return_state='blocked',return_error='delivery_failed' "
+            "WHERE id=? AND state='answered' AND return_state IN ('sending','uncertain','delivered')", (relay_id,),
+        ).rowcount
+        if changed:
+            from .notification_resolvers.message_relay import write
+
+            write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone())
+    elif status in ("accepted", "queued", "sent", "delivered", "read"):
+        _settle_return(conn, relay_id, "delivered", message_id=message_id)
+
+
+def reconcile_relays(conn, *, limit: int = 20) -> None:
+    """Project settled question ledgers after a restart, without sending."""
+    with write_transaction(conn):
+        rows = conn.execute(
+            "SELECT s.logical_key,s.status FROM message_relays r JOIN sent_whatsapp s "
+            "ON s.logical_key='relay-question:' || r.id "
+            "WHERE (r.state IN ('sending','uncertain') AND s.status IN ('accepted','sent','delivered','read')) "
+            "OR (r.state IN ('queued','sending','waiting','uncertain') AND s.status='failed') "
+            "ORDER BY r.created_at,r.id LIMIT ?", (max(0, min(limit, 100)),),
+        ).fetchall()
+        for row in rows:
+            reconcile_question_delivery(conn, logical_key=row["logical_key"], status=row["status"])
+
+
+def return_payload(conn, config, *, relay_id: str, actor_user_id: str, surface: str) -> tuple[dict, str]:
+    """Internal delivery admission, including the frozen origin's live binding."""
+    relay = conn.execute("SELECT * FROM message_relays WHERE id=? AND asker_user_id=?",
+                         (relay_id, actor_user_id)).fetchone()
+    if (relay is None or relay["state"] != "answered" or relay["return_state"] != "sending"
+            or relay["answer_text"] is None or relay["content_expires_at"] <= db.sql_datetime_now()):
+        raise RequestError("return_unavailable")
+    origin = json.loads(relay["origin"])
+    if origin["surface"] != surface:
+        raise RequestError("unsupported_origin")
+    validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
+    if not _answer_fits(config, relay, relay["answer_text"]):
+        raise RequestError("return_oversized")
+    return origin, answer_body(relay, relay["answer_text"])
+
+
+def return_whatsapp_destination(config, *, relay_id: str, actor_user_id: str, caps) -> str:
+    from .whatsapp_requests import binding_fingerprint
+    from .transport.whatsapp.outbound import _destination
+
+    with db.get_db(config.db_path) as conn:
+        relay = conn.execute("SELECT origin FROM message_relays WHERE id=? AND asker_user_id=? AND return_state='sending'",
+                             (relay_id, actor_user_id)).fetchone()
+        binding = db.get_whatsapp_binding(conn, actor_user_id)
+        if (relay is None or binding is None or binding.provider != config.whatsapp.provider
+                or binding_fingerprint(config.whatsapp.provider, binding) != json.loads(relay["origin"])["binding"]):
+            raise RequestError("unsupported_origin")
+        return _destination(binding, caps)
+
+
+def _settle_return(conn, relay_id: str, state: str, *, message_id=None, error=None) -> None:
+    changed = conn.execute(
+        "UPDATE message_relays SET return_state=?,return_message_id=COALESCE(?,return_message_id),return_error=? "
+        "WHERE id=? AND state='answered' AND return_state IN ('pending','sending','uncertain') AND return_state<>?",
+        (state, str(message_id) if message_id is not None else None, error, relay_id, state),
+    ).rowcount
+    if changed and state == "delivered":
+        from .notification_store import resolve_by_object
+
+        resolve_by_object(conn, user_id=conn.execute("SELECT asker_user_id FROM message_relays WHERE id=?", (relay_id,)).fetchone()[0],
+                          source="message_relay", object_type="message_relay", object_id=relay_id, by="delivered")
+    if changed and state in ("blocked", "uncertain"):
+        from .notification_resolvers.message_relay import write
+
+        write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone())
+
+
+def _return_rows(config, limit):
+    with db.get_db(config.db_path) as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM message_relays WHERE state='answered' AND answer_text IS NOT NULL "
+            "AND content_expires_at>datetime('now') AND (return_state='pending' "
+            "OR (return_state IN ('sending','uncertain') AND return_claimed_at<=datetime('now',?))) "
+            "ORDER BY CASE WHEN return_state='pending' THEN 0 ELSE 1 END,return_claimed_at,id LIMIT ?",
+            (f"-{RETURN_RECOVERY_SECONDS} seconds", max(0, min(limit, 100))),
+        )]
+
+
+def _claim_return(config, relay_id: str) -> tuple[dict | None, bool]:
+    """A web return and its outbox settlement commit together."""
+    with db.get_db(config.db_path) as conn:
+        with write_transaction(conn):
+            relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()
+            if (relay is None or relay["state"] != "answered" or relay["answer_text"] is None
+                    or relay["content_expires_at"] <= db.sql_datetime_now()):
+                return None, False
+            fresh = relay["return_state"] == "pending"
+            if not fresh and (relay["return_state"] not in ("sending", "uncertain") or not conn.execute(
+                "SELECT ?<=datetime('now',?)", (relay["return_claimed_at"], f"-{RETURN_RECOVERY_SECONDS} seconds"),
+            ).fetchone()[0]):
+                return None, False
+            origin = json.loads(relay["origin"])
+            try:
+                validate_origin(conn, config, actor_user_id=relay["asker_user_id"], origin=origin)
+            except RequestError:
+                _settle_return(conn, relay_id, "blocked", error="unsupported_origin")
+                return None, False
+            reference = "relay-return:" + relay_id
+            if origin["surface"] == "web":
+                message_id = db.add_message(conn, origin["room_token"], role="system",
+                                            body=answer_body(relay, relay["answer_text"]), origin_surface="web",
+                                            delivery_reference=reference)
+                conn.execute("UPDATE message_relays SET return_reference=? WHERE id=?", (reference, relay_id))
+                _settle_return(conn, relay_id, "delivered", message_id=message_id)
+                return None, False
+            conn.execute("UPDATE message_relays SET return_state=?,return_reference=?,return_claimed_at=datetime('now') WHERE id=?",
+                         ("sending" if fresh else relay["return_state"], reference, relay_id))
+            return dict(conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()), fresh
+
+
+def _record_return(config, relay_id, state, *, message_id=None, error=None):
+    with db.get_db(config.db_path) as conn:
+        with write_transaction(conn):
+            _settle_return(conn, relay_id, state, message_id=message_id, error=error)
+
+
+def _delivery_outcome(status):
+    if status in ("accepted", "queued", "sent", "delivered", "read", "delivery_unconfirmed"):
+        return "delivered"
+    if status in ("pending", "unknown"):
+        return "uncertain"
+    return "blocked"
+
+
+async def _external_return(config, relay, *, fresh):
+    """The first attempt may send. Recovery may only read ledger/readback."""
+    import asyncio
+
+    origin = json.loads(relay["origin"])
+    surface = origin["surface"]
+    reference = relay["return_reference"]
+    if surface == "talk":
+        from .transport.talk import TalkTransport, get_talk_client
+
+        transport = TalkTransport(config)
+        if fresh:
+            message_id = await transport.deliver(origin["channel"], answer_body(relay, relay["answer_text"]),
+                                                 reference_id=reference)
+        else:
+            message_id, _ = await transport._readback(get_talk_client(config), origin["channel"], reference, True, None)
+        return ("delivered" if message_id is not None else "uncertain"), message_id
+    if not fresh:
+        with db.get_db(config.db_path) as conn:
+            table = "sent_whatsapp" if surface == "whatsapp" else "sent_sms"
+            column = "meta_message_id" if surface == "whatsapp" else "provider_message_id"
+            record = conn.execute(f"SELECT status,{column} FROM {table} WHERE logical_key=?", (reference,)).fetchone()
+        # No ledger proves no attempt, but cannot prove a pre-ledger claimant
+        # isn't still alive. Recovery never starts a second external call.
+        return (_delivery_outcome(record[0]), record[1]) if record else ("uncertain", None)
+    if surface == "whatsapp":
+        from .transport.whatsapp.outbound import deliver_whatsapp
+
+        record = await deliver_whatsapp(config, logical_key=reference, user_id=relay["asker_user_id"],
+                                        text="", relay_return_id=relay["id"])
+        return _delivery_outcome(record.status), record.meta_message_id
+    from .transport.sms.outbound import deliver_sms
+    from .transport.sms.providers.registry import make_provider_registry
+
+    providers = await asyncio.to_thread(make_provider_registry, config)
+    record = await deliver_sms(config, providers, logical_key=reference, user_id=relay["asker_user_id"],
+                               text="", relay_return_id=relay["id"])
+    return _delivery_outcome(record.status), record.provider_message_id
+
+
+async def deliver_returns(config, *, limit: int = 20) -> int:
+    import asyncio
+
+    rows = await asyncio.to_thread(_return_rows, config, limit)
+    for row in rows:
+        try:
+            await verify_origin(config, actor_user_id=row["asker_user_id"], origin=json.loads(row["origin"]))
+        except RequestError:
+            await asyncio.to_thread(_record_return, config, row["id"], "blocked", error="unsupported_origin")
+            continue
+        relay, fresh = await asyncio.to_thread(_claim_return, config, row["id"])
+        if relay is None:
+            continue
+        try:
+            state, message_id = await _external_return(config, relay, fresh=fresh)
+        except RequestError as exc:
+            state, message_id = "blocked", None
+            error = str(exc)
+        except Exception:
+            state, message_id, error = "uncertain", None, "delivery_unknown"
+        else:
+            error = None if state == "delivered" else "could_not_deliver"
+        await asyncio.to_thread(_record_return, config, relay["id"], state, message_id=message_id, error=error)
+    return len(rows)
+
+
+def _sweep_relays(config, limit):
+    from .whatsapp_requests import cleanup_content
+
+    with db.get_db(config.db_path) as conn:
+        expire_relays(conn, limit=limit)
+        reconcile_relays(conn, limit=limit)
+        with write_transaction(conn):
+            for table, column in (("sent_whatsapp", "meta_message_id"), ("sent_sms", "provider_message_id")):
+                rows = conn.execute(
+                    f"SELECT s.logical_key,s.status,s.{column} AS message_id FROM message_relays r JOIN {table} s "
+                    "ON s.logical_key=r.return_reference WHERE r.state='answered' "
+                    "AND r.return_state IN ('sending','uncertain','delivered') AND s.status='failed' LIMIT ?", (limit,),
+                ).fetchall()
+                for row in rows:
+                    reconcile_return_delivery(conn, logical_key=row["logical_key"], status=row["status"], message_id=row["message_id"])
+        cleanup_content(conn, limit=limit)
+
+
+async def poll_relays(config, *, limit: int = 20):
+    import asyncio
+
+    limit = max(0, min(limit, 100))
+    await asyncio.to_thread(_sweep_relays, config, limit)
+    await deliver_returns(config, limit=limit)
+    await deliver_relay_notices(config, limit=limit)
+
+
+async def deliver_relay_notices(config, *, limit: int = 20):
+    """Retry only body-free notices; never reroute a private answer."""
+    import asyncio
+    from .notification_store import RaiseResult, deliver_pending, mark_delivered
+    from .notifications import send_notification
+
+    with db.get_db(config.db_path) as conn:
+        rows = [dict(row) for row in conn.execute(
+            "SELECT n.*,r.origin FROM notifications n JOIN message_relays r ON r.id=n.object_id "
+            "AND r.asker_user_id=n.user_id WHERE n.source='message_relay' AND n.state='open' "
+            "AND n.last_delivered_at IS NULL ORDER BY n.id LIMIT ?", (max(0, min(limit, 100)),),
+        )]
+    for row in rows:
+        origin = json.loads(row["origin"]) if row["origin"] else None
+        try:
+            if origin is None:
+                raise RequestError("unsupported_origin")
+            await verify_origin(config, actor_user_id=row["user_id"], origin=origin)
+            with db.get_db(config.db_path) as conn:
+                validate_origin(conn, config, actor_user_id=row["user_id"], origin=origin)
+        except RequestError:
+            result = RaiseResult(row["id"], row["user_id"], True, row["body"], row["title"], "alert")
+            await asyncio.to_thread(deliver_pending, config, [result])
+            continue
+        descriptor = origin["surface"]
+        if descriptor in ("web", "talk"):
+            descriptor += ":" + origin["channel"]
+        sent = await asyncio.to_thread(send_notification, config, row["user_id"], row["body"],
+                                       surface=descriptor, reference_id="relay-notice:" + str(row["id"]))
+        if sent:
+            with db.get_db(config.db_path) as conn:
+                mark_delivered(conn, [row["id"]])

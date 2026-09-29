@@ -391,7 +391,11 @@ def _finish_request(config, request_id: str, *, record=None, reason: str | None 
                              ("waiting" if state == "sent" else "uncertain", row["relay_id"]))
             else:
                 message_relays._close_relay(conn, row["relay_id"], state=state, reason=reason or "delivery_failed")
-        if changed and state != "sent":
+        if changed and row["relay_id"] and state == "uncertain":
+            from .notification_resolvers.message_relay import write
+
+            write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone())
+        if changed and state != "sent" and not row["relay_id"]:
             notice = task_alert.write(
                 conn, row["requester_user_id"], dedup_key="whatsapp-request:" + request_id,
                 title="WhatsApp request " + state,
@@ -437,6 +441,9 @@ async def drain_requests(config, *, limit: int = 20) -> int:
 
     replies = await asyncio.to_thread(reconcile_reply_candidates, config, limit=limit)
     await deliver_event_responses(config, replies)
+    from .message_relays import poll_relays
+
+    await poll_relays(config, limit=limit)
     return len(rows)
 
 

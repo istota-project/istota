@@ -1712,6 +1712,7 @@ CREATE TABLE IF NOT EXISTS message_relays (
     recipient_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     return_state TEXT NOT NULL DEFAULT 'none' CHECK (return_state IN ('none','pending','sending','delivered','blocked','uncertain','expired')),
     return_reference TEXT UNIQUE,
+    return_claimed_at TEXT,
     return_message_id TEXT,
     return_error TEXT,
     content_expires_at TEXT,

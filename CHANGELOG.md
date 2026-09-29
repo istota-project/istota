@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Private conversations can allow or revoke relay questions from a specific user with `!relay allow` and `!relay revoke`. Relay questions remain unavailable until the answer and return paths are enabled.
+- You can ask a consenting user a question on WhatsApp after approving its exact wording. Their explicit text reply returns unchanged to your original private conversation; blocked or uncertain returns remain available through private relay status for 30 days. Use `!relay allow` and `!relay revoke` to control who may ask you questions.
 
 - A running task can send a separate message to your own WhatsApp while keeping its final reply in the original conversation. Queued messages have a delivery status, and retrying the same request does not send it twice.
 

@@ -3587,7 +3587,7 @@ async def cmd_untrust(ctx: CommandContext):
     return f"`{email}` is not in your trusted senders list. Note: senders in config files must be removed from the config."
 
 
-@command("relay", "Manage relay permissions: `!relay allow USER_ID`, `!relay revoke USER_ID`, `!relay permissions`, `!relay cancel RELAY_ID`")
+@command("relay", "Manage private relays: `!relay allow USER_ID`, `!relay revoke USER_ID`, `!relay permissions`, `!relay list`, `!relay show RELAY_ID`, `!relay cancel RELAY_ID`")
 async def cmd_relay(ctx: CommandContext):
     from . import message_relays
     from .whatsapp_requests import RequestError
@@ -3607,11 +3607,26 @@ async def cmd_relay(ctx: CommandContext):
         words = ctx.args.split()
         if words and words[0] == "reply":
             return "Send !relay reply RELAY_ID <answer> from your bound WhatsApp conversation."
+        if words == ["list"]:
+            rows = message_relays.list_relays(ctx.conn, actor_user_id=ctx.user_id)
+            return "\n".join(f"{r['id']}: {r['state']} (return {r['return_state']})" for r in rows) or "No relays."
+        if len(words) == 2 and words[0] == "show":
+            row = message_relays.get_relay(ctx.conn, actor_user_id=ctx.user_id, relay_id=words[1])
+            if row is None:
+                return "Relay unavailable."
+            result = f"Relay {row['id']}: {row['state']} (return {row['return_state']})."
+            if row['content_expires_at']:
+                result += f"\nContent retained until {row['content_expires_at']} UTC."
+            if row['question'] is not None:
+                result += f"\nQuestion: {row['question']}"
+            if row['answer_text'] is not None:
+                result += "\n\n" + message_relays.answer_body(row, row['answer_text'])
+            return result
         if words == ["permissions"]:
             allowed = message_relays.list_permissions(ctx.conn, actor_user_id=ctx.user_id)
             return "Allowed senders: " + (", ".join(row["asker_user_id"] for row in allowed) or "none")
         if len(words) != 2 or words[0] not in ("allow", "revoke", "cancel"):
-            return "Use !relay allow USER_ID, !relay revoke USER_ID, !relay permissions, or !relay cancel RELAY_ID."
+            return "Use !relay allow USER_ID, !relay revoke USER_ID, !relay permissions, !relay list, !relay show RELAY_ID, or !relay cancel RELAY_ID."
         action, target = words
         try:
             if action == "cancel":
