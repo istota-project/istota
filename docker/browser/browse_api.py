@@ -846,6 +846,13 @@ class NavigationMismatch(RuntimeError):
         self.landed = landed
 
 
+def _challenge_settle_pause():
+    """The humanized wait after a challenge window, before the page is read
+    again. One function so both call sites share it and a test can skip it
+    without patching the interpreter's `time.sleep`."""
+    time.sleep(browsing.gauss_clamp(3.5, 1.0, 2.0, 5.0))
+
+
 def _document_url(url):
     """Compare document addresses without fragments or browser spelling changes."""
     parts = urlsplit(url)
@@ -947,7 +954,7 @@ def _navigate_and_wait(page, url, timeout_ms=30000):
             page.bring_to_front()
             xdotool.navigate(url, timeout_s=timeout_ms // 1000, display=_request_instance().display)
             challenge = xdotool.wait_for_challenges(timeout_s=15, display=_request_instance().display)
-            time.sleep(browsing.gauss_clamp(3.5, 1.0, 2.0, 5.0))
+            _challenge_settle_pause()
             if challenge:
                 return challenge
 
@@ -1122,7 +1129,7 @@ def _solve_challenge(session_id, page, requested_url=None):
         if xdotool.wait_for_challenges(timeout_s=15, display=display):
             log.info("Challenge solve on %s: title still a challenge", session_id)
             return blocked
-        time.sleep(browsing.gauss_clamp(3.5, 1.0, 2.0, 5.0))
+        _challenge_settle_pause()
         still = browsing.detect_captcha(page)
     except Exception as e:
         log.warning("Challenge solve on %s: re-check failed: %s", session_id, e)

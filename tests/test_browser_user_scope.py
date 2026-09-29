@@ -996,7 +996,7 @@ class TestTheChallengeIsPressedAtOnce:
         monkeypatch.setattr(api, "_capture_foreground", lambda page: front)
         monkeypatch.setattr(api.xdotool, "clamp_to_screen", lambda x, y, **kw: (x, y))
         monkeypatch.setattr(api, "_settle", lambda page, ms: None)
-        monkeypatch.setattr(api.time, "sleep", lambda s: None)
+        monkeypatch.setattr(api, "_challenge_settle_pause", lambda: None)
         monkeypatch.setattr(
             api.browsing, "cloudflare_checkbox_target",
             lambda page: ((100, 200), api.browsing.CF_TARGET_UNSOLVED),
