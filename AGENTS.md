@@ -118,6 +118,7 @@ src/istota/
 ├── task_cgroup.py        # A cgroup v2 group per task: memory.max, pids.max, cpu.max → sandbox.md
 ├── shell_exec.py         # How a command string becomes a shell argv, with `pipefail` on → sandbox.md
 ├── process_group.py      # `kill_process_group(pid, sig)`: signal a subprocess and its descendants → sandbox.md
+├── peer_process.py       # Who connected to a Unix socket, and whether they descend from a task's root → sandbox.md
 ├── network_proxy.py      # CONNECT proxy for network isolation
 ├── forge_cli.py          # The `gh` / `glab` wrapper: deny policy + server-side token injection → sandbox.md
 ├── devbox_proxy.py       # Per-user host-side daemon: git credentials and the forge token injected server-side

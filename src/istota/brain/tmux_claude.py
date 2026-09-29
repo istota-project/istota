@@ -796,13 +796,21 @@ class TmuxClaudeBrain:
 
             # Report the pane pid (best-effort) before the long wait so !stop
             # has something to target. Session-kill is the real cancel path.
+            # No longer only a `!stop` convenience: the skill proxy serves only
+            # descendants of a reported pid (ISSUE-550), so a missing one means
+            # every skill call this task makes is refused.
             if req.on_pid is not None:
                 pid = self._pane_pid(session)
-                if pid is not None:
+                if pid is None:
+                    logger.warning(
+                        "tmux_brain no_pane_pid session=%s: skill calls will be refused",
+                        session,
+                    )
+                else:
                     try:
                         req.on_pid(pid)
                     except Exception:
-                        logger.debug("on_pid callback raised", exc_info=True)
+                        logger.warning("on_pid callback raised", exc_info=True)
 
             self._inject_prompt(session, prompt_file, started_sentinel)
 

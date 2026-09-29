@@ -248,7 +248,7 @@ Per-task BrainRequest fields the executor populates:
   `tool_*` gated on `progress_show_tool_use`, `progress_text` on
   `progress_show_text`; `tool_progress` always emitted (SSE only)
 - `cancel_check`: closure that polls `db.is_task_cancelled()`
-- `on_pid`: closure that calls `db.update_task_pid()` for `!stop` support
+- `on_pid`: closure that registers the pid with the skill proxy first (`SkillProxy.authorize_pid`, ISSUE-550 — the proxy serves only descendants of a registered pid, so a brain that spawns without calling this gets every skill call refused), then places it in the task cgroup and calls `db.update_task_pid()` for `!stop` support
 - `sandbox_wrap` / `native_sandbox_wrap`: two closures over `build_bwrap_cmd(...)`
   so the brain can wrap its raw cmd without knowing anything about bwrap; both
   no-ops when the sandbox is disabled. Same plan, different `SandboxProfile`:

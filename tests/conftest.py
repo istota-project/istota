@@ -944,3 +944,23 @@ def stack(request, stacks):
     finally:
         if fresh:
             stacks.release(running)
+
+
+@pytest.fixture(autouse=True)
+def _pytest_is_the_skill_proxy_task_root(monkeypatch):
+    """Stand this process in for a task's root on every `SkillProxy`.
+
+    The proxy serves only descendants of a registered process (ISSUE-550),
+    and most tests talk to one from the pytest process itself, which in
+    production would be the daemon. Tests about the peer check pass
+    `trusted_roots` explicitly, which replaces this default rather than
+    adding to it.
+    """
+    try:
+        from istota import skill_proxy
+    except ImportError:
+        return
+    monkeypatch.setattr(
+        skill_proxy, "_default_trusted_roots",
+        lambda: frozenset({os.getpid()}),
+    )

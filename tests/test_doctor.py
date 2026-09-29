@@ -2444,6 +2444,70 @@ class TestSkillProxy:
         assert results["security.skill_proxy.forge_posture"].status == SKIP
 
 
+class TestProxyPeerCheck:
+    """`security.proxy_peer_check` — ISSUE-550."""
+
+    NAME = "security.proxy_peer_check"
+
+    def _run(self, config):
+        return _by_name(run_checks(config, only=(self.NAME,)))[self.NAME]
+
+    def _users(self, make_config, n):
+        from istota.config import UserConfig
+
+        return make_config(users={f"u{i}": UserConfig() for i in range(n)})
+
+    def test_fails_where_no_peer_can_be_read(self, make_config, monkeypatch):
+        from istota import peer_process
+
+        monkeypatch.setattr(peer_process, "supported", lambda: False)
+        result = self._run(make_config())
+        assert result.status == FAIL
+        assert "refuses every connection" in result.detail
+
+    def test_ok_under_the_sandbox(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor, "_deployment_sandboxing", lambda c, p: (True, ""))
+        monkeypatch.setattr(doctor, "_ptrace_scope", lambda: 0)
+        assert self._run(self._users(make_config, 3)).status == OK
+
+    @pytest.mark.parametrize("scope", [0, 1, None])
+    def test_warns_unsandboxed_multi_user_whatever_ptrace_says(
+        self, make_config, monkeypatch, scope,
+    ):
+        # A closed ptrace does not stop one task planting code in a file
+        # another executes, so it must not turn the finding into an OK.
+        monkeypatch.setattr(doctor, "_deployment_sandboxing", lambda c, p: (False, ""))
+        monkeypatch.setattr(doctor, "_ptrace_scope", lambda: scope)
+        result = self._run(self._users(make_config, 2))
+        assert result.status == WARN
+        assert "best-effort" in result.detail
+        assert ("read its memory" in result.detail) == (scope == 0)
+
+    def test_ok_unsandboxed_with_one_user(self, make_config, monkeypatch):
+        monkeypatch.setattr(doctor, "_deployment_sandboxing", lambda c, p: (False, ""))
+        monkeypatch.setattr(doctor, "_ptrace_scope", lambda: 0)
+        assert self._run(self._users(make_config, 1)).status == OK
+
+    def test_skips_with_the_proxy_off(self, make_config):
+        from istota.config import SecurityConfig
+
+        config = make_config(security=SecurityConfig(skill_proxy_enabled=False))
+        assert self._run(config).status == SKIP
+
+    def test_stays_out_of_the_config_load_prefix(self):
+        # `security.skill_proxy` runs inside every `load_config`; this check
+        # imports the executor through the sandbox lookup and must not.
+        from istota.config import CONFIG_LOAD_CHECKS
+
+        assert not any(self.NAME.startswith(p) for p in CONFIG_LOAD_CHECKS)
+
+    def test_ptrace_scope_reads_absent_yama_as_open(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(doctor.platform, "system", lambda: "Linux")
+        assert doctor._ptrace_scope(tmp_path / "missing") == 0
+        (tmp_path / "scope").write_text("2\n")
+        assert doctor._ptrace_scope(tmp_path / "scope") == 2
+
+
 class TestSkillModelCredential:
     """`security.skill_model_credential` — ISSUE-409.
 

@@ -142,6 +142,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 
 - Browser logins and site storage are isolated per user and persist across tasks and restarts. The operator console opens the selected user's browser; a login completed there no longer reaches other users. Credential fills refuse an older shared-profile browser until its image is rebuilt and deployed.
+- The skill proxy now serves only processes from its own task. Without bubblewrap (macOS, or a container whose sandbox probe fails) every task shares one uid, so one task could connect to another's socket and use that user's credentials and vault entries. **Upgrade note:** a command backgrounded past the end of its shell loses proxy access, and `istota doctor --only security.proxy_peer_check` warns on an unsandboxed multi-user host, where isolation between tasks stays best-effort.
 
 ## [0.42.0] - 2026-09-19
 

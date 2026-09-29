@@ -37,6 +37,7 @@ from ._events import (
     make_stream_parser,
 )
 from istota import task_cgroup
+from istota.peer_process import reporting_pid
 from istota import usage as usage_types
 from ..process_group import kill_group_if_live
 from ._aliases import CANONICAL_ROLES, split_effort
@@ -1626,12 +1627,13 @@ class ClaudeCodeBrain:
         # means spawning via Popen so the group can be killed, and roughly
         # ninety tests across six files patch `subprocess.run` to keep the brain
         # from spawning at all, so they would each have to move to Popen first.
-        # Narrower than the streaming path in the meantime: `_execute_simple_once`
-        # never calls `req.on_pid`, so no `worker_pid` is recorded and neither
-        # `!stop` nor the web cancel endpoint reaches this path at all — its own
-        # timeout is the only killer, and nothing here wedges a worker (on POSIX
-        # `subprocess.run` kills the child and `wait()`s, it does not re-drain
-        # the pipes).
+        # Narrower than the streaming path in the meantime: the pid reaches
+        # `req.on_pid` from inside the child (below), so `!stop` and the web
+        # cancel can signal it, but the child leads no process group of its own
+        # and `kill_process_group` therefore reaches it alone — its own timeout
+        # is still the only thing that ends the tree, and nothing here wedges a
+        # worker (on POSIX `subprocess.run` kills the child and `wait()`s, it
+        # does not re-drain the pipes).
         #
         # Placement is the one thing this path does get, because it costs a
         # keyword argument. `subprocess.run` takes `preexec_fn` like `Popen`
@@ -1642,7 +1644,14 @@ class ClaudeCodeBrain:
         # and without this the startup line would report containment for a host
         # on which no task was ever contained. There is no `verify_placement`
         # afterwards — `run` does not hand back a pid to check.
-        with task_cgroup.placement(req.task_cgroup) as place_in_cgroup:
+        #
+        # The pid is reported from the child too, through `reporting_pid`,
+        # because `run` never hands it back and the skill proxy serves only
+        # the descendants of a pid `on_pid` registered (ISSUE-550) — without
+        # it every skill call on this path is refused. The same callback
+        # records `worker_pid`, so `!stop` reaches this path now as well.
+        with task_cgroup.placement(req.task_cgroup) as place_in_cgroup, \
+                reporting_pid(req.on_pid, place_in_cgroup) as preexec:
             result = subprocess.run(
                 cmd,
                 input=req.prompt,
@@ -1651,7 +1660,7 @@ class ClaudeCodeBrain:
                 timeout=req.timeout_seconds,
                 cwd=str(req.cwd),
                 env=req.env,
-                preexec_fn=place_in_cgroup,
+                preexec_fn=preexec,
             )
 
         output = result.stdout.strip()
@@ -1670,6 +1679,20 @@ class ClaudeCodeBrain:
         if answer_text is not None:
             output = answer_text
         accounting["usage"] = simple_usage
+
+        # Ahead of the signal classification, as on the streaming path: now that
+        # this path reports its pid, `!stop` can SIGTERM the child, and that has
+        # to read as a cancellation rather than a crash.
+        if result.returncode != 0 and req.cancel_check is not None:
+            try:
+                if req.cancel_check():
+                    return BrainResult(
+                        success=False,
+                        result_text="Cancelled by user",
+                        stop_reason="cancelled",
+                    )
+            except Exception:
+                logger.debug("cancel_check raised", exc_info=True)
 
         signal_death = _signal_result(result.returncode, None)
         if signal_death is not None:
