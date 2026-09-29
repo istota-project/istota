@@ -23,11 +23,10 @@ from .whatsapp_requests import RequestError, binding_fingerprint, text_hash
 
 KINDS = ("room", "whatsapp", "sms")
 
-# The kinds a held question may be released to today. A room or SMS destination
-# resolves, but nothing delivers one until the room delivery (stage 3) and SMS
-# (stage 5) arms land, so a build without them refuses rather than holding a
-# question it cannot send.
-DELIVERABLE_KINDS = frozenset({"whatsapp"})
+# The kinds a held question may be released to today. An SMS destination
+# resolves, but nothing delivers one until the SMS arm lands, so a build without
+# it refuses rather than holding a question it cannot send.
+DELIVERABLE_KINDS = frozenset({"whatsapp", "room"})
 
 _LABEL_MAX = 80
 
@@ -122,6 +121,23 @@ def resolve_destination(conn: sqlite3.Connection, config, *, recipient_user_id: 
     elif requested:
         return _RESOLVERS[requested](conn, config, recipient_user_id)
     return _room(conn, config, recipient_user_id)
+
+
+def check_room(conn: sqlite3.Connection, config, *, recipient_user_id: str, fingerprint: str) -> dict:
+    """Re-resolve a room destination at admission and require the frozen one.
+
+    Resolved as an ask naming the room would be, so a recipient who has since
+    set another preference, re-pinned their default room, shared it or moved
+    its Talk binding reads as a change. A change closes the relay; nothing here
+    picks a new room.
+    """
+    try:
+        current = resolve_destination(conn, config, recipient_user_id=recipient_user_id, requested="room")
+    except RequestError:
+        raise RequestError("destination_changed") from None
+    if current["kind"] != "room" or current["fingerprint"] != fingerprint:
+        raise RequestError("destination_changed")
+    return current
 
 
 def destination_fingerprint(destination: dict) -> str:

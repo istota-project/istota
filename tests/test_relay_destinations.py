@@ -175,9 +175,24 @@ class TestWhatIsStoredAndRendered:
 
 
 class TestTheHoldGate:
-    """Until rooms and SMS can be delivered, holding one is refused."""
+    """Until SMS can be delivered, holding one is refused."""
 
-    @pytest.mark.parametrize('via', [None, 'room', 'sms'])
+    @pytest.mark.parametrize('via', [None, 'room'])
+    def test_a_room_question_is_held_and_names_its_room(self, setup, via):
+        config = setup[0]
+        token = _bob_room(config)
+        held = hold(setup, via=via)
+        assert held['status'] == 'held'
+        assert "through Bob's room #assistant?" in held['preview']
+        with db.get_db(config.db_path) as conn:
+            row = conn.execute('SELECT surface,destination,provider,binding_fingerprint FROM message_relays WHERE id=?',
+                               (held['relay_id'],)).fetchone()
+        assert row['surface'] == 'room' and row['provider'] == 'room'
+        assert json.loads(row['destination'])['room_token'] == token
+        assert row['binding_fingerprint'] == dest.destination_fingerprint(
+            {'kind': 'room', 'room_token': token, 'talk_ref': None})
+
+    @pytest.mark.parametrize('via', ['sms'])
     def test_an_undeliverable_kind_is_refused_and_nothing_is_held(self, setup, via):
         config = setup[0]
         _bob_room(config)

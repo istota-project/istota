@@ -271,6 +271,7 @@ def _register_all() -> None:
             "health_panel",
             "task_alert",
             "message_relay",
+            "relay_question",
         ):
             try:
                 module = importlib.import_module(

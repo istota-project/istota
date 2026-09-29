@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 from . import db
 
 from .whatsapp_requests import CONTENT_RETENTION_DAYS, RequestError, write_transaction
+
+logger = logging.getLogger(__name__)
 
 RELAY_LIFETIME_SECONDS = 24 * 60 * 60
 MAX_OPEN_PER_ASKER = 10
@@ -151,8 +154,16 @@ def _close_relay(conn: sqlite3.Connection, relay_id: str, *, state: str, reason:
     if changed:
         from .notification_resolvers.message_relay import write
 
-        write(conn, conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone())
+        relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()
+        write(conn, relay)
+        _resolve_recipient_notice(conn, relay)
     return bool(changed)
+
+
+def _resolve_recipient_notice(conn, relay) -> None:
+    from .notification_resolvers import relay_question
+
+    relay_question.resolve_for_relay(conn, relay["recipient_user_id"], relay["id"], by="system")
 
 
 def store_reply_candidate(
@@ -372,6 +383,7 @@ def accept_reply(conn, config, *, actor_user_id: str, relay_id: str,
     if changed:
         conn.execute("UPDATE whatsapp_skill_requests SET state='sent',error_code=NULL,closed_at=datetime('now'),updated_at=datetime('now') "
                      "WHERE relay_id=? AND state IN ('sending','uncertain')", (relay_id,))
+        _resolve_recipient_notice(conn, relay)
     return "accepted" if changed else "expired"
 
 
@@ -524,8 +536,9 @@ def reconcile_question_delivery(conn, *, logical_key: str, status: str) -> None:
     elif status in ("accepted", "sent", "delivered", "read"):
         conn.execute("UPDATE whatsapp_skill_requests SET state='sent',error_code=NULL,updated_at=datetime('now'),closed_at=datetime('now') "
                      "WHERE relay_id=? AND state IN ('sending','uncertain')", (relay_id,))
-        conn.execute("UPDATE message_relays SET state='waiting' WHERE id=? AND state IN ('sending','uncertain')",
-                     (relay_id,))
+        if conn.execute("UPDATE message_relays SET state='waiting' WHERE id=? AND state IN ('sending','uncertain')",
+                        (relay_id,)).rowcount:
+            write_recipient_notice(conn, relay_id)
 
 
 def reconcile_return_delivery(conn, *, logical_key: str, status: str, message_id=None) -> None:
@@ -557,6 +570,154 @@ def reconcile_relays(conn, *, limit: int = 20) -> None:
         ).fetchall()
         for row in rows:
             reconcile_question_delivery(conn, logical_key=row["logical_key"], status=row["status"])
+
+
+def write_recipient_notice(conn, relay_id: str):
+    """Open the recipient's inbox row as the question reaches them.
+
+    Returns the write result for a caller that pushes it; one that does not
+    (a phone destination, whose message is its own push) drops it.
+    """
+    from .notification_resolvers import relay_question
+
+    relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()
+    if relay is None or relay["state"] not in relay_question.OPEN_STATES:
+        return None
+    return relay_question.write(conn, relay)
+
+
+async def deliver_question(config, row) -> None:
+    """Release one approved relay question to its frozen destination.
+
+    Every refusal settles through `_finish_request`, which closes the relay
+    with a fixed reason; nothing here retargets.
+    """
+    import asyncio
+    from .whatsapp_requests import _finish_request, logical_key
+
+    try:
+        if row["state"] == "queued":
+            with db.get_db(config.db_path) as conn:
+                relay = conn.execute("SELECT origin FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
+            await verify_private_audience(config, actor_user_id=row["requester_user_id"], origin=json.loads(relay["origin"]))
+        if row["provider"] == "room":
+            await _deliver_room_question(config, row)
+            return
+        from .transport.whatsapp.outbound import deliver_whatsapp
+        record = await deliver_whatsapp(
+            config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
+            text="", task_id=None, request_id=row["id"],
+        )
+    except RequestError as exc:
+        await asyncio.to_thread(_finish_request, config, row["id"], reason=str(exc))
+    else:
+        await asyncio.to_thread(_finish_request, config, row["id"], record=record)
+
+
+async def _deliver_room_question(config, row) -> None:
+    """The canonical row first, in one transaction with the claim, then Talk.
+
+    The web row is the question: once it lands the relay is answerable, so a
+    Talk post that fails afterwards is logged and costs nothing else. The
+    request stays `sending` across the Talk post, so a crash between the two
+    is found by the stale-claim recovery, which only reads the room back and
+    never posts a second time.
+    """
+    import asyncio
+    from .notification_store import deliver_pending
+
+    fresh = row["state"] == "queued"
+    if fresh:
+        with db.get_db(config.db_path) as conn:
+            stored = conn.execute("SELECT destination FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
+        destination = json.loads(stored["destination"]) if stored and stored["destination"] else {}
+        try:
+            await verify_private_audience(config, actor_user_id=row["recipient_user_id"],
+                                          origin={"talk_ref": destination.get("talk_ref")})
+        except RequestError:
+            raise RequestError("destination_not_private") from None
+    claim, notice = await asyncio.to_thread(_claim_room_question, config, row["id"], fresh)
+    if notice is not None:
+        await asyncio.to_thread(deliver_pending, config, [notice])
+    if claim is None:
+        return
+    talk_id = await _post_room_question(config, claim, fresh=fresh)
+    if talk_id is None:
+        logger.warning("relay %s: question not posted to Talk; it is answerable on web", claim["relay_id"])
+    await asyncio.to_thread(_settle_room_question, config, claim, talk_id)
+
+
+def _claim_room_question(config, request_id: str, fresh: bool):
+    from .whatsapp_requests import CLAIM_RECOVERY_SECONDS, admit_request
+
+    with db.get_db(config.db_path) as conn:
+        with write_transaction(conn):
+            row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
+            if row is None or not row["relay_id"]:
+                return None, None
+            relay_id = row["relay_id"]
+            reference = "relay-question:" + relay_id
+            if fresh:
+                admitted = admit_request(conn, config, request_id=request_id, user_id=row["recipient_user_id"],
+                                         logical_key=reference, send_kind="service", status="pending",
+                                         surface="room")
+                message_id = db.add_message(conn, admitted["room_token"], role="system", body=admitted["service"],
+                                            origin_surface="web", delivery_reference=reference)
+                conn.execute("UPDATE message_relays SET state='waiting',question_message_id=? "
+                             "WHERE id=? AND state='sending'", (message_id, relay_id))
+                notice = write_recipient_notice(conn, relay_id)
+                if not admitted["talk_ref"]:
+                    _mark_question_sent(conn, request_id)
+                    return None, notice
+                return {"relay_id": relay_id, "request_id": request_id, "message_id": message_id,
+                        "talk_ref": admitted["talk_ref"], "body": admitted["service"]}, notice
+            # Recovery of a claim whose Talk half never settled: take it over,
+            # then only read back. The room row already exists.
+            relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (relay_id,)).fetchone()
+            if row["state"] != "sending" or relay is None or not conn.execute(
+                "SELECT ? <= datetime('now', ?)", (row["updated_at"], f"-{CLAIM_RECOVERY_SECONDS} seconds"),
+            ).fetchone()[0]:
+                return None, None
+            conn.execute("UPDATE whatsapp_skill_requests SET updated_at=datetime('now') WHERE id=?", (request_id,))
+            destination = json.loads(relay["destination"] or "{}")
+            if (relay["question_message_id"] is None or relay["question_talk_id"] is not None
+                    or not destination.get("talk_ref")):
+                _mark_question_sent(conn, request_id)
+                return None, None
+            return {"relay_id": relay_id, "request_id": request_id, "message_id": relay["question_message_id"],
+                    "talk_ref": destination["talk_ref"], "body": None}, None
+
+
+def _mark_question_sent(conn, request_id: str) -> None:
+    conn.execute("UPDATE whatsapp_skill_requests SET state='sent',error_code=NULL,closed_at=datetime('now'),"
+                 "updated_at=datetime('now') WHERE id=? AND state='sending'", (request_id,))
+
+
+async def _post_room_question(config, claim, *, fresh: bool):
+    """The Talk half: a post the first time, a readback on recovery."""
+    from .transport.talk import TalkTransport, get_talk_client
+
+    transport = TalkTransport(config)
+    reference = "relay-question:" + claim["relay_id"]
+    try:
+        if fresh:
+            return await transport.deliver(claim["talk_ref"], claim["body"], reference_id=reference)
+        message_id, _ = await transport._readback(get_talk_client(config), claim["talk_ref"], reference, True, None)
+        return message_id
+    except Exception:
+        return None
+
+
+def _settle_room_question(config, claim, talk_id) -> None:
+    with db.get_db(config.db_path) as conn:
+        with write_transaction(conn):
+            if talk_id is not None:
+                # The Talk post and the web row are one question: a reply to
+                # either resolves the same relay.
+                conn.execute("UPDATE message_relays SET question_talk_id=? WHERE id=? AND question_talk_id IS NULL",
+                             (int(talk_id), claim["relay_id"]))
+                db.set_message_external_id(conn, claim["message_id"], "talk", str(talk_id))
+            _mark_question_sent(conn, claim["request_id"])
 
 
 def return_payload(conn, config, *, relay_id: str, actor_user_id: str, surface: str) -> tuple[dict, str]:

@@ -291,10 +291,15 @@ def _check_binding(conn, config, row):
 
 def admit_request(conn, config, *, request_id: str, user_id: str,
                   logical_key: str, send_kind: str, status: str,
-                  ignore_opt_out: bool = False) -> dict[str, str]:
+                  ignore_opt_out: bool = False, surface: str = "whatsapp") -> dict:
     """Validate immutable intent under the send ledger's writer lock.
 
     No caller may use this hook to bypass the ordinary delivery gate.
+    `surface` is the caller's own delivery surface, and a request whose frozen
+    destination is another surface is refused, so a room question can never be
+    admitted by a WhatsApp send nor the other way round. A room admission also
+    returns the room it re-resolved, so the caller writes into the same read
+    the fingerprint was checked against.
     """
     row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
     if (row is None or row["state"] != "queued" or row["recipient_user_id"] != user_id
@@ -304,7 +309,17 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
         raise RequestError("queue_expired")
     if user_id not in config.users:
         raise RequestError("recipient_unavailable")
-    _check_binding(conn, config, row)
+    if (row["provider"] == "room") != (surface == "room"):
+        raise RequestError("request_unavailable")
+    room = None
+    if surface == "room":
+        from . import relay_destinations
+        if row["kind"] != "relay_question":
+            raise RequestError("request_unavailable")
+        room = relay_destinations.check_room(conn, config, recipient_user_id=user_id,
+                                             fingerprint=row["binding_fingerprint"])
+    else:
+        _check_binding(conn, config, row)
     if row["kind"] == "relay_question":
         from . import message_relays
         relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
@@ -337,7 +352,10 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
                      (request_id,))
         if row["relay_id"]:
             conn.execute("UPDATE message_relays SET state='sending' WHERE id=? AND state='queued'", (row["relay_id"],))
-    return {"service": row["service_body"], "template": template or ""}
+    admitted = {"service": row["service_body"], "template": template or ""}
+    if room is not None:
+        admitted.update(room_token=room["room_token"], talk_ref=room["talk_ref"])
+    return admitted
 
 
 def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
@@ -387,8 +405,10 @@ def _finish_request(config, request_id: str, *, record=None, reason: str | None 
         if changed and row["relay_id"]:
             from . import message_relays
             if state in ("sent", "uncertain"):
-                conn.execute("UPDATE message_relays SET state=? WHERE id=? AND state IN ('queued','sending','uncertain')",
-                             ("waiting" if state == "sent" else "uncertain", row["relay_id"]))
+                if conn.execute("UPDATE message_relays SET state=? WHERE id=? AND state IN ('queued','sending','uncertain')",
+                                ("waiting" if state == "sent" else "uncertain", row["relay_id"])).rowcount:
+                    # A phone question is its own push, so this only writes.
+                    message_relays.write_recipient_notice(conn, row["relay_id"])
             else:
                 message_relays._close_relay(conn, row["relay_id"], state=state, reason=reason or "delivery_failed")
         if changed and row["relay_id"] and state == "uncertain":
@@ -440,12 +460,11 @@ async def drain_requests(config, *, limit: int = 20) -> int:
 
     rows = await asyncio.to_thread(_pending_requests, config, max(0, min(limit, 100)))
     for row in rows:
+        if row["relay_id"]:
+            from . import message_relays
+            await message_relays.deliver_question(config, row)
+            continue
         try:
-            if row["relay_id"] and row["state"] == "queued":
-                from . import message_relays
-                with db.get_db(config.db_path) as conn:
-                    relay = conn.execute("SELECT origin FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
-                await message_relays.verify_private_audience(config, actor_user_id=row["requester_user_id"], origin=json.loads(relay["origin"]))
             record = await deliver_whatsapp(
                 config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
                 text="", task_id=None, request_id=row["id"],
