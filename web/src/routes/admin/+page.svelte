@@ -1462,7 +1462,7 @@
   .source-list {
     display: flex;
     flex-wrap: wrap;
-    gap: var(--space-2);
+    gap: 0 var(--space-2);
     margin-top: 0.15rem;
   }
 
@@ -1764,7 +1764,7 @@
 		   visible — they're the only colour-independent legend the user
 		   gets when hover tooltips aren't available. */
     .source-list {
-      gap: var(--space-1);
+      gap: 0 var(--space-1);
     }
     .source-pill {
       font-size: 0.7rem;
