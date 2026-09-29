@@ -884,6 +884,7 @@ class TestSyncAll:
                 "bob": UserConfig(vault_path="vault.kdbx"),
             },
         )
+        config.security.allow_unsandboxed_multi_user_vaults = True
         # alice's is corrupt; bob's is real.
         (mount / "Users" / "alice" / "vault.kdbx").write_bytes(b"junk" * 64)
         _write_vault(mount / "Users" / "bob" / "vault.kdbx")
@@ -1069,3 +1070,39 @@ class TestNoValueIsLogged:
             rendered = record.getMessage()
             for needle in needles:
                 assert needle not in rendered, f"{needle!r} in {rendered!r}"
+
+
+def test_multi_user_policy_blocks_cached_credentials_and_sync(ready, monkeypatch):
+    from istota import doctor, secrets_vault, task_env
+
+    config, _ = ready
+    monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)
+    assert secrets_vault.sync_user(config, "alice", deliver=False).outcome == "ok"
+    assert task_env._vault_credentials(config, "alice")
+    config.users["bob"] = UserConfig()
+    result = secrets_vault.sync_user(config, "alice", deliver=False)
+    assert result.outcome == "VaultIsolationRequired"
+    assert task_env._vault_credentials(config, "alice") == {}
+    assert secrets_store.get_service_secrets(config.db_path, "alice", VAULT_ENTRY_SERVICE)
+    for parse in (False, True):
+        report = secrets_vault.vault_status(config, "alice", parse=parse)
+        assert report.outcome == "VaultIsolationRequired"
+        assert "allow_unsandboxed_multi_user_vaults" in report.reason
+    check = doctor.check_vault_isolation(config, probe=True)
+    assert check.status == doctor.FAIL
+    config.security.allow_unsandboxed_multi_user_vaults = True
+    assert secrets_vault.sync_user(config, "alice", deliver=False).outcome == "ok"
+    assert task_env._vault_credentials(config, "alice")
+    assert doctor.check_vault_isolation(config, probe=True).status == doctor.WARN
+
+
+def test_vault_isolation_doctor_does_not_probe_when_forbidden(ready, monkeypatch):
+    from istota import doctor
+
+    config, _ = ready
+    config.users["bob"] = UserConfig()
+    monkeypatch.setattr("istota.executor._bwrap_checked", None)
+    def unexpected_probe():
+        pytest.fail("probe=False must not spawn a sandbox probe")
+    monkeypatch.setattr("istota.executor._bwrap_available", unexpected_probe)
+    assert doctor.check_vault_isolation(config, probe=False).status == doctor.WARN

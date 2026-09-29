@@ -1163,6 +1163,7 @@ istota_configure_rclone: true
 
 # Security hardening
 istota_security_sandbox_enabled: true  # bwrap filesystem isolation per user
+istota_security_allow_unsandboxed_multi_user_vaults: false
 # Required wherever sandbox_enabled is true. The databases are masked out of
 # the sandbox, so a skill CLI that can't reach the proxy has nothing to read.
 istota_security_skill_proxy_enabled: true  # proxy skill CLI calls via Unix socket (credential isolation)

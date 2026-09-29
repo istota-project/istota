@@ -560,6 +560,7 @@ TOML
 
 [security]
 sandbox_enabled = ${ISTOTA_SECURITY_SANDBOX_ENABLED:-true}
+allow_unsandboxed_multi_user_vaults = ${ISTOTA_SECURITY_ALLOW_UNSANDBOXED_MULTI_USER_VAULTS:-false}
 skill_proxy_enabled = ${ISTOTA_SECURITY_SKILL_PROXY_ENABLED:-true}
 skill_proxy_timeout = ${ISTOTA_SECURITY_SKILL_PROXY_TIMEOUT:-300}
 skill_client_wait_seconds = ${ISTOTA_SECURITY_SKILL_CLIENT_WAIT_SECONDS:-600}

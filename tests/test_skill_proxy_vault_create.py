@@ -98,6 +98,7 @@ def test_signup_address_must_not_name_another_user(tmp_path, monkeypatch, sock):
             "alice+team": UserConfig(),
         },
     )
+    config.security.allow_unsandboxed_multi_user_vaults = True
     config.email.enabled = True
     config.email.bot_email = "bot@example.com"
     config.db_path.parent.mkdir()
@@ -254,3 +255,15 @@ def test_generated_count_comes_from_the_group_not_a_flat_name(tmp_path, monkeypa
     assert secrets_vault.parse_vault(path.read_bytes(), "test-passphrase").generated_count == 1
     secrets_vault.sync_user(config, "alice", force=True, deliver=False)
     assert secrets_vault.vault_status(config, "alice", parse=False).generated_count == 1
+
+
+def test_multi_user_vault_create_requires_opt_in(tmp_path, monkeypatch, sock):
+    config = Config(db_path=tmp_path / "test.db", users={
+        "alice": UserConfig(vault_path="vault.kdbx"), "bob": UserConfig(),
+    })
+    db.init_db(config.db_path)
+    monkeypatch.setattr("istota.executor._bwrap_available", lambda: False)
+    with SkillProxy(sock, {}, {}, config=config, user_id="alice", vault_write_limit=1):
+        reply = _request(sock, {"type": "vault_create", "slug": "acme"})
+    assert reply["reason"] == "vault_isolation_required"
+    assert "allow_unsandboxed_multi_user_vaults" in reply["error"]

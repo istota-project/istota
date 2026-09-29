@@ -92,6 +92,10 @@ Users connect their Google account through the web dashboard at `/istota/` (the 
 
 ## Credential vault
 
+Vaults on a deployment with more than one configured user require a working sandbox. The count includes users without vaults: their tasks can still reach another user's credentials when every task runs as the same OS user. The CLI and settings page refuse to store a passphrase on that shape. Existing vaults stop syncing, and new tasks receive none of their cached credentials; stored rows and vault files remain intact. The settings card reports the refusal, and `istota doctor --only security.vault_isolation` reports it to the operator.
+
+An operator who accepts that exposure can set `[security] allow_unsandboxed_multi_user_vaults = true` and restart the services. For Ansible, set `istota_security_allow_unsandboxed_multi_user_vaults: true`; for Docker, set `ISTOTA_SECURITY_ALLOW_UNSANDBOXED_MULTI_USER_VAULTS=true` in `.env` and recreate the service. Stop active tasks before changing this policy or adding users, since a running task may already hold credentials. The opt-in does not isolate tasks, and doctor continues to warn. Single-user deployments and deployments with effective sandboxing need no opt-in. This policy covers the shared vault namespace; it does not change the policy for credentials injected by skill manifests.
+
 A user who keeps their credentials in a password manager otherwise maintains two copies of every key, and the copy Istota reads is the one they cannot see, search or back up. The credential vault removes the second edit: a KeePass (KDBX) file the user maintains on their own devices, which Istota reads on a schedule and copies into the `secrets` table. Off for every user until somebody puts a file in the folder and generates a passphrase.
 
 It is **provisioning input, not a storage backend**. The table stays the live store, `resolve_secret`'s order is unchanged, and a vault that is missing, half-synced or locked leaves every credential working. Istota can create entries only in `generated/`; it cannot change or delete existing entries.

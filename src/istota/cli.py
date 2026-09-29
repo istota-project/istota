@@ -922,6 +922,13 @@ def cmd_secret(args):
         sys.exit(1)
 
     if args.action == "ensure":
+        from . import secrets_vault
+
+        if args.service == "vault" and args.key == "passphrase":
+            refusal = secrets_vault.vault_isolation_refusal(config, args.user)
+            if refusal:
+                print(f"Error: {refusal}", file=sys.stderr)
+                sys.exit(1)
         value = _secret_ensure_value(config, args)
         state = secrets_store.upsert_secret(
             db_path, args.user, args.service, args.key, value,
@@ -1055,6 +1062,10 @@ def _cmd_secret_vault_new(config, args) -> None:
 
     if not args.user or args.user not in config.users or not args.slug:
         print("Error: vault-new needs a configured --user and --slug", file=sys.stderr)
+        sys.exit(1)
+    refusal = secrets_vault.vault_isolation_refusal(config, args.user)
+    if refusal:
+        print(f"Error: {refusal}", file=sys.stderr)
         sys.exit(1)
     if not secrets_vault._vault_is_enabled(config, args.user):
         print("Error: vault is not configured for this user", file=sys.stderr)

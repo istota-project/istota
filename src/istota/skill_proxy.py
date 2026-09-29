@@ -713,6 +713,10 @@ class SkillProxy:
         if config is None or not user_id or not secrets_vault._vault_is_enabled(config, user_id):
             refuse("vault_not_configured", "No credential vault is configured")
             return
+        refusal = secrets_vault.vault_isolation_refusal(config, user_id)
+        if refusal:
+            refuse("vault_isolation_required", refusal)
+            return
         slug = request.get("slug")
         username = request.get("username")
         url = request.get("url", "")

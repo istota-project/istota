@@ -4,6 +4,8 @@ The boundaries a task runs inside, and the modules that build them. `executor.md
 
 ## Security posture
 
+Credential vaults on a deployment with more than one configured user require `effective_sandboxing` or the operator flag `[security] allow_unsandboxed_multi_user_vaults = true` (default false). The count includes users without vaults. `secrets_vault.vault_isolation_refusal` gates CLI and web passphrase provisioning, sync, status, task credential loading and proxy writes. It withholds cached credentials without deleting rows; existing deployments get a doctor failure and a settings-card refusal. The opt-in accepts same-uid exposure and doctor continues to warn. Restart services and stop active tasks after changing the policy or adding users. Manifest-injected credentials keep their existing policy.
+
 The development container's own bullet is in `devbox.md`.
 
 - **Sandbox** (`bwrap`): per-user filesystem isolation. Linux + bubblewrap is the only supported deployment.

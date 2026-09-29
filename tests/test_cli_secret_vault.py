@@ -814,3 +814,36 @@ class TestVaultStatus:
         cmd_secret(_Args(config=str(cfg), action="vault-status", user="alice"))
         out = capsys.readouterr().out.lower()
         assert "passphrase" in out
+
+
+@pytest.mark.parametrize("allowed,sandboxed,second_user", [
+    (False, False, True), (True, False, True),
+    (False, True, True), (False, False, False),
+])
+def test_multi_user_vault_needs_isolation_or_opt_in(
+    env, monkeypatch, capsys, allowed, sandboxed, second_user,
+):
+    from istota.cli import cmd_secret
+
+    cfg, db_path, _ = env
+    with cfg.open("a") as config_file:
+        if second_user:
+            config_file.write('\n[users.bob]\ndisplay_name = "Bob"\n')
+        config_file.write(
+            '\n[security]\nallow_unsandboxed_multi_user_vaults = '
+            + str(allowed).lower() + '\n'
+        )
+    monkeypatch.setattr("istota.executor._bwrap_available", lambda: sandboxed)
+    secrets_store.set_secret(db_path, "alice", "vault", "passphrase", PASSPHRASE)
+    target = "bob" if second_user else "alice"
+    args = _Args(config=str(cfg), action="ensure", user=target,
+                 service="vault", key="passphrase", generate=True, force=True)
+    if second_user and not (allowed or sandboxed):
+        with pytest.raises(SystemExit) as exc:
+            cmd_secret(args)
+        assert exc.value.code == 1
+        assert not secrets_store.secret_exists(db_path, target, "vault", "passphrase")
+        assert "allow_unsandboxed_multi_user_vaults" in capsys.readouterr().err
+    else:
+        cmd_secret(args)
+        assert secrets_store.secret_exists(db_path, target, "vault", "passphrase")
