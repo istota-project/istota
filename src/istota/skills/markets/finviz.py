@@ -401,6 +401,23 @@ def _format_surprise(release: EconomicRelease) -> str:
         return f" (exp. {release.expected}, prior: {release.prior})"
 
 
+def _release_session(api_url: str, result: dict, headers: dict[str, str]) -> None:
+    """Close the tab a challenge answer kept open; the retry opens its own.
+
+    Left open, each attempt's tab sat on the page for the session TTL
+    (ISSUE-557). Best effort: the TTL is still the backstop.
+    """
+    session_id = result.get("session_id")
+    if not session_id or not result.get("session_retained"):
+        return
+    try:
+        browser_request(
+            "delete", f"{api_url}/sessions/{session_id}", timeout=5.0, headers=headers,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.info("FinViz: could not close session %s: %s", session_id, e)
+
+
 def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizData | None:
     """Fetch and parse FinViz homepage data via the headless browser API.
 
@@ -435,6 +452,7 @@ def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizDat
             if result.get("status") != "ok":
                 last_error = result.get("error", result.get("status"))
                 logger.warning("FinViz fetch failed (attempt %d): %s", attempt + 1, last_error)
+                _release_session(api_url, result, headers)
                 continue
 
             text = result.get("text", "")
