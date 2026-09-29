@@ -254,6 +254,18 @@ def validate_origin(conn, config, *, actor_user_id: str, origin: dict) -> None:
         raise RequestError("unsupported_origin")
 
 
+class AudienceUnavailable(RequestError):
+    """The participant list could not be fetched, which says nothing about who is in the room.
+
+    Carries the same code as a wrong audience, so a caller that answers a
+    person refuses exactly as before; the delivery drain catches it first and
+    tries again on its next tick instead of closing the relay.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("unsupported_origin")
+
+
 async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -> None:
     """Fresh external audience check, called outside the claim transaction."""
     if not origin.get("talk_ref"):
@@ -264,7 +276,7 @@ async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -
     try:
         participants = await client.get_participants(origin["talk_ref"])
     except Exception:
-        raise RequestError("unsupported_origin") from None
+        raise AudienceUnavailable() from None
     finally:
         await client.aclose()
     actors = set()
@@ -807,6 +819,14 @@ async def deliver_question(config, row) -> None:
                 config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
                 text="", task_id=None, request_id=row["id"],
             )
+    except AudienceUnavailable:
+        # Nothing was claimed, so the row is still `queued` and the next drain
+        # retries it. The queue deadline bounds the retries as it bounds any
+        # queued question.
+        if row["queue_deadline"] is None or row["queue_deadline"] <= db.sql_datetime_now():
+            await asyncio.to_thread(_finish_request, config, row["id"], reason="queue_expired")
+        else:
+            logger.warning("relay %s: Talk participants unavailable; retrying next tick", row["relay_id"])
     except RequestError as exc:
         await asyncio.to_thread(_finish_request, config, row["id"], reason=str(exc))
     else:
@@ -833,6 +853,8 @@ async def _deliver_room_question(config, row) -> None:
         try:
             await verify_private_audience(config, actor_user_id=row["recipient_user_id"],
                                           origin={"talk_ref": destination.get("talk_ref")})
+        except AudienceUnavailable:
+            raise
         except RequestError:
             raise RequestError("destination_not_private") from None
     claim, notice = await asyncio.to_thread(_claim_room_question, config, row["id"], fresh)

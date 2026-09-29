@@ -168,6 +168,56 @@ class TestRefusalsAtDelivery:
         assert not rows(config, "SELECT 1 FROM notifications WHERE source='relay_question'")
         assert rows(config, "SELECT 1 FROM notifications WHERE source='message_relay' AND user_id='alice'")
 
+    def test_a_participant_fetch_failure_waits_for_the_next_tick(self, setup, room):
+        # A Nextcloud 5xx or timeout says nothing about who is in the room, so
+        # it must not close the question as not private; the drain retries it.
+        config = room['config']
+        bind_talk(room)
+        room['participants'].side_effect = RuntimeError('503 Service Unavailable')
+        held = release(setup)
+        assert request(config, held['relay_id'])['state'] == 'queued'
+        assert request(config, held['relay_id'])['error_code'] is None
+        assert relay(config, held['relay_id'])['state'] == 'queued'
+        assert not question_rows(config, held['relay_id'])
+        assert not rows(config, "SELECT 1 FROM notifications WHERE source='message_relay'")
+        room['participants'].side_effect = None
+        asyncio.run(requests.drain_requests(config))
+        assert relay(config, held['relay_id'])['state'] == 'waiting'
+        assert len(question_rows(config, held['relay_id'])) == 1
+
+    def test_a_fetch_failure_past_the_queue_deadline_expires(self, setup, room):
+        config = room['config']
+        bind_talk(room)
+        room['participants'].side_effect = RuntimeError('timed out')
+        held = release(setup)
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE whatsapp_skill_requests SET queue_deadline=datetime('now','-1 minute') "
+                         "WHERE relay_id=?", (held['relay_id'],))
+        asyncio.run(requests.drain_requests(config))
+        assert request(config, held['relay_id'])['state'] == 'expired'
+        assert request(config, held['relay_id'])['error_code'] == 'queue_expired'
+        assert relay(config, held['relay_id'])['state'] == 'expired'
+        assert not question_rows(config, held['relay_id'])
+
+    def test_the_askers_origin_check_waits_too(self, setup, room):
+        config = room['config']
+        with db.get_db(config.db_path) as conn:
+            db.add_room_binding(conn, setup[2], 'talk', 'alice-talk')
+        room['participants'].return_value = [{'actorType': 'users', 'actorId': 'alice'},
+                                             {'actorType': 'users', 'actorId': 'bot'}]
+        held = hold(setup)  # WhatsApp, so only the asker-side check reaches Talk
+        assert json.loads(relay(config, held['relay_id'])['origin'])['talk_ref'] == 'alice-talk'
+        park(setup)
+        approve(setup)
+        room['participants'].side_effect = RuntimeError('502 Bad Gateway')
+        asyncio.run(requests.drain_requests(config))
+        assert request(config, held['relay_id'])['state'] == 'queued'
+        assert not setup[3]
+        room['participants'].side_effect = None
+        asyncio.run(requests.drain_requests(config))
+        assert len(setup[3]) == 1
+        assert relay(config, held['relay_id'])['state'] == 'waiting'
+
     @pytest.mark.parametrize('change', ['talk_binding', 'shared', 'preference'])
     def test_a_destination_changed_after_approval_is_refused(self, setup, room, change):
         config = room['config']
