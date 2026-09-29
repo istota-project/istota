@@ -1112,6 +1112,8 @@ class TestThePromptStatesTheFetchBudget:
             temp_dir=tmp_path / "temp",
         )
         config.skills_dir.mkdir(parents=True, exist_ok=True)
+        from istota import db as framework_db
+        framework_db.init_db(config.db_path)
         config.security.vault_fetch_limit_per_task = limit
         task = executor.db.Task(
             id=1, status="running", source_type="talk", user_id="alice",
