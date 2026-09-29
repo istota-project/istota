@@ -3,6 +3,8 @@
 import time
 from datetime import datetime, timezone
 
+import httpx
+
 from istota.briefings.sources import SourceContext, resolve_source
 from istota.config import BrowserConfig, Config, EmailConfig, UserConfig
 
@@ -373,7 +375,7 @@ class TestBrowse:
             calls.append((url, kwargs["json"]))
             return _Resp()
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        monkeypatch.setattr(httpx, "post", _post)
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
 
         assert gs.ok is True
@@ -398,7 +400,7 @@ class TestBrowse:
             calls.append(kwargs["json"])
             return _Resp()
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        monkeypatch.setattr(httpx, "post", _post)
         browse_mod.resolve(
             {"url": "https://example.com/story", "mode": "article", "max_chars": 4000},
             _ctx(tmp_path, browser=True),
@@ -421,7 +423,7 @@ class TestBrowse:
             calls.append(kwargs["json"])
             return _Resp()
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        monkeypatch.setattr(httpx, "post", _post)
         browse_mod.resolve(
             {"url": "https://example.com", "mode": "readable"},
             _ctx(tmp_path, browser=True),
@@ -446,7 +448,7 @@ class TestBrowse:
             calls.append(kwargs["json"])
             return _Resp()
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        monkeypatch.setattr(httpx, "post", _post)
         ctx = _ctx(
             tmp_path, browser=True,
             briefings=BriefingsModuleConfig(max_browse_chars=3000),
@@ -475,7 +477,7 @@ class TestBrowse:
                     ),
                 }
 
-        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
 
         assert gs.ok is True
@@ -495,7 +497,7 @@ class TestBrowse:
             def json(self):
                 return {"status": "ok", "markdown": "## Top"}
 
-        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
         assert gs.untrusted is True
 
@@ -533,7 +535,7 @@ class TestBrowse:
                 active -= 1
             return _Resp()
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        monkeypatch.setattr(httpx, "post", _post)
         ctx = _ctx(tmp_path, browser=True)
         threads = [
             threading.Thread(target=browse_mod.resolve, args=({"preset": "ap"}, ctx))
@@ -563,7 +565,7 @@ class TestBrowse:
         def _boom(*a, **k):
             raise RuntimeError("browser down")
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _boom)
+        monkeypatch.setattr(httpx, "post", _boom)
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
         assert gs.ok is False
         with browse_mod.browser_admission(db_path=tmp_path / "istota.db", queue_timeout=0.01):
@@ -578,7 +580,7 @@ class TestBrowse:
             def json(self):
                 return {"status": "ok", "markdown": "## Top", "truncated": False}
 
-        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
         assert gs.provenance == "frontpage of AP News"
 
@@ -602,7 +604,7 @@ class TestBrowse:
                 return _Resp(404, {})
             return _Resp(200, {"status": "ok", "text": "Headline one. Headline two."})
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        monkeypatch.setattr(httpx, "post", _post)
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
 
         assert gs.ok is True
@@ -618,7 +620,7 @@ class TestBrowse:
             def json(self):
                 return {"status": "ok", "markdown": "custom page"}
 
-        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
         gs = browse_mod.resolve({"url": "https://example.com"}, _ctx(tmp_path, browser=True))
         assert gs.ok is True
         assert "example.com" in gs.text
@@ -632,7 +634,7 @@ class TestBrowse:
             def json(self):
                 return {"status": "ok", "markdown": "   "}
 
-        monkeypatch.setattr(browse_mod.httpx, "post", lambda *a, **k: _Resp())
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: _Resp())
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
         assert gs.ok is False
         assert "no content" in gs.provenance
@@ -643,7 +645,7 @@ class TestBrowse:
         def _boom(*a, **k):
             raise RuntimeError("browser down")
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _boom)
+        monkeypatch.setattr(httpx, "post", _boom)
         gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
         assert gs.ok is False
         assert "fetch failed" in gs.provenance
@@ -673,8 +675,8 @@ class TestBrowse:
                 raise RuntimeError("browser down")
             return _Resp(200, {"status": "closed"})
 
-        monkeypatch.setattr(browse_mod.httpx, "post", _post)
-        monkeypatch.setattr(browse_mod.httpx, "delete", _delete)
+        monkeypatch.setattr(httpx, "post", _post)
+        monkeypatch.setattr(httpx, "delete", _delete)
         return deleted
 
     def test_a_retained_challenge_session_is_closed(self, tmp_path, monkeypatch):
@@ -1381,6 +1383,62 @@ class TestBuiltinMarkets:
         gs = bi.resolve_markets({"futures": ["ES=F"]}, ctx)
         assert gs.ok is True
         assert "ES=F" in gs.text
+
+    def _evening_finviz(self, tmp_path, monkeypatch, *, browser):
+        import istota.briefings.sources.builtins as bi
+        import istota.skills.briefing as briefing_mod
+
+        # The daemon has no task environment.
+        monkeypatch.delenv("ISTOTA_USER_ID", raising=False)
+        monkeypatch.delenv("BROWSER_API_URL", raising=False)
+        monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        monkeypatch.setattr(briefing_mod, "_fetch_market_data", lambda *a, **k: None)
+        sent = []
+
+        def respond(request):
+            sent.append(request)
+            return httpx.Response(200, json={"status": "ok", "text": "Headlines"})
+
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(httpx, "post", client.post)
+        monday_evening = datetime(2026, 7, 20, 20, 0, tzinfo=timezone.utc)
+        bi.resolve_markets({}, _ctx(tmp_path, now=monday_evening, browser=browser))
+        client.close()
+        return sent
+
+    def test_evening_finviz_names_the_user_and_the_configured_browser(self, tmp_path, monkeypatch):
+        """ISSUE-557 follow-up: the daemon-side fetch was refused for want of an identity."""
+        sent = self._evening_finviz(tmp_path, monkeypatch, browser=True)
+        assert sent, "the FinViz fetch never reached the browser"
+        assert sent[0].headers["X-Istota-User"] == "alice"
+        assert str(sent[0].url) == "http://browser:9223/browse"
+
+    def test_evening_finviz_queues_on_the_configured_admission_lock(self, tmp_path, monkeypatch):
+        """Not one relative to the daemon's cwd, which no other caller contends on."""
+        self._evening_finviz(tmp_path, monkeypatch, browser=True)
+        assert (tmp_path / "browser-admission.lock").exists()
+        assert not (tmp_path / "cwd" / "data").exists()
+
+    def test_finviz_headlines_make_the_markets_source_untrusted(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.builtins as bi
+        import istota.skills.briefing as briefing_mod
+
+        monkeypatch.setattr(briefing_mod, "_fetch_market_data", lambda *a, **k: "ES=F +0.5%")
+        monkeypatch.setattr(
+            briefing_mod, "_fetch_finviz_market_data",
+            lambda **k: "**FinViz Market Data:**\n\n- A scraped headline",
+        )
+        monday_evening = datetime(2026, 7, 20, 20, 0, tzinfo=timezone.utc)
+        with_finviz = bi.resolve_markets({}, _ctx(tmp_path, now=monday_evening, browser=True))
+        quotes_only = bi.resolve_markets({}, _ctx(tmp_path, now=monday_evening, browser=False))
+        assert with_finviz.untrusted is True
+        assert quotes_only.untrusted is False
+
+    def test_evening_finviz_is_skipped_without_a_browser(self, tmp_path, monkeypatch):
+        assert self._evening_finviz(tmp_path, monkeypatch, browser=False) == []
 
     def test_weekend_no_quotes(self, tmp_path):
         import istota.briefings.sources.builtins as bi

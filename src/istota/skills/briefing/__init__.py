@@ -459,7 +459,9 @@ def _fetch_market_data(
         return None
 
 
-def _fetch_finviz_market_data() -> str | None:
+def _fetch_finviz_market_data(
+    api_url: str | None = None, user_id: str | None = None, db_path=None,
+) -> str | None:
     """
     Fetch and format FinViz market data for evening briefings.
 
@@ -472,7 +474,7 @@ def _fetch_finviz_market_data() -> str | None:
     try:
         from ..markets.finviz import fetch_finviz_data, format_finviz_briefing
 
-        data = fetch_finviz_data()
+        data = fetch_finviz_data(api_url=api_url, user_id=user_id, db_path=db_path)
         if data is None:
             return None
 

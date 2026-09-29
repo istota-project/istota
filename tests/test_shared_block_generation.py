@@ -180,6 +180,22 @@ class TestVerbatimStructured:
         result = run_shared_block(block, cfg)
         assert result == {"text": "📈 DOW +1%", "trusted": True}
 
+    def test_an_untrusted_source_clears_a_trusted_block(self, tmp_path, monkeypatch):
+        """The definition vouches for the numbers, not for scraped FinViz headlines."""
+        cfg = _config(tmp_path)
+        block = BriefingSharedBlock(
+            name="mk", cron="0 6 * * *", render_mode="structured", trusted=True,
+            sources=[{"kind": "markets", "config": {}}],
+        )
+        monkeypatch.setattr(
+            shared_blocks, "_gather_shared",
+            lambda config, sources, now: [
+                GatheredSource(kind="markets", title="M", text="headline", untrusted=True),
+            ],
+        )
+        result = run_shared_block(block, cfg)
+        assert result["trusted"] is False
+
     def test_structured_concats_in_slot_order(self, tmp_path, monkeypatch):
         cfg = _config(tmp_path)
         block = BriefingSharedBlock(

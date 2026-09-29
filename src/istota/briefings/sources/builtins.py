@@ -108,14 +108,25 @@ def resolve_markets(config: dict, ctx: SourceContext) -> GatheredSource:
         k: v for k, v in config.items() if k in ("futures", "indices")
     }
     parts: list[str] = []
+    # FinViz headlines are text scraped from a third-party page; the quotes
+    # alone are numbers. Only the first earns the untrusted-content wrapper.
+    scraped = False
     if not is_weekend:
         market_data = _fetch_market_data(market_config, mode, tz_str=tz_str)
         if market_data:
             parts.append(market_data)
-        if not is_morning:
-            finviz = _fetch_finviz_market_data()
+        browser = getattr(ctx.app_config, "browser", None)
+        if not is_morning and browser and getattr(browser, "enabled", False):
+            # The daemon has no task environment, so the identity, the API
+            # address and the admission lock come from the context rather than
+            # ISTOTA_USER_ID, BROWSER_API_URL and ISTOTA_DB_PATH.
+            finviz = _fetch_finviz_market_data(
+                api_url=browser.api_url, user_id=ctx.user_id,
+                db_path=ctx.app_config.db_path,
+            )
             if finviz:
                 parts.append(finviz)
+                scraped = True
 
     if not parts:
         note = "(no market quotes — weekend)" if is_weekend else "(no market data)"
@@ -125,6 +136,7 @@ def resolve_markets(config: dict, ctx: SourceContext) -> GatheredSource:
     return GatheredSource(
         kind="markets", title="Markets", text="\n\n".join(parts),
         provenance=f"{mode} market data",
+        untrusted=scraped,
     )
 
 

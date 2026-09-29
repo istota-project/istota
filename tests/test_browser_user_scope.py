@@ -6,6 +6,7 @@ import sys
 import types
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 
@@ -766,8 +767,8 @@ def test_a_briefing_source_reaches_the_api_and_closes_its_challenge_tab(api, mon
     def _delete(url, *, headers, timeout):
         return _Resp(client.delete(url.removeprefix("http://browser:9223"), headers=headers))
 
-    monkeypatch.setattr(browse_mod.httpx, "post", _post)
-    monkeypatch.setattr(browse_mod.httpx, "delete", _delete)
+    monkeypatch.setattr(httpx, "post", _post)
+    monkeypatch.setattr(httpx, "delete", _delete)
     monkeypatch.setattr(api.browsing, "detect_captcha", lambda page: True)
     cfg = Config(
         db_path=tmp_path / "istota.db",

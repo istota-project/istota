@@ -45,10 +45,12 @@ def test_request_waits_before_http_and_releases_on_exception(tmp_path, monkeypat
     monkeypatch.setattr(httpx, "post", post)
     with browser_admission():
         with pytest.raises(BrowserQueueTimeout):
-            browser_request("post", "http://browser/browse", queue_timeout=0.01, timeout=120)
+            browser_request("post", "http://browser/browse", queue_timeout=0.01, timeout=120,
+                            headers={"X-Istota-User": "alice"})
     assert calls == []
     with pytest.raises(RuntimeError, match="fetch failed"):
-        browser_request("post", "http://browser/browse", timeout=120)
+        browser_request("post", "http://browser/browse", timeout=120,
+                        headers={"X-Istota-User": "alice"})
     assert calls == [120]
     with browser_admission(queue_timeout=0.01):
         pass
@@ -104,3 +106,23 @@ def test_finviz_queue_timeout_is_not_retried(tmp_path, monkeypatch, caplog):
     assert finviz.fetch_finviz_data(retries=2) is None
     assert len(calls) == 1
     assert "waiting for admission" in caplog.text
+
+
+@pytest.mark.parametrize("headers", [None, {}, {"X-Istota-User": ""}])
+def test_a_request_naming_no_user_is_refused_before_it_is_sent(tmp_path, monkeypatch, headers):
+    """The API refuses it 400 and every caller read that as an empty page."""
+    from istota.browser_admission import (
+        BrowserIdentityMissing, browser_admission, browser_request,
+    )
+    import httpx
+
+    monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "istota.db"))
+    sent = []
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: sent.append(url))
+    kwargs = {} if headers is None else {"headers": headers}
+    with pytest.raises(BrowserIdentityMissing, match="X-Istota-User"):
+        browser_request("post", "http://browser/render", timeout=5, **kwargs)
+    assert sent == []
+    assert issubclass(BrowserIdentityMissing, ValueError)
+    with browser_admission(queue_timeout=0.01):
+        pass

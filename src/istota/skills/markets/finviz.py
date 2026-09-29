@@ -401,7 +401,9 @@ def _format_surprise(release: EconomicRelease) -> str:
         return f" (exp. {release.expected}, prior: {release.prior})"
 
 
-def _release_session(api_url: str, result: dict, headers: dict[str, str]) -> None:
+def _release_session(
+    api_url: str, result: dict, headers: dict[str, str], db_path=None,
+) -> None:
     """Close the tab a challenge answer kept open; the retry opens its own.
 
     Left open, each attempt's tab sat on the page for the session TTL
@@ -413,17 +415,28 @@ def _release_session(api_url: str, result: dict, headers: dict[str, str]) -> Non
     try:
         browser_request(
             "delete", f"{api_url}/sessions/{session_id}", timeout=5.0, headers=headers,
+            db_path=db_path,
         )
     except Exception as e:  # noqa: BLE001
         logger.info("FinViz: could not close session %s: %s", session_id, e)
 
 
-def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizData | None:
+def fetch_finviz_data(
+    api_url: str | None = None, retries: int = 2, user_id: str | None = None,
+    db_path=None,
+) -> FinVizData | None:
     """Fetch and parse FinViz homepage data via the headless browser API.
 
     Args:
         api_url: Browser API URL. Defaults to BROWSER_API_URL env var or localhost:9223.
         retries: Number of retry attempts on failure (default 2, so up to 3 total).
+        user_id: The user the request is for. A skill CLI leaves it None and
+            takes ISTOTA_USER_ID from its task; the daemon has no task
+            environment, so a briefing passes it.
+        db_path: The framework database, whose directory holds the browser
+            admission lock. Required from the daemon for the same reason:
+            without ISTOTA_DB_PATH the lock falls back to a path relative to
+            the working directory, a different file from every other caller's.
 
     Returns:
         Parsed FinVizData, or None on failure.
@@ -433,7 +446,7 @@ def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizDat
     if api_url is None:
         api_url = os.environ.get("BROWSER_API_URL", DEFAULT_API_URL)
 
-    headers = browser_headers()
+    headers = browser_headers(user_id)
     last_error = None
     for attempt in range(1 + retries):
         if attempt > 0:
@@ -445,14 +458,14 @@ def fetch_finviz_data(api_url: str | None = None, retries: int = 2) -> FinVizDat
             resp = browser_request("post",
                 f"{api_url}/browse",
                 json=with_browser_owner({"url": FINVIZ_URL, "timeout": 30}),
-                timeout=BROWSE_TIMEOUT, headers=headers,
+                timeout=BROWSE_TIMEOUT, headers=headers, db_path=db_path,
             )
             result = resp.json()
 
             if result.get("status") != "ok":
                 last_error = result.get("error", result.get("status"))
                 logger.warning("FinViz fetch failed (attempt %d): %s", attempt + 1, last_error)
-                _release_session(api_url, result, headers)
+                _release_session(api_url, result, headers, db_path)
                 continue
 
             text = result.get("text", "")
