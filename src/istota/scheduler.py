@@ -100,6 +100,7 @@ from .brain import (
     split_effort,
 )
 from .build_info import build_description
+from .chat_files import check_chat_file_links
 from .consumers import (
     LogChannelSubscriber,
     PushNotificationSubscriber,
@@ -3013,6 +3014,15 @@ def process_one_task(
             )
             success = False
             result = f"Malformed output: {malformed_reason}"
+
+    # A `/chat/files` link the endpoint would refuse — most often a browse
+    # capture left in the temp dir — renders as a broken image with nothing to
+    # say why. Checked here, before any surface or store sees the final answer,
+    # so each stored and delivered copy says the file is unavailable instead
+    # (ISSUE-559). Text streamed earlier as `text_delta` is not rewritten, so a
+    # live viewer can still see the broken image until the transcript reloads.
+    if success:
+        result = check_chat_file_links(config, task.user_id, result, task_id=task_id)
 
     from .whatsapp_requests import held_question, present_question
     with db.get_db(config.db_path) as conn:

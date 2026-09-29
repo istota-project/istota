@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A reply that embeds a file web chat cannot serve, such as a browse screenshot taken without `-o`, now says the image is unavailable instead of showing a broken image. Each `/chat/files` link in an answer is checked against the endpoint's own rule before the answer is stored, and a refused one is logged with the task id. `browse screenshot` also prints its scratch note to stderr, for scripts that keep only `path`.
+
 - Switching to a long web chat room in the iOS app now opens it at the newest message instead of part way up the transcript. The room paints its saved copy first and the server page a moment later, and only the first paint got the scroll correction iOS needs, so the second one's pin to the bottom could be dropped and nothing moved the view afterwards. The transcript now also re-pins whenever its content grows while you are at the bottom, and loading older messages waits until that pin has landed.
 
 - A run, hike or walk imported from a Garmin watch now shows up in the location day summary as its own activity, with start and end times, distance and where it began and ended. A loop that started and ended at home used to be folded into the home stop, which moved the departure from home to the end of the run; the stop is now split around the activity, and home resumes from the end of the run until the phone is next seen leaving. `location history` returns each ping's `source` (`overland` or `garmin`) and takes `--source` to filter on it. A run that starts just outside a small saved-place radius takes its start place from the stop it left, and a watch track that repeats its last point stores it once.

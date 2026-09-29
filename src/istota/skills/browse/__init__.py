@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -56,7 +57,9 @@ SCRATCH_NOTE = (
     "This capture is scratch: it is in the task's temp directory, it is swept "
     "on the deployment's temp-file retention, and `/chat/files` does not serve "
     "it — so a reply cannot show it. To show the user the picture, or to keep "
-    "it, take the capture again with -o naming a path inside your workspace."
+    "it, take the capture again with -o naming a path inside your workspace. "
+    "If the page can no longer be captured, copy this file into your "
+    "workspace with cp and embed the copy instead."
 )
 # Where `OrderedAppend` records the command-line order of the `interact`
 # arguments it is declared on. Not an argument of its own, so nothing parses
@@ -812,6 +815,10 @@ def cmd_screenshot(args):
         # dir too and that write is still a file the caller chose.
         if directory is not None:
             notes.append(SCRATCH_NOTE)
+            # Also on stderr: a caller that projects `path` out of the JSON
+            # drops `notes` with the rest, and then embeds a path `/chat/files`
+            # refuses (ISSUE-559).
+            print(f"browse screenshot: {SCRATCH_NOTE}", file=sys.stderr)
         if notes:
             result["notes"] = notes
         workspace_path = _workspace_relative(resolved)

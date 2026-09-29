@@ -154,7 +154,7 @@ Every URL in the markdown is already absolute — use them exactly as given. `mo
  "notes": ["This capture is scratch: ..."]}
 ```
 
-**A capture is scratch unless you asked for otherwise.** With no `-o` it lands in this task's own temp directory, which you can read back and which is swept for you — right for the picture you are taking in order to look at it. `path` is where it actually went; read it from the answer rather than assuming a name, since a second capture in the same second gets a suffix. Such a capture carries a `notes` line saying it is scratch and carries no `workspace_path`.
+**A capture is scratch unless you asked for otherwise.** With no `-o` it lands in this task's own temp directory, which you can read back and which is swept for you — right for the picture you are taking in order to look at it. `path` is where it actually went; read it from the answer rather than assuming a name, since a second capture in the same second gets a suffix. Such a capture carries a `notes` line saying it is scratch (repeated on stderr, for a script that keeps only `path`) and carries no `workspace_path`. `/chat/files` refuses it, and a reply that embeds it anyway shows the user a note that the image is unavailable. If the page can no longer be captured with `-o`, `cp` the scratch file into your workspace and embed the copy.
 
 **Pass `-o` when the picture is for the user** — something to show in a reply, or a file they will open later. Then the answer also carries `workspace_path`, the same file spelled the way `/istota/api/chat/files?path=` wants it, so a web-chat reply can embed it without rebuilding the path by hand. That key is present only for a file that endpoint serves, which is a file under `/Users/{user_id}/`.
 
