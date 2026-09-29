@@ -117,6 +117,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- answers it — which is what keeps an upgrade from changing any existing
     -- row's outcome (ISSUE-420).
     model_namespace TEXT,
+    -- Tool calls in the current attempt, and whether the first was a relay
+    -- ask. Written for every tool call whatever the display settings, and reset
+    -- when an attempt starts; the clean-turn approval rule reads them.
+    attempt_tool_calls INTEGER NOT NULL DEFAULT 0,
+    attempt_first_tool_relay INTEGER NOT NULL DEFAULT 0,
 
     -- Real Talk room for this task's notifications. Distinct from
     -- conversation_token, which doubles as an email-thread grouping key for
@@ -811,6 +816,7 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     email_reply_routing TEXT NOT NULL DEFAULT 'origin+thread', -- email-reply mirror policy: origin+thread | origin | thread
     outbound_approval TEXT NOT NULL DEFAULT '',          -- outbound email approval: '' = unset (follow [email] outbound_approval_floor) | off | untrusted | all
     external_turn_display TEXT NOT NULL DEFAULT 'collapsed', -- external-origin turn body in web chat: full | collapsed | hidden (the turn itself always renders)
+    relay_delivery TEXT NOT NULL DEFAULT '',             -- where relay questions from other users reach this user: '' (asker's choice) | room | whatsapp | sms
     default_briefings INTEGER NOT NULL DEFAULT 1,        -- seed the shared [[default_briefings]] set into this user
     briefing_email_html INTEGER NOT NULL DEFAULT 1,      -- briefing email as multipart/alternative (HTML + plain) vs plain only
     timezone_follow_location INTEGER NOT NULL DEFAULT 0, -- follow the GPS timezone on travel (opt-in; rewrites a user-chosen value)
@@ -1695,7 +1701,7 @@ CREATE TABLE IF NOT EXISTS message_relays (
     id TEXT PRIMARY KEY,
     asker_user_id TEXT NOT NULL,
     recipient_user_id TEXT NOT NULL,
-    surface TEXT NOT NULL DEFAULT 'whatsapp' CHECK (surface = 'whatsapp'),
+    surface TEXT NOT NULL DEFAULT 'whatsapp' CHECK (surface IN ('room','whatsapp','sms')),
     request_id TEXT NOT NULL UNIQUE REFERENCES whatsapp_skill_requests(id),
     question TEXT,
     asker_display TEXT,
@@ -1719,6 +1725,13 @@ CREATE TABLE IF NOT EXISTS message_relays (
     return_error TEXT,
     content_expires_at TEXT,
     content_cleared_at TEXT,
+    -- JSON {"kind", "room_token"?, "talk_ref"?, "label"}; never a phone number
+    -- or a binding identity. The question's canonical row and its Talk post.
+    destination TEXT,
+    question_message_id INTEGER,
+    question_talk_id INTEGER,
+    -- Who released the question: the asker ('user') or the clean-turn rule.
+    approval TEXT CHECK (approval IN ('user','clean_turn')),
     CHECK (asker_user_id != recipient_user_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_message_relay_open_pair
@@ -1728,6 +1741,8 @@ CREATE INDEX IF NOT EXISTS idx_message_relay_expiry
 ON message_relays(state, expires_at);
 CREATE INDEX IF NOT EXISTS idx_message_relay_return
 ON message_relays(return_state, answered_at);
+CREATE INDEX IF NOT EXISTS idx_message_relay_question_talk
+ON message_relays(question_talk_id);
 
 CREATE TABLE IF NOT EXISTS relay_reply_candidates (
     provider TEXT NOT NULL,

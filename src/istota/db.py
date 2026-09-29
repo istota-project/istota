@@ -428,6 +428,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # outcome moves. A backfill would have to guess between the two cases
         # this column exists to tell apart, and they leave identical rows.
         "model_namespace": "TEXT",
+        # Per-attempt tool-call count for the relay clean-turn rule; see
+        # schema.sql. Constant defaults, so every existing row reads 0.
+        "attempt_tool_calls": "INTEGER NOT NULL DEFAULT 0",
+        "attempt_first_tool_relay": "INTEGER NOT NULL DEFAULT 0",
     })
 
     # Sent emails: carry the originating task's resolved Talk room so
@@ -644,6 +648,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # alternative is a stranger's full mail body rendered as an ordinary
         # user bubble, which is what this setting exists to stop.
         "external_turn_display": "TEXT NOT NULL DEFAULT 'collapsed'",
+        # Where relay questions from other users reach this user. '' means no
+        # preference: the asker's choice, else the default room.
+        "relay_delivery": "TEXT NOT NULL DEFAULT ''",
     })
 
     # Outbound drafts: emails the approval gate held instead of sending.
@@ -1149,6 +1156,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # Same position and the same one-way reasoning: schema.sql declares only
     # the replacement table.
     _migrate_relay_blocks(conn)
+    # Rebuilds `message_relays` in place; recreates its indexes itself, so the
+    # open-pair constraint is never absent between this and `schema.sql`.
+    _migrate_message_relays_surfaces(conn)
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -6107,6 +6117,140 @@ def _migrate_relay_blocks(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError as e:
         logger.warning("relay grant migration failed: %s", e)
+
+
+# The rebuilt `message_relays`. A copy of schema.sql's, because this runs before
+# schema.sql; `tests/test_whatsapp_requests.py` holds the two equal.
+_MESSAGE_RELAYS_DDL = """CREATE TABLE message_relays_rebuild (
+    id TEXT PRIMARY KEY,
+    asker_user_id TEXT NOT NULL,
+    recipient_user_id TEXT NOT NULL,
+    surface TEXT NOT NULL DEFAULT 'whatsapp' CHECK (surface IN ('room','whatsapp','sms')),
+    request_id TEXT NOT NULL UNIQUE REFERENCES whatsapp_skill_requests(id),
+    question TEXT,
+    asker_display TEXT,
+    origin TEXT,
+    audience TEXT,
+    provider TEXT NOT NULL,
+    binding_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('held','queued','sending','waiting','uncertain','answered','failed','cancelled','expired')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    approved_at TEXT,
+    expires_at TEXT,
+    answered_at TEXT,
+    closed_at TEXT,
+    inbound_answer_id TEXT,
+    answer_text TEXT,
+    recipient_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    return_state TEXT NOT NULL DEFAULT 'none' CHECK (return_state IN ('none','pending','sending','delivered','blocked','uncertain','expired')),
+    return_reference TEXT UNIQUE,
+    return_claimed_at TEXT,
+    return_message_id TEXT,
+    return_error TEXT,
+    content_expires_at TEXT,
+    content_cleared_at TEXT,
+    destination TEXT,
+    question_message_id INTEGER,
+    question_talk_id INTEGER,
+    approval TEXT CHECK (approval IN ('user','clean_turn')),
+    CHECK (asker_user_id != recipient_user_id)
+)"""
+
+_MESSAGE_RELAYS_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_message_relay_open_pair "
+    "ON message_relays(asker_user_id, recipient_user_id) "
+    "WHERE state IN ('held','queued','sending','waiting','uncertain')",
+    "CREATE INDEX IF NOT EXISTS idx_message_relay_expiry ON message_relays(state, expires_at)",
+    "CREATE INDEX IF NOT EXISTS idx_message_relay_return ON message_relays(return_state, answered_at)",
+    "CREATE INDEX IF NOT EXISTS idx_message_relay_question_talk ON message_relays(question_talk_id)",
+)
+
+# Columns every pre-rebuild table has, copied across by name.
+_MESSAGE_RELAYS_CARRIED = (
+    "id", "asker_user_id", "recipient_user_id", "surface", "request_id",
+    "question", "asker_display", "origin", "audience", "provider",
+    "binding_fingerprint", "state", "created_at", "approved_at", "expires_at",
+    "answered_at", "closed_at", "inbound_answer_id", "answer_text",
+    "recipient_task_id", "return_state", "return_reference",
+    "return_claimed_at", "return_message_id", "return_error",
+    "content_expires_at", "content_cleared_at",
+)
+
+_MESSAGE_RELAYS_ADDED = {
+    "destination": "TEXT",
+    "question_message_id": "INTEGER",
+    "question_talk_id": "INTEGER",
+    "approval": "TEXT CHECK (approval IN ('user','clean_turn'))",
+}
+
+
+def _migrate_message_relays_surfaces(conn: sqlite3.Connection) -> None:
+    """Widen `message_relays` to room and SMS questions.
+
+    SQLite cannot alter a CHECK, so the table is rebuilt by its documented
+    procedure: foreign keys off, create, copy, drop, rename, indexes back, and
+    a `foreign_key_check` before commit, all in one transaction. A failure or a
+    violation rolls back and leaves the old table for the next boot. Existing
+    rows are WhatsApp questions; one the asker approved records `approval =
+    'user'`, and one never approved has none.
+
+    `legacy_alter_table` is on for the rename: the `whatsapp_request_task_deleted`
+    trigger on `tasks` names `message_relays`, which does not exist between the
+    drop and the rename, and the modern rename re-parses every trigger and
+    refuses on that. The trigger text needs no rewrite, since the name it uses
+    is the name the table ends with.
+
+    Idempotent on the table's own SQL: only the old single-surface CHECK
+    triggers a rebuild, so a fresh install (no table yet) and a rebuilt one
+    both pass through.
+
+    The new columns are added by `_add_columns` first, so a refused or failed
+    rebuild still leaves every column schema.sql's indexes name: boot goes on,
+    and only a room or SMS row is refused, by the CHECK still standing.
+    """
+    _add_columns(conn, "message_relays", _MESSAGE_RELAYS_ADDED)
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='message_relays'"
+        ).fetchone()
+        if row is None or not re.search(r"surface\s*=\s*'whatsapp'", row[0] or ""):
+            return
+        conn.commit()
+        foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("DROP TABLE IF EXISTS message_relays_rebuild")
+                conn.execute(_MESSAGE_RELAYS_DDL)
+                cols = ",".join(_MESSAGE_RELAYS_CARRIED)
+                conn.execute(
+                    f"INSERT INTO message_relays_rebuild ({cols},destination,"
+                    "question_message_id,question_talk_id,approval) "
+                    f"SELECT {cols},COALESCE(destination,json_object('kind','whatsapp')),"
+                    "question_message_id,question_talk_id,"
+                    "COALESCE(approval,CASE WHEN approved_at IS NOT NULL THEN 'user' END) "
+                    "FROM message_relays"
+                )
+                conn.execute("DROP TABLE message_relays")
+                conn.execute("ALTER TABLE message_relays_rebuild RENAME TO message_relays")
+                for statement in _MESSAGE_RELAYS_INDEXES:
+                    conn.execute(statement)
+                violations = conn.execute("PRAGMA foreign_key_check(message_relays)").fetchall()
+                if violations:
+                    raise sqlite3.IntegrityError(
+                        f"{len(violations)} foreign key violation(s) in message_relays"
+                    )
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA legacy_alter_table=OFF")
+            conn.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
+    except sqlite3.Error as e:
+        logger.warning("message_relays rebuild failed, will retry: %s", e)
 
 
 def _migrate_room_members(conn: sqlite3.Connection) -> None:
