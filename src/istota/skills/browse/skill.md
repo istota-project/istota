@@ -307,9 +307,11 @@ Two consequences worth knowing. A scroll that moved the **page** invalidates the
 
 ## Captcha handling
 
-`"status": "captcha"` means the page is a challenge rather than the content you asked for. There is no `title`, `text` or `links` in that answer, and none is being withheld — the page was not read. A `challenge` field naming a phrase means the verdict came from the window title, before anything read the page at all.
+`get`, `render` and `interact` press a Cloudflare challenge checkbox themselves the moment they meet one. When that clears it, the answer is the page as usual, with `challenge_solved: true`. You do nothing.
 
-On a Cloudflare challenge you can often clear it yourself, and that is the first thing to try:
+`"status": "captcha"` means the page is still a challenge after that. There is no `title`, `text` or `links` in that answer, and none is being withheld — the page was not read. A `challenge` field naming a phrase means the verdict came from the window title, before anything read the page at all. `challenge_press` says what the automatic press did: `still_challenged` means it pressed once and the challenge stayed, `no_challenge` means there was no Cloudflare checkbox to press (a DataDome or other challenge), `recently_pressed` means this session was pressed within the last minute and was left alone, and anything else means it could not press. After `still_challenged` or `recently_pressed`, do not press again straight away: a second press while the challenge works starts it over. Take a screenshot first and press only if the widget is still there and still unticked.
+
+To look and press by hand:
 
 ```bash
 istota-skill browse challenge <session_id>                  # is there a widget, and where
@@ -339,7 +341,7 @@ When WebSearch or WebFetch aren't available, use `istota-skill browse` as a fall
 - At capacity, a new session can replace the least recently used session from the same task. It refuses with `retry_after_seconds` if every slot belongs to another caller. Close sessions you no longer need, reuse a session, or retry later. Calls without both a user and task identity cannot replace live sessions.
 - The container defaults to two session slots; Ansible defaults to three. New sessions are refused above 80% container memory use. Existing sessions can still be closed by the memory-pressure backstop on requests that do not create a session. Owner hints affect scheduling only; they do not authenticate callers or isolate the shared Chrome profile.
 
-- Sessions expire after 10 minutes of inactivity — always close them when done. `close` returns `not_found` for an unknown session ID. CAPTCHA responses retain their session even without `--keep-session` and report `session_retained: true`; close that session when abandoning the challenge.
+- Sessions expire after 10 minutes of inactivity — always close them when done. `close` returns `not_found` for an unknown session ID. A CAPTCHA response (a challenge the automatic press did not clear) retains its session even without `--keep-session` and reports `session_retained: true`; close that session when abandoning the challenge.
 - Anti-fingerprinting (stealth mode) is enabled by default
 - Budgets are caller-raisable: `render --max-chars` (default 100,000), `get --max-chars` / `--max-links` and `links --max-links` (50,000 / 100), `extract --max-chars` / `--limit` (25,000 per element / 20 elements). The link budget counts links returned rather than anchors examined, and a clipped list says so — see `links_truncated` above.
 

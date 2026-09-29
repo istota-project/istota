@@ -978,6 +978,10 @@ def _captcha_response(session_id, challenge=None, **extra):
     request operator help -- or press it with `click_challenge` -- and retry
     against the same tab.
 
+    `challenge_press` is what `_solve_challenge` reported, when the endpoint
+    tried a press before answering: a caller reading it knows the checkbox was
+    already pressed once, and that pressing again starts the challenge over.
+
     `challenge` names the title phrase `_navigate_and_wait` saw still showing,
     and is None when `detect_captcha` is what decided. The two are worth
     telling apart: on the title verdict nothing has read the page at all, so
@@ -998,10 +1002,138 @@ def _captcha_response(session_id, challenge=None, **extra):
         "session_retained": True,
         "vnc_url": pool.console_url(_request_instance(), os.environ.get("BROWSER_VNC_URL", "")),
         "instance": {"user": _request_instance().user_id, "slot": _request_instance().slot},
-        "message": "Captcha detected. An operator must solve it in the browser console, then retry. The session is retained; close it when finished.",
+        "message": (
+            "Captcha detected and not cleared. An operator must solve it in the "
+            "browser console, then retry. The session is retained; close it when "
+            "finished."
+        ),
         "challenge": challenge,
         **extra,
     })
+
+
+#: The outcome `_solve_challenge` reports when the page came through.
+CHALLENGE_CLEARED = "cleared"
+
+#: A session pressed this recently is not pressed again. A caller retrying a
+#: `still_challenged` session, or an operator solving it in VNC, would
+#: otherwise have the pointer pressed under them on every request.
+CHALLENGE_PRESS_COOLDOWN_S = 60
+
+#: The press, its settle and the waits after it take up to about 30s. Past
+#: this much of the request the solve is skipped rather than run into
+#: BROWSE_WATCHDOG_DEADLINE_S, whose relaunch takes every tab with it.
+CHALLENGE_SOLVE_BUDGET_S = max(0, BROWSE_WATCHDOG_DEADLINE_S - 35)
+
+
+def _same_site(requested, landed):
+    """Whether a cleared challenge left the page on the host that was asked for."""
+    wanted = _document_url(requested)
+    got = _document_url(landed)
+    if len(wanted) < 2 or len(got) < 2:
+        return wanted == got
+    return wanted[1].removeprefix("www.") == got[1].removeprefix("www.")
+
+
+def _solve_challenge(session_id, page, requested_url=None):
+    """Press a Cloudflare challenge once, as soon as it is found. Returns the outcome.
+
+    A challenge used to be answered `captcha` and left for the caller to press
+    with `click_challenge`. Unattended callers never did, and a tab left on the
+    challenge page reaches V8's heap limit in about ninety seconds (ISSUE-562),
+    so nobody got to press it either way. This is the same press, made here:
+    a capture for the coordinate frame, then `_coordinate_action`'s own
+    `click_challenge` arm, which locates the checkbox, checks the frame and
+    drives the pointer through X11.
+
+    One press per session per CHALLENGE_PRESS_COOLDOWN_S: BOT_DETECTION.md
+    records that pressing while a challenge works starts it over. The capture
+    is `measure=False` and is **not** stored on the session, since it has no
+    page half and would let a later `click_at` against the caller's own older
+    picture pass the staleness check (visual.screen_frame's rule). Locating
+    the checkbox still reads the frame over CDP, as `click_challenge` always
+    has; BOT_DETECTION.md records that traffic passing on the interstitial.
+
+    `requested_url` is set when the challenge was met on navigation: the
+    committed-navigation check in `_navigate_and_wait` returned before it ran,
+    so a cleared page on another host raises NavigationMismatch rather than
+    reading someone else's site as the answer.
+
+    Returns CHALLENGE_CLEARED, or why the page is still a challenge: a
+    `click_challenge` or foreground error code (`no_challenge` when there is
+    no Cloudflare checkbox, which covers DataDome and hCaptcha),
+    `recently_pressed`, `no_time`, `capture_failed`, `press_failed`,
+    `still_challenged` (pressed, and it stayed) or `widget_solved_page_blocked`
+    (nothing to press, and the page is still a challenge). Raises only
+    NavigationMismatch.
+    """
+    started = getattr(request, "_start_time", None)
+    if started is not None and time.time() - started > CHALLENGE_SOLVE_BUDGET_S:
+        log.info("Challenge solve on %s: skipped, request too close to the watchdog", session_id)
+        return "no_time"
+    with _sessions_lock:
+        live = _sessions.get(session_id) or {}
+        last = live.get("challenge_pressed_at")
+    if last is not None and time.time() - last < CHALLENGE_PRESS_COOLDOWN_S:
+        log.info("Challenge solve on %s: pressed %.0fs ago, not again", session_id, time.time() - last)
+        return "recently_pressed"
+
+    display = _request_instance().display
+    others, owned = _foreground_tabs(page)
+    try:
+        verdict = _capture_foreground(page)
+        if not verdict.ok:
+            # A background tab does not paint under Xvfb, so the capture would
+            # wait out Playwright's fixed 30s; the press would refuse it anyway.
+            log.info("Challenge solve on %s: tab not in front: %s", session_id, verdict.code)
+            return verdict.code
+        record, why = visual.build_capture(
+            page.screenshot(), page=page, full_page=False, measure=False,
+            display=display,
+        )
+    except Exception as e:
+        log.warning("Challenge solve on %s: capture failed: %s", session_id, e)
+        return "capture_failed"
+    if record is None:
+        log.info("Challenge solve on %s: no coordinate frame: %s", session_id, why)
+        return "capture_failed"
+
+    try:
+        pressed = _coordinate_action(
+            {"capture": record}, page, {"type": "click_challenge"}, others, owned,
+        )
+    except Exception as e:
+        log.warning("Challenge solve on %s: press failed: %s", session_id, e)
+        return "press_failed"
+    did_press = bool(pressed.get("ok"))
+    # A widget that passed on its own is not pressed; the page behind it may
+    # still be loading, which the waits below cover.
+    if not did_press and pressed.get("error") != "challenge_solved":
+        log.info("Challenge solve on %s: not pressed: %s", session_id, pressed.get("error"))
+        return pressed.get("error") or "press_refused"
+    if did_press:
+        with _sessions_lock:
+            live = _sessions.get(session_id)
+            if live is not None:
+                live["challenge_pressed_at"] = time.time()
+    blocked = "still_challenged" if did_press else "widget_solved_page_blocked"
+
+    try:
+        if xdotool.wait_for_challenges(timeout_s=15, display=display):
+            log.info("Challenge solve on %s: title still a challenge", session_id)
+            return blocked
+        time.sleep(browsing.gauss_clamp(3.5, 1.0, 2.0, 5.0))
+        still = browsing.detect_captcha(page)
+    except Exception as e:
+        log.warning("Challenge solve on %s: re-check failed: %s", session_id, e)
+        return blocked
+    if still:
+        log.info("Challenge solve on %s: a challenge is still on the page", session_id)
+        return blocked
+    if requested_url and not _same_site(requested_url, page.url):
+        raise NavigationMismatch(requested_url, page.url)
+    log.info("Challenge solve on %s: cleared", session_id)
+    return CHALLENGE_CLEARED
 
 
 # ---------------------------------------------------------------------------
@@ -1087,13 +1219,16 @@ def browse():
 
     try:
         challenge = _navigate_and_wait(page, url, timeout_ms=timeout) if url else None
+        solved = None
         if challenge:
-            # Answered from the window title, before anything reads the page.
-            # Every call below this line goes over CDP -- the DataDome
-            # evaluate, detect_captcha's inner_text, wait_for_selector and the
-            # content extraction alike -- and a challenge that has not cleared
-            # is exactly the window BOT_DETECTION.md says not to do that in.
-            return _captcha_response(session_id, challenge)
+            # Pressed before the page's content is read. Every call below this
+            # line goes over CDP -- the DataDome evaluate, detect_captcha's
+            # inner_text, wait_for_selector and the content extraction alike --
+            # and a challenge that has not cleared is exactly the window
+            # BOT_DETECTION.md says not to do that in.
+            solved = _solve_challenge(session_id, page, requested_url=url)
+            if solved != CHALLENGE_CLEARED:
+                return _captcha_response(session_id, challenge, challenge_press=solved)
 
         # Re-checked after navigating, not just on the way in. _navigate_and_wait
         # can span a watchdog Chrome relaunch, which takes every tab with it --
@@ -1114,7 +1249,12 @@ def browse():
                 pass
 
         if browsing.detect_captcha(page):
-            return _captcha_response(session_id)
+            if solved is not None:
+                # Pressed once already; a second press starts it over.
+                return _captcha_response(session_id, challenge_press="still_challenged")
+            solved = _solve_challenge(session_id, page)
+            if solved != CHALLENGE_CLEARED:
+                return _captcha_response(session_id, challenge_press=solved)
 
         content = browsing.extract_page_content(
             page,
@@ -1123,6 +1263,8 @@ def browse():
             offset=offset,
         )
         result = {"status": "ok", **content}
+        if solved == CHALLENGE_CLEARED:
+            result["challenge_solved"] = True
 
         if keep_session or not created_new:
             result["session_id"] = session_id
@@ -1532,15 +1674,18 @@ def render_page():
     else:
         return jsonify({"error": "url or session_id is required"}), 400
 
+    solved = None
     try:
         if url:
             challenge = _navigate_and_wait(page, url, timeout_ms=timeout)
             if challenge:
-                # From the window title, before anything reads the page --
-                # page.content() below is as much a CDP call as the DataDome
-                # evaluate, and a challenge that has not cleared is the window
-                # BOT_DETECTION.md says not to make one in.
-                return _captcha_response(session_id, challenge)
+                # Pressed before the page's content is read -- page.content()
+                # below is as much a CDP call as the DataDome evaluate, and a
+                # challenge that has not cleared is the window BOT_DETECTION.md
+                # says not to make one in.
+                solved = _solve_challenge(session_id, page, requested_url=url)
+                if solved != CHALLENGE_CLEARED:
+                    return _captcha_response(session_id, challenge, challenge_press=solved)
 
         chrome.connect_cdp(_request_instance())
         # _page_is_gone rather than a falsy test: the page object outlives the
@@ -1559,7 +1704,11 @@ def render_page():
                 except Exception:
                     pass
             if browsing.detect_captcha(page):
-                return _captcha_response(session_id)
+                if solved is not None:
+                    return _captcha_response(session_id, challenge_press="still_challenged")
+                solved = _solve_challenge(session_id, page)
+                if solved != CHALLENGE_CLEARED:
+                    return _captcha_response(session_id, challenge_press=solved)
 
         html = page.content()
         frame_payload, frames_capped = _collect_frames(page, include_frames)
@@ -1574,6 +1723,8 @@ def render_page():
             "title": page.title(),
             **rendered,
         }
+        if solved == CHALLENGE_CLEARED:
+            result["challenge_solved"] = True
 
         if keep_session or not created_new:
             result["session_id"] = session_id
@@ -2510,16 +2661,28 @@ def interact():
                     "action": action_type, "ok": False, "error": "unknown",
                 })
 
+        solved = None
         if browsing.detect_captcha(page):
-            return _captcha_response(session_id, actions=results)
+            # Not when this list already pressed something (the checkbox, or a
+            # point on it): a second press starts the challenge over. A refused
+            # action pressed nothing and does not count.
+            if any(r.get("action") in ("click_challenge", "click_at") and r.get("ok")
+                   for r in results):
+                return _captcha_response(session_id, actions=results)
+            solved = _solve_challenge(session_id, page)
+            if solved != CHALLENGE_CLEARED:
+                return _captcha_response(session_id, actions=results, challenge_press=solved)
 
         content = browsing.extract_page_content(page)
-        return jsonify({
+        result = {
             "status": "ok",
             "session_id": session_id,
             "actions": results,
             **content,
-        })
+        }
+        if solved == CHALLENGE_CLEARED:
+            result["challenge_solved"] = True
+        return jsonify(result)
 
     except Exception as e:
         # Logged, not just returned. A 500 from here used to leave nothing in

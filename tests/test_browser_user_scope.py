@@ -969,3 +969,146 @@ def test_instance_discovery_responds_during_browser_activity(api, operation_fail
         stopping.set()
         worker.join(5)
         assert not worker.is_alive()
+
+
+class TestTheChallengeIsPressedAtOnce:
+    """ISSUE-562: a challenge is pressed by the endpoint that met it.
+
+    Answered `captcha` and left for the caller, a tab on the challenge page
+    reached V8's heap limit in about ninety seconds with nobody pressing it.
+    The seams patched here are below `_solve_challenge` and below the
+    `click_challenge` arm it reuses, so the press path itself runs.
+    """
+
+    RECORD = {"offset": [0, 87], "window": {"x": 0, "y": 0, "w": 1440, "h": 900}}
+
+    @pytest.fixture
+    def challenge(self, api, monkeypatch):
+        state = {"presses": [], "title_after_press": None, "on_page": [False]}
+        monkeypatch.setattr(api.visual, "build_capture", lambda *a, **kw: (dict(self.RECORD), ""))
+        monkeypatch.setattr(
+            api.visual, "staleness",
+            lambda record, *a, **kw: None if record else ("no_capture", "no screenshot on record"),
+        )
+        monkeypatch.setattr(api.visual, "page_to_screen", lambda rec, x, y: (x, y + 87))
+        front = types.SimpleNamespace(ok=True, confirmed=True, code="confirmed", detail="")
+        monkeypatch.setattr(api.visual, "bring_to_front", lambda *a, **kw: front)
+        monkeypatch.setattr(api, "_capture_foreground", lambda page: front)
+        monkeypatch.setattr(api.xdotool, "clamp_to_screen", lambda x, y, **kw: (x, y))
+        monkeypatch.setattr(api, "_settle", lambda page, ms: None)
+        monkeypatch.setattr(api.time, "sleep", lambda s: None)
+        monkeypatch.setattr(
+            api.browsing, "cloudflare_checkbox_target",
+            lambda page: ((100, 200), api.browsing.CF_TARGET_UNSOLVED),
+        )
+
+        def click(x, y, **kw):
+            state["presses"].append((x, y))
+            return True
+
+        def on_page(page):
+            answers = state["on_page"]
+            return answers.pop(0) if len(answers) > 1 else answers[0]
+
+        monkeypatch.setattr(api.browsing, "human_click_at", click)
+        monkeypatch.setattr(api.xdotool, "wait_for_challenges", lambda **kw: state["title_after_press"])
+        monkeypatch.setattr(api.browsing, "detect_captcha", on_page)
+        monkeypatch.setattr(api, "_navigate_and_wait", lambda *a, **kw: "just a moment")
+        return state
+
+    @pytest.mark.parametrize("path", ["/render", "/browse"])
+    def test_a_title_challenge_is_pressed_and_the_page_read(self, api, challenge, path):
+        response = post(api, path, url="https://example.com/")
+        assert response.json["status"] == "ok"
+        assert response.json["challenge_solved"] is True
+        assert challenge["presses"] == [(100, 287)]
+        assert api._sessions == {}
+
+    @pytest.mark.parametrize("path", ["/render", "/browse"])
+    def test_a_press_that_does_not_clear_answers_captcha_once_pressed(self, api, challenge, path):
+        challenge["title_after_press"] = "just a moment"
+        response = post(api, path, url="https://example.com/")
+        assert response.json["status"] == "captcha"
+        assert response.json["challenge_press"] == "still_challenged"
+        assert challenge["presses"] == [(100, 287)]
+        sid = response.json["session_id"]
+        # The solve's own capture has no page half; stored, it would let a
+        # later click_at against an older picture skip the staleness check.
+        assert "capture" not in api._sessions[sid]
+
+    def test_a_session_pressed_recently_is_not_pressed_again(self, api, challenge):
+        """A caller retrying `still_challenged`, or an operator in VNC, is not pressed under."""
+        challenge["title_after_press"] = "just a moment"
+        sid = post(api, "/render", url="https://example.com/").json["session_id"]
+        response = post(api, "/render", session_id=sid, url="https://example.com/")
+        assert response.json["status"] == "captcha"
+        assert response.json["challenge_press"] == "recently_pressed"
+        assert len(challenge["presses"]) == 1
+
+    def test_a_clear_that_lands_on_another_host_is_a_navigation_mismatch(self, api, challenge):
+        """The committed-navigation check returned before the solve ran."""
+        response = post(api, "/render", url="https://other.example/")
+        assert response.status_code == 502
+        assert response.json["error"] == "navigation_mismatch"
+
+    def test_no_press_when_the_request_is_near_the_watchdog(self, api, challenge, monkeypatch):
+        monkeypatch.setattr(api, "CHALLENGE_SOLVE_BUDGET_S", -1)
+        response = post(api, "/render", url="https://example.com/")
+        assert response.json["challenge_press"] == "no_time"
+        assert challenge["presses"] == []
+
+    def test_no_cloudflare_checkbox_means_no_press(self, api, challenge, monkeypatch):
+        monkeypatch.setattr(
+            api.browsing, "cloudflare_checkbox_target",
+            lambda page: (None, api.browsing.CF_TARGET_NONE),
+        )
+        response = post(api, "/render", url="https://example.com/")
+        assert response.json["status"] == "captcha"
+        assert response.json["challenge_press"] == "no_challenge"
+        assert challenge["presses"] == []
+
+    def test_a_widget_on_the_page_is_pressed_too(self, api, challenge, monkeypatch):
+        monkeypatch.setattr(api, "_navigate_and_wait", lambda *a, **kw: None)
+        challenge["on_page"] = [True, False]
+        response = post(api, "/render", url="https://example.com/")
+        assert response.json["status"] == "ok"
+        assert response.json["challenge_solved"] is True
+        assert challenge["presses"] == [(100, 287)]
+
+    def test_the_checkbox_is_never_pressed_twice(self, api, challenge):
+        """Cleared by title, then a widget on the page: pressing again restarts it."""
+        challenge["on_page"] = [False, True]
+        response = post(api, "/render", url="https://example.com/")
+        assert response.json["status"] == "captcha"
+        assert response.json["challenge_press"] == "still_challenged"
+        assert len(challenge["presses"]) == 1
+
+    def test_interact_does_not_press_after_the_callers_own_press(self, api, challenge, monkeypatch):
+        monkeypatch.setattr(api, "_navigate_and_wait", lambda *a, **kw: None)
+        sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+        challenge["on_page"] = [True]
+        api._sessions[sid]["capture"] = dict(self.RECORD)
+        response = post(api, "/interact", session_id=sid, actions=[{"type": "click_challenge"}])
+        assert response.json["status"] == "captcha"
+        assert "challenge_press" not in response.json
+        assert len(challenge["presses"]) == 1
+
+    def test_a_refused_press_in_the_list_does_not_count_as_one(self, api, challenge, monkeypatch):
+        monkeypatch.setattr(api, "_navigate_and_wait", lambda *a, **kw: None)
+        sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+        challenge["on_page"] = [True, False]
+        # No capture on record, so the list's click_challenge refuses `no_capture`.
+        response = post(api, "/interact", session_id=sid, actions=[{"type": "click_challenge"}])
+        assert response.json["actions"][0]["ok"] is False
+        assert response.json["status"] == "ok"
+        assert response.json["challenge_solved"] is True
+        assert len(challenge["presses"]) == 1
+
+    def test_interact_presses_a_challenge_its_actions_ran_into(self, api, challenge, monkeypatch):
+        monkeypatch.setattr(api, "_navigate_and_wait", lambda *a, **kw: None)
+        sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+        challenge["on_page"] = [True, False]
+        response = post(api, "/interact", session_id=sid, actions=[{"type": "wait", "timeout": 1}])
+        assert response.json["status"] == "ok"
+        assert response.json["challenge_solved"] is True
+        assert len(challenge["presses"]) == 1
