@@ -647,12 +647,11 @@ one with whoever spawned it, and for a daemon child spawned without
 `start_new_session` that group is the daemon's, so signalling it would kill the
 scheduler.
 
-Both of today's writers record leaders, so the group path is what actually
-fires for both: ClaudeCodeBrain's streaming child is a session leader since
-ISSUE-257, and a tmux pane pid is one already (tmux `setsid`s the pane child).
-A tmux `!stop` therefore now takes the pane's whole command tree. The fallback
-is what keeps the helper safe for a future caller that records a pid it did not
-spawn.
+ClaudeCodeBrain's streaming child is a session leader since ISSUE-257, and a
+tmux pane pid is one already (tmux `setsid`s the pane child), so for those the
+group path fires and a tmux `!stop` takes the pane's whole command tree. The
+non-streaming child reports its pid since ISSUE-550 and leads no group, so the
+fallback is what fires there: it is signalled alone and its tree is orphaned.
 
 **This widens the stale-pid hazard above, and clearing `worker_pid` is what
 bounds it.** A recycled pid that happens to lead a group now costs that whole

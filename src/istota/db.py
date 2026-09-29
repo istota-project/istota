@@ -7515,10 +7515,9 @@ def get_running_task_pids(conn: sqlite3.Connection) -> list[tuple[int, int]]:
 
     **Every running task is returned, including one with no pid**, which is
     reported as ``0``. Filtering those out would have printed ``sandbox
-    none-running`` on a host that was running work: ``NativeBrain`` never calls
-    ``on_pid`` at all, and neither does ``ClaudeCodeBrain``'s non-streaming
-    path, so on those deployments the column is legitimately NULL while a task
-    is running. The caller renders a ``0`` as "no worker pid recorded" — which
+    none-running`` on a host that was running work: the column is NULL until
+    the brain reports a pid, and ``TmuxClaudeBrain`` reports one only once its
+    REPL is ready, so a running task can legitimately have none. The caller renders a ``0`` as "no worker pid recorded" — which
     is the true answer, and unlike an omission it does not read as an
     idle host.
     """

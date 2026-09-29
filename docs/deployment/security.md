@@ -114,6 +114,14 @@ Skill CLI commands run through the proxy (`skill_proxy.py`) in the executor thre
 
 The proxy's Unix socket path includes the host process PID — `istota-proxy-{pid}-{task_id}.sock` (and the same shape for the network proxy). This prevents collisions when multiple processes (xdist test workers, parallel `istota run` instances, the daemon plus a manual scheduler) pick the same `task.id` from independent SQLite databases.
 
+### Who may connect
+
+The socket is mode 0600, which keeps out other OS users. It keeps out no other task, because every task runs as the daemon's uid. Under bubblewrap only a task's own socket is bound into its namespace, but on every shape without the sandbox (macOS, a container whose bwrap probe fails, a Linux host with no bwrap) all tasks share one uid and one `/tmp`, and the path above is predictable. The standalone install runs with the proxy off, so none of this applies there.
+
+So the proxy asks the kernel which process connected (`SO_PEERCRED` on Linux, `LOCAL_PEERPID` on macOS) and serves it only if it descends from a process its own task registered: the brain's child, reported when it is spawned, or a skill CLI the proxy itself is running. Each registered process is pinned to its start time, so a pid the kernel later hands to another process carries nothing over. Anything else gets `reason: peer_not_in_task` and a `proxy_rejected ... reason=peer` warning in the log, before the request is parsed. A process whose parent exited and left it reparented to init (a backgrounded command that outlived its shell) is refused too.
+
+What this does not close: on an unsandboxed multi-user shape one task can still rewrite a file another task executes (its credential shim, a git hook, the CLI's shell snapshot) and have its own code run inside that task's tree, and with `kernel.yama.ptrace_scope = 0` it can attach and read memory as well. `istota doctor --only security.proxy_peer_check` reports that shape as a `WARN`, and reports a `FAIL` on a platform where no peer can be read, since the proxy then refuses every connection.
+
 ### Authorization model
 
 Credential authorization is **decoupled from skill selection**. A skill is authorized for credential access if any of its sensitive `EnvSpec`s actually resolves under the task's context — that is, if the user has the corresponding resource configured (Karakeep, etc.) or the relevant instance config is set (SMTP, GitLab/GitHub tokens). Skill selection controls only which skill *docs* go into the prompt, not which credentials can be requested at runtime.

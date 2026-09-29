@@ -11,9 +11,11 @@ import socket
 import subprocess
 import sys
 import threading
+import time
+from collections.abc import Iterable
 from pathlib import Path
 
-from istota import skill_client
+from istota import peer_process, skill_client
 from istota.secrets_vault import label_for_display
 from istota.unix_server import UnixSocketServer
 
@@ -23,10 +25,11 @@ logger = logging.getLogger("istota.skill_proxy")
 #: declares itself: a skill CLI resolving a stamped argument, the shim
 #: injecting into a child process, or a value handed back to the caller.
 #:
-#: It is a **claim by whoever holds the socket and is never verified** — the
-#: proxy sees a socket, not a process — so it decides a log level and nothing
-#: else. Anything absent or unrecognised is recorded as ``read``, which is the
-#: direction that does not under-report.
+#: It is a **claim by the caller and is never verified** — the proxy knows the
+#: caller is in its task's process tree, not which program inside it is asking
+#: — so it decides a log level and nothing else. Anything absent or
+#: unrecognised is recorded as ``read``, which is the direction that does not
+#: under-report.
 #:
 #: All three have producers: ``skill`` is the credential stamp in
 #: ``skills/_credref``, resolving a stamped argument host-side before the
@@ -37,8 +40,16 @@ VAULT_MODE_DEFAULT = "read"
 
 # Owner-only, so no other local user can ask this proxy for a credential. This
 # proxy's own decision, stated here rather than inherited from the server
-# lifecycle it is handed to.
+# lifecycle it is handed to. It keeps out no other *task*, since they all run
+# as this uid; the peer check in `_handle_connection` is what does that.
 SOCKET_MODE = 0o600
+
+# How long a connection from an unrecognised peer waits for a registration
+# before it is refused. `on_pid` is called after the spawn returns and the pid
+# of a skill subprocess arrives down a pipe, so a child can reach the socket a
+# moment before its root is known. A sibling task pays this once per refused
+# connection, which is the cost to it of trying.
+PEER_REGISTRATION_GRACE_SECONDS = 2.0
 
 # Listen backlog. Connections are skill calls from one sandboxed task.
 LISTEN_BACKLOG = 8
@@ -247,6 +258,16 @@ def describe_skill_timeouts(default: int, overrides, client_wait=None) -> list[s
     return notes
 
 
+def _default_trusted_roots() -> frozenset[int]:
+    """Roots a proxy starts with when the caller names none: none at all.
+
+    A function rather than a constant so the test suite can stand the pytest
+    process in for a task's root in one place, rather than in every test that
+    talks to a proxy from its own process.
+    """
+    return frozenset()
+
+
 class SkillProxy:
     """Unix socket server that proxies skill CLI commands with credentials.
 
@@ -278,6 +299,7 @@ class SkillProxy:
         vault_write_limit: int = 0,
         config=None,
         user_id: str | None = None,
+        trusted_roots: Iterable[int] | None = None,
     ):
         self.credential_env = credential_env
         self.base_env = base_env
@@ -333,6 +355,17 @@ class SkillProxy:
         # Locked because `unix_server` runs one thread per connection.
         self._vault_fetches = 0
         self._vault_fetch_lock = threading.Lock()
+        # The processes whose descendants this proxy serves (ISSUE-550): the
+        # brain's child, reported through `on_pid`, and each skill subprocess
+        # this proxy spawns, for as long as it runs. Empty until the first
+        # registration, so nothing is served before the task has a process.
+        # Each pid maps to its start time, so a recycled number matches nothing.
+        self._roots: dict[int, int] = {}
+        self._roots_changed = threading.Condition()
+        for pid in (
+            _default_trusted_roots() if trusted_roots is None else trusted_roots
+        ):
+            self.authorize_pid(pid)
         self._server = UnixSocketServer(
             socket_path,
             # Resolved per connection, not captured here: the accept loop
@@ -345,6 +378,36 @@ class SkillProxy:
             backlog=LISTEN_BACKLOG,
             logger=logger,
         )
+
+    def authorize_pid(self, pid: int) -> None:
+        """Serve ``pid`` and its descendants from now on.
+
+        Pinned to the process's start time as read now. A pid that is already
+        gone has no start time and is not registered: it has no descendants
+        that could still ask, and registering the bare number would hand its
+        authority to whatever holds it next.
+        """
+        pid = int(pid)
+        started = peer_process.start_time(pid)
+        if started is None:
+            logger.warning(
+                "proxy_root_unregistered task_id=%s pid=%s reason=unreadable",
+                self.task_id, pid,
+            )
+            return
+        with self._roots_changed:
+            self._roots[pid] = started
+            self._roots_changed.notify_all()
+
+    def revoke_pid(self, pid: int) -> None:
+        """Stop serving ``pid``'s tree."""
+        with self._roots_changed:
+            self._roots.pop(int(pid), None)
+
+    @property
+    def trusted_roots(self) -> frozenset[int]:
+        with self._roots_changed:
+            return frozenset(self._roots)
 
     @property
     def socket_path(self) -> Path:
@@ -366,8 +429,66 @@ class SkillProxy:
     def __exit__(self, *exc):
         self.stop()
 
+    def _peer_in_task(self, pid: int | None) -> bool:
+        """Whether ``pid`` descends from a root, waiting briefly for one."""
+        if pid is None:
+            return False
+        deadline = time.monotonic() + PEER_REGISTRATION_GRACE_SECONDS
+        with self._roots_changed:
+            while True:
+                roots = dict(self._roots)
+                if peer_process.descends_from(pid, roots):
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._roots_changed.wait(remaining)
+
+    def _refuse_peer(self, conn: socket.socket, pid: int | None) -> None:
+        # Drain the request, bounded, without acting on it. Closing a socket
+        # with unread data makes Linux send a reset, which discards the refusal
+        # before the client reads it and leaves it an empty answer.
+        try:
+            conn.settimeout(1.0)
+            received = 0
+            while received < 65536:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                received += len(chunk)
+                if b"\n" in chunk:
+                    break
+        except OSError:
+            pass
+        logger.warning(
+            "proxy_rejected task_id=%s peer_pid=%s reason=peer",
+            self.task_id, pid,
+        )
+        # Shaped for both clients: `error`/`reason` for a credential lookup,
+        # `stderr`/`returncode` for a skill call, so neither reads it as a
+        # malformed answer.
+        self._send_response(conn, {
+            "error": "Connection is not from this task's processes",
+            "reason": "peer_not_in_task",
+            "stdout": "",
+            "stderr": (
+                "Skill proxy refused the connection: it is not from this "
+                "task's processes\n"
+            ),
+            "returncode": 1,
+        })
+
     def _handle_connection(self, conn: socket.socket) -> None:
         try:
+            # Before the request is parsed (ISSUE-550). The socket's 0600 mode keeps
+            # out other OS users and no other task, since every task runs as
+            # the daemon's uid; this is what keeps out the rest. The kernel
+            # names the peer, so nothing in the request is consulted.
+            peer = peer_process.peer_pid(conn)
+            if not self._peer_in_task(peer):
+                self._refuse_peer(conn, peer)
+                return
+
             # `settimeout` bounds each *blocking operation*, not the connection,
             # so this is the budget for the request read below and — after the
             # re-arm further down — for sending the response back. It is not an
@@ -499,13 +620,35 @@ class SkillProxy:
                 merged_env.update(self.credential_env)
 
             try:
-                result = subprocess.run(
-                    cmd,
-                    env=merged_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=skill_timeout,
-                )
+                # A skill CLI can connect back — a stamped credential argument
+                # is resolved that way — and it descends from the daemon rather
+                # than from the task's brain, so it is registered here for as
+                # long as it runs and revoked after, so a reused pid inherits
+                # nothing. The reader is joined before the revoke, so a late
+                # registration cannot land after it. The cost is a `preexec_fn`,
+                # which takes CPython off its vfork fast path, so each skill call
+                # is a full fork of the daemon; `Popen` and a registration after
+                # it returns would avoid that, at the price of moving the nine
+                # tests that patch `subprocess.run` here.
+                spawned: list[int] = []
+
+                def _register(pid: int) -> None:
+                    spawned.append(pid)
+                    self.authorize_pid(pid)
+
+                try:
+                    with peer_process.reporting_pid(_register) as preexec:
+                        result = subprocess.run(
+                            cmd,
+                            env=merged_env,
+                            capture_output=True,
+                            text=True,
+                            timeout=skill_timeout,
+                            preexec_fn=preexec,
+                        )
+                finally:
+                    for pid in spawned:
+                        self.revoke_pid(pid)
                 self._send_response(conn, {
                     "stdout": result.stdout,
                     "stderr": result.stderr,

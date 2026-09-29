@@ -364,9 +364,12 @@ Wraps the `claude` CLI subprocess. Owns:
 
    The **simple** path still spawns via `subprocess.run`, so its timeout still
    kills only the direct child and orphans the tree — the deferred half of
-   ISSUE-257. Narrower than the streaming path was: `_execute_simple_once`
-   never calls `req.on_pid`, so no `worker_pid` is recorded and neither cancel
-   endpoint reaches it at all. Fixing it means spawning via `Popen` so the
+   ISSUE-257. Since ISSUE-550 the child reports its pid to `req.on_pid` from
+   inside `preexec_fn` (`peer_process.reporting_pid`), because the skill proxy
+   serves only descendants of a reported pid; so `!stop` and the web cancel do
+   reach it, but the child leads no group and `kill_process_group` signals it
+   alone, orphaning its tree. A cancel is checked before signal
+   classification here too. Fixing the orphaning means spawning via `Popen` so the
    group can be killed, and roughly ninety tests across six files patch
    `subprocess.run` to keep the brain from spawning, so those move first.
 4. **Stream parsing** — line-by-line via `make_stream_parser()` from
