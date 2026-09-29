@@ -476,7 +476,6 @@ def _question_response(row) -> dict:
 def hold_question(conn, config, *, actor_user_id: str, task_id: int,
                   recipient_user_id: str, request_key: str, text: str) -> dict:
     from . import message_relays
-    from .async_runtime import run_coro
     from .confirmations import flatten
     from .transport.whatsapp.outbound import active_adapter, _destination, render_whatsapp_result, render_template_result, template_available
 
@@ -501,7 +500,8 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
         raise RequestError("unsupported_origin")
     origin = message_relays.private_origin(conn, config, actor_user_id=actor_user_id,
                                            surface=task.source_type, conversation_token=task.conversation_token)
-    run_coro(message_relays.verify_private_audience(config, actor_user_id=actor_user_id, origin=origin))
+    # No Talk audience call here: this runs in the skill subprocess, which holds
+    # no Nextcloud credential. present_question checks it before the preview.
     with write_transaction(conn):
         message_relays.validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
         adapter = active_adapter(config)

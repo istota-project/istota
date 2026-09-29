@@ -407,3 +407,28 @@ def test_shared_command_cannot_approve_private_relay(setup):
         assert 'private conversation' in asyncio.run(cmd_confirm(ctx))
     asyncio.run(requests.drain_requests(config))
     assert not sent
+
+
+def test_ask_leaves_the_talk_audience_check_to_the_daemon(setup, monkeypatch):
+    # ISSUE-567: the skill subprocess carries no Nextcloud credential, so a
+    # Talk call from hold_question refused every Talk-bound room. The daemon
+    # checks the audience before it shows the preview, so a failure there
+    # still cancels the question without publishing it.
+    config, ident, token, _ = setup
+    with db.get_db(config.db_path) as conn:
+        db.add_room_binding(conn, token, 'talk', 'talk-ref')
+    calls = []
+    async def unreachable(*args, **kwargs):
+        calls.append(kwargs['origin']['talk_ref'])
+        raise requests.RequestError('unsupported_origin')
+    monkeypatch.setattr(relays, 'verify_private_audience', unreachable)
+    held = hold(setup)
+    assert held['status'] == 'held'
+    assert calls == []
+    with db.get_db(config.db_path) as conn:
+        task = db.get_task(conn, ident)
+    assert asyncio.run(requests.present_question(config, task=task, success=True))
+    assert calls == ['talk-ref']
+    with db.get_db(config.db_path) as conn:
+        assert db.get_task(conn, ident).status == 'cancelled'
+        assert db.get_task(conn, ident).confirmation_prompt is None

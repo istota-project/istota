@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Asking another user a WhatsApp question from a web chat room that is also bound to Talk no longer fails with `unsupported_origin`. The Talk participant check now runs in the daemon, before the approval preview is shown, instead of in the skill process, which could not reach Talk.
+
 - A task that uses shared credentials across several commands no longer runs out of credential fetches partway through. The prompt now says how many fetches a task may make and tells the model to put related commands in one `istota-credential run`, instead of one call per command, where every call fetched the same credentials again.
 
 - A reply that embeds a file web chat cannot serve, such as a browse screenshot taken without `-o`, now says the image is unavailable instead of showing a broken image. Each `/chat/files` link in an answer is checked against the endpoint's own rule before the answer is stored, and a refused one is logged with the task id. `browse screenshot` also prints its scratch note to stderr, for scripts that keep only `path`.
