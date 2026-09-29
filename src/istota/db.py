@@ -378,6 +378,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     """
     # Tasks table migrations
     _add_columns(conn, "tasks", {
+        "whatsapp_confirmation_request_id": "TEXT",
         "talk_message_id": "INTEGER",
         "talk_response_id": "INTEGER",
         "reply_to_talk_id": "INTEGER",
@@ -899,6 +900,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # the ones that sit in the sender's own workspace, the path the chip
         # links at.
         _add_columns(conn, "messages", {
+            "delivery_reference": "TEXT",
             "attachments": "TEXT",
             "attachment_paths": "TEXT",
             "client_msg_id": "TEXT",
