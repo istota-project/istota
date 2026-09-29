@@ -26,7 +26,6 @@ def setup(tmp_path, monkeypatch, request):
         token = room.token
         ident = db.create_task(conn, user_id='alice', source_type='web', prompt='Ask a question', conversation_token=token, output_target='talk:shared')
         conn.execute("UPDATE tasks SET status='running',confirmed_at=datetime('now') WHERE id=?", (ident,))
-        relays.set_permission(conn, actor_user_id='bob', asker_user_id='alice')
     sent = []
     async def send(config, message):
         sent.append(message)
@@ -92,7 +91,7 @@ def test_changes_after_approval_cannot_send(setup, change):
     approve(setup)
     with db.get_db(config.db_path) as conn:
         if change == 'consent':
-            relays.revoke_permission(conn, actor_user_id='bob', asker_user_id='alice')
+            relays.block(conn, actor_user_id='bob', asker_user_id='alice')
         elif change == 'binding':
             conn.execute("UPDATE whatsapp_user_bindings SET send_id='different'")
         elif change == 'origin':
@@ -145,16 +144,40 @@ def test_shared_origin_rejected_before_reservation(setup):
         assert not conn.execute('SELECT 1 FROM message_relays').fetchone()
 
 
-def test_direct_permission_command_is_private_and_directional(setup):
+def test_direct_block_command_is_private_and_directional(setup):
     from istota.commands import CommandContext, cmd_relay
     config, _, token, _ = setup
     with db.get_db(config.db_path) as conn:
-        ctx = CommandContext(config, conn, 'alice', token, 'allow bob', surface='web')
-        assert 'allowed' in asyncio.run(cmd_relay(ctx)).lower()
-        assert relays.has_permission(conn, actor_user_id='alice', asker_user_id='bob')
+        ctx = CommandContext(config, conn, 'alice', token, 'block bob', surface='web')
+        assert 'blocked' in asyncio.run(cmd_relay(ctx)).lower()
+        assert relays.is_blocked(conn, actor_user_id='alice', asker_user_id='bob')
+        assert not relays.is_blocked(conn, actor_user_id='bob', asker_user_id='alice')
+        ctx.args = 'blocked'
+        assert 'bob' in asyncio.run(cmd_relay(ctx))
+        ctx.args = 'unblock bob'
+        assert 'unblocked' in asyncio.run(cmd_relay(ctx)).lower()
+        assert not relays.is_blocked(conn, actor_user_id='alice', asker_user_id='bob')
+        ctx.args = 'allow bob'
+        assert asyncio.run(cmd_relay(ctx)).startswith('Use !relay block')
         db.add_room_member(conn, token, 'bob')
-        ctx.args = 'permissions'
+        ctx.args = 'blocked'
         assert asyncio.run(cmd_relay(ctx)) == 'Relay commands require a verified private conversation.'
+
+
+def test_ask_distinguishes_why_a_recipient_cannot_be_asked(setup):
+    config, _, _, _ = setup
+    with pytest.raises(requests.RequestError, match='unknown_user'):
+        hold(setup, recipient_user_id='nobody')
+    config.users['carol'] = UserConfig(display_name='Carol')
+    with pytest.raises(requests.RequestError, match='recipient_not_on_whatsapp'):
+        hold(setup, recipient_user_id='carol')
+    with db.get_db(config.db_path) as conn:
+        relays.block(conn, actor_user_id='bob', asker_user_id='alice')
+    with pytest.raises(requests.RequestError, match='recipient_unavailable'):
+        hold(setup)
+    config.whatsapp.enabled = False
+    with pytest.raises(requests.RequestError, match='whatsapp_unavailable'):
+        hold(setup)
 
 
 def test_scheduler_parks_even_without_model_phrase_and_never_fans_out(setup):
@@ -295,7 +318,7 @@ def test_claimed_question_is_never_retried_or_reopened(setup, monkeypatch, chang
         if change == 'crash_after_claim':
             raise SystemExit('simulated process death')
         with db.get_db(config.db_path) as conn:
-            relays.revoke_permission(conn, actor_user_id='bob', asker_user_id='alice')
+            relays.block(conn, actor_user_id='bob', asker_user_id='alice')
         return await original(*args, **kwargs)
     monkeypatch.setattr(outbound, '_send_claimed', change_after_claim)
     if change == 'crash_after_claim':
@@ -343,9 +366,9 @@ def test_private_command_rechecks_audience_after_remote_check(setup, monkeypatch
             db.add_room_member(other, token, 'bob')
     monkeypatch.setattr(relays, 'verify_private_audience', change_audience)
     with db.get_db(config.db_path) as conn:
-        ctx = CommandContext(config, conn, 'alice', token, 'allow bob', surface='web')
+        ctx = CommandContext(config, conn, 'alice', token, 'block bob', surface='web')
         assert asyncio.run(cmd_relay(ctx)) == 'Relay commands require a verified private conversation.'
-        assert not relays.has_permission(conn, actor_user_id='alice', asker_user_id='bob')
+        assert not relays.is_blocked(conn, actor_user_id='alice', asker_user_id='bob')
 
 
 

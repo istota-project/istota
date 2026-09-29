@@ -1146,6 +1146,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # what makes it one-way: `schema.sql` no longer declares the table, so
     # nothing recreates what this drops.
     _migrate_drop_retired_vault_table(conn)
+    # Same position and the same one-way reasoning: schema.sql declares only
+    # the replacement table.
+    _migrate_relay_blocks(conn)
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -6064,6 +6067,46 @@ def _migrate_drop_retired_vault_table(conn: sqlite3.Connection) -> None:
         # run must not stop a daemon booting, and a table left standing is
         # inert rather than harmful — nothing in the tree reads it.
         logger.warning("retired vault table drop failed: %s", e)
+
+
+def _migrate_relay_blocks(conn: sqlite3.Connection) -> None:
+    """Replace relay grants with blocks (ISSUE-566).
+
+    Asking another user of the installation no longer needs their grant, so an
+    active grant carries nothing forward. A revoked one was the recipient's
+    explicit "no", and becomes a block rather than being dropped with the rest.
+    Copy and drop share one transaction, so a failure leaves the old table for
+    the next boot to retry instead of losing a revocation. One way: a checkout
+    rolled back past this recreates an empty grant table and refuses every ask
+    until someone allows again.
+    """
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS relay_blocks (
+            recipient_user_id TEXT NOT NULL,
+            asker_user_id TEXT NOT NULL,
+            blocked_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (recipient_user_id, asker_user_id),
+            CHECK (recipient_user_id != asker_user_id)
+        )""")
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='relay_permissions'",
+        ).fetchone() is None:
+            return
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO relay_blocks (recipient_user_id,asker_user_id,blocked_at) "
+                "SELECT recipient_user_id,asker_user_id,revoked_at FROM relay_permissions "
+                "WHERE revoked_at IS NOT NULL AND recipient_user_id != asker_user_id"
+            )
+            conn.execute("DROP TABLE relay_permissions")
+        except BaseException:
+            conn.rollback()
+            raise
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        logger.warning("relay grant migration failed: %s", e)
 
 
 def _migrate_room_members(conn: sqlite3.Connection) -> None:

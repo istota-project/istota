@@ -45,7 +45,7 @@ def test_fresh_schema_and_upgrade_match(tmp_path, path):
     db.init_db(old)
     db.init_db(old)
     tables = ("tasks", "messages", "whatsapp_skill_requests", "message_relays",
-              "relay_permissions", "relay_reply_candidates")
+              "relay_blocks", "relay_reply_candidates")
     with db.get_db(path) as fresh, db.get_db(old) as upgraded:
         for table in tables:
             a = {r[1]: tuple(r)[2:5] for r in fresh.execute(f"PRAGMA table_info({table})")}

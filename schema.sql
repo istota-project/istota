@@ -1680,11 +1680,13 @@ ON whatsapp_skill_requests(origin_task_id) WHERE state = 'held';
 CREATE INDEX IF NOT EXISTS idx_whatsapp_request_queue
 ON whatsapp_skill_requests(state, queue_deadline);
 
-CREATE TABLE IF NOT EXISTS relay_permissions (
+-- A recipient's block on one asker. Asking is open by default between users of
+-- one installation (ISSUE-566); db._migrate_relay_blocks keeps a copy of this
+-- DDL, held equal by tests/test_whatsapp_requests.py.
+CREATE TABLE IF NOT EXISTS relay_blocks (
     recipient_user_id TEXT NOT NULL,
     asker_user_id TEXT NOT NULL,
-    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
-    revoked_at TEXT,
+    blocked_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (recipient_user_id, asker_user_id),
     CHECK (recipient_user_id != asker_user_id)
 );

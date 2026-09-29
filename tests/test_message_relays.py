@@ -17,35 +17,45 @@ def path(tmp_path):
 
 
 def hold(conn, task_id, recipient="bob", actor="alice", **kwargs):
-    from istota.message_relays import set_permission
-    set_permission(conn, actor_user_id=recipient, asker_user_id=actor)
     return store(conn, task_id, actor_user_id=actor, kind="relay_question",
                  recipient_user_id=recipient, preview="Exact preview",
                  relay_snapshot=dict(origin={"surface": "web", "room": "private"},
                                      audience=[actor], asker_display=actor), **kwargs)
 
 
-def test_permission_is_directional_and_revocation_closes_only_unanswered(path):
-    from istota.message_relays import has_permission, revoke_permission, get_relay
+def test_block_is_directional_and_closes_only_unanswered(path):
+    from istota.message_relays import block, is_blocked, get_relay, list_blocks
     with db.get_db(path) as conn:
         req = hold(conn, task(conn))
-        assert has_permission(conn, actor_user_id="bob", asker_user_id="alice")
-        assert not has_permission(conn, actor_user_id="alice", asker_user_id="bob")
         assert get_relay(conn, actor_user_id="eve", relay_id=req["relay_id"]) is None
         assert get_relay(conn, actor_user_id="bob", relay_id=req["relay_id"])["question"] == "hello"
-        revoke_permission(conn, actor_user_id="bob", asker_user_id="alice")
+        assert block(conn, actor_user_id="bob", asker_user_id="alice") == 1
+        assert is_blocked(conn, actor_user_id="bob", asker_user_id="alice")
+        assert not is_blocked(conn, actor_user_id="alice", asker_user_id="bob")
+        assert [row["asker_user_id"] for row in list_blocks(conn, actor_user_id="bob")] == ["alice"]
         assert get_relay(conn, actor_user_id="alice", relay_id=req["relay_id"])["state"] == "cancelled"
         assert conn.execute("SELECT state FROM whatsapp_skill_requests").fetchone()[0] == "cancelled"
-        assert not has_permission(conn, actor_user_id="bob", asker_user_id="alice")
 
 
-def test_consent_absent_leaves_no_request(path):
+def test_ask_needs_no_grant_and_a_block_leaves_no_request(path):
+    from istota.message_relays import block, unblock
     from istota.whatsapp_requests import RequestError
     with db.get_db(path) as conn:
+        block(conn, actor_user_id="bob", asker_user_id="alice")
         with pytest.raises(RequestError, match="recipient_unavailable"):
-            store(conn, task(conn), kind="relay_question", recipient_user_id="bob",
-                  preview="preview", relay_snapshot=dict(origin={}, audience=["alice"], asker_display="alice"))
+            hold(conn, task(conn))
         assert conn.execute("SELECT count(*) FROM whatsapp_skill_requests").fetchone()[0] == 0
+        unblock(conn, actor_user_id="bob", asker_user_id="alice")
+        assert hold(conn, task(conn))["state"] == "held"
+
+
+def test_block_refuses_self_and_wildcard(path):
+    from istota.message_relays import block
+    from istota.whatsapp_requests import RequestError
+    with db.get_db(path) as conn:
+        for target in ("bob", "*", ""):
+            with pytest.raises(RequestError, match="invalid_user"):
+                block(conn, actor_user_id="bob", asker_user_id=target)
 
 
 def test_pair_and_task_reservations_are_atomic(path):
@@ -92,11 +102,9 @@ def test_open_count_caps(path, side, cap):
 
 
 def test_concurrent_pair_has_one_winner(path):
-    from istota.message_relays import set_permission
     from istota.whatsapp_requests import RequestError
     with db.get_db(path) as conn:
         ids = [task(conn), task(conn)]
-        set_permission(conn, actor_user_id="bob", asker_user_id="alice")
     barrier = Barrier(2)
     def insert(ident):
         with db.get_db(path) as conn:
@@ -152,13 +160,14 @@ def test_candidate_limits_raw_text_and_restart(path):
         assert conn.execute("SELECT count(*) FROM relay_reply_candidates").fetchone()[0] == 20
 
 
-def test_answered_relay_survives_revocation_and_releases_pair(path):
-    from istota.message_relays import revoke_permission
+def test_answered_relay_survives_a_block(path):
+    from istota.message_relays import block, unblock
     with db.get_db(path) as conn:
         req = hold(conn, task(conn))
         conn.execute("UPDATE message_relays SET state='answered',answer_text='answer',return_state='pending' WHERE id=?", (req["relay_id"],))
         conn.execute("UPDATE whatsapp_skill_requests SET state='sent' WHERE id=?", (req["id"],))
-        assert revoke_permission(conn, actor_user_id="bob", asker_user_id="alice") == 0
+        assert block(conn, actor_user_id="bob", asker_user_id="alice") == 0
+        unblock(conn, actor_user_id="bob", asker_user_id="alice")
         second = hold(conn, task(conn))
         assert second["relay_id"] != req["relay_id"]
         assert conn.execute("SELECT answer_text FROM message_relays WHERE id=?", (req["relay_id"],)).fetchone()[0] == "answer"
@@ -175,3 +184,26 @@ def test_cancel_is_scoped_and_does_not_commit(path):
         assert cancel_relay(conn, actor_user_id="bob", relay_id=req["relay_id"])
         conn.rollback()
         assert get_relay(conn, actor_user_id="bob", relay_id=req["relay_id"])["state"] == "held"
+
+
+def test_migration_turns_revoked_grants_into_blocks(tmp_path):
+    import sqlite3
+    old = tmp_path / "old.db"
+    db.init_db(old)
+    with sqlite3.connect(old) as conn:
+        conn.execute("DROP TABLE relay_blocks")
+        conn.execute("""CREATE TABLE relay_permissions (
+            recipient_user_id TEXT NOT NULL, asker_user_id TEXT NOT NULL,
+            granted_at TEXT NOT NULL DEFAULT (datetime('now')), revoked_at TEXT,
+            PRIMARY KEY (recipient_user_id, asker_user_id))""")
+        conn.execute("INSERT INTO relay_permissions VALUES ('bob','alice','2026-01-01','2026-02-01')")
+        conn.execute("INSERT INTO relay_permissions VALUES ('bob','carol','2026-01-01',NULL)")
+    db.init_db(old)
+    db.init_db(old)
+    with db.get_db(old) as conn:
+        from istota.message_relays import is_blocked
+        assert is_blocked(conn, actor_user_id="bob", asker_user_id="alice")
+        assert not is_blocked(conn, actor_user_id="bob", asker_user_id="carol")
+        assert conn.execute("SELECT blocked_at FROM relay_blocks").fetchone()[0] == "2026-02-01"
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='relay_permissions'").fetchone() is None

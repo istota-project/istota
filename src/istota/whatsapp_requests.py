@@ -315,7 +315,7 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
                 or relay["request_id"] != row["id"] or relay["asker_user_id"] != row["requester_user_id"]
                 or relay["recipient_user_id"] != user_id or row["requester_user_id"] not in config.users
                 or relay["provider"] != row["provider"] or relay["binding_fingerprint"] != row["binding_fingerprint"]
-                or not message_relays.has_permission(conn, actor_user_id=user_id, asker_user_id=row["requester_user_id"])):
+                or message_relays.is_blocked(conn, actor_user_id=user_id, asker_user_id=row["requester_user_id"])):
             raise RequestError("request_unavailable")
         task = db.get_task(conn, row["origin_task_id"]) if row["origin_task_id"] else None
         origin = json.loads(relay["origin"])
@@ -493,8 +493,13 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
         if existing["content_hash"] != text_hash(json.dumps(["relay_question", recipient_user_id, text], ensure_ascii=True)):
             raise RequestError("request_conflict")
         return _question_response(existing)
-    if (recipient_user_id not in config.users or not config.whatsapp.enabled
-            or not message_relays.has_permission(conn, actor_user_id=recipient_user_id, asker_user_id=actor_user_id)):
+    # Asking is open by default within the installation (ISSUE-566). A block is
+    # the one cause kept behind the generic code, so it is never revealed.
+    if recipient_user_id not in config.users:
+        raise RequestError("unknown_user")
+    if not config.whatsapp.enabled:
+        raise RequestError("whatsapp_unavailable")
+    if message_relays.is_blocked(conn, actor_user_id=recipient_user_id, asker_user_id=actor_user_id):
         raise RequestError("recipient_unavailable")
     if task.is_group_chat or task.parent_task_id or task.command or task.skill or task.scheduled_job_id:
         raise RequestError("unsupported_origin")
@@ -506,9 +511,11 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
         message_relays.validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
         adapter = active_adapter(config)
         binding = db.get_whatsapp_binding(conn, recipient_user_id)
-        if (adapter is None or binding is None or binding.provider != config.whatsapp.provider
+        if adapter is None:
+            raise RequestError("whatsapp_unavailable")
+        if (binding is None or binding.provider != config.whatsapp.provider
                 or not _destination(binding, adapter.caps)):
-            raise RequestError("recipient_unavailable")
+            raise RequestError("recipient_not_on_whatsapp")
         relay_id = str(uuid.uuid4())
         display = flatten(config.users[actor_user_id].display_name or actor_user_id)
         wording = (f"{flatten(config.bot_name)}, on behalf of {display} ({actor_user_id}):\n\n{text}\n\n"
@@ -579,7 +586,7 @@ def approve_request(conn, *, task, request_id: str, preview_digest: str) -> None
                 or text_hash(current.confirmation_prompt or "") != preview_digest
                 or text_hash(row["preview"] or "") != preview_digest):
             raise RequestError("confirmation_unavailable")
-        if not message_relays.has_permission(conn, actor_user_id=row["recipient_user_id"], asker_user_id=task.user_id):
+        if message_relays.is_blocked(conn, actor_user_id=row["recipient_user_id"], asker_user_id=task.user_id):
             raise RequestError("recipient_unavailable")
         conn.execute(
             "UPDATE whatsapp_skill_requests SET state='queued',approved_at=datetime('now'),approved_digest=?,"

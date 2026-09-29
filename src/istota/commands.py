@@ -3588,7 +3588,7 @@ async def cmd_untrust(ctx: CommandContext):
     return f"`{email}` is not in your trusted senders list. Note: senders in config files must be removed from the config."
 
 
-@command("relay", "Manage private relays: `!relay allow USER_ID`, `!relay revoke USER_ID`, `!relay permissions`, `!relay list`, `!relay show RELAY_ID`, `!relay cancel RELAY_ID`")
+@command("relay", "Manage private relays: `!relay block USER_ID`, `!relay unblock USER_ID`, `!relay blocked`, `!relay list`, `!relay show RELAY_ID`, `!relay cancel RELAY_ID`")
 async def cmd_relay(ctx: CommandContext):
     from . import message_relays
     from .whatsapp_requests import RequestError
@@ -3623,11 +3623,11 @@ async def cmd_relay(ctx: CommandContext):
             if row['answer_text'] is not None:
                 result += "\n\n" + message_relays.answer_body(row, row['answer_text'])
             return result
-        if words == ["permissions"]:
-            allowed = message_relays.list_permissions(ctx.conn, actor_user_id=ctx.user_id)
-            return "Allowed senders: " + (", ".join(row["asker_user_id"] for row in allowed) or "none")
-        if len(words) != 2 or words[0] not in ("allow", "revoke", "cancel"):
-            return "Use !relay allow USER_ID, !relay revoke USER_ID, !relay permissions, !relay list, !relay show RELAY_ID, or !relay cancel RELAY_ID."
+        if words == ["blocked"]:
+            blocked = message_relays.list_blocks(ctx.conn, actor_user_id=ctx.user_id)
+            return "Blocked from asking you: " + (", ".join(row["asker_user_id"] for row in blocked) or "nobody")
+        if len(words) != 2 or words[0] not in ("block", "unblock", "cancel"):
+            return "Use !relay block USER_ID, !relay unblock USER_ID, !relay blocked, !relay list, !relay show RELAY_ID, or !relay cancel RELAY_ID."
         action, target = words
         try:
             if action == "cancel":
@@ -3635,10 +3635,10 @@ async def cmd_relay(ctx: CommandContext):
                 return "Relay cancelled."
             if target not in ctx.config.users:
                 return "User unavailable."
-            if action == "allow":
-                message_relays.set_permission(ctx.conn, actor_user_id=ctx.user_id, asker_user_id=target)
-                return f"Allowed relay questions from {target}."
-            message_relays.revoke_permission(ctx.conn, actor_user_id=ctx.user_id, asker_user_id=target)
-            return f"Revoked relay permission for {target}."
+            if action == "block":
+                message_relays.block(ctx.conn, actor_user_id=ctx.user_id, asker_user_id=target)
+                return f"Blocked relay questions from {target}."
+            message_relays.unblock(ctx.conn, actor_user_id=ctx.user_id, asker_user_id=target)
+            return f"Unblocked relay questions from {target}."
         except RequestError:
             return "Relay unavailable."

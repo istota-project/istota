@@ -18,34 +18,36 @@ OPEN_STATES = ("held", "queued", "sending", "waiting", "uncertain")
 _OPEN_SQL = "('held','queued','sending','waiting','uncertain')"
 
 
-def set_permission(conn: sqlite3.Connection, *, actor_user_id: str, asker_user_id: str) -> None:
+def _validate_block_target(actor_user_id: str, asker_user_id: str) -> None:
     if not actor_user_id or not asker_user_id or actor_user_id == asker_user_id or asker_user_id == "*":
         raise RequestError("invalid_user")
-    conn.execute(
-        """INSERT INTO relay_permissions (recipient_user_id,asker_user_id) VALUES (?,?)
-           ON CONFLICT (recipient_user_id,asker_user_id) DO UPDATE
-           SET granted_at=datetime('now'),revoked_at=NULL""", (actor_user_id, asker_user_id),
-    )
 
 
-def has_permission(conn: sqlite3.Connection, *, actor_user_id: str, asker_user_id: str) -> bool:
+def is_blocked(conn: sqlite3.Connection, *, actor_user_id: str, asker_user_id: str) -> bool:
+    """Whether `actor_user_id` has blocked relay questions from `asker_user_id`.
+
+    Asking is allowed by default between users of one installation (ISSUE-566);
+    a block is the recipient's only control and is never revealed to the asker.
+    """
     return conn.execute(
-        "SELECT 1 FROM relay_permissions WHERE recipient_user_id=? AND asker_user_id=? AND revoked_at IS NULL",
+        "SELECT 1 FROM relay_blocks WHERE recipient_user_id=? AND asker_user_id=?",
         (actor_user_id, asker_user_id),
     ).fetchone() is not None
 
 
-def list_permissions(conn: sqlite3.Connection, *, actor_user_id: str) -> list[dict]:
+def list_blocks(conn: sqlite3.Connection, *, actor_user_id: str) -> list[dict]:
     return [dict(row) for row in conn.execute(
-        "SELECT asker_user_id,granted_at FROM relay_permissions WHERE recipient_user_id=? "
-        "AND revoked_at IS NULL ORDER BY asker_user_id", (actor_user_id,),
+        "SELECT asker_user_id,blocked_at FROM relay_blocks WHERE recipient_user_id=? ORDER BY asker_user_id",
+        (actor_user_id,),
     )]
 
 
-def revoke_permission(conn: sqlite3.Connection, *, actor_user_id: str, asker_user_id: str) -> int:
+def block(conn: sqlite3.Connection, *, actor_user_id: str, asker_user_id: str) -> int:
+    """Block an asker and close their unanswered relays; returns how many closed."""
+    _validate_block_target(actor_user_id, asker_user_id)
     with write_transaction(conn):
         conn.execute(
-            "UPDATE relay_permissions SET revoked_at=datetime('now') WHERE recipient_user_id=? AND asker_user_id=?",
+            "INSERT OR IGNORE INTO relay_blocks (recipient_user_id,asker_user_id) VALUES (?,?)",
             (actor_user_id, asker_user_id),
         )
         rows = conn.execute(
@@ -53,12 +55,20 @@ def revoke_permission(conn: sqlite3.Connection, *, actor_user_id: str, asker_use
             (actor_user_id, asker_user_id),
         ).fetchall()
         for row in rows:
-            _close_relay(conn, row["id"], state="cancelled", reason="consent_revoked")
+            _close_relay(conn, row["id"], state="cancelled", reason="blocked")
         return len(rows)
 
 
+def unblock(conn: sqlite3.Connection, *, actor_user_id: str, asker_user_id: str) -> bool:
+    _validate_block_target(actor_user_id, asker_user_id)
+    return bool(conn.execute(
+        "DELETE FROM relay_blocks WHERE recipient_user_id=? AND asker_user_id=?",
+        (actor_user_id, asker_user_id),
+    ).rowcount)
+
+
 def _check_reservation(conn: sqlite3.Connection, *, actor_user_id: str, recipient_user_id: str) -> None:
-    if not has_permission(conn, actor_user_id=recipient_user_id, asker_user_id=actor_user_id):
+    if is_blocked(conn, actor_user_id=recipient_user_id, asker_user_id=actor_user_id):
         raise RequestError("recipient_unavailable")
     if conn.execute(
         f"SELECT 1 FROM message_relays WHERE asker_user_id=? AND recipient_user_id=? AND state IN {_OPEN_SQL}",
@@ -343,7 +353,7 @@ def accept_reply(conn, config, *, actor_user_id: str, relay_id: str,
             or relay["provider"] != provider or binding is None or binding.provider != provider
             or binding_fingerprint(provider, binding) != relay["binding_fingerprint"]
             or actor_user_id not in config.users
-            or not has_permission(conn, actor_user_id=actor_user_id, asker_user_id=relay["asker_user_id"])):
+            or is_blocked(conn, actor_user_id=actor_user_id, asker_user_id=relay["asker_user_id"])):
         return "unavailable"
     if not text.strip():
         return "empty"

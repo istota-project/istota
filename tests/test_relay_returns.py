@@ -364,7 +364,7 @@ def test_revocation_after_answer_does_not_retract_its_return(setup):
     config = setup[0]
     relay = answered(setup)
     with db.get_db(config.db_path) as conn:
-        relays.revoke_permission(conn, actor_user_id='bob', asker_user_id='alice')
+        relays.block(conn, actor_user_id='bob', asker_user_id='alice')
     asyncio.run(relays.deliver_returns(config))
     with db.get_db(config.db_path) as conn:
         assert relays.get_relay(conn, actor_user_id='alice', relay_id=relay)['return_state'] == 'delivered'

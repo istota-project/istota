@@ -91,7 +91,7 @@ def test_recognized_rejected_quote_never_confirms(setup, reason):
         elif reason == 'binding':
             conn.execute("UPDATE message_relays SET binding_fingerprint='obsolete'")
         elif reason == 'consent':
-            relays.revoke_permission(conn, actor_user_id='bob', asker_user_id='alice')
+            relays.block(conn, actor_user_id='bob', asker_user_id='alice')
     text = 'x' * 5000 if reason == 'oversized' else '   ' if reason == 'empty' else 'YES'
     result = receive(config, event(config, text))
     assert result.disposition == 'relay_rejected'
