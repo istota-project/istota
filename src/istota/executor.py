@@ -7476,6 +7476,11 @@ def execute_task(
             )
 
         def _on_pid(pid: int) -> None:
+            # The skill proxy serves only this pid's descendants (ISSUE-550),
+            # so it hears first: a child can reach the socket before the DB
+            # write below returns, and the proxy's grace wait is bounded.
+            if _proxy_ctx is not None:
+                _proxy_ctx.authorize_pid(pid)
             # Placement first, DB second. `update_task_pid` can block on the
             # SQLite write lock, and the whole value of the cgroup is in the
             # window before the child's own work starts.

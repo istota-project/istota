@@ -3660,6 +3660,94 @@ def _sandbox_in_force_clause(config: "Config", probe: bool) -> str:
     )
 
 
+_PTRACE_SCOPE = Path("/proc/sys/kernel/yama/ptrace_scope")
+
+
+def _ptrace_scope(path: Path = _PTRACE_SCOPE) -> int | None:
+    """Yama's ``ptrace_scope``: ``0`` where Yama is absent, ``None`` off Linux."""
+    if platform.system() != "Linux":
+        return None
+    try:
+        return int(path.read_text().strip())
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError):
+        return None
+
+
+def check_proxy_peer_check(config: "Config", probe: bool) -> CheckResult:
+    """Whether the skill proxy can tell its own task's processes from others.
+
+    The proxy serves only descendants of a pid its task registered, and it
+    learns who connected from the kernel (ISSUE-550). Where neither
+    ``SO_PEERCRED`` nor ``LOCAL_PEERPID`` answers, every connection is
+    refused, so no skill CLI can run at all: a ``FAIL``.
+
+    Where it works, what it cannot close is stated rather than implied. On an
+    unsandboxed multi-user shape every task runs as one uid, so one task can
+    rewrite a file another task executes — its credential shim, a git hook, the
+    CLI's shell snapshot — and have its own code run inside that task's tree,
+    where the proxy serves it. With Yama's ``ptrace_scope`` at 0 it can also
+    attach and read memory. Either way cross-task isolation there is
+    best-effort, which is a ``WARN`` whatever ``ptrace_scope`` says.
+
+    Named outside the ``security.skill_proxy`` prefix on purpose, because that
+    prefix runs inside every ``load_config`` and this reads the sandbox state,
+    which imports the executor.
+    """
+    name = "security.proxy_peer_check"
+    if not getattr(config.security, "skill_proxy_enabled", True):
+        return CheckResult(name, SKIP, "[security] skill_proxy_enabled = false")
+    from . import peer_process
+
+    if not peer_process.supported():
+        return CheckResult(
+            name,
+            FAIL,
+            (
+                "this host reports no peer process for a Unix socket, so the "
+                "skill proxy refuses every connection and no skill CLI can run"
+            ),
+            remedy="Run istota on Linux or macOS, the two platforms it supports.",
+        )
+    effective, why = _deployment_sandboxing(config, probe)
+    if effective:
+        return CheckResult(
+            name, OK,
+            "the proxy serves only its own task's processes, and bubblewrap "
+            "separates the tasks as well",
+        )
+    users = len(getattr(config, "users", {}) or {})
+    if users > 1:
+        state = why or "tasks are not sandboxed here"
+        scope = _ptrace_scope()
+        ptrace = (
+            "; kernel.yama.ptrace_scope is 0, so one can also attach to "
+            "another and read its memory"
+            if scope == 0 else ""
+        )
+        return CheckResult(
+            name,
+            WARN,
+            (
+                f"{state}; {users} users' tasks run as one uid, so one task "
+                "can rewrite a file another task executes (its credential "
+                "shim, a git hook, a shell snapshot) and have its code run "
+                f"inside that task's tree{ptrace}; cross-task isolation here "
+                "is best-effort"
+            ),
+            remedy=(
+                "Run on bare metal with bubblewrap, where each task has its "
+                "own namespace, or keep one user per deployment on this shape."
+            ),
+        )
+    return CheckResult(
+        name, OK,
+        "the proxy serves only its own task's processes"
+        + (f" ({why})" if why else ""),
+    )
+
+
 def check_sandbox_credentials(config: "Config", probe: bool) -> CheckResult:
     """What ``skill_proxy_enabled = false`` costs when the sandbox is on.
 
@@ -8974,6 +9062,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.skill_proxy", check_skill_proxy),
     ("security.sandbox_effective", check_sandbox_effective),
     ("security.sandbox_credentials", check_sandbox_credentials),
+    ("security.proxy_peer_check", check_proxy_peer_check),
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
     ("security.credential_vault", check_credential_vault),
@@ -9075,6 +9164,7 @@ CHECK_SCOPES: dict[str, str] = {
     # chose in a rendered config. The image tier asserts over `--scope image`
     # and must not go red for a deployment's own decision.
     "security.sandbox_credentials": DEPLOYMENT,
+    "security.proxy_peer_check": DEPLOYMENT,
     "security.skill_model_credential": DEPLOYMENT,
     # Deployment, not image: a master key is a property of an install, and the
     # thing it unlocks is that install's own secrets table. A bare `docker run`

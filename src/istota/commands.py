@@ -635,8 +635,9 @@ def _cancel_one(ctx: CommandContext, task_id: int) -> str:
         # visibly stopped the task (ISSUE-257). kill_process_group falls back
         # to the single process when the pid leads no group of its own, so a
         # recorded pid that is somebody else's child can never resolve to their
-        # group. Both of today's writers record leaders, tmux panes included, so
-        # a tmux `!stop` now takes the pane's whole command tree.
+        # group. The streaming CLI child and a tmux pane lead their groups, so
+        # a tmux `!stop` takes the pane's whole command tree; the non-streaming
+        # CLI child does not, and is signalled alone.
         kill_process_group(pid_row["worker_pid"], signal.SIGTERM)
 
     return f"Cancelling task #{task_id}: {label}"

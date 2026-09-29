@@ -1286,8 +1286,10 @@ def read_sandbox_shm(
         # Distinct from `container_shm_for_pid`'s own pid<=0 branch, whose
         # wording ("container not running") would be a category error here: a
         # task row with no pid means the brain never reported one, not that
-        # something stopped. ClaudeCodeBrain's non-streaming path is the case
-        # today. **NativeBrain used to be the other one and no longer is**: it
+        # something stopped. TmuxClaudeBrain before its REPL is ready is the
+        # case today; ClaudeCodeBrain's non-streaming path reports its pid from
+        # inside the child since ISSUE-550. **NativeBrain used to be another
+        # and no longer is**: it
         # has one long-lived child now, the tool server, spawned through
         # `build_bwrap_cmd(..., profile=NATIVE)` and reported through
         # `req.on_pid` — so a native task's sandbox is attributable here for

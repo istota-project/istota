@@ -331,14 +331,19 @@ def run_shared_block(block_def, config, *, now: datetime | None = None) -> dict 
 
     ``None`` means no usable sources / all-empty gather (keep prior content —
     last-known-good) or, for ``synthesis``, a failed Brain call. The ``trusted``
-    flag flows from the block definition into the stored value; the read side
-    honors it and never a consuming user.
+    flag flows from the block definition into the stored value, cleared when any
+    gathered source is untrusted; the read side honors it and never a
+    consuming user.
     """
     non_empty = _gather_block(block_def, config, now)
     if not non_empty:
         return None
 
-    trusted = bool(getattr(block_def, "trusted", False))
+    # A block definition cannot vouch for a source that says it is untrusted:
+    # the markets source is numbers alone, until FinViz adds scraped headlines.
+    trusted = bool(getattr(block_def, "trusted", False)) and not any(
+        gs.untrusted for gs in non_empty
+    )
 
     if block_def.render_mode == "structured":
         text = _assemble_verbatim(non_empty)

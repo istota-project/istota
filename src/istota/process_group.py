@@ -14,14 +14,14 @@ daemon's. Signalling it would kill the scheduler along with the task. So the
 group is only ever signalled when the pid leads it, and anything else falls
 back to the single process.
 
-The fallback is what makes a *non-leader* pid safe, and both of today's writers
-of ``tasks.worker_pid`` record leaders: ClaudeCodeBrain's own child is a session
-leader after this change, and a tmux pane pid is one already (tmux ``setsid``s
-the pane child so it can take the pty as its controlling terminal — measured,
-pane pid and pgid are the same number). So `!stop` on a tmux task now signals
-the pane's whole command tree rather than the pane leader alone, which is what
-a cancel wants. The guard is what keeps the helper safe if a future caller
-records a pid it did not spawn.
+The fallback is what makes a *non-leader* pid safe. ClaudeCodeBrain's streaming
+child is a session leader after this change, and a tmux pane pid is one already
+(tmux ``setsid``s the pane child so it can take the pty as its controlling
+terminal — measured, pane pid and pgid are the same number). So `!stop` on a
+tmux task signals the pane's whole command tree rather than the pane leader
+alone, which is what a cancel wants. ClaudeCodeBrain's non-streaming child is
+the writer that does *not* lead a group: it reports its pid since ISSUE-550,
+and the fallback is what signals it alone rather than the daemon's group.
 
 stdlib-only leaf so any module can import it without a cycle. Never raises.
 """
