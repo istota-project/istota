@@ -103,7 +103,7 @@ When `skill_proxy_enabled = true` (default), secret env vars are stripped from C
 
 The set of stripped variables is **manifest-derived**: `derive_credential_set(skill_index)` collects every env var declared with `sensitive: true` across all loaded skill manifests. Today's set:
 
-- `CALDAV_PASSWORD`, `NC_PASS`, `SMTP_PASSWORD`, `IMAP_PASSWORD`
+- `CALDAV_PASSWORD`, `NC_PASS`, `ISTOTA_NEXTCLOUD_APP_PASSWORD`, `SMTP_PASSWORD`, `IMAP_PASSWORD`
 - `KARAKEEP_API_KEY`
 - `GITLAB_TOKEN`, `GITHUB_TOKEN`, `MONARCH_SESSION_ID`, `MONARCH_CSRFTOKEN`, `GOOGLE_WORKSPACE_CLI_TOKEN`
 - `NTFY_TOKEN`, `NTFY_PASSWORD`, `TUMBLR_API_KEY`

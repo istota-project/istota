@@ -331,7 +331,7 @@ For more on the proxy architecture, PID-scoped socket paths, and rejection loggi
 The proxy strips these env vars from the Claude subprocess and injects them server-side. The list is manifest-derived (every `EnvSpec` with `sensitive: true`); today's set:
 
 - `CALDAV_PASSWORD`
-- `NC_PASS`
+- `NC_PASS`, and `ISTOTA_NEXTCLOUD_APP_PASSWORD` (the same value, for the relay skill's own config load)
 - `SMTP_PASSWORD`
 - `IMAP_PASSWORD`
 - `KARAKEEP_API_KEY`

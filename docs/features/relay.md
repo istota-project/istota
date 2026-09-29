@@ -103,4 +103,4 @@ The asker is told only that you are unavailable. STOP on WhatsApp or SMS stops a
 
 ## Following your relays
 
-In a verified private conversation, `!relay list` shows your relays, `!relay show RELAY_ID` shows one with any retained answer, and `!relay cancel RELAY_ID` cancels one that has not been answered. A task can read the same through `istota-skill relay list` and `istota-skill relay status REQUEST_ID`. From a Talk-bound room those two currently fail, because the skill process cannot check the room's Talk participants.
+In a verified private conversation, `!relay list` shows your relays, `!relay show RELAY_ID` shows one with any retained answer, and `!relay cancel RELAY_ID` cancels one that has not been answered. A task can read the same through `istota-skill relay list` and `istota-skill relay status REQUEST_ID`. From a Talk-bound room both check the room's Talk participants live before answering, and refuse with `audience_unavailable` when the list cannot be fetched. `!relay list` makes the same check, so it fails the same way during a Nextcloud outage.

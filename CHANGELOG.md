@@ -55,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `istota-skill relay list` and `relay status` now work from a private room bound to Talk. They check the room's Talk participants before showing any relay content, and on a deployment that keeps the Nextcloud app password in its environment file the skill process never received that password, so every check failed. The proxy now hands the relay skill the app password, and a participant list that cannot be fetched is reported as `audience_unavailable` rather than as a room that is not private.
 - Tasks can no longer request another user’s forge credentials directly from their devbox credential socket. The proxy now checks that the caller belongs to that user’s running container and refuses access when it cannot verify the container.
 
 - Credential vaults now require operator consent on deployments where several users share an unsandboxed runtime. Setup is refused, existing vaults stop syncing, and new tasks cannot use cached vault credentials until the operator enables isolation or accepts the exposure.

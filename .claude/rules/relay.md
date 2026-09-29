@@ -16,7 +16,9 @@ Asking is open by default within one installation (ISSUE-566). The recipient's o
 
 Resolution order: the recipient's `user_profiles.relay_delivery` if set and usable, else the asker's `--via` if given, else the default room. **An unusable preference falls to the default room, never to `--via`.** The recipient chose, and a fallback to the asker's choice overrides them in exactly the case they set it for. An unusable `--via` is refused with that kind's code rather than silently rerouted. An unknown stored preference counts as none.
 
-A room qualifies when `db.default_web_room` names one whose only member is the recipient and which is not archived; its Talk ref is captured. **No room is ever created for a relay**, which is the rooms-are-user-created rule; the refusal is `recipient_has_no_private_room`. The live Talk participant check is not run at hold time, because the skill subprocess holds no Nextcloud credential (ISSUE-567).
+A room qualifies when `db.default_web_room` names one whose only member is the recipient and which is not archived; its Talk ref is captured. **No room is ever created for a relay**, which is the rooms-are-user-created rule; the refusal is `recipient_has_no_private_room`. The live Talk participant check is not run at hold time: the daemon runs it before the preview and again at release, so a third call from the skill subprocess added nothing (ISSUE-567).
+
+`relay list` and `relay status` run the live Talk audience check from the skill subprocess. It authenticates with the app password the relay manifest declares `sensitive`, so the proxy injects it into that skill alone and the subprocess's `load_config` picks it up through the `ISTOTA_NEXTCLOUD_APP_PASSWORD` override (ISSUE-568). The subprocess used to hold no credential on a deployment with `istota_use_environment_file`, and every Talk-bound call was refused. A fetch failure is `audience_unavailable` in the skill, apart from a wrong audience (`unsupported_origin`). The local participant store ISSUE-567 proposed was not built: with the credential present it would only trade a live check for a stale one on this path.
 
 The destination is frozen into the request (`provider`, `binding_fingerprint`) and into `message_relays.destination`, JSON holding kind, room token, Talk ref and a human label, never a phone number. Fingerprints: a room is `text_hash(json([room_token, talk_ref]))`, WhatsApp the existing binding fingerprint, SMS `text_hash(number)`. A question is rendered once at hold time and never shortened: a rendering that would not arrive whole is `invalid_rendering`.
 
@@ -78,7 +80,6 @@ Web returns write the canonical message with a unique `delivery_reference` and s
 
 ## Still open
 
-- `relay list` and `relay status` still run the live Talk audience check from the skill subprocess, which cannot reach Nextcloud, so they fail from a Talk-bound room. ISSUE-567 part 2 (a local participant store) replaces that call.
 - The notification's action opens web chat, not the question.
 - `deliver_returns` records a participant fetch failure as `blocked` rather than retrying it; the question path's `AudienceUnavailable` handling has not been carried over.
 
