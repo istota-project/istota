@@ -106,7 +106,8 @@ def _insert_relay(
 
 _PUBLIC_COLUMNS = """id,asker_user_id,recipient_user_id,surface,question,asker_display,
     state,created_at,approved_at,expires_at,answered_at,closed_at,answer_text,
-    return_state,content_expires_at,content_cleared_at"""
+    return_state,content_expires_at,content_cleared_at,approval,
+    json_extract(destination,'$.label') AS destination_label"""
 
 
 def get_relay(conn: sqlite3.Connection, *, actor_user_id: str, relay_id: str) -> dict | None:

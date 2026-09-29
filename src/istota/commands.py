@@ -3621,6 +3621,12 @@ def _relay_reply_in_room(ctx: CommandContext, origin: dict) -> str:
     return message_relays._REPLY_NOTICES[outcome]
 
 
+_RELAY_APPROVAL_TEXT = {
+    "user": "approved by the asker",
+    "clean_turn": "sent without approval (the asker named the recipient, and nothing ran first)",
+}
+
+
 @command("relay", "Manage private relays: `!relay reply RELAY_ID <answer>`, `!relay block USER_ID`, `!relay unblock USER_ID`, `!relay blocked`, `!relay list`, `!relay show RELAY_ID`, `!relay cancel RELAY_ID`")
 async def cmd_relay(ctx: CommandContext):
     from . import message_relays
@@ -3649,6 +3655,10 @@ async def cmd_relay(ctx: CommandContext):
             if row is None:
                 return "Relay unavailable."
             result = f"Relay {row['id']}: {row['state']} (return {row['return_state']})."
+            if row['destination_label']:
+                result += f"\nDestination: {row['destination_label']}"
+            if row['approval']:
+                result += "\nApproval: " + _RELAY_APPROVAL_TEXT.get(row['approval'], row['approval'])
             if row['content_expires_at']:
                 result += f"\nContent retained until {row['content_expires_at']} UTC."
             if row['question'] is not None:

@@ -7709,6 +7709,46 @@ def update_task_pid(conn: sqlite3.Connection, task_id: int, pid: int) -> None:
     conn.commit()
 
 
+def reset_attempt_tool_calls(conn: sqlite3.Connection, task_id: int) -> None:
+    """Start an attempt's tool-call count from zero (ISSUE-565)."""
+    conn.execute(
+        "UPDATE tasks SET attempt_tool_calls = 0, attempt_first_tool_relay = 0 WHERE id = ?",
+        (task_id,),
+    )
+
+
+def record_attempt_tool_call(
+    conn: sqlite3.Connection, task_id: int, *, calls_seen: int, first_is_relay: bool,
+) -> None:
+    """Count one tool call of the running attempt.
+
+    The clean-turn relay rule reads these columns, so every way this can go
+    wrong has to go wrong towards a higher count. It increments rather than
+    assigning, so a second writer on the same row (a reclaimed task's old
+    worker) only adds; and it takes the caller's own running total as a floor,
+    so a write that failed earlier in the attempt is not lost. The first-call
+    flag is taken only while the row still reads zero calls.
+    """
+    conn.execute(
+        """UPDATE tasks SET
+               attempt_first_tool_relay = CASE WHEN attempt_tool_calls = 0 THEN ?
+                                               ELSE attempt_first_tool_relay END,
+               attempt_tool_calls = MAX(attempt_tool_calls + 1, ?)
+           WHERE id = ?""",
+        (1 if first_is_relay else 0, calls_seen, task_id),
+    )
+
+
+def get_attempt_tool_calls(conn: sqlite3.Connection, task_id: int) -> tuple[int, bool]:
+    row = conn.execute(
+        "SELECT attempt_tool_calls, attempt_first_tool_relay FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return 0, False
+    return int(row[0]), bool(row[1])
+
+
 def get_running_task_pids(conn: sqlite3.Connection) -> list[tuple[int, int]]:
     """``(task_id, worker_pid)`` for every running task with a pid recorded.
 
