@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import asyncio
 import hashlib
 import json
 import re
@@ -14,6 +15,7 @@ from . import db
 
 MAX_CONTENT_CHARS = 2000
 QUEUE_DEADLINE_SECONDS = 600
+CLAIM_RECOVERY_SECONDS = 120
 CONTENT_RETENTION_DAYS = 30
 REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
@@ -214,3 +216,186 @@ def _clear_request_content(conn: sqlite3.Connection, request_id: str) -> None:
            preview=NULL,content_cleared_at=datetime('now'),updated_at=datetime('now') WHERE id=?""",
         (request_id,),
     )
+
+
+def _request_response(row) -> dict:
+    state = row["state"]
+    return {"status": state, "request_id": row["id"],
+            "delivery_status": "pending" if state == "queued" else state,
+            "independent_of_task_result": True}
+
+
+def enqueue_self_send(conn, config, *, actor_user_id: str, task_id: int,
+                 request_key: str, text: str) -> dict:
+    """Persist a self-send; only the daemon may attempt its delivery."""
+    from .transport.whatsapp.outbound import (
+        active_adapter, _destination, render_whatsapp_result, render_template_result,
+        template_available,
+    )
+
+    _validate_input(request_key, text)
+    with write_transaction(conn):
+        task = conn.execute("SELECT status FROM tasks WHERE id=? AND user_id=?",
+                            (task_id, actor_user_id)).fetchone()
+        if task is None or task["status"] != "running":
+            raise RequestError("task_unavailable")
+        existing = conn.execute(
+            "SELECT * FROM whatsapp_skill_requests WHERE requester_user_id=? "
+            "AND origin_task_id=? AND request_key=?", (actor_user_id, task_id, request_key),
+        ).fetchone()
+        if existing:
+            digest = text_hash(json.dumps(["self_send", actor_user_id, text], ensure_ascii=True))
+            if digest != existing["content_hash"]:
+                raise RequestError("request_conflict")
+            return _request_response(existing)
+        if actor_user_id not in config.users or not config.whatsapp.enabled:
+            raise RequestError("recipient_unavailable")
+        adapter = active_adapter(config)
+        binding = db.get_whatsapp_binding(conn, actor_user_id)
+        if (adapter is None or binding is None or binding.provider != config.whatsapp.provider
+                or not _destination(binding, adapter.caps)):
+            raise RequestError("recipient_unavailable")
+        service, truncated = render_whatsapp_result(text, limit=adapter.caps.service_body_limit)
+        if not service or truncated:
+            raise RequestError("invalid_rendering")
+        template = None
+        if adapter.caps.supports_templates and template_available(config):
+            rendered, truncated = render_template_result(text)
+            if rendered and not truncated:
+                template = rendered
+        row = _store_request(
+            conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
+            kind="self_send", recipient_user_id=actor_user_id, text=text,
+            service_body=service, template_body=template, provider=config.whatsapp.provider,
+            binding_fingerprint=binding_fingerprint(config.whatsapp.provider, binding),
+        )
+        return _request_response(row)
+
+
+def logical_key(row) -> str:
+    if row["kind"] == "relay_question":
+        return "relay-question:" + row["relay_id"]
+    return "skill-whatsapp:" + row["id"]
+
+
+def _check_binding(conn, config, row):
+    binding = db.get_whatsapp_binding(conn, row["recipient_user_id"])
+    if (row["provider"] != config.whatsapp.provider or binding is None
+            or binding.provider != row["provider"]
+            or binding_fingerprint(config.whatsapp.provider, binding) != row["binding_fingerprint"]):
+        raise RequestError("binding_changed")
+    return binding
+
+
+def admit_request(conn, config, *, request_id: str, user_id: str,
+                  logical_key: str, send_kind: str, status: str,
+                  ignore_opt_out: bool = False) -> dict[str, str]:
+    """Validate immutable intent under the send ledger's writer lock.
+
+    Relay admission is deliberately unavailable until its approval and return
+    path have landed. No caller may use this hook to bypass the ordinary gate.
+    """
+    row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
+    if (row is None or row["kind"] != "self_send" or row["state"] != "queued"
+            or row["recipient_user_id"] != user_id or row["requester_user_id"] != user_id
+            or logical_key != "skill-whatsapp:" + request_id or ignore_opt_out):
+        raise RequestError("request_unavailable")
+    if row["queue_deadline"] is None or row["queue_deadline"] <= db.sql_datetime_now():
+        raise RequestError("queue_expired")
+    if user_id not in config.users:
+        raise RequestError("recipient_unavailable")
+    _check_binding(conn, config, row)
+    if not row["service_body"] or text_hash(row["service_body"]) != row["service_hash"]:
+        raise RequestError("invalid_rendering")
+    template = row["template_body"]
+    if template is not None and text_hash(template) != row["template_hash"]:
+        raise RequestError("invalid_rendering")
+    if status == "pending" and send_kind == "template" and template is None:
+        raise RequestError("template_unavailable")
+    if status == "pending":
+        conn.execute("UPDATE whatsapp_skill_requests SET state='sending',updated_at=datetime('now') WHERE id=?",
+                     (request_id,))
+    return {"service": row["service_body"], "template": template or ""}
+
+
+def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
+    """Check and address the same binding snapshot after the ledger claim."""
+    from .transport.whatsapp.outbound import _destination
+
+    with db.get_db(config.db_path) as conn:
+        row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=? AND recipient_user_id=?",
+                           (request_id, user_id)).fetchone()
+        if row is None:
+            raise RequestError("request_unavailable")
+        return _destination(_check_binding(conn, config, row), caps)
+
+
+def _finish_request(config, request_id: str, *, record=None, reason: str | None = None) -> None:
+    from .transport.whatsapp._types import REACHED_META
+    from .notification_resolvers import task_alert
+    from .transport._alerts import push_off_surface
+
+    state = "failed"
+    if record is not None:
+        if record.status in REACHED_META:
+            state = "sent"
+        elif record.status in ("pending", "unknown"):
+            state = "uncertain"
+        reason = record.error_code or (None if state == "sent" else "unknown" if state == "uncertain" else record.status)
+    if reason == "queue_expired":
+        state = "expired"
+    notice = None
+    with db.get_db(config.db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
+        if row is None:
+            return
+        if record is not None and record.status == "pending":
+            # A competing poller can observe a live claim. Only the stale
+            # recovery path may call that an uncertain outcome.
+            stale = conn.execute("SELECT ? <= datetime('now', ?)",
+                                 (row["updated_at"], f"-{CLAIM_RECOVERY_SECONDS} seconds")).fetchone()[0]
+            if not stale:
+                return
+        changed = conn.execute(
+            "UPDATE whatsapp_skill_requests SET state=?,error_code=?,closed_at=datetime('now'),"
+            "updated_at=datetime('now') WHERE id=? AND state IN ('queued','sending','uncertain')",
+            (state, reason, request_id),
+        ).rowcount
+        if changed and state != "sent":
+            notice = task_alert.write(
+                conn, row["requester_user_id"], dedup_key="whatsapp-request:" + request_id,
+                title="WhatsApp request " + state,
+                body=f"WhatsApp request {request_id} is {state}. Check its status before trying again.",
+                params={"request_id": request_id, "status": state},
+            )
+    push_off_surface(config, notice, exclude_surface="whatsapp", reference_prefix="whatsapp-request")
+
+
+def _pending_requests(config, limit: int) -> list[dict]:
+    with db.get_db(config.db_path) as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM whatsapp_skill_requests WHERE kind='self_send' AND "
+            "(state='queued' OR (state='sending' AND (updated_at <= datetime('now', ?) "
+            "OR EXISTS (SELECT 1 FROM sent_whatsapp s WHERE s.logical_key='skill-whatsapp:' || whatsapp_skill_requests.id "
+            "AND s.status <> 'pending')))) "
+            "ORDER BY created_at,id LIMIT ?", (f"-{CLAIM_RECOVERY_SECONDS} seconds", limit),
+        )]
+
+
+async def drain_requests(config, *, limit: int = 20) -> int:
+    """Bounded daemon-only poll; SQLite work stays off the shared event loop."""
+    from .transport.whatsapp.outbound import deliver_whatsapp
+
+    rows = await asyncio.to_thread(_pending_requests, config, max(0, min(limit, 100)))
+    for row in rows:
+        try:
+            record = await deliver_whatsapp(
+                config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
+                text="", task_id=None, request_id=row["id"],
+            )
+        except RequestError as exc:
+            await asyncio.to_thread(_finish_request, config, row["id"], reason=str(exc))
+        else:
+            await asyncio.to_thread(_finish_request, config, row["id"], record=record)
+    return len(rows)

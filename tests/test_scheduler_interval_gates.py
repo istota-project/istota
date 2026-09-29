@@ -73,6 +73,7 @@ EXPECTED_BINDINGS: list[tuple[str, str | None]] = [
     # Added after the baseline extraction: the WhatsApp pairing request poll,
     # `fixed_interval=0` like `backup-stale-alert` and for the same
     # clock-bypass reason. See `tests/test_whatsapp_pairing_poll.py`.
+    ("whatsapp-requests", None),
     ("whatsapp-pairing", None),
     ("skill-overlay-reindex", "skill_overlay_reindex_interval"),
     ("vault-sync", "vault_sync_interval"),
@@ -98,6 +99,7 @@ KNOWN_FIELD_MISMATCHES = {
 # (`background_check_still_running name=%s`) and key the in-flight registry, so
 # they are not free to change.
 EXPECTED_BACKGROUND = {
+    "whatsapp-requests",
     "sleep-cycles",
     "travel-timezone",
     "email-poll",

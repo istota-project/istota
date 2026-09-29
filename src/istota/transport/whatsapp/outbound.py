@@ -249,10 +249,14 @@ def render_whatsapp(text: str, *, limit: int = WHATSAPP_TEXT_LIMIT) -> str:
     2026 per-message cost by three and gives the recipient three chances to
     read half an answer.
     """
+    return render_whatsapp_result(text, limit=limit)[0]
+
+
+def render_whatsapp_result(text: str, *, limit: int = WHATSAPP_TEXT_LIMIT) -> tuple[str, bool]:
+    """Return the service body and whether any content was truncated."""
     cleaned = _clean_markdown(_sanitize(text))
-    if len(cleaned) <= limit:
-        return cleaned
-    return _truncate(cleaned, limit, TRUNCATION_SUFFIX)
+    truncated = len(cleaned) > limit
+    return (_truncate(cleaned, limit, TRUNCATION_SUFFIX) if truncated else cleaned), truncated
 
 
 def _body_budget(
@@ -312,6 +316,11 @@ def render_template_parameter(
     is the operator's approved template, which istota never sees — hence the
     conservative cap.
     """
+    return render_template_result(text, limit=limit)[0]
+
+
+def render_template_result(text: str, *, limit: int = TEMPLATE_PARAMETER_LIMIT) -> tuple[str, bool]:
+    """Return the flattened template body and an explicit truncation flag."""
     # Whitespace first, controls second, and the order matters: a tab is both,
     # and dropping it as a control would join the words either side of it.
     spaced = "".join(
@@ -323,8 +332,8 @@ def render_template_parameter(
     )
     flattened = _SPACE_RUN.sub(" ", flattened).strip()
     if len(flattened) <= limit:
-        return flattened
-    return _truncate(flattened, limit, TRUNCATION_SUFFIX.strip().replace("\n", " "))
+        return flattened, False
+    return _truncate(flattened, limit, TRUNCATION_SUFFIX.strip().replace("\n", " ")), True
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +594,7 @@ def _claim(
     bodies: dict[str, str],
     ignore_opt_out: bool,
     caps: "WhatsAppProviderCaps | None",
+    request_id: str | None = None,
 ) -> tuple[str, WhatsAppDeliveryRecord]:
     """Insert-or-reuse one ledger row and take it, in one transaction.
 
@@ -629,6 +639,14 @@ def _claim(
             conn, config, user_id, ignore_opt_out=ignore_opt_out, month=month,
             caps=caps,
         )
+        if request_id is not None:
+            from ...whatsapp_requests import admit_request
+
+            bodies.update(admit_request(
+                conn, config, request_id=request_id, user_id=user_id,
+                logical_key=logical_key, send_kind=send_kind, status=status,
+                ignore_opt_out=ignore_opt_out,
+            ))
         body = bodies[send_kind]
         digest = hashlib.sha256(body.encode()).hexdigest()
         claimed_at = now if status == "pending" else None
@@ -981,6 +999,7 @@ async def deliver_whatsapp(
     reply_to_message_id: str | None = None,
     ignore_opt_out: bool = False,
     client=None,
+    request_id: str | None = None,
 ) -> WhatsAppDeliveryRecord:
     """Claim and perform one logical send. At most one Cloud API call.
 
@@ -1024,7 +1043,7 @@ async def deliver_whatsapp(
     # service window and therefore decide which one this send is. Both are
     # pure functions of `text`, so computing the unused one costs two regex
     # passes and buys the kind decision staying where the lock is.
-    bodies = {
+    bodies = {} if request_id is not None else {
         "service": render_whatsapp(
             text,
             # A message carrying buttons is a different object on Meta's API
@@ -1041,7 +1060,7 @@ async def deliver_whatsapp(
     outcome, record = await asyncio.to_thread(
         _claim, config,
         logical_key=logical_key, user_id=user_id, task_id=task_id,
-        bodies=bodies, ignore_opt_out=ignore_opt_out, caps=caps,
+        bodies=bodies, ignore_opt_out=ignore_opt_out, caps=caps, request_id=request_id,
     )
     if outcome == "settled":
         return record
@@ -1054,7 +1073,7 @@ async def deliver_whatsapp(
             config, logical_key=logical_key, user_id=user_id,
             body=bodies[record.send_kind], send_kind=record.send_kind,
             task_id=task_id, buttons=buttons,
-            reply_to_message_id=reply_to_message_id, adapter=adapter,
+            reply_to_message_id=reply_to_message_id, adapter=adapter, request_id=request_id,
         )
     except BaseException:
         # `BaseException`, not `Exception`: this runs as a FastAPI background
@@ -1086,6 +1105,7 @@ async def _send_claimed(
     buttons: tuple[tuple[str, str], ...],
     reply_to_message_id: str | None,
     adapter,
+    request_id: str | None = None,
 ) -> WhatsAppDeliveryRecord:
     """The body of :func:`deliver_whatsapp` from a claimed row onwards.
 
@@ -1106,9 +1126,22 @@ async def _send_claimed(
         # Resolved *after* the claim and immediately before the call, so a
         # binding the operator changed while the task ran is honoured and the
         # old destination never receives the answer.
-        destination = await asyncio.to_thread(
-            current_destination, config, user_id, adapter.caps,
-        )
+        if request_id is None:
+            destination = await asyncio.to_thread(
+                current_destination, config, user_id, adapter.caps,
+            )
+        else:
+            from ...whatsapp_requests import request_destination, RequestError
+
+            try:
+                destination = await asyncio.to_thread(
+                    request_destination, config, request_id=request_id,
+                    user_id=user_id, caps=adapter.caps,
+                )
+            except RequestError as exc:
+                record = await _settle_async(config, logical_key, "failed", error_code=str(exc))
+                await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)
+                return record
         if not destination:
             record = await _settle_async(config, logical_key, "unconfigured")
             await asyncio.to_thread(_alert_failure, config, record, user_id, task_id)

@@ -8395,6 +8395,11 @@ def build_interval_gates(
             config, now, persisted, backup["alerted"]
         )
 
+    def _whatsapp_requests(now: float) -> None:
+        from .whatsapp_requests import drain_requests
+
+        run_coro(drain_requests(config))
+
     def _whatsapp_pairing(now: float) -> None:
         # Inline on the dispatch thread, deliberately: the poll's own cheap
         # read is what makes an every-tick gate affordable, and
@@ -8646,6 +8651,12 @@ def build_interval_gates(
         # CLI's attach mode, which writes the same request row and depends on
         # this poll — an operator who turned the web flow off is exactly the one
         # who will be on a terminal. That key gates the routes.
+        IntervalGate(
+            name="whatsapp-requests",
+            run=_whatsapp_requests,
+            fixed_interval=0,
+            background=True,
+        ),
         IntervalGate(
             name="whatsapp-pairing",
             run=_whatsapp_pairing,

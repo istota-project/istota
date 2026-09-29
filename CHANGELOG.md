@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A running task can send a separate message to your own WhatsApp while keeping its final reply in the original conversation. Queued messages have a delivery status, and retrying the same request does not send it twice.
+
 - New accounts can use an address in Istota's mailbox, so confirmation mail is filed for the account and can be read during signup. Mail arriving later raises a notification instead of starting another task.
 
 - Tasks can create credentials in the `generated` group of a configured password vault and use them in a signup form without receiving the password. The vault is no longer read-only to Istota; set `[security] vault_writes_per_task = 0` to disable task-requested writes. A password manager already holding the file open can overwrite a new entry on its next save.
