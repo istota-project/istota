@@ -2410,7 +2410,7 @@ class TestTheScratchDefault:
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
     def test_a_scratch_capture_says_so_and_carries_no_chat_url(
-        self, mock_url, mock_post, workspace, deferred_dir,
+        self, mock_url, mock_post, workspace, deferred_dir, capsys,
     ):
         """The absence and the note are asserted together.
 
@@ -2427,11 +2427,13 @@ class TestTheScratchDefault:
 
         assert "workspace_path" not in result, result
         assert SCRATCH_NOTE in result.get("notes", []), result
+        # On stderr too, for a caller that keeps only `path` (ISSUE-559).
+        assert SCRATCH_NOTE in capsys.readouterr().err
 
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")
     def test_an_output_in_the_workspace_still_earns_the_chat_url(
-        self, mock_url, mock_post, workspace,
+        self, mock_url, mock_post, workspace, capsys,
     ):
         """The control. Embedding still works when a caller asks for it, which
         is what makes the move a change of default rather than a removal."""
@@ -2446,6 +2448,7 @@ class TestTheScratchDefault:
 
         assert result["workspace_path"] == "/Users/alice/radar.png"
         assert SCRATCH_NOTE not in result.get("notes", []), result
+        assert SCRATCH_NOTE not in capsys.readouterr().err
 
     @patch("istota.skills.browse.httpx.post")
     @patch("istota.skills.browse.get_api_url", return_value="http://test:9223")

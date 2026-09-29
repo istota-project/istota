@@ -61,6 +61,7 @@ from . import user_profiles
 from . import web_shutdown
 from .build_info import build_description
 from .brain import make_brain
+from .chat_files import ChatFileError, resolve_chat_file
 from .config import load_config
 from .image_sniff import SNIFF_BYTES, sniff_raster
 from .ocs import OcsError, ocs_data
@@ -9003,80 +9004,14 @@ async def chat_upload_attachment(
 # back to being for giving a file to *someone else*.
 
 
-class ChatFileError(Exception):
-    """Refusal to serve a path, carrying the status the caller should see."""
-
-    def __init__(self, status: int, message: str):
-        super().__init__(message)
-        self.status = status
-        self.message = message
-
-
-def _chat_file_workspace(username: str) -> Path:
-    """On-disk root the caller's downloads are confined to.
-
-    Deliberately the user's own workspace with no admin bypass. The endpoint
-    exists to hand someone their own files; an admin who needs to read
-    elsewhere has the sandbox and the CLI, and widening this would make the
-    single most directly-reachable read path on the web app the widest one.
-    """
-    root = _config.workspace_root(username) if _config else None
-    if root is None:
-        raise ChatFileError(
-            503,
-            "This deployment has no local workspace mount, so files cannot be "
-            "served directly. Use a Nextcloud share link instead.",
-        )
-    return root
-
-
 def _resolve_chat_file(username: str, path: str) -> Path:
-    """Map a caller-supplied workspace path to a real file, or refuse.
+    """`chat_files.resolve_chat_file` against this process's config.
 
-    Two independent checks, because they catch different escapes: the lexical
-    scope check (shared with the skill CLI, so the browser and the model are
-    held to one rule) rejects ``..`` and absolute paths outside the workspace,
-    and the realpath check afterwards rejects a symlink *inside* the workspace
-    that points out of it — which no amount of string normalization can see.
+    Kept as a module-level name because the download path and its tests reach
+    it here; the rule itself lives in `chat_files`, which the scheduler also
+    asks when it stores an answer (ISSUE-559).
     """
-    from .nextcloud._http import (
-        PathScopeError,
-        resolve_scoped_path,
-        workspace_root as nc_workspace_root,
-    )
-
-    raw = (path or "").strip()
-    if not raw:
-        raise ChatFileError(400, "path is required")
-    if "\x00" in raw:
-        raise ChatFileError(400, "path is not a valid filename")
-
-    try:
-        # is_admin=False always — see _chat_file_workspace.
-        scoped = resolve_scoped_path(raw, username, is_admin=False)
-    except PathScopeError as e:
-        raise ChatFileError(403, str(e)) from e
-
-    root = _chat_file_workspace(username)
-    # Same helper the scope check anchors on, so the Nextcloud-path prefix and
-    # the on-disk root can't drift apart.
-    relative = scoped[len(nc_workspace_root(username)):].lstrip("/")
-    if not relative:
-        raise ChatFileError(400, "path names the workspace itself, not a file")
-
-    real_root = os.path.realpath(root)
-    real = os.path.realpath(os.path.join(real_root, relative))
-    if real != real_root and not real.startswith(real_root + os.sep):
-        raise ChatFileError(403, "path resolves outside your workspace")
-
-    target = Path(real)
-    if not target.exists():
-        raise ChatFileError(404, "file not found")
-    if target.is_dir():
-        raise ChatFileError(400, "path is a directory, not a file")
-    if not target.is_file():
-        raise ChatFileError(400, "path is not a regular file")
-    return target
+    return resolve_chat_file(_config, username, path)
 
 
 def _resolve_chat_file_for_download(
