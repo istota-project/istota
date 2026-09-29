@@ -130,6 +130,13 @@ def render_sms(text: str, max_segments: int) -> RenderedSms:
         units = _units(cleaned, encoding)
     return RenderedSms(cleaned, encoding, _segment_count(units, encoding))
 
+def _exact_rendering(text: str) -> RenderedSms:
+    """A body that was checked whole when it was stored, sent as it is."""
+    gsm = _gsm7_units(text)
+    encoding = "gsm7" if gsm is not None else "ucs2"
+    return RenderedSms(text, encoding, _segment_count(gsm if gsm is not None else _utf16_units(text), encoding))
+
+
 def _record(row) -> SmsDeliveryRecord:
     return SmsDeliveryRecord(
         logical_key=row["logical_key"], provider=row["provider"],
@@ -157,6 +164,7 @@ async def deliver_sms(
     task_id: int | None = None,
     preferred_from_number: str | None = None,
     relay_return_id: str | None = None,
+    relay_question_id: str | None = None,
 ) -> SmsDeliveryRecord:
     """Claim and perform one logical send, off whatever loop awaits it.
 
@@ -173,6 +181,7 @@ async def deliver_sms(
         _deliver_sms_blocking, config, providers,
         logical_key=logical_key, user_id=user_id, text=text, task_id=task_id,
         preferred_from_number=preferred_from_number, relay_return_id=relay_return_id,
+        relay_question_id=relay_question_id,
     )
 
 
@@ -186,8 +195,15 @@ def _deliver_sms_blocking(
     task_id: int | None = None,
     preferred_from_number: str | None = None,
     relay_return_id: str | None = None,
+    relay_question_id: str | None = None,
 ) -> SmsDeliveryRecord:
-    """The body of :func:`deliver_sms`, on a worker thread. Never on the loop."""
+    """The body of :func:`deliver_sms`, on a worker thread. Never on the loop.
+
+    A relay question renders nothing the caller supplies: its stored body is
+    admitted twice, once to size the ledger row and again under the claim's
+    write lock, and it goes to the number that second admission matched
+    against the frozen fingerprint.
+    """
     previous = _existing(config, logical_key)
     if previous is not None and (
         previous["status"] != "pending"
@@ -196,7 +212,17 @@ def _deliver_sms_blocking(
     ):
         return _record(previous)
 
-    if relay_return_id is not None:
+    question = None
+    if relay_question_id is not None:
+        from ...whatsapp_requests import RequestError, admit_sms_question
+
+        if relay_return_id is not None or logical_key != "relay-question:" + relay_question_id:
+            raise RequestError("request_unavailable")
+        with db.get_db(config.db_path) as conn:
+            question = admit_sms_question(conn, config, relay_id=relay_question_id,
+                                          user_id=user_id, status="check")
+        rendered = _exact_rendering(question["service"])
+    elif relay_return_id is not None:
         from ...message_relays import return_payload
         from ...whatsapp_requests import RequestError, text_hash
 
@@ -204,12 +230,10 @@ def _deliver_sms_blocking(
             raise RequestError("return_unavailable")
         with db.get_db(config.db_path) as conn:
             origin, text = return_payload(conn, config, relay_id=relay_return_id, actor_user_id=user_id, surface="sms")
-        gsm = _gsm7_units(text)
-        encoding = "gsm7" if gsm is not None else "ucs2"
-        rendered = RenderedSms(text, encoding, _segment_count(gsm if gsm is not None else _utf16_units(text), encoding))
+        rendered = _exact_rendering(text)
     else:
         rendered = render_sms(text, config.sms.max_segments)
-    number = config.sms_phone_number_for(user_id)
+    number = question["number"] if question is not None else config.sms_phone_number_for(user_id)
     if relay_return_id is not None and text_hash(number or "") != origin["binding"]:
         raise RequestError("unsupported_origin")
     sender = (
@@ -264,6 +288,8 @@ def _deliver_sms_blocking(
         return blocked_record
 
     with db.get_db(config.db_path) as conn:
+        if question is not None:
+            conn.execute("BEGIN IMMEDIATE")
         claimed = conn.execute(
             "UPDATE sent_sms SET provider = ?, to_number = ?, from_number = ?, "
             "claimed_at = ?, updated_at = ? "
@@ -271,6 +297,11 @@ def _deliver_sms_blocking(
             "AND claimed_at IS NULL AND attempted_at IS NULL",
             (provider_name, number, sender, now, now, logical_key),
         ).rowcount
+        if claimed and question is not None:
+            # Under the claim's lock, so the request moves to `sending` with
+            # the ledger row, or neither does.
+            question = admit_sms_question(conn, config, relay_id=relay_question_id,
+                                          user_id=user_id, status="pending")
         row = conn.execute(
             "SELECT * FROM sent_sms WHERE logical_key = ?", (logical_key,),
         ).fetchone()
@@ -282,7 +313,7 @@ def _deliver_sms_blocking(
         record = _set_outcome(config, logical_key, "unknown")
         _alert_failure(config, record, user_id, task_id)
         return record
-    number = config.sms_phone_number_for(user_id)
+    number = question["number"] if question is not None else config.sms_phone_number_for(user_id)
     if relay_return_id is not None and text_hash(number or "") != origin["binding"]:
         raise RequestError("unsupported_origin")
     if not number:
@@ -939,8 +970,9 @@ def apply_delivery_event(conn, event):
             "VALUES (?, ?, ?) ON CONFLICT(phone_number) DO UPDATE SET updated_at = excluded.updated_at",
             (updated["to_number"], now, now),
         )
-    from ...message_relays import reconcile_return_delivery
+    from ...message_relays import reconcile_question_delivery, reconcile_return_delivery
 
+    reconcile_question_delivery(conn, logical_key=updated["logical_key"], status=updated["status"])
     reconcile_return_delivery(conn, logical_key=updated["logical_key"], status=updated["status"], message_id=updated["provider_message_id"])
     record = _record(updated)
     _log_transition_on_connection(conn, record, updated["task_id"])

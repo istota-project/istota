@@ -28,7 +28,6 @@ Use `istota-skill relay list` or `istota-skill relay status REQUEST_ID` from a v
 - `recipient_not_on_whatsapp` / `recipient_not_on_sms`: the recipient has no WhatsApp or SMS binding for the `--via` you named.
 - `whatsapp_unavailable` / `sms_unavailable`: that transport is not enabled here.
 - `recipient_has_no_private_room`: the recipient has no default room only they belong to. No room is created for a question.
-- `destination_unavailable`: this deployment cannot deliver to that kind of destination yet. Try `--via whatsapp` if the user agrees.
 
 ## Direct user controls
 

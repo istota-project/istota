@@ -289,6 +289,14 @@ def _check_binding(conn, config, row):
     return binding
 
 
+def _check_sms_number(config, row) -> str:
+    """The recipient's number, read once and matched against the frozen hash."""
+    number = config.sms_phone_number_for(row["recipient_user_id"]) if config.sms.enabled else None
+    if not number or text_hash(number) != row["binding_fingerprint"]:
+        raise RequestError("binding_changed")
+    return number
+
+
 def admit_request(conn, config, *, request_id: str, user_id: str,
                   logical_key: str, send_kind: str, status: str,
                   ignore_opt_out: bool = False, surface: str = "whatsapp") -> dict:
@@ -296,10 +304,12 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
 
     No caller may use this hook to bypass the ordinary delivery gate.
     `surface` is the caller's own delivery surface, and a request whose frozen
-    destination is another surface is refused, so a room question can never be
-    admitted by a WhatsApp send nor the other way round. A room admission also
-    returns the room it re-resolved, so the caller writes into the same read
-    the fingerprint was checked against.
+    destination is another surface is refused, so a room or SMS question can
+    never be admitted by a WhatsApp send nor the other way round. A room
+    admission also returns the room it re-resolved, and an SMS admission the
+    number, so the caller sends to the same read the fingerprint was checked
+    against. Only `status="pending"` moves the request; any other value checks
+    and returns the stored bodies without writing.
     """
     row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
     if (row is None or row["state"] != "queued" or row["recipient_user_id"] != user_id
@@ -309,20 +319,24 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
         raise RequestError("queue_expired")
     if user_id not in config.users:
         raise RequestError("recipient_unavailable")
-    if (row["provider"] == "room") != (surface == "room"):
+    relay = None
+    if row["relay_id"]:
+        relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
+    # A self-send is always WhatsApp; a question goes where its relay froze it.
+    destination_kind = relay["surface"] if relay is not None else ("whatsapp" if row["kind"] == "self_send" else None)
+    if destination_kind != surface or (row["provider"] == "room") != (surface == "room"):
         raise RequestError("request_unavailable")
-    room = None
+    room = number = None
     if surface == "room":
         from . import relay_destinations
-        if row["kind"] != "relay_question":
-            raise RequestError("request_unavailable")
         room = relay_destinations.check_room(conn, config, recipient_user_id=user_id,
                                              fingerprint=row["binding_fingerprint"])
+    elif surface == "sms":
+        number = _check_sms_number(config, row)
     else:
         _check_binding(conn, config, row)
     if row["kind"] == "relay_question":
         from . import message_relays
-        relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
         if (relay is None or relay["state"] != "queued" or not row["approved_at"]
                 or row["approved_digest"] != row["preview_digest"]
                 or text_hash(row["preview"] or "") != row["approved_digest"]
@@ -355,7 +369,20 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
     admitted = {"service": row["service_body"], "template": template or ""}
     if room is not None:
         admitted.update(room_token=room["room_token"], talk_ref=room["talk_ref"])
+    if number is not None:
+        admitted["number"] = number
     return admitted
+
+
+def admit_sms_question(conn, config, *, relay_id: str, user_id: str, status: str) -> dict:
+    """`admit_request` for the SMS ledger, which keys a question by its relay."""
+    row = conn.execute("SELECT id FROM whatsapp_skill_requests WHERE relay_id=? AND kind='relay_question'",
+                       (relay_id,)).fetchone()
+    if row is None:
+        raise RequestError("request_unavailable")
+    return admit_request(conn, config, request_id=row["id"], user_id=user_id,
+                         logical_key="relay-question:" + relay_id, send_kind="service",
+                         status=status, surface="sms")
 
 
 def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
@@ -371,13 +398,15 @@ def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
 
 
 def _finish_request(config, request_id: str, *, record=None, reason: str | None = None) -> None:
+    from .transport.sms._types import REACHED_PROVIDER, SmsDeliveryRecord
     from .transport.whatsapp._types import REACHED_META
     from .notification_resolvers import task_alert
     from .transport._alerts import push_off_surface
 
     state = "failed"
     if record is not None:
-        if record.status in REACHED_META:
+        reached = REACHED_PROVIDER if isinstance(record, SmsDeliveryRecord) else REACHED_META
+        if record.status in reached:
             state = "sent"
         elif record.status in ("pending", "unknown"):
             state = "uncertain"
@@ -449,6 +478,8 @@ def _pending_requests(config, limit: int) -> list[dict]:
             "SELECT * FROM whatsapp_skill_requests WHERE "
             "(state='queued' OR (state='sending' AND (updated_at <= datetime('now', ?) "
             "OR EXISTS (SELECT 1 FROM sent_whatsapp s WHERE s.logical_key=CASE WHEN kind='self_send' THEN 'skill-whatsapp:' || whatsapp_skill_requests.id ELSE 'relay-question:' || relay_id END "
+            "AND s.status <> 'pending') "
+            "OR EXISTS (SELECT 1 FROM sent_sms s WHERE s.logical_key='relay-question:' || relay_id "
             "AND s.status <> 'pending')))) "
             "ORDER BY created_at,id LIMIT ?", (f"-{CLAIM_RECOVERY_SECONDS} seconds", limit),
         )]
@@ -531,8 +562,6 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
         message_relays.validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
         destination = relay_destinations.resolve_destination(
             conn, config, recipient_user_id=recipient_user_id, requested=via)
-        if destination["kind"] not in relay_destinations.DELIVERABLE_KINDS:
-            raise RequestError("destination_unavailable")
         relay_id = str(uuid.uuid4())
         display = relay_destinations.display_name(config, actor_user_id)
         wording = relay_destinations.render_question(

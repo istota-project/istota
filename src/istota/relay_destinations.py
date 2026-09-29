@@ -23,11 +23,6 @@ from .whatsapp_requests import RequestError, binding_fingerprint, text_hash
 
 KINDS = ("room", "whatsapp", "sms")
 
-# The kinds a held question may be released to today. An SMS destination
-# resolves, but nothing delivers one until the SMS arm lands, so a build without
-# it refuses rather than holding a question it cannot send.
-DELIVERABLE_KINDS = frozenset({"whatsapp", "room"})
-
 _LABEL_MAX = 80
 
 

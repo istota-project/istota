@@ -192,16 +192,19 @@ class TestTheHoldGate:
         assert row['binding_fingerprint'] == dest.destination_fingerprint(
             {'kind': 'room', 'room_token': token, 'talk_ref': None})
 
-    @pytest.mark.parametrize('via', ['sms'])
-    def test_an_undeliverable_kind_is_refused_and_nothing_is_held(self, setup, via):
+    def test_an_sms_question_is_held_with_the_number_frozen_as_a_hash(self, setup):
         config = setup[0]
         _bob_room(config)
         _sms(config)
-        with pytest.raises(requests.RequestError, match='destination_unavailable'):
-            hold(setup, via=via)
+        config.sms.max_segments = 4
+        held = hold(setup, via='sms')
+        assert held['status'] == 'held'
         with db.get_db(config.db_path) as conn:
-            assert not conn.execute('SELECT 1 FROM whatsapp_skill_requests').fetchone()
-            assert not conn.execute('SELECT 1 FROM message_relays').fetchone()
+            row = conn.execute('SELECT surface,destination,provider,binding_fingerprint FROM message_relays WHERE id=?',
+                               (held['relay_id'],)).fetchone()
+        assert row['surface'] == 'sms' and row['provider'] == config.sms.provider
+        assert row['binding_fingerprint'] == requests.text_hash('+15557654321')
+        assert json.loads(row['destination']) == {'kind': 'sms', 'label': "Bob's SMS"}
 
     def test_the_preference_can_route_a_plain_ask_to_whatsapp(self, setup):
         config = setup[0]

@@ -539,10 +539,18 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
             attachments=attachments or [], mirror_to_room=False, queue="foreground",
             reply_to_content=context,
         ))
+    elif surface == "sms":
+        from .transport.sms import sms_conversation_token
+
+        task_id = ingest_message(conn, config, IncomingMessage(
+            user_id=actor_user_id, text=text, source_type="sms", surface="sms",
+            channel_token=sms_conversation_token(actor_user_id), output_target="sms",
+            mirror_to_room=False, queue="foreground", reply_to_content=context,
+        ))
     else:
         raise ValueError("unsupported relay reply surface")
     if task_id is None:
-        if surface != "whatsapp":
+        if surface in ("web", "talk"):
             # A room surface drops a known echo of a mirrored turn; raising
             # here would roll back the whole Talk poll batch on every retry.
             return None
@@ -569,22 +577,33 @@ def _reply_task(conn, config, *, actor_user_id: str, inbound_id: str, text: str,
                               response_logical_key=f"relay-reply:{inbound_id}")
 
 
+def parse_reply_command(text: str) -> tuple[bool, str | None, str]:
+    """``(is_command, relay_id, answer)`` for a `!relay reply ID answer` message.
+
+    Exactly one separator after the id is consumed and the rest is the answer
+    verbatim. A command with no usable id comes back with `relay_id` None.
+    """
+    import re
+
+    if not re.match(r"^\s*!relay\s+reply(?:\s|$)", text, re.IGNORECASE):
+        return False, None, text
+    parsed = re.match(r"^\s*!relay\s+reply +([^\s]+)(?: (.*))?$", text, re.IGNORECASE | re.DOTALL)
+    if not parsed:
+        return True, None, text
+    return True, parsed[1], parsed[2] or ""
+
+
 def match_whatsapp_reply(conn, config, *, actor_user_id: str, event):
     """Handle only explicit relay replies, before bare YES/NO or commands."""
-    import re
     from .transport.whatsapp.webhook import WhatsAppEventResult
 
     text = event.text or ""
-    command = re.match(r"^\s*!relay\s+reply(?:\s|$)", text, re.IGNORECASE)
+    command, relay_id, answer = parse_reply_command(text)
     relay = None
-    answer = text
     if command:
-        # Consume exactly one separator after the id, preserving the rest.
-        parsed = re.match(r"^\s*!relay\s+reply +([^\s]+)(?: (.*))?$", text, re.IGNORECASE | re.DOTALL)
-        if parsed:
+        if relay_id is not None:
             relay = conn.execute("SELECT * FROM message_relays WHERE id=? AND recipient_user_id=?",
-                                 (parsed[1], actor_user_id)).fetchone()
-            answer = parsed[2] or ""
+                                 (relay_id, actor_user_id)).fetchone()
     elif event.reply_to_message_id:
         relay = _quoted_relay(conn, actor_user_id=actor_user_id, provider=config.whatsapp.provider,
                               quoted_id=event.reply_to_message_id)
@@ -612,6 +631,32 @@ def match_whatsapp_reply(conn, config, *, actor_user_id: str, event):
                                surface="whatsapp", inbound_id=event.message_id, text=answer)
     return _reply_task(conn, config, actor_user_id=actor_user_id, inbound_id=event.message_id,
                        text=answer, relay=relay, outcome=outcome)
+
+
+def match_sms_reply(conn, config, *, actor_user_id: str, inbound_id: str, text: str):
+    """``(outcome, task_id)`` for an SMS `!relay reply`, or None for any other text.
+
+    SMS has no quote field, so the command is the only way to answer. An
+    unknown and a foreign id read alike. The recipient's task is created
+    whatever the outcome, carrying the notice as relay context when refused.
+    """
+    command, relay_id, answer = parse_reply_command(text)
+    if not command:
+        return None
+    relay = None
+    if relay_id is not None:
+        relay = conn.execute("SELECT * FROM message_relays WHERE id=? AND recipient_user_id=?",
+                             (relay_id, actor_user_id)).fetchone()
+    if relay is None:
+        outcome = "unavailable"
+    else:
+        outcome = accept_reply(conn, config, actor_user_id=actor_user_id, relay_id=relay["id"],
+                               surface="sms", inbound_id=inbound_id, text=answer)
+    task_id = create_recipient_task(
+        conn, config, relay, surface="sms", actor_user_id=actor_user_id,
+        text=answer if answer.strip() else text.strip(), outcome=outcome,
+    )
+    return outcome, task_id
 
 
 def reconcile_reply_candidates(config, *, limit: int = 20) -> list:
@@ -658,6 +703,11 @@ def expire_relays(conn, *, limit: int = 20) -> int:
     return len(rows)
 
 
+# Ledger statuses meaning the provider took a question, across the WhatsApp
+# and SMS ledgers. SMS `delivery_unconfirmed` is a message that left.
+_QUESTION_REACHED = ("accepted", "queued", "sent", "delivered", "read", "delivery_unconfirmed")
+
+
 def reconcile_question_delivery(conn, *, logical_key: str, status: str) -> None:
     """Provider receipts cannot undo a recipient's already committed answer."""
     if not logical_key.startswith("relay-question:"):
@@ -665,7 +715,7 @@ def reconcile_question_delivery(conn, *, logical_key: str, status: str) -> None:
     relay_id = logical_key.removeprefix("relay-question:")
     if status == "failed":
         _close_relay(conn, relay_id, state="failed", reason="delivery_failed")
-    elif status in ("accepted", "sent", "delivered", "read"):
+    elif status in _QUESTION_REACHED:
         conn.execute("UPDATE whatsapp_skill_requests SET state='sent',error_code=NULL,updated_at=datetime('now'),closed_at=datetime('now') "
                      "WHERE relay_id=? AND state IN ('sending','uncertain')", (relay_id,))
         if conn.execute("UPDATE message_relays SET state='waiting' WHERE id=? AND state IN ('sending','uncertain')",
@@ -692,16 +742,18 @@ def reconcile_return_delivery(conn, *, logical_key: str, status: str, message_id
 
 def reconcile_relays(conn, *, limit: int = 20) -> None:
     """Project settled question ledgers after a restart, without sending."""
+    reached = ",".join("?" * len(_QUESTION_REACHED))
     with write_transaction(conn):
-        rows = conn.execute(
-            "SELECT s.logical_key,s.status FROM message_relays r JOIN sent_whatsapp s "
-            "ON s.logical_key='relay-question:' || r.id "
-            "WHERE (r.state IN ('sending','uncertain') AND s.status IN ('accepted','sent','delivered','read')) "
-            "OR (r.state IN ('queued','sending','waiting','uncertain') AND s.status='failed') "
-            "ORDER BY r.created_at,r.id LIMIT ?", (max(0, min(limit, 100)),),
-        ).fetchall()
-        for row in rows:
-            reconcile_question_delivery(conn, logical_key=row["logical_key"], status=row["status"])
+        for table in ("sent_whatsapp", "sent_sms"):
+            rows = conn.execute(
+                f"SELECT s.logical_key,s.status FROM message_relays r JOIN {table} s "
+                "ON s.logical_key='relay-question:' || r.id "
+                f"WHERE (r.state IN ('sending','uncertain') AND s.status IN ({reached})) "
+                "OR (r.state IN ('queued','sending','waiting','uncertain') AND s.status='failed') "
+                "ORDER BY r.created_at,r.id LIMIT ?", (*_QUESTION_REACHED, max(0, min(limit, 100))),
+            ).fetchall()
+            for row in rows:
+                reconcile_question_delivery(conn, logical_key=row["logical_key"], status=row["status"])
 
 
 def write_recipient_notice(conn, relay_id: str):
@@ -728,18 +780,32 @@ async def deliver_question(config, row) -> None:
     from .whatsapp_requests import _finish_request, logical_key
 
     try:
+        with db.get_db(config.db_path) as conn:
+            relay = conn.execute("SELECT origin,surface FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
+        if relay is None:
+            raise RequestError("request_unavailable")
         if row["state"] == "queued":
-            with db.get_db(config.db_path) as conn:
-                relay = conn.execute("SELECT origin FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
             await verify_private_audience(config, actor_user_id=row["requester_user_id"], origin=json.loads(relay["origin"]))
-        if row["provider"] == "room":
+        if relay["surface"] == "room":
             await _deliver_room_question(config, row)
             return
-        from .transport.whatsapp.outbound import deliver_whatsapp
-        record = await deliver_whatsapp(
-            config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
-            text="", task_id=None, request_id=row["id"],
-        )
+        if relay["surface"] == "sms":
+            from .transport.sms.outbound import deliver_sms
+            from .transport.sms.providers.registry import make_provider_registry
+            try:
+                providers = await asyncio.to_thread(make_provider_registry, config)
+            except (ImportError, ValueError):
+                raise RequestError("sms_unavailable") from None
+            record = await deliver_sms(
+                config, providers, logical_key=logical_key(row), user_id=row["recipient_user_id"],
+                text="", relay_question_id=row["relay_id"],
+            )
+        else:
+            from .transport.whatsapp.outbound import deliver_whatsapp
+            record = await deliver_whatsapp(
+                config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
+                text="", task_id=None, request_id=row["id"],
+            )
     except RequestError as exc:
         await asyncio.to_thread(_finish_request, config, row["id"], reason=str(exc))
     else:
