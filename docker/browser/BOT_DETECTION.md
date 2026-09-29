@@ -222,6 +222,18 @@ traffic in general. The passive wait stays. `/screenshot` accepts
 `measure: false` to skip even that one evaluate for a caller who would rather
 not find out the hard way.
 
+**Pressed by the endpoint, not left for the caller** (ISSUE-562). `click_challenge`
+was reached only through `/interact`, so a `/render` or `/browse` that met a
+challenge answered `captcha` and left the tab on the interstitial. Unattended
+callers never pressed it, and a tab left there reached V8's heap limit in about
+ninety seconds, taking any tab sharing its renderer with it. `_solve_challenge`
+now makes the same press as soon as either endpoint, or an `/interact` list
+that did not press itself, meets a challenge: a `measure: false` capture for
+the coordinate frame, then the `click_challenge` arm, then the title wait and a
+`detect_captcha` re-check. One press per request, since pressing while a
+challenge works starts it over; a `captcha` answer after it carries
+`challenge_press` saying what the press did.
+
 ### The scroll was the last model-driven evaluate — and the weakest scroll
 
 `/interact`'s `scroll` ran `page.evaluate("window.scrollBy(0, N)")`, which is
