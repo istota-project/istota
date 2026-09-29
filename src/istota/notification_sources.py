@@ -252,7 +252,7 @@ def _register_all() -> None:
 
     The guard isolates a source's *own* failure, and there is exactly one thing
     it cannot isolate: every source imports ``notification_resolvers._common`` at
-    module scope, so a break in that file fails all six guarded imports at once
+    module scope, so a break in that file fails every guarded import at once
     and produces the outcome above anyway. That is the trade for the four
     mechanical bodies it holds; the file is kept import-free at module scope so
     there is as little as possible in it to break.
@@ -271,6 +271,7 @@ def _register_all() -> None:
             "health_panel",
             "task_alert",
             "message_relay",
+            "relay_question",
         ):
             try:
                 module = importlib.import_module(

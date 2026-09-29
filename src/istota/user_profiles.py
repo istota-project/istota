@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 # make reordering the tuple change what an unset row means.
 EXTERNAL_TURN_DISPLAY_VALUES = ("full", "collapsed", "hidden")
 
+# Where a relay question from another user reaches this one. '' is no
+# preference: the asker's `--via`, else the default room. The non-empty members
+# are also the destination kinds `relay_destinations` resolves, which reads
+# them from here.
+RELAY_DELIVERY_VALUES = ("", "room", "whatsapp", "sms")
+
 
 @dataclass
 class UserProfile:
@@ -85,6 +91,10 @@ class UserProfile:
     outbound_approval: str = ""
     # External-origin turn body in web chat: full | collapsed | hidden.
     external_turn_display: str = "collapsed"
+    # Relay questions from other users: '' | room | whatsapp | sms. Read by
+    # `relay_destinations.resolve_destination`, which treats an unknown value
+    # as no preference.
+    relay_delivery: str = ""
     # Seed the shared [[default_briefings]] set into this user (default on).
     default_briefings: bool = True
     # Deliver briefing email as multipart/alternative (HTML + plain) — default on.
@@ -106,7 +116,7 @@ _PROFILE_COLUMNS = (
     "disabled_skills", "trusted_email_senders", "quiet_email_senders",
     "disabled_modules",
     "routing", "default_destination", "default_room", "email_reply_routing",
-    "outbound_approval", "external_turn_display",
+    "outbound_approval", "external_turn_display", "relay_delivery",
     "default_briefings", "briefing_email_html",
     "timezone_follow_location",
     "google_scopes",
@@ -265,6 +275,7 @@ def _row_to_profile(row: sqlite3.Row) -> UserProfile:
         external_turn_display=(
             _row_get(row, "external_turn_display") or "collapsed"
         ),
+        relay_delivery=str(_row_get(row, "relay_delivery") or ""),
         default_briefings=_coerce_bool(_row_get(row, "default_briefings"), True),
         briefing_email_html=_coerce_bool(
             _row_get(row, "briefing_email_html"), True,
@@ -682,6 +693,7 @@ def _insert(db_path: Path, profile: UserProfile, *, replace: bool = False) -> No
         profile.email_reply_routing or "origin+thread",
         profile.outbound_approval or "",
         profile.external_turn_display or "collapsed",
+        profile.relay_delivery or "",
         1 if profile.default_briefings else 0,
         1 if profile.briefing_email_html else 0,
         1 if profile.timezone_follow_location else 0,

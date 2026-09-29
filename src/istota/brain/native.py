@@ -54,7 +54,7 @@ from urllib.parse import urlparse
 from istota import __version__ as _ISTOTA_VERSION
 from istota import usage as usage_types
 from istota.claude_runtime_env import without_claude_runtime_env
-from istota.agent.events import AgentEvent, _describe_tool_use, _tool_invocation
+from istota.agent.events import AgentEvent, _describe_tool_use, _lone_relay_ask, _tool_invocation
 from istota.agent.loop import run_agent_loop, run_agent_loop_continue
 from istota.agent.sanitize import sanitize_tool_pairs
 from istota.agent.types import (
@@ -1467,7 +1467,7 @@ class NativeBrain:
                 pending_tools.append(entry)
                 actions.append(desc)
                 await self._emit_progress(
-                    req, _tool_use_event(event.tool_name, desc, event.tool_call_id)
+                    req, _tool_use_event(event.tool_name, desc, event.tool_call_id, event.args)
                 )
             elif event.type == "tool_execution_end":
                 await self._emit_progress(
@@ -2754,11 +2754,12 @@ def _log_cache_telemetry(usage: TaskUsage) -> None:
     )
 
 
-def _tool_use_event(tool_name: str, description: str, tool_call_id: str = ""):
+def _tool_use_event(tool_name: str, description: str, tool_call_id: str = "", args=None):
     from ._events import ToolUseEvent
 
     return ToolUseEvent(
-        tool_name=tool_name, description=description, tool_call_id=tool_call_id
+        tool_name=tool_name, description=description, tool_call_id=tool_call_id,
+        lone_relay_ask=_lone_relay_ask(tool_name, args),
     )
 
 

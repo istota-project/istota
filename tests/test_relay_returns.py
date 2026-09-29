@@ -286,7 +286,7 @@ def test_binding_replaced_between_return_ledger_claim_and_destination(setup, mon
 
 def test_private_scoped_show_and_skill_status_include_retained_answer(setup, monkeypatch):
     from istota.commands import dispatch
-    from istota.skills.whatsapp import _dispatch
+    from istota.skills.relay import _dispatch
     from argparse import Namespace
     config, ident, token, _ = setup
     relay = answered(setup)
@@ -302,7 +302,7 @@ def test_private_scoped_show_and_skill_status_include_retained_answer(setup, mon
     status = _dispatch(Namespace(command='status', request_id=request_id))
     assert status['request']['relay']['answer_text'] == ANSWER
     assert 'binding_fingerprint' not in json.dumps(status)
-    assert _dispatch(Namespace(command='relays'))['relays'][0]['id'] == relay
+    assert _dispatch(Namespace(command='list'))['relays'][0]['id'] == relay
     with db.get_db(config.db_path) as conn:
         db.add_room_member(conn, token, 'bob')
     result = asyncio.run(dispatch(config, 'alice', token, '!relay show ' + relay, surface='web'))
@@ -310,17 +310,17 @@ def test_private_scoped_show_and_skill_status_include_retained_answer(setup, mon
     with pytest.raises(requests.RequestError, match='unsupported_origin'):
         _dispatch(Namespace(command='status', request_id=request_id))
     with pytest.raises(requests.RequestError, match='unsupported_origin'):
-        _dispatch(Namespace(command='relays'))
+        _dispatch(Namespace(command='list'))
 
 
 def test_ask_cli_enqueues_held_question_and_waits_for_exact_approval(setup, monkeypatch, capsys):
-    from istota.skills.whatsapp import main
+    from istota.skills.relay import main
     config, ident, _, sent = setup
     monkeypatch.setattr('istota.config.load_config', lambda: config)
     monkeypatch.setenv('ISTOTA_DB_PATH', str(config.db_path))
     monkeypatch.setenv('ISTOTA_USER_ID', 'alice')
     monkeypatch.setenv('ISTOTA_TASK_ID', str(ident))
-    main(['ask', 'bob', '--request-key', 'cli-question', 'What time?'])
+    main(['ask', 'bob', '--request-key', 'cli-question', '--via', 'whatsapp', 'What time?'])
     result = json.loads(capsys.readouterr().out)
     assert result['status'] == 'held' and result['needs_confirmation']
     asyncio.run(requests.drain_requests(config))

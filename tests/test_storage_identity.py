@@ -85,6 +85,7 @@ def _task(**kw):
 def _base_config(tmp_path, **kw):
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
+    db.init_db(tmp_path / "t.db")
     return Config(
         db_path=tmp_path / "t.db",
         skills_dir=skills_dir,

@@ -80,6 +80,7 @@ def _config(tmp_path, **overrides) -> Config:
     (guidelines / "talk.md").write_text(f"{SENTINELS['guidelines']} guidelines.\n")
     mount = tmp_path / "mount"
     mount.mkdir(exist_ok=True)
+    db.init_db(tmp_path / "test.db")
     config = Config(
         db_path=tmp_path / "test.db",
         skills_dir=skills_dir,

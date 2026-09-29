@@ -1636,6 +1636,39 @@ async def _process_poll_results(
                     if parent_content:
                         reply_to_content = parent_content[:1000]
 
+                # A reply to a relay question is its answer, checked before the
+                # confirmation intercept: a quoted "yes" to one must never
+                # approve a parked task. The task is created here, in this
+                # transaction, rather than by the ingest below.
+                if reply_to_talk_id is not None:
+                    from ... import message_relays
+
+                    room_token = (
+                        db.resolve_room_token(conn, "talk", conversation_token)
+                        or conversation_token
+                    )
+                    relay = message_relays.relay_for_room_reply(
+                        conn, actor_user_id=actor_id, room_token=room_token,
+                        talk_id=reply_to_talk_id,
+                    )
+                    if relay is not None:
+                        confirmations.cancel_for_conversation(
+                            conn, conversation_token, actor_id, by="talk",
+                        )
+                        _outcome, task_id = message_relays.accept_room_reply(
+                            conn, config, actor_user_id=actor_id, relay_id=relay["id"],
+                            surface="talk", inbound_id=f"talk:{message_id}", text=content,
+                            task_text=content.strip() or "Process the attached file(s)",
+                            attachments=attachments or None, channel=conversation_token,
+                            channel_name=conv_names.get(conversation_token),
+                            platform_message_id=message_id, reply_to_id=reply_to_talk_id,
+                            model=model_override, effort=effort_override,
+                            model_prefix_used=prefix.matched,
+                        )
+                        if task_id is not None:
+                            created.append(task_id)
+                        continue
+
                 # Check if this is a confirmation reply before creating a new task
                 handled = await _await_in_txn(
                     hold,

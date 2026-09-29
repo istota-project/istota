@@ -384,10 +384,12 @@ class TestBuildPromptSkillsChangelog:
         )
 
     def _make_config(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        db.init_db(db_path)
         skills_dir = tmp_path / "config" / "skills"
         skills_dir.mkdir(parents=True)
         return Config(
-            db_path=tmp_path / "test.db",
+            db_path=db_path,
             skills_dir=skills_dir,
             bundled_skills_dir=tmp_path / "_empty_bundled",
             temp_dir=tmp_path / "temp",

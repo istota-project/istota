@@ -498,3 +498,33 @@ class TestTimezoneFollowLocation:
         assert n == 1
         p = user_profiles.get_profile(db_path, "alice")
         assert p.timezone_follow_location is True
+
+
+class TestRelayDelivery:
+    """Where relay questions from other users reach this one ('' is no preference)."""
+
+    def test_default_is_no_preference(self, db_path):
+        assert user_profiles.ensure_profile(db_path, "alice").relay_delivery == ""
+
+    def test_round_trip(self, db_path):
+        user_profiles.ensure_profile(db_path, "alice")
+        user_profiles.update_profile(db_path, "alice", relay_delivery="sms")
+        assert user_profiles.get_profile(db_path, "alice").relay_delivery == "sms"
+        user_profiles.update_profile(db_path, "alice", relay_delivery="")
+        assert user_profiles.get_profile(db_path, "alice").relay_delivery == ""
+
+    def test_an_upsert_carries_it(self, db_path):
+        user_profiles.upsert_profile(
+            db_path, UserProfile(user_id="alice", relay_delivery="whatsapp"),
+        )
+        assert user_profiles.get_profile(db_path, "alice").relay_delivery == "whatsapp"
+
+    def test_noop_detection(self, db_path):
+        user_profiles.update_profile_with_status(db_path, "alice", relay_delivery="room")
+        _, state = user_profiles.update_profile_with_status(
+            db_path, "alice", relay_delivery="room",
+        )
+        assert state == "noop"
+
+    def test_values_are_the_no_preference_and_the_three_kinds(self):
+        assert user_profiles.RELAY_DELIVERY_VALUES == ("", "room", "whatsapp", "sms")

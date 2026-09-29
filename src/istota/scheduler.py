@@ -2675,6 +2675,10 @@ def process_one_task(
 
         # Update to running
         db.update_task_status(conn, task_id, "running")
+        # Every attempt counts its own tool calls from zero, in the same write
+        # as the transition, so a reset cannot fail on its own and leave the
+        # previous attempt's count standing for the clean-turn relay rule.
+        db.reset_attempt_tool_calls(conn, task_id)
         # A held draft was never published. A reclaimed/retried attempt must
         # not inherit it; approved requests are already queued and unaffected.
         from .message_relays import close_task_questions

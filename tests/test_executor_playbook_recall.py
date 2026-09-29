@@ -119,6 +119,7 @@ class TestBuildPromptPlaybooks:
     def _config(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir(parents=True)
+        db.init_db(tmp_path / "t.db")
         return Config(
             db_path=tmp_path / "t.db",
             skills_dir=skills_dir,

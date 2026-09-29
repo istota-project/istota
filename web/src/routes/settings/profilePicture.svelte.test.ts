@@ -35,6 +35,7 @@ await fillApiDouble(api, {
       // has touched it — and the header-Save assertion below turns on exactly
       // that state.
       external_turn_display: 'collapsed',
+      relay_delivery: '',
       timezone_follow_location: false,
       delivery_surfaces: ['talk'],
     },

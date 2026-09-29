@@ -1618,6 +1618,13 @@ export interface UserProfile {
   // email) the transcript shows. The row is always there whatever this says —
   // `hidden` withholds the body, never the turn.
   external_turn_display: ExternalTurnDisplay;
+  // Where a relay question from another user reaches this one. '' defers to
+  // the asker's choice and ends at the default room.
+  relay_delivery: RelayDelivery;
+  // Read-only: which of the values above would reach this user now, asked of
+  // the same checks the relay resolver runs. An unavailable preference still
+  // saves, and the resolver then falls back to the default room.
+  relay_delivery_options?: RelayDeliveryOption[];
   // Read-only hint from the server: surfaces available for delivery routing.
   delivery_surfaces?: string[];
   // Read-only: the rooms a `web:<token>` route can name, oldest first. `default`
@@ -1671,6 +1678,13 @@ export interface TalkRoomOption {
  * module is mocked away by every store test that replaces `$lib/api`.
  */
 export type ExternalTurnDisplay = 'full' | 'collapsed' | 'hidden';
+
+export type RelayDelivery = '' | 'room' | 'whatsapp' | 'sms';
+
+export interface RelayDeliveryOption {
+  value: RelayDelivery;
+  available: boolean;
+}
 
 export async function getProfile(): Promise<{ profile: UserProfile | null }> {
   return apiFetch<{ profile: UserProfile | null }>('/settings/profile');

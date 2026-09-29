@@ -3898,6 +3898,13 @@ const handlers: MockHandler[] = [
       briefing_email_html: true,
       timezone_follow_location: false,
       external_turn_display: 'collapsed',
+      relay_delivery: '',
+      relay_delivery_options: [
+        { value: '', available: true },
+        { value: 'room', available: true },
+        { value: 'whatsapp', available: false },
+        { value: 'sms', available: false },
+      ],
       purposes: ['reply', 'alert', 'log', 'briefing', 'notification'],
       delivery_surfaces: ['email', 'ntfy', 'talk', 'web'],
       web_rooms: [

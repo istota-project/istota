@@ -13,11 +13,11 @@ from istota.skills._loader import capability_disabled_skills, load_skill_index
 from .test_whatsapp_requests import task
 
 
-def call(sock_path, args, **forged):
+def call(sock_path, args, skill='whatsapp', **forged):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(10)
         sock.connect(str(sock_path))
-        sock.sendall((json.dumps(dict(skill='whatsapp', args=args, **forged)) + '\n').encode())
+        sock.sendall((json.dumps(dict(skill=skill, args=args, **forged)) + '\n').encode())
         with sock.makefile('rb') as stream:
             return json.loads(stream.readline())
 

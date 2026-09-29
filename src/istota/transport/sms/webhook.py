@@ -155,6 +155,25 @@ def handle_provider_event(
     if not event.text.strip():
         _set_disposition(conn, event, "empty")
         return SmsEventResult("empty")
+    # Ahead of the bare-answer parse and the `!` command dispatch, which
+    # refuses `reply` off a room: `!relay reply ID yes` answers the relay and
+    # can never approve a parked task.
+    from ...message_relays import _REPLY_NOTICES, match_sms_reply
+
+    relay_reply = match_sms_reply(
+        conn, config, actor_user_id=user_id,
+        inbound_id=f"sms:{event.provider}:{event.provider_message_id}", text=event.text,
+    )
+    if relay_reply is not None:
+        outcome, task_id = relay_reply
+        disposition = "relay_answer" if outcome == "accepted" else "relay_rejected"
+        _set_disposition(conn, event, disposition, task_id)
+        return SmsEventResult(
+            disposition, user_id=user_id, task_id=task_id,
+            response_text=_REPLY_NOTICES[outcome],
+            response_logical_key=f"relay-reply:{event.provider}:{event.provider_message_id}",
+            preferred_from_number=event.to_number,
+        )
     answer = confirmations.parse_answer(event.text)
     if answer is not None:
         # No ambiguity arm: this conversation holds at most one parked

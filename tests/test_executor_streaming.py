@@ -109,6 +109,7 @@ def _make_config(tmp_path: Path) -> Config:
     config.temp_dir = tmp_path / "temp"
     config.temp_dir.mkdir()
     config.db_path = tmp_path / "test.db"
+    db.init_db(config.db_path)
     config.skills_dir = tmp_path / "skills"
     config.skills_dir.mkdir()
     # Write empty _index.toml

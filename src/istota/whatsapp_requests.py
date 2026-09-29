@@ -289,12 +289,27 @@ def _check_binding(conn, config, row):
     return binding
 
 
+def _check_sms_number(config, row) -> str:
+    """The recipient's number, read once and matched against the frozen hash."""
+    number = config.sms_phone_number_for(row["recipient_user_id"]) if config.sms.enabled else None
+    if not number or text_hash(number) != row["binding_fingerprint"]:
+        raise RequestError("binding_changed")
+    return number
+
+
 def admit_request(conn, config, *, request_id: str, user_id: str,
                   logical_key: str, send_kind: str, status: str,
-                  ignore_opt_out: bool = False) -> dict[str, str]:
+                  ignore_opt_out: bool = False, surface: str = "whatsapp") -> dict:
     """Validate immutable intent under the send ledger's writer lock.
 
     No caller may use this hook to bypass the ordinary delivery gate.
+    `surface` is the caller's own delivery surface, and a request whose frozen
+    destination is another surface is refused, so a room or SMS question can
+    never be admitted by a WhatsApp send nor the other way round. A room
+    admission also returns the room it re-resolved, and an SMS admission the
+    number, so the caller sends to the same read the fingerprint was checked
+    against. Only `status="pending"` moves the request; any other value checks
+    and returns the stored bodies without writing.
     """
     row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?", (request_id,)).fetchone()
     if (row is None or row["state"] != "queued" or row["recipient_user_id"] != user_id
@@ -304,10 +319,24 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
         raise RequestError("queue_expired")
     if user_id not in config.users:
         raise RequestError("recipient_unavailable")
-    _check_binding(conn, config, row)
+    relay = None
+    if row["relay_id"]:
+        relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
+    # A self-send is always WhatsApp; a question goes where its relay froze it.
+    destination_kind = relay["surface"] if relay is not None else ("whatsapp" if row["kind"] == "self_send" else None)
+    if destination_kind != surface or (row["provider"] == "room") != (surface == "room"):
+        raise RequestError("request_unavailable")
+    room = number = None
+    if surface == "room":
+        from . import relay_destinations
+        room = relay_destinations.check_room(conn, config, recipient_user_id=user_id,
+                                             fingerprint=row["binding_fingerprint"])
+    elif surface == "sms":
+        number = _check_sms_number(config, row)
+    else:
+        _check_binding(conn, config, row)
     if row["kind"] == "relay_question":
         from . import message_relays
-        relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
         if (relay is None or relay["state"] != "queued" or not row["approved_at"]
                 or row["approved_digest"] != row["preview_digest"]
                 or text_hash(row["preview"] or "") != row["approved_digest"]
@@ -337,7 +366,23 @@ def admit_request(conn, config, *, request_id: str, user_id: str,
                      (request_id,))
         if row["relay_id"]:
             conn.execute("UPDATE message_relays SET state='sending' WHERE id=? AND state='queued'", (row["relay_id"],))
-    return {"service": row["service_body"], "template": template or ""}
+    admitted = {"service": row["service_body"], "template": template or ""}
+    if room is not None:
+        admitted.update(room_token=room["room_token"], talk_ref=room["talk_ref"])
+    if number is not None:
+        admitted["number"] = number
+    return admitted
+
+
+def admit_sms_question(conn, config, *, relay_id: str, user_id: str, status: str) -> dict:
+    """`admit_request` for the SMS ledger, which keys a question by its relay."""
+    row = conn.execute("SELECT id FROM whatsapp_skill_requests WHERE relay_id=? AND kind='relay_question'",
+                       (relay_id,)).fetchone()
+    if row is None:
+        raise RequestError("request_unavailable")
+    return admit_request(conn, config, request_id=row["id"], user_id=user_id,
+                         logical_key="relay-question:" + relay_id, send_kind="service",
+                         status=status, surface="sms")
 
 
 def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
@@ -353,13 +398,15 @@ def request_destination(config, *, request_id: str, user_id: str, caps) -> str:
 
 
 def _finish_request(config, request_id: str, *, record=None, reason: str | None = None) -> None:
+    from .transport.sms._types import REACHED_PROVIDER, SmsDeliveryRecord
     from .transport.whatsapp._types import REACHED_META
     from .notification_resolvers import task_alert
     from .transport._alerts import push_off_surface
 
     state = "failed"
     if record is not None:
-        if record.status in REACHED_META:
+        reached = REACHED_PROVIDER if isinstance(record, SmsDeliveryRecord) else REACHED_META
+        if record.status in reached:
             state = "sent"
         elif record.status in ("pending", "unknown"):
             state = "uncertain"
@@ -387,8 +434,10 @@ def _finish_request(config, request_id: str, *, record=None, reason: str | None 
         if changed and row["relay_id"]:
             from . import message_relays
             if state in ("sent", "uncertain"):
-                conn.execute("UPDATE message_relays SET state=? WHERE id=? AND state IN ('queued','sending','uncertain')",
-                             ("waiting" if state == "sent" else "uncertain", row["relay_id"]))
+                if conn.execute("UPDATE message_relays SET state=? WHERE id=? AND state IN ('queued','sending','uncertain')",
+                                ("waiting" if state == "sent" else "uncertain", row["relay_id"])).rowcount:
+                    # A phone question is its own push, so this only writes.
+                    message_relays.write_recipient_notice(conn, row["relay_id"])
             else:
                 message_relays._close_relay(conn, row["relay_id"], state=state, reason=reason or "delivery_failed")
         if changed and row["relay_id"] and state == "uncertain":
@@ -429,6 +478,8 @@ def _pending_requests(config, limit: int) -> list[dict]:
             "SELECT * FROM whatsapp_skill_requests WHERE "
             "(state='queued' OR (state='sending' AND (updated_at <= datetime('now', ?) "
             "OR EXISTS (SELECT 1 FROM sent_whatsapp s WHERE s.logical_key=CASE WHEN kind='self_send' THEN 'skill-whatsapp:' || whatsapp_skill_requests.id ELSE 'relay-question:' || relay_id END "
+            "AND s.status <> 'pending') "
+            "OR EXISTS (SELECT 1 FROM sent_sms s WHERE s.logical_key='relay-question:' || relay_id "
             "AND s.status <> 'pending')))) "
             "ORDER BY created_at,id LIMIT ?", (f"-{CLAIM_RECOVERY_SECONDS} seconds", limit),
         )]
@@ -440,12 +491,11 @@ async def drain_requests(config, *, limit: int = 20) -> int:
 
     rows = await asyncio.to_thread(_pending_requests, config, max(0, min(limit, 100)))
     for row in rows:
+        if row["relay_id"]:
+            from . import message_relays
+            await message_relays.deliver_question(config, row)
+            continue
         try:
-            if row["relay_id"] and row["state"] == "queued":
-                from . import message_relays
-                with db.get_db(config.db_path) as conn:
-                    relay = conn.execute("SELECT origin FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
-                await message_relays.verify_private_audience(config, actor_user_id=row["requester_user_id"], origin=json.loads(relay["origin"]))
             record = await deliver_whatsapp(
                 config, logical_key=logical_key(row), user_id=row["recipient_user_id"],
                 text="", task_id=None, request_id=row["id"],
@@ -465,19 +515,85 @@ async def drain_requests(config, *, limit: int = 20) -> int:
     return len(rows)
 
 
-def _question_response(row) -> dict:
+def _question_response(conn, row) -> dict:
     result = {"status": row["state"], "request_id": row["id"], "relay_id": row["relay_id"],
               "delivery_status": "pending" if row["state"] == "queued" else row["state"]}
     if row["state"] == "held":
         result.update(needs_confirmation=True, preview=row["preview"])
+    relay = conn.execute("SELECT approval FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
+    if relay is not None and relay["approval"]:
+        result["approval"] = relay["approval"]
     return result
 
 
-def hold_question(conn, config, *, actor_user_id: str, task_id: int,
-                  recipient_user_id: str, request_key: str, text: str) -> dict:
+# The surfaces whose `tasks.prompt` is the sender's own text; stage 7 of the
+# relay spec checked each producer. A task from anywhere else is held.
+_CLEAN_TURN_SURFACES = frozenset({"web", "talk", "whatsapp", "sms"})
+
+
+def _names_recipient(config, task, recipient_user_id: str) -> bool:
+    """Whether the task's own prompt names the recipient, whole-word.
+
+    Only `tasks.prompt`: never conversation context, memory or attachments.
+    Attachment file names are cut out first, because a web send with no typed
+    text stores a stand-in prompt that lists its files.
+    """
+    prompt = task.prompt or ""
+    for path in task.attachments or []:
+        name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+        if name:
+            prompt = re.sub(re.escape(name), " ", prompt, flags=re.IGNORECASE)
+    user = config.users.get(recipient_user_id)
+    for name in (recipient_user_id, getattr(user, "display_name", "") or ""):
+        name = name.strip()
+        # A one-character id would be matched by an article.
+        if len(name) < 2:
+            continue
+        if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", prompt, flags=re.IGNORECASE):
+            return True
+    return False
+
+
+def _clean_turn(conn, config, task, recipient_user_id: str) -> bool:
+    """ISSUE-565: skip the asker's approval only for a turn the daemon can vouch for.
+
+    The recipient is named in this task's own prompt, and this ask is the
+    attempt's first and only tool call so far, so nothing the task read in
+    this attempt can have shaped it. The executor writes the count as it reads
+    each call; a call not yet counted reads as zero, which is held.
+    """
+    if task.source_type not in _CLEAN_TURN_SURFACES:
+        return False
+    # A confirmed re-run counts from zero, but its prompt carries the previous
+    # attempt's output ("Execute the action you proposed"), which that attempt's
+    # tool calls may have shaped.
+    if task.confirmed_at or (task.confirmation_prompt or "").strip():
+        return False
+    calls, first_is_relay = db.get_attempt_tool_calls(conn, task.id)
+    if calls != 1 or not first_is_relay:
+        return False
+    return _names_recipient(config, task, recipient_user_id)
+
+
+def _queue_question(conn, *, request_id: str, relay_id: str, digest: str, approval: str) -> None:
+    """Release a held question to the delivery queue, recording who approved it."""
     from . import message_relays
-    from .confirmations import flatten
-    from .transport.whatsapp.outbound import active_adapter, _destination, render_whatsapp_result, render_template_result, template_available
+    conn.execute(
+        "UPDATE whatsapp_skill_requests SET state='queued',approved_at=datetime('now'),approved_digest=?,"
+        "queue_deadline=datetime('now',?),updated_at=datetime('now') WHERE id=?",
+        (digest, f"+{QUEUE_DEADLINE_SECONDS} seconds", request_id),
+    )
+    conn.execute(
+        "UPDATE message_relays SET state='queued',approved_at=datetime('now'),expires_at=datetime('now',?),"
+        "approval=? WHERE id=? AND state='held'",
+        (f"+{message_relays.RELAY_LIFETIME_SECONDS} seconds", approval, relay_id),
+    )
+
+
+def hold_question(conn, config, *, actor_user_id: str, task_id: int,
+                  recipient_user_id: str, request_key: str, text: str,
+                  via: str | None = None) -> dict:
+    from . import message_relays, relay_destinations
 
     _validate_input(request_key, text)
     task = db.get_task(conn, task_id)
@@ -485,6 +601,8 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
         raise RequestError("task_unavailable")
     if recipient_user_id == actor_user_id:
         raise RequestError("use_send")
+    if via is not None and via not in relay_destinations.KINDS:
+        raise RequestError("invalid_via")
     existing = conn.execute(
         "SELECT * FROM whatsapp_skill_requests WHERE requester_user_id=? AND origin_task_id=? AND request_key=?",
         (actor_user_id, task_id, request_key),
@@ -492,13 +610,13 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
     if existing:
         if existing["content_hash"] != text_hash(json.dumps(["relay_question", recipient_user_id, text], ensure_ascii=True)):
             raise RequestError("request_conflict")
-        return _question_response(existing)
+        return _question_response(conn, existing)
     # Asking is open by default within the installation (ISSUE-566). A block is
-    # the one cause kept behind the generic code, so it is never revealed.
+    # the one cause kept behind the generic code, so it is never revealed; it is
+    # checked before the destination, so a blocked asker learns nothing about
+    # where the recipient could have been reached.
     if recipient_user_id not in config.users:
         raise RequestError("unknown_user")
-    if not config.whatsapp.enabled:
-        raise RequestError("whatsapp_unavailable")
     if message_relays.is_blocked(conn, actor_user_id=recipient_user_id, asker_user_id=actor_user_id):
         raise RequestError("recipient_unavailable")
     if task.is_group_chat or task.parent_task_id or task.command or task.skill or task.scheduled_job_id:
@@ -509,45 +627,49 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
     # no Nextcloud credential. present_question checks it before the preview.
     with write_transaction(conn):
         message_relays.validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
-        adapter = active_adapter(config)
-        binding = db.get_whatsapp_binding(conn, recipient_user_id)
-        if adapter is None:
-            raise RequestError("whatsapp_unavailable")
-        if (binding is None or binding.provider != config.whatsapp.provider
-                or not _destination(binding, adapter.caps)):
-            raise RequestError("recipient_not_on_whatsapp")
+        destination = relay_destinations.resolve_destination(
+            conn, config, recipient_user_id=recipient_user_id, requested=via)
         relay_id = str(uuid.uuid4())
-        display = flatten(config.users[actor_user_id].display_name or actor_user_id)
-        wording = (f"{flatten(config.bot_name)}, on behalf of {display} ({actor_user_id}):\n\n{text}\n\n"
-                   f"To send your answer to {display}, reply to this message or send !relay reply {relay_id} <answer>. "
-                   "Only that answer will be shared.")
-        service, truncated = render_whatsapp_result(wording, limit=adapter.caps.service_body_limit)
-        if not service or truncated:
-            raise RequestError("invalid_rendering")
-        template = None
-        if adapter.caps.supports_templates and template_available(config):
-            candidate, truncated = render_template_result(wording)
-            if candidate and not truncated:
-                template = candidate
-        preview = (f"Send a WhatsApp question to {flatten(recipient_user_id)}?\n"
+        display = relay_destinations.display_name(config, actor_user_id)
+        wording = relay_destinations.render_question(
+            config, asker=actor_user_id, text=text, destination=destination, relay_id=relay_id)
+        service, template = relay_destinations.fit_question(config, destination, wording)
+        preview = (f"Send a question to {relay_destinations.label_text(recipient_user_id)} through {destination['label']}?\n"
                    f"Answer returns to {origin['surface']}:{origin['channel']}.\n"
-                   "Expires 24 hours after approval; sending must start within 10 minutes.\n\n"
-                   f"Service message:\n{service}\n\nTemplate message:\n{template if template is not None else '(unavailable)'}")
+                   "Expires 24 hours after approval; sending must start within 10 minutes.\n\n")
+        if destination["kind"] == "whatsapp":
+            preview += (f"Service message:\n{service}\n\n"
+                        f"Template message:\n{template if template is not None else '(unavailable)'}")
+        else:
+            preview += f"Message:\n{service}"
         # Phone previews must fit intact. No approval of a shortened preview.
-        if origin["surface"] in ("sms", "whatsapp"):
+        if origin["surface"] == "sms":
             from .transport.sms.outbound import render_sms
-            if origin["surface"] == "sms" and render_sms(preview, config.sms.max_segments).text != preview:
+            if render_sms(preview, config.sms.max_segments).text != preview:
                 raise RequestError("invalid_preview")
-            if origin["surface"] == "whatsapp" and len(preview) > adapter.caps.service_body_limit:
+        if origin["surface"] == "whatsapp":
+            from .transport.whatsapp.outbound import active_adapter
+            adapter = active_adapter(config)
+            if adapter is None or len(preview) > adapter.caps.service_body_limit:
                 raise RequestError("invalid_preview")
         row = _store_request(
             conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
             kind="relay_question", recipient_user_id=recipient_user_id, text=text,
-            service_body=service, template_body=template, provider=config.whatsapp.provider,
-            binding_fingerprint=binding_fingerprint(config.whatsapp.provider, binding), preview=preview,
-            relay_id=relay_id, relay_snapshot={"origin": origin, "audience": [actor_user_id], "asker_display": display},
+            service_body=service, template_body=template, provider=destination["provider"],
+            binding_fingerprint=destination["fingerprint"], preview=preview, relay_id=relay_id,
+            relay_snapshot={"origin": origin, "audience": [actor_user_id], "asker_display": display,
+                            "destination": relay_destinations.stored_destination(destination)},
         )
-        return _question_response(row)
+        # Decided after the store, which is where the reservation, the caps and
+        # the pending-confirmation check ran, and inside the same transaction.
+        # The preview is stored either way, so the audit trail matches a held
+        # question's.
+        if row["state"] == "held" and _clean_turn(conn, config, task, recipient_user_id):
+            _queue_question(conn, request_id=row["id"], relay_id=row["relay_id"],
+                            digest=row["preview_digest"], approval="clean_turn")
+            row = dict(conn.execute("SELECT * FROM whatsapp_skill_requests WHERE id=?",
+                                    (row["id"],)).fetchone())
+        return _question_response(conn, row)
 
 
 def park_question(conn, config, *, task) -> dict | None:
@@ -588,15 +710,8 @@ def approve_request(conn, *, task, request_id: str, preview_digest: str) -> None
             raise RequestError("confirmation_unavailable")
         if message_relays.is_blocked(conn, actor_user_id=row["recipient_user_id"], asker_user_id=task.user_id):
             raise RequestError("recipient_unavailable")
-        conn.execute(
-            "UPDATE whatsapp_skill_requests SET state='queued',approved_at=datetime('now'),approved_digest=?,"
-            "queue_deadline=datetime('now',?),updated_at=datetime('now') WHERE id=?",
-            (preview_digest, f"+{QUEUE_DEADLINE_SECONDS} seconds", request_id),
-        )
-        conn.execute(
-            "UPDATE message_relays SET state='queued',approved_at=datetime('now'),expires_at=datetime('now',?) WHERE id=? AND state='held'",
-            (f"+{message_relays.RELAY_LIFETIME_SECONDS} seconds", row["relay_id"]),
-        )
+        _queue_question(conn, request_id=request_id, relay_id=row["relay_id"],
+                        digest=preview_digest, approval="user")
         conn.execute("UPDATE tasks SET whatsapp_confirmation_request_id=NULL WHERE id=?", (task.id,))
 
 

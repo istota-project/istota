@@ -17,7 +17,7 @@ from dataclasses import dataclass
 # Tool-use rendering moved to istota.agent.events in Phase 0 of the agent-loop
 # migration (brain-agnostic; reused by the native loop). Re-exported here so
 # the stream_parser shim and existing imports keep working.
-from ..agent.events import _TOOL_EMOJI, _describe_tool_use, _tool_invocation  # noqa: F401
+from ..agent.events import _TOOL_EMOJI, _describe_tool_use, _lone_relay_ask, _tool_invocation  # noqa: F401
 
 logger = logging.getLogger("istota.brain.events")
 
@@ -37,6 +37,10 @@ class ToolUseEvent:
     # invocation when distilling a playbook, instead of the paraphrased
     # `description` (ISSUE-174 fix 1). Empty = no meaningful command string.
     invocation: str = ""
+    # This call is exactly one `istota-skill relay ask` and nothing else
+    # (`agent.events._lone_relay_ask`, over the raw input). The clean-turn relay
+    # rule authorizes on it; `description` only says the output is hidden.
+    lone_relay_ask: bool = False
 
 
 @dataclass
@@ -384,6 +388,7 @@ def parse_stream_line(
                     ToolUseEvent(
                         tool_name=name, description=desc, tool_call_id=block_id,
                         invocation=_tool_invocation(name, input_data) or "",
+                        lone_relay_ask=_lone_relay_ask(name, input_data),
                     )
                 )
 

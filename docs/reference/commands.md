@@ -34,6 +34,11 @@ Commands prefixed with `!` are intercepted before task creation and handled sync
 | `!drafts send ID` | Release one held draft (id optional when exactly one is waiting) |
 | `!drafts discard ID` | Bin one held draft |
 | `!confirm [#ID] [no\|trust]` | Answer a task parked in `pending_confirmation` — approve it, discard it with `no`, or approve and trust the sender with `trust` (hidden aliases: `!yes`, `!y`, `!approve`, `!no`, `!n`, `!decline`, `!reject`) |
+| `!relay reply RELAY_ID TEXT` | Answer a [relay question](../features/relay.md) with exactly TEXT, from the room, WhatsApp or SMS conversation it reached you in |
+| `!relay list` / `!relay show RELAY_ID` | List your relays, or show one with its approval and any retained answer (private conversations only) |
+| `!relay cancel RELAY_ID` | Cancel a relay question you asked that has not been answered |
+| `!relay block USER_ID` / `!relay unblock USER_ID` | Stop or allow again relay questions from that user; blocking closes their unanswered ones |
+| `!relay blocked` | List who you have blocked |
 
 ## Answering a held task
 

@@ -38,7 +38,7 @@ _TOOL_EMOJI = {
 # one file, because a copied literal is how the audit would silently start
 # reporting every image unread.
 READ_DESCRIPTION_PREFIX = f"{_TOOL_EMOJI['Read']} Reading "
-PRIVATE_RELAY_TOOL_DESCRIPTION = "Private WhatsApp relay request"
+PRIVATE_RELAY_TOOL_DESCRIPTION = "Private relay request"
 
 
 def _private_relay_tool(name: str, input_data: dict) -> bool:
@@ -51,7 +51,61 @@ def _private_relay_tool(name: str, input_data: dict) -> bool:
         command = " ".join(shlex.split(command))
     except ValueError:
         pass
-    return bool(re.search(r"\bwhatsapp\s+ask\b", command))
+    # `whatsapp ask` is retired, but a task holding the old instructions can
+    # still type it, and the argv would carry the question all the same.
+    return bool(re.search(r"\b(?:relay|whatsapp)\s+ask\b", command))
+
+
+# Outside quotes the shell would treat any of these as more than one plain
+# word: a separator, a pipe, a redirect, a substitution, an expansion or a glob.
+_UNQUOTED_SHELL_SYNTAX = frozenset(";&|<>()$`*?[]{}~")
+
+
+def _lone_relay_ask(name: str, input_data: dict) -> bool:
+    """Whether a tool call is exactly one `istota-skill relay ask` and nothing else.
+
+    The clean-turn rule (ISSUE-565) authorizes on this flag, so it is strict
+    where `_private_relay_tool` is loose: that one hides output, and matching
+    too much there costs nothing. Here a false positive lets a question shaped
+    by something the task read skip approval. One simple command, argv[0]
+    literally `istota-skill`, no separators, pipes, redirects, substitutions,
+    expansions, globs, newlines or assignment prefixes. Single-quoted text is
+    literal and may hold anything but a newline; double-quoted text may not
+    hold `$` or a backtick, which the shell would still expand there.
+    """
+    if name != "Bash" or not isinstance(input_data, dict):
+        return False
+    command = input_data.get("command")
+    if not isinstance(command, str) or "\n" in command or "\r" in command:
+        return False
+    quote = None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                quote = None
+            elif ch in "$`":
+                return False
+        elif ch == "\\":
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+        elif ch in _UNQUOTED_SHELL_SYNTAX:
+            return False
+        i += 1
+    if quote is not None:
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return argv[:3] == ["istota-skill", "relay", "ask"]
 
 
 def _describe_tool_use(name: str, input_data: dict) -> str:

@@ -242,21 +242,13 @@ Use a bare `whatsapp` destination. `whatsapp:+15551234567` is refused, so routin
 
 `all` and `both` are unchanged. Enabling the transport adds no WhatsApp delivery to a route somebody set up before it existed. `talk,whatsapp` and `all,whatsapp` work.
 
-## Separate task messages and questions
+## Separate task messages
 
 You can ask Istota in a web or Talk conversation to send a separate message to your own WhatsApp. The task's final answer stays in its original conversation. Once the message is queued, a later task failure does not retract it. Queued means waiting for an attempt, not delivered; a timeout may leave its status uncertain, and Istota will not automatically send it again.
 
-You can also ask another deployment user a question on WhatsApp. No prior permission is needed between users of one installation. A recipient who does not want questions from someone blocks them: Bob sends `!relay block alice` in a verified private conversation, which closes Alice's unanswered questions and stops new ones. `!relay blocked` lists blocks and `!relay unblock alice` lifts one. Blocking is directional, and admins cannot bypass it. The asker is told only that the recipient is unavailable, never that they were blocked. STOP still blocks all WhatsApp delivery, and START does not lift a relay block.
+The task skill exposes `whatsapp send --request-key KEY "text"` and `whatsapp status REQUEST_ID` through `istota-skill`. There is no recipient argument: the message goes to your own binding. Request keys are scoped to the user and task: retrying identical content returns the original request, while changed content needs a new key. Text is limited to 2,000 characters. Opt-out, Cloud windows and budgets apply, and a changed binding blocks a queued message.
 
-Ask from a private web or Talk room, or your own bound WhatsApp or SMS conversation. Give the recipient's exact user ID and the question. Istota presents the recipient, exact wording, return conversation, expiry and any Cloud template rendering through its normal task confirmation controls. Approving releases only that question. Email, CLI, scheduled tasks and shared rooms cannot start a relay, and final-output overrides cannot change where its preview or answer goes.
-
-The question identifies the asker and explains how to answer. Quote that message on WhatsApp, or send `!relay reply RELAY_ID text`. Only that explicit text is shared, unchanged, with an attribution header. Ordinary messages are private, and a photograph or caption is not an answer. The recipient's assistant still receives its own task with the question and reply context; the asker's conversation and memories are not included. An answer too long for one complete post is refused with a request for a shorter explicit reply.
-
-Use `!relay list`, `!relay show RELAY_ID` and `!relay cancel RELAY_ID` in a verified private conversation to inspect or cancel your relays. Questions expire 24 hours after approval, and a queued first send has ten minutes to start. One unanswered question per ordered pair is allowed. Each asker may have ten open questions and each recipient twenty.
-
-Opt-out, Cloud windows and budgets apply to these sends too. A changed binding or a new block prevents a first send; a failed question does not reopen automatically. If the return conversation becomes shared or delivery is blocked or uncertain, Istota retains the exact answer for 30 days and sends a notice without its content. Read it through private relay status; it is never silently moved to another conversation. Provider acceptance is not proof that the handset received it.
-
-The task skill exposes `whatsapp send --request-key KEY "text"`, `whatsapp ask USER_ID --request-key KEY "question"`, `whatsapp status REQUEST_ID` and `whatsapp relays` through `istota-skill`. Request keys are scoped to the user and task: retrying identical content returns the original request, while changed content needs a new key. Text is limited to 2,000 characters and approved questions are never silently truncated. The skill cannot block, unblock or approve its own request.
+Questions to another user of the installation, which can travel over WhatsApp among other routes, are [relay questions](relay.md). A WhatsApp question is answered by quoting it or with `!relay reply RELAY_ID text`, and STOP still blocks all WhatsApp delivery, relay questions included.
 
 ## The 24-hour service window (Cloud only)
 

@@ -4446,6 +4446,66 @@ class TestProfileEndpoints:
         got = await client.get("/istota/api/settings/profile", cookies=cookies)
         assert got.json()["profile"]["external_turn_display"] == "hidden"
 
+    async def test_get_profile_relay_delivery_defaults_to_no_preference(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert resp.status_code == 200
+        profile = resp.json()["profile"]
+        assert profile["relay_delivery"] == ""
+        options = {o["value"]: o["available"] for o in profile["relay_delivery_options"]}
+        # No room, no WhatsApp and no SMS on this config: only the default.
+        assert options == {"": True, "room": False, "whatsapp": False, "sms": False}
+
+    async def test_relay_delivery_options_reflect_a_private_room(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        from istota import db
+        with db.get_db(self._db_path) as conn:
+            db.create_web_chat_room(conn, "alice", "assistant")
+        resp = await client.get("/istota/api/settings/profile", cookies=cookies)
+        options = {o["value"]: o["available"]
+                   for o in resp.json()["profile"]["relay_delivery_options"]}
+        assert options["room"] is True
+
+    async def test_update_profile_relay_delivery(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"relay_delivery": "whatsapp"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 200
+        from istota import user_profiles
+        assert user_profiles.get_profile(self._db_path, "alice").relay_delivery == "whatsapp"
+        got = await client.get("/istota/api/settings/profile", cookies=cookies)
+        assert got.json()["profile"]["relay_delivery"] == "whatsapp"
+
+    async def test_update_profile_relay_delivery_rejects_an_unknown_value(
+        self, tmp_path, client, app,
+    ):
+        cfg = self._make_test_config(tmp_path)
+        _patch_app(cfg)
+        cookies = await self._login(client, "alice", "Alice")
+        resp = await client.put(
+            "/istota/api/settings/profile",
+            json={"relay_delivery": "talk"},
+            cookies=cookies,
+            headers={"origin": "https://example.com"},
+        )
+        assert resp.status_code == 400
+
     async def test_external_turn_display_reaches_chat_config_without_a_restart(
         self, tmp_path, client, app,
     ):

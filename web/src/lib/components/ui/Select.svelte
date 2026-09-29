@@ -5,6 +5,7 @@
   export interface SelectOption {
     value: string;
     label: string;
+    disabled?: boolean;
   }
 
   interface Props {
@@ -99,7 +100,12 @@
     <BitsSelect.Content class="ui-select-content" sideOffset={4} {align} collisionPadding={12}>
       <BitsSelect.Viewport class="ui-select-viewport">
         {#each options as opt (opt.value)}
-          <BitsSelect.Item value={opt.value} label={opt.label} class="ui-select-item">
+          <BitsSelect.Item
+            value={opt.value}
+            label={opt.label}
+            disabled={opt.disabled}
+            class="ui-select-item"
+          >
             {opt.label}
           </BitsSelect.Item>
         {/each}
@@ -230,5 +236,9 @@
   }
   :global(.ui-select-item[data-selected]) {
     color: var(--text-primary);
+  }
+  :global(.ui-select-item[data-disabled]) {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

@@ -487,6 +487,12 @@ def _format_actions_line(actions_json: str) -> str | None:
 
 _REFERENCE_ID_PATTERN = re.compile(r"^istota:task:(\d+):(\w+)$")
 
+# Talk posts `message_relays` makes. A question carries another user's text
+# and reaches its recipient's task framed, through `recipient_context`; a return
+# is the asker's answer delivered by us. As a bot turn in history either would
+# be third-party text read unframed in the daemon's voice.
+_RELAY_REFERENCE_PREFIXES = ("relay-question:", "relay-return:")
+
 
 def _parse_reference_id(ref_id: str | None) -> tuple[int | None, str | None]:
     """Parse an istota referenceId string.
@@ -533,6 +539,8 @@ def build_talk_context(
 
         # Skip ack and progress messages
         if tag in ("ack", "progress"):
+            continue
+        if ref_id and ref_id.startswith(_RELAY_REFERENCE_PREFIXES):
             continue
 
         actor_id = msg.get("actorId", "")

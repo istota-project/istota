@@ -6477,7 +6477,7 @@ You have access to:
     # between fixed neighbours, and concatenating them raw now leaves a dropped
     # block's separators behind. One blank line between whatever is present.
     relay_context = ""
-    if task.source_type == "whatsapp":
+    if task.source_type in ("whatsapp", "web", "talk", "sms"):
         from .message_relays import recipient_context
 
         if conn is not None:

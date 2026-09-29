@@ -40,13 +40,13 @@ def test_skill_approval_question_reply_return_keeps_each_users_context(setup, tm
                ISTOTA_DB_PATH=str(config.db_path), ISTOTA_CONFIG_PATH=str(config_path))
     with tempfile.TemporaryDirectory(prefix='relay_flow_', dir='/tmp') as directory:
         sock = Path(directory) / 's'
-        with SkillProxy(sock, {}, env, allowed_skills=frozenset({'whatsapp'})):
-            args = ['ask', 'bob', '--request-key', 'meeting', question]
-            response = call(sock, args)
+        with SkillProxy(sock, {}, env, allowed_skills=frozenset({'relay'})):
+            args = ['ask', 'bob', '--request-key', 'meeting', '--via', 'whatsapp', question]
+            response = call(sock, args, skill='relay')
             assert response['returncode'] == 0, response
             held = json.loads(response['stdout'])
             assert held['status'] == 'held' and held['needs_confirmation']
-            assert json.loads(call(sock, args)['stdout']) == held
+            assert json.loads(call(sock, args, skill='relay')['stdout']) == held
     asyncio.run(requests.drain_requests(config))
     assert sent == []
     assert park(setup)['preview'] == held['preview']

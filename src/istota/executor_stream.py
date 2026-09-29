@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .agent.events import PRIVATE_RELAY_TOOL_DESCRIPTION
@@ -68,6 +69,8 @@ class TaskStreamAdapter:
         self.show_tool_use = config.scheduler.progress_show_tool_use
         self.show_text = config.scheduler.progress_show_text
         self._private_tool_calls: set[str] = set()
+        self._tool_calls = 0
+        self._first_tool_relay = False
 
         # Stream surfaces (web chat, repl) get the answer text streamed live as
         # ``text_delta`` events; push surfaces (Talk/email/ntfy/istota_file) are
@@ -246,7 +249,38 @@ class TaskStreamAdapter:
 
     # --- the callback ---
 
+    def _count_tool_call(self, event: ToolUseEvent) -> None:
+        # The clean-turn relay rule (ISSUE-565) reads this count. It is written
+        # for every tool call on every surface and ahead of every display
+        # setting: a count that followed `progress_show_tool_use` or
+        # `event_log_enabled` would read every turn as clean where either is off.
+        # The flag is the strict lone-ask parse the brain made of the raw input,
+        # never the description: that label hides any command mentioning an
+        # ask, a compound one included, and hiding is not authorizing.
+        is_relay = event.lone_relay_ask
+        self._tool_calls += 1
+        if self._tool_calls == 1:
+            self._first_tool_relay = is_relay
+        db_path = Path(self.config.db_path)
+        if not self.task.id or not db_path.exists():
+            return
+        try:
+            from . import db
+
+            with db.get_db(db_path) as conn:
+                db.record_attempt_tool_call(
+                    conn, self.task.id,
+                    calls_seen=self._tool_calls, first_is_relay=self._first_tool_relay,
+                )
+        except Exception:
+            # A lost write leaves the count low for now; the next call's write
+            # carries the running total, and a question asked meanwhile reads
+            # zero, which is held.
+            logger.warning("tool-call count write failed (task %s)", self.task.id, exc_info=True)
+
     def on_event(self, event: StreamEvent) -> None:
+        if isinstance(event, ToolUseEvent):
+            self._count_tool_call(event)
         event_writer = self.event_writer
         if event_writer is None:
             return

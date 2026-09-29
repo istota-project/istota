@@ -48,6 +48,7 @@ const sidebars: SidebarsConfig = {
         'features/google-workspace',
         'features/web-interface',
         'features/notifications',
+        'features/relay',
         'features/usage',
       ],
     },

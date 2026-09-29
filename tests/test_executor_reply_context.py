@@ -7,6 +7,8 @@ the namespace one — a canonical id must never resolve through the Talk-native
 column, even when the two collide numerically in the same room.
 """
 
+from pathlib import Path
+
 import pytest
 
 from istota import db
@@ -24,7 +26,7 @@ def conn(tmp_path):
 
 def _config(tmp_path, db_path):
     return Config(
-        db_path=db_path,
+        db_path=Path(db_path),
         workspace_path=tmp_path / "mount",
         users={"alice": UserConfig(display_name="Alice")},
     )
@@ -187,6 +189,7 @@ class TestQuoteFrame:
     def _prompt_for(self, tmp_path, task):
         from istota.executor import build_prompt
 
+        db.init_db(tmp_path / "istota.db")
         config = _config(tmp_path, tmp_path / "istota.db")
         return build_prompt(task, [], config).user
 

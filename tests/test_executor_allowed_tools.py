@@ -20,6 +20,7 @@ The CLI brains are unaffected either way — they run with
 
 from pathlib import Path
 
+from istota import db
 from istota.config import Config, WebFetchConfig
 from istota.executor import build_allowed_tools, build_prompt
 
@@ -164,6 +165,7 @@ class TestTheWithheldCaseIsStated:
 
     def _config(self, tmp_path, *, kind: str = "native", browser: bool = False,
                 **web_fetch) -> Config:
+        db.init_db(tmp_path / "t.db")
         config = Config(
             db_path=tmp_path / "t.db",
             skills_dir=tmp_path / "skills",
