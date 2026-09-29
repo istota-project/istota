@@ -45,7 +45,8 @@ def test_successive_phone_previews_use_the_request_identity(setup, monkeypatch, 
         assert current.confirmation_prompt == second['preview']
 
 
-@pytest.mark.parametrize('invocation', ['istota-skill whatsapp', 'python -m istota.skills.whatsapp', "istota-skill whatsa''pp"])
+@pytest.mark.parametrize('invocation', ['istota-skill relay', 'python -m istota.skills.relay', "istota-skill rel''ay",
+                                        'istota-skill whatsapp'])
 @pytest.mark.parametrize('brain', ['claude', 'native'])
 @pytest.mark.parametrize('description', ['', 'Ask Bob the Secret question?'])
 def test_relay_tool_content_never_enters_progress_logs(setup, brain, description, invocation):

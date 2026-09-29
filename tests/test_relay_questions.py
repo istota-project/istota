@@ -41,7 +41,7 @@ def setup(tmp_path, monkeypatch, request):
 
 def hold(setup, **kw):
     config, ident, _, _ = setup
-    args = dict(actor_user_id='alice', task_id=ident, recipient_user_id='bob', request_key='question', text='What time?')
+    args = dict(actor_user_id='alice', task_id=ident, recipient_user_id='bob', request_key='question', text='What time?', via='whatsapp')
     args.update(kw)
     with db.get_db(config.db_path) as conn:
         return requests.hold_question(conn, config, **args)
@@ -171,13 +171,19 @@ def test_ask_distinguishes_why_a_recipient_cannot_be_asked(setup):
     config.users['carol'] = UserConfig(display_name='Carol')
     with pytest.raises(requests.RequestError, match='recipient_not_on_whatsapp'):
         hold(setup, recipient_user_id='carol')
-    with db.get_db(config.db_path) as conn:
-        relays.block(conn, actor_user_id='bob', asker_user_id='alice')
-    with pytest.raises(requests.RequestError, match='recipient_unavailable'):
-        hold(setup)
     config.whatsapp.enabled = False
     with pytest.raises(requests.RequestError, match='whatsapp_unavailable'):
         hold(setup)
+    config.whatsapp.enabled = True
+    with pytest.raises(requests.RequestError, match='sms_unavailable'):
+        hold(setup, via='sms')
+    # A block is checked ahead of the destination, so a blocked asker gets the
+    # same answer whatever the recipient's bindings are.
+    with db.get_db(config.db_path) as conn:
+        relays.block(conn, actor_user_id='bob', asker_user_id='alice')
+    for via in ('whatsapp', 'sms', None):
+        with pytest.raises(requests.RequestError, match='recipient_unavailable'):
+            hold(setup, via=via)
 
 
 def test_scheduler_parks_even_without_model_phrase_and_never_fans_out(setup):

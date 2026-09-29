@@ -88,14 +88,16 @@ def _insert_relay(
     conn: sqlite3.Connection, *, relay_id: str, request_id: str, actor_user_id: str,
     recipient_user_id: str, question: str, provider: str, binding_fingerprint: str, snapshot: dict,
 ) -> None:
+    destination = snapshot.get("destination") or {"kind": "whatsapp"}
     conn.execute(
         """INSERT INTO message_relays
-           (id,asker_user_id,recipient_user_id,request_id,question,asker_display,origin,audience,
-            provider,binding_fingerprint,state,return_reference)
-           VALUES (?,?,?,?,?,?,?,?,?,?,'held',?)""",
-        (relay_id, actor_user_id, recipient_user_id, request_id, question, snapshot["asker_display"],
-         json.dumps(snapshot["origin"], sort_keys=True), json.dumps(snapshot["audience"]),
-         provider, binding_fingerprint, "relay-return:" + relay_id),
+           (id,asker_user_id,recipient_user_id,surface,request_id,question,asker_display,origin,audience,
+            provider,binding_fingerprint,state,return_reference,destination)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,'held',?,?)""",
+        (relay_id, actor_user_id, recipient_user_id, destination["kind"], request_id, question,
+         snapshot["asker_display"], json.dumps(snapshot["origin"], sort_keys=True),
+         json.dumps(snapshot["audience"]), provider, binding_fingerprint, "relay-return:" + relay_id,
+         json.dumps(destination, sort_keys=True)),
     )
 
 

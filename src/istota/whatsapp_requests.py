@@ -474,10 +474,9 @@ def _question_response(row) -> dict:
 
 
 def hold_question(conn, config, *, actor_user_id: str, task_id: int,
-                  recipient_user_id: str, request_key: str, text: str) -> dict:
-    from . import message_relays
-    from .confirmations import flatten
-    from .transport.whatsapp.outbound import active_adapter, _destination, render_whatsapp_result, render_template_result, template_available
+                  recipient_user_id: str, request_key: str, text: str,
+                  via: str | None = None) -> dict:
+    from . import message_relays, relay_destinations
 
     _validate_input(request_key, text)
     task = db.get_task(conn, task_id)
@@ -485,6 +484,8 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
         raise RequestError("task_unavailable")
     if recipient_user_id == actor_user_id:
         raise RequestError("use_send")
+    if via is not None and via not in relay_destinations.KINDS:
+        raise RequestError("invalid_via")
     existing = conn.execute(
         "SELECT * FROM whatsapp_skill_requests WHERE requester_user_id=? AND origin_task_id=? AND request_key=?",
         (actor_user_id, task_id, request_key),
@@ -494,11 +495,11 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
             raise RequestError("request_conflict")
         return _question_response(existing)
     # Asking is open by default within the installation (ISSUE-566). A block is
-    # the one cause kept behind the generic code, so it is never revealed.
+    # the one cause kept behind the generic code, so it is never revealed; it is
+    # checked before the destination, so a blocked asker learns nothing about
+    # where the recipient could have been reached.
     if recipient_user_id not in config.users:
         raise RequestError("unknown_user")
-    if not config.whatsapp.enabled:
-        raise RequestError("whatsapp_unavailable")
     if message_relays.is_blocked(conn, actor_user_id=recipient_user_id, asker_user_id=actor_user_id):
         raise RequestError("recipient_unavailable")
     if task.is_group_chat or task.parent_task_id or task.command or task.skill or task.scheduled_job_id:
@@ -509,43 +510,40 @@ def hold_question(conn, config, *, actor_user_id: str, task_id: int,
     # no Nextcloud credential. present_question checks it before the preview.
     with write_transaction(conn):
         message_relays.validate_origin(conn, config, actor_user_id=actor_user_id, origin=origin)
-        adapter = active_adapter(config)
-        binding = db.get_whatsapp_binding(conn, recipient_user_id)
-        if adapter is None:
-            raise RequestError("whatsapp_unavailable")
-        if (binding is None or binding.provider != config.whatsapp.provider
-                or not _destination(binding, adapter.caps)):
-            raise RequestError("recipient_not_on_whatsapp")
+        destination = relay_destinations.resolve_destination(
+            conn, config, recipient_user_id=recipient_user_id, requested=via)
+        if destination["kind"] not in relay_destinations.DELIVERABLE_KINDS:
+            raise RequestError("destination_unavailable")
         relay_id = str(uuid.uuid4())
-        display = flatten(config.users[actor_user_id].display_name or actor_user_id)
-        wording = (f"{flatten(config.bot_name)}, on behalf of {display} ({actor_user_id}):\n\n{text}\n\n"
-                   f"To send your answer to {display}, reply to this message or send !relay reply {relay_id} <answer>. "
-                   "Only that answer will be shared.")
-        service, truncated = render_whatsapp_result(wording, limit=adapter.caps.service_body_limit)
-        if not service or truncated:
-            raise RequestError("invalid_rendering")
-        template = None
-        if adapter.caps.supports_templates and template_available(config):
-            candidate, truncated = render_template_result(wording)
-            if candidate and not truncated:
-                template = candidate
-        preview = (f"Send a WhatsApp question to {flatten(recipient_user_id)}?\n"
+        display = relay_destinations.display_name(config, actor_user_id)
+        wording = relay_destinations.render_question(
+            config, asker=actor_user_id, text=text, destination=destination, relay_id=relay_id)
+        service, template = relay_destinations.fit_question(config, destination, wording)
+        preview = (f"Send a question to {relay_destinations.label_text(recipient_user_id)} through {destination['label']}?\n"
                    f"Answer returns to {origin['surface']}:{origin['channel']}.\n"
-                   "Expires 24 hours after approval; sending must start within 10 minutes.\n\n"
-                   f"Service message:\n{service}\n\nTemplate message:\n{template if template is not None else '(unavailable)'}")
+                   "Expires 24 hours after approval; sending must start within 10 minutes.\n\n")
+        if destination["kind"] == "whatsapp":
+            preview += (f"Service message:\n{service}\n\n"
+                        f"Template message:\n{template if template is not None else '(unavailable)'}")
+        else:
+            preview += f"Message:\n{service}"
         # Phone previews must fit intact. No approval of a shortened preview.
-        if origin["surface"] in ("sms", "whatsapp"):
+        if origin["surface"] == "sms":
             from .transport.sms.outbound import render_sms
-            if origin["surface"] == "sms" and render_sms(preview, config.sms.max_segments).text != preview:
+            if render_sms(preview, config.sms.max_segments).text != preview:
                 raise RequestError("invalid_preview")
-            if origin["surface"] == "whatsapp" and len(preview) > adapter.caps.service_body_limit:
+        if origin["surface"] == "whatsapp":
+            from .transport.whatsapp.outbound import active_adapter
+            adapter = active_adapter(config)
+            if adapter is None or len(preview) > adapter.caps.service_body_limit:
                 raise RequestError("invalid_preview")
         row = _store_request(
             conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
             kind="relay_question", recipient_user_id=recipient_user_id, text=text,
-            service_body=service, template_body=template, provider=config.whatsapp.provider,
-            binding_fingerprint=binding_fingerprint(config.whatsapp.provider, binding), preview=preview,
-            relay_id=relay_id, relay_snapshot={"origin": origin, "audience": [actor_user_id], "asker_display": display},
+            service_body=service, template_body=template, provider=destination["provider"],
+            binding_fingerprint=destination["fingerprint"], preview=preview, relay_id=relay_id,
+            relay_snapshot={"origin": origin, "audience": [actor_user_id], "asker_display": display,
+                            "destination": relay_destinations.stored_destination(destination)},
         )
         return _question_response(row)
 

@@ -38,7 +38,7 @@ _TOOL_EMOJI = {
 # one file, because a copied literal is how the audit would silently start
 # reporting every image unread.
 READ_DESCRIPTION_PREFIX = f"{_TOOL_EMOJI['Read']} Reading "
-PRIVATE_RELAY_TOOL_DESCRIPTION = "Private WhatsApp relay request"
+PRIVATE_RELAY_TOOL_DESCRIPTION = "Private relay request"
 
 
 def _private_relay_tool(name: str, input_data: dict) -> bool:
@@ -51,7 +51,9 @@ def _private_relay_tool(name: str, input_data: dict) -> bool:
         command = " ".join(shlex.split(command))
     except ValueError:
         pass
-    return bool(re.search(r"\bwhatsapp\s+ask\b", command))
+    # `whatsapp ask` is retired, but a task holding the old instructions can
+    # still type it, and the argv would carry the question all the same.
+    return bool(re.search(r"\b(?:relay|whatsapp)\s+ask\b", command))
 
 
 def _describe_tool_use(name: str, input_data: dict) -> str:
