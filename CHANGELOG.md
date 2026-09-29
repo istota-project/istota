@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- You can ask another user of your installation a question on WhatsApp after approving its exact wording. No permission from them is needed first. Their explicit text reply returns unchanged to your original private conversation; blocked or uncertain returns remain available through private relay status for 30 days. Use `!relay block` and `!relay unblock` to stop or allow questions from a particular user; ordinary messages and attachments are never forwarded as answers.
+- You can ask another user of your installation a question, and their explicit reply comes back unchanged to the private conversation you asked from. The question reaches them in their default room (web chat, and Talk when the room is bound), on WhatsApp or by SMS; they can pick where in Settings, and their choice outranks yours. It also waits in their notification inbox until it is answered. They answer by replying to it, quoting it on WhatsApp or sending `!relay reply`, and nothing else they say is shared. You approve each question's exact wording first, unless the message you sent named the recipient and asking was the first thing the task did. No permission is needed beforehand, and `!relay block` stops questions from a particular user; blocked or uncertain answers stay readable through `!relay show` for 30 days.
 
 - A running task can send a separate message to your own WhatsApp while keeping its final reply in the original conversation. Queued messages have a delivery status, and retrying the same request does not send it twice.
 

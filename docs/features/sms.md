@@ -40,6 +40,10 @@ The sender's number must be assigned to a user before Istota accepts work from i
 
 Use a bare `sms` routing destination. `sms:+15551234567` is rejected because routing must not become an arbitrary-contact send API. Existing `all` and `both` destinations do not include SMS, so enabling the transport does not add paid delivery to old routes.
 
+## Relay questions
+
+Another user of the installation can send you a [relay question](relay.md) by SMS, when you or they choose SMS and your number is assigned. Answer it with `!relay reply RELAY_ID text`; SMS has no quoting, so an ordinary message is never an answer. The question is sent whole or not at all, within `max_segments`.
+
 ## Twilio setup
 
 Create a Messaging Service, add every configured service number to its sender pool, and enable Advanced Opt-Out. Configure neutral provider-managed responses for START, STOP, and HELP because Istota deliberately sends no second compliance response. Configure both incoming messages and status callbacks to:

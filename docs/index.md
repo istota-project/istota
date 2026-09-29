@@ -76,6 +76,7 @@ This view shares the humanist premise of [Common Task](https://commontask.org/):
 - [Web interface](features/web-interface.md)
 - [SMS](features/sms.md)
 - [WhatsApp](features/whatsapp.md)
+- [Relay questions](features/relay.md)
 - [Skills index](reference/skills-index.md)
 - [Configuration reference](configuration/reference.md)
 - [Command reference](reference/commands.md)

@@ -29,7 +29,7 @@ A row shows a severity dot, the title, how long ago it last changed, and `×N` w
 
 ## What raises a row
 
-Six sources ship.
+Eight sources ship.
 
 | Source | What it is | What you can do | Closes when |
 |---|---|---|---|
@@ -39,8 +39,10 @@ Six sources ship.
 | `connected_service` | A stored credential the remote rejected (Garmin today) | Reconnect, which links to Settings | The service reports connected again |
 | `health_panel` | A bloodwork panel left in draft after OCR | Review, which links to the bloodwork page | The panel leaves draft |
 | `task_alert` | One-shot alerts: a task that failed, a mail throttle notice, a confirmation that timed out, a DMARC warning, a result that reached nobody | Nothing; it clears itself once you have seen it | You open the panel with it visible |
+| `relay_question` | A [relay question](relay.md) another user asked you, waiting for your answer | Open chat, for a question in a room; the view shows the question | The relay is answered, expires, fails or is cancelled |
+| `message_relay` | A change to a relay question you asked: delivered, failed, answered, or an answer kept back | Nothing; `!relay show` has the detail | You open the panel with it visible, or the answer reaches you |
 
-The first five are **object-backed**: something outside the table changes and the row closes. `task_alert` is **fire-and-forget** — nothing will ever close it, so it closes when you see it.
+Six are **object-backed**: something outside the table changes and the row closes. `task_alert` and `message_relay` are **fire-and-forget** — nothing will ever close them, so they close when you see them.
 
 Three of these are worth spelling out because the obvious reading is wrong.
 
@@ -86,6 +88,7 @@ The inbox does not change how anything is routed. A row is written; separately, 
 What varies is whether a producer sends at all, and that is decided per producer rather than per source:
 
 - **Write and deliver** — most sources. A dead Garmin credential delivers because the wiped credential takes the sync job with it, so nothing would ever notice again.
+- **Deliver only where nothing else alerts you** — a relay question. One that went to your room pushes; one that went to WhatsApp or SMS is written and not pushed, since the message on your phone already is the alert. The pushed text never contains the question.
 - **Write, never deliver** — a draft bloodwork panel. The producer is the upload handler and you are looking at the review screen it just returned you to, so pushing "lab results are waiting" at that moment is a notice about something you are in the middle of doing.
 - **The producer keeps its own send** — the DMARC canary, the mail throttle, the expired-confirmation notice. Each has its own delivery window already and stamps the row rather than sending twice.
 

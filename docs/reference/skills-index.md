@@ -21,6 +21,8 @@ All built-in skills shipped with Istota. Skills marked "always" are loaded for e
 | `email` | email, mail, send, inbox, reply, message | yes -- list, read, search, thread, attachments, from-senders, newsletters, send, reply, reply-all, mark, delete, output |
 | `nextcloud` | share, sharing, download link, nextcloud, permission, access, capabilities, quota | yes -- capabilities, user, group, share (incl. `share link`), files, talk, notify, activity. Gated on `requires_capability: [nextcloud]` |
 | `ntfy` | ntfy, push notification, notify me, notify my phone, mobile alert | yes -- send (one-way push to the user's ntfy device) |
+| `relay` | ask, relay, question for, ask someone, ask another user | yes -- ask (hold a question to another user; `--via room\|whatsapp\|sms`), status, list. See [relay questions](../features/relay.md) |
+| `whatsapp` | — | yes -- send (a separate message to your own WhatsApp), status. Gated on `requires_capability: [whatsapp]` |
 
 ## Productivity
 
