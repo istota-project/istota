@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
+  import { get } from 'svelte/store';
   import { page } from '$app/state';
   import { Plus, MessageSquare, Cloud, ChevronDown, Circle, Star, CheckCheck } from 'lucide-svelte';
   import {
@@ -148,6 +149,9 @@
   let creatingRoom = $state(false);
   let newRoomName = $state('');
   let listEl: HTMLDivElement | undefined = $state();
+  // The rows inside the scroller, apart from the composer reserve and fade. Its
+  // size is what the content ResizeObserver below watches.
+  let transcriptEl: HTMLDivElement | undefined = $state();
   // The docked composer floats over the transcript, so its height is a layout
   // input: it drives the transcript's bottom padding (keeping the newest message
   // clear of the pill) and the jump-to-latest offset. Measured rather than
@@ -533,25 +537,45 @@
    */
   function pinToBottom(repaint = false) {
     if (!listEl) return;
+    // A plain pin mid-settle would land between the nudge and its paint (a
+    // resize observation is delivered after frame callbacks, before paint) and
+    // put the offset back where it was, so the frame repaints nothing. The
+    // settle's last frame pins to the final height anyway.
+    if (!repaint && settling) return;
     listEl.scrollTop = listEl.scrollHeight;
     if (!repaint || typeof requestAnimationFrame === 'undefined') return;
+    // Until the last frame lands, a scroll event reports an offset the pin is
+    // about to overwrite, so `onScroll` neither samples nor pages on it.
+    const gen = ++settleGen;
+    settling = true;
+    const settle = () => {
+      if (gen === settleGen) settling = false;
+    };
     requestAnimationFrame(() => {
-      if (!listEl) return;
+      if (!listEl) return settle();
       // Relative to the max *scroll offset*, not scrollHeight: scrollHeight - 1
       // clamps straight back to the bottom on any scroller taller than a pixel,
       // so it would leave the offset unchanged and repaint nothing.
       const maxTop = listEl.scrollHeight - listEl.clientHeight;
-      if (maxTop <= 1) return; // nothing to scroll, so nothing was jumped
+      if (maxTop <= 1) return settle(); // nothing to scroll, so nothing was jumped
       listEl.scrollTop = maxTop - 1;
       requestAnimationFrame(() => {
         if (listEl) listEl.scrollTop = listEl.scrollHeight;
+        settle();
       });
     });
   }
+  let settling = false;
+  let settleGen = 0;
 
   async function onScroll() {
     if (!listEl) return;
     clearActivation();
+    // A switch's settle pin is still moving the viewport. On iOS WebKit the
+    // offset this event reads can be the one a dropped write left behind, part
+    // way up the new transcript, and paging from there would prepend a page
+    // and anchor the viewport to it (ISSUE-560).
+    if (settling) return;
     sampleAtBottom();
     // Near the top with older history available → fetch the previous page and
     // restore the scroll anchor so the viewport stays put (scroll-anchored
@@ -559,7 +583,11 @@
     if (listEl.scrollTop <= TOP_THRESHOLD && $hasMore && !$loadingOlder) {
       const prevHeight = listEl.scrollHeight;
       const prevTop = listEl.scrollTop;
-      await session.loadOlder();
+      // Only a page prepended into this transcript moves it. A page dropped
+      // because the room changed under the fetch leaves `prevHeight` naming a
+      // transcript that is no longer on screen.
+      const prepended = await session.loadOlder();
+      if (!prepended) return;
       await tick();
       if (listEl) listEl.scrollTop = listEl.scrollHeight - prevHeight + prevTop;
     }
@@ -645,33 +673,42 @@
   // atBottom false, so the anchor restore in onScroll owns the viewport instead.
   $effect(() => {
     const msgs = $messages;
-    if (!atBottom) return;
-    // First content after a switch: pin with the repaint pass. The empty render
-    // the switch passes through on its way there doesn't count — it has nothing
-    // to paint and no offset to lose.
+    // Content after a switch: pin with the repaint pass. The empty render the
+    // switch passes through doesn't count — it has nothing to paint and no
+    // offset to lose. Nor does the cached tail `loadHistory` paints first: it
+    // gets the repaint pass too, but the server page replaces every row a
+    // moment later, and that is the larger swap. Consumed there, the latch left
+    // the server paint a plain pin, which iOS WebKit drops, and the room opened
+    // at the cached tail's bottom, part way up the full page (ISSUE-560).
+    // Read untracked: the flag and the rows change together, and one run is
+    // enough.
+    // Consumed ahead of the `atBottom` gate, so a reader who scrolled up during
+    // a slow load does not carry the latch into their next unrelated append. A
+    // room left on the cache by a failed fetch keeps it until the next paint off
+    // the wire, which costs its offline appends a 1px nudge each.
     const afterSwitch = switchPending && msgs.length > 0;
-    if (afterSwitch) switchPending = false;
+    if (afterSwitch && !get(offlineTranscript)) switchPending = false;
+    if (!atBottom) return;
     tick().then(() => pinToBottom(afterSwitch));
   });
 
-  // An image finishing its fetch is the other thing that grows the scroller,
-  // and the effect on `$messages` cannot see it — the decode lands long after
-  // the message settled. `loading="lazy"` sharpens the timing, since the fetch
-  // only starts once the box nears the viewport, which is exactly when it is
-  // being read: a reader parked at the bottom watches the newest text walk off
-  // the fold. A `#w=<px>&h=<px>` hint on the URL reserves the right box at
-  // insertion and avoids the growth entirely; this is the backstop for an image
-  // that arrived without one. Capture phase, because `load` does not bubble.
+  // Anything that grows the rows after they rendered, while the reader is at
+  // the bottom, walks the newest message off the fold, and the effect on
+  // `$messages` cannot see it: an image decoding without a `#w=&h=` size hint
+  // (`loading="lazy"` starts the fetch just as its box nears the viewport), a
+  // table wrapper measuring itself, a web font swapping in, and a room
+  // switch's server page whose plain pin WebKit dropped. One observer on the
+  // rows covers them all. Re-pinning an offset already at the bottom is a
+  // no-op, so the callback firing for growth the pin already absorbed costs
+  // nothing.
   $effect(() => {
-    const el = listEl;
-    if (!el) return;
-    const onLoad = (e: Event) => {
-      if (!atBottom) return;
-      if (!(e.target instanceof HTMLImageElement)) return;
-      pinToBottom();
-    };
-    el.addEventListener('load', onLoad, true);
-    return () => el.removeEventListener('load', onLoad, true);
+    const el = transcriptEl;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      if (atBottom) pinToBottom();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   });
 
   // Track the docked composer's height. The transcript reserves it as bottom
@@ -1096,50 +1133,52 @@
         {:else}
           <!-- Older-history affordance (B3): a spinner while a page loads, a
 				     quiet marker once the start of the conversation is reached. -->
-          {#if $loadingOlder}
-            <div class="older-status" role="status">Loading older messages…</div>
-          {:else if !$hasMore && !$offlineTranscript}
-            <div class="older-status begin">Beginning of conversation</div>
-          {/if}
-          {#each $messages as message, i (message.cid)}
-            {#if message.createdAt && startsNewDay(i)}
-              <div class="day-divider" role="separator">
-                <span class="day-label">{dayLabel(message.createdAt)}</span>
-              </div>
+          <div class="transcript" bind:this={transcriptEl}>
+            {#if $loadingOlder}
+              <div class="older-status" role="status">Loading older messages…</div>
+            {:else if !$hasMore && !$offlineTranscript}
+              <div class="older-status begin">Beginning of conversation</div>
             {/if}
-            <Message
-              {message}
-              continuation={isContinuation(i)}
-              {userName}
-              userId={userId ?? undefined}
-              {userAvatar}
-              {botName}
-              {botAvatar}
-              onConfirm={session.confirm}
-              onReject={session.reject}
-              onToggleStar={session.toggleStar}
-              onDelete={askDeleteMessage}
-              onRetry={inViewMode ? undefined : retryFailedSend}
-              retryBusy={busy}
-              onQueueSend={inViewMode ? undefined : releaseQueuedSend}
-              onQueueEdit={inViewMode ? undefined : session.editQueued}
-              onQueueRemove={inViewMode ? undefined : session.removeQueued}
-              onReply={inViewMode ? undefined : stageReply}
-              onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
-              onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
-              onJump={(token, taskId) => session.jumpToTask(token, taskId)}
-              onImageOpen={(imgs, idx) => {
-                lightboxImages = imgs;
-                lightboxIndex = idx;
-              }}
-              drafts={draftsForRow(message)}
-              draftActions={inViewMode ? undefined : draftActions}
-              externalDisplay={$externalTurnDisplay}
-              aggregate={inViewMode}
-              active={message.cid === activeCid}
-              touch={pointerIsTouch}
-            />
-          {/each}
+            {#each $messages as message, i (message.cid)}
+              {#if message.createdAt && startsNewDay(i)}
+                <div class="day-divider" role="separator">
+                  <span class="day-label">{dayLabel(message.createdAt)}</span>
+                </div>
+              {/if}
+              <Message
+                {message}
+                continuation={isContinuation(i)}
+                {userName}
+                userId={userId ?? undefined}
+                {userAvatar}
+                {botName}
+                {botAvatar}
+                onConfirm={session.confirm}
+                onReject={session.reject}
+                onToggleStar={session.toggleStar}
+                onDelete={askDeleteMessage}
+                onRetry={inViewMode ? undefined : retryFailedSend}
+                retryBusy={busy}
+                onQueueSend={inViewMode ? undefined : releaseQueuedSend}
+                onQueueEdit={inViewMode ? undefined : session.editQueued}
+                onQueueRemove={inViewMode ? undefined : session.removeQueued}
+                onReply={inViewMode ? undefined : stageReply}
+                onJumpToMessage={inViewMode ? undefined : jumpToCitedMessage}
+                onRoomClick={inViewMode ? (token) => session.selectRoomByToken(token) : undefined}
+                onJump={(token, taskId) => session.jumpToTask(token, taskId)}
+                onImageOpen={(imgs, idx) => {
+                  lightboxImages = imgs;
+                  lightboxIndex = idx;
+                }}
+                drafts={draftsForRow(message)}
+                draftActions={inViewMode ? undefined : draftActions}
+                externalDisplay={$externalTurnDisplay}
+                aggregate={inViewMode}
+                active={message.cid === activeCid}
+                touch={pointerIsTouch}
+              />
+            {/each}
+          </div>
         {/if}
         <!-- Bottom reserve: keeps the newest message clear of the docked
              composer. A spacer rather than padding on the scroller, because the
