@@ -613,3 +613,29 @@ def test_finviz_missing_identity_never_sends(monkeypatch):
         with pytest.raises(ValueError, match="ISTOTA_USER_ID"):
             fetch_finviz_data()
     post.assert_not_called()
+
+
+def test_finviz_closes_each_retained_challenge_tab(monkeypatch):
+    """ISSUE-557: every attempt's challenge tab is closed before the retry."""
+    import httpx
+    requests = []
+    answers = iter([
+        {"status": "captcha", "session_id": "s1", "session_retained": True},
+        {"status": "ok", "text": SAMPLE_PAGE_TEXT},
+    ])
+
+    def respond(request):
+        requests.append(request)
+        if request.method == "DELETE":
+            return httpx.Response(200, json={"status": "closed"})
+        return httpx.Response(200, json=next(answers))
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        monkeypatch.setattr(httpx, "post", client.post)
+        monkeypatch.setattr(httpx, "delete", client.delete)
+        assert fetch_finviz_data(retries=1) is not None
+    assert [(r.method, r.url.path) for r in requests] == [
+        ("POST", "/browse"), ("DELETE", "/sessions/s1"), ("POST", "/browse"),
+    ]
+    assert requests[1].headers["X-Istota-User"] == "alice"

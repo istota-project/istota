@@ -648,6 +648,76 @@ class TestBrowse:
         assert gs.ok is False
         assert "fetch failed" in gs.provenance
 
+    def _challenge(self, browse_mod, monkeypatch, payloads, *, delete_raises=False):
+        """Answer each POST from ``payloads`` in turn; record every DELETE."""
+        deleted = []
+
+        class _Resp:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        queue = list(payloads)
+
+        def _post(url, **kwargs):
+            assert kwargs["headers"] == {"X-Istota-User": "alice"}
+            return _Resp(*queue.pop(0))
+
+        def _delete(url, **kwargs):
+            assert kwargs["headers"] == {"X-Istota-User": "alice"}
+            deleted.append(url)
+            if delete_raises:
+                raise RuntimeError("browser down")
+            return _Resp(200, {"status": "closed"})
+
+        monkeypatch.setattr(browse_mod.httpx, "post", _post)
+        monkeypatch.setattr(browse_mod.httpx, "delete", _delete)
+        return deleted
+
+    def test_a_retained_challenge_session_is_closed(self, tmp_path, monkeypatch):
+        """ISSUE-557: a captcha answer keeps its tab, and a briefing never uses it."""
+        import istota.briefings.sources.browse as browse_mod
+
+        deleted = self._challenge(browse_mod, monkeypatch, [
+            (200, {"status": "captcha", "session_id": "ab12cd34", "session_retained": True}),
+        ])
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert gs.ok is False
+        assert deleted == ["http://browser:9223/sessions/ab12cd34"]
+
+    def test_the_text_path_closes_its_challenge_session_too(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        deleted = self._challenge(browse_mod, monkeypatch, [
+            (404, {}),
+            (200, {"status": "captcha", "session_id": "ef56ab78", "session_retained": True}),
+        ])
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert gs.ok is False
+        assert deleted == ["http://browser:9223/sessions/ef56ab78"]
+
+    def test_only_a_retained_session_is_closed(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        deleted = self._challenge(browse_mod, monkeypatch, [
+            (200, {"status": "error", "session_id": "ab12cd34", "session_retained": False}),
+        ])
+        browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert deleted == []
+
+    def test_a_failed_close_does_not_fail_the_source(self, tmp_path, monkeypatch):
+        import istota.briefings.sources.browse as browse_mod
+
+        deleted = self._challenge(browse_mod, monkeypatch, [
+            (200, {"status": "captcha", "session_id": "ab12cd34", "session_retained": True}),
+        ], delete_raises=True)
+        gs = browse_mod.resolve({"preset": "ap"}, _ctx(tmp_path, browser=True))
+        assert deleted == ["http://browser:9223/sessions/ab12cd34"]
+        assert gs.provenance == "(browse returned no content)"
+
     def test_unknown_preset(self, tmp_path):
         gs = resolve_source("browse", {"preset": "nope"}, _ctx(tmp_path, browser=True))
         assert gs.ok is False

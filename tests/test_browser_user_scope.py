@@ -697,6 +697,93 @@ def test_captcha_reports_retained_session_without_keep_session(api, monkeypatch)
     assert "close" in response.json["message"].lower()
 
 
+def _crash_handler(page):
+    handlers = [c.args[1] for c in page.on.call_args_list if c.args[0] == "crash"]
+    assert len(handlers) == 1
+    return handlers[0]
+
+
+def test_a_renderer_crash_names_its_session(api, caplog):
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    page = api._sessions[sid]["page"]
+    with caplog.at_level("WARNING", logger=api.log.name):
+        _crash_handler(page)(page)
+    line = next(r.getMessage() for r in caplog.records if "Renderer crashed" in r.getMessage())
+    assert f"session={sid}" in line
+    assert "url=https://example.com/" in line
+    assert "last_challenge=none" in line
+
+
+def test_a_crash_on_a_retained_challenge_tab_says_so(api, monkeypatch, caplog):
+    """ISSUE-557: the tab a challenge kept open is the one worth naming."""
+    monkeypatch.setattr(api.browsing, "detect_captcha", lambda page: True)
+    sid = post(api, "/render", url="https://example.com/").json["session_id"]
+    page = api._sessions[sid]["page"]
+    with caplog.at_level("WARNING", logger=api.log.name):
+        _crash_handler(page)(page)
+    line = next(r.getMessage() for r in caplog.records if "Renderer crashed" in r.getMessage())
+    assert "last_challenge=0s ago" in line
+
+
+def test_the_crash_handler_takes_no_lock(api):
+    """Patchright may dispatch it while this thread holds the non-reentrant lock."""
+    sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
+    page = api._sessions[sid]["page"]
+    import threading
+
+    handler = _crash_handler(page)
+    worker = threading.Thread(target=handler, args=(page,), daemon=True)
+    with api._sessions_lock:
+        worker.start()
+        worker.join(timeout=2)
+        finished = not worker.is_alive()
+    assert finished, "the crash handler blocked on _sessions_lock"
+
+
+def test_a_briefing_source_reaches_the_api_and_closes_its_challenge_tab(api, monkeypatch, tmp_path):
+    """The briefing source through the real browser API: the scope header, and the close.
+
+    Before ISSUE-557's fix the source sent no X-Istota-User, so every request
+    was refused 400 user_scope_required and every browse block came back empty.
+    """
+    import istota.briefings.sources.browse as browse_mod
+    from istota.briefings.sources import SourceContext
+    from istota.config import BrowserConfig, Config, UserConfig
+
+    client = api.app.test_client()
+
+    class _Resp:
+        def __init__(self, flask_response):
+            self.status_code = flask_response.status_code
+            self._payload = flask_response.json
+
+        def json(self):
+            return self._payload
+
+    def _post(url, *, json, headers, timeout):
+        return _Resp(client.post(url.removeprefix("http://browser:9223"), json=json, headers=headers))
+
+    def _delete(url, *, headers, timeout):
+        return _Resp(client.delete(url.removeprefix("http://browser:9223"), headers=headers))
+
+    monkeypatch.setattr(browse_mod.httpx, "post", _post)
+    monkeypatch.setattr(browse_mod.httpx, "delete", _delete)
+    monkeypatch.setattr(api.browsing, "detect_captcha", lambda page: True)
+    cfg = Config(
+        db_path=tmp_path / "istota.db",
+        workspace_path=tmp_path / "mount",
+        browser=BrowserConfig(enabled=True, api_url="http://browser:9223"),
+        users={"alice": UserConfig(timezone="UTC")},
+    )
+    ctx = SourceContext(app_config=cfg, user_id="alice", conn=None, now=None)
+
+    gs = browse_mod.resolve({"url": "https://example.com/"}, ctx)
+
+    assert gs.ok is False
+    assert api._sessions == {}
+    assert api.pool.instance_for("alice") is not None
+
+
 def test_force_still_preserves_profile_when_browser_cannot_stop(api, monkeypatch):
     sid = post(api, "/browse", url="https://example.com/", keep_session=True).json["session_id"]
     inst = api.pool.instance_for("alice")
