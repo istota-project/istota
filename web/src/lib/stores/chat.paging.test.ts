@@ -198,4 +198,53 @@ describe('chat store — scroll-up paging', () => {
     await s.selectRoom(2);
     expect(get(s.hasMore)).toBe(false);
   });
+
+  // ISSUE-560: the scroll handler restores its anchor on this answer, so an
+  // older page that settles after a switch must say it prepended nothing, and
+  // its `finally` must leave the new room's paging guard alone.
+  it('answers whether it prepended, and false for a page the room left behind', async () => {
+    api.getChatRooms.mockResolvedValue({ rooms: [room(1), room(2)] });
+    const withOlder = {
+      messages: [userTurn(2, 'q2'), asstTurn(2, 'a2')],
+      active_task: null,
+      active_tasks: [],
+      has_more: true,
+      oldest_cursor: { ts: '2026-06-10 12:00:00', id: 3 },
+    };
+    const olderPage = {
+      messages: [userTurn(1, 'q1'), asstTurn(1, 'a1')],
+      active_task: null,
+      active_tasks: [],
+      has_more: true,
+      oldest_cursor: { ts: '2026-06-10 11:00:00', id: 1 },
+    };
+    api.getRoomMessages.mockResolvedValueOnce(withOlder);
+    const s = await freshSession();
+    await s.init();
+    api.getRoomMessages.mockResolvedValueOnce(olderPage);
+    expect(await s.loadOlder()).toBe(true);
+
+    // Room 1's older page is in flight when the user switches to room 2.
+    let settleStale!: (v: typeof olderPage) => void;
+    api.getRoomMessages.mockReturnValueOnce(new Promise((r) => (settleStale = r)));
+    const stale = s.loadOlder();
+    api.getRoomMessages.mockResolvedValueOnce(withOlder);
+    await s.selectRoom(2);
+
+    // Room 2 starts its own older page, which is still loading when room 1's
+    // request finally settles.
+    let settleFresh!: (v: typeof olderPage) => void;
+    api.getRoomMessages.mockReturnValueOnce(new Promise((r) => (settleFresh = r)));
+    const fresh = s.loadOlder();
+    expect(get(s.loadingOlder)).toBe(true);
+
+    settleStale(olderPage);
+    expect(await stale).toBe(false);
+    expect(get(s.loadingOlder)).toBe(true);
+    expect(get(s.messages).map((m) => m.text)).toEqual(['q2', 'a2']);
+
+    settleFresh(olderPage);
+    expect(await fresh).toBe(true);
+    expect(get(s.loadingOlder)).toBe(false);
+  });
 });

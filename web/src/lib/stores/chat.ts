@@ -304,7 +304,9 @@ export interface ChatSession {
   // in-flight guard, and the fetch-and-prepend action the scroll handler calls.
   hasMore: Writable<boolean>;
   loadingOlder: Writable<boolean>;
-  loadOlder: () => Promise<void>;
+  // Resolves true only when a page was prepended into the transcript still on
+  // screen — the scroll handler restores its anchor on that and nothing else.
+  loadOlder: () => Promise<boolean>;
   // True when what the transcript is showing came out of the offline cache
   // rather than off the wire (ISSUE-202). `hasMore` is forced false alongside
   // it — an older page is a fetch, and offline there is none to be had — so
@@ -414,8 +416,13 @@ function createSession(): ChatSession {
   const loadingOlder = writable(false);
   const offlineTranscript = writable(false);
   let oldestCursor: { ts: string; id: number } | null = null;
+  // Which older-page request owns `loadingOlder`. A request that outlives the
+  // transcript it was made for must not clear a newer one's guard on its way
+  // out, or a second overlapping load gets through behind it.
+  let olderRequest = 0;
   function resetPaging() {
     oldestCursor = null;
+    olderRequest += 1;
     hasMore.set(false);
     loadingOlder.set(false);
     // Cleared with the rest of the transcript's state, so the flag is only
@@ -2811,9 +2818,12 @@ function createSession(): ChatSession {
         void deleteTranscript(cacheUserId(), roomToken);
       }
     }
-    // Seed paging state from the first-load response.
+    // Seed paging state from the first-load response. A reload replaces the
+    // transcript an older page in flight was fetched against, so it is orphaned
+    // here the way a room switch orphans it.
     oldestCursor = hist.oldest_cursor ?? null;
     hasMore.set(!!hist.has_more);
+    olderRequest += 1;
     loadingOlder.set(false);
 
     // Resume the room's in-flight tasks in order: the first streams, the rest
@@ -2879,6 +2889,8 @@ function createSession(): ChatSession {
       messages.set(v === 'all' ? carryClientOnlyRows(prev, next, null) : next);
       oldestCursor = hist.oldest_cursor ?? null;
       hasMore.set(!!hist.has_more);
+      olderRequest += 1;
+      loadingOlder.set(false);
     } catch {
       // The aggregate panes are deliberately not cached — they are a cross-room
       // query the client cannot reproduce from per-room tails — so offline they
@@ -2971,17 +2983,18 @@ function createSession(): ChatSession {
   // store updates, so the viewport stays put. Never touches active_tasks /
   // enqueueStream — an older page carries no in-flight slot, and resuming one
   // here would double-stream a task.
-  async function loadOlder() {
+  async function loadOlder(): Promise<boolean> {
     const v = get(view);
     if (v !== 'room') {
       // Aggregate views page the cross-room endpoint. No aux/notif dedup
       // bands here — the durable store is the only source — but dedup by
       // msg_id anyway so a boundary anomaly can't double a row.
-      if (!get(hasMore) || get(loadingOlder) || !oldestCursor) return;
+      if (!get(hasMore) || get(loadingOlder) || !oldestCursor) return false;
+      const req = ++olderRequest;
       loadingOlder.set(true);
       try {
         const hist = await getChatMessagesView(v, { before: oldestCursor });
-        if (get(view) !== v) return;
+        if (get(view) !== v || req !== olderRequest) return false;
         const have = new Set<number>();
         for (const m of get(messages)) {
           if (typeof m.msgId === 'number') have.add(m.msgId);
@@ -2992,21 +3005,27 @@ function createSession(): ChatSession {
         if (page.length) messages.update((cur) => [...page, ...cur]);
         oldestCursor = hist.oldest_cursor ?? null;
         hasMore.set(!!hist.has_more);
+        return page.length > 0;
       } catch {
         // Transient — leave the cursor untouched so the next scroll retries.
+        return false;
       } finally {
-        loadingOlder.set(false);
+        if (req === olderRequest) loadingOlder.set(false);
       }
-      return;
     }
     const roomId = get(activeRoomId);
-    if (roomId == null || !get(hasMore) || get(loadingOlder) || !oldestCursor) return;
+    if (roomId == null || !get(hasMore) || get(loadingOlder) || !oldestCursor) return false;
+    const req = ++olderRequest;
     loadingOlder.set(true);
     try {
+      // Deliberately unbounded: a timeout here reports the connection offline,
+      // and a slow scroll-up page is not an outage. A late answer is dropped by
+      // the request check below rather than applied.
       const hist = await getRoomMessages(roomId, { before: oldestCursor });
       // Switched rooms mid-fetch — drop the page rather than prepend it into
-      // the wrong transcript.
-      if (get(activeRoomId) !== roomId) return;
+      // the wrong transcript. The request check also catches a switch away and
+      // back, which leaves the room id equal and the transcript replaced.
+      if (get(activeRoomId) !== roomId || req !== olderRequest) return false;
       // Dedup against what's already on screen by the same identity the server
       // dedups on: (role, taskId) for task-backed turns, notif_id for system
       // rows. The band tiling already prevents overlap; this guards a
@@ -3028,10 +3047,12 @@ function createSession(): ChatSession {
       if (page.length) messages.update((cur) => [...page, ...cur]);
       oldestCursor = hist.oldest_cursor ?? null;
       hasMore.set(!!hist.has_more);
+      return page.length > 0;
     } catch {
       // Transient — leave the cursor untouched so the next scroll retries.
+      return false;
     } finally {
-      loadingOlder.set(false);
+      if (req === olderRequest) loadingOlder.set(false);
     }
   }
 

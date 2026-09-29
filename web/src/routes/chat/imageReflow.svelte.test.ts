@@ -3,14 +3,13 @@
  *
  * `lib/markdown/index.test.ts` pins that a `#w=&h=` hint becomes `width` /
  * `height` on the tag; this pins that the attributes survive the page's own
- * render, and that the scroller re-pins when an image without a hint finishes
- * loading underneath a reader who is at the bottom. The two halves fail
- * independently: a renderer that emits the attributes into a page that strips
- * them reserves nothing, and neither does a page that never listens for the
- * load it cannot predict.
+ * render. A renderer that emits the attributes into a page that strips them
+ * reserves nothing. An image that arrived without a hint grows the rows when it
+ * decodes, and the page's content ResizeObserver re-pins for that, along with
+ * every other late growth — `switchPin.svelte.test.ts` covers it.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, cleanup, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, cleanup, waitFor } from '@testing-library/svelte';
 
 // Same mock, same reason, as `imageLightbox.svelte.test.ts`: the renderer
 // admits an image only for a src starting `${base}/api/chat/files?`.
@@ -96,19 +95,7 @@ function seedTranscript(body: string) {
   ]);
 }
 
-/**
- * jsdom lays nothing out, so the scroller's metrics are 0 and every offset
- * reads as the bottom. These are the numbers the page's arithmetic needs:
- * a scroller taller than its viewport, with a settable `scrollTop`.
- */
-function measure(list: HTMLElement, { scrollHeight = 900, clientHeight = 300 } = {}) {
-  Object.defineProperty(list, 'scrollHeight', { value: scrollHeight, configurable: true });
-  Object.defineProperty(list, 'clientHeight', { value: clientHeight, configurable: true });
-}
-
 const renderPage = () => render(Harness, { component: Page, user: person });
-const transcript = (container: HTMLElement) =>
-  container.querySelector<HTMLElement>('[role="log"]')!;
 
 beforeEach(() => {
   // A fetch that never settles moves no state under the test.
@@ -134,46 +121,5 @@ describe('an image the model sized', () => {
     });
     expect(img.getAttribute('width')).toBe('1439');
     expect(img.getAttribute('height')).toBe('812');
-  });
-});
-
-describe('an image the model did not size', () => {
-  it('re-pins the transcript when it loads under a reader at the bottom', async () => {
-    seedTranscript(`![Radar](${SRC})`);
-    const { container } = renderPage();
-    const img = await waitFor(() => {
-      const el = container.querySelector<HTMLImageElement>('img.md-image');
-      expect(el).not.toBeNull();
-      return el!;
-    });
-    const list = transcript(container);
-    measure(list);
-    // The mount's own pin already ran against an unmeasured scroller; start
-    // from the top so the re-pin is the only thing that could move it.
-    list.scrollTop = 0;
-
-    await fireEvent.load(img);
-
-    expect(list.scrollTop).toBe(900);
-  });
-
-  it('leaves the viewport alone when the reader has scrolled up', async () => {
-    seedTranscript(`![Radar](${SRC})`);
-    const { container } = renderPage();
-    const img = await waitFor(() => {
-      const el = container.querySelector<HTMLImageElement>('img.md-image');
-      expect(el).not.toBeNull();
-      return el!;
-    });
-    const list = transcript(container);
-    measure(list);
-    list.scrollTop = 100;
-    // The latch is only resampled on a real scroll, which is what reading back
-    // through history produces.
-    await fireEvent.scroll(list);
-
-    await fireEvent.load(img);
-
-    expect(list.scrollTop).toBe(100);
   });
 });
