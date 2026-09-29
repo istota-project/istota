@@ -242,6 +242,22 @@ Use a bare `whatsapp` destination. `whatsapp:+15551234567` is refused, so routin
 
 `all` and `both` are unchanged. Enabling the transport adds no WhatsApp delivery to a route somebody set up before it existed. `talk,whatsapp` and `all,whatsapp` work.
 
+## Separate task messages and questions
+
+You can ask Istota in a web or Talk conversation to send a separate message to your own WhatsApp. The task's final answer stays in its original conversation. Once the message is queued, a later task failure does not retract it. Queued means waiting for an attempt, not delivered; a timeout may leave its status uncertain, and Istota will not automatically send it again.
+
+You can also ask another deployment user a question on WhatsApp. The recipient must first allow your exact user ID: Bob sends `!relay allow alice` in a verified private conversation to let Alice ask him. Permission is directional and denied by default, including for admins. `!relay permissions` lists it and `!relay revoke alice` withdraws it, cancelling unanswered questions. STOP still blocks WhatsApp delivery; START does not restore revoked relay permission.
+
+Ask from a private web or Talk room, or your own bound WhatsApp or SMS conversation. Give the recipient's exact user ID and the question. Istota presents the recipient, exact wording, return conversation, expiry and any Cloud template rendering through its normal task confirmation controls. Approving releases only that question. Email, CLI, scheduled tasks and shared rooms cannot start a relay, and final-output overrides cannot change where its preview or answer goes.
+
+The question identifies the asker and explains how to answer. Quote that message on WhatsApp, or send `!relay reply RELAY_ID text`. Only that explicit text is shared, unchanged, with an attribution header. Ordinary messages are private, and a photograph or caption is not an answer. The recipient's assistant still receives its own task with the question and reply context; the asker's conversation and memories are not included. An answer too long for one complete post is refused with a request for a shorter explicit reply.
+
+Use `!relay list`, `!relay show RELAY_ID` and `!relay cancel RELAY_ID` in a verified private conversation to inspect or cancel your relays. Questions expire 24 hours after approval, and a queued first send has ten minutes to start. One unanswered question per ordered pair is allowed. Each asker may have ten open questions and each recipient twenty.
+
+Opt-out, Cloud windows and budgets apply to these sends too. A changed binding or lost permission prevents a first send; a failed question does not reopen automatically. If the return conversation becomes shared or delivery is blocked or uncertain, Istota retains the exact answer for 30 days and sends a notice without its content. Read it through private relay status; it is never silently moved to another conversation. Provider acceptance is not proof that the handset received it.
+
+The task skill exposes `whatsapp send --request-key KEY "text"`, `whatsapp ask USER_ID --request-key KEY "question"`, `whatsapp status REQUEST_ID` and `whatsapp relays` through `istota-skill`. Request keys are scoped to the user and task: retrying identical content returns the original request, while changed content needs a new key. Text is limited to 2,000 characters and approved questions are never silently truncated. The skill cannot grant consent or approve its own request.
+
 ## The 24-hour service window (Cloud only)
 
 Meta allows a free-form service message only within 24 hours of the user's latest message. Istota keeps a five-minute safety margin, so its local window is open while `now` is before `last_user_message_at + 23h55m`. Meta stays authoritative and can still refuse a send the local state allowed.
@@ -254,7 +270,7 @@ Baileys has no window and no interactive message, so a reply goes out whenever t
 
 ## Delivery, and what "sent" means
 
-Istota sends at most one WhatsApp message per logical response, rendered to the adapter's limit with a truncation note rather than split into several messages. A row is written before the network call, so a timeout can never become a second send.
+For ordinary task replies, Istota sends at most one WhatsApp message per logical response, rendered to the adapter's limit with a truncation note rather than split into several messages. A row is written before the network call, so a timeout can never become a second send.
 
 Acceptance is not delivery on either adapter. Task and operator views distinguish accepted, sent, delivered, read, failed, window closed, budget exhausted, billing blocked, opted out, unconfigured and delivery unknown. A definite rejection is `failed`. A failure that may already have been accepted — a timeout, a dropped socket — is `unknown`, and Istota never retries it: a duplicate private answer is worse than a visible unknown state. A failure alert goes out with WhatsApp removed from its route, so a broken surface cannot report itself through itself.
 
