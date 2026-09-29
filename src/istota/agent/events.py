@@ -56,6 +56,58 @@ def _private_relay_tool(name: str, input_data: dict) -> bool:
     return bool(re.search(r"\b(?:relay|whatsapp)\s+ask\b", command))
 
 
+# Outside quotes the shell would treat any of these as more than one plain
+# word: a separator, a pipe, a redirect, a substitution, an expansion or a glob.
+_UNQUOTED_SHELL_SYNTAX = frozenset(";&|<>()$`*?[]{}~")
+
+
+def _lone_relay_ask(name: str, input_data: dict) -> bool:
+    """Whether a tool call is exactly one `istota-skill relay ask` and nothing else.
+
+    The clean-turn rule (ISSUE-565) authorizes on this flag, so it is strict
+    where `_private_relay_tool` is loose: that one hides output, and matching
+    too much there costs nothing. Here a false positive lets a question shaped
+    by something the task read skip approval. One simple command, argv[0]
+    literally `istota-skill`, no separators, pipes, redirects, substitutions,
+    expansions, globs, newlines or assignment prefixes. Single-quoted text is
+    literal and may hold anything but a newline; double-quoted text may not
+    hold `$` or a backtick, which the shell would still expand there.
+    """
+    if name != "Bash" or not isinstance(input_data, dict):
+        return False
+    command = input_data.get("command")
+    if not isinstance(command, str) or "\n" in command or "\r" in command:
+        return False
+    quote = None
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                quote = None
+            elif ch in "$`":
+                return False
+        elif ch == "\\":
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+        elif ch in _UNQUOTED_SHELL_SYNTAX:
+            return False
+        i += 1
+    if quote is not None:
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return argv[:3] == ["istota-skill", "relay", "ask"]
+
+
 def _describe_tool_use(name: str, input_data: dict) -> str:
     """Extract a human-readable description from a tool_use block."""
     emoji = _TOOL_EMOJI.get(name, "🔧")

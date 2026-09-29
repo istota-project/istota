@@ -44,7 +44,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..agent.events import _describe_tool_use, _tool_invocation
+from ..agent.events import _describe_tool_use, _lone_relay_ask, _tool_invocation
 from ._events import (
     ResultEvent,
     StreamEvent,
@@ -244,6 +244,7 @@ def parse_transcript(path: Path) -> list[StreamEvent]:
                     ToolUseEvent(
                         tool_name=name, description=desc, tool_call_id=block_id,
                         invocation=_tool_invocation(name, block_input) or "",
+                        lone_relay_ask=_lone_relay_ask(name, block_input),
                     )
                 )
             elif btype == "text":
@@ -549,6 +550,7 @@ class _TranscriptTailer(threading.Thread):
             ev = ToolUseEvent(
                 tool_name=name, description=desc, tool_call_id=block_id,
                 invocation=_tool_invocation(name, block_input) or "",
+                lone_relay_ask=_lone_relay_ask(name, block_input),
             )
         elif btype == "text":
             key = (rec_idx, blk_idx)

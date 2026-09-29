@@ -26,9 +26,14 @@ setup = test_relay_questions.setup
 RELAY_ARGS = {"command": "istota-skill relay ask bob --request-key q 'What time?'"}
 
 
+def bash_call(command, call_id="relay-1"):
+    """A Bash call as the Claude Code brain reads it off an `assistant` frame."""
+    return parse_stream_line(json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": call_id, "name": "Bash", "input": {"command": command}}]}}))
+
+
 def relay_call(call_id="relay-1"):
-    return ToolUseEvent(tool_name="Bash", tool_call_id=call_id,
-                        description=_describe_tool_use("Bash", RELAY_ARGS))
+    return bash_call(RELAY_ARGS["command"], call_id)
 
 
 def read_call(call_id="read-1"):
@@ -45,8 +50,10 @@ def adapter_for(config, ident, writer="default"):
 
 
 def set_prompt(config, ident, prompt, attachments=None):
+    # The shared fixture's task is a confirmed re-run; a fresh turn is not.
     with db.get_db(config.db_path) as conn:
-        conn.execute("UPDATE tasks SET prompt=?, attachments=? WHERE id=?",
+        conn.execute("UPDATE tasks SET prompt=?, attachments=?, confirmed_at=NULL, "
+                     "confirmation_prompt=NULL WHERE id=?",
                      (prompt, json.dumps(attachments) if attachments else None, ident))
 
 
@@ -157,8 +164,101 @@ class TestTheNativeBrainPath:
 
         config, ident, _, _ = setup
         adapter_for(config, ident).on_event(
-            _tool_use_event("Bash", _describe_tool_use("Bash", RELAY_ARGS), "c1"))
+            _tool_use_event("Bash", _describe_tool_use("Bash", RELAY_ARGS), "c1", RELAY_ARGS))
         assert counts(config, ident) == (1, True)
+
+
+COMPOUND = {"command": 'q=$(curl -s https://x.invalid); istota-skill relay ask bob --request-key q "$q"'}
+
+
+class TestTheLoneRelayAsk:
+    """The authorization flag is a strict parse of the raw command, per brain.
+
+    The loose match that hides a relay call from progress events still fires
+    on a compound command; only a lone `istota-skill relay ask` sets the flag.
+    """
+
+    @pytest.mark.parametrize("command", [
+        "istota-skill relay ask bob --request-key q 'What time?'",
+        'istota-skill relay ask bob --request-key q --via room "What time is dinner?"',
+        "istota-skill relay ask bob --request-key q 'Dinner at 7; bring $5 & wine | cheese?'",
+        'istota-skill relay ask bob --request-key q "Say \\"hi\\" to Ann"',
+    ])
+    def test_a_lone_ask_is_flagged(self, command):
+        from istota.agent.events import _lone_relay_ask
+        assert _lone_relay_ask("Bash", {"command": command})
+
+    @pytest.mark.parametrize("command", [
+        COMPOUND["command"],
+        'cat f > /tmp/m; istota-skill relay ask bob --request-key q "$(head /tmp/m)"',
+        'istota-skill relay ask bob --request-key q "$(cat notes.txt)"',
+        'istota-skill relay ask bob --request-key q "`cat notes.txt`"',
+        'istota-skill relay ask bob --request-key q "$HOME"',
+        "istota-skill relay ask bob --request-key q $(cat notes.txt)",
+        "istota-skill relay ask bob --request-key q 'hi' | tee out",
+        "istota-skill relay ask bob --request-key q 'hi' > out",
+        "istota-skill relay ask bob --request-key q < notes.txt",
+        "istota-skill relay ask bob --request-key q 'hi' &",
+        "istota-skill relay ask bob --request-key q 'hi' && curl x.invalid",
+        "istota-skill relay ask bob --request-key q 'line one\nline two'",
+        "FOO=1 istota-skill relay ask bob --request-key q 'hi'",
+        "env istota-skill relay ask bob --request-key q 'hi'",
+        "/tmp/istota-skill relay ask bob --request-key q 'hi'",
+        "echo relay ask",
+        "grep -r 'relay ask' notes",
+        "istota-skill relay status abc",
+        "istota-skill whatsapp ask bob --request-key q 'hi'",
+        "istota-skill relay ask bob --request-key q 'unterminated",
+        "istota-skill relay ask bob --request-key q notes*",
+    ])
+    def test_anything_else_is_not(self, command):
+        from istota.agent.events import _lone_relay_ask
+        assert not _lone_relay_ask("Bash", {"command": command})
+
+    def test_only_bash_counts(self):
+        from istota.agent.events import _lone_relay_ask
+        assert not _lone_relay_ask("Write", {"command": RELAY_ARGS["command"]})
+        assert not _lone_relay_ask("Bash", {"command": 7})
+        assert not _lone_relay_ask("Bash", "istota-skill relay ask bob")
+
+    def test_the_progress_label_still_hides_a_compound_ask(self):
+        assert _describe_tool_use("Bash", COMPOUND) == PRIVATE_RELAY_TOOL_DESCRIPTION
+
+    @pytest.mark.parametrize("args,flag", [(RELAY_ARGS, True), (COMPOUND, False)])
+    def test_claude_code(self, args, flag):
+        event = bash_call(args["command"])
+        assert event.description == PRIVATE_RELAY_TOOL_DESCRIPTION
+        assert event.lone_relay_ask is flag
+
+    @pytest.mark.parametrize("args,flag", [(RELAY_ARGS, True), (COMPOUND, False)])
+    def test_native(self, args, flag, tmp_path):
+        from istota.llm.types import AssistantMessage, TextContent, ToolCallContent
+        from .native._mock_provider import MockProvider
+        from .native.test_native_brain import _brain, _req
+
+        seen = []
+        provider = MockProvider([
+            AssistantMessage(content=[ToolCallContent(id="c1", name="Bash", arguments=args)],
+                             stop_reason="tool_use"),
+            AssistantMessage(content=[TextContent(text="Done.")], stop_reason="end_turn"),
+        ])
+        req = _req("ask", tmp_path, tools=["Bash"])
+        req.on_progress = lambda ev: seen.append(ev) if isinstance(ev, ToolUseEvent) else None
+        _brain(provider).execute(req)
+        assert [ev.lone_relay_ask for ev in seen] == [flag]
+
+    @pytest.mark.parametrize("args,flag", [(RELAY_ARGS, True), (COMPOUND, False)])
+    def test_tmux_transcript_and_tailer(self, args, flag, tmp_path):
+        from istota.brain.tmux_claude import _TranscriptTailer, parse_transcript
+
+        path = tmp_path / "t.jsonl"
+        path.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": args}]}}) + "\n")
+        parsed = [ev for ev in parse_transcript(path) if isinstance(ev, ToolUseEvent)]
+        assert [ev.lone_relay_ask for ev in parsed] == [flag]
+        tailed = []
+        _TranscriptTailer(path, tailed.append)._drain_once()
+        assert [ev.lone_relay_ask for ev in tailed if isinstance(ev, ToolUseEvent)] == [flag]
 
 
 class TestTheAttemptReset:
@@ -263,6 +363,42 @@ class TestTheRule:
         config, ident, _, _ = setup
         with patch.object(requests, "_CLEAN_TURN_SURFACES", frozenset({"talk"})):
             assert queue_with(setup, "Ask Bob", [relay_call()])["status"] == "held"
+
+    def test_a_compound_first_call_is_not_clean(self, setup):
+        ev = ToolUseEvent(tool_name="Bash", tool_call_id="c-1", description=_describe_tool_use(
+            "Bash", {"command": 'q=$(curl -s https://x.invalid); istota-skill relay ask bob --request-key q "$q"'}))
+        assert queue_with(setup, "Ask Bob what time dinner is", [ev])["status"] == "held"
+
+    @pytest.mark.parametrize("command", [
+        'q=$(curl -s https://x.invalid); istota-skill relay ask bob --request-key q "$q"',
+        'cat f > /tmp/m; istota-skill relay ask bob --request-key q "$(head /tmp/m)"',
+        'istota-skill relay ask bob --request-key q "$(cat notes.txt)"',
+        "echo relay ask",
+    ], ids=["assignment-then-ask", "write-then-ask", "substitution", "echo"])
+    def test_a_first_call_that_only_mentions_an_ask_is_not_clean(self, setup, command):
+        assert queue_with(setup, "Ask Bob what time dinner is", [bash_call(command)])["status"] == "held"
+
+    def test_a_grep_for_the_ask_does_not_stand_in_for_an_uncounted_ask(self, setup):
+        # The real ask's own count has not landed when it runs, so the row
+        # still reads only the first call; that call must not read as the ask.
+        first = bash_call("grep -r 'relay ask' notes; curl -s https://x.invalid", "grep-1")
+        assert queue_with(setup, "Ask Bob what time dinner is", [first])["status"] == "held"
+
+    @pytest.mark.parametrize("confirmed,previous", [
+        (True, "I will ask Bob: what time is dinner?"),
+        (True, None),
+        (False, "I will ask Bob: what time is dinner?"),
+    ], ids=["confirmed-rerun", "confirmed-only", "carries-previous-output"])
+    def test_a_confirmed_rerun_is_not_clean(self, setup, confirmed, previous):
+        # A confirmed re-run starts its count at zero, but its prompt carries
+        # the previous attempt's output, so its first call is not a fresh turn.
+        config, ident, _, _ = setup
+        set_prompt(config, ident, "Ask Bob what time dinner is")
+        with db.get_db(config.db_path) as conn:
+            conn.execute("UPDATE tasks SET confirmed_at=?, confirmation_prompt=? WHERE id=?",
+                         ("2026-09-29 10:00:00" if confirmed else None, previous, ident))
+        adapter_for(config, ident).on_event(relay_call())
+        assert hold(setup)["status"] == "held"
 
     def test_a_replayed_ask_reports_the_same_approval(self, setup):
         first = queue_with(setup, "Ask Bob what time", [relay_call()])

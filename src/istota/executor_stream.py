@@ -254,7 +254,10 @@ class TaskStreamAdapter:
         # for every tool call on every surface and ahead of every display
         # setting: a count that followed `progress_show_tool_use` or
         # `event_log_enabled` would read every turn as clean where either is off.
-        is_relay = event.description == PRIVATE_RELAY_TOOL_DESCRIPTION
+        # The flag is the strict lone-ask parse the brain made of the raw input,
+        # never the description: that label hides any command mentioning an
+        # ask, a compound one included, and hiding is not authorizing.
+        is_relay = event.lone_relay_ask
         self._tool_calls += 1
         if self._tool_calls == 1:
             self._first_tool_relay = is_relay

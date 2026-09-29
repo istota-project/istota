@@ -564,6 +564,11 @@ def _clean_turn(conn, config, task, recipient_user_id: str) -> bool:
     """
     if task.source_type not in _CLEAN_TURN_SURFACES:
         return False
+    # A confirmed re-run counts from zero, but its prompt carries the previous
+    # attempt's output ("Execute the action you proposed"), which that attempt's
+    # tool calls may have shaped.
+    if task.confirmed_at or (task.confirmation_prompt or "").strip():
+        return False
     calls, first_is_relay = db.get_attempt_tool_calls(conn, task.id)
     if calls != 1 or not first_is_relay:
         return False
