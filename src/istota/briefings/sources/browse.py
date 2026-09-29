@@ -30,10 +30,8 @@ from __future__ import annotations
 import logging
 import re
 
-import httpx
-
 from istota.briefings.sources import GatheredSource, SourceContext
-from istota.browser_admission import browser_admission, BrowserQueueTimeout
+from istota.browser_admission import browser_admission, browser_call, BrowserQueueTimeout
 from istota.browser_owner import browser_headers
 
 
@@ -112,8 +110,8 @@ def _release_session(api_url: str, data: dict, headers: dict[str, str]) -> None:
     if not session_id or not data.get("session_retained"):
         return
     try:
-        resp = httpx.delete(
-            f"{api_url}/sessions/{session_id}", headers=headers, timeout=5.0,
+        resp = browser_call(
+            "delete", f"{api_url}/sessions/{session_id}", headers=headers, timeout=5.0,
         )
     except Exception as e:  # noqa: BLE001
         logger.info("browse source: could not close session %s: %s", session_id, e)
@@ -132,8 +130,8 @@ def _render_markdown(
 
     A ``None`` body means the endpoint isn't there (old image).
     """
-    resp = httpx.post(
-        f"{api_url}/render",
+    resp = browser_call(
+        "post", f"{api_url}/render",
         json={
             "url": url,
             "mode": mode,
@@ -162,8 +160,8 @@ def _render_markdown(
 
 def _browse_text(api_url: str, url: str, headers: dict[str, str]) -> str:
     """Legacy flattened-text path, for a browser image predating /render."""
-    resp = httpx.post(
-        f"{api_url}/browse",
+    resp = browser_call(
+        "post", f"{api_url}/browse",
         json={"url": url, "timeout": 30, "keep_session": False},
         headers=headers,
         timeout=_FETCH_TIMEOUT,
