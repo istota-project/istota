@@ -3675,6 +3675,34 @@ def _ptrace_scope(path: Path = _PTRACE_SCOPE) -> int | None:
         return None
 
 
+def check_vault_isolation(config: "Config", probe: bool) -> CheckResult:
+    """Report existing vaults blocked by the multi-user isolation policy."""
+    from . import secrets_vault
+
+    name = "security.vault_isolation"
+    if not secrets_vault.vault_has_other_users(config) or not config.any_vault_configured():
+        return CheckResult(name, SKIP, "no multi-user credential vault deployment")
+    effective, why = _deployment_sandboxing(config, probe)
+    if effective:
+        return CheckResult(name, OK, "vault users are separated by the sandbox")
+    if effective is None:
+        return CheckResult(
+            name, WARN, "vault isolation could not be established: " + why,
+            remedy="Run `istota doctor --only security.vault_isolation` on the host.",
+        )
+    if config.security.allow_unsandboxed_multi_user_vaults is True:
+        return CheckResult(
+            name, WARN,
+            "the operator allowed unsandboxed multi-user vaults; same-uid tasks "
+            "can access another user's credentials",
+            remedy="Enable a working sandbox to separate users' tasks.",
+        )
+    return CheckResult(
+        name, FAIL, secrets_vault.VAULT_ISOLATION_REASON,
+        remedy="Enable a working sandbox or explicitly accept the exposure, then restart services.",
+    )
+
+
 def check_proxy_peer_check(config: "Config", probe: bool) -> CheckResult:
     """Whether the skill proxy can tell its own task's processes from others.
 
@@ -9065,6 +9093,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("security.proxy_peer_check", check_proxy_peer_check),
     ("security.skill_model_credential", check_skill_model_credential),
     ("security.secret_key", check_secret_key),
+    ("security.vault_isolation", check_vault_isolation),
     ("security.credential_vault", check_credential_vault),
     ("security.vault_contents", check_vault_contents),
     ("security.signup_tags", check_signup_tags),
@@ -9173,6 +9202,7 @@ CHECK_SCOPES: dict[str, str] = {
     # Deployment, not image: every question it asks is about an install — which
     # users a rendered config declares, a file on that install's workspace, and
     # a row in its own secrets table. A bare `docker run` has none of the three.
+    "security.vault_isolation": DEPLOYMENT,
     "security.credential_vault": DEPLOYMENT,
     # Deployment, and a sibling name rather than a child of the one above:
     # `only` and `skip` match by prefix, so a dotted child could not be skipped

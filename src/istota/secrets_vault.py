@@ -1653,6 +1653,39 @@ OUTCOME_NOT_CONFIGURED = "not_configured"
 OUTCOME_ERROR = "error"
 
 
+VAULT_ISOLATION_REASON = (
+    "vaults are disabled on a multi-user deployment without effective sandboxing; "
+    "same-uid tasks can access another user's credentials. Enable a working "
+    "sandbox, or have the operator accept this exposure with [security] "
+    "allow_unsandboxed_multi_user_vaults = true and restart the services"
+)
+
+
+class VaultIsolationRequired(VaultError):
+    """The operator has not accepted unsandboxed multi-user vault access."""
+
+
+def vault_has_other_users(config, user_id: str = "") -> bool:
+    """Count task users, including a not-yet-configured CLI recipient."""
+    users = set(config.users)
+    if user_id:
+        users.add(user_id)
+    return len(users) > 1
+
+
+def vault_isolation_refusal(config, user_id: str) -> str | None:
+    """Gate vault use on deployment isolation, before reading credentials."""
+    if not vault_has_other_users(config, user_id):
+        return None
+    if config.security.allow_unsandboxed_multi_user_vaults is True:
+        return None
+    from .executor import effective_sandboxing
+
+    if effective_sandboxing(config):
+        return None
+    return VAULT_ISOLATION_REASON
+
+
 class VaultPathRefused(VaultError):
     """The configured ``vault_path`` is one the resolver may not open.
 
@@ -1751,6 +1784,7 @@ VAULT_NOTIFICATION_SERVICE = "vault"
 #: ``test_every_vault_error_class_has_a_sentence`` walks the subclasses rather
 #: than trusting either list.
 NOTIFICATION_REASONS: dict[str, str] = {
+    VaultIsolationRequired.__name__: VAULT_ISOLATION_REASON,
     VaultLocked.__name__: (
         "the stored credentials do not open the file — either the passphrase is "
         "wrong, or the file also needs a key file or a hardware key, which "
@@ -2340,6 +2374,14 @@ def sync_user(
         # out of.
         return VaultSyncResult(user_id=user_id, outcome=OUTCOME_NOT_CONFIGURED)
 
+    refusal = vault_isolation_refusal(config, user_id)
+    if refusal:
+        return _publish(
+            config,
+            _settle(user_id, VaultIsolationRequired(refusal), digest=None, path=""),
+            deliver=deliver,
+        )
+
     resolution = storage.vault_location_for(config, user_id)
     if resolution.location is None:
         exc = _resolution_outcome(resolution.refusal)
@@ -2856,6 +2898,13 @@ def vault_status(
     # `vault_path_for` alone it would answer False for every folder user, and
     # the card would have no sync record to render.
     present = _passphrase_present(config, user_id)
+    refusal = vault_isolation_refusal(config, user_id)
+    if refusal:
+        return VaultStatusReport(
+            user_id=user_id, configured=_vault_is_enabled(config, user_id),
+            passphrase_present=present, outcome=VaultIsolationRequired.__name__,
+            reason=refusal,
+        )
     if not _vault_is_enabled(config, user_id):
         return VaultStatusReport(
             user_id=user_id, configured=False, passphrase_present=present,

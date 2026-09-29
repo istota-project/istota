@@ -1435,6 +1435,8 @@ class SecurityConfig:
     # This is a capability gate: 0 disables model-requested vault writes.
     # Unlike the fetch limit above, it never means unlimited.
     vault_writes_per_task: int = 3
+    # Accept same-uid cross-task exposure of vaults without a working sandbox.
+    allow_unsandboxed_multi_user_vaults: bool = False
     passthrough_env_vars: list[str] = field(default_factory=lambda: [
         "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     ])

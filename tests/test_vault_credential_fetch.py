@@ -839,6 +839,25 @@ def seeded_runtime(tmp_path, runtime_inputs, monkeypatch):
 
 
 class TestThePlacement:
+    @pytest.mark.parametrize("allowed", [False, True])
+    def test_cached_credentials_follow_isolation_policy(
+        self, tmp_path, runtime_inputs, monkeypatch, allowed,
+    ):
+        from istota import db
+        from istota.config import UserConfig
+
+        config = _config(tmp_path, allow_unsandboxed_multi_user_vaults=allowed)
+        config.users = {"testuser": UserConfig(), "bob": UserConfig()}
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: False)
+        monkeypatch.setenv("ISTOTA_SECRET_KEY", "deadbeef" * 8)
+        db.init_db(config.db_path)
+        for name, value in VAULT.items():
+            secrets_store.upsert_secret(
+                config.db_path, "testuser", secrets_vault.VAULT_ENTRY_SERVICE, name, value,
+            )
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+        assert runtime.proxy_ctx.vault_credentials == (VAULT if allowed else {})
+
     def test_the_namespace_reaches_the_proxy(self, seeded_runtime):
         assert seeded_runtime.proxy_ctx.vault_credentials == VAULT
 

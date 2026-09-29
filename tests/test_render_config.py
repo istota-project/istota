@@ -2741,3 +2741,10 @@ class TestTheCredentialVault:
             config.scheduler.vault_sync_interval
             == SchedulerConfig().vault_sync_interval
         )
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_unsandboxed_vault_opt_in_renders(tmp_path, allowed):
+    path = render(tmp_path, **REQUIRED, ISTOTA_SECURITY_ALLOW_UNSANDBOXED_MULTI_USER_VAULTS=str(allowed).lower())
+    config = load_config(path)
+    assert config.security.allow_unsandboxed_multi_user_vaults is allowed

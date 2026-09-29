@@ -474,6 +474,9 @@ features = []
 #                                  # listing the names costs nothing. A legitimate loop
 #                                  # over several credentials is the first thing to
 #                                  # trip it, which is why it is a setting at all.
+# On deployments with several configured users, vaults require a working sandbox.
+# Accept same-uid cross-task credential exposure only as an operator decision.
+# allow_unsandboxed_multi_user_vaults = false
 # vault_writes_per_task = 3        # how many create requests one task attempt may
 #                                  # make against the user's KDBX. Refusals count.
 #                                  # Set 0 to disable task-requested writes;

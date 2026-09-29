@@ -290,6 +290,7 @@ bypass_accept_marker = "{{ istota_brain_tmux_bypass_accept_marker | istota_toml_
 
 [security]
 sandbox_enabled = {{ istota_security_sandbox_enabled | lower }}
+allow_unsandboxed_multi_user_vaults = {{ istota_security_allow_unsandboxed_multi_user_vaults | lower }}
 skill_proxy_enabled = {{ istota_security_skill_proxy_enabled | lower }}
 skill_proxy_timeout = {{ istota_security_skill_proxy_timeout }}
 skill_client_wait_seconds = {{ istota_security_skill_client_wait_seconds }}
