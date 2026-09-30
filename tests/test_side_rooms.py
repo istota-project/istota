@@ -308,7 +308,9 @@ class TestTheParentTranscript:
                            origin_surface="web", author_user_id="bob")
         composed = self._prompt(config, shared)
         assert "PARENT ROOM TRANSCRIPT" not in composed.user
-        assert "side room" not in composed.system
+        # The side room's own header line; the shared room's card does name
+        # the principal's side room, as the place to whisper to.
+        assert "Side room: this is" not in composed.system
 
 
 # ---------------------------------------------------------------------------

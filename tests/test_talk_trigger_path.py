@@ -17,9 +17,9 @@ the path, and these tests drive the drain rather than the poll to see it.
 
 The second test is the other half: the two paths must produce the *same* task
 for the same message, not merely agree about whether to make one. The
-`[Room participants: …]` prefix and the stripped mention are both built from
-the same context, so a path that carried a wrong `conv_type` and still passed
-the gate would produce a task with neither.
+group flag and the stripped mention are both built from the same context, so
+a path that carried a wrong `conv_type` and still passed the gate would
+produce a task with neither.
 """
 
 import pytest
@@ -284,8 +284,7 @@ class TestTheTwoPathsProduceTheSameTask:
             triggered = db.get_task(conn, trigger_ids[0])
             triggered_room = db.get_room(conn, "group1")
 
-        assert polled.prompt.startswith("[Room participants: ")
-        assert "istota" not in polled.prompt.lower()
+        assert polled.prompt == "check my calendar"
         assert triggered.prompt == polled.prompt
         assert triggered.is_group_chat == polled.is_group_chat is True
         assert triggered.user_id == polled.user_id == "alice"

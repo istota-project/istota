@@ -195,6 +195,45 @@ def audience_class(
     return PRIVATE
 
 
+@dataclass(frozen=True)
+class RoomReaders:
+    """Who reads a shared room now, for the room card (D7). Ids and a count only.
+
+    Members are named by istota user id, which the operator assigns; guests are
+    counted and never named, because a display name is text its owner chose and
+    the card is in the system half.
+    """
+    members: tuple[str, ...]
+    guests: int
+    host: str | None
+
+
+def room_readers(conn: sqlite3.Connection, room_token: str) -> RoomReaders:
+    """Read-only: unlike `current_host`, a host found gone is reported, not cleared."""
+    members = set(db.list_room_members(conn, room_token))
+    rows = conn.execute(
+        "SELECT kind, user_id, surface, surface_ref FROM room_participants "
+        "WHERE room_token = ? AND left_at IS NULL AND kind != 'agent'",
+        (room_token,),
+    ).fetchall()
+    guests = set()
+    for row in rows:
+        if row["kind"] == "principal" and row["user_id"]:
+            members.add(row["user_id"])
+        elif row["kind"] == "guest":
+            guests.add((row["surface"], row["surface_ref"]))
+    policy = get_policy(conn, room_token)
+    if policy is None:
+        # No row yet: the host `ensure_policy` would fix, without writing it.
+        room = db.get_room(conn, room_token)
+        host = _first_present_member(conn, room) if room is not None else None
+    else:
+        host = policy.host_user_id
+        if host and not host_present(conn, room_token, host):
+            host = None
+    return RoomReaders(tuple(sorted(members)), len(guests), host)
+
+
 def bot_turns_since_principal(conn: sqlite3.Connection, room_token: str) -> int:
     """Assistant turns in the room since a member last wrote one.
 

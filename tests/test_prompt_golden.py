@@ -429,6 +429,16 @@ class Case:
     #: and pushes nothing to Talk, so a promoted room's target carries both
     #: legs and the golden is where that is visible.
     room_talk_ref: str | None = None
+    #: Makes that room shared (multiplayer D7): `OTHER_USER` joins it as a web
+    #: member, the task carries `is_group_chat` as ingest would set it, and
+    #: the room card replaces nothing in any other golden, since a private
+    #: room has no card. Grants every scope but `files` and `memory`, so the
+    #: card lists two withheld scopes and the menu keeps its shape.
+    shared: bool = False
+    #: One Talk guest present in that room, and the task is that guest's turn:
+    #: it runs as the host with every scope withheld (D2). The guest's display
+    #: name is here to show it is **not** rendered in the system half.
+    guest_turn: bool = False
 
 
 CASES: tuple[Case, ...] = (
@@ -522,6 +532,27 @@ CASES: tuple[Case, ...] = (
     # that it exists, and the quoting the injection form needs. Names and
     # values are in neither golden, because they are in neither prompt.
     Case("shared_credentials", shared_credentials=True),
+    # The room card (multiplayer Stage 12), against `room_web`, which differs
+    # from it in nothing but the second member: the diff is the card and what
+    # the two withheld scopes (`files`, `memory`) take away.
+    Case(
+        "shared_room",
+        source_type="web",
+        conversation_token="web-room",
+        room=("#weekly", "web"),
+        shared=True,
+    ),
+    # A guest's turn in a Talk room the user hosts: the header's first line,
+    # the card saying who wrote it and who the bot acts for, and every scope
+    # withheld whatever the host granted.
+    Case(
+        "guest_turn",
+        source_type="talk",
+        conversation_token="room-token",
+        room=("family", "talk"),
+        shared=True,
+        guest_turn=True,
+    ),
 )
 
 CASES_BY_NAME = {c.name: c for c in CASES}
@@ -609,6 +640,7 @@ def _build_task(case: Case) -> db.Task:
         prompt="Summarize what changed in my notes this week.",
         conversation_token=case.conversation_token,
         brain=case.brain,
+        is_group_chat=case.shared,
     )
     if case.confirmed:
         fields["confirmed_at"] = "2026-01-01T00:00:00Z"
@@ -767,6 +799,23 @@ def _seed_room(config: Config, case: Case) -> None:
             db.add_room_binding(
                 conn, case.conversation_token, "talk", case.room_talk_ref,
             )
+        if case.shared:
+            from istota import room_policy, room_scopes
+            from istota.skills._loader import load_skill_index
+
+            db.add_web_room_member(conn, case.conversation_token, OTHER_USER)
+            room_policy.ensure_policy(conn, case.conversation_token)
+            index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+            room_scopes.grant_scopes(
+                conn, case.conversation_token, USER,
+                [s for s in room_scopes.scope_names(index) if s not in ("files", "memory")],
+            )
+        if case.guest_turn:
+            db.upsert_room_participant(
+                conn, room_token=case.conversation_token, surface="talk",
+                surface_ref="guests/max", kind="guest",
+                display_name="Max GUEST_DISPLAY_NAME",
+            )
         conn.commit()
 
 
@@ -796,6 +845,16 @@ def assemble(case: Case, tmp_path: Path, monkeypatch) -> str:
     _seed_shared_credentials(config, case, monkeypatch)
     _seed_room(config, case)
     task = _build_task(case)
+    if case.guest_turn:
+        from istota.transport.ingest import guest_prompt
+
+        with db.get_db(config.db_path) as conn:
+            task.guest_participant_id = conn.execute(
+                "SELECT id FROM room_participants WHERE kind = 'guest'"
+            ).fetchone()[0]
+        # What `record_inbound` makes a guest's turn into: the name the guest
+        # chose is in the user half, fenced, and nowhere in the system half.
+        task.prompt = guest_prompt("Max GUEST_DISPLAY_NAME", USER, task.prompt)
 
     success, result, _actions, _trace = execute_task(task, config, [], dry_run=True)
     assert success, result

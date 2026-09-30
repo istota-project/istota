@@ -15,7 +15,6 @@ from istota.transport.talk.inbound import (
     _is_multi_user,
     _participant_cache,
     _dm_token_cache,
-    _participant_names,
     clean_message_content,
     extract_attachments,
     get_dm_token,
@@ -1514,26 +1513,6 @@ class TestGetParticipantsAndMultiUser:
         assert _is_multi_user(participants) is False
 
 
-class TestParticipantNames:
-    def test_extracts_display_names(self):
-        participants = [
-            {"actorId": "alice", "displayName": "Alice"},
-            {"actorId": "bob", "displayName": "Bob"},
-        ]
-        assert _participant_names(participants) == ["Alice", "Bob"]
-
-    def test_excludes_actor(self):
-        participants = [
-            {"actorId": "alice", "displayName": "Alice"},
-            {"actorId": "istota", "displayName": "Istota"},
-        ]
-        assert _participant_names(participants, exclude="istota") == ["Alice"]
-
-    def test_falls_back_to_actor_id(self):
-        participants = [{"actorId": "alice", "displayName": ""}]
-        assert _participant_names(participants) == ["alice"]
-
-
 # =============================================================================
 # TestPollTalkConversationsGroupRoom
 # =============================================================================
@@ -1607,10 +1586,9 @@ class TestPollTalkConversationsGroupRoom:
             assert task.is_group_chat is True
             # Bot mention should be stripped from prompt
             assert "istota" not in task.prompt.lower()
-            assert "check my calendar" in task.prompt
-            # Participant names should be in the prompt
-            assert "Alice" in task.prompt
-            assert "Bob" in task.prompt
+            # The author's own words, and nothing else: who is in the room
+            # reaches the task through the room card (multiplayer D7).
+            assert task.prompt == "check my calendar"
 
     @pytest.mark.asyncio
     async def test_two_person_group_acts_like_dm(self, make_config):
@@ -1640,8 +1618,7 @@ class TestPollTalkConversationsGroupRoom:
         with db.get_db(config.db_path) as conn:
             task = db.get_task(conn, result[0])
             assert task.is_group_chat is False
-            # No participant context for DM-like rooms
-            assert "[Room participants:" not in task.prompt
+            assert task.prompt == "Hello there"
 
     @pytest.mark.asyncio
     async def test_dm_unchanged(self, make_config):
@@ -1766,9 +1743,8 @@ class TestUnmentionedGroupTurnsAreRecorded:
 
         dispatch.assert_not_awaited()
         assert created == []
-        assert [r["body"] for r in _user_rows(config)] == [
-            "[Room participants: Alice, Bob]\n!help",
-        ]
+        # The author's own text: the room card, not a prefix, names the room.
+        assert [r["body"] for r in _user_rows(config)] == ["!help"]
 
     @pytest.mark.asyncio
     async def test_an_unmentioned_yes_answers_no_confirmation(self, make_config):

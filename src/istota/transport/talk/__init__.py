@@ -320,7 +320,11 @@ class TalkTransport:
                 part_reply_to = None
                 if threaded and i == 0 and task is not None and task.is_group_chat:
                     part_reply_to = task.talk_message_id
-                    part = f"@{task.user_id} {part}"
+                    # Only the member who asked on Talk: a web question's answer
+                    # mirrored here would notify them on a surface they did not
+                    # use, and a guest's turn runs as the host, who did not ask.
+                    if task.source_type == "talk" and task.guest_participant_id is None:
+                        part = f"@{task.user_id} {part}"
                 elif reply_to is not None and i == 0:
                     part_reply_to = reply_to
                 msg_id = await self._post_part(

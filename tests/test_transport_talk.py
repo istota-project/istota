@@ -59,6 +59,25 @@ class TestDeliver:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("overrides", [
+        # A web question in a shared promoted room, its answer mirrored here.
+        {"source_type": "web", "talk_message_id": None},
+        # A guest's turn, which runs as the host: the host did not ask.
+        {"guest_participant_id": 5},
+    ], ids=["web_origin", "guest_turn"])
+    async def test_only_the_member_who_asked_on_talk_is_mentioned(self, overrides):
+        t = TalkTransport(_config())
+        task = _task(**{"is_group_chat": True, "talk_message_id": 42, "user_id": "bob",
+                        **overrides})
+        with patch("istota.transport.talk.get_talk_client") as MockClient:
+            inst = MockClient.return_value
+            inst.send_message = AsyncMock(return_value={"id": 200})
+            await t.deliver("room123", "Sure", task=task, threaded=True)
+        inst.send_message.assert_called_once_with(
+            "room123", "Sure", reply_to=task.talk_message_id, reference_id=None,
+        )
+
+    @pytest.mark.asyncio
     async def test_split_only_first_part_threaded(self):
         t = TalkTransport(_config())
         task = _task(is_group_chat=True, talk_message_id=42, user_id="carol")

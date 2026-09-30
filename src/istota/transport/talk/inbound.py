@@ -341,19 +341,6 @@ def _is_multi_user(participants: list[dict]) -> bool:
     return len(participants) >= 3
 
 
-def _participant_names(participants: list[dict], exclude: str | None = None) -> list[str]:
-    """Extract display names from participant list, excluding a specific actor."""
-    names = []
-    for p in participants:
-        actor_id = p.get("actorId", "")
-        if exclude and actor_id == exclude:
-            continue
-        name = p.get("displayName") or actor_id
-        if name:
-            names.append(name)
-    return names
-
-
 def _istota_members_for_conversation(
     conv: dict, participants: list[dict], config: Config,
 ) -> list[str]:
@@ -1121,8 +1108,8 @@ async def poll_one_conversation(
     False, and every message is treated as addressed. A
     ``poll_one_conversation(config, token)`` with no listing would take that
     default and answer **every** message in every group room the bot sits in,
-    from any configured user, with no @mention required — and would also drop
-    the ``[Room participants: …]`` prefix and pass a null channel name. So the supervisor holds a token → context map built
+    from any configured user, with no @mention required — and would also record
+    the task as a direct conversation and pass a null channel name. So the supervisor holds a token → context map built
     from the same ``list_conversations`` payload it builds the watcher set
     from, which gives the invariant that makes this safe: a watcher exists only
     because that listing named its room, so a watcher always has context. A
@@ -1898,15 +1885,10 @@ async def _process_poll_results(
                 if not content.strip() and not attachments:
                     continue
 
-                # Build prompt
+                # The author's own text, which is also what the transcript
+                # stores. Who else is in the room reaches the task through the
+                # room card, built from `room_participants` (multiplayer D7).
                 prompt = content.strip() if content.strip() else "Process the attached file(s)"
-
-                # For group chats, prepend participant context so the bot
-                # knows who else is in the room
-                if is_multi_user and participants:
-                    other_names = _participant_names(participants, exclude=config.talk.bot_username)
-                    if other_names:
-                        prompt = f"[Room participants: {', '.join(other_names)}]\n{prompt}"
 
                 # Cancel any pending confirmations in this conversation —
                 # the user has moved on by sending a new message
