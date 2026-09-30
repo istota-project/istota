@@ -2726,7 +2726,13 @@ class TestTheClassifierRunsBeforeThePollTransaction:
         def completer(prompt):
             with probing:
                 prompts.append(prompt)
-                probe = sqlite3.connect(config.db_path, timeout=0)
+                # A short wait, not none: the other call's read connection
+                # checkpoints the WAL when it closes, which takes the write
+                # lock for a moment and refused a zero-timeout probe about one
+                # run in fifteen. A lock held across this call — the defect
+                # being tested — outlasts any wait, since the call itself is
+                # what the holder would be waiting on.
+                probe = sqlite3.connect(config.db_path, timeout=1.0)
                 try:
                     probe.execute("BEGIN IMMEDIATE")
                     probe.rollback()
