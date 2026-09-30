@@ -5095,7 +5095,11 @@ def _chat_update_room(
                         db.remove_room_member(conn, updated.token, username)
                         db.dismiss_room(conn, updated.token, username)
                     else:
-                        db.add_room_member(conn, updated.token, username)
+                        # Un-hiding is the member's own act on a room they
+                        # already read: not a join (D3).
+                        db.add_room_member(
+                            conn, updated.token, username, acknowledged=True,
+                        )
                         db.undismiss_room(conn, updated.token, username)
                         # A promoted room archived *before* ISSUE-408 took the
                         # other arm and set the global flag, which nothing here

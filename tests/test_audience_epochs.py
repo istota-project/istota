@@ -71,10 +71,10 @@ def _turn(conn, token, user, prompt, result, *, mirror=True, source="talk"):
 
 
 def _talk_group(conn, config, token="grp"):
-    """Alice and Bob in a Talk group room, its roster observed once."""
+    """Alice and Bob in a Talk group room, registered as its founders."""
     shape = plain_talk_room(conn, "alice", token=token, name="Family")
     db.add_room_member(conn, shape.canonical, "bob", acknowledged=True)
-    _sync_talk_roster(conn, config, token, [ALICE, BOB, BOT])
+    _sync_talk_roster(conn, config, token, [ALICE, BOB, BOT], baseline=True)
     return shape.canonical
 
 
@@ -136,17 +136,63 @@ def _epochs(conn, token):
 
 
 class TestWhenAJoinSplits:
-    def test_the_first_roster_observation_is_a_baseline_not_a_join(self, config):
-        """A room whose roster was never observed (a new room, or every room
-        on the day this ships) has no record of anybody joining: whoever is on
-        it the first time is the audience its transcript was written for."""
+    def test_registration_records_the_roster_as_founders(self, config):
+        """A Talk room registered on first sight: everyone on its roster,
+        guests included, is who its transcript was written for."""
         with db.get_db(config.db_path) as conn:
             shape = plain_talk_room(conn, "alice", token="grp", name="Family")
             _turn(conn, shape.canonical, "alice", "earlier plans", "Ok.")
-            _sync_talk_roster(conn, config, "grp", [ALICE, BOB, MAX, BOT])
+            _sync_talk_roster(conn, config, "grp", [ALICE, BOB, MAX, BOT],
+                              baseline=True)
             assert _epochs(conn, "grp") == []
             context = _db_context(config, conn, _front_stage_task(conn, "grp"))
         assert "earlier plans" in context
+
+    def test_a_room_that_predates_epochs_takes_its_first_roster_as_baseline(
+        self, tmp_path, config,
+    ):
+        """On the day this ships every group room's roster is unobserved;
+        reading it as everyone joining at once would hide all their history."""
+        with db.get_db(config.db_path) as conn:
+            shape = plain_talk_room(conn, "alice", token="grp", name="Family")
+            _turn(conn, shape.canonical, "alice", "earlier plans", "Ok.")
+        raw = sqlite3.connect(config.db_path)
+        raw.execute("DROP TABLE room_epochs")
+        raw.execute("DELETE FROM _migration_state WHERE name = 'room_epochs_v1'")
+        raw.commit()
+        raw.row_factory = sqlite3.Row
+        db._run_migrations(raw)
+        raw.commit()
+        raw.close()
+        with db.get_db(config.db_path) as conn:
+            assert db.audience_baseline_pending(conn, "grp", "talk")
+            _sync_talk_roster(conn, config, "grp", [ALICE, BOB, MAX, BOT])
+            assert _epochs(conn, "grp") == []
+            assert not db.audience_baseline_pending(conn, "grp", "talk")
+            # Past the baseline, the next newcomer is a join.
+            _sync_talk_roster(conn, config, "grp",
+                              [ALICE, BOB, MAX, BOT,
+                               {"actorType": "guests", "actorId": "tina"}])
+            assert [e["person"] for e in _epochs(conn, "grp")] == ["talk:guests/tina"]
+
+    def test_a_promoted_room_first_seen_on_talk_splits_for_a_talk_joiner(
+        self, config,
+    ):
+        """A room made under epochs whose Talk roster is first read once
+        somebody could already have been added there: the joiner is compared
+        against who read the room, not taken as a founder."""
+        from .support.rooms import promoted_room
+        with db.get_db(config.db_path) as conn:
+            shape = promoted_room(conn, "alice", name="Plans")
+            _turn(conn, shape.canonical, "alice", "the web-only plan", "Ok.",
+                  source="web")
+            _sync_talk_roster(conn, config, shape.talk_ref,
+                              [ALICE, {"actorType": "guests", "actorId": "carol",
+                                       "displayName": "Carol"}, BOT])
+            assert [e["person"] for e in _epochs(conn, shape.canonical)] == [
+                "talk:guests/carol",
+            ]
+            assert db.front_stage_cutoff(conn, shape.talk_ref).message_id > 0
 
     def test_a_talk_join_after_the_baseline_starts_an_epoch(self, config):
         with db.get_db(config.db_path) as conn:
@@ -411,7 +457,21 @@ class TestTheMigration:
             assert upgraded.execute(
                 "SELECT 1 FROM _migration_state WHERE name = 'room_epochs_v1'"
             ).fetchone() is not None
-            assert upgraded.execute("SELECT COUNT(*) FROM room_epochs").fetchone()[0] == 0
+            # No epochs are backfilled; an existing Talk room is only marked
+            # so its next roster is read as its baseline.
+            assert upgraded.execute(
+                "SELECT COUNT(*) FROM room_epochs WHERE epoch > 0"
+            ).fetchone()[0] == 0
+
+    def test_a_fresh_install_marks_nothing_pending(self, config):
+        """On a fresh install the migration's marker lands on a later boot;
+        a room made in between is one made under epochs."""
+        with db.get_db(config.db_path) as conn:
+            plain_talk_room(conn, "alice", token="grp", name="Family")
+            conn.execute("DELETE FROM _migration_state WHERE name = 'room_epochs_v1'")
+        db.init_db(config.db_path)
+        with db.get_db(config.db_path) as conn:
+            assert not db.audience_baseline_pending(conn, "grp", "talk")
 
     def test_the_ddl_copies_agree(self):
         from pathlib import Path

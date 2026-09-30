@@ -4748,14 +4748,25 @@ def note_audience_join(
     return int(row[0])
 
 
-def audience_baseline_observed(
+def audience_baseline_pending(
     conn: sqlite3.Connection, room_token: str, surface: str,
 ) -> bool:
-    """Whether `surface`'s roster has been observed for this room before."""
-    return conn.execute(
-        "SELECT 1 FROM room_epochs WHERE room_token = ? AND epoch = 0 "
-        "AND reason = ?", (room_token, f"baseline:{surface}"),
-    ).fetchone() is not None
+    """Whether this room's next `surface` roster is its baseline, not joins.
+
+    True only for a room the `room_epochs_v1` migration found already bound to
+    `surface` and whose roster has not been observed since. A room made after
+    that records its baseline where its roster is first known (Talk
+    registration, promotion to Talk), so a roster first seen later — once
+    somebody could already have been added — is compared against the room's
+    audience like any other.
+    """
+    rows = {
+        r[0] for r in conn.execute(
+            "SELECT reason FROM room_epochs WHERE room_token = ? AND epoch = 0",
+            (room_token,),
+        )
+    }
+    return f"pending:{surface}" in rows and f"baseline:{surface}" not in rows
 
 
 def mark_audience_baseline(
@@ -7576,19 +7587,39 @@ _ROOM_EPOCHS_INDEXES = (
 def _migrate_room_epochs(conn: sqlite3.Connection) -> None:
     """Create `room_epochs`, empty (multiplayer Stage 14).
 
-    Markered (`room_epochs_v1`) and never backfilled: nothing recorded when
-    anybody joined a room before this, so every existing room starts in epoch
-    0, and its next roster observation is its baseline rather than a join.
+    Markered (`room_epochs_v1`). No epoch is backfilled: nothing recorded
+    when anybody joined a room before this, so every existing room starts in
+    epoch 0. Each existing Talk-bound room gets a `pending:talk` row instead,
+    so its next roster observation is taken as its baseline rather than as
+    everybody on it joining at once — which would hide every group room's
+    history on the day this ships. Only when the table is new here: on a fresh
+    install `schema.sql` creates it and the marker can only land on a later
+    boot, by which time any room is one made under epochs, whose baseline was
+    recorded where its roster was first known.
     """
+    existed = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'room_epochs'"
+    ).fetchone() is not None
     conn.execute(_ROOM_EPOCHS_DDL)
     for statement in _ROOM_EPOCHS_INDEXES:
         conn.execute(statement)
     try:
+        if existed:
+            conn.execute(
+                "INSERT OR IGNORE INTO _migration_state (name) "
+                "VALUES ('room_epochs_v1')"
+            )
+            return
+        conn.execute(
+            "INSERT OR IGNORE INTO room_epochs (room_token, epoch, reason) "
+            "SELECT DISTINCT room_token, 0, 'pending:talk' FROM room_bindings "
+            "WHERE surface = 'talk'"
+        )
         conn.execute(
             "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_epochs_v1')"
         )
     except sqlite3.OperationalError:
-        return  # marker table not created yet (very early fresh install)
+        return  # rooms or the marker table not created yet (fresh install)
 
 
 def _migrate_notifications(conn: sqlite3.Connection) -> None:

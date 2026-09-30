@@ -711,9 +711,14 @@ def _apply_room_pass(
                 )
                 db.add_room_binding(conn, plan.canonical, "talk", plan.token)
                 # Founders, not joiners: the room is registered the first
-                # time it is seen, so these are who it was already written for.
+                # time it is seen, so everyone on its roster now — guests
+                # included — is who it was already written for.
                 for uid in member_ids[1:]:
                     db.add_room_member(conn, plan.canonical, uid, acknowledged=True)
+                if plan.participants:
+                    _sync_talk_roster(
+                        conn, config, plan.token, plan.participants, baseline=True,
+                    )
 
         last_message_id = plan.last_message_id
         if plan.needs_cursor_init:
@@ -1450,6 +1455,7 @@ def _message_author(msg: dict, config: Config) -> ParticipantRef:
 
 def _sync_talk_roster(
     conn, config: Config, conversation_token: str, roster: list[dict],
+    *, baseline: bool = False,
 ) -> None:
     """Record a group room's live roster as its Talk participants.
 
@@ -1460,16 +1466,18 @@ def _sync_talk_roster(
     empty list means the fetch failed or the room is a DM, never that everyone
     left. The bot itself is not recorded.
 
-    Anybody new on a roster after the first one starts an audience epoch
-    (D3). Talk has no history acknowledgment of its own — people are added in
-    Talk's UI, not through istota — so a Talk join always splits. The first
-    roster observed for a room is its baseline instead: nothing recorded
-    anybody joining before it.
+    Anybody new on a roster starts an audience epoch (D3). Talk has no history
+    acknowledgment of its own — people are added in Talk's UI, not through
+    istota — so a Talk join always splits. `baseline` records the roster as
+    the room's founders instead, which is what registering a Talk room on
+    first sight passes. A room that already existed when epochs shipped has
+    its first roster taken as its baseline too (`audience_baseline_pending`):
+    nothing recorded anybody joining it before then.
     """
     room_token = db.resolve_room_token(conn, "talk", conversation_token) or conversation_token
     if db.get_room(conn, room_token) is None:
         return
-    baseline = not db.audience_baseline_observed(conn, room_token, "talk")
+    baseline = baseline or db.audience_baseline_pending(conn, room_token, "talk")
     present: list[str] = []
     for entry in roster:
         actor_id = entry.get("actorId") or ""
