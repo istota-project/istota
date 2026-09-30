@@ -1778,3 +1778,43 @@ BEGIN
     WHERE origin_task_id=OLD.id;
     UPDATE message_relays SET recipient_task_id=NULL WHERE recipient_task_id=OLD.id;
 END;
+
+-- Login identifiers are independent of inbound email routing patterns.
+CREATE TABLE IF NOT EXISTS web_auth_identities (
+    user_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL DEFAULT '',
+    credential_epoch INTEGER NOT NULL DEFAULT 1,
+    disabled INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login_at TEXT
+);
+
+-- Retain session revocation when a removable email identity is deleted.
+CREATE TABLE IF NOT EXISTS web_auth_retired_epochs (
+    user_id TEXT PRIMARY KEY,
+    credential_epoch INTEGER NOT NULL
+);
+
+-- Only digests of random, single-use credentials are stored.
+CREATE TABLE IF NOT EXISTS web_auth_tokens (
+    id INTEGER PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_by TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_web_auth_tokens_user ON web_auth_tokens(user_id, purpose);
+
+CREATE TABLE IF NOT EXISTS web_auth_attempts (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_auth_attempts ON web_auth_attempts(kind, key, at);

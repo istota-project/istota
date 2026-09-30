@@ -806,50 +806,36 @@ TOML
         fi
     fi
 
-    # Web UI (auto-configured when provision-nc.sh registered an OAuth2 client).
-    # OAUTH_CLIENT_ID / OAUTH_CLIENT_SECRET / OAUTH_REDIRECT_URI come from the
-    # provisioning flag we sourced earlier.
-    if [ -n "${OAUTH_CLIENT_ID:-}" ] && [ -n "${OAUTH_CLIENT_SECRET:-}" ]; then
-        # NC user-facing URL — what the browser uses to authorize. Compose
-        # defaults this to the nginx-proxied public URL; bare-metal can pin it
-        # via ISTOTA_WEB_NC_EXTERNAL_URL. NC_URL (internal) is the last resort.
-        WEB_NC_EXTERNAL_URL="${ISTOTA_WEB_NC_EXTERNAL_URL:-${NC_URL}}"
-        # Supplied by the caller where there is one to keep. entrypoint.sh
-        # resolves it once per boot (operator value, then the persisted file,
-        # then the existing config, then fresh) precisely so re-rendering does
-        # not mint a new key and drop every logged-in session. Minting one here
-        # is the standalone path: the image tier and the lean compose stack call
-        # this script with no entrypoint in front of it.
-        WEB_SESSION_SECRET="${WEB_SESSION_SECRET:-$(python3 -c "import secrets; print(secrets.token_hex(32))")}"
-        # Site hostname feeds web_app's external-origin / cookie scoping.
-        # Defaults to the public host (proxied via nginx); falls back to the
-        # web service's own port for bypass-nginx setups.
-        WEB_SITE_HOSTNAME="${ISTOTA_WEB_SITE_HOSTNAME:-localhost:${WEB_PORT:-8766}}"
-        # Redirect URI: prefer the value provision-nc.sh registered with NC
-        # (sourced from $API_PROVISION_FLAG / $PROVISION_FLAG). Fall back to
-        # ISTOTA_WEB_CALLBACK_URL (set by compose to the proxied path) so we
-        # never write a stale default into config when the flag predates the
-        # OAuth2 fields.
-        WEB_REDIRECT_URI="${OAUTH_REDIRECT_URI:-${ISTOTA_WEB_CALLBACK_URL:-http://localhost:${WEB_PORT:-8766}/istota/callback}}"
-
-        cat >> "$CONFIG_FILE" <<TOML
+    # Web login also works without Nextcloud provisioning. The entrypoint
+    # persists this secret before each render; direct testbed renders mint one.
+    WEB_SESSION_SECRET="${WEB_SESSION_SECRET:-$(python3 -c "import secrets; print(secrets.token_hex(32))")}"
+    WEB_SITE_HOSTNAME="${ISTOTA_WEB_SITE_HOSTNAME:-localhost:${WEB_PORT:-8766}}"
+    WEB_AUTH="$(toml_string_list "${ISTOTA_WEB_AUTH:-nextcloud}")"
+    cat >> "$CONFIG_FILE" <<TOML
 
 [web]
 enabled = true
 port = ${WEB_PORT:-8766}
+auth = ${WEB_AUTH}
+session_secret_key = "$(toml_escape "$WEB_SESSION_SECRET")"
+# Docker provisions the encryption key itself; other shapes default to ephemeral.
+token_storage = "${ISTOTA_WEB_TOKEN_STORAGE:-encrypted}"
+TOML
+
+    # OAuth keys still depend on the client registered by provision-nc.sh.
+    if [ -n "${OAUTH_CLIENT_ID:-}" ] && [ -n "${OAUTH_CLIENT_SECRET:-}" ]; then
+        WEB_NC_EXTERNAL_URL="${ISTOTA_WEB_NC_EXTERNAL_URL:-${NC_URL}}"
+        WEB_REDIRECT_URI="${OAUTH_REDIRECT_URI:-${ISTOTA_WEB_CALLBACK_URL:-http://localhost:${WEB_PORT:-8766}/istota/callback}}"
+        cat >> "$CONFIG_FILE" <<TOML
 oauth2_provider = "${WEB_NC_EXTERNAL_URL}"
 oauth2_client_id = "${OAUTH_CLIENT_ID}"
 oauth2_client_secret = "${OAUTH_CLIENT_SECRET}"
 oauth2_token_endpoint = "${NC_URL}/index.php/apps/oauth2/api/v1/token"
 oauth2_userinfo_endpoint = "${NC_URL}/ocs/v2.php/cloud/user?format=json"
 oauth2_redirect_uri = "${WEB_REDIRECT_URI}"
-session_secret_key = "${WEB_SESSION_SECRET}"
-# "encrypted" rather than config.py's "ephemeral", deliberately: Docker is the
-# one shape that provisions the prerequisite itself. entrypoint.sh mints
-# /data/.web_token_key and compose hands it to the web service, so post-as-user
-# Talk mirroring and read sync work out of the box. Ansible leaves that key to
-# the operator, so every other shape defaults to storing no OAuth pair at rest.
-token_storage = "${ISTOTA_WEB_TOKEN_STORAGE:-encrypted}"
+TOML
+    fi
+    cat >> "$CONFIG_FILE" <<TOML
 
 [web.map]
 provider = "${ISTOTA_WEB_MAP_PROVIDER:-openfreemap}"
@@ -864,8 +850,7 @@ talk_read_sync_interval = ${ISTOTA_WEB_CHAT_TALK_READ_SYNC_INTERVAL:-60}
 [site]
 hostname = "${WEB_SITE_HOSTNAME}"
 TOML
-        echo "[istota] Web UI configured (OAuth2 client=${OAUTH_CLIENT_ID})"
-    fi
+    echo "[istota] Web UI configured"
 
     # Primary user
     cat >> "$CONFIG_FILE" <<TOML

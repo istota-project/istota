@@ -1347,6 +1347,157 @@ def cmd_email(args):
             sys.exit(1)
 
 
+def _auth_policy(config):
+    from .web_auth import policy_from_config
+
+    return policy_from_config(config)
+
+
+def _auth_read_password(args, policy, *, email, user_id):
+    import getpass
+    from .web_auth import password_policy_error
+
+    if sys.stdin.isatty():
+        password = getpass.getpass("New password: ")
+        if getpass.getpass("Confirm password: ") != password:
+            raise ValueError("Passwords do not match")
+    elif args.password_stdin:
+        # Bound the read, preserving spaces and removing only the line ending.
+        password = sys.stdin.readline(1026).removesuffix("\n").removesuffix("\r")
+    else:
+        raise ValueError("Use --password-stdin when stdin is not a terminal")
+    error = password_policy_error(password, policy, email=email, user_id=user_id)
+    if error:
+        raise ValueError(error)
+    return password
+
+
+def _auth_link_origin(config, print_link):
+    from .web_origin import external_origin
+
+    hostname, scheme = external_origin(config)
+    if not print_link and not config.email.enabled:
+        raise ValueError("email is not configured; use --print-link")
+    return f"{scheme}://{hostname}"
+
+
+def _auth_issue_link(config, identity, purpose, print_link):
+    from . import web_auth, web_auth_mail
+
+    origin = _auth_link_origin(config, print_link)
+    options = {
+        "enrol": (config.web.auth_enrol_ttl_hours, 3600, web_auth_mail.build_enrol_email),
+        "reset": (config.web.auth_reset_ttl_hours, 3600, web_auth_mail.build_reset_email),
+        "login": (config.web.auth_login_link_ttl_minutes, 60, web_auth_mail.build_login_link_email),
+    }
+    ttl, multiplier, builder = options[purpose]
+    token = web_auth.issue_token(
+        config.db_path, identity.user_id, purpose, ttl * multiplier, expected_identity=identity,
+    )
+    route = "login-link" if purpose == "login" else "set-password"
+    link = f"{origin}/istota/auth/{route}?token={token}"
+    if print_link:
+        print(link)
+        return
+    profile = user_profiles.get_profile(config.db_path, identity.user_id)
+    subject, plain, html = builder(config.bot_name, profile.display_name if profile else "", link, ttl)
+    if not web_auth_mail.send_auth_email(config, identity.email, subject, plain, html):
+        raise ValueError("Auth email could not be sent; retry or use --print-link")
+
+
+def cmd_auth(args):
+    """Manage web identities separately from profiles and routing addresses."""
+    from . import web_auth
+
+    config = load_config(Path(args.config) if args.config else None)
+    db_path = config.db_path
+    if not db_path.exists():
+        print("Error: DB not found; run `istota init` first", file=sys.stderr)
+        sys.exit(1)
+    try:
+        action = args.auth_action
+        if action == "list":
+            profiles = user_profiles.list_profiles(db_path)
+            identities = {row.user_id: row for row in web_auth.list_identities(db_path)}
+            for user_id in sorted(profiles.keys() | identities.keys()):
+                identity = identities.get(user_id)
+                if identity is None:
+                    print(f"{user_id} nextcloud_only")
+                    continue
+                status = "orphaned" if user_id not in profiles else "live"
+                print(f"{user_id} email={identity.email} password_set={bool(identity.password_hash)} "
+                      f"disabled={identity.disabled} last_login={identity.last_login_at or '-'} {status}")
+            print("state=unchanged")
+            return
+
+        user_id = args.user_id
+        identity = web_auth.get_identity(db_path, user_id)
+        state = "updated"
+        if action == "add":
+            email = web_auth.normalize_email(args.email)
+            if not email:
+                raise ValueError("Email must not be empty")
+            profiles = user_profiles.list_profiles(db_path)
+            for existing_id in profiles:
+                if existing_id != user_id and existing_id.casefold() == user_id.casefold():
+                    raise ValueError(f"User id differs only by case from {existing_id}")
+            if user_id not in profiles:
+                if not args.create_user:
+                    raise ValueError("No user profile; use `istota user ensure` or --create-user")
+                if not web_auth.valid_new_user_id(user_id):
+                    raise ValueError("New user id must match [a-z0-9][a-z0-9._-]{0,31}")
+            owner = web_auth.get_identity_by_email(db_path, email)
+            if owner and owner.user_id != user_id:
+                raise ValueError(f"That address is already a login for {owner.user_id}")
+            wants_link = args.send_invite or args.print_link
+            if wants_link:
+                _auth_link_origin(config, args.print_link)
+                if identity and identity.disabled:
+                    raise ValueError("Identity is disabled")
+            password = None
+            if args.password_stdin:
+                password = _auth_read_password(args, _auth_policy(config), email=email, user_id=user_id)
+            if user_id not in profiles:
+                user_profiles.ensure_profile(db_path, user_id)
+            previous = identity
+            identity = web_auth.upsert_identity(db_path, user_id, email)
+            if previous is None:
+                state = "created"
+            elif previous == identity and password is None and not wants_link:
+                state = "unchanged"
+            if password is not None:
+                web_auth.set_password(db_path, user_id, password)
+            if wants_link:
+                _auth_issue_link(config, identity, "enrol", args.print_link)
+        elif action == "remove":
+            state = "updated" if web_auth.delete_identity(db_path, user_id) else "unchanged"
+        else:
+            if identity is None:
+                raise ValueError("No email identity for this user; use `istota auth add` first")
+            if action == "set-password":
+                password = _auth_read_password(args, _auth_policy(config), email=identity.email, user_id=user_id)
+                web_auth.set_password(db_path, user_id, password)
+            elif action in ("invite", "reset", "login-link"):
+                purpose = {"invite": "enrol", "reset": "reset", "login-link": "login"}[action]
+                _auth_issue_link(config, identity, purpose, args.print_link)
+            elif action in ("disable", "enable"):
+                web_auth.set_disabled(db_path, user_id, action == "disable")
+            elif action == "logout-all":
+                web_auth.bump_epoch(db_path, user_id)
+        print(f"state={state}")
+    except (ValueError, EOFError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except sqlite3.IntegrityError:
+        owner = web_auth.get_identity_by_email(db_path, args.email) if action == "add" else None
+        message = f"That address is already a login for {owner.user_id}" if owner else "Auth database constraint failed"
+        print(f"Error: {message}", file=sys.stderr)
+        sys.exit(1)
+    except sqlite3.Error:
+        print("Error: Auth database operation failed", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_user_list(args):
     """List configured users."""
     config = load_config(Path(args.config) if args.config else None)
@@ -4614,6 +4765,31 @@ def main():
     email_parser.add_argument("--body", help="Body for test email")
 
     # user (with subparsers)
+    # Disable option abbreviation: --password must never mean --password-stdin.
+    auth_parser = subparsers.add_parser("auth", help="Web login identities", allow_abbrev=False)
+    auth_subparsers = auth_parser.add_subparsers(dest="auth_action", required=True)
+    auth_subparsers.add_parser("list", help="List web identities and profile status", allow_abbrev=False)
+    auth_add = auth_subparsers.add_parser("add", help="Attach an email login", allow_abbrev=False)
+    auth_add.add_argument("user_id")
+    auth_add.add_argument("--email", required=True)
+    auth_add.add_argument("--create-user", action="store_true")
+    auth_add_mode = auth_add.add_mutually_exclusive_group()
+    auth_add_mode.add_argument("--send-invite", action="store_true")
+    auth_add_mode.add_argument("--print-link", action="store_true")
+    auth_add_mode.add_argument("--password-stdin", action="store_true")
+    auth_password = auth_subparsers.add_parser("set-password", help="Set a password directly", allow_abbrev=False)
+    auth_password.add_argument("user_id")
+    auth_password.add_argument("--password-stdin", action="store_true")
+    for verb in ("invite", "reset", "login-link"):
+        auth_link = auth_subparsers.add_parser(verb, help="Send a fresh link (or print it)", allow_abbrev=False)
+        auth_link.add_argument("user_id")
+        auth_link_mode = auth_link.add_mutually_exclusive_group()
+        auth_link_mode.add_argument("--send", action="store_true", help="Send by email (default)")
+        auth_link_mode.add_argument("--print-link", action="store_true")
+    for verb in ("disable", "enable", "logout-all", "remove"):
+        auth_mutation = auth_subparsers.add_parser(verb, allow_abbrev=False)
+        auth_mutation.add_argument("user_id")
+
     user_parser = subparsers.add_parser("user", help="User management")
     user_subparsers = user_parser.add_subparsers(dest="user_action", required=True)
 
@@ -5145,6 +5321,7 @@ def main():
         "resource": cmd_resource,
         "briefing": cmd_briefing,
         "secret": cmd_secret,
+        "auth": cmd_auth,
         "email": cmd_email,
         "repl": cmd_repl,
         "serve": cmd_serve,

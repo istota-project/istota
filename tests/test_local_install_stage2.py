@@ -263,9 +263,17 @@ class TestRunServe:
         monkeypatch.setattr(sched, "run_daemon", fake_daemon)
         fake_server = _FakeServer()
         monkeypatch.setattr(serve, "build_uvicorn_server", lambda host, port: fake_server)
+        from istota import web_app
+        original_run = fake_server.run
 
+        def run_with_launch_marker():
+            assert web_app.app.state.local_no_auth_bind == "127.0.0.1"
+            original_run()
+
+        monkeypatch.setattr(fake_server, "run", run_with_launch_marker)
         serve.run_serve(cfg, host="127.0.0.1", port=8799)
 
+        assert web_app.app.state.local_no_auth_bind is None
         assert fake_server.ran
         assert daemon_started.is_set()
         # run_serve requested shutdown on exit, so the fake daemon loop ended.

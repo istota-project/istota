@@ -502,6 +502,10 @@ class _FakeRequest:
 
     def __init__(self, *, headers=None, disconnect_after=2, on_check=None):
         self.headers = headers or {}
+        from types import SimpleNamespace
+
+        self.session = {"user": {"username": "alice"}}
+        self.state = SimpleNamespace()
         self._checks = 0
         self._limit = disconnect_after
         self._on_check = on_check

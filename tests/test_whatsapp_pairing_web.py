@@ -240,6 +240,10 @@ class _FakeRequest:
 
     def __init__(self, *, disconnect_after: int = 1):
         self.headers: dict[str, str] = {}
+        from types import SimpleNamespace
+
+        self.session = {"user": {"username": "alice"}}
+        self.state = SimpleNamespace()
         self._checks = 0
         self._limit = disconnect_after
 

@@ -9,6 +9,7 @@
     ScrollText,
     SlidersHorizontal,
     Stethoscope,
+    Users,
   } from 'lucide-svelte';
 
   let { children } = $props();
@@ -20,6 +21,7 @@
   // loaded, Health says whether the machine actually has what that describes.
   const SECTIONS = [
     { href: '', label: 'Status', icon: Activity },
+    { href: '/users', label: 'Users', icon: Users },
     { href: '/health', label: 'Health', icon: Stethoscope },
     { href: '/config', label: 'Configuration', icon: SlidersHorizontal },
     { href: '/connections', label: 'Connections', icon: Plug },
