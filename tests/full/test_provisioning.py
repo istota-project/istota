@@ -36,6 +36,8 @@ and needs a per-test reset.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from testbed import profiles
@@ -105,6 +107,16 @@ def _nextcloud(stack):
 
 class TestFirstInstallProvisioning:
     """What `provision-nc.sh` and `entrypoint.sh` left behind on a cold volume set."""
+
+    @pytest.mark.parametrize("service", ["istota", "web"])
+    def test_both_login_methods_are_enabled(self, provisioned, service):
+        result = provisioned.exec([
+            "uv", "run", "python", "-c",
+            "import json; from pathlib import Path; from istota.config import load_config; "
+            "print(json.dumps(load_config(Path('/data/config/config.toml')).web.auth))",
+        ], service=service)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == ["nextcloud", "email"]
 
     def test_both_users_exist(self, provisioned):
         """`user:add` twice, both `|| true`.

@@ -30,6 +30,7 @@ from typing import Literal
 #: this module import a service module and close a cycle: `services/__init__`
 #: is what resolves a profile's service names.
 MAIL_OVERLAY = Path(__file__).resolve().parent / "compose" / "mail" / "mail.yml"
+MAIL_WEB_OVERLAY = MAIL_OVERLAY.with_name("web.yml")
 
 
 @dataclass(frozen=True)
@@ -220,6 +221,7 @@ NO_FORGE = Profile("no-forge", services=("model", "gitlab"))
 #: two apart, which is the failure this tier has documented eight times.
 FULL_CONFIG = {
     **MAIL_CONFIG,
+    "ISTOTA_WEB_AUTH": "nextcloud,email",
     "ISTOTA_EMAIL_CONFIRM_SENDER_MATCH": "verify",
     "ISTOTA_TALK_SIGNALING_ROOM_SYNC_INTERVAL": "30",
 }
@@ -234,7 +236,7 @@ FULL = Profile(
     shape="full",
     services=("model", "nextcloud", "mail", "signaling"),
     config=FULL_CONFIG,
-    compose_overlays=(MAIL_OVERLAY,),
+    compose_overlays=(MAIL_OVERLAY, MAIL_WEB_OVERLAY),
     compose_profiles=("signaling",),
 )
 

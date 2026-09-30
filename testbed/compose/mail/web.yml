@@ -1,0 +1,10 @@
+# The full shape's web process sends authentication mail itself. Trust the
+# same generated Maddy certificate as the daemon, with hostname verification.
+# Kept separate from mail.yml because the lean shape has no web service.
+services:
+  web:
+    volumes:
+      - ${ISTOTA_TESTBED_MAIL_CERT:?the harness must export ISTOTA_TESTBED_MAIL_CERT}:/etc/istota-testbed/mail-ca.crt:ro
+    environment:
+      SSL_CERT_FILE: /etc/istota-testbed/mail-ca.crt
+      SSL_CERT_DIR: /etc/ssl/certs
