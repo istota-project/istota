@@ -4811,11 +4811,10 @@ def _ensure_reply_parent_in_history(
             return None, None
         return parent, db.email_sender_for_task(c, parent.id)
 
-    if conn is not None:
-        parent_task, parent_sender = _lookup(conn)
-    else:
-        with db.get_db(config.db_path) as temp_conn:
-            parent_task, parent_sender = _lookup(temp_conn)
+    parent_task, parent_sender = None, None
+    with db.get_db_if_present(config.db_path, conn) as c:
+        if c is not None:
+            parent_task, parent_sender = _lookup(c)
 
     if parent_task:
         parent_msg = db.ConversationMessage(
@@ -4972,11 +4971,10 @@ def _build_talk_api_context(
     from .context import _parse_reference_id
 
     limit = config.conversation.talk_context_limit
-    if conn is not None:
-        raw_messages = db.get_cached_talk_messages(conn, task.conversation_token, limit=limit)
-    else:
-        with db.get_db(config.db_path) as temp_conn:
-            raw_messages = db.get_cached_talk_messages(temp_conn, task.conversation_token, limit=limit)
+    raw_messages = []
+    with db.get_db_if_present(config.db_path, conn) as c:
+        if c is not None:
+            raw_messages = db.get_cached_talk_messages(c, task.conversation_token, limit=limit)
 
     if not raw_messages:
         logger.info("No messages from Talk API for token %s", task.conversation_token)
@@ -4996,11 +4994,9 @@ def _build_talk_api_context(
     # Batch lookup task metadata
     task_metadata: dict[int, dict] = {}
     if task_ids:
-        if conn is not None:
-            task_metadata = db.get_task_metadata_for_context(conn, task_ids)
-        else:
-            with db.get_db(config.db_path) as temp_conn:
-                task_metadata = db.get_task_metadata_for_context(temp_conn, task_ids)
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is not None:
+                task_metadata = db.get_task_metadata_for_context(c, task_ids)
 
     # Build filtered TalkMessage list
     talk_messages = build_talk_context(
@@ -5091,17 +5087,11 @@ def _build_db_context(
     # against this user's addresses would mark them external for no reason.
     own_email_addresses = _user_email_address_map(config)
 
-    if conn is not None:
-        history = db.get_conversation_history(
-            conn, task.conversation_token, exclude_task_id=task.id,
-            limit=config.conversation.lookback_count,
-            exclude_source_types=_exclude_types,
-            user_email_addresses=own_email_addresses,
-        )
-    else:
-        with db.get_db(config.db_path) as temp_conn:
+    history = []
+    with db.get_db_if_present(config.db_path, conn) as c:
+        if c is not None:
             history = db.get_conversation_history(
-                temp_conn, task.conversation_token, exclude_task_id=task.id,
+                c, task.conversation_token, exclude_task_id=task.id,
                 limit=config.conversation.lookback_count,
                 exclude_source_types=_exclude_types,
                 user_email_addresses=own_email_addresses,
@@ -5115,17 +5105,11 @@ def _build_db_context(
     # conversation (the LLM-context isolation invariant — canonical-room-
     # transcript spec). So hard-exclude them from this re-surfacing path as well.
     _prev_exclude = ["subtask", "heartbeat"]
-    if conn is not None:
-        prev_tasks = db.get_previous_tasks(
-            conn, task.conversation_token, exclude_task_id=task.id,
-            limit=config.conversation.previous_tasks_count,
-            exclude_source_types=_prev_exclude,
-            user_email_addresses=own_email_addresses,
-        )
-    else:
-        with db.get_db(config.db_path) as temp_conn:
+    prev_tasks = []
+    with db.get_db_if_present(config.db_path, conn) as c:
+        if c is not None:
             prev_tasks = db.get_previous_tasks(
-                temp_conn, task.conversation_token, exclude_task_id=task.id,
+                c, task.conversation_token, exclude_task_id=task.id,
                 limit=config.conversation.previous_tasks_count,
                 exclude_source_types=_prev_exclude,
                 user_email_addresses=own_email_addresses,
@@ -5303,25 +5287,17 @@ def _recall_memories(
         source_types += ["channel_memory", "channel_memory_durable"]
 
     try:
-        if conn is not None:
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is None:
+                return None
             results = search(
-                conn, task.user_id, prompt,
+                c, task.user_id, prompt,
                 limit=config.memory_search.auto_recall_limit,
                 source_types=source_types,
                 include_user_ids=include_ids or None,
                 exclude_conversation_task_ids=exclude_task_ids or None,
                 recency_half_life_days=config.memory_search.recency_half_life_days,
             )
-        else:
-            with db.get_db(config.db_path) as temp_conn:
-                results = search(
-                    temp_conn, task.user_id, prompt,
-                    limit=config.memory_search.auto_recall_limit,
-                    source_types=source_types,
-                    include_user_ids=include_ids or None,
-                    exclude_conversation_task_ids=exclude_task_ids or None,
-                    recency_half_life_days=config.memory_search.recency_half_life_days,
-                )
     except Exception:
         logger.debug("Memory recall search failed", exc_info=True)
         return None
@@ -5361,19 +5337,14 @@ def _recall_playbooks(
         return None
 
     try:
-        if conn is not None:
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is None:
+                return None
             results = search(
-                conn, task.user_id, prompt,
+                c, task.user_id, prompt,
                 limit=config.playbooks.recall_limit,
                 source_types=["playbook"],
             )
-        else:
-            with db.get_db(config.db_path) as temp_conn:
-                results = search(
-                    temp_conn, task.user_id, prompt,
-                    limit=config.playbooks.recall_limit,
-                    source_types=["playbook"],
-                )
     except Exception:
         logger.debug("Playbook recall search failed", exc_info=True)
         return None
@@ -5678,16 +5649,10 @@ def room_identity_line(
             binding = db.get_room_binding(c, tok, "talk")
             return tok, found, (binding.surface_ref if binding else None)
 
-        if conn is not None:
-            token, room, talk_ref = _lookup(conn)
-        else:
-            # `sqlite3.connect` creates a missing file, and the default
-            # `db_path` is relative, so an optional read must not open one
-            # that is not there (ISSUE-570).
-            if not Path(config.db_path).is_file():
+        with db.get_db_if_present(config.db_path, conn) as c:
+            if c is None:
                 return ""
-            with db.get_db(config.db_path) as temp_conn:
-                token, room, talk_ref = _lookup(temp_conn)
+            token, room, talk_ref = _lookup(c)
         if room is None:
             return ""
         # "Talk", never "Nextcloud Talk": `tests/test_storage_identity.py`
@@ -6485,11 +6450,19 @@ You have access to:
     if task.source_type in ("whatsapp", "web", "talk", "sms"):
         from .message_relays import recipient_context
 
-        if conn is not None:
-            relay_context = recipient_context(conn, actor_user_id=task.user_id, task_id=task.id)
-        elif config.db_path.exists():
-            with db.get_db(config.db_path) as relay_conn:
-                relay_context = recipient_context(relay_conn, actor_user_id=task.user_id, task_id=task.id)
+        # Optional, like room_identity_line: a failed read must cost the relay
+        # framing, not the task. Logged loudly because an answer then reaches
+        # the model without the question it answers (ISSUE-573).
+        try:
+            with db.get_db_if_present(config.db_path, conn) as c:
+                if c is not None:
+                    relay_context = recipient_context(c, actor_user_id=task.user_id, task_id=task.id)
+        except Exception:
+            logger.warning(
+                "Task %s: relay context unavailable, prompt built without it",
+                task.id, exc_info=True,
+            )
+            relay_context = ""
 
     user_blocks = [
         memory_section,
@@ -6559,6 +6532,17 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
         from .briefings import ensure_initialised
         from .briefings.generate import assemble_briefing_input
     except Exception:  # noqa: BLE001
+        return None
+
+    # Refused rather than skipped, and before the module is resolved: its state
+    # lives under `{db_path.parent}/modules`, so with no framework database
+    # `ensure_initialised` would create a module database beside a path that
+    # does not exist, and a real run always has one (ISSUE-571).
+    if not db.database_present(config.db_path):
+        logger.warning(
+            "briefings module prompt build for task %s: no framework "
+            "database at %s", task.id, config.db_path,
+        )
         return None
 
     try:
@@ -6862,11 +6846,9 @@ def execute_task(
                         pass
             return skills
         try:
-            if conn is not None:
-                sticky_skills = _get_sticky(conn)
-            else:
-                with db.get_db(config.db_path) as temp_conn:
-                    sticky_skills = _get_sticky(temp_conn)
+            with db.get_db_if_present(config.db_path, conn) as c:
+                if c is not None:
+                    sticky_skills = _get_sticky(c)
             if sticky_skills:
                 logger.debug("Sticky skills from conversation: %s", ", ".join(sorted(sticky_skills)))
         except Exception:
@@ -6926,12 +6908,10 @@ def execute_task(
         def _save_skills(c: "db.sqlite3.Connection") -> None:
             db.save_task_selected_skills(c, task.id, selected_skills)
         try:
-            if conn is not None:
-                _save_skills(conn)
-            else:
-                with db.get_db(config.db_path) as temp_conn:
-                    _save_skills(temp_conn)
-            logger.debug("Saved %d selected skills for task %d", len(selected_skills), task.id)
+            with db.get_db_if_present(config.db_path, conn) as c:
+                if c is not None:
+                    _save_skills(c)
+                    logger.debug("Saved %d selected skills for task %d", len(selected_skills), task.id)
         except Exception:
             logger.warning("Failed to save selected_skills for task %d", task.id, exc_info=True)
 
@@ -7024,11 +7004,11 @@ def execute_task(
         try:
             def _check_fingerprint(c):
                 return db.get_user_skills_fingerprint(c, task.user_id)
-            if conn is not None:
-                stored_fingerprint = _check_fingerprint(conn)
-            else:
-                with db.get_db(config.db_path) as fp_conn:
-                    stored_fingerprint = _check_fingerprint(fp_conn)
+            with db.get_db_if_present(config.db_path, conn) as c:
+                # No database: no fingerprint to compare, and no changelog to show.
+                stored_fingerprint = (
+                    _check_fingerprint(c) if c is not None else current_fingerprint
+                )
             if stored_fingerprint != current_fingerprint:
                 skills_changelog = load_skills_changelog(config.skills_dir, bundled_dir=_bundled_dir)
                 if skills_changelog:
@@ -7158,19 +7138,10 @@ def execute_task(
                 format_facts_for_prompt,
             )
             max_kf = config.max_knowledge_facts
-            if conn is not None:
-                ensure_table(conn)
-                kg_facts = get_current_facts(conn, task.user_id)
-                if kg_facts:
-                    kg_facts = select_relevant_facts(
-                        kg_facts, retrieval_query, task.user_id, max_facts=max_kf,
-                    )
-                    if kg_facts:
-                        knowledge_facts_text = format_facts_for_prompt(kg_facts)
-            else:
-                with db.get_db(config.db_path) as _kg_conn:
-                    ensure_table(_kg_conn)
-                    kg_facts = get_current_facts(_kg_conn, task.user_id)
+            with db.get_db_if_present(config.db_path, conn) as c:
+                if c is not None:
+                    ensure_table(c)
+                    kg_facts = get_current_facts(c, task.user_id)
                     if kg_facts:
                         kg_facts = select_relevant_facts(
                             kg_facts, retrieval_query, task.user_id, max_facts=max_kf,

@@ -21,11 +21,40 @@ def _queue_timeout(_path):
     )
 
 
+class BrowserAdmissionUnconfigured(RuntimeError):
+    """No framework database path names where the admission lock lives."""
+
+
+def _admission_database(db_path) -> Path:
+    """Where the framework database is, and so where the lock lives (#572).
+
+    The daemon passes its config's path, and a skill CLI run through the proxy
+    inherits it as ISTOTA_DB_PATH. With the proxy off the executor withholds
+    that variable from the model's environment, so the CLI reads the config
+    file the daemon loaded instead. Config's bare default is never used: it is
+    relative, a lock under the caller's cwd coordinates with nobody, and the
+    mkdir in browser_admission left a stray data/ wherever it ran.
+    """
+    for candidate in (db_path, os.environ.get("ISTOTA_DB_PATH")):
+        if candidate is not None and str(candidate).strip():
+            return Path(candidate)
+    from istota.config import load_config
+
+    config = load_config()
+    # A relative path is relative to the daemon's cwd, which this process
+    # cannot know, so it names no lock anybody else holds.
+    if config.config_path is not None and Path(config.db_path).is_absolute():
+        return Path(config.db_path)
+    raise BrowserAdmissionUnconfigured(
+        "Browser admission cannot find the framework database: no db_path was "
+        "passed, ISTOTA_DB_PATH is unset and no config file names an absolute "
+        "db_path. No page request was sent."
+    )
+
+
 @contextmanager
 def browser_admission(*, db_path=None, queue_timeout=QUEUE_WAIT_TIMEOUT):
-    # The daemon supplies its config path; host-side skill processes inherit
-    # that same path through ISTOTA_DB_PATH. Standalone calls use Config's default.
-    database = Path(db_path or os.environ.get("ISTOTA_DB_PATH") or "data/istota.db")
+    database = _admission_database(db_path)
     lock_path = database.resolve().parent / "browser-admission.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     # Never unlink: waiters must continue to contend on the same inode.

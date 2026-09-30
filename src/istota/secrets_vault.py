@@ -1061,6 +1061,10 @@ def has_shared_credentials(db_path, user_id: str) -> bool:
     """
     if not db_path or not secrets_store.secret_key_available():
         return False
+    # Opening creates a missing file, and a dry run with a bare Config()
+    # reaches here with the relative default path (ISSUE-571).
+    if not Path(db_path).is_file():
+        return False
     try:
         return bool(_stored_entry_names(Path(db_path), user_id))
     except Exception as exc:
