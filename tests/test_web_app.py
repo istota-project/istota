@@ -46,6 +46,9 @@ def _make_config(tmp_path, users=None, mount_path=None, web=None):
                 disabled_modules=["feeds", "money", "location"],
             ),
         }
+    from istota import db
+
+    db.init_db(tmp_path / "istota.db")
     return Config(
         db_path=tmp_path / "istota.db",
         workspace_path=Path(mount_path) if mount_path else tmp_path / "mount",
@@ -116,7 +119,7 @@ class TestLoginRoute:
         assert resp.status_code == 200
         assert "Log in with Nextcloud" in resp.text
 
-    async def test_login_page_shows_logo_version_and_email_placeholder(self, client, app):
+    async def test_login_page_shows_logo_version_and_enabled_method(self, client, app):
         from istota import __version__
 
         resp = await client.get("/istota/login")
@@ -124,9 +127,9 @@ class TestLoginRoute:
         assert "/istota/octopus-sigil.webp" in resp.text
         assert "istota.cynium.com" in resp.text
         assert f"v{__version__}" in resp.text
-        # Email login is advertised but not yet an actionable control — it must
-        # not render as a link, or it would 404 into the Nextcloud flow.
-        assert "Coming soon" in resp.text
+        # This deployment enables only Nextcloud.
+        assert "Coming soon" not in resp.text
+        assert 'name="password"' not in resp.text
         assert 'href="/istota/login?go=1"' in resp.text
         assert resp.text.count('href="/istota/login?go=1"') == 1
 

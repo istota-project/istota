@@ -1348,19 +1348,9 @@ def cmd_email(args):
 
 
 def _auth_policy(config):
-    from .web_auth import Policy
+    from .web_auth import policy_from_config
 
-    web = config.web
-    return Policy(
-        min_password_length=web.auth_min_password_length,
-        throttle_window_seconds=web.auth_throttle_window_seconds,
-        throttle_max_email=web.auth_throttle_max_email,
-        throttle_max_ip=web.auth_throttle_max_ip,
-        enrol_ttl_seconds=web.auth_enrol_ttl_hours * 3600,
-        reset_ttl_seconds=web.auth_reset_ttl_hours * 3600,
-        login_link_ttl_seconds=web.auth_login_link_ttl_minutes * 60,
-        mail_link_max_email=web.auth_mail_link_max_email,
-    )
+    return policy_from_config(config)
 
 
 def _auth_read_password(args, policy, *, email, user_id):

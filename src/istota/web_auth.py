@@ -57,6 +57,20 @@ class Policy:
     mail_link_max_email: int
 
 
+def policy_from_config(config) -> Policy:
+    web = config.web
+    return Policy(
+        min_password_length=web.auth_min_password_length,
+        throttle_window_seconds=web.auth_throttle_window_seconds,
+        throttle_max_email=web.auth_throttle_max_email,
+        throttle_max_ip=web.auth_throttle_max_ip,
+        enrol_ttl_seconds=web.auth_enrol_ttl_hours * 3600,
+        reset_ttl_seconds=web.auth_reset_ttl_hours * 3600,
+        login_link_ttl_seconds=web.auth_login_link_ttl_minutes * 60,
+        mail_link_max_email=web.auth_mail_link_max_email,
+    )
+
+
 def _timestamp(offset_seconds: int = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).strftime("%Y-%m-%d %H:%M:%S.%f")
 

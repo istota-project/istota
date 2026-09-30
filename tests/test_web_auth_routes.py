@@ -1,0 +1,343 @@
+"""Native login and live session revocation through the web routes."""
+
+import base64
+import json
+import re
+import sqlite3
+from unittest.mock import AsyncMock, MagicMock
+
+from httpx import ASGITransport, AsyncClient
+from itsdangerous import TimestampSigner
+import pytest
+
+pytest.importorskip("authlib")
+pytest.importorskip("fastapi")
+from starlette.requests import Request
+
+from istota import db, user_profiles, web_auth
+from istota.config import Config, SiteConfig, UserConfig, WebConfig
+
+PASSWORD = "a long example passphrase"
+
+
+@pytest.fixture
+def configured(db_path, monkeypatch):
+    from istota import web_app as mod
+
+    config = Config(db_path=db_path, site=SiteConfig(hostname="example.com"),
+                    web=WebConfig(auth=["email", "nextcloud"]),
+                    users={"alice": UserConfig(display_name="Alice")},
+                    admin_users={"alice"})
+    monkeypatch.setattr(mod, "_config", config)
+    monkeypatch.setattr(mod.app.state, "istota_config", config, raising=False)
+    oauth = MagicMock()
+    oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "alice"})
+    monkeypatch.setattr(mod, "_oauth", oauth)
+    user_profiles.ensure_profile(db_path, "alice", display_name="Alice")
+    web_auth.upsert_identity(db_path, "alice", "alice@example.com")
+    web_auth.set_password(db_path, "alice", PASSWORD)
+    return mod
+
+
+@pytest.fixture
+async def client(configured):
+    async with AsyncClient(transport=ASGITransport(app=configured.app),
+                           base_url="https://example.com") as client:
+        yield client
+
+
+def csrf(page, action="/istota/login/email"):
+    form = re.search(r'<form[^>]*action="' + re.escape(action) + r'"[^>]*>(.*?)</form>', page.text, re.S)
+    assert form, page.text
+    return re.search(r'name="csrf_token" value="([^"]+)"', form[1])[1]
+
+
+async def sign_in(client, email="alice@example.com", password=PASSWORD):
+    page = await client.get("/istota/login")
+    return await client.post("/istota/login/email", data={
+        "email": email, "password": password, "csrf_token": csrf(page),
+    })
+
+
+def set_session(client, mod, session):
+    secret = next(m.kwargs["secret_key"] for m in mod.app.user_middleware
+                  if m.cls.__name__ == "SessionMiddleware")
+    value = TimestampSigner(str(secret)).sign(base64.b64encode(json.dumps(session).encode())).decode()
+    client.cookies.set("istota_session", value, domain="example.com", path="/istota/")
+
+
+def session_value(client):
+    value = client.cookies.get("istota_session")
+    return json.loads(base64.b64decode(value.split(".")[0]))
+
+
+@pytest.mark.parametrize("methods", [["email"], ["nextcloud"], ["email", "nextcloud"]])
+async def test_login_choices(client, configured, methods):
+    configured._config.web.auth = methods
+    if methods == ["email"]:
+        configured._oauth = None
+    page = await client.get("/istota/login")
+    assert page.status_code == 200
+    assert ('name="password"' in page.text) == ("email" in methods)
+    assert ('action="/istota/auth/login-link/request"' in page.text) == ("email" in methods)
+    assert ('href="/istota/login?go=1"' in page.text) == ("nextcloud" in methods)
+    assert ('class="divider"' in page.text) == (len(methods) == 2)
+    assert page.headers["cache-control"] == "no-store"
+    assert page.headers["referrer-policy"] == "no-referrer"
+
+
+async def test_email_login_uses_live_profile_and_rotates_session(client, configured):
+    configured._config.users = {"bob": UserConfig()}
+    set_session(client, configured, {"planted": "old"})
+    response = await sign_in(client)
+    assert response.status_code == 302
+    assert "planted" not in session_value(client)
+    me = await client.get("/istota/api/me")
+    assert me.status_code == 200
+    assert me.json()["username"] == "alice"
+    assert me.json()["auth"] == {"method": "email", "email": "alice@example.com", "can_change_password": True}
+
+
+@pytest.mark.parametrize("method,mutation", [
+    (method, mutation) for method in ("email", "nextcloud")
+    for mutation in ("epoch", "delete", "disable", "method", "orphan")
+    if (method, mutation) != ("nextcloud", "orphan")
+])
+async def test_session_revocation(client, configured, mutation, method):
+    response = await sign_in(client) if method == "email" else await client.get("/istota/callback")
+    assert response.status_code == 302
+    path = configured._config.db_path
+    if mutation == "epoch":
+        web_auth.bump_epoch(path, "alice")
+    elif mutation == "delete":
+        web_auth.delete_identity(path, "alice")
+    elif mutation == "disable":
+        web_auth.set_disabled(path, "alice", True)
+    elif mutation == "method":
+        configured._config.web.auth = ["nextcloud" if method == "email" else "email"]
+    elif mutation == "orphan":
+        with db.get_db(path) as conn:
+            conn.execute("DELETE FROM user_profiles WHERE user_id = 'alice'")
+    assert (await client.get("/istota/api/me")).status_code == 401
+
+
+async def test_failures_have_identical_bodies_and_orphans_stay_orphaned(client, configured):
+    wrong = await sign_in(client, password="wrong")
+    unknown = await sign_in(client, email="unknown@example.com")
+    web_auth.set_disabled(configured._config.db_path, "alice", True)
+    disabled = await sign_in(client)
+    assert wrong.status_code == unknown.status_code == disabled.status_code == 400
+    assert wrong.content == unknown.content == disabled.content
+    web_auth.set_disabled(configured._config.db_path, "alice", False)
+    with db.get_db(configured._config.db_path) as conn:
+        conn.execute("DELETE FROM user_profiles WHERE user_id = 'alice'")
+    orphan = await sign_in(client)
+    assert orphan.content == wrong.content
+    assert user_profiles.get_profile(configured._config.db_path, "alice") is None
+
+
+@pytest.mark.parametrize("submitted", [None, "wrong"])
+async def test_csrf_failure_is_distinct(client, submitted):
+    await client.get("/istota/login")
+    data = {"email": "alice@example.com", "password": PASSWORD}
+    if submitted:
+        data["csrf_token"] = submitted
+    response = await client.post("/istota/login/email", data=data)
+    assert response.status_code == 403
+    assert "form expired" in response.text
+    assert "user" not in session_value(client)
+
+
+@pytest.mark.parametrize("attached,enabled", [(False, True), (True, True), (False, False)])
+async def test_legacy_cookie_rule(client, configured, attached, enabled):
+    if not attached:
+        web_auth.delete_identity(configured._config.db_path, "alice")
+    if not enabled:
+        configured._config.web.auth = ["email"]
+    set_session(client, configured, {"user": {"username": "alice"}})
+    response = await client.get("/istota/api/me")
+    assert response.status_code == (200 if not attached and enabled else 401)
+    if response.status_code == 200:
+        assert session_value(client)["auth"] == {"method": "nextcloud", "epoch": 0}
+        web_auth.upsert_identity(configured._config.db_path, "alice", "alice@example.com")
+        assert (await client.get("/istota/api/me")).status_code == 401
+
+
+async def test_nextcloud_disabled_and_reconnect_revoked(client, configured):
+    assert (await client.get("/istota/callback")).status_code == 302
+    web_auth.set_disabled(configured._config.db_path, "alice", True)
+    assert (await client.get("/istota/callback")).status_code == 403
+    response = await client.get("/istota/reconnect")
+    assert response.status_code in (302, 401)
+    if response.status_code == 302:
+        assert response.headers["location"] == "/istota/login"
+    configured._oauth.nextcloud.authorize_redirect.assert_not_called()
+
+
+async def test_session_database_failure_denies_access(client, configured, monkeypatch):
+    assert (await sign_in(client)).status_code == 302
+    def unavailable(*args):
+        raise sqlite3.OperationalError("unavailable")
+    monkeypatch.setattr(web_auth, "get_identity", unavailable)
+    assert (await client.get("/istota/api/me")).status_code == 401
+
+
+def test_csrf_purposes_are_independent(configured):
+    request = Request({"type": "http", "session": {}})
+    original = configured._csrf_token(request, "login")
+    reset = configured._csrf_token(request, "reset")
+    assert original != reset
+    assert configured._check_csrf(request, "login", original)
+    assert not configured._check_csrf(request, "reset", original)
+
+
+@pytest.mark.parametrize("hops,forwarded,expected", [
+    (0, "192.0.2.1", None), (0, "", None),
+    (1, "192.0.2.1, 192.0.2.2", "192.0.2.2"),
+    (2, "192.0.2.1, 192.0.2.2", "192.0.2.1"),
+    (3, "192.0.2.1", None), (1, "invalid", None),
+])
+def test_client_ip_uses_only_configured_proxy_hop(configured, hops, forwarded, expected):
+    configured._config.web.trusted_proxy_hops = hops
+    request = Request({"type": "http", "headers": [(b"x-forwarded-for", forwarded.encode())],
+                       "client": ("192.0.2.9", 1234)})
+    assert configured._client_ip(request) == expected
+
+
+async def test_email_route_disabled(client, configured):
+    configured._config.web.auth = ["nextcloud"]
+    assert (await client.post("/istota/login/email")).status_code == 404
+
+
+@pytest.mark.parametrize("stream", ["task", "room", "logs", "pairing"])
+@pytest.mark.parametrize("mutation", ["epoch", "disable", "admin"])
+async def test_open_stream_revocation(client, configured, monkeypatch, stream, mutation):
+    import asyncio
+
+    if mutation == "admin" and stream in ("task", "room"):
+        pytest.skip("User streams do not require admin")
+    assert (await sign_in(client)).status_code == 302
+    request = Request({"type": "http", "headers": [], "session": session_value(client)})
+    request.is_disconnected = AsyncMock(return_value=False)
+    user = configured._require_api_auth(request)
+    monkeypatch.setattr(configured.web_shutdown, "sleep_unless_shutdown", AsyncMock(return_value=True))
+    path = configured._config.db_path
+    with db.get_db(path) as conn:
+        room = db.create_web_chat_room(conn, "alice", "general")
+        task = db.create_task(conn, "hello", "alice", source_type="web", conversation_token=room.token)
+        db.add_message(conn, room.token, role="assistant", body="first", origin_surface="web")
+        db.add_message(conn, room.token, role="assistant", body="second", origin_surface="web")
+        conn.execute("INSERT INTO task_events(task_id, seq, kind, payload) VALUES (?, 1, 'text', '{}')", (task,))
+        conn.execute("INSERT INTO task_events(task_id, seq, kind, payload) VALUES (?, 2, 'text', '{}')", (task,))
+        db.log_task(conn, task, "info", "first")
+    if stream == "task":
+        response = await configured.chat_task_stream(task, request, user=user)
+    elif stream == "room":
+        response = await configured.chat_room_stream(request, user=user)
+    elif stream == "logs":
+        response = await configured.admin_log_stream("tasks", request, "0", logger_name=None, _=user)
+    else:
+        # The sidecar is the external boundary; the generator and its auth are real.
+        monkeypatch.setattr(configured, "_require_whatsapp_pairing", lambda: None)
+        monkeypatch.setattr(configured, "_pairing_state_payload", lambda: None)
+        response = await configured.admin_whatsapp_pairing_stream(request, _=user)
+    iterator = response.body_iterator
+    first = await asyncio.wait_for(anext(iterator), 2)
+    assert "data:" in first
+    if mutation == "epoch":
+        web_auth.bump_epoch(path, "alice")
+    elif mutation == "disable":
+        web_auth.set_disabled(path, "alice", True)
+    else:
+        configured._config.admin_users = set()
+    # In task/room streams the second frame was already loaded in the batch.
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(iterator), 2)
+
+
+async def test_password_gate_refuses_without_database_work_and_delays(client, configured, monkeypatch):
+    import time
+
+    configured._config.web.auth_throttle_max_email = 1
+    first = await sign_in(client, password="wrong")
+    with db.get_db(configured._config.db_path) as conn:
+        before = conn.execute("SELECT count(*) FROM web_auth_attempts").fetchone()[0]
+    verify = MagicMock(side_effect=AssertionError("throttle reached KDF"))
+    monkeypatch.setattr(web_auth, "verify_password", verify)
+    started = time.monotonic()
+    refused = await sign_in(client, password="wrong")
+    assert time.monotonic() - started >= configured._LOGIN_FAILURE_SECONDS
+    assert refused.status_code == first.status_code
+    assert refused.content == first.content
+    verify.assert_not_called()
+    with db.get_db(configured._config.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM web_auth_attempts").fetchone()[0] == before
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_password_work_is_bounded_off_event_loop(client, configured, monkeypatch, cancel):
+    import asyncio
+    import threading
+
+    page = await client.get("/istota/login")
+    token = csrf(page)
+    loop_thread = threading.get_ident()
+    active = 0
+    peak = 0
+    entered = threading.Event()
+    release = threading.Event()
+    lock = threading.Lock()
+    monkeypatch.setattr(configured, "_password_slots", asyncio.Semaphore(4))
+
+    def authenticate(*args, **kwargs):
+        nonlocal active, peak
+        assert threading.get_ident() != loop_thread
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 4:
+                entered.set()
+        assert release.wait(5)
+        with lock:
+            active -= 1
+        return "bad", None
+
+    monkeypatch.setattr(web_auth, "authenticate", authenticate)
+    requests = [asyncio.create_task(client.post("/istota/login/email", data={
+        "email": f"alice{i}@example.com", "password": "wrong", "csrf_token": token,
+    })) for i in range(8)]
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        if cancel:
+            for request in requests[:4]:
+                request.cancel()
+        await asyncio.sleep(0.05)  # The loop stays responsive, even during cancellation.
+        assert peak == 4
+    finally:
+        release.set()
+        responses = await asyncio.gather(*requests, return_exceptions=True)
+    assert all(isinstance(response, asyncio.CancelledError) or response.status_code == 400
+               for response in responses)
+    assert peak == 4
+
+
+@pytest.mark.parametrize("method,password_set", [("email", True), ("email", False), ("nextcloud", True)])
+async def test_me_reports_password_capability(client, configured, method, password_set):
+    if not password_set:
+        web_auth.clear_password(configured._config.db_path, "alice")
+    identity = web_auth.get_identity(configured._config.db_path, "alice")
+    set_session(client, configured, {"user": {"username": "alice"},
+                                    "auth": {"method": method, "epoch": identity.credential_epoch}})
+    response = await client.get("/istota/api/me")
+    assert response.status_code == 200
+    assert response.json()["auth"] == {"method": method, "email": "alice@example.com",
+                                       "can_change_password": method == "email" and password_set}
+
+
+async def test_callback_database_failure_does_not_mint_session(client, configured, monkeypatch):
+    def unavailable(*args):
+        raise sqlite3.OperationalError("unavailable")
+    monkeypatch.setattr(web_auth, "get_identity", unavailable)
+    response = await client.get("/istota/callback")
+    assert response.status_code == 403
+    assert (await client.get("/istota/api/me")).status_code == 401
