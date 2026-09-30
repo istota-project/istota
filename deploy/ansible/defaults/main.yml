@@ -487,6 +487,16 @@ istota_conversation_context_min_messages: 10  # always include at least this man
 istota_conversation_previous_tasks_count: 3  # inject N recent scheduled/briefing tasks into context
 istota_conversation_talk_context_limit: 100  # max messages to fetch from Talk message cache
 
+# Speech gate: whether the bot replies to an unaddressed turn in a room with more
+# than one human. "mention" replies only when mentioned; "classifier" lets a
+# cheap model decide and stays silent if it fails; "off" replies to every turn.
+istota_speech_gate_mode: "mention"
+istota_speech_gate_model: "fast"  # role alias; override through istota_models_aliases
+istota_speech_gate_window_messages: 8  # transcript turns the classifier sees
+istota_speech_gate_max_message_chars: 400  # per-turn cap inside the window
+istota_speech_gate_timeout_seconds: 8.0
+istota_speech_gate_decision_retention_days: 30  # 0 keeps speech_gate_decisions rows forever
+
 # Admin users — full system access (DB, all mount paths, admin-only skills).
 # Deployed as /etc/<namespace>/admins, root-owned. An EMPTY list is asymmetric:
 # sandbox / skills / commands treat everyone as admin (back-compat), while the
