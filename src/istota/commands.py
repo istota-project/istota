@@ -1501,10 +1501,49 @@ async def cmd_room(ctx: CommandContext):
         db.set_room_effort(conn, token, level)
         return f"Room effort set to `{level}`."
 
+    if sub == "host":
+        return _room_host(conn, token, ctx.user_id)
+
+    if sub == "guests":
+        return _room_guests(conn, token, ctx.user_id, rest.lower())
+
     return (
-        "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`. "
+        "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
+        "`!room host`, `!room guests <off|held|direct>`. "
         "Use `default` to clear."
     )
+
+
+def _room_host(conn, token: str, user_id: str) -> str:
+    """`!room host`: claim a room that has lost its host (multiplayer D14)."""
+    from . import room_policy
+
+    outcome = room_policy.claim_host(conn, token, user_id)
+    if outcome == "claimed":
+        return "You are now this room's host. Guests' turns run on your behalf."
+    if outcome == "already_host":
+        return "You are this room's host."
+    if outcome == "held_by_another":
+        host = room_policy.get_policy(conn, token).host_user_id
+        return f"This room's host is {host}. A host is never replaced while present."
+    return "Only a member of this room can host it."
+
+
+def _room_guests(conn, token: str, user_id: str, value: str) -> str:
+    """`!room guests <off|held|direct>`: how guests are answered. Host only."""
+    from . import room_policy
+
+    policy = room_policy.ensure_policy(conn, token)
+    if policy is None:
+        return "This room has no guest policy."
+    if not value:
+        return f"Guest replies here: `{policy.guest_reply}`."
+    if room_policy.current_host(conn, policy) != user_id:
+        return "Only this room's host can change how guests are answered."
+    if value not in room_policy.GUEST_REPLY_VALUES:
+        return "Usage: `!room guests <off|held|direct>`."
+    room_policy.set_guest_reply(conn, token, value)
+    return f"Guest replies here are now `{value}`."
 
 
 @command("status", "Show your running/pending tasks and system status")

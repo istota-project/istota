@@ -126,6 +126,13 @@ class Task:
     #: history fallback, the channel memory namespace, the channel sleep cycle,
     #: and the two failure paths that would otherwise have no channel at all.
     withheld_from_room: bool = False
+    #: The guest whose turn this task answers, as a `room_participants.id`
+    #: (multiplayer D2). Set means emissary mode: the task runs as the room's
+    #: host, at room-safe reach, with no outbound action beyond the reply.
+    guest_participant_id: int | None = None
+    #: Who reads the room this turn was written in: `private`, `principals`
+    #: or `mixed` (multiplayer D3), computed at ingest. None off a room.
+    audience: str | None = None
     heartbeat_silent: bool = False
     skip_log_channel: bool = False
     scheduled_job_id: int | None = None
@@ -432,6 +439,11 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         # schema.sql. Constant defaults, so every existing row reads 0.
         "attempt_tool_calls": "INTEGER NOT NULL DEFAULT 0",
         "attempt_first_tool_relay": "INTEGER NOT NULL DEFAULT 0",
+        # Multiplayer Stage 11; see schema.sql. No backfill: no guest turn
+        # created a task before this, and the audience of a past turn is not
+        # recoverable.
+        "guest_participant_id": "INTEGER",
+        "audience": "TEXT",
     })
 
     # Sent emails: carry the originating task's resolved Talk room so
@@ -1126,6 +1138,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_room_participants(conn)
     _migrate_room_data_grants(conn)
     _migrate_side_rooms(conn)
+    _migrate_room_policy(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1285,6 +1298,10 @@ def create_task(
     # names (ISSUE-255). Written by the one caller that knows — `record_inbound`,
     # from the same answer that turned off the transcript mirror.
     withheld_from_room: bool = False,
+    # Multiplayer D2/D3: the guest this task answers (emissary mode), and who
+    # reads the room. Written only by `record_inbound`.
+    guest_participant_id: int | None = None,
+    audience: str | None = None,
     heartbeat_silent: bool = False,
     skip_log_channel: bool = False,
     scheduled_job_id: int | None = None,
@@ -1337,11 +1354,11 @@ def create_task(
             prompt, command, user_id, source_type, conversation_token,
             parent_task_id, is_group_chat, attachments, priority, scheduled_for,
             output_target, talk_message_id, reply_to_talk_id, reply_to_content,
-            reply_to_message_id, withheld_from_room,
+            reply_to_message_id, withheld_from_room, guest_participant_id, audience,
             heartbeat_silent, skip_log_channel, scheduled_job_id, briefing_name,
             queue, model, effort, brain, model_namespace,
             talk_delivery_token, skill, skill_args
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         """,
         (
@@ -1361,6 +1378,8 @@ def create_task(
             reply_to_content,
             reply_to_message_id,
             1 if withheld_from_room else 0,
+            guest_participant_id,
+            audience,
             1 if heartbeat_silent else 0,
             1 if skip_log_channel else 0,
             scheduled_job_id,
@@ -1393,7 +1412,7 @@ _TASK_COLUMNS = (
     "priority, attempt_count, max_attempts, created_at, scheduled_for, "
     "output_target, talk_message_id, talk_response_id, reply_to_talk_id, "
     "reply_to_content, reply_to_message_id, withheld_from_room, "
-    "heartbeat_silent, skip_log_channel, scheduled_job_id, "
+    "guest_participant_id, audience, heartbeat_silent, skip_log_channel, scheduled_job_id, "
     "briefing_name, queue, confirmed_at, selected_skills, model, effort, model_used, "
     "brain, model_namespace, talk_delivery_token, skill, skill_args, whatsapp_confirmation_request_id"
 )
@@ -1436,6 +1455,8 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         reply_to_content=row["reply_to_content"],
         reply_to_message_id=row["reply_to_message_id"],
         withheld_from_room=bool(row["withheld_from_room"]),
+        guest_participant_id=row["guest_participant_id"],
+        audience=row["audience"],
         heartbeat_silent=bool(row["heartbeat_silent"]),
         skip_log_channel=bool(row["skip_log_channel"]),
         scheduled_job_id=row["scheduled_job_id"],
@@ -4151,6 +4172,7 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_dismissals WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_data_grants WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_policy WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     # Drop every participant's handle for the token, not just the requester's
     # (room_id): a promoted web room can accrue handles for other members, and
@@ -7255,6 +7277,39 @@ def _migrate_side_rooms(conn: sqlite3.Connection) -> None:
         return  # rooms or the marker table not created yet
 
 
+# Kept equal to schema.sql's copy by tests/test_room_policy.py.
+_ROOM_POLICY_DDL = """
+CREATE TABLE IF NOT EXISTS room_policy (
+    room_token   TEXT PRIMARY KEY REFERENCES rooms(token) ON DELETE CASCADE,
+    host_user_id TEXT,
+    speech_mode  TEXT,
+    guest_reply  TEXT NOT NULL DEFAULT 'held'
+                 CHECK (guest_reply IN ('off', 'held', 'direct')),
+    record_guests INTEGER NOT NULL DEFAULT 1,
+    vetoed_by    INTEGER REFERENCES room_participants(id),
+    max_bot_turns_without_human INTEGER NOT NULL DEFAULT 3,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+)
+"""
+
+
+def _migrate_room_policy(conn: sqlite3.Connection) -> None:
+    """Create `room_policy`, empty (multiplayer Stage 11).
+
+    Markered (`room_policy_v1`) and never backfilled: `room_policy.ensure_policy`
+    makes a room's row the first time the room needs one, from the room as it
+    is then, which is the same answer a backfill would give and costs nothing
+    for the rooms that are never shared.
+    """
+    conn.execute(_ROOM_POLICY_DDL)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_policy_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
+
+
 def _migrate_notifications(conn: sqlite3.Connection) -> None:
     """Create the `notifications` inbox table and its indexes on existing DBs.
 
@@ -10118,6 +10173,9 @@ def get_completed_tasks_since(
     """
     Fetch completed tasks for a user since a given datetime.
 
+    A guest's turn run as this user (multiplayer D2) is not theirs to learn
+    from: it is extracted into nobody's memory, so it is excluded here.
+
     Args:
         since_datetime: ISO format datetime string (UTC)
         after_task_id: Only return tasks with id > this value (to avoid reprocessing)
@@ -10131,6 +10189,7 @@ def get_completed_tasks_since(
         AND status = 'completed'
         AND result IS NOT NULL
         AND completed_at >= ?
+        AND guest_participant_id IS NULL
     """
     params: list = [user_id, since_datetime]
 

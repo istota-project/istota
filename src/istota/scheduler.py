@@ -2325,6 +2325,14 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     """
     from .executor import get_user_temp_dir
     user_temp_dir = get_user_temp_dir(config, task.user_id)
+    if task.guest_participant_id is not None:
+        # Emissary mode (multiplayer D2): a guest's turn takes no action beyond
+        # its reply, so nothing it wrote down is replayed. The files are ops
+        # the host never asked for — a subtask would run at the host's full
+        # reach — and are dropped rather than left for the temp sweep.
+        _purge_deferred_files_for_retry(task, user_temp_dir)
+        logger.info("Task %d: emissary task, deferred ops dropped", task.id)
+        return
     # One end of the order is load-bearing: `_warn_unconsumed_deferred_files`
     # runs last so it reports only what the handlers genuinely left behind.
     # The retired-file sweep leads because it depends on nothing, which is a
@@ -3028,6 +3036,7 @@ def process_one_task(
     if success:
         result = check_chat_file_links(config, task.user_id, result, task_id=task_id)
 
+    from . import side_rooms as side_rooms_mod
     from .whatsapp_requests import held_question, present_question
     with db.get_db(config.db_path) as conn:
         relay_question = held_question(conn, task_id)
@@ -3080,6 +3089,35 @@ def process_one_task(
         and not is_no_final_answer(result)
         and CONFIRMATION_PATTERN.search(result)
     )
+
+    # A guest's turn under `guest_reply = held` (multiplayer D4 item 2): the
+    # answer is proposed in the host's side room as a held `room post`, and
+    # parks the task on that exact text, instead of reaching the room. From
+    # here on it is a side-routed confirmation like any other; approving it
+    # releases the post and completes the task rather than re-running it
+    # (`confirmations.approve`). A host who changed or left since the turn
+    # gets nothing, and neither does the room.
+    guest_route = None
+    if success and task.guest_participant_id is not None and not dry_run:
+        with db.get_db(config.db_path) as conn:
+            guest_mode = side_rooms_mod.guest_reply_mode(conn, task)
+            if guest_mode == "held":
+                guest_route = side_rooms_mod.propose_guest_reply(conn, config, task, result)
+        if guest_mode != "direct" and guest_route is None:
+            logger.info("Task %d: guest reply has no host to propose it to; cancelled",
+                        task_id)
+            with db.get_db(config.db_path) as conn:
+                db.cancel_task(conn, task_id)
+                db.log_task(conn, task_id, "info",
+                            "Guest reply cancelled: no host to propose it to")
+            if event_writer is not None:
+                event_writer.emit("cancelled")
+                event_writer.emit("done", {"stop_reason": "cancelled", "duration_seconds": 0})
+                event_writer.finish()
+            return (task_id, False)
+        if guest_route is not None:
+            result = guest_route.preview
+            is_confirmation_request = True
 
     # The durable `messages.id` of this task's stored assistant turn, when it
     # was persisted below. Threaded into the terminal `done` event so a
@@ -3154,7 +3192,10 @@ def process_one_task(
                 # A task in a shared room asks its principal privately
                 # (multiplayer D4): the question goes to their side room and
                 # its Talk view, never into the room everyone reads.
-                side_confirmation = side_rooms.confirmation_route(conn, task)
+                side_confirmation = (
+                    guest_route.route if guest_route is not None
+                    else side_rooms.confirmation_route(conn, task)
+                )
                 if side_confirmation is not None:
                     side_rooms.write_confirmation(conn, side_confirmation, task, result)
                 elif plan_talk and talk_token and not (
@@ -3299,8 +3340,12 @@ def process_one_task(
                         _speaker = speaker_labels(conn, config, [task]).get(
                             task_id, "User",
                         )
-                        _index_conv(conn, task.user_id, task_id, task.prompt, result,
-                                    speaker=_speaker)
+                        # A guest's turn is the host's by authority only,
+                        # never by memory (multiplayer D2): nothing a guest
+                        # wrote is recalled back into the host's own tasks.
+                        if task.guest_participant_id is None:
+                            _index_conv(conn, task.user_id, task_id, task.prompt, result,
+                                        speaker=_speaker)
                         # Also index under channel namespace if in a channel.
                         # Skipped for an exchange deliberately kept out of that
                         # room (ISSUE-255): `_recall_memories` serves this

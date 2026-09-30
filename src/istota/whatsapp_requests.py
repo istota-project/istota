@@ -627,6 +627,10 @@ def _clean_turn(conn, config, task, recipient_user_id: str, *, post_text: str | 
     """
     if task.source_type not in _CLEAN_TURN_SURFACES:
         return False
+    # A guest's turn (multiplayer D2): the prompt is somebody else's words,
+    # run as the host, so it can vouch for nothing the host would send.
+    if getattr(task, "guest_participant_id", None) is not None:
+        return False
     # A confirmed re-run counts from zero, but its prompt carries the previous
     # attempt's output ("Execute the action you proposed"), which that attempt's
     # tool calls may have shaped.

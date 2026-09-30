@@ -296,9 +296,16 @@ class TestRecordingAuthors:
         }]
         assert row["author_participant_id"] is not None
 
-    def test_a_guest_turn_is_recorded_with_no_task(self, config, db_path):
+    def test_a_guest_turn_is_recorded_with_no_task_when_guests_are_off(
+        self, config, db_path,
+    ):
+        # Stage 11 answers a guest as the room's host; with `guest_reply = off`
+        # the turn is still what Stage 7 made it, recorded and acting on nothing.
+        from istota import room_policy
+
         with db.get_db(db_path) as conn:
             _room(conn)
+            room_policy.set_guest_reply(conn, "grp", "off")
             db.dismiss_room(conn, "grp", "alice")
             result = record_inbound(
                 conn, config, surface="talk", surface_ref="grp", user_id="",
@@ -322,7 +329,7 @@ class TestRecordingAuthors:
         assert row["author_user_id"] is None
         assert row["author_label"] == "Max"
         assert row["author_participant_id"] is not None
-        assert tuple(decision) == (0, "guest_author")
+        assert tuple(decision) == (0, "guest_reply_off")
         assert [(p["surface_ref"], p["kind"]) for p in people] == [
             ("guests/abc123", "guest"),
         ]
@@ -462,12 +469,12 @@ class TestTheSharedPredicate:
 
 
 class TestTheLadder:
-    def test_a_guest_author_is_recorded_even_when_addressed(self):
+    def test_a_guest_author_is_recorded_even_when_addressed_if_guests_are_off(self):
         decision = speech_gate.should_speak(
             is_multi_human=False, addressed_to_bot=True, mode="off",
-            author_is_guest=True,
+            author_is_guest=True, guest_reply="off",
         )
-        assert (decision.speak, decision.rung) == (False, "guest_author")
+        assert (decision.speak, decision.rung) == (False, "guest_reply_off")
 
     def test_an_agent_outranks_a_guest(self):
         decision = speech_gate.should_speak(

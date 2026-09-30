@@ -74,6 +74,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- that *does* belong in the room until the user approves it.
     withheld_from_room INTEGER DEFAULT 0,
 
+    -- Multiplayer D2: the `room_participants.id` of the guest whose turn this
+    -- task answers. Set means emissary mode — the task runs as the room's host,
+    -- at room-safe reach, with no outbound action beyond the reply — and it is
+    -- extracted into nobody's memory.
+    guest_participant_id INTEGER,
+    -- Multiplayer D3: who read the room when the turn was written, `private`,
+    -- `principals` or `mixed`. NULL for a task that is not a room turn.
+    audience TEXT,
+
     -- Silent mode (for scheduled jobs with silent_unless_action)
     heartbeat_silent INTEGER DEFAULT 0,  -- Whether to suppress output on no-action
 
@@ -1453,6 +1462,30 @@ CREATE TABLE IF NOT EXISTS room_data_grants (
     PRIMARY KEY (room_token, user_id, scope)
 );
 
+-- One row per room that has ever needed one: who hosts it and how it treats
+-- guests (multiplayer Stage 11, D2/D9/D11/D14). Made by
+-- `room_policy.ensure_policy` the first time a room is shared or a guest
+-- writes in it, never backfilled. `host_user_id` is the room's creator, or its
+-- first member when the creator has gone; NULL means the host left and the
+-- room is record-only until a principal claims it with `!room host`. It is
+-- nullable for that reason, where the umbrella spec's sketch said NOT NULL.
+-- `guest_reply` defaults per surface at creation (Talk and web `direct`,
+-- WhatsApp and email `held`); the column default is the conservative one.
+-- `vetoed_by` and `record_guests` are read from Stage 20 on. The FK cascade is
+-- decorative (foreign_keys unset); room deletion hand-deletes from here.
+-- Kept equal to `db._ROOM_POLICY_DDL` by tests/test_room_policy.py.
+CREATE TABLE IF NOT EXISTS room_policy (
+    room_token   TEXT PRIMARY KEY REFERENCES rooms(token) ON DELETE CASCADE,
+    host_user_id TEXT,
+    speech_mode  TEXT,
+    guest_reply  TEXT NOT NULL DEFAULT 'held'
+                 CHECK (guest_reply IN ('off', 'held', 'direct')),
+    record_guests INTEGER NOT NULL DEFAULT 1,
+    vetoed_by    INTEGER REFERENCES room_participants(id),
+    max_bot_turns_without_human INTEGER NOT NULL DEFAULT 3,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- The speech gate's audit trail: one row per decision about whether the bot
 -- replies to an inbound turn. An operator-facing tuning log, not a second
 -- transcript: `message_id` points at the turn rather than copying its body,
@@ -1465,7 +1498,7 @@ CREATE TABLE IF NOT EXISTS speech_gate_decisions (
     user_id    TEXT NOT NULL,
     message_id INTEGER,
     spoke      INTEGER NOT NULL,
-    -- 'agent_author'|'guest_author'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'failed'
+    -- 'agent_author'|'host_lost'|'guest_command'|'guest_reply_off'|'loop_cap'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'failed'
     rung       TEXT NOT NULL,
     reason     TEXT,
     model      TEXT,

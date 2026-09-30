@@ -2851,9 +2851,15 @@ class TestTalkParticipants:
 
     @pytest.mark.asyncio
     async def test_a_guest_turn_is_recorded_as_a_guest(self, make_config):
+        from istota import room_policy
+
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
         _registered_group(config)
+        # Stage 11 answers a guest as the host; this pins the recording half,
+        # so guest replies are switched off for the room.
+        with db.get_db(config.db_path) as conn:
+            room_policy.set_guest_reply(conn, "group1", "off")
         msg = _mentioning(id=301, actor_id="abc123", actor_type="guests",
                           message="{mention-user0} can Alice do Thursday?")
         msg["actorDisplayName"] = "Max"
@@ -2873,7 +2879,7 @@ class TestTalkParticipants:
                 "SELECT rung FROM speech_gate_decisions ORDER BY id DESC LIMIT 1"
             ).fetchone()[0]
         assert tuple(row) == (None, None, "Max", "guest", "guests/abc123")
-        assert rung == "guest_author"
+        assert rung == "guest_reply_off"
 
     @pytest.mark.asyncio
     async def test_a_nextcloud_user_outside_istota_is_a_guest(self, make_config):

@@ -89,9 +89,13 @@ class IncomingMessage:
     # Who wrote the turn, when that is not simply ``user_id`` speaking for
     # themselves: a guest or a bot in a Talk room. None means ``user_id`` is the
     # author, which is every surface's answer for its own users. A ref with no
-    # ``user_id`` is recorded and never creates a task, and ``user_id`` above is
-    # then empty.
+    # ``user_id`` is recorded, and answered only as the room's host in emissary
+    # mode (multiplayer D2); ``user_id`` above is then empty.
     author: ParticipantRef | None = None
+    # The text as typed is a `!command`. A surface dispatches its own users'
+    # commands before ingest; for a guest, whose commands are ignored, this is
+    # what keeps one from becoming a task instead.
+    is_command: bool = False
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None

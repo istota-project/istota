@@ -1926,6 +1926,9 @@ async def _process_poll_results(
                 task_id = ingest_message(conn, config, IncomingMessage(
                     user_id=actor_id if is_user else "",
                     author=None if is_user else author,
+                    # A user's command was dispatched above; a guest's is
+                    # ignored, which the ingest needs to know (multiplayer D2).
+                    is_command=not is_user and content.strip().startswith("!"),
                     text=prompt,
                     source_type="talk",
                     surface="talk",

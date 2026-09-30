@@ -287,7 +287,10 @@ def confirmation_route(conn, task) -> ConfirmationRoute | None:
     parent = db.get_room(conn, parent_token) if parent_token else None
     if parent is None or parent.side_of:
         return None
-    if not is_shared_room(conn, parent_token, is_group_chat=task.is_group_chat):
+    # A guest's turn asks its host privately even in a room no second member
+    # reads: the guest is the audience it must not reach (multiplayer D2).
+    if (getattr(task, "guest_participant_id", None) is None
+            and not is_shared_room(conn, parent_token, is_group_chat=task.is_group_chat)):
         return None
     talk_bound = db.get_room_binding(conn, parent_token, "talk") is not None
     try:
@@ -305,6 +308,149 @@ def write_confirmation(conn, route: ConfirmationRoute, task, prompt: str) -> Non
         conn, route.side_token, role="system", body=prompt, origin_surface="web",
         delivery_reference=f"side-confirmation:{task.id}:{text_hash(prompt)[:16]}",
     )
+
+
+# ---------------------------------------------------------------------------
+# Guest proposals and backstage memory (multiplayer Stage 11)
+# ---------------------------------------------------------------------------
+
+
+def _host_of(conn, room_token: str) -> str | None:
+    """The room's host while present, read without recording a loss."""
+    from . import room_policy
+
+    policy = room_policy.get_policy(conn, room_token)
+    host = policy.host_user_id if policy is not None else None
+    if host and room_policy.host_present(conn, room_token, host):
+        return host
+    return None
+
+
+def guest_reply_mode(conn, task) -> str | None:
+    """``direct`` or ``held`` for a guest's task at completion, or None.
+
+    Read when the answer exists rather than frozen at the turn, so a host who
+    tightened the policy meanwhile is obeyed. Anything but ``direct`` is held,
+    ``off`` included: the turn already ran, and the host is the one to decide
+    about its answer. None when the task's principal is no longer the room's
+    host, and the answer then goes to nobody.
+    """
+    from . import room_policy
+
+    token = canonical_token(conn, task.conversation_token)
+    if not token or _host_of(conn, token) != task.user_id:
+        return None
+    policy = room_policy.get_policy(conn, token)
+    return "direct" if policy.guest_reply == room_policy.DIRECT else "held"
+
+
+@dataclass(frozen=True)
+class GuestProposal:
+    route: ConfirmationRoute
+    preview: str
+
+
+def _guest_words(conn, task) -> tuple[str, str]:
+    """The guest's label and what they wrote, off the transcript row."""
+    row = conn.execute(
+        "SELECT body, author_label FROM messages WHERE task_id = ? "
+        "AND role = 'user' AND author_participant_id = ? ORDER BY id LIMIT 1",
+        (task.id, task.guest_participant_id),
+    ).fetchone()
+    if row is None:
+        return "A guest", ""
+    return row["author_label"] or "A guest", row["body"] or ""
+
+
+_GUEST_QUOTE_CHARS = 500
+
+
+def propose_guest_reply(conn, config, task, reply: str) -> GuestProposal | None:
+    """Hold a guest-triggered answer as a `room post` for the host (D4 item 2).
+
+    The relay hold machinery carries it (D16): a held `room_post` request whose
+    preview is the exact approval document, the task parked on that preview's
+    digest, and the preview written to the host's side room by the caller's
+    ordinary side-routed confirmation path. None when it cannot be proposed —
+    no side room, a parent the host no longer reads, or an answer the post
+    path would refuse — and the caller then cancels rather than posting.
+    """
+    from .confirmations import flatten
+    from .whatsapp_requests import associate_confirmation
+
+    parent = canonical_token(conn, task.conversation_token)
+    if not parent:
+        return None
+    try:
+        side = db.ensure_side_room(conn, parent, task.user_id)
+        destination = _post_destination(conn, parent, task.user_id)
+        if destination["talk_ref"]:
+            from .transport.talk import TalkTransport
+            if len(reply) > TalkTransport.capabilities.max_message_length:
+                raise RequestError("invalid_rendering")
+        label, words = _guest_words(conn, task)
+        if len(words) > _GUEST_QUOTE_CHARS:
+            words = words[:_GUEST_QUOTE_CHARS].rstrip() + "…"
+        bot = flatten(getattr(config, "bot_name", "") or "") or "the assistant"
+        preview = (
+            f"{label} asked in {destination['label']}:\n{words}\n\n"
+            f"Post this answer there as {bot}? Reply yes to post it exactly as "
+            "written, or no to drop it. Only the message below is posted.\n\n"
+            f"Message:\n{reply}"
+        )
+        with write_transaction(conn):
+            row = _store_request(
+                conn, actor_user_id=task.user_id, task_id=task.id,
+                request_key=f"guest-reply-{task.id}", kind="room_post",
+                recipient_user_id=task.user_id, text=reply, service_body=reply,
+                template_body=None, provider="room",
+                binding_fingerprint=destination["fingerprint"], preview=preview,
+                origin={"surface": "web", "room_token": side.token, "channel": side.token},
+                destination={key: destination[key]
+                             for key in ("kind", "room_token", "talk_ref", "label")},
+            )
+            db.set_task_confirmation(conn, task.id, row["preview"])
+            associate_confirmation(conn, actor_user_id=task.user_id, task_id=task.id,
+                                   request_id=row["id"], preview_digest=row["preview_digest"])
+    except (ValueError, RequestError) as exc:
+        logger.info("task %s: guest reply not proposed: %s", task.id, exc)
+        return None
+    talk_bound = db.get_room_binding(conn, parent, "talk") is not None
+    return GuestProposal(
+        route=ConfirmationRoute(parent_token=parent, side_token=side.token,
+                                talk_bound=talk_bound),
+        preview=row["preview"],
+    )
+
+
+_SPEAKER_SURFACES = ("talk", "web")
+
+
+def backstage_room(conn, task) -> db.Room | None:
+    """The side room whose notes a task in a shared room may read (D4 item 4).
+
+    The task's principal's side room, and only when that principal is the
+    speaker (their own turn in the room) or the host a guest's turn runs as.
+    A cron job, a subtask or a retry carrying the room's token has neither,
+    so it reads nothing backstage, and nor does a task in a private room.
+    """
+    token = canonical_token(conn, task.conversation_token)
+    room = db.get_room(conn, token) if token else None
+    if room is None or room.side_of:
+        return None
+    if getattr(task, "guest_participant_id", None) is not None:
+        if _host_of(conn, token) != task.user_id:
+            return None
+    else:
+        if (task.source_type not in _SPEAKER_SURFACES or task.parent_task_id
+                or task.command or task.skill or task.scheduled_job_id):
+            return None
+        if not is_shared_room(conn, token, is_group_chat=task.is_group_chat):
+            return None
+    side = db.get_side_room(conn, token, task.user_id)
+    if side is None or db.side_room_parent(conn, side.token) is None:
+        return None
+    return side
 
 
 # ---------------------------------------------------------------------------

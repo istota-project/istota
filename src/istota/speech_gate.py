@@ -8,6 +8,12 @@ it. The decision is a ladder, first match wins:
    our own echo is never classified and never answered; this is the loop guard.
    It comes before everything else, including an explicit address, because two
    bots mentioning each other is exactly the loop it exists to stop.
+0a. **The room has lost its host** -> record only, until a principal claims it
+   (multiplayer D14). The caller says when this applies.
+0b. **A guest's `!command`** -> record only. A guest commands nothing (D2).
+0c. **A guest, and the room's `guest_reply` is `off`** -> record only (D5 1b).
+0d. **A guest, past the room's loop cap** -> record only (D9): too many bot
+   turns since a principal last spoke.
 1. **Not a multi-human room** -> speak. A one-to-one conversation is never
    gated, which is what makes failing closed safe everywhere below.
 2. **Structurally addressed to the bot** -> speak. A mention the surface
@@ -50,9 +56,10 @@ GateMode = Literal["off", "mention", "classifier"]
 MODES: tuple[str, ...] = ("off", "mention", "classifier")
 
 RUNG_AGENT_AUTHOR = "agent_author"
-# A guest (a human who is not a member) never gets a task until principal
-# resolution decides whose authority it would carry (multiplayer Stage 11).
-RUNG_GUEST_AUTHOR = "guest_author"
+RUNG_HOST_LOST = "host_lost"
+RUNG_GUEST_COMMAND = "guest_command"
+RUNG_GUEST_REPLY_OFF = "guest_reply_off"
+RUNG_LOOP_CAP = "loop_cap"
 RUNG_NOT_MULTI_HUMAN = "not_multi_human"
 RUNG_ADDRESSED = "addressed"
 RUNG_MODE_OFF = "mode_off"
@@ -294,6 +301,10 @@ def should_speak(
     mode: str,
     author_is_agent: bool = False,
     author_is_guest: bool = False,
+    host_lost: bool = False,
+    guest_command: bool = False,
+    guest_reply: str = "direct",
+    loop_capped: bool = False,
     window: str | None = None,
     completer: Completer | None = None,
     model: str | None = None,
@@ -301,10 +312,11 @@ def should_speak(
 ) -> GateDecision:
     """Walk the ladder. Never raises.
 
-    ``author_is_agent`` is rung 0 and ``author_is_guest`` the rung after it,
-    both from `transport.participants.classify`. Both record and never speak,
-    whatever else holds: an agent turn is the loop D9 guards, and a guest's turn
-    has no principal to act for yet.
+    ``author_is_agent`` is rung 0, from `transport.participants.classify`; an
+    agent turn is the loop D9 guards. ``host_lost``, ``guest_reply`` and
+    ``loop_capped`` come from the room's `room_policy` row, and the caller
+    decides when each applies. A guest the policy lets through goes down the
+    ordinary ladder: it is answered when addressed, or as the mode says.
     ``window`` is the prompt :func:`build_window` produced and is only read on
     the classifier rung, so a caller on any other mode need not build one.
 
@@ -316,8 +328,15 @@ def should_speak(
     try:
         if author_is_agent:
             return GateDecision(False, RUNG_AGENT_AUTHOR)
+        if host_lost:
+            return GateDecision(False, RUNG_HOST_LOST)
         if author_is_guest:
-            return GateDecision(False, RUNG_GUEST_AUTHOR)
+            if guest_command:
+                return GateDecision(False, RUNG_GUEST_COMMAND)
+            if guest_reply == "off":
+                return GateDecision(False, RUNG_GUEST_REPLY_OFF)
+            if loop_capped:
+                return GateDecision(False, RUNG_LOOP_CAP)
         if not is_multi_human:
             return GateDecision(True, RUNG_NOT_MULTI_HUMAN)
         if addressed_to_bot:

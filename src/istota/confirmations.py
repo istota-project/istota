@@ -232,11 +232,22 @@ def approve(
     from .whatsapp_requests import approve_request, text_hash, write_transaction
     with write_transaction(conn):
         current = db.get_task(conn, task.id)
+        proposal = None
         if current and current.whatsapp_confirmation_request_id:
-            approve_request(conn, task=current,
-                            request_id=current.whatsapp_confirmation_request_id,
+            request_id = current.whatsapp_confirmation_request_id
+            approve_request(conn, task=current, request_id=request_id,
                             preview_digest=text_hash(current.confirmation_prompt or ""))
-        db.confirm_task(conn, task.id)
+            if current.guest_participant_id is not None:
+                proposal = conn.execute(
+                    "SELECT text FROM whatsapp_skill_requests WHERE id = ?", (request_id,),
+                ).fetchone()
+        if proposal is not None:
+            # A guest's proposed answer (multiplayer D4 item 2): approving it
+            # releases the post, and there is nothing left to run. A re-run
+            # would only compose another answer to propose.
+            db.update_task_status(conn, task.id, "completed", result=proposal["text"])
+        else:
+            db.confirm_task(conn, task.id)
     db.log_task(conn, task.id, "info", "User confirmed task")
 
     # Drop the parked attempt's two terminal frames, and nothing else
