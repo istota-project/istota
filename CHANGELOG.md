@@ -162,6 +162,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- A task can no longer use another task’s network proxy by connecting to its socket. New connections must come from the task’s own process tree, as skill-proxy connections already do.
+
 - Deployments behind the shipped public proxies now refuse no-auth mode at startup, including loopback web backends. No-auth is supported only by the direct local launcher on loopback. Email login token URLs are excluded from the shipped proxy and web server access logs.
 
 - Browser logins and site storage are isolated per user and persist across tasks and restarts. The operator console opens the selected user's browser; a login completed there no longer reaches other users. Credential fills refuse an older shared-profile browser until its image is rebuilt and deployed.

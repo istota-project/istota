@@ -11,7 +11,6 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -360,8 +359,7 @@ class SkillProxy:
         # this proxy spawns, for as long as it runs. Empty until the first
         # registration, so nothing is served before the task has a process.
         # Each pid maps to its start time, so a recycled number matches nothing.
-        self._roots: dict[int, int] = {}
-        self._roots_changed = threading.Condition()
+        self._peer_roots = peer_process.PeerRoots()
         for pid in (
             _default_trusted_roots() if trusted_roots is None else trusted_roots
         ):
@@ -388,26 +386,20 @@ class SkillProxy:
         authority to whatever holds it next.
         """
         pid = int(pid)
-        started = peer_process.start_time(pid)
-        if started is None:
+        if not self._peer_roots.authorize(pid):
             logger.warning(
                 "proxy_root_unregistered task_id=%s pid=%s reason=unreadable",
                 self.task_id, pid,
             )
             return
-        with self._roots_changed:
-            self._roots[pid] = started
-            self._roots_changed.notify_all()
 
     def revoke_pid(self, pid: int) -> None:
         """Stop serving ``pid``'s tree."""
-        with self._roots_changed:
-            self._roots.pop(int(pid), None)
+        self._peer_roots.revoke(pid)
 
     @property
     def trusted_roots(self) -> frozenset[int]:
-        with self._roots_changed:
-            return frozenset(self._roots)
+        return self._peer_roots.pids
 
     @property
     def socket_path(self) -> Path:
@@ -431,18 +423,9 @@ class SkillProxy:
 
     def _peer_in_task(self, pid: int | None) -> bool:
         """Whether ``pid`` descends from a root, waiting briefly for one."""
-        if pid is None:
-            return False
-        deadline = time.monotonic() + PEER_REGISTRATION_GRACE_SECONDS
-        with self._roots_changed:
-            while True:
-                roots = dict(self._roots)
-                if peer_process.descends_from(pid, roots):
-                    return True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._roots_changed.wait(remaining)
+        return self._peer_roots.contains(
+            pid, grace_seconds=PEER_REGISTRATION_GRACE_SECONDS,
+        )
 
     def _refuse_peer(self, conn: socket.socket, pid: int | None) -> None:
         # Drain the request, bounded, without acting on it. Closing a socket

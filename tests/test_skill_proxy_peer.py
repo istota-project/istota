@@ -316,10 +316,12 @@ class TestTheRootIsRegistered:
     other test here registers by hand.
     """
 
-    def test_the_executor_hands_the_brains_pid_to_the_proxy(self, tmp_path):
+    @pytest.mark.parametrize("skill_enabled", [True, False])
+    def test_the_executor_hands_the_brains_pid_to_the_proxy(self, tmp_path, skill_enabled):
         from unittest.mock import MagicMock, patch
 
         from istota.executor import execute_task
+        from istota.network_proxy import NetworkProxy
 
         from .test_executor_streaming import (
             _EXECUTOR_PATCH_RETURNS,
@@ -330,7 +332,10 @@ class TestTheRootIsRegistered:
         )
 
         config = _make_config(tmp_path)
-        assert config.security.skill_proxy_enabled
+        config.security.skill_proxy_enabled = skill_enabled
+        config.security.network.enabled = True
+        config.security.sandbox_enabled = True
+        network_registered = []
         registered: list[int] = []
 
         def record(self, pid):
@@ -346,7 +351,10 @@ class TestTheRootIsRegistered:
         patches = [
             patch(name, return_value=ret)
             for name, ret in zip(_EXECUTOR_PATCHES, _EXECUTOR_PATCH_RETURNS)
-        ] + [patch.object(SkillProxy, "authorize_pid", record)]
+        ] + [
+            patch.object(SkillProxy, "authorize_pid", record),
+            patch.object(NetworkProxy, "authorize_pid", lambda self, pid: network_registered.append(pid)),
+        ]
         with contextmanager_chain(patches):
             with patch("istota.executor.make_brain") as make_brain:
                 brain = MagicMock()
@@ -359,7 +367,8 @@ class TestTheRootIsRegistered:
 
         # The suite's default root (this process) is registered at
         # construction through the same method, so look for the brain's pid.
-        assert 4242 in registered
+        assert (4242 in registered) == skill_enabled
+        assert 4242 in network_registered
 
     def test_the_non_streaming_claude_path_reports_its_child(self, tmp_path):
         # `subprocess.run` never hands the pid back, and a deployment with

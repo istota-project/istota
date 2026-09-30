@@ -9,8 +9,10 @@ Only HTTPS CONNECT requests to allowlisted host:port pairs are tunneled.
 import logging
 import socket
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 
+from istota import peer_process
 from istota.unix_server import UnixSocketServer
 
 logger = logging.getLogger("istota.network_proxy")
@@ -23,6 +25,9 @@ SOCKET_MODE = 0o600
 # Listen backlog. Every connection is a sandboxed process reaching for the
 # network, and the bridge opens one per outbound TCP connection.
 LISTEN_BACKLOG = 32
+
+# The child may connect before its spawn callback registers the root.
+PEER_REGISTRATION_GRACE_SECONDS = 2.0
 
 # Bridge port inside the sandbox network namespace.  Deterministic since
 # each task gets its own namespace — no port conflicts.
@@ -87,6 +92,8 @@ class NetworkProxy:
     Usage::
 
         with NetworkProxy(sock_path, allowed_hosts) as proxy:
+            # Register the brain child through its spawn callback.
+            proxy.authorize_pid(child.pid)
             # Claude subprocess runs in sandbox with --unshare-net
             ...
 
@@ -98,8 +105,13 @@ class NetworkProxy:
         self,
         socket_path: Path,
         allowed_hosts: set[str],  # {"api.anthropic.com:443", ...}
+        *,
+        trusted_roots: Iterable[int] = (),
     ):
         self.allowed_hosts = allowed_hosts
+        self._peer_roots = peer_process.PeerRoots()
+        for pid in trusted_roots:
+            self.authorize_pid(pid)
         self._server = UnixSocketServer(
             socket_path,
             # Resolved per connection, not captured here: the accept loop
@@ -112,6 +124,11 @@ class NetworkProxy:
             backlog=LISTEN_BACKLOG,
             logger=logger,
         )
+
+    def authorize_pid(self, pid: int) -> None:
+        """Serve only this process and its descendants, pinned to its lifetime."""
+        if not self._peer_roots.authorize(pid):
+            logger.warning("network_proxy_root_unregistered pid=%s", pid)
 
     @property
     def socket_path(self) -> Path:
@@ -138,6 +155,23 @@ class NetworkProxy:
 
     def _handle_connection(self, client: socket.socket) -> None:
         try:
+            pid = peer_process.peer_pid(client)
+            if not self._peer_roots.contains(
+                pid, grace_seconds=PEER_REGISTRATION_GRACE_SECONDS,
+            ):
+                logger.warning("network_proxy_rejected pid=%s reason=peer", pid)
+                # Drain only bytes already queued, without parsing a request.
+                # Unread bytes at close can discard the refusal on Linux.
+                client.setblocking(False)
+                try:
+                    for _ in range(16):
+                        if not client.recv(4096):
+                            break
+                except OSError:
+                    pass
+                client.settimeout(1)
+                client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                return
             client.settimeout(30)
             # Read until we have the full request line
             data = b""
