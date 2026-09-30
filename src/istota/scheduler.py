@@ -3354,7 +3354,8 @@ def process_one_task(
                         # even where the transcript is clean. The per-user index
                         # above is untouched — the exchange is the user's own and
                         # belongs in their own recall.
-                        if task.conversation_token and not task.withheld_from_room:
+                        if (task.conversation_token and not task.withheld_from_room
+                                and task.guest_participant_id is None):
                             channel_uid = f"channel:{task.conversation_token}"
                             _index_conv(conn, channel_uid, task_id, task.prompt, result,
                                         speaker=_speaker)

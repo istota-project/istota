@@ -526,6 +526,27 @@ def get_user_temp_dir(config: Config, user_id: str) -> Path:
     return config.temp_dir / user_id
 
 
+EMISSARY_DIR_PREFIX = "emissary-task-"
+
+
+def task_temp_dir(config: Config, task: "db.Task") -> Path:
+    """The temp directory a task's sandbox binds and writes its deferred ops to.
+
+    The per-user directory for every task but a guest's. A guest's turn runs as
+    the host (multiplayer D2) and is the first tenant of that directory with
+    less authority than the host, and the directory is where every other task
+    of the host's leaves deferred-op files the scheduler replays with the
+    host's full authority, keyed only by a task id the model can guess. So a
+    guest's task gets a directory of its own inside it, bound instead of it,
+    and cannot plant a file for the host's next task or read what the host's
+    other tasks left.
+    """
+    base = get_user_temp_dir(config, task.user_id)
+    if task.guest_participant_id is not None:
+        return base / f"{EMISSARY_DIR_PREFIX}{int(task.id)}"
+    return base
+
+
 CONTROL_DIR_NAME = ".control"
 
 
@@ -3706,6 +3727,7 @@ def build_allowed_tools(
     skill_names: list[str],
     *,
     web_fetch_admin_only: bool = False,
+    emissary: bool = False,
 ) -> list[str]:
     """Build the per-task tool list.
 
@@ -3767,7 +3789,14 @@ def build_allowed_tools(
     `build_prompt`'s Tools section names `WebFetch` under the same condition, or
     a non-admin native task is told to reach for a tool that is not registered.
     """
-    tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch"]
+    tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+    if emissary:
+        # A guest's turn takes no outbound action beyond its reply (multiplayer
+        # D2), and a query or a URL is one: the host's backstage notes are in
+        # its prompt. Native builds only what this list names; a CLI brain keeps
+        # its own web tools behind `--unshare-net` and the CONNECT allowlist.
+        return tools
+    tools.append("WebSearch")
     if is_admin or not web_fetch_admin_only:
         tools.append("WebFetch")
     return tools
@@ -6506,6 +6535,12 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
             "says."
         )
     web_tools = web_search_line + read_line
+    if task.guest_participant_id is not None:
+        # Emissary mode (multiplayer D2): the reply is the only action.
+        web_tools = (
+            "\n- Web: do not search or fetch in this turn. You are answering a "
+            "guest, and your reply is the only action you take."
+        )
 
     # Bash runs with `pipefail` on (ISSUE-321), which the model has to be told
     # once because it changes what an exit status means.
@@ -6971,8 +7006,9 @@ def execute_task(
 
     Returns (success, result_or_error).
     """
-    # Ensure per-user temp directory exists
-    user_temp_dir = get_user_temp_dir(config, task.user_id)
+    # Ensure the task's temp directory exists: the per-user one, or a guest's
+    # own directory inside it (`task_temp_dir`).
+    user_temp_dir = task_temp_dir(config, task)
     user_temp_dir.mkdir(parents=True, exist_ok=True)
 
     # And the daemon-owned directory beside it, for the files the framework
@@ -7712,6 +7748,7 @@ def execute_task(
             is_admin,
             selected_skills,
             web_fetch_admin_only=config.brain.native.web_fetch.admin_only,
+            emissary=task.guest_participant_id is not None,
         )
 
         # Which attempt of this task is running, bound once and read twice: it

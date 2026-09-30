@@ -238,8 +238,11 @@ def approve(
             approve_request(conn, task=current, request_id=request_id,
                             preview_digest=text_hash(current.confirmation_prompt or ""))
             if current.guest_participant_id is not None:
+                # Only the proposal the scheduler made of the guest's answer;
+                # a room post the task asked for itself re-runs as any does.
                 proposal = conn.execute(
-                    "SELECT text FROM whatsapp_skill_requests WHERE id = ?", (request_id,),
+                    "SELECT text FROM whatsapp_skill_requests WHERE id = ? "
+                    "AND request_key = ?", (request_id, f"guest-reply-{current.id}"),
                 ).fetchone()
         if proposal is not None:
             # A guest's proposed answer (multiplayer D4 item 2): approving it

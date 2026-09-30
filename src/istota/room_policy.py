@@ -78,8 +78,14 @@ def get_policy(conn: sqlite3.Connection, room_token: str) -> RoomPolicy | None:
 
 def host_present(conn: sqlite3.Connection, room_token: str, user_id: str) -> bool:
     """Whether ``user_id`` is still in the room: a member, and not someone every
-    one of whose participant rows has ended (they left the surface's roster)."""
-    if not db.is_room_member(conn, room_token, user_id):
+    one of whose participant rows has ended (they left the surface's roster).
+
+    A member who hid the room is still in it. Hiding drops web membership and
+    writes a dismissal tombstone, but it is a view preference; reading it as
+    leaving would take a room's host away because they tidied their sidebar.
+    """
+    if not (db.is_room_member(conn, room_token, user_id)
+            or db.is_room_dismissed(conn, room_token, user_id)):
         return False
     rows = conn.execute(
         "SELECT left_at FROM room_participants WHERE room_token = ? AND user_id = ?",
@@ -152,11 +158,11 @@ def claim_host(conn: sqlite3.Connection, room_token: str, user_id: str) -> str:
         return "already_host"
     if host is not None:
         return "held_by_another"
-    conn.execute(
+    claimed = conn.execute(
         "UPDATE room_policy SET host_user_id = ? WHERE room_token = ? AND host_user_id IS NULL",
         (user_id, room_token),
-    )
-    return "claimed"
+    ).rowcount
+    return "claimed" if claimed else "held_by_another"
 
 
 def set_guest_reply(conn: sqlite3.Connection, room_token: str, value: str) -> RoomPolicy:

@@ -528,3 +528,51 @@ class TestTheLadder:
             is_multi_human=True, addressed_to_bot=True, mode="mention",
             author_is_guest=True, guest_reply="direct")
         assert (decision.speak, decision.rung) == (True, speech_gate.RUNG_ADDRESSED)
+
+
+# ---------------------------------------------------------------------------
+# Review fixes
+# ---------------------------------------------------------------------------
+
+
+class TestReviewFixes:
+    def test_a_host_who_hides_the_room_is_still_its_host(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            room_policy.ensure_policy(conn, "grp")
+            db.remove_room_member(conn, "grp", "alice")
+            db.dismiss_room(conn, "grp", "alice")
+            db.upsert_room_participant(conn, room_token="grp", surface="talk",
+                                       surface_ref="guests/max", kind="guest")
+            result = _member_turn(conn, config, "bob", "still here?")
+            assert result.outcome == "created"
+            assert room_policy.get_policy(conn, "grp").host_user_id == "alice"
+
+    def test_a_guest_turn_has_no_web_tools(self):
+        from istota.executor import build_allowed_tools
+        tools = build_allowed_tools(True, [], emissary=True)
+        assert "WebFetch" not in tools and "WebSearch" not in tools
+        assert {"WebFetch", "WebSearch"} <= set(build_allowed_tools(True, []))
+
+    def test_a_guest_turn_never_reaches_the_rooms_memory(self, config):
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            guest = _guest_turn(conn, config).task_id
+            own = _member_turn(conn, config, "alice", "note this").task_id
+            for ident in (guest, own):
+                db.update_task_status(conn, ident, "completed", result="ok")
+            found = db.get_completed_channel_tasks_since(conn, "grp", "2000-01-01 00:00:00")
+            active = db.get_active_channel_tokens(conn, "2000-01-01 00:00:00")
+        assert [t.id for t in found] == [own]
+        assert "grp" in active
+
+    def test_a_guest_task_gets_a_temp_dir_of_its_own(self, config):
+        from istota.executor import get_user_temp_dir, task_temp_dir
+        with db.get_db(config.db_path) as conn:
+            _group(conn)
+            guest = db.get_task(conn, _guest_turn(conn, config).task_id)
+            own = db.get_task(conn, _member_turn(conn, config, "alice", "hi").task_id)
+        base = get_user_temp_dir(config, "alice")
+        assert task_temp_dir(config, own) == base
+        assert task_temp_dir(config, guest).parent == base
+        assert task_temp_dir(config, guest) != base

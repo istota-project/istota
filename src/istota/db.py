@@ -10107,6 +10107,8 @@ def get_completed_channel_tasks_since(
 
     Returns list of Task objects ordered by id ascending.
 
+    Excludes a guest's turn (multiplayer D2): a guest's words are extracted into
+    nobody's memory, and `CHANNEL.md` is read by every later task in the room.
     Excludes ``withheld_from_room`` (ISSUE-255): the channel sleep cycle distils
     what it collects into ``CHANNEL.md``, which is durable and reaches every
     later prompt in the room — so an exchange deliberately kept out of the room
@@ -10120,6 +10122,7 @@ def get_completed_channel_tasks_since(
         AND result IS NOT NULL
         AND completed_at >= ?
         AND COALESCE(withheld_from_room, 0) = 0
+        AND guest_participant_id IS NULL
     """
     params: list = [conversation_token, since_datetime]
 
@@ -10157,6 +10160,7 @@ def get_active_channel_tokens(
         AND conversation_token != ''
         AND completed_at >= ?
         AND COALESCE(withheld_from_room, 0) = 0
+        AND guest_participant_id IS NULL
         ORDER BY conversation_token
         """,
         (since_datetime,),

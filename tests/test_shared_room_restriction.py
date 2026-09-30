@@ -108,8 +108,11 @@ def _room(config, *, shared: bool, grants: tuple[str, ...] = ()) -> str:
     return room.token
 
 
-def _run(config, room_token: str) -> dict:
-    """Run one web task in the room; return what each seam saw."""
+def _run(config, room_token: str, *, guest: bool = False) -> dict:
+    """Run one web task in the room; return what each seam saw.
+
+    ``guest`` runs it as a guest's turn (multiplayer Stage 11, emissary mode).
+    """
     captured: list = []
     disabled_seen: list[set[str]] = []
 
@@ -138,6 +141,9 @@ def _run(config, room_token: str) -> dict:
                 conn, prompt="what's on my calendar tomorrow?", user_id="alice",
                 source_type="web", conversation_token=room_token,
             )
+            if guest:
+                conn.execute("UPDATE tasks SET guest_participant_id = 1 WHERE id = ?",
+                             (task_id,))
             task = db.get_task(conn, task_id)
             from istota.executor import execute_task
             outcome = execute_task(task, config, [], conn=conn)
@@ -412,3 +418,27 @@ class TestTheMountPlanPerScope:
         assert "developer_repos" not in reasons
         assert "package_cache" not in reasons
         assert {"nextcloud_user_dir", "user_resource"} <= reasons
+
+
+class TestAGuestsTurn:
+    """Emissary mode (multiplayer Stage 11): a guest's turn runs as the host,
+    and the host's own temp directory, where every other task of theirs leaves
+    deferred ops the scheduler replays with their authority, is not in its
+    namespace. Only a directory of its own inside it is."""
+
+    def test_the_hosts_temp_dir_is_not_bound_only_its_own(self, config):
+        seen = _run(config, _room(config, shared=True, grants=("calendar",)), guest=True)
+        argv = seen["argv"]
+        host_dir = str((config.temp_dir / "alice").resolve())
+        rw = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]
+        assert host_dir not in rw
+        own = [path for path in rw if path.startswith(host_dir + "/emissary-task-")]
+        assert len(own) == 1
+        assert seen["model_env"]["ISTOTA_DEFERRED_DIR"] == own[0]
+        assert "calendar" in seen["disabled"]
+
+    def test_control_the_hosts_own_turn_binds_the_temp_dir(self, config):
+        seen = _run(config, _room(config, shared=True))
+        host_dir = str((config.temp_dir / "alice").resolve())
+        argv = seen["argv"]
+        assert host_dir in [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]
