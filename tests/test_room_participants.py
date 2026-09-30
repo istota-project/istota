@@ -239,6 +239,33 @@ class TestRoomIsShared:
             )
             assert db.room_is_shared(conn, "grp") is False
 
+    def test_a_co_member_who_hides_the_room_stops_counting(self, db_path):
+        """Their web presence is membership; dropping it ends that presence."""
+        with db.get_db(db_path) as conn:
+            _room(conn, members=("alice", "bob"))
+            for surface, ref in (("talk", "alice"), ("talk", "bob"), ("web", "bob")):
+                db.upsert_room_participant(
+                    conn, room_token="grp", surface=surface, surface_ref=ref,
+                    kind="principal", user_id=ref,
+                )
+            db.remove_room_member(conn, "grp", "bob")
+            db.sync_room_roster(conn, room_token="grp", surface="talk", present=["alice"])
+            assert db.room_is_shared(conn, "grp") is False
+
+    def test_an_agent_off_the_roster_is_not_churned(self, db_path):
+        """Talk bots never appear on a roster; a sync must not end their row."""
+        with db.get_db(db_path) as conn:
+            _room(conn)
+            for _ in range(3):
+                db.upsert_room_participant(
+                    conn, room_token="grp", surface="talk", surface_ref="bots/x",
+                    kind="agent",
+                )
+                db.sync_room_roster(
+                    conn, room_token="grp", surface="talk", present=["alice"],
+                )
+            assert len(_participants(conn)) == 1
+
     def test_two_members_make_it_shared(self, db_path):
         with db.get_db(db_path) as conn:
             _room(conn, members=("alice", "bob"))

@@ -4298,9 +4298,20 @@ def add_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> 
 
 def remove_room_member(conn: sqlite3.Connection, room_token: str, user_id: str) -> None:
     """Drop `user_id`'s membership — the per-user "hide this room" switch. The
-    shared room, its transcript, and other members are untouched."""
+    shared room, its transcript, and other members are untouched.
+
+    Their web presence in `room_participants` ends with it: web has no roster
+    to sync, so membership is the only thing saying they are still there, and a
+    row left present would keep `room_is_shared` true for a room they left.
+    """
     conn.execute(
         "DELETE FROM room_members WHERE room_token = ? AND user_id = ?",
+        (room_token, user_id),
+    )
+    conn.execute(
+        "UPDATE room_participants SET left_at = datetime('now') "
+        "WHERE room_token = ? AND surface = 'web' AND user_id = ? "
+        "AND left_at IS NULL",
         (room_token, user_id),
     )
 
@@ -4465,12 +4476,16 @@ def sync_room_roster(
     caller upserts the present ones itself. Returns how many rows left. A caller
     whose roster fetch failed must not call this — an empty list here means
     everyone left.
+
+    Agents are exempt: a Talk bot posts without ever being on the roster, so
+    ending its row here would mint a new one on each of its turns.
     """
     placeholders = ", ".join("?" for _ in present)
     exclusion = f"AND surface_ref NOT IN ({placeholders})" if present else ""
     cur = conn.execute(
         "UPDATE room_participants SET left_at = datetime('now') "
-        f"WHERE room_token = ? AND surface = ? AND left_at IS NULL {exclusion}",
+        "WHERE room_token = ? AND surface = ? AND left_at IS NULL "
+        f"AND kind != 'agent' {exclusion}",
         (room_token, surface, *present),
     )
     return cur.rowcount or 0
@@ -6882,9 +6897,14 @@ def _migrate_room_participants(conn: sqlite3.Connection) -> None:
         already = conn.execute(
             "SELECT 1 FROM _migration_state WHERE name = 'room_participants_v1'"
         ).fetchone()
+        # The author backfill re-arms on failure; linking before it has finished
+        # would mark this done over rows it has yet to attribute.
+        authored = conn.execute(
+            "SELECT 1 FROM _migration_state WHERE name = 'messages_author_v1'"
+        ).fetchone()
     except sqlite3.OperationalError:
         return  # marker table not created yet (very early fresh install)
-    if already:
+    if already or not authored:
         return
     try:
         conn.execute(

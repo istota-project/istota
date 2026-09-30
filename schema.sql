@@ -1351,8 +1351,10 @@ CREATE TABLE IF NOT EXISTS messages (
     -- guest's flattened display name (`transport.participants.guest_label`),
     -- never raw surface text. Readers render it as-is.
     author_label   TEXT,
-    -- The `room_participants` row that wrote this turn. Set on every stored
-    -- room-surface user row; NULL for assistant and system rows, for an email
+    -- The `room_participants` row that wrote this turn. Set on every user row
+    -- `record_inbound` stores on a room surface (not yet on the `!steer`,
+    -- `!retry` and confirmation-exchange rows); NULL for assistant and system
+    -- rows, for an email
     -- turn mirrored into a room (email joins a room's transcript without
     -- joining the room), and for rows older than the table the backfill could
     -- not attribute. A guest turn has this and no `author_user_id`.
