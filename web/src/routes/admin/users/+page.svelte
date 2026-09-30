@@ -319,7 +319,7 @@
         reload.
       </p>
     {/if}
-    <div class="form-actions">
+    <div class="form-actions dialog-actions">
       <Button variant="ghost" onclick={() => (formOpen = false)} disabled={busy}>Cancel</Button>
       <Button
         type="submit"
@@ -353,10 +353,7 @@
     flex-direction: column;
     gap: var(--space-4);
   }
-  .form-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
+  .dialog-actions {
     padding-top: var(--space-3);
     border-top: 1px solid var(--border-subtle);
   }
