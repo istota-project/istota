@@ -540,6 +540,7 @@ class SkillProxy:
                 if self.config is not None and self.user_id:
                     from . import db
                     from .credential_broker.bindings import get_binding
+                    from .credential_broker.grants import get_grant
                     with db.get_db(self.config.db_path) as database:
                         metadata = {name: get_binding(database, self.user_id, name)
                                     for name in names}
@@ -550,11 +551,12 @@ class SkillProxy:
                             env_name = name.split(".")[1].upper() + "_TOKEN"
                             if env_name in self.credential_env:
                                 metadata[name] = binding
+                        granted = {name for name in metadata if get_grant(database, self.user_id, name)}
                     reply["names"] = sorted(metadata)
                     reply["credentials"] = [
                         {"name": name, "bound_hosts": (binding or {}).get("hosts", []),
                          "revealable": (binding or {}).get("revealable", False),
-                         "grant": "ungranted"}
+                         "grant": "granted" if name in granted else "ungranted"}
                         for name, binding in sorted(metadata.items())
                     ]
                 self._send_response(conn, reply)

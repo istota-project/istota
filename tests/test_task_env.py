@@ -871,3 +871,23 @@ class TestTheClientWaitExport:
         runtime = task_env.build_task_runtime(config, **runtime_inputs)
 
         assert "ISTOTA_SKILL_CLIENT_WAIT" not in runtime.env
+
+
+def test_runtime_freezes_empty_credential_snapshot(tmp_path, runtime_inputs):
+    from istota import db
+    from istota.credential_broker import grants
+    from istota.credential_broker.bindings import put_binding, parse_binding
+    config = _config(tmp_path)
+    db.init_db(config.db_path)
+    with db.get_db(config.db_path) as conn:
+        identifier = db.create_task(conn, user_id="testuser", source_type="talk", prompt="test",
+                                    conversation_token="room-a")
+        runtime_inputs["task"] = db.get_task(conn, identifier)
+    task_env.build_task_runtime(config, **runtime_inputs)
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT credential_grants_initialized FROM tasks WHERE id=?", (identifier,)).fetchone()[0] == 1
+        put_binding(conn, "testuser", "portal", parse_binding("https://portal.example", {}, []))
+        grants.put_grant(conn, "testuser", "portal")
+    task_env.build_task_runtime(config, **runtime_inputs)
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM credential_task_grants").fetchone()[0] == 0

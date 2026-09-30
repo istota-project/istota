@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Settings now lists credential bindings and lets you choose room access, HTTP methods and scheduled use. New credentials start ungranted; a one-time action grants the credentials already present. Grants are stored for the upcoming credential broker and do not yet restrict credential use.
+
 - The web UI supports email and password login or one-time email sign-in links, alongside Nextcloud login or on its own. Admins can invite users and manage login access; operators can print recovery links when mail is unavailable. Changing a password signs out every existing session.
 
 - You can ask another user of your installation a question, and their explicit reply comes back unchanged to the private conversation you asked from. The question reaches them in their default room (web chat, and Talk when the room is bound), on WhatsApp or by SMS; they can pick where in Settings, and their choice outranks yours. It also waits in their notification inbox until it is answered. They answer by replying to it, quoting it on WhatsApp or sending `!relay reply`, and nothing else they say is shared. You approve each question's exact wording first, unless the message you sent named the recipient and asking was the first thing the task did. No permission is needed beforehand, and `!relay block` stops questions from a particular user; blocked or uncertain answers stay readable through `!relay show` for 30 days.

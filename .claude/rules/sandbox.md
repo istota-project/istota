@@ -106,3 +106,10 @@ Which process is on the other end of a Unix socket, and whether it descends from
 ## process_group.py
 
 `kill_process_group(pid, sig)` — signal a subprocess and every descendant sharing its group, falling back to the single process when the pid leads no group of its own (a non-leader shares the daemon's group, so signalling it would kill the scheduler; the streaming CLI child and a tmux pane lead their groups, while `ClaudeCodeBrain`'s non-streaming child, which reports its pid since ISSUE-550, does not and takes this fallback). Used by both kill paths in ClaudeCodeBrain's streaming spawn, by `!stop` and the web cancel endpoint, and by the scheduler / native-bash timeout kills. Never raises — the brain's timeout calls it from a `threading.Timer` callback, where an exception would report a timeout while leaving the process alive. stdlib-only leaf
+
+
+## Credential grant snapshots
+
+`credential_broker/grants.py` owns credential policies, room scopes and per-task revisions. A missing grant denies admission. New grants allow GET, HEAD, POST, PUT and PATCH, with scheduled use off. `build_task_runtime` freezes admission under `BEGIN IMMEDIATE`; `tasks.credential_grants_initialized` records even an empty snapshot, so retries cannot add names. Live checks verify task ownership, scope, scheduled ancestry, policy revision, current binding and credential presence. They are helpers for the later intercepting proxy; this stage does not enforce them on existing consumers.
+
+The reserved per-user KV namespace `_credential_grants` holds `granted_existing` and `revision:<name>`. The first makes the settings upgrade action one-time. The second retains revisions after deletion so a recreated grant cannot revive an earlier snapshot. Deleting a vault credential deletes its grant and room rows in the same transaction. Task retention and room deletion explicitly delete task grant rows because foreign-key cascades are disabled.

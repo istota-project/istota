@@ -4254,3 +4254,43 @@ export async function runNotificationAction(endpoint: string): Promise<unknown> 
 }
 
 export { AuthError };
+
+export interface CredentialGrant {
+  scope_mode: 'all' | 'rooms';
+  methods: string[];
+  rooms: string[];
+  allow_scheduled: boolean;
+  policy_revision?: number;
+}
+export interface CredentialGrantsSettings {
+  credentials: {
+    name: string;
+    source: string;
+    hosts: string[];
+    headers: string[];
+    revealable: boolean;
+    grant: CredentialGrant | null;
+  }[];
+  rooms: { token: string; name: string }[];
+  grant_existing_available: boolean;
+  sandboxed: boolean;
+}
+export function getCredentialGrants(): Promise<CredentialGrantsSettings> {
+  return apiFetch('/settings/credentials');
+}
+export function saveCredentialGrant(
+  name: string,
+  grant: CredentialGrant,
+): Promise<{ ok: boolean }> {
+  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(grant),
+  });
+}
+export function revokeCredentialGrant(name: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/settings/credentials/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+export function grantExistingCredentials(): Promise<{ ok: boolean; count: number }> {
+  return apiFetch('/settings/credentials/grant-existing', { method: 'POST' });
+}

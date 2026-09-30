@@ -273,6 +273,8 @@ def delete_secret(db_path: Path, user_id: str, service: str, key: str) -> bool:
             (user_id, service, key),
         )
         if service == "vault_entries":
+            from .credential_broker.grants import delete_grant
+            delete_grant(conn, user_id, key)
             conn.execute("DELETE FROM credential_bindings WHERE user_id=? AND name=?",
                          (user_id, key))
         return cur.rowcount > 0

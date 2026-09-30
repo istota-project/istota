@@ -400,6 +400,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         "heartbeat_silent": "INTEGER DEFAULT 0",
         "skip_log_channel": "INTEGER DEFAULT 0",
         "scheduled_job_id": "INTEGER",
+        "credential_grants_initialized": "INTEGER NOT NULL DEFAULT 0",
         "briefing_name": "TEXT",
         "command": "TEXT",
         "queue": "TEXT DEFAULT 'foreground'",
@@ -1128,6 +1129,25 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # notice and the user re-auths).
     _migrate_google_oauth_encryption(conn)
 
+    conn.executescript("""
+CREATE TABLE IF NOT EXISTS credential_grants (
+    user_id TEXT NOT NULL, name TEXT NOT NULL,
+    scope_mode TEXT NOT NULL CHECK (scope_mode IN ('all', 'rooms')),
+    methods TEXT NOT NULL, allow_scheduled INTEGER NOT NULL,
+    policy_revision INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, name)
+);
+CREATE TABLE IF NOT EXISTS credential_grant_rooms (
+    user_id TEXT NOT NULL, name TEXT NOT NULL, conversation_token TEXT NOT NULL,
+    PRIMARY KEY (user_id, name, conversation_token)
+);
+CREATE TABLE IF NOT EXISTS credential_task_grants (
+    task_id INTEGER NOT NULL, user_id TEXT NOT NULL, name TEXT NOT NULL,
+    policy_revision INTEGER NOT NULL,
+    PRIMARY KEY (task_id, name)
+);
+    """)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS credential_bindings (
             user_id TEXT NOT NULL,
@@ -4059,6 +4079,11 @@ def delete_web_chat_room(
     token = room.token
     conn.execute(
         "DELETE FROM task_events WHERE task_id IN "
+        "(SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ?)",
+        (token, user_id),
+    )
+    conn.execute(
+        "DELETE FROM credential_task_grants WHERE task_id IN "
         "(SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ?)",
         (token, user_id),
     )
@@ -8334,6 +8359,13 @@ def cleanup_old_tasks(conn: sqlite3.Connection, retention_days: int) -> int:
             AND completed_at < datetime('now', '-' || ? || ' days')
         )
         """,
+        (retention_days,),
+    )
+
+    conn.execute(
+        "DELETE FROM credential_task_grants WHERE task_id IN "
+        "(SELECT id FROM tasks WHERE status IN ('completed', 'failed', 'cancelled') "
+        "AND completed_at < datetime('now', '-' || ? || ' days'))",
         (retention_days,),
     )
 
