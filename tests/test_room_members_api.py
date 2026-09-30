@@ -482,3 +482,55 @@ class TestACoMemberCannotDestroyTheRoom:
         )
         assert resp.status_code == 200
         assert room.token in await _room_ids(client, bob)
+
+
+def _pending_task(db_path, user_id, token):
+    with db.get_db(db_path) as conn:
+        return db.create_task(
+            conn, prompt="x", user_id=user_id, source_type="web",
+            conversation_token=token,
+        )
+
+
+@web_only
+class TestInFlightWorkOfOtherMembers:
+    async def _shared(self, client, db_path):
+        room = _new_room(db_path)
+        alice = await _login(client, "alice")
+        await _add(client, alice, room.id, "bob")
+        return room, alice
+
+    async def test_the_creator_cannot_delete_a_room_a_co_member_is_working_in(
+        self, client, db_path,
+    ):
+        room, alice = await self._shared(client, db_path)
+        _pending_task(db_path, "bob", room.token)
+        resp = await client.delete(
+            f"/istota/api/chat/rooms/{room.id}", cookies=alice, headers=ORIGIN,
+        )
+        assert resp.status_code == 409
+        with db.get_db(db_path) as conn:
+            assert db.get_room(conn, room.token) is not None
+
+    async def test_a_deleted_room_takes_every_members_finished_tasks_with_it(
+        self, client, db_path,
+    ):
+        room, alice = await self._shared(client, db_path)
+        task_id = _pending_task(db_path, "bob", room.token)
+        with db.get_db(db_path) as conn:
+            conn.execute("UPDATE tasks SET status = 'completed' WHERE id = ?", (task_id,))
+        resp = await client.delete(
+            f"/istota/api/chat/rooms/{room.id}", cookies=alice, headers=ORIGIN,
+        )
+        assert resp.status_code == 200
+        with db.get_db(db_path) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE conversation_token = ?", (room.token,),
+            ).fetchone()[0] == 0
+
+    async def test_a_member_with_work_in_flight_is_not_removed(self, client, db_path):
+        room, alice = await self._shared(client, db_path)
+        _pending_task(db_path, "bob", room.token)
+        assert (await _remove(client, alice, room.id, "bob")).status_code == 409
+        with db.get_db(db_path) as conn:
+            assert db.is_room_member(conn, room.token, "bob")

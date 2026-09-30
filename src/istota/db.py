@@ -4071,8 +4071,9 @@ def count_active_room_tasks(conn: sqlite3.Connection, token: str) -> int:
     that is room-global rather than per-user. A room's `CHANNEL.md` is one file
     shared by every member, so any member's worker may be writing it — filtering
     by the caller the way the delete guard does would refuse nothing in exactly
-    the shared-room case that needs the guard most. Delete is per-user because
-    it drops only the caller's own handle; this is not.
+    the shared-room case that needs the guard most. A member leaving waits on
+    their own tasks only; the creator's delete, which destroys the room for
+    everyone, waits on this.
     """
     row = conn.execute(
         "SELECT COUNT(*) FROM tasks WHERE conversation_token = ? "
@@ -4098,15 +4099,14 @@ def delete_web_chat_room(
     if room is None or room.user_id != user_id:
         return False
     token = room.token
+    # Every member's tasks, not only the caller's: a web room can hold more
+    # than one member, and a co-member's row would otherwise outlive its room.
     conn.execute(
         "DELETE FROM task_events WHERE task_id IN "
-        "(SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ?)",
-        (token, user_id),
+        "(SELECT id FROM tasks WHERE conversation_token = ?)",
+        (token,),
     )
-    conn.execute(
-        "DELETE FROM tasks WHERE conversation_token = ? AND user_id = ?",
-        (token, user_id),
-    )
+    conn.execute("DELETE FROM tasks WHERE conversation_token = ?", (token,))
     conn.execute("DELETE FROM web_chat_messages WHERE token = ?", (token,))
     conn.execute(
         "DELETE FROM channel_sleep_cycle_state WHERE conversation_token = ?",

@@ -5189,6 +5189,10 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         if reg is not None and reg.user_id != username:
             db.drop_web_room_member(conn, room.token, username)
             return "ok"
+        # The creator's delete destroys what every member reads, so it waits on
+        # any member's work in the room, not only the creator's.
+        if db.count_active_room_tasks(conn, room.token) > 0:
+            return "busy"
         db.delete_web_chat_room(conn, room_id, username)
         token = room.token
     # Best-effort: drop the channel's CHANNEL.md directory. Outside the DB
@@ -5294,6 +5298,10 @@ def _chat_remove_member(username: str, room_id: int, target: str) -> tuple[int, 
         # This also refuses removing the last member.
         if target == reg.user_id:
             return 409, {"error": "the room's creator cannot leave it; delete the room instead"}
+        # Same rule as leaving through the room delete: a task of theirs still
+        # running here would answer into a room they are no longer in.
+        if db.count_active_web_tasks(conn, handle.token, target) > 0:
+            return 409, {"error": "member has a task in progress"}
         db.drop_web_room_member(conn, handle.token, target)
     return 204, {}
 
