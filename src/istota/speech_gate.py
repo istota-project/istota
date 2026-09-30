@@ -38,7 +38,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, Literal
+from typing import Callable, Iterable, Literal, Sequence
 
 from . import db
 from .llm_json import candidate_json_blocks
@@ -149,6 +149,15 @@ def window_turns(
     return turns
 
 
+def pending_turn(author: str, text: object, *, max_message_chars: int) -> WindowTurn:
+    """A human turn that is not stored yet, as the classifier sees it."""
+    return WindowTurn(
+        author=_flatten(author, 60) or "someone",
+        text=_flatten_body(text, max_message_chars),
+        is_bot=False,
+    )
+
+
 def load_window(
     conn: sqlite3.Connection,
     room_token: str,
@@ -156,20 +165,29 @@ def load_window(
     bot_name: str,
     window_messages: int,
     max_message_chars: int,
+    pending: Sequence[WindowTurn] = (),
 ) -> list[WindowTurn]:
     """The last ``window_messages`` conversation turns of a room, oldest first.
 
     System rows (notifications, relay questions) are not conversation and are
-    not counted against the window.
+    not counted against the window. ``pending`` are turns newer than every
+    stored row that the caller has not stored yet — the turn being decided,
+    classified ahead of the write that records it, and anything before it in
+    the same batch. They take the newest places in the window.
     """
     if window_messages <= 0:
         return []
-    messages = db.get_messages(
-        conn, room_token, limit=window_messages, roles=("user", "assistant"),
-    )
-    return window_turns(
-        messages, bot_name=bot_name, max_message_chars=max_message_chars,
-    )
+    pending = list(pending)[-window_messages:]
+    stored: list[WindowTurn] = []
+    room_rows = window_messages - len(pending)
+    if room_rows > 0:
+        messages = db.get_messages(
+            conn, room_token, limit=room_rows, roles=("user", "assistant"),
+        )
+        stored = window_turns(
+            messages, bot_name=bot_name, max_message_chars=max_message_chars,
+        )
+    return stored + pending
 
 
 def build_window(turns: list[WindowTurn], *, bot_name: str) -> str:
@@ -258,7 +276,8 @@ def parse_decision(raw: str | None) -> ClassifierVerdict | None:
     return None
 
 
-def _normalize_mode(mode: object) -> str | None:
+def normalize_mode(mode: object) -> str | None:
+    """The configured mode as one of ``MODES``, or None when unrecognised."""
     if not isinstance(mode, str):
         return None
     value = mode.strip().lower()
@@ -274,6 +293,7 @@ def should_speak(
     window: str | None = None,
     completer: Completer | None = None,
     model: str | None = None,
+    classified: GateDecision | None = None,
 ) -> GateDecision:
     """Walk the ladder. Never raises.
 
@@ -281,6 +301,11 @@ def should_speak(
     classification that produces it arrives with ``room_participants``.
     ``window`` is the prompt :func:`build_window` produced and is only read on
     the classifier rung, so a caller on any other mode need not build one.
+
+    ``classified`` is a :func:`classify` answer the caller obtained before
+    opening its write transaction, so the model call never holds the lock. It
+    is used on the classifier rung only; every rung above it still decides
+    first, from this call's own arguments.
     """
     try:
         if author_is_agent:
@@ -289,7 +314,7 @@ def should_speak(
             return GateDecision(True, RUNG_NOT_MULTI_HUMAN)
         if addressed_to_bot:
             return GateDecision(True, RUNG_ADDRESSED)
-        normalized = _normalize_mode(mode)
+        normalized = normalize_mode(mode)
         if normalized == "off":
             return GateDecision(True, RUNG_MODE_OFF)
         if normalized == "mention":
@@ -297,15 +322,18 @@ def should_speak(
         if normalized is None:
             logger.warning("speech gate: unknown mode %r, not speaking", mode)
             return GateDecision(False, RUNG_FAILED, reason="unknown mode")
-        return _classify(window, completer, model)
+        if classified is not None:
+            return classified
+        return classify(window, completer, model)
     except Exception as e:  # pragma: no cover - the ladder above cannot raise
         logger.warning("speech gate failed: %s", e)
         return GateDecision(False, RUNG_FAILED, reason="gate error", model=model)
 
 
-def _classify(
+def classify(
     window: str | None, completer: Completer | None, model: str | None,
 ) -> GateDecision:
+    """Rung 5 on its own: ask the completer about ``window``. Never raises."""
     if completer is None:
         logger.warning("speech gate: no classifier available, not speaking")
         return GateDecision(False, RUNG_FAILED, reason="no completer", model=model)

@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Sequence
 
 from .. import db, speech_gate
 from ..surfaces import is_room_member
@@ -214,11 +214,14 @@ def _ask_gate(
     message_id: int,
     is_group_chat: bool,
     addressed_to_bot: bool,
+    classified: speech_gate.GateDecision | None,
 ) -> speech_gate.GateDecision:
     """Whether a stored turn gets a task, with the decision audited.
 
-    No completer is passed yet, so the classifier rung fails closed; at the
-    default ``mode = "mention"`` it is never reached. ``is_group_chat`` is the
+    No completer is built here: this runs inside the caller's write
+    transaction, and a model call would hold its lock. The classifier rung
+    takes ``classified`` — `classify_ahead`'s answer, obtained before the
+    transaction opened — and fails closed without one. ``is_group_chat`` is the
     surface's own answer to "more than one human here" until participants are
     recorded.
     """
@@ -226,12 +229,85 @@ def _ask_gate(
         is_multi_human=is_group_chat,
         addressed_to_bot=addressed_to_bot,
         mode=config.speech_gate.mode,
+        classified=classified,
+        model=config.speech_gate.model,
     )
     speech_gate.record_decision(
         conn, room_token=room_token, surface=surface, user_id=user_id,
         message_id=message_id, decision=decision,
     )
     return decision
+
+
+def classify_ahead(
+    config: "Config",
+    *,
+    surface: str,
+    surface_ref: str,
+    user_id: str,
+    text: str,
+    is_group_chat: bool,
+    addressed_to_bot: bool,
+    source_type: str | None = None,
+    earlier: Sequence[tuple[str, str]] = (),
+) -> speech_gate.GateDecision | None:
+    """Run the speech gate's classifier for a turn before it is recorded.
+
+    Call this **before** opening the write transaction `record_inbound` runs
+    in, and hand the answer to it as ``classified``: the model call takes up to
+    ``[speech_gate] timeout_seconds``, and under the Talk poll's transaction
+    that would be a write lock held for the whole call. The window is read on a
+    connection of its own, closed before the model is asked.
+
+    None when the classifier rung cannot be reached — any mode but
+    ``classifier``, a turn addressed to the bot, a room with one human, or a
+    surface that does not own its rooms — so the default mode costs one string
+    comparison. ``earlier`` is the ``(user_id, text)`` of turns ahead of this
+    one in the same unrecorded batch, oldest first; they belong in the window
+    and are not stored yet. Never raises: a failure is a failed decision, which
+    the gate reads as "do not speak".
+    """
+    gate = config.speech_gate
+    if speech_gate.normalize_mode(gate.mode) != "classifier":
+        return None
+    if addressed_to_bot or not is_group_chat or not is_room_member(surface):
+        return None
+    source_type = source_type or surface
+    try:
+        from ..executor import build_speech_gate_completer
+
+        with db.get_db(config.db_path) as conn:
+            room_token = (
+                db.resolve_room_token(conn, surface, surface_ref) or surface_ref
+            )
+            room = db.get_room(conn, room_token)
+            pending = []
+            for author_id, body in [*earlier, (user_id, text)]:
+                author_user_id, author_label = resolve_author(config, author_id, None)
+                pending.append(speech_gate.pending_turn(
+                    author_label or author_user_id or author_id, body,
+                    max_message_chars=gate.max_message_chars,
+                ))
+            turns = speech_gate.load_window(
+                conn, room_token,
+                bot_name=config.bot_name,
+                window_messages=gate.window_messages,
+                max_message_chars=gate.max_message_chars,
+                pending=pending,
+            )
+        completer = build_speech_gate_completer(
+            config, user_id=user_id, source_type=source_type,
+            brain_kind=room.brain if room is not None else None,
+        )
+        return speech_gate.classify(
+            speech_gate.build_window(turns, bot_name=config.bot_name),
+            completer, gate.model,
+        )
+    except Exception as e:  # noqa: BLE001 — a classifier failure never costs the turn
+        logger.warning("speech gate: classifying ahead failed: %s", type(e).__name__)
+        return speech_gate.GateDecision(
+            False, speech_gate.RUNG_FAILED, reason="classify error", model=gate.model,
+        )
 
 
 def _live_pin_namespace(config, conn, room_token: str, source_type: str) -> str | None:
@@ -325,6 +401,10 @@ def record_inbound(
     # Whether the surface detected an explicit address to the bot. Unset means
     # no; a direct conversation is answered by the gate's first rung anyway.
     addressed_to_bot: bool = False,
+    # The classifier's answer for this turn, from `classify_ahead`, which the
+    # caller ran before opening its transaction. Read only on the gate's
+    # classifier rung; without it that rung fails closed.
+    classified: speech_gate.GateDecision | None = None,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -606,6 +686,7 @@ def record_inbound(
             conn, config, room_token=transcript_token, surface=surface,
             user_id=user_id, message_id=message_id,
             is_group_chat=is_group_chat, addressed_to_bot=addressed_to_bot,
+            classified=classified,
         )
         if not decision.speak:
             return InboundResult(
@@ -682,5 +763,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         mirror_to_room=msg.mirror_to_room,
         sender_address=msg.sender_address,
         addressed_to_bot=msg.addressed_to_bot,
+        classified=msg.classified,
     )
     return result.task_id

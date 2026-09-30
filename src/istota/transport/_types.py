@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from .. import db
+    from ..speech_gate import GateDecision
 
 # referenceId prefix stamped on a web-origin user turn the web process posted
 # into Talk *as the user* (post-as-user mirroring). The Talk poller drops any
@@ -61,6 +62,10 @@ class IncomingMessage:
     # Unset means no. A direct conversation is answered by the gate's first
     # rung whatever this says, so the default only matters in a group.
     addressed_to_bot: bool = False
+    # The speech gate's classifier answer, obtained by `ingest.classify_ahead`
+    # before the caller opened its write transaction. None means not asked;
+    # read only when the gate reaches its classifier rung.
+    classified: "GateDecision | None" = None
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None

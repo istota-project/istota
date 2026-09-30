@@ -12,12 +12,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ... import confirmations, db
+from ... import confirmations, db, speech_gate
 from ...async_runtime import get_talk_client
 from ...config import Config
 from ...talk import TalkClient, clean_message_content
 from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage
-from ..ingest import ingest_message
+from ..ingest import classify_ahead, ingest_message
 from ._db_lock import DB_BUSY_TIMEOUT_MS, loop_db_lock, talk_db
 
 logger = logging.getLogger("istota.transport.talk.inbound")
@@ -1413,6 +1413,82 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     )
 
 
+def _is_configured_user_turn(msg: dict, config: Config) -> bool:
+    """Whether a Talk message was written by a configured istota user.
+
+    The bot's own messages, guest and bot actors, and senders outside
+    ``config.users`` are all refused.
+    """
+    actor_id = msg.get("actorId", "")
+    if actor_id == config.talk.bot_username:
+        return False
+    if msg.get("actorType", "") != "users":
+        return False
+    return actor_id in config.users
+
+
+async def _classify_batch_ahead(
+    config: Config,
+    client: TalkClient,
+    results: list[tuple[str, list[dict]]],
+    conv_types: dict,
+) -> dict[tuple[str, int], "speech_gate.GateDecision"]:
+    """The speech gate's classifier answers for a batch, keyed ``(token, id)``.
+
+    Runs before ``_process_poll_results`` opens its transaction, so no model
+    call holds the write lock. Empty unless ``[speech_gate] mode`` is
+    ``classifier``. Only an unmentioned turn in a multi-user room can reach the
+    classifier rung, so only those are asked; each sees the turns ahead of it in
+    the batch, which are not stored yet. A turn this pass did not answer is
+    decided in the transaction without one, which fails closed.
+
+    This pass reads the same filters the results loop applies but acts on
+    none of them; the loop still decides what happens to every message.
+    """
+    if speech_gate.normalize_mode(config.speech_gate.mode) != "classifier":
+        return {}
+    decisions: dict[tuple[str, int], speech_gate.GateDecision] = {}
+    for conversation_token, messages in results:
+        earlier: list[tuple[str, str]] = []
+        participants: list[dict] | None = None
+        for msg in messages:
+            if msg.get("messageType", "") == "system":
+                continue
+            reference_id = msg.get("referenceId") or ""
+            if isinstance(reference_id, str) and reference_id.startswith(
+                WEBMIRROR_REF_PREFIX
+            ):
+                continue
+            if not _is_configured_user_turn(msg, config):
+                continue
+            content = clean_message_content(
+                msg, bot_username=config.talk.bot_username,
+            ).strip()
+            if not content and not extract_attachments(msg):
+                continue
+            text = content or "Process the attached file(s)"
+            actor_id = msg.get("actorId", "")
+            message_id = msg.get("id")
+            if message_id and not is_bot_mentioned(msg, config.talk.bot_username):
+                if participants is None:
+                    participants = await _get_participants(
+                        client, conversation_token,
+                        conv_types.get(conversation_token, 1),
+                    )
+                decision = await asyncio.to_thread(
+                    classify_ahead, config,
+                    surface="talk", surface_ref=conversation_token,
+                    user_id=actor_id, text=text,
+                    is_group_chat=_is_multi_user(participants),
+                    addressed_to_bot=False, source_type="talk",
+                    earlier=tuple(earlier),
+                )
+                if decision is not None:
+                    decisions[(conversation_token, message_id)] = decision
+            earlier.append((actor_id, text))
+    return decisions
+
+
 async def _process_poll_results(
     config: Config,
     client: TalkClient,
@@ -1433,6 +1509,9 @@ async def _process_poll_results(
     swallows fetch errors. A drain calling this owes the raise a ``finally``.
     """
     created: list[int] = []
+    # Before the transaction opens: a classifier call under it would hold the
+    # WAL write lock for the whole model call.
+    ahead = await _classify_batch_ahead(config, client, results, conv_types)
 
     async with contextlib.AsyncExitStack() as stack:
         # Same order as the room pass above, and the same reason. This is the
@@ -1456,7 +1535,6 @@ async def _process_poll_results(
             for msg in messages:
                 message_id = msg.get("id")
                 actor_id = msg.get("actorId", "")  # Nextcloud username
-                actor_type = msg.get("actorType", "")
                 message_type = msg.get("messageType", "")
 
                 # Update poll state to this message
@@ -1496,17 +1574,9 @@ async def _process_poll_results(
                     )
                     continue
 
-                # Skip bot's own messages
-                if actor_id == config.talk.bot_username:
-                    continue
-
-                # Only process messages from users (not guests, bots, etc.)
-                if actor_type != "users":
-                    continue
-
-                # Check if sender is a configured user
-                if actor_id not in config.users:
-                    # Unknown user - skip silently
+                # Not the bot's own message, not a guest or bot actor, and a
+                # configured user; anyone else is skipped silently.
+                if not _is_configured_user_turn(msg, config):
                     continue
 
                 conv_type = conv_types.get(conversation_token, 1)
@@ -1722,6 +1792,7 @@ async def _process_poll_results(
                     channel_name=conv_names.get(conversation_token),
                     is_group_chat=is_multi_user,
                     addressed_to_bot=addressed,
+                    classified=ahead.get((conversation_token, message_id)),
                     attachments=attachments if attachments else [],
                     platform_message_id=message_id,
                     reply_to_message_id=reply_to_talk_id,

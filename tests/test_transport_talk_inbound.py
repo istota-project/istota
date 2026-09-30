@@ -2686,3 +2686,101 @@ class TestThePerRoomFetchIsGatedOnLastMessage:
         assert _talk_poller_mod._last_full_sweep is None, (
             "a cycle that never reached the room loop recorded a full sweep"
         )
+
+
+class TestTheClassifierRunsBeforeThePollTransaction:
+    """SG 6: in classifier mode the poller asks the model before it opens the
+    results transaction, and hands each answer to the ingest."""
+
+    @staticmethod
+    async def _poll(config, messages, token="group1"):
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            client = MockClient.return_value
+            client.list_conversations = AsyncMock(return_value=[
+                {"token": token, "type": 2, "displayName": "Group"},
+            ])
+            client.poll_messages = AsyncMock(return_value=messages)
+            client.get_participants = AsyncMock(return_value=_GROUP_PARTICIPANTS)
+            client.send_message = AsyncMock(return_value={"id": 999})
+            client.fetch_chat_history = AsyncMock(return_value=[])
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, token, 50)
+            return await poll_talk_conversations(config)
+
+    @pytest.mark.asyncio
+    async def test_each_unmentioned_turn_is_classified_outside_the_lock(
+        self, make_config,
+    ):
+        import sqlite3
+
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.speech_gate.mode = "classifier"
+        prompts: list[str] = []
+        lock_free: list[bool] = []
+        answers = ['{"speak": false}', '{"speak": true, "reason": "asks the bot"}']
+
+        def completer(prompt):
+            prompts.append(prompt)
+            probe = sqlite3.connect(config.db_path, timeout=0)
+            try:
+                probe.execute("BEGIN IMMEDIATE")
+                probe.rollback()
+                lock_free.append(True)
+            except sqlite3.OperationalError:
+                lock_free.append(False)
+            finally:
+                probe.close()
+            return answers.pop(0)
+
+        with patch("istota.executor.build_speech_gate_completer",
+                   return_value=completer):
+            created = await self._poll(config, [
+                _msg(id=201, actor_id="bob", message="lunch at noon?"),
+                _msg(id=202, actor_id="alice", message="could you book it"),
+            ])
+
+        assert lock_free == [True, True]
+        assert len(created) == 1
+        # The second turn's window carries the first, which is in the same
+        # batch and not stored yet when the model is asked.
+        assert "bob: lunch at noon?" in prompts[1]
+        assert prompts[1].index("lunch at noon?") < prompts[1].index(
+            "could you book it")
+        rows = _user_rows(config)
+        assert [r["task_id"] for r in rows] == [None, created[0]]
+        with db.get_db(config.db_path) as conn:
+            decisions = [tuple(r) for r in conn.execute(
+                "SELECT spoke, rung FROM speech_gate_decisions ORDER BY id"
+            ).fetchall()]
+        assert decisions == [(0, "classifier"), (1, "classifier")]
+
+    @pytest.mark.asyncio
+    async def test_a_mentioned_turn_is_not_classified(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.speech_gate.mode = "classifier"
+
+        with patch("istota.executor.build_speech_gate_completer") as build:
+            created = await self._poll(config, [_msg(
+                id=203, actor_id="alice", message="{mention-user0} hi",
+                message_params={
+                    "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+                },
+            )])
+
+        build.assert_not_called()
+        assert len(created) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_default_mode_asks_nothing(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        with patch("istota.executor.build_speech_gate_completer") as build:
+            created = await self._poll(
+                config, [_msg(id=204, actor_id="bob", message="just chatting")],
+            )
+
+        build.assert_not_called()
+        assert created == []

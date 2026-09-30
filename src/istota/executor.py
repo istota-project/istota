@@ -1326,6 +1326,33 @@ def _native_with_user_key(native_config, config: Config, user_id: str):
     return native_config
 
 
+#: Stands in for a provider so ``NativeBrain`` can resolve a model name without
+#: building an HTTP client; resolution never touches the provider.
+_NO_PROVIDER = object()
+
+
+def _native_with_model(native_config, model: str):
+    """A copy of the native config with ``model`` resolved in its namespace.
+
+    ``NativeBrain.resolve_model_name`` is the resolver a native task uses, so an
+    operator's ``[models.aliases]`` override applies here too; an unoverridden
+    role collapses to the configured native model. Any failure keeps the config
+    as given.
+    """
+    import dataclasses
+
+    try:
+        from .brain.native import NativeBrain
+
+        resolved = NativeBrain(native_config, provider=_NO_PROVIDER).resolve_model_name(model)
+    except Exception:
+        logger.debug("native model resolution failed for %r", model, exc_info=True)
+        return native_config
+    if not resolved or resolved == native_config.model:
+        return native_config
+    return dataclasses.replace(native_config, model=resolved)
+
+
 # --- Brain fallback (availability failover) --------------------------------
 # Generalizes the old tmux→claude_code in-attempt fallback so an operator can
 # configure any brain as a fallback for any primary, triggered when the primary
@@ -2352,6 +2379,7 @@ def build_oneshot_completer(
     brain_kind: str | None = None,
     timeout: float,
     origin: str,
+    model: str | None = None,
 ):
     """A task-free one-shot completer, routed through the brain the arguments name.
 
@@ -2370,6 +2398,9 @@ def build_oneshot_completer(
     Needs no ``db.Task``: a caller that runs before a task exists passes the
     fields itself. The completer carries its own usage sink (ISSUE-272), which
     writes a task-less ``task_usage`` row under ``origin``.
+
+    ``model`` is a role alias or id resolved in the native namespace; None keeps
+    the native brain's own model, which is what context triage has always used.
     """
     from .brain import resolve_brain_kind
 
@@ -2378,6 +2409,8 @@ def build_oneshot_completer(
         return None
 
     native = _native_with_user_key(routed.native, config, user_id)
+    if model:
+        native = _native_with_model(native, model)
     completer = _build_native_completer(
         native,
         timeout,
@@ -2437,6 +2470,49 @@ def _build_triage_usage_sink(task: "db.Task", config: Config):
         config, user_id=task.user_id, source_type=task.source_type,
         origin="context_triage",
     )
+
+
+def build_speech_gate_completer(
+    config: Config,
+    *,
+    user_id: str,
+    source_type: str,
+    brain_kind: str | None = None,
+):
+    """The speech gate's classifier completer. Always returns a completer.
+
+    ``build_oneshot_completer`` with ``[speech_gate] model`` and
+    ``timeout_seconds``; where it answers None (claude_code, tmux) this wraps
+    the tool-less ``claude`` CLI path context triage uses, with the model
+    resolved in the CLI's namespace. Either way the spend is a task-less
+    ``task_usage`` row with ``origin="speech_gate"``. A failed call returns
+    None, which the gate reads as "do not speak".
+    """
+    gate = config.speech_gate
+    completer = build_oneshot_completer(
+        config,
+        user_id=user_id,
+        source_type=source_type,
+        brain_kind=brain_kind,
+        timeout=gate.timeout_seconds,
+        origin="speech_gate",
+        model=gate.model,
+    )
+    if completer is not None:
+        return completer
+
+    sink = _oneshot_usage_sink(
+        config, user_id=user_id, source_type=source_type, origin="speech_gate",
+    )
+
+    def _cli(prompt: str) -> str | None:
+        from .brain import ClaudeCodeBrain
+        from .context import _claude_cli_triage
+
+        model = ClaudeCodeBrain().resolve_model_name(gate.model)
+        return _claude_cli_triage(prompt, model, gate.timeout_seconds, config, sink)
+
+    return _cli
 
 
 # Credential-related env var patterns to strip from subprocess environments

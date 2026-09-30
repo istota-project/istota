@@ -21,6 +21,7 @@ from ._types import (
 from .email import EmailTransport
 from .ingest import (
     InboundResult,
+    classify_ahead,
     display_attachment_names,
     ingest_message,
     record_inbound,
@@ -50,6 +51,7 @@ __all__ = [
     "make_registry",
     "display_attachment_names",
     "InboundResult",
+    "classify_ahead",
     "ingest_message",
     "record_inbound",
     "Destination",

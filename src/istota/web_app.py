@@ -6610,9 +6610,19 @@ def _chat_create_web_task(
     by `message_relays.accept_room_reply` in this same transaction.
     """
     from . import confirmations, db, message_relays
-    from .transport import record_inbound
+    from .transport import classify_ahead, record_inbound
     from .transport.web import addressed_to_bot_in_text
     chat = _config.web.chat
+    addressed = addressed_to_bot_in_text(
+        text, (_config.bot_name, _config.talk.bot_username),
+    )
+    # Ahead of BEGIN IMMEDIATE, so a classifier call never holds the write
+    # lock. None unless the gate could reach its classifier rung.
+    classified = classify_ahead(
+        _config, surface="web", surface_ref=token, user_id=username,
+        text=text, is_group_chat=False, addressed_to_bot=addressed,
+        source_type="web",
+    )
     with db.get_db(_config.db_path) as conn:
         # Take the write lock up front so the count and the insert are one
         # critical section — a plain SELECT takes no lock under WAL, so two
@@ -6715,9 +6725,8 @@ def _chat_create_web_task(
             client_msg_id=client_msg_id,
             reply_to_canonical_id=reply_to_msg_id,
             reply_to_content=reply_to_content,
-            addressed_to_bot=addressed_to_bot_in_text(
-                text, (_config.bot_name, _config.talk.bot_username),
-            ),
+            addressed_to_bot=addressed,
+            classified=classified,
         )
     # A replay of a turn that was recorded unanswered has no task either.
     if result.task_id is None and result.message_id is not None:
