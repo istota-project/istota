@@ -127,7 +127,26 @@ export interface UserContact {
   talk: boolean;
 }
 
+export interface UserAuth {
+  method: 'email' | 'nextcloud' | 'none';
+  email: string | null;
+  can_change_password: boolean;
+}
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ signed_out: true }> {
+  return apiFetch('/account/password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
 export interface User {
+  // Absent on cached records from before email authentication.
+  auth?: UserAuth;
   username: string;
   display_name: string;
   bot_name: string;

@@ -1847,6 +1847,50 @@ async def api_me(request: Request, user: dict = Depends(_require_api_auth)):
     }
 
 
+@api_router.post("/account/password")
+async def api_account_password(request: Request):
+    if not _config or not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    _require_api_auth(request)
+    _verify_origin(request)
+    if request.session["auth"]["method"] != "email":
+        raise HTTPException(status_code=403, detail="Sign in by email to change your password.")
+    identity = request.state.web_auth_identity
+    if not identity.password_hash:
+        raise HTTPException(status_code=400, detail="Use a password reset link to set your first password.")
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid password request.")
+    if (not isinstance(payload, dict)
+            or not isinstance(payload.get("current_password"), str)
+            or not isinstance(payload.get("new_password"), str)):
+        raise HTTPException(status_code=400, detail="Both passwords are required.")
+    policy = web_auth.policy_from_config(_config)
+    error = web_auth.password_policy_error(
+        payload["new_password"], policy, email=identity.email, user_id=identity.user_id,
+    )
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+    started = time.monotonic()
+    ip = _client_ip(request)
+    changed = False
+    if _admit_password_request(identity.email, ip, policy):
+        try:
+            changed = await _run_password_work(
+                web_auth.change_password, _config.db_path, policy, identity,
+                payload["current_password"], payload["new_password"], ip=ip,
+            )
+        except Exception:
+            logger.warning("Account password update failed")
+            raise HTTPException(status_code=503, detail="Password could not be changed. Try again later.")
+    if not changed:
+        await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
+        raise HTTPException(status_code=400, detail="Current password was not accepted. Try again later.")
+    request.session.clear()
+    return {"signed_out": True}
+
+
 # ---- Admin dashboard ----
 
 

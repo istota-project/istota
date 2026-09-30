@@ -618,3 +618,82 @@ async def test_token_database_failure_is_a_generic_card(client, configured, monk
     response = await client.get(route, params={"token": token})
     assert response.status_code == 400 and "link is invalid" in response.text
     assert "private-token" not in response.text
+
+
+async def test_account_password_revokes_both_clients(client, configured):
+    async with AsyncClient(transport=ASGITransport(app=configured.app),
+                           base_url="https://example.com") as other:
+        assert (await sign_in(client)).status_code == 302
+        assert (await sign_in(other)).status_code == 302
+        path = configured._config.db_path
+        before = web_auth.get_identity(path, "alice")
+        payload = {"current_password": "wrong", "new_password": PASSWORD + " changed"}
+        response = await client.post("/istota/api/account/password", json=payload,
+                                     headers={"Origin": "https://example.com"})
+        assert response.status_code == 400
+        assert web_auth.get_identity(path, "alice") == before
+        payload["current_password"] = PASSWORD
+        response = await client.post("/istota/api/account/password", json=payload,
+                                     headers={"Origin": "https://example.com"})
+        assert response.status_code == 200
+        assert response.json() == {"signed_out": True}
+        after = web_auth.get_identity(path, "alice")
+        assert after.credential_epoch > before.credential_epoch
+        assert web_auth.verify_password(payload["new_password"], after.password_hash)[0]
+        assert (await client.get("/istota/api/me")).status_code == 401
+        assert (await other.get("/istota/api/me")).status_code == 401
+
+
+@pytest.mark.parametrize("case", ["anonymous", "nextcloud", "origin", "passwordless", "disabled-method", "policy", "malformed"])
+async def test_account_password_guards(client, configured, case):
+    if case == "passwordless":
+        web_auth.clear_password(configured._config.db_path, "alice")
+        identity = web_auth.get_identity(configured._config.db_path, "alice")
+        set_session(client, configured, {"user": {"username": "alice"},
+                    "auth": {"method": "email", "epoch": identity.credential_epoch}})
+    elif case == "nextcloud":
+        await client.get("/istota/callback")
+    elif case != "anonymous":
+        await sign_in(client)
+    if case == "disabled-method":
+        configured._config.web.auth = ["nextcloud"]
+    before = web_auth.get_identity(configured._config.db_path, "alice")
+    payload = {"current_password": PASSWORD, "new_password": "short" if case == "policy" else PASSWORD + " changed"}
+    response = await client.post("/istota/api/account/password",
+        json=[] if case == "malformed" else payload,
+        headers={} if case == "origin" else {"Origin": "https://example.com"})
+    expected = {"anonymous": 401, "nextcloud": 403, "origin": 403, "passwordless": 400,
+                "disabled-method": 404, "policy": 400, "malformed": 400}
+    assert response.status_code == expected[case]
+    assert web_auth.get_identity(configured._config.db_path, "alice") == before
+
+
+@pytest.mark.parametrize("ingress", [True, False])
+async def test_account_password_throttle_skips_kdf(client, configured, monkeypatch, ingress):
+    await sign_in(client)
+    configured._config.web.auth_throttle_max_email = 1
+    if not ingress:
+        configured._login_ingress.clear()
+    from unittest.mock import Mock
+    verify = Mock(side_effect=AssertionError("Throttled request ran scrypt"))
+    monkeypatch.setattr(web_auth, "verify_password", verify)
+    response = await client.post("/istota/api/account/password",
+        json={"current_password": PASSWORD, "new_password": PASSWORD + " changed"},
+        headers={"Origin": "https://example.com"})
+    assert response.status_code == 400
+    verify.assert_not_called()
+
+
+async def test_account_password_database_failure_is_closed(client, configured, monkeypatch):
+    await sign_in(client)
+    before = web_auth.get_identity(configured._config.db_path, "alice")
+
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("unavailable")
+
+    monkeypatch.setattr(web_auth, "check_and_record", unavailable)
+    response = await client.post("/istota/api/account/password",
+        json={"current_password": PASSWORD, "new_password": PASSWORD + " changed"},
+        headers={"Origin": "https://example.com"})
+    assert response.status_code == 503
+    assert web_auth.get_identity(configured._config.db_path, "alice") == before

@@ -347,3 +347,30 @@ def test_authentication_error_logs_no_exception_payload(db_path, policy, caplog)
         assert auth.authenticate(db_path, policy, "alice@example.com", PASSWORD, ip=None) == ("bad", None)
     assert "RuntimeError" in caplog.text
     assert PASSWORD not in caplog.text
+
+
+@pytest.mark.parametrize("mutation", ["epoch", "disable", "delete", "email", "orphan"])
+def test_password_change_rechecks_after_hash(db_path, identity, policy, monkeypatch, mutation):
+    auth.set_password(db_path, "alice", PASSWORD)
+    before = auth.get_identity(db_path, "alice")
+    real_hash = auth.hash_password
+
+    def race(password):
+        result = real_hash(password)
+        if mutation == "epoch":
+            auth.bump_epoch(db_path, "alice")
+        elif mutation == "disable":
+            auth.set_disabled(db_path, "alice", True)
+        elif mutation == "delete":
+            auth.delete_identity(db_path, "alice")
+        elif mutation == "email":
+            auth.upsert_identity(db_path, "alice", "updated@example.com")
+        else:
+            with db.get_db(db_path) as conn:
+                conn.execute("DELETE FROM user_profiles WHERE user_id = 'alice'")
+        return result
+
+    monkeypatch.setattr(auth, "hash_password", race)
+    assert not auth.change_password(db_path, policy, before, PASSWORD, PASSWORD + " changed", ip=None)
+    after = auth.get_identity(db_path, "alice")
+    assert after is None or after.password_hash == before.password_hash

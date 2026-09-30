@@ -59,6 +59,7 @@
   import { theme, setTheme, type Theme } from '$lib/stores/theme';
   import {
     ServiceCard,
+    SecurityCard,
     GarminCard,
     GoogleWorkspaceCard,
     HeaderSave,
@@ -1390,6 +1391,8 @@
         </div>
       </SettingsCard>
     {/if}
+
+    <SecurityCard auth={identity.user.auth} onSignedOut={identity.expireSession} />
 
     {#if ncToken}
       {@const nc = ncToken}

@@ -134,6 +134,16 @@ describe('the settings page re-resolving the identity', () => {
     expect(getMe).toHaveBeenCalledTimes(2);
   });
 
+  it('shows the Security card from the identity loaded by the layout', async () => {
+    getMe.mockResolvedValue({
+      ...person(),
+      auth: { method: 'email', email: 'alice@example.com', can_change_password: false },
+    });
+    render(SettingsInLayout);
+    expect(await screen.findByRole('heading', { name: 'Security' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Set a password' })).toBeTruthy();
+  });
+
   it('reports a /me that fails on its own, rather than showing a stale answer', async () => {
     // `reload()` never rejects — the layout owns the 401 redirect and the
     // offline fallback — so a `/me`-only failure reaches nothing unless the

@@ -213,6 +213,34 @@ def set_password(db_path: Path, user_id: str, password: str) -> int:
     return _change_credential(db_path, user_id, password_hash=hash_password(password))
 
 
+def change_password(
+    db_path: Path, policy: Policy, identity: Identity,
+    current_password: str, new_password: str, *, ip: str | None,
+) -> bool:
+    """Replace a verified credential only while its session snapshot is live."""
+    error = password_policy_error(new_password, policy, email=identity.email, user_id=identity.user_id)
+    if error:
+        raise ValueError(error)
+    if not check_and_record(db_path, policy, email=identity.email, ip=ip):
+        return False
+    ok, _ = verify_password(current_password, identity.password_hash or DUMMY_HASH)
+    if not ok or not identity.password_hash or identity.disabled:
+        return False
+    encoded = hash_password(new_password)
+    with get_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _get_identity(conn, identity.user_id)
+        if (current is None or current.disabled or current.email != identity.email
+                or current.credential_epoch != identity.credential_epoch
+                or current.password_hash != identity.password_hash
+                or not _has_profile(conn, identity.user_id)):
+            return False
+        conn.execute("UPDATE web_auth_identities SET password_hash = ?, credential_epoch = credential_epoch + 1, updated_at = ? WHERE user_id = ?",
+                     (encoded, _timestamp(), identity.user_id))
+        _invalidate_tokens(conn, identity.user_id)
+        return True
+
+
 def clear_password(db_path: Path, user_id: str) -> int:
     return _change_credential(db_path, user_id, password_hash="")
 
