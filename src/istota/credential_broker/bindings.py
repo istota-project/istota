@@ -38,7 +38,7 @@ def parse_binding(url, attributes, tags, *, source="vault"):
     try:
         if url:
             hosts.add(https_host(url))
-        for value in attributes.get("istota_hosts", "").split(","):
+        for value in (attributes.get("istota_hosts") or "").split(","):
             value = value.strip()
             if not value:
                 continue

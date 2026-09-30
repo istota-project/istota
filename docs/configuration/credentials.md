@@ -157,7 +157,7 @@ A vault entry's HTTPS URL binds all its credential names to that host and port. 
 
 `istota-credential list` shows bound hosts, whether an entry is revealable, and its grant status. Configured forge tokens appear as `forge.gitlab` and `forge.github` for tasks already authorized to use them. Their hosts come from the deployment's forge URLs; public GitHub also includes `api.github.com`.
 
-Browser credential fills require a bound HTTPS origin now. An unbound entry or a field on another origin returns `credential_origin_mismatch` before input. Add the correct URL in KeePassXC and let the vault sync before retrying. This requires a rebuilt browser image: older images are refused before receiving any credential action. Credential fills address the checked element through CDP, so navigation cannot redirect a keyboard fill into another page.
+Browser credential fills require a bound HTTPS origin now. An unbound entry or a field on another origin returns `credential_origin_mismatch` before input. Add the correct URL in KeePassXC and let the vault sync before retrying. This requires a rebuilt browser image: older images are refused before receiving any credential action. Credential fills update the checked element and emit input/change events in one CDP evaluation, so navigation cannot redirect a keyboard fill into another page.
 
 ### The passphrase
 

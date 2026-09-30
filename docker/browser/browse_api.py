@@ -2462,6 +2462,28 @@ def _cdp_selector_action(page, action, path, why):
     }
 
 
+_CREDENTIAL_FILL_JS = """(el, {value, origin}) => {
+    if (document.location.origin !== origin || el.ownerDocument !== document || !el.isConnected)
+        return {ok: false, error: "credential_origin_mismatch"};
+    if (el.disabled || el.readOnly)
+        return {ok: false, error: "credential_field_unfillable"};
+    let setter;
+    if (el instanceof HTMLInputElement &&
+        ["text", "email", "password", "search", "tel", "url", "number"].includes(el.type))
+        setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    else if (el instanceof HTMLTextAreaElement)
+        setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+    else if (!el.isContentEditable)
+        return {ok: false, error: "credential_field_unfillable"};
+    el.__istotaCredential = true;
+    if (setter) setter.call(el, value);
+    else el.textContent = value;
+    el.dispatchEvent(new InputEvent("input", {bubbles: true, inputType: "insertText", data: value}));
+    el.dispatchEvent(new Event("change", {bubbles: true}));
+    return {ok: true};
+}"""
+
+
 def _selector_action(session, page, action, others=(), owned=()):
     """Run one selector action, through the pointer and the keyboard.
 
@@ -2492,11 +2514,10 @@ def _selector_action(session, page, action, others=(), owned=()):
         value = action.get("value", "")
         if value:
             _credential_values.add(value)
-        handle.evaluate("el => { el.__istotaCredential = true; }")
-        # Keyboard focus can move to another document between checking and
-        # typing. A credential always addresses the checked element via CDP.
-        handle.fill(value, timeout=SELECTOR_TIMEOUT_MS)
-        return {"action": "fill", "selector": selector, "ok": True,
+        # Even ElementHandle.fill uses keyboard insertion internally. Keep the
+        # origin check and DOM write in one evaluation, with no focus dispatch.
+        result = handle.evaluate(_CREDENTIAL_FILL_JS, {"value": value, "origin": origin})
+        return {"action": "fill", "selector": selector, **result,
                 "path": "cdp", "path_reason": "credential origin checked"}
     if not selector:
         return {"action": action_type, "ok": False,

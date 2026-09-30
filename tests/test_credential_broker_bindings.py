@@ -215,3 +215,15 @@ def test_list_columns_include_unbound_and_forge(tmp_path, monkeypatch, capsys):
     assert "forge.github\tapi.github.com,github.com" in output
     assert "fixture-password" not in output
     assert "fixture-token" not in output
+
+
+def test_empty_custom_metadata_roundtrips_as_none(tmp_path):
+    kp, path = _new_db(tmp_path)
+    entry = kp.add_entry(kp.root_group, "portal", "", "fixture-password", url="https://portal.example")
+    entry.set_custom_property("istota_hosts", "")
+    entry.set_custom_property("istota_headers", "")
+    kp.save()
+    read, _ = _read(path)
+    assert read.bindings["portal"]["hosts"] == ["portal.example"]
+    assert "authorization" in read.bindings["portal"]["headers"]
+    assert not any("istota_" in name for name in read.services)
