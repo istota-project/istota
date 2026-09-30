@@ -20,12 +20,14 @@ not the same directory, and it never appears in an argument or an answer.
 import argparse
 import json
 import os
+import posixpath
 import sys
 from pathlib import Path
 
 from istota.config import Config, NextcloudConfig, load_admin_users
 from istota.nextcloud import (
     OcsError,
+    PathScopeError,
     capabilities as caps_mod,
     dav as dav_mod,
     notifications as notify_mod,
@@ -33,6 +35,7 @@ from istota.nextcloud import (
     shares as shares_mod,
     to_remote_path,
     users as users_mod,
+    workspace_root,
 )
 from istota.nextcloud_client import (
     ocs_create_public_link,
@@ -83,10 +86,44 @@ def _caller() -> str:
     return os.environ.get("ISTOTA_USER_ID", "")
 
 
-def _scoped(config: Config, path: str) -> str:
-    """Normalize a caller-supplied path and confine it to their workspace."""
+def _scoped(config: Config, path: str, *, whole_tree: bool = False) -> str:
+    """Normalize a caller-supplied path and confine it to their workspace.
+
+    Then apply what the calling task's room withholds, as the sandbox and the
+    host-path allowlist do (`skill_host_paths`): with ``files`` withheld no
+    path is reachable, and with ``memory`` withheld nothing inside the
+    caller's memory directories is. The bot's credentials reach the whole
+    workspace over WebDAV, so without this a ``nextcloud`` grant read what
+    the room withholds. ``whole_tree`` is for a verb that hands a directory
+    on whole (a share): it also refuses a directory that contains memory.
+    """
     user_id = _caller()
-    return resolve_scoped_path(path, user_id, is_admin=config.is_admin(user_id))
+    scoped = resolve_scoped_path(path, user_id, is_admin=config.is_admin(user_id))
+    _refuse_withheld_path(scoped, user_id, whole_tree=whole_tree)
+    return scoped
+
+
+def _refuse_withheld_path(path: str, user_id: str, *, whole_tree: bool) -> None:
+    from istota.skill_host_paths import memory_dir_parts, withheld_from_env
+
+    withheld = withheld_from_env()
+    if "files" in withheld:
+        raise PathScopeError(
+            "This room withholds your files, so no file path is reachable from "
+            "this task."
+        )
+    if "memory" not in withheld or not user_id:
+        return
+    root = workspace_root(user_id)
+    for parts in memory_dir_parts(os.environ.get("ISTOTA_BOT_DIR_NAME", "")):
+        denied = posixpath.join(root, *parts)
+        inside = path == denied or path.startswith(denied + "/")
+        contains = whole_tree and (path == "/" or denied.startswith(path.rstrip("/") + "/"))
+        if inside or contains:
+            raise PathScopeError(
+                f"Refusing {path}: this room withholds your memory, and the path "
+                "is in it."
+            )
 
 
 def _default_expire_days() -> int:
@@ -216,7 +253,7 @@ def cmd_share_create(args):
             f"Unknown share type: {args.type}. Use one of: {', '.join(sorted(_SHARE_TYPE_MAP))}"
         )
 
-    path = _scoped(config, args.path)
+    path = _scoped(config, args.path, whole_tree=True)
     extras = {
         "note": getattr(args, "note", None),
         "send_mail": True if getattr(args, "send_mail", False) else None,
@@ -285,7 +322,7 @@ def cmd_share_update(args):
 
 def cmd_share_link(args):
     config = _config_from_env()
-    path = _scoped(config, args.path)
+    path = _scoped(config, args.path, whole_tree=True)
 
     password = args.password
     if getattr(args, "password_generate", False):
@@ -502,6 +539,79 @@ def _talk_run(coro_factory):
     return asyncio.run(_run())
 
 
+def _is_own_room(token: str) -> bool:
+    """Whether ``token`` names the room the calling task was asked in.
+
+    The task's own conversation, by its token or by any surface's ref to the
+    same registry room (a promoted room's task carries the web token while
+    Talk knows it by another). False whenever the registry cannot say.
+    """
+    own = os.environ.get("ISTOTA_CONVERSATION_TOKEN", "").strip()
+    if not own or not token:
+        return False
+    if token == own:
+        return True
+    db_path = os.environ.get("ISTOTA_DB_PATH", "")
+    if not db_path:
+        return False
+    try:
+        from istota import db
+
+        with db.get_db(db_path) as conn:
+            def canonical(ref):
+                if db.get_room(conn, ref) is not None:
+                    return ref
+                return db.find_room_token_by_ref(conn, ref)
+
+            mine = canonical(own)
+            return mine is not None and mine == canonical(token)
+    except Exception:
+        return False
+
+
+def _audience_refusal(token: str, *, own_room: bool) -> dict | None:
+    """Refuse a write into a conversation someone besides the caller reads.
+
+    A task's own answer reaches a shared room only through delivery, which a
+    room's reach gate and the side-room pin bound; this verb posts with the
+    bot's credentials wherever the bot is, so without the check a private,
+    full-reach task could put anything it read into a room other people read
+    (multiplayer Stage 16). The rule is the live Talk roster: every
+    participant must be the calling user or the bot. ``own_room`` lets a post
+    into the room the task was asked in through, since that task already runs
+    at that room's reach; changing a shared room (rename, invite, delete) is
+    its host's, from the room's settings, and never exempt.
+
+    Outside a task (an operator's shell, a heartbeat command) there is no
+    reach to protect and nothing is checked. A roster that cannot be fetched
+    refuses: this is a boundary, not a convenience.
+    """
+    if not os.environ.get("ISTOTA_TASK_ID", "").strip():
+        return None
+    if own_room and _is_own_room(token):
+        return None
+    caller = _caller()
+    try:
+        people = _talk_run(lambda c: c.get_participants(token))
+        bot = _config_from_env().nextcloud.username
+    except Exception:
+        return error_envelope(
+            "could not read who is in that conversation, so nothing was changed",
+            reason="audience_unavailable", token=token,
+        )
+    readers = {caller, bot}
+    for person in people or []:
+        if person.get("actorType") != "users" or person.get("actorId") not in readers:
+            return error_envelope(
+                "that conversation is read by people besides you, so this task "
+                "cannot write into it. An answer for a room other people read "
+                "is posted from that room, or from your side room of it with "
+                "`istota-skill room post`, which holds the text for your approval.",
+                reason="shared_room", token=token,
+            )
+    return None
+
+
 def _room_summary(room: dict) -> dict:
     return {
         "token": room.get("token", ""),
@@ -633,16 +743,25 @@ def cmd_talk_create(args):
 
 
 def cmd_talk_rename(args):
+    refusal = _audience_refusal(args.token, own_room=False)
+    if refusal is not None:
+        return refusal
     _talk_run(lambda c: c.rename_conversation(args.token, args.name))
     return {"status": "ok", "token": args.token, "name": args.name}
 
 
 def cmd_talk_describe(args):
+    refusal = _audience_refusal(args.token, own_room=False)
+    if refusal is not None:
+        return refusal
     _talk_run(lambda c: c.set_conversation_description(args.token, args.description))
     return {"status": "ok", "token": args.token, "description": args.description}
 
 
 def cmd_talk_invite(args):
+    refusal = _audience_refusal(args.token, own_room=False)
+    if refusal is not None:
+        return refusal
     _talk_run(lambda c: c.add_participant(args.token, args.uid, source=args.source))
     return {"status": "ok", "token": args.token, "invited": args.uid, "source": args.source}
 
@@ -689,6 +808,9 @@ def cmd_talk_read(args):
 
 
 def cmd_talk_send(args):
+    refusal = _audience_refusal(args.token, own_room=True)
+    if refusal is not None:
+        return refusal
     posted = _talk_run(
         lambda c: c.send_message(args.token, args.message, reply_to=args.reply_to)
     )
@@ -700,8 +822,11 @@ def cmd_talk_send(args):
 
 
 def cmd_talk_share_file(args):
+    refusal = _audience_refusal(args.token, own_room=True)
+    if refusal is not None:
+        return refusal
     config = _config_from_env()
-    path = _scoped(config, args.path)
+    path = _scoped(config, args.path, whole_tree=True)
     # A Talk attachment is share type 10 on the same OCS endpoint `share
     # create` uses, so it needs the same mapping — `TalkClient` holds a base
     # URL rather than a Config, so it is applied here. The reply keeps the
@@ -743,11 +868,17 @@ def cmd_talk_search(args):
 
 
 def cmd_talk_leave(args):
+    refusal = _audience_refusal(args.token, own_room=False)
+    if refusal is not None:
+        return refusal
     _talk_run(lambda c: c.leave_conversation(args.token))
     return {"status": "ok", "left": args.token}
 
 
 def cmd_talk_delete(args):
+    refusal = _audience_refusal(args.token, own_room=False)
+    if refusal is not None:
+        return refusal
     if not args.confirmed:
         return _confirmation_required(
             "talk delete", f"conversation {args.token}",
@@ -1181,6 +1312,17 @@ def main(argv=None):
     if handler is None:
         parser.print_help()
         sys.exit(1)
+    if group in ("files", "share"):
+        from istota.skill_host_paths import withheld_from_env
+
+        if "files" in withheld_from_env():
+            # The files control plane, trash and share listings included, is
+            # the `files` scope whatever else was granted.
+            print(json.dumps(error_envelope(
+                "This room withholds your files, so the file and share verbs "
+                "are unavailable to this task.", reason="files_withheld",
+            ), indent=2))
+            sys.exit(1)
 
     def describe(exc: BaseException) -> dict:
         # The *package* OcsError carries the HTTP status, the OCS status and

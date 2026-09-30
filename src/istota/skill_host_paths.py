@@ -226,6 +226,27 @@ def _files_withheld() -> bool:
     return "files" in _withheld_from_env()
 
 
+def memory_dir_parts(bot_dir_name: str) -> list[tuple[str, ...]]:
+    """Where the ``memory`` scope lives inside a user's workspace, relative to it.
+
+    ``memories/`` (dated memories), and under the bot directory ``config/``
+    (``USER.md`` and the per-skill overlays) and ``playbooks/``. The one list
+    the sandbox's masks, the host-path refusal below and the nextcloud skill's
+    WebDAV refusal all read. The bot entries are dropped for a bot directory
+    name that is not a single path component.
+    """
+    parts: list[tuple[str, ...]] = [("memories",)]
+    bot = (bot_dir_name or "").strip()
+    if bot and "/" not in bot and bot not in (".", ".."):
+        parts += [(bot, "config"), (bot, "playbooks")]
+    return parts
+
+
+def withheld_from_env() -> frozenset[str]:
+    """The scopes the proxy says the calling task's room withholds."""
+    return frozenset(_withheld_from_env())
+
+
 def memory_refusal(resolved: Path) -> str | None:
     """A refusal when ``resolved`` is the user's memory and the room withholds it.
 
@@ -239,10 +260,10 @@ def memory_refusal(resolved: Path) -> str | None:
     own = user_workspace_root()
     if own is None:
         return None
-    bot = os.environ.get("ISTOTA_BOT_DIR_NAME", "").strip()
-    denied = [own / "memories"]
-    if bot and "/" not in bot and bot not in (".", ".."):
-        denied += [own / bot / "config", own / bot / "playbooks"]
+    denied = [
+        own.joinpath(*parts)
+        for parts in memory_dir_parts(os.environ.get("ISTOTA_BOT_DIR_NAME", ""))
+    ]
     if path_under_roots(resolved, denied):
         return (
             f"Refusing {resolved}: this room withholds your memory, and the "
