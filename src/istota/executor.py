@@ -5681,6 +5681,11 @@ def room_identity_line(
         if conn is not None:
             token, room, talk_ref = _lookup(conn)
         else:
+            # `sqlite3.connect` creates a missing file, and the default
+            # `db_path` is relative, so an optional read must not open one
+            # that is not there (ISSUE-570).
+            if not Path(config.db_path).is_file():
+                return ""
             with db.get_db(config.db_path) as temp_conn:
                 token, room, talk_ref = _lookup(temp_conn)
         if room is None:
