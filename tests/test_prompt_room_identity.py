@@ -136,6 +136,21 @@ class TestWhenThereIsNoLine:
             cfg, _task("web-alice-1"), rooms_cli_available=True,
         ) == ""
 
+    def test_a_missing_database_is_not_created(self, tmp_path, monkeypatch):
+        """ISSUE-570: the default `db_path` is relative, and `sqlite3.connect`
+        creates a missing file, so a bare `Config()` assembling a prompt left a
+        zero-byte `data/istota.db` in the cwd that later tests then read."""
+        from istota.executor import build_prompt
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        cfg = Config()
+        task = _task("web-alice-1")
+        assert room_identity_line(cfg, task, rooms_cli_available=True) == ""
+        assert not (tmp_path / cfg.db_path).exists()
+        build_prompt(task, [], cfg)
+        assert not (tmp_path / cfg.db_path).exists()
+
     def test_a_broken_registry_read_is_silent_rather_than_a_failed_task(
         self, db_path, monkeypatch,
     ):
