@@ -1541,8 +1541,8 @@ class TestParticipantNames:
 
 class TestPollTalkConversationsGroupRoom:
     @pytest.mark.asyncio
-    async def test_group_room_skips_without_mention(self, make_config):
-        """In a 3+ person room, messages without @mention are skipped."""
+    async def test_group_room_creates_no_task_without_mention(self, make_config):
+        """In a 3+ person room, a message without @mention gets no task."""
 
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
@@ -1666,6 +1666,188 @@ class TestPollTalkConversationsGroupRoom:
         assert len(result) == 1
         # get_participants should not be called for type 1
         mock_instance.get_participants.assert_not_called()
+
+
+_GROUP_PARTICIPANTS = [
+    {"actorId": "alice", "displayName": "Alice"},
+    {"actorId": "bob", "displayName": "Bob"},
+    {"actorId": "istota", "displayName": "Istota"},
+]
+
+
+async def _poll_group(config, msg, *, token="group1"):
+    """One poll of a three-person group room carrying `msg`; returns (created, client)."""
+    with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+        client = MockClient.return_value
+        client.list_conversations = AsyncMock(return_value=[
+            {"token": token, "type": 2, "displayName": "Group"},
+        ])
+        client.poll_messages = AsyncMock(return_value=[msg])
+        client.get_participants = AsyncMock(return_value=_GROUP_PARTICIPANTS)
+        client.send_message = AsyncMock(return_value={"id": 999})
+        client.fetch_chat_history = AsyncMock(return_value=[])
+        with db.get_db(config.db_path) as conn:
+            db.set_talk_poll_state(conn, token, 50)
+        created = await poll_talk_conversations(config)
+    return created, client
+
+
+def _user_rows(config, token="group1"):
+    with db.get_db(config.db_path) as conn:
+        room = db.resolve_room_token(conn, "talk", token) or token
+        return [
+            dict(r) for r in conn.execute(
+                "SELECT id, body, task_id, author_user_id FROM messages "
+                "WHERE room_token = ? AND role = 'user' ORDER BY id",
+                (room,),
+            ).fetchall()
+        ]
+
+
+class TestUnmentionedGroupTurnsAreRecorded:
+    """SG 5: Talk no longer drops an unmentioned group turn before ingest.
+
+    The turn is stored in the room with no task, and the speech gate (at the
+    default ``mode = "mention"``) declines it. Nothing else a Talk message can
+    cause happens for it: no command, no confirmation answer, no cancel of a
+    parked confirmation, no channel-gate notice. The recorded row is the only
+    visible change.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_turn_is_stored_with_no_task(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        created, client = await _poll_group(
+            config, _msg(id=101, actor_id="alice", message="Just chatting"),
+        )
+
+        assert created == []
+        rows = _user_rows(config)
+        assert len(rows) == 1
+        assert "Just chatting" in rows[0]["body"]
+        assert rows[0]["task_id"] is None
+        assert rows[0]["author_user_id"] == "alice"
+        with db.get_db(config.db_path) as conn:
+            decision = conn.execute(
+                "SELECT spoke, rung FROM speech_gate_decisions WHERE message_id = ?",
+                (rows[0]["id"],),
+            ).fetchone()
+            assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert (decision["spoke"], decision["rung"]) == (0, "mode_mention")
+        client.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_mentioned_turn_still_gets_its_task(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        created, _ = await _poll_group(config, _msg(
+            id=102, actor_id="alice", message="{mention-user0} check my calendar",
+            message_params={
+                "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+            },
+        ))
+
+        assert len(created) == 1
+        rows = _user_rows(config)
+        assert [r["task_id"] for r in rows] == created
+
+    @pytest.mark.asyncio
+    async def test_an_unmentioned_command_is_not_dispatched(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        with patch("istota.commands.dispatch", new=AsyncMock()) as dispatch:
+            created, _ = await _poll_group(
+                config, _msg(id=103, actor_id="alice", message="!help"),
+            )
+
+        dispatch.assert_not_awaited()
+        assert created == []
+        assert [r["body"] for r in _user_rows(config)] == [
+            "[Room participants: Alice, Bob]\n!help",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_unmentioned_yes_answers_no_confirmation(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+
+        with patch(
+            "istota.transport.talk.inbound.handle_confirmation_reply",
+            new=AsyncMock(return_value=True),
+        ) as handler, patch(
+            "istota.transport.talk.inbound.confirmations.cancel_for_conversation",
+        ) as cancel:
+            created, _ = await _poll_group(
+                config, _msg(id=104, actor_id="bob", message="yes"),
+            )
+
+        handler.assert_not_awaited()
+        cancel.assert_not_called()
+        assert created == []
+        assert len(_user_rows(config)) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_unmentioned_turn_posts_no_channel_gate_notice(self, make_config):
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.create_task(
+                conn, prompt="previous request", user_id="alice",
+                source_type="talk", conversation_token="group1", queue="foreground",
+            )
+
+        created, client = await _poll_group(
+            config, _msg(id=105, actor_id="bob", message="meanwhile, lunch?"),
+        )
+
+        assert created == []
+        client.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_unmentioned_turn_unhides_the_room_for_its_sender(self, make_config):
+        """Re-engagement now rides `record_inbound`, which every turn reaches."""
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "group1", "alice", origin="talk", name="Group")
+            db.add_room_binding(conn, "group1", "talk", "group1")
+            db.add_room_member(conn, "group1", "alice")
+            db.dismiss_room(conn, "group1", "alice")
+
+        await _poll_group(config, _msg(id=106, actor_id="alice", message="back again"))
+
+        with db.get_db(config.db_path) as conn:
+            tokens = [r.token for r in db.list_member_rooms(conn, "alice")]
+        assert "group1" in tokens
+
+    @pytest.mark.asyncio
+    async def test_a_dm_strips_the_bot_mention_too(self, make_config):
+        """`clean_message_content` is no longer conditional on a group room."""
+        config = make_config()
+        msg = _msg(
+            id=107, actor_id="alice", message="{mention-user0} hello there",
+            message_params={
+                "mention-user0": {"type": "user", "id": "istota", "name": "Istota"},
+            },
+        )
+        with patch("istota.transport.talk.inbound.get_talk_client") as MockClient:
+            client = MockClient.return_value
+            client.list_conversations = AsyncMock(return_value=[
+                {"token": "dm1", "type": 1},
+            ])
+            client.poll_messages = AsyncMock(return_value=[msg])
+            with db.get_db(config.db_path) as conn:
+                db.set_talk_poll_state(conn, "dm1", 50)
+            created = await poll_talk_conversations(config)
+
+        assert len(created) == 1
+        with db.get_db(config.db_path) as conn:
+            task = db.get_task(conn, created[0])
+        assert task.prompt == "hello there"
 
 
 class TestChannelGate:

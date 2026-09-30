@@ -220,7 +220,9 @@ class TestWebChatRoomsDB:
         found = db.get_web_chat_room_by_token(conn, room.token)
         assert found.id == room.id
 
-    def test_count_recent_web_tasks(self, conn):
+    def test_count_recent_web_sends(self, conn):
+        from istota.speech_gate import GateDecision, record_decision
+
         room = db.create_web_chat_room(conn, "alice", "general")
         for _ in range(3):
             db.create_task(
@@ -229,7 +231,15 @@ class TestWebChatRoomsDB:
             )
         # A non-web task for the same user must not be counted.
         db.create_task(conn, prompt="x", user_id="alice", source_type="talk")
-        assert db.count_recent_web_tasks(conn, "alice", 300) == 3
+        # A web turn the gate recorded without answering counts; one it
+        # answered is already counted by its task; a Talk one does not count.
+        record_decision(conn, room_token=room.token, surface="web", user_id="alice",
+                        message_id=1, decision=GateDecision(False, "mode_mention"))
+        record_decision(conn, room_token=room.token, surface="web", user_id="alice",
+                        message_id=2, decision=GateDecision(True, "addressed"))
+        record_decision(conn, room_token=room.token, surface="talk", user_id="alice",
+                        message_id=3, decision=GateDecision(False, "mode_mention"))
+        assert db.count_recent_web_sends(conn, "alice", 300) == 4
 
 
 def _add_system(conn, token: str, text: str, title: str | None = None) -> int:
@@ -856,6 +866,72 @@ class TestChatMessagesApi:
             chat_client, cookies, room["id"], text="talking to bob", client_msg_id="c1",
         )
         assert again.json() == body
+
+    async def test_the_send_says_whether_it_named_the_bot(
+        self, chat_client, monkeypatch,
+    ):
+        from istota.speech_gate import GateDecision
+
+        seen: list[bool] = []
+
+        def _spy(**kw):
+            seen.append(kw["addressed_to_bot"])
+            return GateDecision(True, "not_multi_human")
+
+        monkeypatch.setattr("istota.transport.ingest.speech_gate.should_speak", _spy)
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        import istota.web_app as mod
+        bot = mod._config.bot_name
+        await self._send(chat_client, cookies, room["id"], text=f"@{bot} hello")
+        await self._send(chat_client, cookies, room["id"], text="hello bob")
+        assert seen == [True, False]
+
+    async def test_recorded_turns_count_toward_the_send_rate_limit(
+        self, chat_client, monkeypatch,
+    ):
+        """The cap counted tasks, so a turn the gate declined was free."""
+        from istota.speech_gate import GateDecision
+
+        monkeypatch.setattr(
+            "istota.transport.ingest.speech_gate.should_speak",
+            lambda **_kw: GateDecision(False, "mode_mention"),
+        )
+        import istota.web_app as mod
+        monkeypatch.setattr(mod._config.web.chat, "rate_limit_messages", 2)
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        for n in range(2):
+            ok = await self._send(chat_client, cookies, room["id"], text=f"chat {n}")
+            assert ok.json()["status"] == "recorded"
+        refused = await self._send(chat_client, cookies, room["id"], text="chat 3")
+        assert refused.status_code == 429
+
+    async def test_a_recorded_turn_is_mirrored_by_its_message_id(
+        self, chat_client, monkeypatch,
+    ):
+        """No task means no scheduler repost behind the mirror, so the send
+        itself is the only thing that can put the turn in a bound Talk room."""
+        from unittest.mock import AsyncMock
+
+        from istota.speech_gate import GateDecision
+
+        monkeypatch.setattr(
+            "istota.transport.ingest.speech_gate.should_speak",
+            lambda **_kw: GateDecision(False, "mode_mention"),
+        )
+        import istota.web_app as mod
+        mirror = AsyncMock()
+        monkeypatch.setattr(mod, "_mirror_web_turn_as_user", mirror)
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        body = (await self._send(
+            chat_client, cookies, room["id"], text="talking to bob",
+        )).json()
+        mirror.assert_awaited_once()
+        args, kwargs = mirror.call_args
+        assert args[:4] == ("alice", room["token"], "talking to bob", None)
+        assert kwargs["message_id"] == body["message_id"]
 
     async def _send(self, client, cookies, room_id: int, **payload):
         return await client.post(

@@ -210,6 +210,57 @@ class TestThePostAsUserMirror:
         assert fake_talk_web.constructions == []
 
 
+class TestARecordedTurnIsMirroredByMessageId:
+    """SG 5: a web turn the speech gate recorded has no task, so the lookup the
+    task path uses finds nothing. The send hands the row id over instead."""
+
+    async def test_it_posts_and_stamps_the_row(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        _store(db_path, "live-at")
+        message_id = _user_turn(db_path, room.canonical, task_id=None)
+
+        await web_app_module._mirror_web_turn_as_user(
+            "alice", room.canonical, "hello from web", None, message_id=message_id,
+        )
+
+        assert [(c.method, c.token) for c in fake_talk_web.calls] == [
+            ("send_message", room.talk_ref),
+        ]
+        assert _stamp(db_path, message_id) == str(fake_talk_web.sent_ids[-1])
+
+    async def test_a_stamped_row_is_not_posted_twice(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        """The stamp is the retry guard on this path too: a replayed send would
+        otherwise put the same words in Talk again."""
+        _store(db_path, "live-at")
+        message_id = _user_turn(db_path, room.canonical, task_id=None)
+
+        for _ in range(2):
+            await web_app_module._mirror_web_turn_as_user(
+                "alice", room.canonical, "hello from web", None,
+                message_id=message_id,
+            )
+
+        assert len(fake_talk_web.calls) == 1
+
+    async def test_a_row_in_another_room_is_not_posted(
+        self, fake_talk_web, web_app_module, db_path, room,
+    ):
+        """The id is looked up inside the room being mirrored into."""
+        _store(db_path, "live-at")
+        with db.get_db(db_path) as conn:
+            other = db.create_web_chat_room(conn, "alice", "elsewhere")
+        message_id = _user_turn(db_path, other.token, task_id=None)
+
+        await web_app_module._mirror_web_turn_as_user(
+            "alice", room.canonical, "hello from web", None, message_id=message_id,
+        )
+
+        assert fake_talk_web.calls == []
+
+
 class TestThe401Retry:
     """The behaviour the construction-site patch had to preserve.
 

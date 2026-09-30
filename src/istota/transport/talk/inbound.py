@@ -335,7 +335,7 @@ def _report_poll_txn(hold: "_TxnHold", held_seconds: float) -> None:
 
 
 def _is_multi_user(participants: list[dict]) -> bool:
-    """Return True if 3+ participants (requires @mention)."""
+    """Return True if 3+ participants (an unmentioned turn is only recorded)."""
     return len(participants) >= 3
 
 
@@ -1116,12 +1116,11 @@ async def poll_one_conversation(
     **The room context is required and has no default anywhere on this path.**
     The results block reads ``conv_types.get(token, 1)``, and 1 is a DM:
     ``_get_participants`` returns ``[]`` for type 1, ``_is_multi_user`` is then
-    False, and the ``is_bot_mentioned`` gate is skipped. A
+    False, and every message is treated as addressed. A
     ``poll_one_conversation(config, token)`` with no listing would take that
-    default and ingest **every** message in every group room the bot sits in,
-    from any configured user, with no @mention required — and would also stop
-    stripping the mention, drop the ``[Room participants: …]`` prefix and pass
-    a null channel name. So the supervisor holds a token → context map built
+    default and answer **every** message in every group room the bot sits in,
+    from any configured user, with no @mention required — and would also drop
+    the ``[Room participants: …]`` prefix and pass a null channel name. So the supervisor holds a token → context map built
     from the same ``list_conversations`` payload it builds the watcher set
     from, which gives the invariant that makes this safe: a watcher exists only
     because that listing named its room, so a watcher always has context. A
@@ -1335,7 +1334,8 @@ async def poll_talk_conversations(config: Config) -> list[int]:
 
     This is the Talk transport's inbound body (``TalkTransport.poll`` delegates
     here). It owns every Talk-protocol-specific step — conversation listing +
-    cache, per-room long-poll, system/own/unknown-user/unmentioned filtering,
+    cache, per-room long-poll, system/own/unknown-user filtering, the @mention
+    test that keeps an unmentioned group turn to a recorded row,
     ``!model`` prefix parsing, ``!command`` dispatch, confirmation-reply
     handling, the per-channel active-task gate, attachment extraction, and
     cancelling superseded confirmations.
@@ -1509,38 +1509,23 @@ async def _process_poll_results(
                     # Unknown user - skip silently
                     continue
 
-                # Re-engagement un-hides: any message the user posts in a room
-                # they'd hidden clears their dismissal tombstone (and re-adds
-                # their membership), so it resurfaces in their web list — even
-                # in a multi-user room where the message is dropped just below
-                # for lacking an @mention (so record_inbound is never reached).
-                # Resolve to the canonical token so a promoted web room works.
-                reengaged_token = (
-                    db.resolve_room_token(conn, "talk", conversation_token)
-                    or conversation_token
-                )
-                if db.get_room(conn, reengaged_token) is not None:
-                    db.add_room_member(conn, reengaged_token, actor_id)
-                    db.undismiss_room(conn, reengaged_token, actor_id)
-
-                # In multi-user rooms, only respond when @mentioned
                 conv_type = conv_types.get(conversation_token, 1)
                 participants = await _await_in_txn(
                     hold, _get_participants(client, conversation_token, conv_type),
                 )
                 is_multi_user = _is_multi_user(participants)
-                if is_multi_user and not is_bot_mentioned(msg, config.talk.bot_username):
-                    logger.debug(
-                        "Skipping message from %s in multi-user room %s (no @mention)",
-                        actor_id, conversation_token,
-                    )
-                    continue
+                addressed = is_bot_mentioned(msg, config.talk.bot_username)
+                # An unmentioned turn in a group room is recorded and nothing
+                # else: `record_inbound` stores it and the speech gate decides
+                # whether it gets a task. Everything between here and the ingest
+                # that can act on the room — `!model` usage, `!command`, a relay
+                # or confirmation answer, the channel-gate notice, cancelling a
+                # parked confirmation — stays behind the mention, as it was when
+                # these turns were dropped here.
+                engaged = addressed or not is_multi_user
 
-                # Extract message content and attachments
-                # In multi-user rooms, strip bot mention from prompt and resolve other mentions
                 content = clean_message_content(
-                    msg,
-                    bot_username=config.talk.bot_username if is_multi_user else None,
+                    msg, bot_username=config.talk.bot_username,
                 )
                 attachments = extract_attachments(msg)
 
@@ -1579,7 +1564,7 @@ async def _process_poll_results(
                 # pinned to native. `is_model_prefix` is the same test
                 # `parse_model_prefix` makes first, so nothing that used to
                 # match stops matching.
-                if is_model_prefix(content):
+                if engaged and is_model_prefix(content):
                     prefix = resolve_model_prefix(
                         content,
                         make_brain(brain_for_room(
@@ -1613,7 +1598,7 @@ async def _process_poll_results(
                     content = prefix.content
 
                 # !command dispatch — intercept before task creation
-                if content.strip().startswith("!"):
+                if engaged and content.strip().startswith("!"):
                     result = await _await_in_txn(
                         hold,
                         dispatch_command(
@@ -1640,7 +1625,7 @@ async def _process_poll_results(
                 # confirmation intercept: a quoted "yes" to one must never
                 # approve a parked task. The task is created here, in this
                 # transaction, rather than by the ingest below.
-                if reply_to_talk_id is not None:
+                if engaged and reply_to_talk_id is not None:
                     from ... import message_relays
 
                     room_token = (
@@ -1670,19 +1655,20 @@ async def _process_poll_results(
                         continue
 
                 # Check if this is a confirmation reply before creating a new task
-                handled = await _await_in_txn(
+                if engaged and await _await_in_txn(
                     hold,
                     handle_confirmation_reply(
                         conn, config, actor_id, content, conversation_token,
                         reply_to_talk_id=reply_to_talk_id,
                     ),
-                )
-                if handled:
+                ):
                     continue
 
                 # Per-channel gate: notify user if there's already an active fg task
                 # but still queue the message (fall through to task creation)
-                if db.has_active_foreground_task_for_channel(conn, conversation_token):
+                if engaged and db.has_active_foreground_task_for_channel(
+                    conn, conversation_token,
+                ):
                     logger.debug(
                         "Channel gate: active fg task in %s, queuing message from %s",
                         conversation_token, actor_id,
@@ -1714,7 +1700,7 @@ async def _process_poll_results(
 
                 # Cancel any pending confirmations in this conversation —
                 # the user has moved on by sending a new message
-                cancelled = confirmations.cancel_for_conversation(
+                cancelled = engaged and confirmations.cancel_for_conversation(
                     conn, conversation_token, actor_id, by="talk",
                 )
                 if cancelled:
@@ -1723,8 +1709,9 @@ async def _process_poll_results(
                         cancelled, conversation_token, actor_id,
                     )
 
-                # Normalize into an IncomingMessage and create the task in the
-                # SAME transaction as the poll-state advance above — see the
+                # Normalize into an IncomingMessage and record the turn (and,
+                # when the speech gate speaks, create its task) in the SAME
+                # transaction as the poll-state advance above — see the
                 # docstring's atomicity note.
                 task_id = ingest_message(conn, config, IncomingMessage(
                     user_id=actor_id,
@@ -1734,6 +1721,7 @@ async def _process_poll_results(
                     channel_token=conversation_token,
                     channel_name=conv_names.get(conversation_token),
                     is_group_chat=is_multi_user,
+                    addressed_to_bot=addressed,
                     attachments=attachments if attachments else [],
                     platform_message_id=message_id,
                     reply_to_message_id=reply_to_talk_id,

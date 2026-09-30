@@ -3949,15 +3949,24 @@ def _default_room_candidates(
 # dropping it is a migration and out of scope.
 
 
-def count_recent_web_tasks(
+def count_recent_web_sends(
     conn: sqlite3.Connection, user_id: str, window_seconds: int,
 ) -> int:
-    """Count this user's web-chat tasks created within the last
-    ``window_seconds`` — backs the per-user rate limit (no extra state)."""
+    """Count this user's web-chat sends within the last ``window_seconds`` —
+    backs the per-user rate limit (no extra state).
+
+    A send is a task, or a turn the speech gate recorded without answering,
+    which has no task and is counted off its `speech_gate_decisions` row. That
+    row is the exact set: a `task_id IS NULL` user row is also what a
+    confirmation answer and a `!steer` note write, and neither is a send here.
+    """
+    window = f"-{int(window_seconds)} seconds"
     row = conn.execute(
-        "SELECT COUNT(*) FROM tasks WHERE user_id = ? AND source_type = 'web' "
-        "AND created_at > datetime('now', ?)",
-        (user_id, f"-{int(window_seconds)} seconds"),
+        "SELECT (SELECT COUNT(*) FROM tasks WHERE user_id = ? "
+        "AND source_type = 'web' AND created_at > datetime('now', ?)) "
+        "+ (SELECT COUNT(*) FROM speech_gate_decisions WHERE user_id = ? "
+        "AND surface = 'web' AND spoke = 0 AND created_at > datetime('now', ?))",
+        (user_id, window, user_id, window),
     ).fetchone()
     return int(row[0]) if row else 0
 
@@ -3968,7 +3977,7 @@ def count_recent_email_tasks(
     """Count this user's email-origin tasks created within the last
     ``window_seconds`` — backs the per-user inbound volume budget (ISSUE-250).
 
-    The email twin of ``count_recent_web_tasks``, and deliberately the same
+    The email twin of ``count_recent_web_sends``, and deliberately the same
     shape: counting `tasks` rather than keeping a separate counter means the
     budget survives a daemon restart and cannot drift from what was actually
     created. A held (`pending_confirmation`) task counts — it cost a prompt and

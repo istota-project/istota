@@ -322,10 +322,9 @@ def record_inbound(
     # The message's own sender when it isn't `user_id` (email's envelope
     # sender). Raw and untrusted; sanitized here, never by a reader.
     sender_address: str | None = None,
-    # Whether the surface detected an explicit address to the bot. Every
-    # surface still drops an unaddressed group turn before calling in, so a
-    # turn that reaches here was addressed unless the caller says otherwise.
-    addressed_to_bot: bool = True,
+    # Whether the surface detected an explicit address to the bot. Unset means
+    # no; a direct conversation is answered by the gate's first rung anyway.
+    addressed_to_bot: bool = False,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -682,5 +681,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         suppress_transcript_mirror=msg.suppress_transcript_mirror,
         mirror_to_room=msg.mirror_to_room,
         sender_address=msg.sender_address,
+        addressed_to_bot=msg.addressed_to_bot,
     )
     return result.task_id

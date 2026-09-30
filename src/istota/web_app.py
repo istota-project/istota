@@ -6611,6 +6611,7 @@ def _chat_create_web_task(
     """
     from . import confirmations, db, message_relays
     from .transport import record_inbound
+    from .transport.web import addressed_to_bot_in_text
     chat = _config.web.chat
     with db.get_db(_config.db_path) as conn:
         # Take the write lock up front so the count and the insert are one
@@ -6618,7 +6619,7 @@ def _chat_create_web_task(
         # concurrent sends could both read under-limit and both insert,
         # overshooting the cap (TOCTOU). BEGIN IMMEDIATE serializes them.
         conn.execute("BEGIN IMMEDIATE")
-        recent = db.count_recent_web_tasks(conn, username, chat.rate_limit_window_seconds)
+        recent = db.count_recent_web_sends(conn, username, chat.rate_limit_window_seconds)
         if recent >= chat.rate_limit_messages:
             return ("rate_limited", chat.rate_limit_window_seconds)
         # A retry of a send we already accepted replays that turn, and the
@@ -6714,6 +6715,9 @@ def _chat_create_web_task(
             client_msg_id=client_msg_id,
             reply_to_canonical_id=reply_to_msg_id,
             reply_to_content=reply_to_content,
+            addressed_to_bot=addressed_to_bot_in_text(
+                text, (_config.bot_name, _config.talk.bot_username),
+            ),
         )
     # A replay of a turn that was recorded unanswered has no task either.
     if result.task_id is None and result.message_id is not None:
@@ -7038,8 +7042,10 @@ async def _post_as_user(
 
 
 async def _mirror_web_turn_as_user(
-    username: str, room_token: str, text: str, task_id: int,
+    username: str, room_token: str, text: str, task_id: int | None,
     reply_to_msg_id: int | None = None,
+    *,
+    message_id: int | None = None,
 ) -> None:
     """Post a just-ingested web user turn into the room's bound Talk
     conversation *as the user*, at send time — so the message appears in Talk
@@ -7060,6 +7066,10 @@ async def _mirror_web_turn_as_user(
     (`transport/talk/inbound.py`) reconciles those from the message itself, so
     a stamp missing here is usually repaired within a poll interval rather
     than standing.
+
+    A turn the speech gate recorded without answering has no task, so the
+    caller names its row by ``message_id`` instead. There is no scheduler
+    repost behind that path: if this post fails, the turn stays web-only.
 
     Two processes therefore write this one ledger entry, and what keeps them
     off each other is not symmetric: the `_lookup` early return above skips
@@ -7089,13 +7099,24 @@ async def _mirror_web_turn_as_user(
             # the first attempt created, and that attempt already mirrored it.
             # The stamp is the record of that, so it is also the guard: without
             # it a client-side timeout would put the message in Talk twice.
-            if db.user_turn_has_external_id(conn, task_id, "talk"):
-                return None, None, None
-            row = conn.execute(
-                "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
-                "AND role = 'user' LIMIT 1",
-                (room_token, task_id),
-            ).fetchone()
+            if message_id is not None:
+                row = conn.execute(
+                    "SELECT id FROM messages WHERE id = ? AND room_token = ? "
+                    "AND role = 'user'",
+                    (message_id, room_token),
+                ).fetchone()
+                if row is not None and db.get_message_external_id(
+                    conn, message_id, "talk",
+                ) is not None:
+                    return None, None, None
+            else:
+                if db.user_turn_has_external_id(conn, task_id, "talk"):
+                    return None, None, None
+                row = conn.execute(
+                    "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
+                    "AND role = 'user' LIMIT 1",
+                    (room_token, task_id),
+                ).fetchone()
             # The cited parent's own Talk id, when it has one. A parent that
             # never reached Talk (web-only, or predating the mirror) leaves
             # this None and the post degrades to a plain one.
@@ -7110,8 +7131,8 @@ async def _mirror_web_turn_as_user(
             return talk_ref, (int(row["id"]) if row else None), parent_talk_id
 
     try:
-        talk_ref, message_id, parent_talk_id = await asyncio.to_thread(_lookup)
-        if not talk_ref or message_id is None:
+        talk_ref, row_id, parent_talk_id = await asyncio.to_thread(_lookup)
+        if not talk_ref or row_id is None:
             return  # web-only room (or turn not stored) — nothing to mirror
 
         access = await asyncio.to_thread(
@@ -7129,7 +7150,7 @@ async def _mirror_web_turn_as_user(
 
         _note_token_healthy(username)
         posted_id = await _post_as_user(
-            access, talk_ref, text, message_id, username,
+            access, talk_ref, text, row_id, username,
             reply_to_talk_id=parent_talk_id,
         )
         if posted_id is None:
@@ -7138,7 +7159,7 @@ async def _mirror_web_turn_as_user(
         def _stamp():
             with db.get_db(_config.db_path) as conn:
                 db.set_message_external_id(
-                    conn, message_id, "talk", str(posted_id),
+                    conn, row_id, "talk", str(posted_id),
                 )
 
         await asyncio.to_thread(_stamp)
@@ -8302,7 +8323,12 @@ async def chat_send_message(
         )
     if outcome == "recorded":
         # Stored in the room, and the bot is not answering it: no task, so no
-        # stream to open.
+        # stream to open. The mirror is keyed on the row, and it is the only
+        # route into a bound Talk room: with no task there is no scheduler
+        # repost to fall back on.
+        await _mirror_web_turn_as_user(
+            username, room.token, text, None, reply_to_msg_id, message_id=value,
+        )
         return {"task_id": None, "message_id": value, "status": "recorded"}
     task_id = value
     # Post-as-user mirror into a bound Talk room, at send time (bounded ~5s,

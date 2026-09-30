@@ -532,6 +532,10 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
     from .transport.ingest import ingest_message, record_inbound
 
     context = None if outcome == "accepted" else _context(relay, outcome)
+    # A relay reply answers a question the bot posted, so it is addressed to the
+    # bot by construction. Set on the two room surfaces, the only ones whose
+    # turn the speech gate sees: without it the gate could record the answer
+    # with no task, and the web relay branch would report ("ok", None).
     if surface == "web":
         task_id = record_inbound(
             conn, config, surface="web", surface_ref=channel, user_id=actor_user_id, text=text,
@@ -539,6 +543,7 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
             attachment_names=attachment_names or None, client_msg_id=client_msg_id,
             reply_to_canonical_id=reply_to_id, reply_to_content=context,
             model=model, effort=effort, apply_room_default=not model_prefix_used,
+            addressed_to_bot=True,
         ).task_id
     elif surface == "talk":
         task_id = ingest_message(conn, config, IncomingMessage(
@@ -546,6 +551,7 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
             channel_token=channel, channel_name=channel_name, attachments=attachments or [],
             platform_message_id=platform_message_id, reply_to_message_id=reply_to_id,
             reply_to_content=context, model=model, effort=effort, model_prefix_used=model_prefix_used,
+            addressed_to_bot=True,
         ))
     elif surface == "whatsapp":
         from .transport.whatsapp import whatsapp_conversation_token

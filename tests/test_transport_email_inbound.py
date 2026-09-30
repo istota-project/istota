@@ -1329,6 +1329,65 @@ class TestExtractUserFromRecipient:
 # =============================================================================
 
 
+class TestBotAddressedInTo:
+    """SG 5: email's explicit address is the bot in To, not only in Cc."""
+
+    def _config(self):
+        config = Config()
+        config.email = _email_config()
+        return config
+
+    @pytest.mark.parametrize("to, cc, expected", [
+        (("bot@test.com",), (), True),
+        (("BOT@Test.com",), (), True),
+        (("bot+carol@test.com",), (), True),
+        (('"Istota" <bot+carol@test.com>',), (), True),
+        (("carol@test.com",), ("bot@test.com",), False),
+        (("carol@test.com",), ("bot+carol@test.com",), False),
+        (("robot@test.com",), (), False),
+        (("bot@elsewhere.com",), (), False),
+        ((), (), False),
+    ])
+    def test_to_versus_cc(self, to, cc, expected):
+        from istota.email_ownership import bot_addressed_in_to
+
+        email = _email(to=to, cc=cc)
+        assert bot_addressed_in_to(self._config(), email) is expected
+
+    def test_no_bot_address_configured(self):
+        from istota.email_ownership import bot_addressed_in_to
+
+        config = Config()
+        assert bot_addressed_in_to(config, _email()) is False
+
+    @pytest.mark.parametrize("to, cc, expected", [
+        (("bot+carol@test.com",), (), True),
+        (("dave@test.com",), ("bot+carol@test.com",), False),
+    ])
+    def test_the_poller_passes_it_to_ingest(self, make_config, to, cc, expected):
+        config = make_config()
+        config.email = _email_config()
+        config.users = {"carol": UserConfig(email_addresses=["carol@test.com"])}
+        envelope = _envelope(id="adr", sender="carol@test.com")
+        email = _email(id="adr", sender="carol@test.com", to=to, cc=cc)
+        captured = {}
+        real_ingest = inbound_module.ingest_message
+
+        def _spy(conn, cfg, msg):
+            captured["addressed"] = msg.addressed_to_bot
+            return real_ingest(conn, cfg, msg)
+
+        with (
+            patch("istota.transport.email.inbound.list_emails", return_value=[envelope]),
+            patch("istota.transport.email.inbound.read_email", return_value=email),
+            patch("istota.transport.email.inbound.download_attachments", return_value=[]),
+            patch("istota.transport.email.inbound.ingest_message", side_effect=_spy),
+        ):
+            poll_emails(config)
+
+        assert captured["addressed"] is expected
+
+
 class TestPollEmailsPlusAddressRouting:
     """Tests for plus-address routing in the poll loop."""
 

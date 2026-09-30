@@ -35,6 +35,7 @@ class TestIngestMessage:
             reply_to_content="parent text",
             attachments=["Talk/a.png"],
             is_group_chat=True,
+            addressed_to_bot=True,
             output_target="both",
             model="claude-opus-4-8",
             effort="high",

@@ -33,9 +33,10 @@ WEBMIRROR_REF_PREFIX = "istota:webmirror:"
 class IncomingMessage:
     """A surface-normalized inbound message, ready to become a task.
 
-    A transport's ``poll()`` yields one of these per message that SHOULD create
-    a task. Messages the transport handles internally (commands, confirmation
-    replies, mentions it chose to ignore) are not emitted.
+    A transport's ``poll()`` yields one of these per conversational message.
+    Messages the transport handles internally (commands, confirmation replies)
+    are not emitted. Whether one gets a task is the speech gate's decision,
+    made in ``record_inbound`` after the turn is stored.
 
     The field-to-column mapping is the contract ``ingest_message`` relies on:
     ``channel_token`` → ``Task.conversation_token``, ``delivery_token`` →
@@ -55,6 +56,11 @@ class IncomingMessage:
     reply_to_content: str | None = None
     attachments: list[str] = field(default_factory=list)
     is_group_chat: bool = False
+    # Whether the surface detected an explicit address to the bot: a Talk
+    # @mention, the bot named in a web message, the bot in an email's To line.
+    # Unset means no. A direct conversation is answered by the gate's first
+    # rung whatever this says, so the default only matters in a group.
+    addressed_to_bot: bool = False
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None

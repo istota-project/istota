@@ -109,15 +109,15 @@ class TestRecordThenDecide:
             assert [r["task_id"] for r in rows] == [result.task_id]
             assert [d["rung"] for d in _decisions(conn, "grp")] == ["addressed"]
 
-    def test_an_unstated_address_keeps_todays_behaviour(self, config, db_path):
-        # Until the surfaces state it, every caller has already dropped an
-        # unaddressed turn before calling in, so the default is "addressed".
+    def test_an_unstated_address_is_not_addressed(self, config, db_path):
+        # Every surface states it since SG 5, so a caller that says nothing
+        # gets no answer in a group. A DM is still answered by rung 1.
         with db.get_db(db_path) as conn:
             result = record_inbound(
                 conn, config, surface="talk", surface_ref="grp", user_id="alice",
                 text="@istota hi", is_group_chat=True,
             )
-        assert result.outcome == "created"
+        assert result.outcome == "recorded"
 
     def test_mode_off_speaks_in_a_group(self, config, db_path):
         config.speech_gate.mode = "off"
