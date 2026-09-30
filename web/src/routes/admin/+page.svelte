@@ -13,6 +13,7 @@
     type AdminSubscriptionSpend,
   } from '$lib/api';
   import { Avatar, AvatarPicker, Field, NoticeBanner, StatTile } from '$lib/components/ui';
+  import UserCell from '$lib/admin/UserCell.svelte';
   import { getCurrentUser } from '$lib/userContext';
   import {
     formatCost,
@@ -551,37 +552,7 @@
               {@const totalSeg = segments.reduce((acc, s) => acc + s.count, 0)}
               <tr>
                 <td>
-                  <!-- A flex row inside the cell rather than on it: `display:
-									     flex` on a `<td>` takes it out of the table's own
-									     layout, which is what sizes these columns. -->
-                  <span class="user-cell">
-                    <!-- Bare: `/me` carries the reader's own hash and the
-										     bot's, and nothing carries a third party's (D13), so
-										     this revalidates on an ETag. A user this admin
-										     shares no room with 404s — being an admin is not the
-										     endpoint's predicate, deliberately — and falls back
-										     to the chip the table drew before.
-
-										     Two consequences of the keyed `{#each}`, both
-										     accepted. The 60s refresh hands every row the same
-										     props, so the URL never changes and nothing
-										     re-requests — which is also why `Avatar`'s failure
-										     chip is sticky here where the transcript's is not
-										     (that one re-mints a cid per rebuild): a request
-										     that failed once holds the chip until the page is
-										     left. And a mount costs one request per listed user
-										     at once, bounded after that by the 404's own 30s
-										     negative cache. -->
-                    <span class="user-face">
-                      <Avatar
-                        kind="user"
-                        userId={u.username}
-                        label={u.display_name || u.username}
-                      />
-                    </span>
-                    <span class="username">{u.display_name || u.username}</span>
-                    {#if u.is_admin}<span class="admin-badge">admin</span>{/if}
-                  </span>
+                  <UserCell userId={u.username} displayName={u.display_name} isAdmin={u.is_admin} />
                 </td>
                 <td class="num col-total">{formatNumber(u.tasks_total)}</td>
                 <td class="source-cell">
@@ -1188,31 +1159,8 @@
     white-space: nowrap;
   }
 
-  /* Face, name, badge on one line. The name is what may be too long for the
-	   column, so it is the part that gives — the face keeps its box. */
-  .user-cell {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-  }
-  .user-face {
-    /* Set on the avatar's own wrapper, never on the cell or the row:
-		   --avatar-size inherits, and a shared container would resize every
-		   avatar nested under it. */
-    --avatar-size: 1.5rem;
-    display: flex;
-    flex: 0 0 auto;
-    margin-right: var(--space-2);
-  }
   .username {
     font-weight: 500;
-  }
-  /* Only in this cell, which is the one that now shares its width with a
-	   picture. The scheduler tables use the same class and are left alone. */
-  .user-cell .username {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Neutral count chip (module-poller row). Distinct from .admin-badge — this
@@ -1225,21 +1173,6 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
     color: var(--text-muted);
-  }
-
-  /* Matches .effort-chip's metrics so the two chips read as one family;
-	   amber is the identity accent, not a severity. */
-  .admin-badge {
-    display: inline-block;
-    margin-left: var(--space-2);
-    padding: 0.05rem var(--space-2);
-    font-size: 0.55rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    border-radius: var(--radius-pill);
-    background: color-mix(in srgb, var(--accent-amber) 18%, transparent);
-    color: var(--accent-amber);
   }
 
   /* The tiles themselves are `StatTile`; this sizes the wall they sit in. */
@@ -1711,12 +1644,6 @@
     }
     .users-grid .col-cost {
       width: 5.5rem;
-    }
-    /* The user column is too narrow to hold name + chip on one line, and the
-		   wrap leaves the chip stranded under an off-centre name. Admin status
-		   isn't actionable from the mobile view, so drop it. */
-    .admin-badge {
-      display: none;
     }
     /* The narrow-screen step-down for the KPI numerals is gone with the
        hand-rolled tile: StatTile's default sits at --text-lg (1.05rem), which

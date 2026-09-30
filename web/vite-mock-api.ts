@@ -1,5 +1,5 @@
 import type { Plugin } from 'vite';
-import type { AdminStats } from './src/lib/api';
+import type { AdminStats, AdminUsers } from './src/lib/api';
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
@@ -3675,12 +3675,103 @@ const chatFilesHandler: MockHandler = ({ url }) => {
   };
 };
 
+const mockAdminUsers: AdminUsers = {
+  email_enabled: true,
+  users: [
+    {
+      user_id: 'carol',
+      display_name: 'Carol',
+      is_admin: true,
+      state: 'password_set',
+      identity: {
+        email: 'carol@example.com',
+        disabled: false,
+        last_login_at: new Date().toISOString(),
+      },
+    },
+    {
+      user_id: 'alice',
+      display_name: 'Alice',
+      is_admin: false,
+      state: 'nextcloud_only',
+      identity: null,
+    },
+    {
+      user_id: 'bob',
+      display_name: 'Bob',
+      is_admin: false,
+      state: 'passwordless',
+      identity: { email: 'bob@example.com', disabled: false, last_login_at: null },
+    },
+    {
+      user_id: 'dave',
+      display_name: 'Dave',
+      is_admin: false,
+      state: 'password_set',
+      identity: { email: 'dave@example.com', disabled: true, last_login_at: null },
+    },
+  ],
+  orphans: [],
+};
+
+const adminUsersHandler: MockHandler = ({ url, method, body }) => {
+  if (url === '/istota/api/admin/users') {
+    if (method === 'GET') return mockAdminUsers;
+    if (method !== 'POST') return undefined;
+    const userId = String(body?.user_id ?? '').trim();
+    const email = String(body?.email ?? '')
+      .trim()
+      .toLowerCase();
+    if (!userId || !/^[^\s@]+@[^\s@]+$/.test(email))
+      return { __status: 400, detail: 'User ID and a valid email are required.' };
+    if (mockAdminUsers.users.some((row) => row.user_id !== userId && row.identity?.email === email))
+      return { __status: 400, detail: 'That email is already attached to another user.' };
+    let row = mockAdminUsers.users.find((row) => row.user_id === userId);
+    if (!row) {
+      if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(userId))
+        return { __status: 400, detail: 'Enter a valid user ID.' };
+      row = {
+        user_id: userId,
+        display_name: body.display_name || userId,
+        is_admin: false,
+        state: 'passwordless',
+        identity: null,
+      };
+      mockAdminUsers.users.push(row);
+    }
+    row.identity = { email, disabled: false, last_login_at: null };
+    row.state = 'passwordless';
+    return { sent: true };
+  }
+  const match = url.match(/^\/istota\/api\/admin\/users\/([^/]+)(?:\/([^/]+))?$/);
+  if (!match) return undefined;
+  const row = mockAdminUsers.users.find((row) => row.user_id === decodeURIComponent(match[1]));
+  if (!row?.identity) return { __status: 404, detail: 'Email login not found.' };
+  if (method === 'DELETE' && !match[2]) {
+    row.identity = null;
+    row.state = 'nextcloud_only';
+    return { removed: true };
+  }
+  if (method === 'POST' && match[2] === 'disable') {
+    row.identity.disabled = !!body?.disabled;
+    return { updated: true };
+  }
+  if (method === 'POST' && match[2] === 'logout-all') return { updated: true };
+  if (method === 'POST' && ['invite', 'reset', 'login-link'].includes(match[2])) {
+    if (row.identity.disabled)
+      return { __status: 400, detail: 'Enable web access before sending a link.' };
+    return { sent: true };
+  }
+  return { __status: 404, detail: 'Unknown user action.' };
+};
+
 const handlers: MockHandler[] = [
   ({ url }) => (url === '/istota/api/me' ? user : undefined),
   avatarsHandler,
   chatFilesHandler,
   chatHandler,
   notificationsHandler,
+  adminUsersHandler,
 
   ({ url }) =>
     url === '/istota/api/admin/stats'

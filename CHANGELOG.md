@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Admin Users now uses the same user cells as Status, with one action menu per row and a table that fits the available width. Add user and Attach email open dialogs with local error feedback; web-access help is collapsed above the list.
+
 - Sign-in now shows one email method at a time, with a choice between password and email link. Switching methods keeps the entered address, and password recovery sits beside the password label.
 
 - Ansible deployments now enable email login alongside Nextcloud login by default. Users still need a configured email login identity to sign in by email.
