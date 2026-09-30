@@ -94,17 +94,26 @@ def config(tmp_path, _bwrap_flag_cache):
     return cfg
 
 
+def _share(config, token: str, user: str, *scopes: str) -> None:
+    """Grant through `!room share`, the writer a member actually uses."""
+    import asyncio
+
+    from istota import commands
+
+    with db.get_db(config.db_path) as conn:
+        for scope in scopes:
+            reply = asyncio.run(commands.dispatch(
+                config, user, token, f"!room share {scope}", surface="web", conn=conn,
+            ))
+            assert f"`{scope}` is shared" in reply.text, reply.text
+
+
 def _room(config, *, shared: bool, grants: tuple[str, ...] = ()) -> str:
     with db.get_db(config.db_path) as conn:
         room = db.create_web_chat_room(conn, "alice", "Family")
         if shared:
             db.add_room_member(conn, room.token, "bob")
-        for scope in grants:
-            conn.execute(
-                "INSERT INTO room_data_grants (room_token, user_id, scope) "
-                "VALUES (?, ?, ?)",
-                (room.token, "alice", scope),
-            )
+    _share(config, room.token, "alice", *grants)
     return room.token
 
 
@@ -313,13 +322,7 @@ class TestAfterTheSenderGrants:
 
     def test_a_grant_by_another_member_is_not_the_senders(self, config):
         token = _room(config, shared=True)
-        with db.get_db(config.db_path) as conn:
-            for scope in ("files", "calendar", "health"):
-                conn.execute(
-                    "INSERT INTO room_data_grants (room_token, user_id, scope) "
-                    "VALUES (?, 'bob', ?)",
-                    (token, scope),
-                )
+        _share(config, token, "bob", "files", "calendar", "health")
         seen = _run(config, token)
         assert "calendar" in seen["disabled"]
         assert "calendar" not in seen["allowed_skills"]

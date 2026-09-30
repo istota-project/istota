@@ -1507,11 +1507,69 @@ async def cmd_room(ctx: CommandContext):
     if sub == "guests":
         return _room_guests(conn, token, ctx.user_id, rest.lower())
 
+    if sub in ("share", "unshare"):
+        return _room_share(config, conn, room, ctx.user_id, sub, rest.lower())
+
     return (
         "Usage: `!room` (show), `!room model <alias>`, `!room effort <level>`, "
-        "`!room host`, `!room guests <off|held|direct>`. "
+        "`!room host`, `!room guests <off|held|direct>`, "
+        "`!room share [<scope>|all|none]`, `!room unshare <scope>`. "
         "Use `default` to clear."
     )
+
+
+def _room_share(config, conn, room, user_id: str, sub: str, arg: str) -> str:
+    """`!room share` / `!room unshare`: the caller's own grants in this room.
+
+    A grant means answers using that scope may land in front of everyone who
+    reads the room (speech gate draft B3). It is the caller's alone: the command
+    takes no user id, and a grant never reaches a guest's turn, which runs at
+    room-safe reach whatever the host granted (multiplayer D2).
+    """
+    from . import room_policy, room_scopes
+    from .skills._loader import load_skill_index
+
+    if room.side_of:
+        return "A side room is private to you; there is nothing to share here."
+    if not room_policy.host_present(conn, room.token, user_id):
+        return "Only a member of this room can share data in it."
+    index = load_skill_index(config.skills_dir, bundled_dir=config.bundled_skills_dir)
+    scopes = room_scopes.scope_names(index)
+    granted = room_scopes.granted_scopes(conn, room.token, user_id)
+
+    if sub == "share" and not arg:
+        shown = [s for s in scopes if s in granted]
+        withheld = [s for s in scopes if s not in granted]
+        return (
+            f"Shared by you here: {', '.join(shown) or 'nothing'}.\n"
+            f"Withheld: {', '.join(withheld) or 'nothing'}.\n"
+            "`!room share <scope>` grants one, `!room unshare <scope>` takes it "
+            "back, `!room share all|none` does every one."
+        )
+    if sub == "share" and arg == "none":
+        room_scopes.revoke_scopes(conn, room.token, user_id)
+        return "Nothing of yours is shared in this room now."
+    if sub == "share" and arg == "all":
+        room_scopes.grant_scopes(conn, room.token, user_id, scopes)
+        return "Everything of yours is shared in this room now." + _share_note(conn, room)
+    if arg not in scopes:
+        return (
+            f"`{arg}` is not a scope. Scopes: {', '.join(scopes)}."
+        )
+    if sub == "unshare":
+        room_scopes.revoke_scopes(conn, room.token, user_id, [arg])
+        return f"`{arg}` is withheld in this room again."
+    room_scopes.grant_scopes(conn, room.token, user_id, [arg])
+    return (
+        f"`{arg}` is shared in this room: everyone who reads it sees answers "
+        "that use it." + _share_note(conn, room)
+    )
+
+
+def _share_note(conn, room) -> str:
+    if db.room_is_shared(conn, room.token):
+        return ""
+    return " The room is private right now, so the grant applies once someone else joins."
 
 
 def _room_host(conn, token: str, user_id: str) -> str:

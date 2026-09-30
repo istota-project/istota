@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from . import db
 
@@ -66,6 +66,39 @@ def withheld_scopes(
 ) -> frozenset[str]:
     """The scopes not granted."""
     return frozenset(scope_names(skill_index)) - granted
+
+
+def grant_scopes(
+    conn: sqlite3.Connection, room_token: str, user_id: str, scopes: Iterable[str],
+) -> None:
+    """Record ``user_id``'s own grant of each scope in ``room_token``.
+
+    The one writer. It takes no second user: a grant is the caller's consent,
+    and nobody grants on another member's behalf. Callers validate the names
+    against `scope_names` first.
+    """
+    conn.executemany(
+        "INSERT OR IGNORE INTO room_data_grants (room_token, user_id, scope) "
+        "VALUES (?, ?, ?)",
+        [(room_token, user_id, scope) for scope in scopes],
+    )
+
+
+def revoke_scopes(
+    conn: sqlite3.Connection, room_token: str, user_id: str,
+    scopes: Iterable[str] | None = None,
+) -> None:
+    """Withdraw ``user_id``'s grants in ``room_token``: the named ones, or all."""
+    if scopes is None:
+        conn.execute(
+            "DELETE FROM room_data_grants WHERE room_token = ? AND user_id = ?",
+            (room_token, user_id),
+        )
+        return
+    conn.executemany(
+        "DELETE FROM room_data_grants WHERE room_token = ? AND user_id = ? AND scope = ?",
+        [(room_token, user_id, scope) for scope in scopes],
+    )
 
 
 def is_scope_granted(
