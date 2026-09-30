@@ -2309,9 +2309,12 @@ def set_briefing_last_run(conn: sqlite3.Connection, user_id: str, briefing_name:
 
 @dataclass
 class ConversationMessage:
+    # The turn's task id, or 0 for an unanswered turn, which has no task.
     id: int
     prompt: str
-    result: str
+    # None means nobody answered this turn: a message the room recorded
+    # without creating a task for it.
+    result: str | None
     created_at: str
     actions_taken: str | None = None
     source_type: str = "talk"
@@ -2693,54 +2696,73 @@ def _conversation_history_from_messages(
     back into the (prompt, result) ConversationMessage shape callers expect.
 
     The user row and assistant row of one turn share a `task_id`; the join to
-    `tasks` recovers per-task metadata (source_type, user_id, actions_taken) the
+    `tasks` recovers per-task metadata (source_type, actions_taken) the
     role/body-only message rows don't carry, and applies the same
-    completed/result-present + exclusion filters as the legacy path. An in-flight
-    turn (user row, no assistant row yet) is excluded by the inner join, exactly
-    as the `result IS NOT NULL` filter excludes it today. `id` stays the task id
-    so reply-parent / memory-dedup callers keyed on it are unaffected.
+    completed/result-present + exclusion filters as the legacy path. `id` stays
+    the task id so reply-parent / memory-dedup callers keyed on it are
+    unaffected.
+
+    A user row with no `task_id` is a turn the room recorded and nobody
+    answered, returned with `result=None` and `id=0`. Both joins are therefore
+    outer, with `t.status = 'completed'` in the join condition rather than the
+    WHERE clause, where it would turn the outer join back into an inner one and
+    drop exactly those rows. A user row that *has* a task still needs a
+    completed task and a paired assistant row, so an in-flight or failed turn is
+    excluded as before. The speaker is read off the message row first: an
+    unanswered row has no task to name one, and in a shared room the two differ.
     """
     query = f"""
-        SELECT t.id AS id, mu.body AS prompt, ma.body AS result,
-               t.created_at AS created_at, t.actions_taken AS actions_taken,
-               t.source_type AS source_type, t.user_id AS user_id,
+        SELECT mu.task_id AS task_id, mu.body AS prompt, ma.body AS result,
+               COALESCE(t.created_at, mu.created_at) AS created_at,
+               t.actions_taken AS actions_taken,
+               COALESCE(t.source_type, mu.origin_surface) AS source_type,
+               COALESCE(mu.author_user_id, t.user_id) AS user_id,
+               mu.author_label AS author_label,
                {EMAIL_SENDER_SUBQUERY.format(alias="t")}
         FROM messages mu
-        JOIN messages ma
+        LEFT JOIN tasks t
+          ON t.id = mu.task_id AND t.status = 'completed'
+        LEFT JOIN messages ma
           ON ma.room_token = mu.room_token AND ma.task_id = mu.task_id
              AND ma.role = 'assistant'
-        JOIN tasks t ON t.id = mu.task_id
         WHERE mu.room_token = ? AND mu.role = 'user'
-          AND t.status = 'completed'
+          AND (mu.task_id IS NULL OR (t.id IS NOT NULL AND ma.id IS NOT NULL))
     """
     params: list = [conversation_token]
 
     if exclude_task_id is not None:
-        query += " AND t.id != ?"
+        query += " AND (mu.task_id IS NULL OR mu.task_id != ?)"
         params.append(exclude_task_id)
 
     if exclude_source_types:
         placeholders = ", ".join("?" for _ in exclude_source_types)
-        query += f" AND t.source_type NOT IN ({placeholders})"
+        query += f" AND (mu.task_id IS NULL OR t.source_type NOT IN ({placeholders}))"
         params.extend(exclude_source_types)
 
-    query += " ORDER BY t.created_at DESC, t.id DESC LIMIT ?"
+    query += " ORDER BY COALESCE(t.created_at, mu.created_at) DESC, mu.id DESC LIMIT ?"
     params.append(limit)
 
     rows = conn.execute(query, params).fetchall()
-    return [
-        ConversationMessage(
-            id=row["id"],
+    history: list[ConversationMessage] = []
+    for row in reversed(rows):
+        answered = row["task_id"] is not None
+        history.append(ConversationMessage(
+            id=row["task_id"] if answered else 0,
             prompt=row["prompt"],
-            result=row["result"],
+            result=row["result"] if answered else None,
             created_at=row["created_at"],
-            actions_taken=row["actions_taken"] if "actions_taken" in row.keys() else None,
-            source_type=row["source_type"] if "source_type" in row.keys() else "talk",
-            user_id=row["user_id"] if "user_id" in row.keys() else None,
-            external_sender=_external_sender_for_row(row, user_email_addresses),
-        )
-        for row in reversed(rows)
-    ]
+            actions_taken=row["actions_taken"],
+            source_type=row["source_type"] or "talk",
+            user_id=row["user_id"],
+            # An answered email turn's sender comes off `processed_emails` as
+            # before; an unanswered row has no task, so its stored label (already
+            # sanitized at ingest) is the only record of who wrote it.
+            external_sender=(
+                _external_sender_for_row(row, user_email_addresses)
+                if answered else row["author_label"]
+            ),
+        ))
+    return history
 
 
 def _messages_caught_up(conn: sqlite3.Connection, conversation_token: str) -> bool:

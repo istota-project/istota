@@ -373,7 +373,10 @@ def _triage_older_messages(
 
     def _format_triage_msg(i: int, msg: ConversationMessage) -> str:
         ts = msg.created_at[:16] if msg.created_at else "unknown"
-        lines = f"[{i}] ({ts}) {_speaker_label(msg)}: {msg.prompt}\nBot: {msg.result}"
+        lines = f"[{i}] ({ts}) {_speaker_label(msg)}: {msg.prompt}"
+        # An unanswered turn has no reply; a `Bot:` line would invent one.
+        if msg.result is not None:
+            lines += f"\nBot: {msg.result}"
         if msg.actions_taken:
             actions_line = _format_actions_line(msg.actions_taken)
             if actions_line:
@@ -452,9 +455,10 @@ def format_context_for_prompt(
         timestamp = _format_created_at(msg.created_at, user_tz)
         formatted.append(f"[{timestamp}] {_speaker_label(msg)}: {msg.prompt}")
         result = msg.result
-        if truncation > 0 and len(result) > truncation:
-            result = result[:truncation] + "...[truncated]"
-        formatted.append(f"[{timestamp}] Bot: {result}")
+        if result is not None:
+            if truncation > 0 and len(result) > truncation:
+                result = result[:truncation] + "...[truncated]"
+            formatted.append(f"[{timestamp}] Bot: {result}")
 
         # Append compact actions summary if available
         if msg.actions_taken:

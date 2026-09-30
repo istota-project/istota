@@ -2487,6 +2487,26 @@ class TestCmdExport:
         assert "---" not in content
 
     @pytest.mark.asyncio
+    async def test_an_unanswered_last_turn_does_not_reset_the_export_cursor(
+        self, make_config,
+    ):
+        config = make_config()
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk")
+            ids = _seed_conversation(conn, count=2)
+            db.backfill_room_messages_from_tasks(conn, "room1")
+            db.add_message(
+                conn, "room1", role="user", body="just between us",
+                origin_surface="talk", task_id=None, author_user_id="bob",
+            )
+            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        content = export_path.read_text()
+        assert f"last_id={ids[-1]}," in content.split("\n", 1)[0]
+        assert "just between us" in content
+
+    @pytest.mark.asyncio
     async def test_empty_channel(self, make_config):
         config = make_config()
         with db.get_db(config.db_path) as conn:

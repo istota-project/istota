@@ -2568,8 +2568,10 @@ async def cmd_export(ctx: CommandContext):
     if not messages:
         return "No messages to export."
 
-    last_id = messages[-1].id
-    title = await resolve_room_name(ctx, conversation_token)
+    # Not `messages[-1].id`: an unanswered turn carries id 0, and the
+    # incremental export keys on the highest task id already written.
+    last_id = max(m.id for m in messages)
+    title =await resolve_room_name(ctx, conversation_token)
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     if tz:
