@@ -6485,11 +6485,21 @@ You have access to:
     if task.source_type in ("whatsapp", "web", "talk", "sms"):
         from .message_relays import recipient_context
 
-        if conn is not None:
-            relay_context = recipient_context(conn, actor_user_id=task.user_id, task_id=task.id)
-        elif config.db_path.exists():
-            with db.get_db(config.db_path) as relay_conn:
-                relay_context = recipient_context(relay_conn, actor_user_id=task.user_id, task_id=task.id)
+        # Optional, like room_identity_line: a failed read must cost the relay
+        # framing, not the task. Logged loudly because an answer then reaches
+        # the model without the question it answers (ISSUE-573).
+        try:
+            if conn is not None:
+                relay_context = recipient_context(conn, actor_user_id=task.user_id, task_id=task.id)
+            elif config.db_path and Path(config.db_path).is_file():
+                with db.get_db(config.db_path) as relay_conn:
+                    relay_context = recipient_context(relay_conn, actor_user_id=task.user_id, task_id=task.id)
+        except Exception:
+            logger.warning(
+                "Task %s: relay context unavailable, prompt built without it",
+                task.id, exc_info=True,
+            )
+            relay_context = ""
 
     user_blocks = [
         memory_section,

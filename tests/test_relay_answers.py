@@ -374,3 +374,32 @@ def test_task_and_answer_roll_back_when_dedup_association_fails(setup):
         assert relays.get_relay(conn, actor_user_id='alice', relay_id=relay)['answer_text'] is None
         conn.execute('DROP TRIGGER fail_association')
     assert receive(config, event(config)).disposition == 'relay_answer'
+
+
+@pytest.mark.parametrize('with_conn', [False, True])
+@pytest.mark.parametrize('source_type', ['web', 'talk', 'whatsapp', 'sms'])
+def test_a_relay_read_that_fails_degrades_to_no_relay_context(
+    tmp_path, caplog, source_type, with_conn,
+):
+    """#573: a database file with no schema raised out of prompt assembly,
+    which fails the whole task. The read is optional, like the room line, so
+    the prompt is built without relay framing and the loss is logged."""
+    from istota.config import Config
+    from istota.executor import build_prompt
+
+    config = Config()
+    config.db_path = tmp_path / 'istota.db'
+    config.db_path.write_bytes(b'')
+    task = db.Task(id=7, status='running', source_type=source_type,
+                   user_id='alice', prompt='hi', conversation_token='tok')
+    with caplog.at_level('WARNING', logger='istota.executor'):
+        if with_conn:
+            # The scheduler's shape: it hands build_prompt an open connection.
+            with db.get_db(config.db_path) as conn:
+                composed = build_prompt(task, [], config, conn=conn)
+        else:
+            composed = build_prompt(task, [], config)
+    assert 'UNTRUSTED RELAY' not in composed.user
+    assert "## User's request" in composed.user
+    assert any('relay context' in r.getMessage() and r.levelname == 'WARNING'
+               for r in caplog.records)
