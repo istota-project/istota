@@ -1125,6 +1125,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # After the author backfill, which is what it reads.
     _migrate_room_participants(conn)
     _migrate_room_data_grants(conn)
+    _migrate_side_rooms(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -1165,6 +1166,9 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     # Rebuilds `message_relays` in place; recreates its indexes itself, so the
     # open-pair constraint is never absent between this and `schema.sql`.
     _migrate_message_relays_surfaces(conn)
+    # The request table the relays point at, for the same reason and in the
+    # same way: a CHECK cannot be altered, so it is rebuilt.
+    _migrate_skill_request_room_kinds(conn)
     # And then the inbox's one-shot seed, which needs that table to exist. It
     # takes a transaction of its own, so it commits whatever the migrations
     # above left open first (ISSUE-261); nothing after it depends on the
@@ -2016,11 +2020,15 @@ def cancel_pending_confirmations(
 def get_pending_confirmation(
     conn: sqlite3.Connection,
     conversation_token: str,
+    *,
+    user_id: str | None = None,
 ) -> Task | None:
     """
     Get a task that is pending confirmation for a conversation.
 
     Returns the most recent task awaiting confirmation, or None if none found.
+    ``user_id`` narrows it to that user's tasks, for a caller answering on
+    their behalf from somewhere else (a side room answering its parent).
     """
     cursor = conn.execute(
         f"""
@@ -2028,10 +2036,11 @@ def get_pending_confirmation(
         FROM tasks
         WHERE conversation_token = ?
         AND status = 'pending_confirmation'
+        AND (? IS NULL OR user_id = ?)
         ORDER BY created_at DESC
         LIMIT 1
         """,
-        (conversation_token,),
+        (conversation_token, user_id, user_id),
     )
     row = cursor.fetchone()
     if not row:
@@ -3908,10 +3917,15 @@ def _usable_as_delivery_default(
     - **A channel room.** `log_channel` and `alerts_channel` are machine-owned;
       the entrypoint even posts into `alerts` at boot, so activity alone would
       hand a user's default to whichever the daemon last wrote to.
+    - **A side room** (multiplayer D4). It is private, but it is the companion
+      of one shared room and is created by the system on that room's need, so
+      a default landing there would file unrelated alerts under that room.
     """
     if token in channels:
         return False
     if visible_room(conn, user_id, token) is None:
+        return False
+    if is_side_room(conn, token):
         return False
     return not (set(list_room_members(conn, token)) - {user_id})
 
@@ -4169,6 +4183,10 @@ class Room:
     # queries that compute it (`list_member_rooms`) — a room fetched by token
     # carries None rather than a stale stamp.
     last_activity: str | None = None
+    #: A side room's parent (multiplayer D4), and the one member it is for.
+    #: None on every other room.
+    side_of: str | None = None
+    side_for_user: str | None = None
 
 
 @dataclass
@@ -4226,6 +4244,8 @@ def _row_to_room(row: sqlite3.Row) -> Room:
             row["model_namespace"] if "model_namespace" in keys else None
         ),
         last_activity=row["last_activity"] if "last_activity" in keys else None,
+        side_of=row["side_of"] if "side_of" in keys else None,
+        side_for_user=row["side_for_user"] if "side_for_user" in keys else None,
     )
 
 
@@ -4609,6 +4629,86 @@ def list_member_rooms(
 def get_room(conn: sqlite3.Connection, token: str) -> Room | None:
     row = conn.execute("SELECT * FROM rooms WHERE token = ?", (token,)).fetchone()
     return _row_to_room(row) if row else None
+
+
+def is_side_room(conn: sqlite3.Connection, token: str) -> bool:
+    row = conn.execute(
+        "SELECT side_of FROM rooms WHERE token = ?", (token,),
+    ).fetchone()
+    return bool(row and row["side_of"])
+
+
+def get_side_room(
+    conn: sqlite3.Connection, parent_token: str, user_id: str,
+) -> Room | None:
+    """``user_id``'s side room of ``parent_token``, or None when none exists."""
+    row = conn.execute(
+        "SELECT * FROM rooms WHERE side_of = ? AND side_for_user = ?",
+        (parent_token, user_id),
+    ).fetchone()
+    return _row_to_room(row) if row else None
+
+
+def ensure_side_room(
+    conn: sqlite3.Connection, parent_token: str, user_id: str,
+) -> Room:
+    """``user_id``'s side room of ``parent_token``, created on first need (D4).
+
+    **This is the one place the system makes a room, and why it may.** Rooms
+    are user-created: nothing mints a room to deliver into, and an email thread
+    routes into a room a person made. A side room is not a new conversation
+    and not a new audience. It is the private companion of a room the user is
+    *already a member of*, with that user as its only member for good, and it
+    exists only because that room produced something for them alone (a
+    whisper, a confirmation). It never becomes anyone's delivery default
+    (`_usable_as_delivery_default`), never gains a second member, and nothing
+    that is not about its parent is ever routed into it. Refused, with
+    ``ValueError``, for a parent that does not exist, a user who is not a
+    member of it, and a parent that is itself a side room.
+
+    Idempotent, including under a race: the partial unique index on
+    ``(side_of, side_for_user)`` keeps one row, `INSERT OR IGNORE` loses
+    quietly, and only the writer whose row landed makes the membership, the
+    web binding and the web handle.
+    """
+    parent = get_room(conn, parent_token)
+    if parent is None:
+        raise ValueError("parent_unavailable")
+    if parent.side_of:
+        raise ValueError("side_room_of_side_room")
+    if not is_room_member(conn, parent_token, user_id):
+        raise ValueError("not_a_member")
+    existing = get_side_room(conn, parent_token, user_id)
+    if existing is not None:
+        return existing
+    token = _new_web_chat_token(user_id)
+    name = f"re: {room_display_name(parent, None) or 'room'}"[:80]
+    conn.execute(
+        "INSERT OR IGNORE INTO rooms (token, user_id, name, origin, side_of, side_for_user) "
+        "VALUES (?, ?, ?, 'web', ?, ?)",
+        (token, user_id, name, parent_token, user_id),
+    )
+    room = get_side_room(conn, parent_token, user_id)
+    assert room is not None
+    if room.token == token:
+        add_room_member(conn, token, user_id)
+        add_room_binding(conn, token, "web", token)
+        ensure_web_chat_handle(conn, user_id, token, name)
+    return room
+
+
+def side_room_parent(conn: sqlite3.Connection, token: str) -> Room | None:
+    """The side room ``token`` names, when it is one whose member still reads
+    its parent; None for any other room, and for a side room whose member has
+    left the parent or whose parent is gone."""
+    room = get_room(conn, token)
+    if room is None or not room.side_of or not room.side_for_user:
+        return None
+    if get_room(conn, room.side_of) is None:
+        return None
+    if not is_room_member(conn, room.side_of, room.side_for_user):
+        return None
+    return room
 
 
 def list_rooms(
@@ -6486,6 +6586,111 @@ def _migrate_message_relays_surfaces(conn: sqlite3.Connection) -> None:
         logger.warning("message_relays rebuild failed, will retry: %s", e)
 
 
+# The rebuilt `whatsapp_skill_requests`. A copy of schema.sql's, because this
+# runs before schema.sql; `tests/test_side_rooms.py` holds the two equal.
+_SKILL_REQUESTS_DDL = """CREATE TABLE whatsapp_skill_requests_rebuild (
+    id TEXT PRIMARY KEY,
+    requester_user_id TEXT NOT NULL,
+    origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+    request_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post')),
+    recipient_user_id TEXT NOT NULL,
+    relay_id TEXT UNIQUE,
+    text TEXT,
+    content_hash TEXT NOT NULL,
+    service_body TEXT,
+    service_hash TEXT NOT NULL,
+    template_body TEXT,
+    template_hash TEXT,
+    preview TEXT,
+    preview_digest TEXT,
+    provider TEXT NOT NULL,
+    binding_fingerprint TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('held','queued','sending','sent','uncertain','failed','cancelled','expired')),
+    approved_at TEXT,
+    approved_digest TEXT,
+    queue_deadline TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at TEXT,
+    content_cleared_at TEXT,
+    error_code TEXT,
+    origin TEXT,
+    destination TEXT,
+    UNIQUE (requester_user_id, origin_task_id, request_key)
+)"""
+
+_SKILL_REQUESTS_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_request_held_task "
+    "ON whatsapp_skill_requests(origin_task_id) WHERE state = 'held'",
+    "CREATE INDEX IF NOT EXISTS idx_whatsapp_request_queue "
+    "ON whatsapp_skill_requests(state, queue_deadline)",
+)
+
+
+def _migrate_skill_request_room_kinds(conn: sqlite3.Connection) -> None:
+    """Widen `whatsapp_skill_requests` to the side-room kinds (multiplayer D16).
+
+    `side_whisper` and `room_post` ride the relay request table rather than a
+    second hold table, so its `kind` CHECK is rebuilt by the procedure
+    `_migrate_message_relays_surfaces` documents: foreign keys off,
+    `legacy_alter_table` on for the rename (the `whatsapp_request_task_deleted`
+    trigger and `message_relays`' foreign key both name this table), create,
+    copy, drop, rename, indexes back, and a `foreign_key_check` of this table
+    before commit. A failure rolls back and the next boot retries.
+
+    The two new columns are added first, so a refused rebuild still leaves
+    every column the code reads; only a row of a new kind is refused, by the
+    CHECK still standing. Idempotent on the table's own SQL.
+    """
+    _add_columns(conn, "whatsapp_skill_requests", {"origin": "TEXT", "destination": "TEXT"})
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='whatsapp_skill_requests'"
+        ).fetchone()
+        if row is None or "room_post" in (row[0] or ""):
+            return
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(whatsapp_skill_requests)")]
+        conn.commit()
+        foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("PRAGMA legacy_alter_table=ON")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("DROP TABLE IF EXISTS whatsapp_skill_requests_rebuild")
+                conn.execute(_SKILL_REQUESTS_DDL)
+                listed = ",".join(cols)
+                conn.execute(
+                    f"INSERT INTO whatsapp_skill_requests_rebuild ({listed}) "
+                    f"SELECT {listed} FROM whatsapp_skill_requests"
+                )
+                conn.execute("DROP TABLE whatsapp_skill_requests")
+                conn.execute(
+                    "ALTER TABLE whatsapp_skill_requests_rebuild "
+                    "RENAME TO whatsapp_skill_requests"
+                )
+                for statement in _SKILL_REQUESTS_INDEXES:
+                    conn.execute(statement)
+                violations = conn.execute(
+                    "PRAGMA foreign_key_check(whatsapp_skill_requests)"
+                ).fetchall()
+                if violations:
+                    raise sqlite3.IntegrityError(
+                        f"{len(violations)} foreign key violation(s) in "
+                        "whatsapp_skill_requests"
+                    )
+            except BaseException:
+                conn.rollback()
+                raise
+            conn.commit()
+        finally:
+            conn.execute("PRAGMA legacy_alter_table=OFF")
+            conn.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
+    except sqlite3.Error as e:
+        logger.warning("whatsapp_skill_requests rebuild failed, will retry: %s", e)
+
+
 def _migrate_room_members(conn: sqlite3.Connection) -> None:
     """Backfill `room_members` for existing deploys (ISSUE-134). Folds in every
     participant of every registered room so a shared Talk room surfaces for all
@@ -7013,6 +7218,27 @@ def _migrate_room_data_grants(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         return  # marker table not created yet (very early fresh install)
+
+
+def _migrate_side_rooms(conn: sqlite3.Connection) -> None:
+    """Add `rooms.side_of` / `rooms.side_for_user` and their unique index.
+
+    Markered (`side_rooms_v1`) so a later migration can tell a database that
+    got the columns empty from one that predates them. Nothing is backfilled:
+    no side room existed before this, and minting one here would be exactly
+    the room nobody asked for that the rooms rule forbids.
+    """
+    _add_columns(conn, "rooms", {"side_of": "TEXT", "side_for_user": "TEXT"})
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side "
+            "ON rooms (side_of, side_for_user) WHERE side_of IS NOT NULL"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('side_rooms_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # rooms or the marker table not created yet
 
 
 def _migrate_notifications(conn: sqlite3.Connection) -> None:

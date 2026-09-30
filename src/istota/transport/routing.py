@@ -1213,4 +1213,8 @@ def resolve_delivery_plan(
         if fb is not None:
             resolved.append(fb)
 
-    return resolved
+    # A side room's output never reaches its parent (multiplayer D4); posting
+    # there is the held `room post` verb. Last, so no rung above can put the
+    # parent back.
+    from ..side_rooms import pin_plan
+    return pin_plan(config, task, resolved)

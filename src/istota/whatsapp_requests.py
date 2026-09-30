@@ -20,6 +20,16 @@ CONTENT_RETENTION_DAYS = 30
 REQUEST_KEY_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 
+#: Every request kind. The two side-room kinds (multiplayer D4, D16) ride this
+#: table rather than a second hold table: `side_whisper` is a task in a shared
+#: room writing to its principal's side room, `room_post` a side-room task's
+#: post into the parent room, held for the member's approval.
+KINDS = ("self_send", "relay_question", "side_whisper", "room_post")
+ROOM_KINDS = ("side_whisper", "room_post")
+_SELF_KINDS = ("self_send", "side_whisper", "room_post")
+_HELD_KINDS = ("relay_question", "room_post")
+
+
 class RequestError(ValueError):
     """A fixed, body-free refusal code, safe to pass to a caller."""
 
@@ -75,19 +85,26 @@ def _store_request(
     service_body: str, template_body: str | None, provider: str,
     binding_fingerprint: str, preview: str | None = None,
     relay_snapshot: dict | None = None, request_id: str | None = None,
-    relay_id: str | None = None,
+    relay_id: str | None = None, origin: dict | None = None,
+    destination: dict | None = None,
 ) -> dict:
     """Internal insertion after rendering and surface validation by the host.
 
     This is not a skill entry point. Its caller supplies validated immutable
     snapshots; it enforces task ownership, replay, consent and reservations.
+
+    Four kinds. A `self_send` and a `side_whisper` go to the requester and are
+    queued at once; a `relay_question` and a `room_post` are held for the
+    requester's approval of the exact preview. The two side-room kinds carry
+    their own `origin` and `destination` here, where a relay keeps them on its
+    `message_relays` row.
     """
     from . import message_relays
 
     _validate_input(request_key, text)
-    if kind not in ("self_send", "relay_question"):
+    if kind not in KINDS:
         raise RequestError("invalid_kind")
-    if kind == "self_send" and recipient_user_id != actor_user_id:
+    if kind in _SELF_KINDS and recipient_user_id != actor_user_id:
         raise RequestError("recipient_unavailable")
     if kind == "relay_question" and recipient_user_id == actor_user_id:
         raise RequestError("use_send")
@@ -107,31 +124,36 @@ def _store_request(
             if existing["content_hash"] != payload_hash:
                 raise RequestError("request_conflict")
             return dict(existing)
-        if kind == "relay_question":
-            if not preview or relay_snapshot is None:
+        if kind in _HELD_KINDS:
+            if not preview or (kind == "relay_question" and relay_snapshot is None):
                 raise RequestError("invalid_preview")
+            # One held request per task: the task parks on one confirmation.
             if task["whatsapp_confirmation_request_id"] or conn.execute(
                 "SELECT 1 FROM whatsapp_skill_requests WHERE origin_task_id=? AND state='held'",
                 (task_id,),
             ).fetchone():
                 raise RequestError("confirmation_pending")
+        if kind == "relay_question":
             message_relays._check_reservation(conn, actor_user_id=actor_user_id,
                                               recipient_user_id=recipient_user_id)
         request_id = request_id or str(uuid.uuid4())
         relay_id = (relay_id or str(uuid.uuid4())) if kind == "relay_question" else None
-        state = "held" if relay_id else "queued"
+        state = "held" if kind in _HELD_KINDS else "queued"
         conn.execute(
             """INSERT INTO whatsapp_skill_requests
             (id,requester_user_id,origin_task_id,request_key,kind,recipient_user_id,
              relay_id,text,content_hash,service_body,service_hash,template_body,
-             template_hash,preview,preview_digest,provider,binding_fingerprint,state,queue_deadline)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+             template_hash,preview,preview_digest,provider,binding_fingerprint,state,
+             origin,destination,queue_deadline)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                     CASE WHEN ?='queued' THEN datetime('now', ?) END)""",
             (request_id, actor_user_id, task_id, request_key, kind, recipient_user_id,
              relay_id, text, payload_hash, service_body, text_hash(service_body), template_body,
              text_hash(template_body) if template_body is not None else None,
              preview, text_hash(preview) if preview else None, provider, binding_fingerprint,
-             state, state, f"+{QUEUE_DEADLINE_SECONDS} seconds"),
+             state, json.dumps(origin) if origin is not None else None,
+             json.dumps(destination) if destination is not None else None,
+             state, f"+{QUEUE_DEADLINE_SECONDS} seconds"),
         )
         if relay_id:
             message_relays._insert_relay(
@@ -277,6 +299,10 @@ def enqueue_self_send(conn, config, *, actor_user_id: str, task_id: int,
 def logical_key(row) -> str:
     if row["kind"] == "relay_question":
         return "relay-question:" + row["relay_id"]
+    if row["kind"] == "room_post":
+        return "room-post:" + row["id"]
+    if row["kind"] == "side_whisper":
+        return "room-whisper:" + row["id"]
     return "skill-whatsapp:" + row["id"]
 
 
@@ -491,6 +517,10 @@ async def drain_requests(config, *, limit: int = 20) -> int:
 
     rows = await asyncio.to_thread(_pending_requests, config, max(0, min(limit, 100)))
     for row in rows:
+        if row["kind"] in ROOM_KINDS:
+            from . import side_rooms
+            await side_rooms.deliver_request(config, row)
+            continue
         if row["relay_id"]:
             from . import message_relays
             await message_relays.deliver_question(config, row)
@@ -515,7 +545,7 @@ async def drain_requests(config, *, limit: int = 20) -> int:
     return len(rows)
 
 
-def _question_response(conn, row) -> dict:
+def _question_response(conn, row, *, approval: str | None = None) -> dict:
     result = {"status": row["state"], "request_id": row["id"], "relay_id": row["relay_id"],
               "delivery_status": "pending" if row["state"] == "queued" else row["state"]}
     if row["state"] == "held":
@@ -523,6 +553,8 @@ def _question_response(conn, row) -> dict:
     relay = conn.execute("SELECT approval FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
     if relay is not None and relay["approval"]:
         result["approval"] = relay["approval"]
+    elif approval:
+        result["approval"] = approval
     return result
 
 
@@ -554,13 +586,31 @@ def _names_recipient(config, task, recipient_user_id: str) -> bool:
     return False
 
 
-def _clean_turn(conn, config, task, recipient_user_id: str) -> bool:
+def _quotes_prompt(task, text: str) -> bool:
+    """Whether ``text`` is the member's own words: whole, verbatim, in this
+    task's own prompt, with attachment names cut out as `_names_recipient` does."""
+    wanted = text.strip()
+    if not wanted:
+        return False
+    prompt = task.prompt or ""
+    for path in task.attachments or []:
+        name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+        if name:
+            prompt = prompt.replace(name, " ")
+    return wanted in prompt
+
+
+def _clean_turn(conn, config, task, recipient_user_id: str, *, post_text: str | None = None) -> bool:
     """ISSUE-565: skip the asker's approval only for a turn the daemon can vouch for.
 
     The recipient is named in this task's own prompt, and this ask is the
     attempt's first and only tool call so far, so nothing the task read in
     this attempt can have shaped it. The executor writes the count as it reads
     each call; a call not yet counted reads as zero, which is held.
+
+    A `room_post` (``post_text`` set) takes the same rule with one test
+    swapped: the text to post must be the member's own words, verbatim in
+    their prompt, rather than the prompt naming a recipient (multiplayer D4).
     """
     if task.source_type not in _CLEAN_TURN_SURFACES:
         return False
@@ -572,22 +622,29 @@ def _clean_turn(conn, config, task, recipient_user_id: str) -> bool:
     calls, first_is_relay = db.get_attempt_tool_calls(conn, task.id)
     if calls != 1 or not first_is_relay:
         return False
+    if post_text is not None:
+        return _quotes_prompt(task, post_text)
     return _names_recipient(config, task, recipient_user_id)
 
 
-def _queue_question(conn, *, request_id: str, relay_id: str, digest: str, approval: str) -> None:
-    """Release a held question to the delivery queue, recording who approved it."""
+def _queue_question(conn, *, request_id: str, relay_id: str | None, digest: str, approval: str) -> None:
+    """Release a held request to the delivery queue, recording who approved it.
+
+    A `room_post` has no relay row; its approval is the request's own
+    `approved_digest`, which delivery checks against the preview.
+    """
     from . import message_relays
     conn.execute(
         "UPDATE whatsapp_skill_requests SET state='queued',approved_at=datetime('now'),approved_digest=?,"
         "queue_deadline=datetime('now',?),updated_at=datetime('now') WHERE id=?",
         (digest, f"+{QUEUE_DEADLINE_SECONDS} seconds", request_id),
     )
-    conn.execute(
-        "UPDATE message_relays SET state='queued',approved_at=datetime('now'),expires_at=datetime('now',?),"
-        "approval=? WHERE id=? AND state='held'",
-        (f"+{message_relays.RELAY_LIFETIME_SECONDS} seconds", approval, relay_id),
-    )
+    if relay_id:
+        conn.execute(
+            "UPDATE message_relays SET state='queued',approved_at=datetime('now'),expires_at=datetime('now',?),"
+            "approval=? WHERE id=? AND state='held'",
+            (f"+{message_relays.RELAY_LIFETIME_SECONDS} seconds", approval, relay_id),
+        )
 
 
 def hold_question(conn, config, *, actor_user_id: str, task_id: int,
@@ -687,8 +744,8 @@ def park_question(conn, config, *, task) -> dict | None:
         if current is None or current.status != "running":
             message_relays.close_task_questions(conn, task.id)
             return None
-        relay = conn.execute("SELECT * FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
-        message_relays.validate_origin(conn, config, actor_user_id=task.user_id, origin=json.loads(relay["origin"]))
+        message_relays.validate_origin(conn, config, actor_user_id=task.user_id,
+                                       origin=request_origin(conn, row))
         db.set_task_confirmation(conn, task.id, row["preview"])
         associate_confirmation(conn, actor_user_id=task.user_id, task_id=task.id,
                                request_id=row["id"], preview_digest=row["preview_digest"])
@@ -708,7 +765,8 @@ def approve_request(conn, *, task, request_id: str, preview_digest: str) -> None
                 or text_hash(current.confirmation_prompt or "") != preview_digest
                 or text_hash(row["preview"] or "") != preview_digest):
             raise RequestError("confirmation_unavailable")
-        if message_relays.is_blocked(conn, actor_user_id=row["recipient_user_id"], asker_user_id=task.user_id):
+        if row["relay_id"] and message_relays.is_blocked(
+                conn, actor_user_id=row["recipient_user_id"], asker_user_id=task.user_id):
             raise RequestError("recipient_unavailable")
         _queue_question(conn, request_id=request_id, relay_id=row["relay_id"],
                         digest=preview_digest, approval="user")
@@ -734,6 +792,9 @@ async def present_question(config, *, task, success: bool) -> bool:
             message_relays.close_task_questions(conn, task.id, reason="attempt_failed")
         return False
     origin = json.loads(row["origin"])
+    post = row["kind"] == "room_post"
+    title = ("Room post awaiting approval" if post
+             else "Private relay question awaiting approval")
     try:
         await message_relays.verify_private_audience(config, actor_user_id=task.user_id, origin=origin)
         with db.get_db(config.db_path) as conn:
@@ -744,8 +805,9 @@ async def present_question(config, *, task, success: bool) -> bool:
                     raise RequestError("cancelled")
                 return True
             confirmation.write(conn, task.user_id, task_id=task.id,
-                               title="Private relay question awaiting approval",
-                               body="Open the private conversation to review this relay question.",
+                               title=title,
+                               body=("Open the side room to review this post." if post else
+                                     "Open the private conversation to review this relay question."),
                                room_token=origin.get("room_token"))
             db.drop_pending_steers(conn, task.id)
         # Check again at delivery, after releasing the parking transaction.
@@ -775,7 +837,7 @@ async def present_question(config, *, task, success: bool) -> bool:
                 raise RequestError("unsupported_origin")
             await transport.deliver(origin["channel"], parked["preview"], task=task,
                                     reference_id=f"relay-preview:{parked['id']}")
-            writer.emit("confirmation", {"prompt": "Private relay question awaiting approval."})
+            writer.emit("confirmation", {"prompt": title + "."})
         writer.emit("done", {"stop_reason": "completed", "duration_seconds": 0})
         writer.finish()
     except RequestError as exc:
@@ -791,7 +853,20 @@ async def present_question(config, *, task, success: bool) -> bool:
     return True
 
 
+def request_origin(conn, row) -> dict:
+    """The frozen private origin of a held request: the relay's, or its own."""
+    if row["relay_id"]:
+        relay = conn.execute("SELECT origin FROM message_relays WHERE id=?", (row["relay_id"],)).fetchone()
+        return json.loads(relay["origin"]) if relay and relay["origin"] else {}
+    return json.loads(row["origin"] or "{}")
+
+
 def held_question(conn, task_id: int) -> dict | None:
-    row = conn.execute("SELECT r.*,m.origin FROM whatsapp_skill_requests r JOIN message_relays m ON m.id=r.relay_id "
-                       "WHERE r.origin_task_id=? AND r.state='held'", (task_id,)).fetchone()
-    return dict(row) if row is not None else None
+    """The task's held relay question or room post, with its frozen origin."""
+    row = conn.execute("SELECT * FROM whatsapp_skill_requests WHERE origin_task_id=? AND state='held'",
+                       (task_id,)).fetchone()
+    if row is None or row["kind"] not in _HELD_KINDS:
+        return None
+    held = dict(row)
+    held["origin"] = json.dumps(request_origin(conn, row))
+    return held

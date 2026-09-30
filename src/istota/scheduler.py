@@ -3093,6 +3093,11 @@ def process_one_task(
     # carrying the question instead, and that post can fail.
     held_notification: RaiseResult | None = None
 
+    # Where a shared-room task's confirmation went instead of the room, when
+    # it parked on one (multiplayer D4). Its Talk view is posted at the tail.
+    from . import side_rooms
+    side_confirmation: "side_rooms.ConfirmationRoute | None" = None
+
     # A once-job whose table row was deleted inside the transaction below, and
     # whose CRON.md entry therefore still has to go: `(user_id, job_name)`.
     # Buffered rather than written in place, the same shape as
@@ -3145,7 +3150,14 @@ def process_one_task(
                 # suppressed on the mirror leg — delivered nowhere, then killed
                 # by `expire_stale_confirmations` two hours later, which is the
                 # exact failure the paragraph above records fixing.
-                if plan_talk and talk_token and not (
+                #
+                # A task in a shared room asks its principal privately
+                # (multiplayer D4): the question goes to their side room and
+                # its Talk view, never into the room everyone reads.
+                side_confirmation = side_rooms.confirmation_route(conn, task)
+                if side_confirmation is not None:
+                    side_rooms.write_confirmation(conn, side_confirmation, task, result)
+                elif plan_talk and talk_token and not (
                     _talk_is_mirror
                     and is_room_view(origin_surface_for_source_type(
                         task.source_type or ""
@@ -3218,6 +3230,8 @@ def process_one_task(
                     post_talk_message is None
                     and post_sms_message is None
                     and post_whatsapp_message is None
+                    and not (side_confirmation is not None
+                             and side_confirmation.talk_bound)
                 ):
                     notification_results.append(held_notification)
                     held_notification = None
@@ -3917,6 +3931,25 @@ def process_one_task(
         # bypasses the delivery plan entirely, and that answer is just as lost.
         # Being inside this block is the same test, stated once.
         talk_undelivered = response_msg_id is None
+    # A shared-room confirmation's Talk view: the principal's own conversation
+    # with the bot, headed with the room's name. Its id is the task's
+    # `talk_response_id`, so a reply to it answers by Path A. A push that
+    # posted nothing owes the withheld notification, as a failed Talk post does.
+    side_undelivered = False
+    if side_confirmation is not None and side_confirmation.talk_bound:
+        side_msg_id = run_coro(side_rooms.push_to_talk_view(
+            config, user_id=task.user_id,
+            parent_token=side_confirmation.parent_token, body=result,
+            reference_id=f"istota:task:{task.id}:confirmation",
+        ))
+        side_undelivered = side_msg_id is None
+        if side_msg_id:
+            try:
+                with db.get_db(config.db_path) as conn:
+                    db.update_talk_response_id(conn, task_id, side_msg_id)
+            except Exception as e:
+                logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
+
     # Store bot's response message ID for reply tracking
     if response_msg_id and not is_failure_notify:
         try:
@@ -4177,6 +4210,7 @@ def process_one_task(
     # message failed, and carries neither the question nor its `!confirm` verbs.
     if held_notification is not None and (
         talk_undelivered or sms_undelivered or whatsapp_undelivered
+        or side_undelivered
     ):
         deliver_pending(config, [held_notification])
 

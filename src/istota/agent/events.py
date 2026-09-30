@@ -52,8 +52,10 @@ def _private_relay_tool(name: str, input_data: dict) -> bool:
     except ValueError:
         pass
     # `whatsapp ask` is retired, but a task holding the old instructions can
-    # still type it, and the argv would carry the question all the same.
-    return bool(re.search(r"\b(?:relay|whatsapp)\s+ask\b", command))
+    # still type it, and the argv would carry the question all the same. A
+    # `room whisper` is for the principal alone, and a shared room's progress
+    # trace is read by the whole room; a `room post` is not yet approved.
+    return bool(re.search(r"\b(?:(?:relay|whatsapp)\s+ask|room\s+(?:whisper|post))\b", command))
 
 
 # Outside quotes the shell would treat any of these as more than one plain
@@ -105,7 +107,8 @@ def _lone_relay_ask(name: str, input_data: dict) -> bool:
         argv = shlex.split(command)
     except ValueError:
         return False
-    return argv[:3] == ["istota-skill", "relay", "ask"]
+    # `room post` takes the same clean-turn rule (multiplayer D4).
+    return argv[:3] in (["istota-skill", "relay", "ask"], ["istota-skill", "room", "post"])
 
 
 def _describe_tool_use(name: str, input_data: dict) -> str:

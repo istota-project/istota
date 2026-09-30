@@ -1224,9 +1224,18 @@ CREATE TABLE IF NOT EXISTS rooms (
     -- cross-surface half of ISSUE-421: this row is shared by every surface
     -- bound to the room, written against the writing surface's lane and read
     -- against the inbound one. NULL = not recorded.
-    model_namespace TEXT
+    model_namespace TEXT,
+    -- A side room (multiplayer D4): one member's private companion of the
+    -- shared room `side_of`, for `side_for_user` alone. NULL on every other
+    -- room. db._migrate_side_rooms adds both columns to an existing table. No
+    -- foreign key: deleting the parent must not be refused or cascade into the
+    -- member's own transcript; a side room whose parent is gone posts nowhere.
+    side_of     TEXT,
+    side_for_user TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_user ON rooms (user_id, archived);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rooms_side
+ON rooms (side_of, side_for_user) WHERE side_of IS NOT NULL;
 
 -- Per-user room membership (ISSUE-134). A room is shared (one token, one
 -- transcript) but each participant has a membership row; web visibility is
@@ -1734,7 +1743,7 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     requester_user_id TEXT NOT NULL,
     origin_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
     request_key TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question')),
+    kind TEXT NOT NULL CHECK (kind IN ('self_send', 'relay_question', 'side_whisper', 'room_post')),
     recipient_user_id TEXT NOT NULL,
     relay_id TEXT UNIQUE,
     text TEXT,
@@ -1756,6 +1765,11 @@ CREATE TABLE IF NOT EXISTS whatsapp_skill_requests (
     closed_at TEXT,
     content_cleared_at TEXT,
     error_code TEXT,
+    -- JSON: the private conversation a held request was asked from, and where
+    -- a side_whisper or room_post goes. A relay question keeps both on its
+    -- message_relays row instead.
+    origin TEXT,
+    destination TEXT,
     UNIQUE (requester_user_id, origin_task_id, request_key)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_request_held_task

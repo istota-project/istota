@@ -3198,6 +3198,7 @@ def _room_snapshot(username: str) -> dict[str, dict]:
                 "name": db.room_display_name(r, handle),
                 "origin": r.origin,
                 "talk_token": talk_refs.get(r.token),
+                "side_of": r.side_of,
                 "model": r.model,
                 "effort": r.effort,
                 # The room's standing brain pin, beside the model and effort it
@@ -4769,6 +4770,9 @@ def _chat_list_rooms(username: str) -> list[dict]:
             d["name"] = db.room_display_name(r, handle)
             d["origin"] = r.origin
             d["talk_token"] = talk_refs.get(r.token)
+            # The shared room a side room belongs to (multiplayer D4), so the
+            # client can link the two; None for every other room.
+            d["side_of"] = r.side_of
             # Standing per-room model/effort default lives on the shared registry
             # room (canonical), not the per-user web handle.
             d["model"] = r.model
@@ -5268,6 +5272,10 @@ def _chat_add_member(
         handle, reg = found
         if _is_talk_backed(conn, reg, handle.token):
             return 409, {"error": "membership of a Talk room is managed in Talk"}
+        # A side room is one member's private channel (multiplayer D4); a
+        # second member would read answers given at that member's full reach.
+        if reg.side_of:
+            return 409, {"error": "a side room is private to its member"}
         if reg.user_id != username:
             return 403, {"error": "only the room's creator can add members"}
         if target not in _config.users:

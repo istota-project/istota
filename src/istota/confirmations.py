@@ -116,6 +116,10 @@ def describe(conn, task: db.Task) -> str:
     prompt-assembly detail and not something to rest the invariant on.
     """
     if task.whatsapp_confirmation_request_id:
+        row = conn.execute("SELECT kind FROM whatsapp_skill_requests WHERE id=?",
+                           (task.whatsapp_confirmation_request_id,)).fetchone()
+        if row is not None and row["kind"] == "room_post":
+            return "a room post awaiting approval"
         return "a private relay question"
     if task.source_type == "email":
         record = db.get_email_for_task(conn, task.id)
@@ -360,7 +364,26 @@ def resolve(
     if talk_response_id:
         task = db.get_pending_confirmation_by_response_id(conn, talk_response_id)
     if task is None and conversation_token:
+        from .side_rooms import canonical_token, is_shared_room
+
+        room_token = canonical_token(conn, conversation_token)
+        # A shared room's questions are asked in its members' side rooms
+        # (multiplayer D4), so a bare "yes" typed in the room is conversation,
+        # never an approval: it would otherwise land on a question the room
+        # never saw. `!confirm <id>` and a reply to the prompt still work.
+        if room_token and is_shared_room(conn, room_token):
+            return Resolution(task=task if task is not None and task.user_id == user_id else None)
         task = db.get_pending_confirmation(conn, conversation_token)
+        # A side room also answers what its parent asked this member.
+        side = db.side_room_parent(conn, room_token) if room_token else None
+        if task is None and side is not None and side.side_for_user == user_id:
+            # A parked task carries whichever token its surface named the
+            # parent by: the canonical one, or a binding's ref.
+            refs = [side.side_of] + [b.surface_ref for b in db.list_room_bindings(conn, side.side_of)]
+            for ref in dict.fromkeys(refs):
+                task = db.get_pending_confirmation(conn, ref, user_id=user_id)
+                if task is not None:
+                    break
     if task is None:
         open_for_user = pending_for_user(conn, user_id)
         if len(open_for_user) > 1:

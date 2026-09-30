@@ -142,8 +142,11 @@ def test_the_shipped_safe_set_is_exactly_the_reviewed_one(tmp_path):
     # Widening this is a disclosure decision: each entry has to be shown to
     # read nothing user-specific. `browse` and `markets` were on the draft's
     # list and are not here, since both drive the user's own browser profile.
+    # `room` (multiplayer Stage 10) reads nothing: `whisper` writes only to the
+    # principal's own side room, and `post` works only from a side room, whose
+    # task is private and is held for the member's approval besides.
     empty = tmp_path / "overrides"
     empty.mkdir()
     index = load_skill_index(empty)
     safe = {name for name, meta in index.items() if meta.shared_room == "safe"}
-    assert safe == {"sensitive_actions", "untrusted_input"}
+    assert safe == {"sensitive_actions", "untrusted_input", "room"}

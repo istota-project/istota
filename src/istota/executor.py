@@ -5762,6 +5762,49 @@ def _header_scalar(value: object) -> str:
     return _one_line(str(value or "")).strip()[:_ROOM_SCALAR_MAX_CHARS]
 
 
+def _side_room_prompt(
+    config: Config, task: "db.Task", conn, display_user_id: str, *,
+    post_cli_available: bool,
+) -> tuple[str, str]:
+    """``(system line, user-half block)`` for a task in a side room, else ``("", "")``.
+
+    The line names the parent by token only, for the reason
+    `room_identity_line` gives for leaving a room's name out of the system
+    half. Opens its own connection when handed none, but never on a database
+    path that does not exist, since opening one would create it. Never raises.
+    """
+    try:
+        from .side_rooms import parent_context, task_side_room
+
+        def _read(c):
+            side = task_side_room(c, task)
+            return side, (parent_context(c, config, task) if side is not None else "")
+
+        if conn is not None:
+            side, block = _read(conn)
+        elif config.db_path and Path(config.db_path).exists():
+            with db.get_db(config.db_path) as own:
+                side, block = _read(own)
+        else:
+            return "", ""
+    except Exception as exc:
+        logger.warning("side room prompt for task %s failed: %s", task.id, exc)
+        return "", ""
+    if side is None:
+        return "", ""
+    line = (
+        f"\nSide room: this is {display_user_id}'s private side room of room "
+        f"{_header_scalar(side.side_of)}. Only they read it, and nothing you "
+        "write here reaches that room."
+    )
+    if post_cli_available:
+        line += (
+            " `istota-skill room post` puts a message in that room, held for "
+            "their approval of the exact text."
+        )
+    return line, block
+
+
 def room_identity_line(
     config: Config, task: "db.Task", conn=None, *, rooms_cli_available: bool,
 ) -> str:
@@ -6582,6 +6625,15 @@ Execute the action you proposed. If you drafted an email, send it now via `istot
                 "`run ... -- sh -c '...'` rather than one `run` per command."
             )
 
+    # A side room (multiplayer D4): the header says which room it belongs to
+    # and that nothing written here reaches it; the parent's transcript goes in
+    # the user half, fenced, since every line of it is somebody else's text.
+    # Empty for every other task, so no other prompt changes.
+    side_room_line, side_context = _side_room_prompt(
+        config, task, conn, display_user_id,
+        post_cli_available=cli_skill_names is None or "room" in cli_skill_names,
+    )
+
     group_chat_line = ""
     if task.is_group_chat:
         # No "below": the conversation context this names is in the user half,
@@ -6604,7 +6656,7 @@ Today's date: {user_date_str}
 User timezone: {user_tz_str}
 Current UTC: {utc_now_str}
 Current task ID: {task.id}
-Conversation token: {display_token}{room_line}{group_chat_line}
+Conversation token: {display_token}{room_line}{side_room_line}{group_chat_line}
 Source: {display_source}
 Output target: {display_output_target}{per_user_email_line}
 {db_path_line}
@@ -6654,6 +6706,7 @@ You have access to:
         recalled_section,
         playbooks_section,
         context_section,
+        side_context,
         confirmation_section,
         relay_context,
     ]

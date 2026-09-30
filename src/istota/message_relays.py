@@ -297,11 +297,25 @@ async def verify_private_audience(config, *, actor_user_id: str, origin: dict) -
 def close_task_questions(conn, task_id: int, *, reason: str = "cancelled") -> None:
     with write_transaction(conn):
         rows = conn.execute(
-            "SELECT relay_id FROM whatsapp_skill_requests WHERE origin_task_id=? AND state='held'",
+            "SELECT id, relay_id FROM whatsapp_skill_requests WHERE origin_task_id=? AND state='held'",
             (task_id,),
         ).fetchall()
+        state = "expired" if reason == "confirmation_expired" else "cancelled"
         for row in rows:
-            _close_relay(conn, row[0], state="expired" if reason == "confirmation_expired" else "cancelled", reason=reason)
+            if row["relay_id"]:
+                _close_relay(conn, row["relay_id"], state=state, reason=reason)
+                continue
+            # A held room post has no relay row; close the request and
+            # release its task the way `_close_relay` does.
+            conn.execute(
+                "UPDATE whatsapp_skill_requests SET state=?,error_code=?,closed_at=datetime('now'),"
+                "updated_at=datetime('now') WHERE id=? AND state='held'", (state, reason, row["id"]),
+            )
+            conn.execute(
+                """UPDATE tasks SET whatsapp_confirmation_request_id=NULL,
+                   status=CASE WHEN status='pending_confirmation' THEN 'cancelled' ELSE status END
+                   WHERE whatsapp_confirmation_request_id=?""", (row["id"],),
+            )
 
 
 # Replies never enter command or confirmation dispatch again, including when
