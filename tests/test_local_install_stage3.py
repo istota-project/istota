@@ -84,7 +84,7 @@ class TestRenderers:
         cfg = load_config(p)
         assert cfg.workspace_path == a.workspace
         assert cfg.nextcloud_mount_path is None
-        assert cfg.web.auth == "none"
+        assert cfg.web.auth == ["none"]
         assert cfg.web.port == 9000
         assert cfg.talk.enabled is False
         assert cfg.security.sandbox_enabled is False

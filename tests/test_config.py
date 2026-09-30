@@ -3510,3 +3510,64 @@ class TestTheDeveloperContainerBlock:
         config = load_config(path)
 
         assert devbox_container_backend(config) is False
+
+
+class TestWebAuthMethods:
+    @pytest.mark.parametrize("raw, expected", [
+        ("email", ["email"]),
+        (" NextCloud, EMAIL,nextcloud ", ["nextcloud", "email"]),
+        ([" EMAIL ", "nextcloud", "email"], ["email", "nextcloud"]),
+        ("nextcloud,none", ["none"]),
+        (["email", "none", "nextcloud"], ["none"]),
+        ("unknown,email", ["email"]),
+        ("", ["nextcloud"]),
+        ([], ["nextcloud"]),
+        (["unknown"], ["nextcloud"]),
+    ])
+    def test_constructor_and_toml(self, raw, expected, tmp_path, monkeypatch, caplog):
+        import json
+        from istota.config import WebConfig
+
+        monkeypatch.delenv("ISTOTA_WEB_AUTH", raising=False)
+        cfg = Config(web=WebConfig(auth=raw))
+        assert cfg.web.auth == expected
+        assert cfg.web.has_method("email") == ("email" in expected)
+        assert cfg.is_standalone == (expected == ["none"])
+        cfg.nextcloud.url = "https://cloud.example.com"
+        assert not cfg.is_standalone
+        path = tmp_path / "config.toml"
+        path.write_text("[web]\nauth = " + json.dumps(raw) + "\n")
+        assert load_config(path).web.auth == expected
+        if "unknown" in str(raw):
+            assert "unknown method" in caplog.text
+        if "none" in str(raw) and ("email" in str(raw) or "nextcloud" in str(raw)):
+            assert "exclusive" in caplog.text
+
+    @pytest.mark.parametrize("raw, expected", [
+        ("email", ["email"]),
+        ("NEXTCLOUD, email,nextcloud", ["nextcloud", "email"]),
+        ("nextcloud,none", ["none"]),
+        ("none,email", ["none"]),
+        ("unknown,email", ["email"]),
+        ("", ["email"]),
+        ("unknown", ["email"]),
+    ])
+    def test_environment_override(self, raw, expected, tmp_path, monkeypatch):
+        path = tmp_path / "config.toml"
+        path.write_text('[web]\nauth = ["email"]\n')
+        monkeypatch.setenv("ISTOTA_WEB_AUTH", raw)
+        assert load_config(path).web.auth == expected
+
+    def test_policy_settings_load(self, tmp_path):
+        values = {
+            "auth_enrol_ttl_hours": 24, "auth_reset_ttl_hours": 2,
+            "auth_login_link_ttl_minutes": 10, "auth_min_password_length": 16,
+            "auth_throttle_window_seconds": 600, "auth_throttle_max_email": 5,
+            "auth_throttle_max_ip": 20, "auth_mail_link_max_email": 2,
+            "trusted_proxy_hops": 1,
+        }
+        path = tmp_path / "config.toml"
+        path.write_text("[web]\n" + "\n".join(f"{key} = {value}" for key, value in values.items()))
+        cfg = load_config(path)
+        for key, value in values.items():
+            assert getattr(cfg.web, key) == value

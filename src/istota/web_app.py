@@ -17,7 +17,6 @@ import math
 import os
 import platform
 import re
-import secrets
 import shutil
 import signal
 import sqlite3
@@ -174,42 +173,43 @@ class _CacheHeaderStatics(StaticFiles):
 _STATIC_DIR = _resolve_static_dir()
 
 
-def _reload_config():
+def _reload_config(launch_app: FastAPI | None = None):
     """Load config and register OAuth clients.
 
     Web auth uses NC's built-in OAuth2 provider (auth-only). Google is
     a separate, unrelated OAuth client used only by the google_workspace skill.
     """
     global _config, _oauth
-    _config = load_config()
-    _oauth = OAuth()
-    if _config.web.oauth2_client_id:
+    config = load_config()
+    _assert_no_auth_launch_safe(config.web.auth, launch_app or app)
+    oauth = OAuth()
+    if config.web.oauth2_client_id:
         # NC built-in OAuth2 — no metadata discovery, register endpoints directly.
-        provider = _config.web.oauth2_provider.rstrip("/")
-        _oauth.register(
+        provider = config.web.oauth2_provider.rstrip("/")
+        oauth.register(
             name="nextcloud",
-            client_id=_config.web.oauth2_client_id,
-            client_secret=_config.web.oauth2_client_secret,
+            client_id=config.web.oauth2_client_id,
+            client_secret=config.web.oauth2_client_secret,
             authorize_url=f"{provider}/index.php/apps/oauth2/authorize",
             access_token_url=(
-                _config.web.oauth2_token_endpoint
+                config.web.oauth2_token_endpoint
                 or f"{provider}/index.php/apps/oauth2/api/v1/token"
             ),
             client_kwargs={"scope": ""},  # NC built-in OAuth2 ignores scope
         )
-    if _config.google_workspace.enabled and _config.google_workspace.client_id:
-        _oauth.register(
+    if config.google_workspace.enabled and config.google_workspace.client_id:
+        oauth.register(
             name="google",
-            client_id=_config.google_workspace.client_id,
-            client_secret=_config.google_workspace.client_secret,
+            client_id=config.google_workspace.client_id,
+            client_secret=config.google_workspace.client_secret,
             server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-            client_kwargs={"scope": " ".join(_config.google_workspace.scopes)},
+            client_kwargs={"scope": " ".join(config.google_workspace.scopes)},
             authorize_params={"access_type": "offline", "prompt": "consent"},
         )
     # token_storage = "encrypted" without the web-only key is a deploy
     # misconfiguration: fail loud once, then run as ephemeral (the
     # web_tokens.feature_enabled gate is False everywhere downstream).
-    if _config.web.token_storage == "encrypted":
+    if config.web.token_storage == "encrypted":
         from . import web_tokens as _wt  # noqa: PLC0415
         if not _wt.token_key_available():
             logger.error(
@@ -218,6 +218,8 @@ def _reload_config():
                 "\"ephemeral\" (no post-as-user mirroring, no read sync). "
                 "Provision the key for the web unit only.",
             )
+
+    _config, _oauth = config, oauth
 
 
 def _publish_config(app: FastAPI) -> None:
@@ -239,7 +241,7 @@ def _reload_config_on_signal(app: FastAPI) -> None:
     so — the same shape `webhook_receiver._maybe_reload_for_signal` already uses.
     """
     try:
-        _reload_config()
+        _reload_config(app)
         _publish_config(app)
     except Exception as e:
         logger.error(
@@ -254,7 +256,7 @@ async def lifespan(app: FastAPI):
     # See `build_info`: the web service is restarted last by the Ansible deploy,
     # so it is the one that stays stale longest.
     logger.info("STARTUP Running %s", build_description())
-    _reload_config()
+    _reload_config(app)
     _publish_config(app)
     signal.signal(signal.SIGHUP, lambda *_: _reload_config_on_signal(app))
     # Wrap the stop signals so the SSE streams below can end themselves instead
@@ -280,40 +282,21 @@ async def lifespan(app: FastAPI):
 #   3. No real secret found → fail closed. There is deliberately no constant
 #      fallback. For local dev/test, ISTOTA_WEB_ALLOW_INSECURE_SESSION=1 opts
 #      into a random per-process key (sessions don't survive a restart).
-_ALLOW_INSECURE_SESSION_ENV = "ISTOTA_WEB_ALLOW_INSECURE_SESSION"
+from .web_session_secret import (
+    ALLOW_INSECURE_SESSION_ENV as _ALLOW_INSECURE_SESSION_ENV,
+    resolve as _resolve_web_session_secret,
+)
 
 
 def _resolve_session_secret() -> str:
-    env_secret = os.environ.get("ISTOTA_WEB_SESSION_SECRET_KEY", "").strip()
-    if env_secret:
-        return env_secret
-
-    # config.toml (Docker-persisted) secret. Best-effort: a missing or
-    # unreadable config must not crash import — it just means none was found.
+    # Loading can fail at import time; the resolver still honors an env key.
     try:
-        _cfg = load_config()
-        config_secret = (_cfg.web.session_secret_key or "").strip()
+        config = load_config()
     except Exception:  # pragma: no cover - defensive
-        _cfg = None
-        config_secret = ""
-    if config_secret:
-        return config_secret
-
-    # No-auth (standalone local) mode never reads the session — the middleware
-    # is still constructed, so it needs *a* key, but a random per-process one is
-    # fine (there is nothing to forge without an auth flow). Do not crash import.
-    if _cfg is not None and getattr(_cfg.web, "auth", "nextcloud") == "none":
-        return secrets.token_hex(32)
-
-    if os.environ.get(_ALLOW_INSECURE_SESSION_ENV, "").strip().lower() in ("1", "true", "yes"):
-        logger.warning(
-            "No web session secret configured; signing with a random per-process "
-            "key because %s is set. Sessions will not survive a restart. Do not "
-            "use this in production.",
-            _ALLOW_INSECURE_SESSION_ENV,
-        )
-        return secrets.token_hex(32)
-
+        config = None
+    secret = _resolve_web_session_secret(config, os.environ)
+    if secret:
+        return secret
     raise RuntimeError(
         "No web session signing secret configured. Set "
         "ISTOTA_WEB_SESSION_SECRET_KEY (or web.session_secret_key in config.toml) "
@@ -373,14 +356,13 @@ def is_loopback_host(host: str) -> bool:
     return host.strip().lower() in ("127.0.0.1", "::1", "localhost")
 
 
-def assert_no_auth_bind_safe(auth: str, host: str) -> None:
+def assert_no_auth_bind_safe(auth: list[str], host: str) -> None:
     """Refuse to serve no-auth on a non-loopback bind.
 
-    Raises ``RuntimeError`` when ``auth == "none"`` and ``host`` is not a
-    loopback address — structurally prevents an unauthenticated instance from
-    being exposed on the network. A no-op for ``auth == "nextcloud"``.
+    The lifespan separately requires proof that the local launcher performed
+    this check; a loopback bind alone can sit behind a public proxy.
     """
-    if auth != "none":
+    if "none" not in auth:
         return
     if not is_loopback_host(host):
         raise RuntimeError(
@@ -391,13 +373,24 @@ def assert_no_auth_bind_safe(auth: str, host: str) -> None:
         )
 
 
+def _assert_no_auth_launch_safe(auth: list[str], launch_app: FastAPI) -> None:
+    if "none" not in auth:
+        return
+    host = getattr(launch_app.state, "local_no_auth_bind", None)
+    if not isinstance(host, str) or not is_loopback_host(host):
+        raise RuntimeError(
+            '[web] auth = ["none"] requires istota serve with a verified '
+            "loopback bind; direct uvicorn and public proxy deployments are refused."
+        )
+
+
 def _no_auth_mode() -> bool:
     """Whether the web app is running with authentication bypassed.
 
     Single-user local (standalone) shape: ``[web] auth = "none"``. Server
     deployments leave the default ``"nextcloud"`` and this is always False.
     """
-    return bool(_config) and getattr(_config.web, "auth", "nextcloud") == "none"
+    return bool(_config) and _config.web.has_method("none")
 
 
 def _local_user() -> dict:
