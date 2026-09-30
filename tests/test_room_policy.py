@@ -314,10 +314,19 @@ class TestEmissaryReach:
             guest = db.get_task(conn, _guest_turn(conn, config).task_id)
             own = db.get_task(conn, _member_turn(conn, config, "alice", "my day?").task_id)
             withheld = _task_withheld_scopes(config, conn, guest, _index())
-            granted = _task_withheld_scopes(config, conn, own, _index())
+            mixed = _task_withheld_scopes(config, conn, own, _index())
+            # The guest leaves; the host's next turn is read by members only.
+            conn.execute("UPDATE room_participants SET left_at = datetime('now') "
+                         "WHERE kind = 'guest'")
+            later = db.get_task(conn, _member_turn(conn, config, "alice", "and now?").task_id)
+            granted = _task_withheld_scopes(config, conn, later, _index())
         assert {"calendar", "files", "memory"} <= withheld
         assert "room" not in withheld
-        # Control: the host's own turn reaches what the host granted.
+        # The host's own turn while the guest reads the room: grants are
+        # ignored under a mixed audience (multiplayer Stage 13). `off` switches
+        # the disclosure gate off for members' turns, mixed or not.
+        assert ("calendar" in mixed) == (policy != "off")
+        # Control: with the guest gone, the host's turn reaches what they granted.
         assert "calendar" not in granted
 
     def test_a_guest_task_never_counts_as_a_clean_turn(self, config):
@@ -333,22 +342,23 @@ class TestEmissaryReach:
             assert not _clean_turn(conn, config, db.get_task(conn, guest), "bob")
 
     def test_deferred_ops_from_a_guest_task_are_dropped(self, config):
-        from istota.executor import get_user_temp_dir
+        from istota.executor import task_deferred_dir
         from istota.scheduler import _drain_deferred_ops
         with db.get_db(config.db_path) as conn:
             _group(conn)
             guest = db.get_task(conn, _guest_turn(conn, config).task_id)
             own = db.get_task(conn, _member_turn(conn, config, "alice", "go").task_id)
-        temp = get_user_temp_dir(config, "alice")
-        temp.mkdir(parents=True, exist_ok=True)
         for task in (guest, own):
+            # Where each run wrote them: the guest's own directory, the host's.
+            temp = task_deferred_dir(config, task)
+            temp.mkdir(parents=True, exist_ok=True)
             (temp / f"task_{task.id}_subtasks.json").write_text(
                 json.dumps([{"prompt": f"follow up {task.id}"}]))
             _drain_deferred_ops(config, task, "done")
         with db.get_db(config.db_path) as conn:
             prompts = [r[0] for r in conn.execute(
                 "SELECT prompt FROM tasks WHERE source_type = 'subtask'")]
-        assert not (temp / f"task_{guest.id}_subtasks.json").exists()
+        assert not (task_deferred_dir(config, guest) / f"task_{guest.id}_subtasks.json").exists()
         assert prompts == [f"follow up {own.id}"]
 
     def test_a_guest_task_is_extracted_into_nobodys_memory(self, config):

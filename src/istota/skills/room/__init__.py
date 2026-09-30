@@ -1,8 +1,10 @@
 """Side-room verbs from the trusted host-side skill process (multiplayer D4).
 
 `whisper` puts a note in the principal's side room from a task in a shared
-room; `post` asks, from a side room, to post into its parent, held for the
-member's approval. Neither sends: both persist a request the daemon delivers.
+room; `answer-privately` asks the principal's own question again in that side
+room, where it runs at their full reach; `post` asks, from a side room, to post
+into its parent, held for the member's approval. None of them sends: each
+persists a request or a task the daemon delivers.
 Identity comes from the proxy's environment and nothing else, as in the relay
 skill: the actor, the task and the database path are never arguments.
 """
@@ -26,6 +28,9 @@ def _dispatch(args):
         raise RequestError("task_unavailable")
     with db.get_db(Path(path)) as conn:
         config = load_config()
+        if args.command == "answer-privately":
+            return side_rooms.queue_side_answer(
+                conn, config, actor_user_id=actor, task_id=int(task))
         verb = side_rooms.enqueue_whisper if args.command == "whisper" else side_rooms.hold_room_post
         return verb(conn, config, actor_user_id=actor, task_id=int(task),
                     request_key=args.request_key, text=args.text)
@@ -39,9 +44,12 @@ def build_parser():
         verb = commands.add_parser(name)
         verb.add_argument("--request-key", required=True)
         verb.add_argument("text")
+    # No text: what is asked again is the principal's own turn, never the model's.
+    commands.add_parser("answer-privately")
     return parser
 
 
 def main(argv=None):
     args = parse_and_resolve(build_parser(), argv)
-    return run_skill_cli({"whisper": _dispatch, "post": _dispatch}, args)
+    return run_skill_cli(
+        {"whisper": _dispatch, "post": _dispatch, "answer-privately": _dispatch}, args)

@@ -130,9 +130,8 @@ def _load_deferred_email_output(
     `_consume_deferred_email_output` once the message has gone out or been
     recorded as a draft, never at load time.
     """
-    from ...executor import get_user_temp_dir
-    user_temp_dir = get_user_temp_dir(config, task.user_id)
-    path = user_temp_dir / f"task_{task.id}_email_output.json"
+    from ...executor import task_deferred_dir
+    path = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
     if not path.exists():
         return None
 
@@ -172,8 +171,8 @@ def _consume_deferred_email_output(config: "Config", task: db.Task) -> None:
     body in ``outbound_drafts`` — never on the path where the approval check
     itself failed, because there the file is the only surviving copy.
     """
-    from ...executor import get_user_temp_dir
-    path = get_user_temp_dir(config, task.user_id) / f"task_{task.id}_email_output.json"
+    from ...executor import task_deferred_dir
+    path = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
     try:
         path.unlink(missing_ok=True)
     except OSError as e:

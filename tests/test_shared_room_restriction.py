@@ -117,7 +117,9 @@ def _room(config, *, shared: bool, grants: tuple[str, ...] = ()) -> str:
     return room.token
 
 
-def _run(config, room_token: str, *, guest: bool = False) -> dict:
+def _run(
+    config, room_token: str, *, guest: bool = False, attachments: list[str] | None = None,
+) -> dict:
     """Run one web task in the room; return what each seam saw.
 
     ``guest`` runs it as a guest's turn (multiplayer Stage 11, emissary mode).
@@ -149,6 +151,7 @@ def _run(config, room_token: str, *, guest: bool = False) -> dict:
             task_id = db.create_task(
                 conn, prompt="what's on my calendar tomorrow?", user_id="alice",
                 source_type="web", conversation_token=room_token,
+                attachments=attachments,
             )
             if guest:
                 conn.execute("UPDATE tasks SET guest_participant_id = 1 WHERE id = ?",
@@ -440,8 +443,11 @@ class TestAGuestsTurn:
         assert seen["model_env"]["ISTOTA_DEFERRED_DIR"] == own[0]
         assert "calendar" in seen["disabled"]
 
-    def test_control_the_hosts_own_turn_binds_the_temp_dir(self, config):
-        seen = _run(config, _room(config, shared=True))
+    def test_control_an_unrestricted_turn_binds_the_temp_dir(self, config):
+        # In a shared room the host's own turn is restricted and gets a
+        # directory of its own too (Stage 13); only an unrestricted task binds
+        # the per-user one.
+        seen = _run(config, _room(config, shared=False))
         host_dir = str((config.temp_dir / "alice").resolve())
         argv = seen["argv"]
         assert host_dir in [argv[i + 1] for i, tok in enumerate(argv) if tok == "--bind"]

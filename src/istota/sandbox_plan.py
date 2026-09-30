@@ -193,6 +193,26 @@ class SandboxProfile(str, Enum):
     NATIVE = "native"
 
 
+def memory_masks(config: Config, user_dir: Path) -> list[Path]:
+    """The directories of a user's workspace that hold the ``memory`` scope.
+
+    ``memories/`` (dated memories), and under the bot directory ``config/``
+    (``USER.md`` and the per-skill overlays beside the user's other bot
+    config) and ``playbooks/``. Only directories that exist and are not
+    symlinks: a mask needs a mountpoint, and bwrap would create a missing one
+    on the host inside the read-write workspace bind.
+    """
+    bot = user_dir / config.bot_dir_name
+    out = []
+    for path in (user_dir / "memories", bot / "config", bot / "playbooks"):
+        try:
+            if path.is_dir() and not path.is_symlink():
+                out.append(path)
+        except OSError:
+            continue
+    return out
+
+
 def plan_masks(config: Config, protected: list[Path]) -> tuple[list[Path], list[Path]]:
     """The database masks for this config, as ``(masks, refused)``.
 
@@ -678,9 +698,11 @@ def build_mount_plan(
             )
         elif user_dir.exists() and "files" not in withheld_scopes:
             _rw(user_dir, "nextcloud_user_dir", user_data=True)
-        # Talk attachments directory (flat, shared across conversations)
+        # Talk attachments directory (flat, shared across conversations). Not
+        # for a task its room restricts: it holds every conversation's files,
+        # and `execute_task` copies the task's own into its temp dir instead.
         talk_dir = mount / "Talk"
-        if talk_dir.exists():
+        if talk_dir.exists() and not withheld_scopes:
             _ro(talk_dir, "nextcloud_talk_dir", user_data=True)
         if task.conversation_token:
             channel_dir = mount / "Channels" / task.conversation_token
@@ -924,6 +946,10 @@ def build_mount_plan(
     # that is not a bind, and `mask_protected_paths` adds it from the config.
     protected = executor.mask_protected_paths(config, plan_mounts=tuple(mounts))
     masks, refused = plan_masks(config, protected)
+    # `files` without `memory`: the workspace is bound, and the memory inside
+    # it is masked, so the two scopes are granted independently.
+    if user_dir is not None and "files" not in withheld_scopes and "memory" in withheld_scopes:
+        masks.extend(memory_masks(config, user_dir))
 
     return MountPlan(
         mounts=tuple(mounts),

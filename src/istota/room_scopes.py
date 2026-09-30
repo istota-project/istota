@@ -11,7 +11,10 @@ two synthetic scopes that are not skills:
   knowledge-graph facts and per-skill overlays.
 
 A ``shared_room: safe`` skill is never a scope, and the room's own
-``CHANNEL.md`` is shared by construction. What is withheld is enforced by what
+``CHANNEL.md`` is shared by construction. A grant is consent to disclose to
+the room's members, so while a guest is present (the ``mixed`` audience, D3)
+every grant is ignored and every scope is withheld; what needs one is answered
+in the principal's side room instead (`side_rooms.queue_side_answer`). What is withheld is enforced by what
 the task can reach, at the seams ``execute_task`` and ``task_env`` apply it to;
 nothing here asks the model to keep anything to itself.
 
@@ -115,6 +118,7 @@ def task_withheld_scopes(
     user_id: str,
     skill_index: Mapping[str, object],
     assume_shared: bool = False,
+    assume_mixed: bool = False,
 ) -> frozenset[str]:
     """The scopes a task in this conversation may not reach; empty when none.
 
@@ -128,19 +132,31 @@ def task_withheld_scopes(
     the surface's roster, which can say "group" on a turn where
     ``room_is_shared`` cannot yet (a Talk group's first turn, a batch whose
     roster fetch failed). Either signal restricts.
+
+    ``assume_mixed`` is the audience stored with the turn. A guest present when
+    the turn was written, or present now, makes it ``mixed`` and withholds
+    every scope whatever was granted: the answer may be read by the guest who
+    was there, and is read by whoever is there now.
     """
     if policy == POLICY_OFF or not conversation_token:
         return frozenset()
+    from . import room_policy
+
     try:
         room_token = conversation_token
         if db.get_room(conn, room_token) is None:
             room_token = db.find_room_token_by_ref(conn, room_token) or room_token
         shared = assume_shared or db.room_is_shared(conn, room_token)
+        mixed = assume_mixed or room_policy.audience_class(
+            conn, room_token, is_group_chat=assume_shared,
+        ) == room_policy.MIXED
     except Exception as exc:
         logger.warning(
             "room_scopes: could not read the audience of %s, withholding every "
             "scope: %s", conversation_token, exc,
         )
+        return withheld_scopes(skill_index, frozenset())
+    if mixed:
         return withheld_scopes(skill_index, frozenset())
     if not shared:
         return frozenset()

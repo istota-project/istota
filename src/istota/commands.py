@@ -1544,7 +1544,7 @@ def _room_share(config, conn, room, user_id: str, sub: str, arg: str) -> str:
             f"Shared by you here: {', '.join(shown) or 'nothing'}.\n"
             f"Withheld: {', '.join(withheld) or 'nothing'}.\n"
             "`!room share <scope>` grants one, `!room unshare <scope>` takes it "
-            "back, `!room share all|none` does every one."
+            "back, `!room share all|none` does every one." + _guest_note(conn, room)
         )
     if sub == "unshare" and arg in ("", "all"):
         if not arg:
@@ -1571,9 +1571,24 @@ def _room_share(config, conn, room, user_id: str, sub: str, arg: str) -> str:
 
 
 def _share_note(conn, room) -> str:
+    guest = _guest_note(conn, room)
+    if guest:
+        return guest
     if db.room_is_shared(conn, room.token):
         return ""
     return " The room is private right now, so the grant applies once someone else joins."
+
+
+def _guest_note(conn, room) -> str:
+    """While a guest reads the room every grant is ignored (multiplayer D3)."""
+    from . import room_policy
+
+    if room_policy.audience_class(conn, room.token) != room_policy.MIXED:
+        return ""
+    return (
+        "\nA guest reads this room, so grants are ignored here until no guest is "
+        "present: answers that need your data come to your side room instead."
+    )
 
 
 def _room_host(conn, token: str, user_id: str) -> str:

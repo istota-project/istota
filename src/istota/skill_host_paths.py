@@ -217,9 +217,38 @@ def user_workspace_root() -> Path | None:
 WITHHELD_SCOPES_VAR = "ISTOTA_WITHHELD_SCOPES"
 
 
-def _files_withheld() -> bool:
+def _withheld_from_env() -> set[str]:
     raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
-    return "files" in {part.strip() for part in raw.split(",")}
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _files_withheld() -> bool:
+    return "files" in _withheld_from_env()
+
+
+def memory_refusal(resolved: Path) -> str | None:
+    """A refusal when ``resolved`` is the user's memory and the room withholds it.
+
+    ``files`` and ``memory`` are separate scopes. With ``files`` granted the
+    workspace is a root, and the memory inside it — ``memories/``, and under
+    the bot directory ``config/`` and ``playbooks/`` — is the same set the
+    sandbox masks (`sandbox_plan.memory_masks`). None when nothing is refused.
+    """
+    if "memory" not in _withheld_from_env():
+        return None
+    own = user_workspace_root()
+    if own is None:
+        return None
+    bot = os.environ.get("ISTOTA_BOT_DIR_NAME", "").strip()
+    denied = [own / "memories"]
+    if bot and "/" not in bot and bot not in (".", ".."):
+        denied += [own / bot / "config", own / bot / "playbooks"]
+    if path_under_roots(resolved, denied):
+        return (
+            f"Refusing {resolved}: this room withholds your memory, and the "
+            "path is in it."
+        )
+    return None
 
 
 def env_host_roots(
@@ -276,10 +305,15 @@ def resolve_host_path(
     `writable=False` means an existing source to read; `writable=True` means a
     destination that need not exist yet.
     """
-    return resolve_in_roots(
+    resolved, error = resolve_in_roots(
         path, env_host_roots(writable=writable),
         writable=writable, operation=operation,
     )
+    if resolved is not None:
+        refusal = memory_refusal(resolved)
+        if refusal is not None:
+            return None, refusal
+    return resolved, error
 
 
 def resolve_in_roots(

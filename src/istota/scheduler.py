@@ -2323,8 +2323,10 @@ def _drain_deferred_ops(config: Config, task: db.Task, result: str) -> None:
     going to lose anyway — but the breadcrumb is worth the same as any other,
     so it is written before the re-raise.
     """
-    from .executor import get_user_temp_dir
-    user_temp_dir = get_user_temp_dir(config, task.user_id)
+    from .executor import task_deferred_dir
+    # The directory the run wrote to: the per-user one, or the task's own
+    # when its room restricted it or a guest wrote the turn.
+    user_temp_dir = task_deferred_dir(config, task)
     if task.guest_participant_id is not None:
         # Emissary mode (multiplayer D2): a guest's turn takes no action beyond
         # its reply, so nothing it wrote down is replayed. The files are ops
@@ -2737,17 +2739,15 @@ def process_one_task(
     # a charged attempt and would have its held writes discarded. The narrower
     # stale-email_output cleanup just below is what that path needs instead.
     if task.attempt_count > 0 and task.confirmation_prompt is None:
-        from .executor import get_user_temp_dir
-        _purge_deferred_files_for_retry(
-            task, get_user_temp_dir(config, task.user_id),
-        )
+        from .executor import task_deferred_dir
+        _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
 
     # Clean up stale deferred email output from a previous execution (e.g.
     # confirmation flow: first run writes a draft via `email output`, re-run
     # sends via `email send` — the stale file would cause a double-send).
     if task.confirmation_prompt is not None:
-        from .executor import get_user_temp_dir
-        _stale = get_user_temp_dir(config, task.user_id) / f"task_{task.id}_email_output.json"
+        from .executor import task_deferred_dir
+        _stale = task_deferred_dir(config, task) / f"task_{task.id}_email_output.json"
         if _stale.exists():
             logger.debug("Removing stale email output file from prior execution of task %d", task.id)
             _stale.unlink(missing_ok=True)
@@ -3601,10 +3601,8 @@ def process_one_task(
                 )
                 # The next attempt re-runs from the top, so this attempt's
                 # deferred-op files must not replay alongside it (ISSUE-074).
-                from .executor import get_user_temp_dir
-                _purge_deferred_files_for_retry(
-                    task, get_user_temp_dir(config, task.user_id),
-                )
+                from .executor import task_deferred_dir
+                _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
             elif decision.will_retry:
                 delay = decision.delay_minutes
                 db.set_task_pending_retry(conn, task_id, result, delay)
@@ -3615,10 +3613,8 @@ def process_one_task(
                 # the failed attempt's ops alongside the successful one's. The
                 # claim-time backstop above would catch this too; purging at the
                 # requeue keeps the disk clean for a task that never comes back.
-                from .executor import get_user_temp_dir
-                _purge_deferred_files_for_retry(
-                    task, get_user_temp_dir(config, task.user_id),
-                )
+                from .executor import task_deferred_dir
+                _purge_deferred_files_for_retry(task, task_deferred_dir(config, task))
                 # The event log is intentionally NOT wiped here: keeping it lets
                 # a watching web client survive the retry (its resume cursor
                 # stays valid) and see a "retrying" notice. The next attempt's
@@ -3995,6 +3991,21 @@ def process_one_task(
                     db.update_talk_response_id(conn, task_id, side_msg_id)
             except Exception as e:
                 logger.debug("Failed to store talk_response_id for task %d: %s", task_id, e)
+    # A side-room answer (multiplayer D4 item 1) is stored in the side room
+    # like any side-room task's. Its question was asked in a room the principal
+    # may read on Talk, so the answer goes to their Talk view there as well.
+    if success and not is_confirmation_request and not dry_run:
+        try:
+            with db.get_db(config.db_path) as conn:
+                side_answer_parent = side_rooms.side_answer_parent(conn, task)
+        except Exception as e:
+            logger.warning("Side-answer check failed for task %d: %s", task_id, e)
+            side_answer_parent = None
+        if side_answer_parent:
+            run_coro(side_rooms.push_to_talk_view(
+                config, user_id=task.user_id, parent_token=side_answer_parent,
+                body=result, reference_id=f"istota:task:{task.id}:side-answer",
+            ))
 
     # Store bot's response message ID for reply tracking
     if response_msg_id and not is_failure_notify:

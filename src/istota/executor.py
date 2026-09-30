@@ -460,7 +460,7 @@ def _make_cancel_check(config: Config, task_id: int) -> "Callable[[], bool]":
 
 def image_bind_roots(
     config: Config, task: db.Task, user_temp_dir: Path,
-    control_dir: Path | None = None,
+    control_dir: Path | None = None, *, restricted: bool = False,
 ) -> list[Path]:
     """The roots an image attachment can live under and still be openable.
 
@@ -509,7 +509,10 @@ def image_bind_roots(
         own = scoped_user_dir(mount / "Users", task.user_id)
         if own is not None:
             roots.append(own)
-        roots.append(mount / "Talk")
+        # A task its room restricts has no `{mount}/Talk` bind; its own
+        # attachments were copied into its temp dir instead.
+        if not restricted:
+            roots.append(mount / "Talk")
         if task.conversation_token:
             roots.append(mount / "Channels" / task.conversation_token)
     resolved = []
@@ -527,24 +530,106 @@ def get_user_temp_dir(config: Config, user_id: str) -> Path:
 
 
 EMISSARY_DIR_PREFIX = "emissary-task-"
+RESTRICTED_DIR_PREFIX = "room-task-"
 
 
-def task_temp_dir(config: Config, task: "db.Task") -> Path:
+def task_temp_dir(
+    config: Config, task: "db.Task", *, restricted: bool = False,
+) -> Path:
     """The temp directory a task's sandbox binds and writes its deferred ops to.
 
-    The per-user directory for every task but a guest's. A guest's turn runs as
-    the host (multiplayer D2) and is the first tenant of that directory with
-    less authority than the host, and the directory is where every other task
-    of the host's leaves deferred-op files the scheduler replays with the
-    host's full authority, keyed only by a task id the model can guess. So a
-    guest's task gets a directory of its own inside it, bound instead of it,
-    and cannot plant a file for the host's next task or read what the host's
-    other tasks left.
+    The per-user directory for every task a room does not restrict. That
+    directory is shared by all of the user's tasks in every room, so it holds
+    what their private tasks left: downloads, staged attachments, deferred-op
+    files. A task whose room withholds anything (``restricted``) gets a
+    directory of its own inside it, bound instead of it, so a shared room's
+    audience cannot reach the rest (multiplayer Stage 13).
+
+    A guest's turn always gets one, under its own prefix, whatever the room
+    withholds. It runs as the host (multiplayer D2) with less authority than
+    the host, and the per-user directory is where the host's other tasks leave
+    deferred-op files the scheduler replays with the host's full authority,
+    keyed by a task id the model can guess.
+
+    `task_deferred_dir` is the reader's half: it finds the directory a run
+    chose without recomputing what the room withheld then.
     """
     base = get_user_temp_dir(config, task.user_id)
     if task.guest_participant_id is not None:
         return base / f"{EMISSARY_DIR_PREFIX}{int(task.id)}"
+    if restricted:
+        return base / f"{RESTRICTED_DIR_PREFIX}{int(task.id)}"
     return base
+
+
+def task_deferred_dir(config: Config, task: "db.Task") -> Path:
+    """Where a task's run left its deferred-op and output files.
+
+    The directory `task_temp_dir` chose: a guest's own, a restricted task's own
+    when the run made one, else the per-user directory. Read from disk rather
+    than recomputed, because what a room withholds can change between the run
+    and the scheduler reading its files (a grant, a guest leaving). Only the
+    user's own tasks can create a directory of that name, so finding one grants
+    nothing the user did not already have.
+    """
+    base = get_user_temp_dir(config, task.user_id)
+    if task.guest_participant_id is not None:
+        return base / f"{EMISSARY_DIR_PREFIX}{int(task.id)}"
+    own = base / f"{RESTRICTED_DIR_PREFIX}{int(task.id)}"
+    if own.is_dir() and not own.is_symlink():
+        return own
+    return base
+
+
+def stage_restricted_attachments(
+    config: Config, attachments: "list[str] | None", task_dir: Path,
+) -> "list[str] | None":
+    """Copy a restricted task's own Talk attachments into ``task_dir``.
+
+    The sandbox of a task its room restricts binds no ``{mount}/Talk``, since
+    that directory is flat and holds the attachments of every conversation the
+    bot is in. The files this task was sent are copied to
+    ``{task_dir}/attachments/`` and the list names the copies. Anything else is
+    left as given: a path outside ``Talk`` is bound, or withheld, by its own
+    rule. A symlink, or a path resolving outside ``Talk``, is not copied.
+    """
+    mount = config.workspace_path
+    if not attachments or not mount:
+        return attachments
+    try:
+        talk = (Path(mount) / "Talk").resolve()
+    except OSError:
+        return attachments
+    dest_dir = task_dir / "attachments"
+    staged: list[str] = []
+    used: set[str] = set()
+    for raw in attachments:
+        source = Path(raw)
+        try:
+            resolved = source.resolve()
+            inside = resolved.is_relative_to(talk)
+            usable = inside and not source.is_symlink() and resolved.is_file()
+        except (OSError, ValueError):
+            usable = False
+        if not usable:
+            staged.append(raw)
+            continue
+        name = resolved.name
+        stem, suffix, n = resolved.stem, resolved.suffix, 1
+        while name in used:
+            n += 1
+            name = f"{stem}-{n}{suffix}"
+        used.add(name)
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(resolved, dest_dir / name, follow_symlinks=False)
+        except OSError as exc:
+            logger.warning("could not stage attachment %s for a restricted task: %s",
+                           resolved.name, exc)
+            staged.append(raw)
+            continue
+        staged.append(str(dest_dir / name))
+    return staged
 
 
 CONTROL_DIR_NAME = ".control"
@@ -6091,12 +6176,20 @@ def room_card(
     if persona_loaded:
         lines.append(f"The persona in use is that of '{principal}'.")
 
+    # A guest reading the room makes it `mixed` (D3): grants are ignored for
+    # everything posted here, the same rule `room_scopes` enforces.
+    mixed = readers.guests > 0 or task.audience == "mixed"
     if withheld_scopes is not None:
         scopes = ", ".join(_header_scalar(s) for s in sorted(withheld_scopes))
         if guest_turn:
             lines.append(
                 f"Withheld from this turn, whatever '{principal}' has granted, "
                 f"because a guest wrote it: {scopes or 'nothing'}."
+            )
+        elif mixed and scopes:
+            lines.append(
+                f"Withheld from this turn, whatever '{principal}' has granted, "
+                f"because a guest reads this room: {scopes}."
             )
         elif scopes:
             lines.append(
@@ -6117,6 +6210,14 @@ def room_card(
                 "`istota-skill room whisper`."
             )
         else:
+            if withheld_scopes:
+                lines.append(
+                    "If answering needs something withheld here, run "
+                    "`istota-skill room answer-privately`: it asks "
+                    f"'{principal}''s own question again in their side room, "
+                    "where only they read the answer. Then say here that you "
+                    "have answered privately, and do not answer it here."
+                )
             lines.append(
                 f"Anything only '{principal}' should see goes to their private "
                 "side room with `istota-skill room whisper`; post to the room "
@@ -7102,6 +7203,7 @@ def _task_withheld_scopes(
         user_id=task.user_id,
         skill_index=skill_index,
         assume_shared=bool(task.is_group_chat),
+        assume_mixed=task.audience == "mixed",
     )
     if conn is not None:
         withheld = room_scopes.task_withheld_scopes(conn, **kwargs)
@@ -7148,10 +7250,26 @@ def execute_task(
 
     Returns (success, result_or_error).
     """
-    # Ensure the task's temp directory exists: the per-user one, or a guest's
-    # own directory inside it (`task_temp_dir`).
-    user_temp_dir = task_temp_dir(config, task)
+    # What this task's room withholds, read once and handed to every reach
+    # seam below. First, because it also decides the temp directory: a task
+    # the room restricts gets its own (`task_temp_dir`).
+    from .skills._loader import load_skill_index
+
+    skill_index = load_skill_index(
+        config.skills_dir, bundled_dir=config.bundled_skills_dir,
+    )
+    _withheld = _task_withheld_scopes(config, conn, task, skill_index)
+
+    # Ensure the task's temp directory exists: the per-user one, or a
+    # restricted task's own directory inside it.
+    user_temp_dir = task_temp_dir(config, task, restricted=bool(_withheld))
     user_temp_dir.mkdir(parents=True, exist_ok=True)
+    if user_temp_dir.is_symlink():
+        # Bound read-write into the sandbox under this name: a link planted
+        # here would put wherever it points in front of the room.
+        msg = f"task temp directory {user_temp_dir} is a symlink; refusing it"
+        logger.error("Task %s: %s", task.id, msg)
+        return False, msg, None, None
 
     # And the daemon-owned directory beside it, for the files the framework
     # authors and the model must not touch: both prompt halves and the prepared
@@ -7228,6 +7346,15 @@ def execute_task(
     # normalization plus the OCR deadline, in sequence on one worker.
     _cancel_check = _make_cancel_check(config, task.id)
 
+    # A task its room restricts is not given the flat Talk attachments
+    # directory, which holds every conversation's files; the ones this task
+    # was sent are copied into its own directory instead. In memory only, as
+    # the image renditions below are.
+    if _withheld:
+        task.attachments = stage_restricted_attachments(
+            config, task.attachments, user_temp_dir,
+        )
+
     # Pre-transcribe audio attachments so skill selection sees real text.
     #
     # This one *does* still land on `task.prompt`, and deliberately: the
@@ -7269,7 +7396,9 @@ def execute_task(
         # replacing the user's own file path with a temp one in the prompt —
         # on the standalone single-user shape, for every image.
         bind_roots=(
-            image_bind_roots(config, task, user_temp_dir, control_dir)
+            image_bind_roots(
+                config, task, user_temp_dir, control_dir, restricted=bool(_withheld),
+            )
             if effective_sandboxing(config)
             else None
         ),
@@ -7316,7 +7445,7 @@ def execute_task(
 
     # Select and load relevant skills
     from .skills._loader import (
-        load_skill_index, select_skills, load_skills,
+        select_skills, load_skills,
         compute_skills_fingerprint, load_skills_changelog,
         effective_disabled_skills,
     )
@@ -7324,14 +7453,12 @@ def execute_task(
     is_admin = config.is_admin(task.user_id)
 
     _bundled_dir = config.bundled_skills_dir
-    skill_index = load_skill_index(config.skills_dir, bundled_dir=_bundled_dir)
     user_resource_types = {r.resource_type for r in user_resources}
     # Instance-wide + per-user disabled skills, plus the capability gate: a
     # skill whose `requires_capability` (e.g. browse→browser, devbox→devbox)
     # isn't available in this deployment is folded into the disabled set so it
     # drops from both selection and the on-demand menu (no wasted pull /
     # confusing CLI failure). See config.available_capabilities().
-    _withheld = _task_withheld_scopes(config, conn, task, skill_index)
     _disabled = effective_disabled_skills(
         config, task.user_id, skill_index, withheld_scopes=_withheld,
     )

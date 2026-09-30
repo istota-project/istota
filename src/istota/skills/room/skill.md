@@ -1,7 +1,7 @@
 ---
 name: room
-triggers: [whisper, privately, side room, only me, post to the room, post in the room, tell the room]
-description: Write privately to your principal in a shared room, or post from a side room into its room
+triggers: [whisper, privately, side room, only me, post to the room, post in the room, tell the room, withheld]
+description: Write privately to your principal in a shared room, answer their question privately when the room withholds what it needs, or post from a side room into its room
 cli: true
 shared_room: safe
 companion_skills: [untrusted_input]
@@ -19,6 +19,16 @@ istota-skill room whisper --request-key KEY "text"
 Puts `text` in the side room of the user you are acting for. Only they read it. Use it for anything that should not be said in front of the room: a private answer, a question for them, something to check before replying publicly. The room sees none of it, and your public reply should not repeat it.
 
 It returns `queued`; the daemon delivers it. It is refused (`not_a_shared_room`) outside a shared room, where your ordinary answer already reaches only the user.
+
+## `room answer-privately` — a question the room withholds the data for
+
+```bash
+istota-skill room answer-privately
+```
+
+When answering the user you are acting for needs something this room withholds (their calendar, files, memory, email and so on), do not answer from what you can reach and do not ask them to share it here. Run this: their own question is asked again in their side room, where it is answered with everything of theirs, and only they read the answer. Then tell the room, briefly, that you have answered them privately. The command takes no text: what is asked again is their message as they wrote it.
+
+It returns `queued` with the side-room task's id. It is refused for a guest's message (`guest_turn`), outside a shared room (`not_a_shared_room`), and for anything but the user's own message (`unsupported_origin`).
 
 ## `room post` — from a side room, into its room
 

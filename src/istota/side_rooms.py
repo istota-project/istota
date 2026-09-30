@@ -28,8 +28,14 @@ What this module holds, and what it deliberately does not:
   ``re: <room>`` (`push_to_talk_view`), and only when the parent is on Talk.
   Nothing binds the side room to that conversation: it is its own room.
 
-Not here: the nested and ephemeral web rendering (Stage 17), and side-room
-answers for withheld scopes (Stage 13).
+- **Side-room answers** (D4 item 1). A task in a shared room that needs a scope
+  the room withholds asks for the answer privately (`queue_side_answer`): the
+  principal's own question is put in their side room as a turn of theirs, and
+  runs there as an ordinary private task. The shared-room task never gains the
+  scope, and the side-room task's answer reaches the room only through a held
+  `room post`.
+
+Not here: the nested and ephemeral web rendering (Stage 17).
 """
 
 from __future__ import annotations
@@ -516,6 +522,83 @@ def enqueue_whisper(conn, config, *, actor_user_id: str, task_id: int,
             destination={"kind": "side_room", "room_token": side.token, "parent": parent},
         )
         return _question_response(conn, row)
+
+
+SIDE_ANSWER_REFERENCE = "side-answer:"
+
+
+def queue_side_answer(conn, config, *, actor_user_id: str, task_id: int) -> dict:
+    """Ask a shared-room task's question again, privately, in the side room.
+
+    For a question the room withholds the scope to answer (multiplayer D4 item
+    1). What goes to the side room is the principal's own turn, as stored with
+    the task, never text the model wrote: the side-room task runs at the
+    principal's full reach, so a question composed by a model that has been
+    reading guests' words would be an injection route to that reach. It is
+    recorded as the principal's turn in their side room and runs there as an
+    ordinary private task (source ``web``), which is what the principal would
+    have got by asking there, and its answer is pinned to the side room like
+    every side-room task's.
+
+    Not the deferred-subtask op: a subtask is pinned to its parent's
+    conversation, so it would run in the same shared room at the same
+    restricted reach, and it is admin-only and rate-limited besides.
+
+    Refused for a guest's turn (the question is not the host's), for anything
+    but the principal's own turn in a shared room they are in, and from a side
+    room. Idempotent per task: a second call returns the first side-room task.
+    """
+    task = _owned_running_task(conn, actor_user_id=actor_user_id, task_id=task_id)
+    if getattr(task, "guest_participant_id", None) is not None:
+        raise RequestError("guest_turn")
+    if (task.source_type not in _SPEAKER_SURFACES or task.parent_task_id
+            or task.command or task.skill or task.scheduled_job_id):
+        raise RequestError("unsupported_origin")
+    reference = f"{SIDE_ANSWER_REFERENCE}{task.id}"
+    with write_transaction(conn):
+        existing = conn.execute(
+            "SELECT task_id FROM messages WHERE delivery_reference = ?", (reference,),
+        ).fetchone()
+        if existing is not None and existing["task_id"] is not None:
+            return {"status": "queued", "task_id": int(existing["task_id"])}
+        parent = canonical_token(conn, task.conversation_token)
+        room = db.get_room(conn, parent) if parent else None
+        if (room is None or room.side_of or room.archived
+                or not db.is_room_member(conn, parent, actor_user_id)
+                or not is_shared_room(conn, parent, is_group_chat=task.is_group_chat)):
+            raise RequestError("not_a_shared_room")
+        try:
+            side = db.ensure_side_room(conn, parent, actor_user_id)
+        except ValueError:
+            raise RequestError("side_room_unavailable") from None
+        new_id = db.create_task(
+            conn, prompt=task.prompt, user_id=actor_user_id, source_type="web",
+            conversation_token=side.token, attachments=task.attachments or None,
+            model=task.model, effort=task.effort, brain=task.brain,
+            model_namespace=task.model_namespace,
+        )
+        db.add_message(
+            conn, side.token, role="user", body=task.prompt, origin_surface="web",
+            task_id=new_id, author_user_id=actor_user_id, delivery_reference=reference,
+        )
+    return {"status": "queued", "task_id": new_id}
+
+
+def side_answer_parent(conn, task) -> str | None:
+    """The parent room of a side-room answer task, or None for any other task.
+
+    Its answer goes to the side room like any side-room task's; the parent is
+    what `push_to_talk_view` needs to show it in the principal's Talk view as
+    well, since the question was asked where they read on Talk.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM messages WHERE task_id = ? AND delivery_reference LIKE ?",
+        (task.id, SIDE_ANSWER_REFERENCE + "%"),
+    ).fetchone()
+    if row is None:
+        return None
+    side = task_side_room(conn, task)
+    return side.side_of if side is not None else None
 
 
 def _post_destination(conn, parent_token: str, user_id: str) -> dict:
