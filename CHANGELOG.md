@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Ansible deployments now enable email login alongside Nextcloud login by default. Users still need a configured email login identity to sign in by email.
+
 - Ansible deployments that use the tmux brain now expect Claude CLI 2.1.280. The version check warns if the installed CLI differs.
 
 - Browser sessions now have separate per-user and deployment-wide limits. Opening a session at capacity closes the requesting user's oldest first; it can close another user's oldest only at the global limit when the requester has none. Idle browser processes stop while their saved profiles remain.
