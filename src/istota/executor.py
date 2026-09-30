@@ -2227,7 +2227,9 @@ def fallback_notice_text(primary_kind, reason, fallback_kind, model, dropped_pin
     return f"{lead} {backup} I might say weird stuff, but I'm doing my best."
 
 
-def _build_native_completer(native_config, timeout: float, *, on_usage=None):
+def _build_native_completer(
+    native_config, timeout: float, *, on_usage=None, close_after_call: bool = False,
+):
     """A `prompt -> raw_output | None` one-shot completer over the native provider.
 
     Conversation-context triage on a native deployment, so the native brain runs
@@ -2262,7 +2264,11 @@ def _build_native_completer(native_config, timeout: float, *, on_usage=None):
         return None
 
     def _classify(prompt: str) -> str | None:
-        message = completer(prompt, timeout=timeout)
+        try:
+            message = completer(prompt, timeout=timeout)
+        finally:
+            if close_after_call:
+                _close_provider(provider)
         if message is None:
             return None
         if on_usage is not None:
@@ -2275,6 +2281,20 @@ def _build_native_completer(native_config, timeout: float, *, on_usage=None):
         return message.text
 
     return _classify
+
+
+def _close_provider(provider) -> None:
+    """Close a provider's HTTP client from sync code. Never raises.
+
+    For a completer built per call, whose provider nothing else will close;
+    each one holds an ``httpx.AsyncClient`` and its sockets until collected.
+    """
+    try:
+        import asyncio
+
+        asyncio.run(provider.aclose())
+    except Exception:  # noqa: BLE001 — cleanup must not cost the answer
+        logger.debug("closing a one-shot provider failed", exc_info=True)
 
 
 def _report_native_usage(on_usage, message, requested_model: str) -> None:
@@ -2380,6 +2400,7 @@ def build_oneshot_completer(
     timeout: float,
     origin: str,
     model: str | None = None,
+    close_after_call: bool = False,
 ):
     """A task-free one-shot completer, routed through the brain the arguments name.
 
@@ -2401,6 +2422,8 @@ def build_oneshot_completer(
 
     ``model`` is a role alias or id resolved in the native namespace; None keeps
     the native brain's own model, which is what context triage has always used.
+    ``close_after_call`` closes the native provider after each call, for a
+    caller that builds a completer per call and uses it once.
     """
     from .brain import resolve_brain_kind
 
@@ -2417,6 +2440,7 @@ def build_oneshot_completer(
         on_usage=_oneshot_usage_sink(
             config, user_id=user_id, source_type=source_type, origin=origin,
         ),
+        close_after_call=close_after_call,
     )
     if completer is None:
         return lambda _prompt: None
@@ -2497,6 +2521,9 @@ def build_speech_gate_completer(
         timeout=gate.timeout_seconds,
         origin="speech_gate",
         model=gate.model,
+        # Built once per unaddressed turn and used once, so nothing else would
+        # close its provider.
+        close_after_call=True,
     )
     if completer is not None:
         return completer

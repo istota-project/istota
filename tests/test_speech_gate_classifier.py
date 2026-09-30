@@ -269,8 +269,8 @@ class TestTheCompleterAndItsUsage:
         )
         seen = []
 
-        def _fake(native, timeout, *, on_usage=None):
-            seen.append((native.model, timeout))
+        def _fake(native, timeout, *, on_usage=None, close_after_call=False):
+            seen.append((native.model, timeout, close_after_call))
             return lambda _p: None
 
         config.speech_gate.model = "small/model"
@@ -290,7 +290,37 @@ class TestTheCompleterAndItsUsage:
                 origin="context_triage",
             )
 
-        assert seen == [("small/model", 4.0), ("big/model", 1.0), ("big/model", 1.0)]
+        assert seen == [
+            ("small/model", 4.0, True),
+            ("big/model", 1.0, False),
+            ("big/model", 1.0, False),
+        ]
+
+    def test_a_per_turn_native_provider_is_closed_after_its_call(self, config):
+        """The gate builds a completer per unaddressed turn, so its provider's
+        HTTP client would otherwise outlive every call."""
+        from tests.native._mock_provider import MockProvider
+
+        from istota.llm.types import AssistantMessage, TextContent
+
+        class _Closing(MockProvider):
+            closed = 0
+
+            async def aclose(self):
+                type(self).closed += 1
+
+        config.brain = BrainConfig(
+            kind="native", native=NativeBrainConfig(model="m", api_key="k"),
+        )
+        provider = _Closing([AssistantMessage(content=[TextContent(text='{"speak": true}')])])
+        with patch("istota.llm.make_provider", return_value=provider), \
+                patch("istota.executor._native_with_user_key",
+                      side_effect=lambda nc, *a, **k: nc):
+            completer = build_speech_gate_completer(
+                config, user_id="alice", source_type="talk",
+            )
+            assert completer("prompt") == '{"speak": true}'
+        assert _Closing.closed == 1
 
 
 class TestTheDashboardCounter:

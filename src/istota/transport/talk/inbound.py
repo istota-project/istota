@@ -1427,6 +1427,13 @@ def _is_configured_user_turn(msg: dict, config: Config) -> bool:
     return actor_id in config.users
 
 
+#: How many classifier calls one batch runs at once.
+_CLASSIFY_AHEAD_CONCURRENCY = 4
+#: Slack on the pass's deadline beyond the per-call timeouts; the CLI path's
+#: retry budget and process start can run a little past its own timeout.
+_CLASSIFY_AHEAD_GRACE_SECONDS = 5.0
+
+
 async def _classify_batch_ahead(
     config: Config,
     client: TalkClient,
@@ -1442,12 +1449,18 @@ async def _classify_batch_ahead(
     the batch, which are not stored yet. A turn this pass did not answer is
     decided in the transaction without one, which fails closed.
 
+    The calls run concurrently, a few at a time, under one deadline for the
+    whole pass: each window depends on the text of earlier turns and not on
+    their decisions, and the batch — every room in it, mentioned turns
+    included — waits on this pass. A call still running at the deadline is
+    abandoned and its turn fails closed.
+
     This pass reads the same filters the results loop applies but acts on
     none of them; the loop still decides what happens to every message.
     """
     if speech_gate.normalize_mode(config.speech_gate.mode) != "classifier":
         return {}
-    decisions: dict[tuple[str, int], speech_gate.GateDecision] = {}
+    jobs: list[tuple[tuple[str, int], dict]] = []
     for conversation_token, messages in results:
         earlier: list[tuple[str, str]] = []
         participants: list[dict] | None = None
@@ -1475,17 +1488,43 @@ async def _classify_batch_ahead(
                         client, conversation_token,
                         conv_types.get(conversation_token, 1),
                     )
-                decision = await asyncio.to_thread(
-                    classify_ahead, config,
-                    surface="talk", surface_ref=conversation_token,
-                    user_id=actor_id, text=text,
-                    is_group_chat=_is_multi_user(participants),
-                    addressed_to_bot=False, source_type="talk",
-                    earlier=tuple(earlier),
-                )
-                if decision is not None:
-                    decisions[(conversation_token, message_id)] = decision
+                if _is_multi_user(participants):
+                    jobs.append(((conversation_token, message_id), dict(
+                        surface="talk", surface_ref=conversation_token,
+                        user_id=actor_id, text=text, is_group_chat=True,
+                        addressed_to_bot=False, source_type="talk",
+                        earlier=tuple(earlier),
+                    )))
             earlier.append((actor_id, text))
+    if not jobs:
+        return {}
+
+    limit = asyncio.Semaphore(_CLASSIFY_AHEAD_CONCURRENCY)
+
+    async def _one(kwargs: dict):
+        async with limit:
+            return await asyncio.to_thread(classify_ahead, config, **kwargs)
+
+    tasks = {key: asyncio.ensure_future(_one(kwargs)) for key, kwargs in jobs}
+    rounds = -(-len(jobs) // _CLASSIFY_AHEAD_CONCURRENCY)
+    deadline = (
+        float(config.speech_gate.timeout_seconds) * rounds
+        + _CLASSIFY_AHEAD_GRACE_SECONDS
+    )
+    _done, pending = await asyncio.wait(tasks.values(), timeout=deadline)
+    for task in pending:
+        task.cancel()
+    if pending:
+        logger.warning(
+            "speech gate: %d of %d classifications missed the batch deadline",
+            len(pending), len(jobs),
+        )
+    decisions: dict[tuple[str, int], speech_gate.GateDecision] = {}
+    for key, task in tasks.items():
+        if task.done() and not task.cancelled() and task.exception() is None:
+            decision = task.result()
+            if decision is not None:
+                decisions[key] = decision
     return decisions
 
 

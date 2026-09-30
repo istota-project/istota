@@ -2712,26 +2712,32 @@ class TestTheClassifierRunsBeforeThePollTransaction:
         self, make_config,
     ):
         import sqlite3
+        import threading
 
         config = make_config()
         config.users = {"alice": UserConfig(), "bob": UserConfig()}
         config.speech_gate.mode = "classifier"
         prompts: list[str] = []
         lock_free: list[bool] = []
-        answers = ['{"speak": false}', '{"speak": true, "reason": "asks the bot"}']
+        # The calls run concurrently; serialize the probes so one probe's
+        # BEGIN IMMEDIATE cannot be what refuses the other's.
+        probing = threading.Lock()
 
         def completer(prompt):
-            prompts.append(prompt)
-            probe = sqlite3.connect(config.db_path, timeout=0)
-            try:
-                probe.execute("BEGIN IMMEDIATE")
-                probe.rollback()
-                lock_free.append(True)
-            except sqlite3.OperationalError:
-                lock_free.append(False)
-            finally:
-                probe.close()
-            return answers.pop(0)
+            with probing:
+                prompts.append(prompt)
+                probe = sqlite3.connect(config.db_path, timeout=0)
+                try:
+                    probe.execute("BEGIN IMMEDIATE")
+                    probe.rollback()
+                    lock_free.append(True)
+                except sqlite3.OperationalError:
+                    lock_free.append(False)
+                finally:
+                    probe.close()
+            if "could you book it" in prompt:
+                return '{"speak": true, "reason": "asks the bot"}'
+            return '{"speak": false}'
 
         with patch("istota.executor.build_speech_gate_completer",
                    return_value=completer):
@@ -2744,9 +2750,9 @@ class TestTheClassifierRunsBeforeThePollTransaction:
         assert len(created) == 1
         # The second turn's window carries the first, which is in the same
         # batch and not stored yet when the model is asked.
-        assert "bob: lunch at noon?" in prompts[1]
-        assert prompts[1].index("lunch at noon?") < prompts[1].index(
-            "could you book it")
+        second = next(p for p in prompts if "could you book it" in p)
+        assert "bob: lunch at noon?" in second
+        assert second.index("lunch at noon?") < second.index("could you book it")
         rows = _user_rows(config)
         assert [r["task_id"] for r in rows] == [None, created[0]]
         with db.get_db(config.db_path) as conn:
@@ -2784,3 +2790,36 @@ class TestTheClassifierRunsBeforeThePollTransaction:
 
         build.assert_not_called()
         assert created == []
+
+    @pytest.mark.asyncio
+    async def test_a_call_past_the_deadline_fails_closed(self, make_config):
+        """One hung call does not hold the batch: past the pass's deadline the
+        turn reaches the transaction unanswered and is recorded, not answered."""
+        import threading
+
+        config = make_config()
+        config.users = {"alice": UserConfig(), "bob": UserConfig()}
+        config.speech_gate.mode = "classifier"
+        config.speech_gate.timeout_seconds = 0.01
+        release = threading.Event()
+
+        def completer(_prompt):
+            release.wait(5)
+            return '{"speak": true}'
+
+        try:
+            with patch("istota.executor.build_speech_gate_completer",
+                       return_value=completer), \
+                    patch.object(_talk_poller_mod, "_CLASSIFY_AHEAD_GRACE_SECONDS", 0.1):
+                created = await self._poll(
+                    config, [_msg(id=205, actor_id="bob", message="hm")],
+                )
+        finally:
+            release.set()
+
+        assert created == []
+        with db.get_db(config.db_path) as conn:
+            rung = conn.execute(
+                "SELECT rung FROM speech_gate_decisions ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        assert rung == "failed"
