@@ -1436,8 +1436,18 @@ class NetworkConfig:
 
 
 @dataclass
+class CredentialBrokerConfig:
+    """Opt-in credential interception and its bounded scans."""
+    enabled: bool = False
+    enforce_reveal: bool = False
+    scan_max_bytes: int = 1048576
+    leaf_validity_hours: int = 24
+
+
+@dataclass
 class SecurityConfig:
     """Security hardening configuration."""
+    credential_broker: CredentialBrokerConfig = field(default_factory=CredentialBrokerConfig)
     sandbox_enabled: bool = True  # bwrap filesystem isolation per user
     skill_proxy_enabled: bool = True  # proxy skill CLI calls via Unix socket
     skill_proxy_timeout: int = 300  # timeout for proxied skill commands (seconds)
@@ -3959,6 +3969,8 @@ _CONFIG_HOOKS: dict[str, Hook] = {
     # An empty string means "unset" here, not a relative path of `.`.
     "security.sandbox_cache_dir": lambda raw, key: str(raw or ""),
     "security.sandbox_cache_max_gb": _positive_float,
+    "security.credential_broker.scan_max_bytes": _positive_int,
+    "security.credential_broker.leaf_validity_hours": _positive_int,
     # Each of these validates against a closed vocabulary or a path policy and
     # warns in its own terms. They are the validators the walk exists to leave
     # alone.
@@ -4271,6 +4283,8 @@ def load_config(config_path: Path | None = None) -> Config:
     # Read off the loaded config rather than off `data`, so it fires whichever
     # of the two keys the file names and whichever it inherits.
     _warn_ro_paths_over_control_tree(config)
+    if config.security.credential_broker.enabled and not config.security.sandbox_enabled:
+        logger.warning("Credential broker enabled without sandboxing: values are not contained")
 
     config.admin_users = load_admin_users()
 

@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -72,6 +72,8 @@ class TaskRuntime:
     # auto-authorizes — not ``selected_skills``. `build_bwrap_cmd`'s docstring
     # says why the distinction decides what gets bound.
     authorized_skills: frozenset[str]
+    # Applied by the sandbox exec wrapper, never by the daemon or skill proxy.
+    sandbox_env: dict[str, str] = field(default_factory=dict)
 
 
 def _vault_credentials(config: Config, user_id: str) -> dict[str, str]:
@@ -646,8 +648,18 @@ def build_task_runtime(
     # plus the unconditional seed beside them.
     _extra_ro_binds: list[Path] = [control_dir]
 
+    sandbox_env = {}
+    if config.security.credential_broker.enabled:
+        from .credential_broker.ca import load_or_create_ca, state_directory, write_trust_bundle
+
+        authority = load_or_create_ca(state_directory(config))
+        sandbox_env = write_trust_bundle(authority, control_dir / "trust")
+        if not effective_sandboxing(config):
+            logger.warning("Credential broker enabled without effective sandboxing: values are not contained")
+
     return TaskRuntime(
         env=env,
+        sandbox_env=sandbox_env,
         proxy_ctx=_proxy_ctx,
         proxy_sock=_proxy_sock,
         net_proxy_ctx=_net_proxy_ctx,

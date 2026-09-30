@@ -891,3 +891,47 @@ def test_runtime_freezes_empty_credential_snapshot(tmp_path, runtime_inputs):
     task_env.build_task_runtime(config, **runtime_inputs)
     with db.get_db(config.db_path) as conn:
         assert conn.execute("SELECT count(*) FROM credential_task_grants").fetchone()[0] == 0
+
+
+class TestBrokerTrustSplit:
+    def test_trust_only_enters_sandbox_wrapper(self, tmp_path, runtime_inputs, monkeypatch):
+        from istota.config import CredentialBrokerConfig
+        from istota.sandbox_plan import SandboxProfile
+        from istota.tool_server import merge_proxy_env
+        import shlex
+
+        monkeypatch.setattr(executor, "_bwrap_available", lambda: True)
+        config = _config(tmp_path, credential_broker=CredentialBrokerConfig(enabled=True))
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+        assert runtime.sandbox_env
+        assert all(k not in runtime.env for k in runtime.sandbox_env)
+        assert all(k not in runtime.proxy_ctx.base_env for k in runtime.sandbox_env)
+        assert all(k not in runtime.proxy_ctx.credential_env for k in runtime.sandbox_env)
+        for path in runtime.sandbox_env.values():
+            assert Path(path).is_relative_to(runtime_inputs["control_dir"])
+            assert "PRIVATE KEY" not in Path(path).read_text()
+        for profile in (SandboxProfile.CLAUDE, SandboxProfile.NATIVE):
+            argv = executor.build_bwrap_cmd(
+                ["echo", "ok"], config, runtime_inputs["task"], True, [],
+                runtime_inputs["user_temp_dir"], net_proxy_sock=runtime.net_proxy_sock,
+                extra_ro_binds=runtime.extra_ro_binds, profile=profile,
+                sandbox_env=runtime.sandbox_env,
+            )
+            shell = argv[argv.index("-c") + 1]
+            for key, value in runtime.sandbox_env.items():
+                assert f"{key}={value}" in shlex.split(shell)
+            assert "ca-key.pem" not in " ".join(argv)
+        assert merge_proxy_env({}, runtime.sandbox_env) == runtime.sandbox_env
+
+    def test_disabled_has_no_ca_or_bundle(self, tmp_path, runtime_inputs):
+        config = _config(tmp_path)
+        runtime = task_env.build_task_runtime(config, **runtime_inputs)
+        assert runtime.sandbox_env == {}
+        assert not (config.db_path.parent / "credential-broker").exists()
+
+    def test_ca_refuses_a_sandbox_bound_state_dir(self, tmp_path, runtime_inputs):
+        from istota.config import CredentialBrokerConfig
+        config = _config(tmp_path, credential_broker=CredentialBrokerConfig(enabled=True))
+        config.db_path = runtime_inputs["user_temp_dir"] / "test.db"
+        with pytest.raises(ValueError, match="sandbox"):
+            task_env.build_task_runtime(config, **runtime_inputs)

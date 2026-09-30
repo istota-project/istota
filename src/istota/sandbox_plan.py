@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -923,6 +924,7 @@ def render_bwrap_argv(
     *,
     net_proxy_sock: Path | None = None,
     user_temp_dir: Path,
+    sandbox_env: dict[str, str] | None = None,
 ) -> list[str]:
     """The plan as bwrap's argv, plus the lifecycle tail.
 
@@ -1040,12 +1042,13 @@ def render_bwrap_argv(
         from .network_proxy import BRIDGE_PORT
         bridge_path = str(user_temp_dir.resolve() / ".developer" / "net-bridge")
         sock_path = str(net_proxy_sock)
+        trust_env = "".join(shlex.quote(f"{key}={value}") + " " for key, value in (sandbox_env or {}).items())
         shell_cmd = (
             f"python3 {bridge_path} {sock_path} {BRIDGE_PORT} </dev/null & "
             f"exec env "
             f"HTTPS_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
             f"HTTP_PROXY=http://127.0.0.1:{BRIDGE_PORT} "
-            f'NO_PROXY= "$@"'
+            f'NO_PROXY= {trust_env}"$@"'
         )
         args.extend(["/bin/sh", "-c", shell_cmd, "sh"] + cmd)
     else:

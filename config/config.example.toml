@@ -533,6 +533,14 @@ features = []
 # [security.skill_proxy_timeouts]
 # browse = 90
 
+# [security.credential_broker]
+# enabled = false                 # opt-in CA and task trust bundle; interception lands separately
+# enforce_reveal = false          # reserved for the reveal-enforcement rollout
+# scan_max_bytes = 1048576         # request scan and response scrub limit
+# leaf_validity_hours = 24         # positive lifetime for per-host TLS certificates
+# The CA stays in daemon state. Only sandbox commands receive its trust bundle.
+# Leave disabled until credential interception is available.
+
 # [security.network]
 # enabled = true                   # --unshare-net + CONNECT proxy (requires sandbox)
 # allow_pypi = true                # add pypi.org + files.pythonhosted.org to allowlist

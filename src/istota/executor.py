@@ -4481,6 +4481,7 @@ def build_bwrap_cmd(
     workspace_dir: Path | None = None,
     *,
     profile: SandboxProfile,
+    sandbox_env: dict[str, str] | None = None,
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -4516,6 +4517,7 @@ def build_bwrap_cmd(
     )
     return render_bwrap_argv(
         plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
+        sandbox_env=sandbox_env,
     )
 
 
@@ -7452,6 +7454,7 @@ def execute_task(
                     authorized_skills=authorized_skills,
                     workspace_dir=workspace_dir,
                     profile=sandbox_profile,
+                    sandbox_env=_runtime.sandbox_env,
                 )
 
             return _wrap
