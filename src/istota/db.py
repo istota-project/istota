@@ -4170,6 +4170,10 @@ class Message:
     #: Canonical id of the message this one replies to, or None. May dangle —
     #: the parent can be hard-deleted, and the citation outlives it.
     reply_to_message_id: int | None = None
+    #: Who wrote the row: an istota user id, or a sanitized external label. At
+    #: most one is set by convention; a reader that finds both prefers the label.
+    author_user_id: str | None = None
+    author_label: str | None = None
 
 
 def _row_to_room(row: sqlite3.Row) -> Room:
@@ -4213,6 +4217,8 @@ def _row_to_message(row: sqlite3.Row) -> Message:
         reply_to_message_id=(
             row["reply_to_message_id"] if "reply_to_message_id" in keys else None
         ),
+        author_user_id=row["author_user_id"] if "author_user_id" in keys else None,
+        author_label=row["author_label"] if "author_label" in keys else None,
         id=row["id"],
         room_token=row["room_token"],
         role=row["role"],
@@ -4846,18 +4852,27 @@ def find_confirmation_exchange(
 
 def get_messages(
     conn: sqlite3.Connection, room_token: str, limit: int | None = None,
+    *, roles: tuple[str, ...] | None = None,
 ) -> list[Message]:
     """A room's messages, oldest-first (by id). With `limit`, returns the most
-    recent `limit` messages, still oldest-first."""
+    recent `limit` messages, still oldest-first. With `roles`, only rows of
+    those roles are returned and counted against `limit`."""
+    where = "room_token = ?"
+    params: list = [room_token]
+    if roles is not None:
+        if not roles:
+            return []
+        where += f" AND role IN ({','.join('?' * len(roles))})"
+        params.extend(roles)
     if limit is None:
         rows = conn.execute(
-            "SELECT * FROM messages WHERE room_token = ? ORDER BY id ASC",
-            (room_token,),
+            f"SELECT * FROM messages WHERE {where} ORDER BY id ASC",
+            params,
         ).fetchall()
         return [_row_to_message(r) for r in rows]
     rows = conn.execute(
-        "SELECT * FROM messages WHERE room_token = ? ORDER BY id DESC LIMIT ?",
-        (room_token, limit),
+        f"SELECT * FROM messages WHERE {where} ORDER BY id DESC LIMIT ?",
+        (*params, limit),
     ).fetchall()
     return [_row_to_message(r) for r in reversed(rows)]
 

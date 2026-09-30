@@ -92,7 +92,7 @@ def _warn_once(key: str, message: str) -> None:
     _warned_keys.add(key)
     logger.warning("%s", message)
 
-from . import avatars, confirmations, db
+from . import avatars, confirmations, db, speech_gate
 from .brain import (
     make_brain,
     resolve_brain_kind,
@@ -7040,6 +7040,14 @@ def run_cleanup_checks(config: Config) -> None:
         pruned = db.prune_message_deletions(conn, _MESSAGE_DELETION_RETENTION_DAYS)
         if pruned > 0:
             logger.info(f"Pruned {pruned} message-deletion ledger row(s)")
+
+        # 4b'. Age out the speech gate's audit rows. Small, one row per
+        # decision in a multi-human room, and nothing else deletes them.
+        gate_rows = speech_gate.prune_decisions(
+            conn, config.speech_gate.decision_retention_days,
+        )
+        if gate_rows > 0:
+            logger.info(f"Pruned {gate_rows} speech-gate decision row(s)")
 
     # 4c. Prune token/cost rows, in a transaction of its own. The block above is
     # one long write transaction and this retention window is 180 days against

@@ -1389,6 +1389,28 @@ CREATE TABLE IF NOT EXISTS message_deletions (
     deleted_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- The speech gate's audit trail: one row per decision about whether the bot
+-- replies to an inbound turn. An operator-facing tuning log, not a second
+-- transcript: `message_id` points at the turn rather than copying its body,
+-- and `reason` is the classifier's own bounded one-liner. Pruned by age on the
+-- scheduler's cleanup tick (`[speech_gate] decision_retention_days`).
+CREATE TABLE IF NOT EXISTS speech_gate_decisions (
+    id         INTEGER PRIMARY KEY,
+    room_token TEXT NOT NULL,
+    surface    TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    message_id INTEGER,
+    spoke      INTEGER NOT NULL,
+    -- 'agent_author'|'not_multi_human'|'addressed'|'mode_off'|'mode_mention'|'classifier'|'failed'
+    rung       TEXT NOT NULL,
+    reason     TEXT,
+    model      TEXT,
+    latency_ms INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_speech_gate_room ON speech_gate_decisions (room_token, id);
+CREATE INDEX IF NOT EXISTS idx_speech_gate_created ON speech_gate_decisions (created_at);
+
 -- One-time data-migration ledger (markered, so heavy backfills run once).
 CREATE TABLE IF NOT EXISTS _migration_state (
     name        TEXT PRIMARY KEY,

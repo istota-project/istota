@@ -289,6 +289,23 @@ class ConversationConfig:
 
 
 @dataclass
+class SpeechGateConfig:
+    """Whether the bot replies to an unaddressed turn in a multi-human room.
+
+    Read by ``speech_gate``. ``mode`` is ``"mention"`` (reply only when
+    addressed, which is Talk's rule), ``"classifier"`` (a cheap model decides)
+    or ``"off"`` (always reply). An unrecognised mode fails closed at the gate.
+    """
+
+    mode: str = "mention"
+    model: str = "fast"  # role alias, resolved per brain namespace; not a pin
+    window_messages: int = 8  # transcript turns the classifier sees
+    max_message_chars: int = 400  # per-turn cap inside the window
+    timeout_seconds: float = 8.0
+    decision_retention_days: int = 30  # speech_gate_decisions rows; 0 keeps them forever
+
+
+@dataclass
 class SchedulerConfig:
     # 5, not 2, because 5 is what every deployment actually runs: the Ansible
     # template, the Docker render, `config.example.toml` and `istota setup` all
@@ -2011,6 +2028,7 @@ class Config:
     sms: SmsConfig = field(default_factory=SmsConfig)
     whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
+    speech_gate: SpeechGateConfig = field(default_factory=SpeechGateConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
