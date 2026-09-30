@@ -2894,6 +2894,10 @@ export interface SendResult {
   command_data?: Record<string, unknown> | null;
   stream_url?: string;
   error?: string;
+  // The speech gate stored the turn and nobody is answering it: no task, no
+  // stream. `message_id` is the stored row's canonical id.
+  recorded?: boolean;
+  message_id?: number;
 }
 
 export interface TaskEventDTO {
@@ -3407,7 +3411,14 @@ export async function sendChatMessage(
     // `data` spread first: the endpoint's own payload carries a `status`
     // ("pending"), which would otherwise shadow the numeric HTTP status this
     // type promises — and that status is now rendered to the user on failure.
-    return { ...data, ok: true, status: resp.status };
+    // The one payload status the caller needs is "recorded", so it gets a
+    // field of its own before the shadowing.
+    return {
+      ...data,
+      ...(data.status === 'recorded' ? { recorded: true } : {}),
+      ok: true,
+      status: resp.status,
+    };
   } catch {
     // A rejection here is the network, never the server: connection refused,
     // DNS, a dropped socket, a stalled body, or our own abort. There is no

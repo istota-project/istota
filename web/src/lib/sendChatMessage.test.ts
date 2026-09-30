@@ -37,6 +37,29 @@ describe('sendChatMessage', () => {
     expect(res.status).toBe(200);
   });
 
+  it('says so when the server recorded the turn without answering it', async () => {
+    // The payload's own `status` is shadowed by the numeric one, so a recorded
+    // turn needs a field of its own or it reads as an inline command with no
+    // text.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => mockResponse(200, { task_id: null, message_id: 12, status: 'recorded' })),
+    );
+    const res = await sendChatMessage(1, 'hello');
+    expect(res.ok).toBe(true);
+    expect(res.recorded).toBe(true);
+    expect(res.message_id).toBe(12);
+    expect(res.status).toBe(200);
+  });
+
+  it('marks nothing recorded on an ordinary send', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => mockResponse(200, { task_id: 7, status: 'pending' })),
+    );
+    expect((await sendChatMessage(1, 'hello')).recorded).toBeUndefined();
+  });
+
   it('classifies an unreachable server rather than throwing', async () => {
     vi.stubGlobal(
       'fetch',

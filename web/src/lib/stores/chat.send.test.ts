@@ -96,6 +96,35 @@ describe('chat store — send lifecycle', () => {
     });
   });
 
+  describe('a turn the server recorded without answering (SG 5)', () => {
+    it('keeps the user row, stamps its message id and opens no reply', async () => {
+      const s = await freshSession();
+      await s.init();
+      api.sendChatMessage.mockResolvedValue({
+        ok: true,
+        status: 200,
+        task_id: null,
+        message_id: 77,
+        recorded: true,
+      });
+
+      await s.send('talking to bob');
+
+      const msgs = get(s.messages);
+      // No assistant placeholder and no empty system row: nobody is answering.
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].role).toBe('user');
+      expect(msgs[0].text).toBe('talking to bob');
+      expect(msgs[0].sendState).toBeUndefined();
+      // The room stream's echo of this row dedups on `msg_id`, the only key
+      // a task-less row has.
+      expect(msgs[0].msgId).toBe(77);
+      expect(msgs[0].taskId).toBeUndefined();
+      expect(get(s.status)).toBe('idle');
+      expect(api.getTaskEvents).not.toHaveBeenCalled();
+    });
+  });
+
   describe('a rejected send', () => {
     it('flips the user row to failed and drops the assistant placeholder', async () => {
       const s = await freshSession();

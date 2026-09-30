@@ -4714,6 +4714,24 @@ function createSession(): ChatSession {
     // pending mark clearing is the ack's visible form; there is no receipt to
     // leave behind.
     settleSend(userCid, roomId);
+    if (res.recorded) {
+      // The speech gate stored the turn and nobody is answering it, so there
+      // is no assistant row to hand over to. The id is what dedups the room
+      // stream's echo of this row, since a task-less row carries no task id.
+      if (typeof res.message_id === 'number') {
+        const msgId = res.message_id;
+        updateMsg(userCid, (m) => {
+          m.msgId = msgId;
+        });
+      }
+      // Room-guarded, and the queue drained, for the reasons the inline
+      // branch below gives: no stream will settle for this turn.
+      if (get(activeRoomId) === roomId) {
+        status.set('idle');
+        void drainSendQueue(roomId);
+      }
+      return;
+    }
     // Hand the turn over to its assistant row. Deferred to here rather than
     // appended before the POST so the transcript never carries two progress
     // indicators for one message — see `runTurn`.
