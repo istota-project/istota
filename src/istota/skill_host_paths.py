@@ -105,8 +105,13 @@ def workspace_roots(
     conversation_token: str | None = None,
     writable: bool = False,
     talk: bool = False,
+    own_workspace: bool = True,
 ) -> list[Path]:
     """The roots one caller may operate inside, derived from explicit values.
+
+    ``own_workspace=False`` drops ``{mount}/Users/{user_id}`` and keeps the
+    rest: a shared room that withholds ``files`` binds no workspace, and a
+    host-side CLI must not reach what the sandbox does not.
 
     The single derivation. Every consumer of this module gets its root list
     from here — the skill CLIs through `env_host_roots`, the daemon-side
@@ -161,7 +166,7 @@ def workspace_roots(
     except (OSError, TypeError, ValueError):
         return roots
 
-    own = scoped_user_dir(mount_path / "Users", user_id)
+    own = scoped_user_dir(mount_path / "Users", user_id) if own_workspace else None
     if own is not None:
         roots.append(own)
 
@@ -201,8 +206,20 @@ def user_workspace_root() -> Path | None:
     own = workspace_roots(
         mount=workspace or legacy_workspace or None,
         user_id=os.environ.get("ISTOTA_USER_ID", "").strip(),
+        own_workspace=not _files_withheld(),
     )
     return own[0] if own else None
+
+
+#: Set by `task_env` in the proxy's base env for a shared-room task, naming
+#: what the room withholds. Never in the model's env; the proxy is its only
+#: route to a skill CLI.
+WITHHELD_SCOPES_VAR = "ISTOTA_WITHHELD_SCOPES"
+
+
+def _files_withheld() -> bool:
+    raw = os.environ.get(WITHHELD_SCOPES_VAR, "")
+    return "files" in {part.strip() for part in raw.split(",")}
 
 
 def env_host_roots(
@@ -233,6 +250,7 @@ def env_host_roots(
         ),
         writable=writable,
         talk=talk,
+        own_workspace=not _files_withheld(),
     )
 
 

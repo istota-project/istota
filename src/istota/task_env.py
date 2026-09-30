@@ -445,6 +445,12 @@ def build_task_runtime(
         proxy_base_env.update(
             skill_cli_tls_env(proxy_base_env, credential_env)
         )
+        # What a shared room withholds, for the host-path allowlist: with
+        # `files` withheld a skill CLI's roots drop the user's workspace, as the
+        # sandbox's binds do. Only here, never in the model's env.
+        if withheld_scopes:
+            from .skill_host_paths import WITHHELD_SCOPES_VAR
+            proxy_base_env[WITHHELD_SCOPES_VAR] = ",".join(sorted(withheld_scopes))
         # One skill CLI is itself a model caller, and the strip above left it
         # unauthenticated: `code_review` spawns the `claude` binary per
         # reviewer, so from ISSUE-390 every review came back `review_failed`
@@ -489,7 +495,11 @@ def build_task_runtime(
         #
         # Empty where the user has no vault, which is every user by default;
         # the feature is then absent rather than refused differently.
-        vault_credentials = _vault_credentials(config, task.user_id)
+        # A shared room serves none of them: every name in it is a credential
+        # of the sender's that no grant covers.
+        vault_credentials = (
+            {} if withheld_scopes else _vault_credentials(config, task.user_id)
+        )
         _proxy_ctx = SkillProxy(
             _proxy_sock, credential_env, proxy_base_env,
             timeout=config.security.skill_proxy_timeout,
@@ -502,7 +512,9 @@ def build_task_runtime(
             task_id=task.id,
             vault_credentials=vault_credentials,
             vault_fetch_limit=config.security.vault_fetch_limit_per_task,
-            vault_write_limit=config.security.vault_writes_per_task,
+            vault_write_limit=(
+                0 if withheld_scopes else config.security.vault_writes_per_task
+            ),
             config=config,
             user_id=task.user_id,
         )

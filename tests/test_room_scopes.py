@@ -85,6 +85,15 @@ class TestWhatATaskIsWithheld:
         _grant(conn, token, "alice", "files")
         assert self._withheld(conn, token) == {"calendar", "memory"}
 
+    def test_a_task_marked_group_chat_is_restricted_before_the_roster_is(self, conn):
+        # A Talk group's first turn, or one whose roster fetch failed: the
+        # surface said group, the participants table does not know yet.
+        room = db.create_web_chat_room(conn, "alice", "Mine")
+        assert room_scopes.task_withheld_scopes(
+            conn, policy="restrict", conversation_token=room.token, user_id="alice",
+            skill_index=self.INDEX, assume_shared=True,
+        ) == {"calendar", "files", "memory"}
+
     def test_policy_off_withholds_nothing(self, conn):
         assert self._withheld(conn, _shared_room(conn), policy="off") == frozenset()
 

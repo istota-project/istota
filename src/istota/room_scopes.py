@@ -52,7 +52,7 @@ def granted_scopes(
             "SELECT scope FROM room_data_grants WHERE room_token = ? AND user_id = ?",
             (room_token, user_id),
         ).fetchall()
-    except sqlite3.Error as exc:
+    except Exception as exc:
         logger.warning(
             "room_scopes: could not read grants for %s in %s: %s",
             user_id, room_token, exc,
@@ -81,6 +81,7 @@ def task_withheld_scopes(
     conversation_token: str,
     user_id: str,
     skill_index: Mapping[str, object],
+    assume_shared: bool = False,
 ) -> frozenset[str]:
     """The scopes a task in this conversation may not reach; empty when none.
 
@@ -89,6 +90,11 @@ def task_withheld_scopes(
     canonical room first, since a task can carry a surface's ref (an email
     continuation on a promoted room carries the Talk token) and grants are kept
     against the room.
+
+    ``assume_shared`` is the task's own ``is_group_chat``: ingest set it from
+    the surface's roster, which can say "group" on a turn where
+    ``room_is_shared`` cannot yet (a Talk group's first turn, a batch whose
+    roster fetch failed). Either signal restricts.
     """
     if policy == POLICY_OFF or not conversation_token:
         return frozenset()
@@ -96,8 +102,8 @@ def task_withheld_scopes(
         room_token = conversation_token
         if db.get_room(conn, room_token) is None:
             room_token = db.find_room_token_by_ref(conn, room_token) or room_token
-        shared = db.room_is_shared(conn, room_token)
-    except sqlite3.Error as exc:
+        shared = assume_shared or db.room_is_shared(conn, room_token)
+    except Exception as exc:
         logger.warning(
             "room_scopes: could not read the audience of %s, withholding every "
             "scope: %s", conversation_token, exc,

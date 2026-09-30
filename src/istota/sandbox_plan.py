@@ -565,8 +565,11 @@ def build_mount_plan(
             settings = claude_dir / "settings.json"
             if settings.exists():
                 _ro(settings, "claude_settings")
-            # Persist session JSONL logs and debug output across sandbox exits
-            for subdir in ["projects", "debug", "todos"]:
+            # Persist session JSONL logs and debug output across sandbox exits.
+            # Not for a shared-room task: `projects` holds the session JSONL of
+            # every earlier task, USER.md and file contents included, so any
+            # withheld scope would come straight back through it.
+            for subdir in ([] if withheld_scopes else ["projects", "debug", "todos"]):
                 d = claude_dir / subdir
                 if d.exists():
                     _rw(d, f"claude_{subdir}")

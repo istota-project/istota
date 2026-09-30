@@ -129,7 +129,8 @@ def _run(config, room_token: str) -> dict:
             patch("istota.executor._bwrap_available", return_value=True), \
             patch("istota.skill_proxy.SkillProxy") as mock_proxy, \
             patch.object(_loader, "effective_disabled_skills", _spy_disabled), \
-            patch("istota.skills.health.setup_env", _health_hook):
+            patch("istota.skills.health.setup_env", _health_hook), \
+            patch("istota.task_env._vault_credentials", lambda *a: {"bank": "s3cret"}):
         mock_proxy.return_value.__enter__ = lambda s: s
         mock_proxy.return_value.__exit__ = lambda s, *a: False
         with db.get_db(config.db_path) as conn:
@@ -153,6 +154,8 @@ def _run(config, room_token: str) -> dict:
         "model_env": req.env,
         "argv": argv,
         "prompt": req.prompt,
+        "vault": kwargs["vault_credentials"],
+        "vault_writes": kwargs["vault_write_limit"],
     }
 
 
@@ -218,6 +221,65 @@ class TestMemoryIsAScope:
         self._write_user_md(config)
         seen = _run(config, _room(config, shared=True, grants=("memory",)))
         assert self.SENTINEL in seen["prompt"]
+
+
+class TestTheCredentialVault:
+    """The sender's shared credentials are fetchable by name: no grant covers them."""
+
+    def test_a_shared_room_serves_no_vault(self, config):
+        seen = _run(config, _room(config, shared=True))
+        assert seen["vault"] == {}
+        assert seen["vault_writes"] == 0
+
+    def test_a_private_room_serves_it(self, config):
+        seen = _run(config, _room(config, shared=False))
+        assert seen["vault"] == {"bank": "s3cret"}
+        assert seen["vault_writes"] == config.security.vault_writes_per_task
+
+
+class TestHostPathsFollowTheFilesScope:
+    """A granted skill CLI's host-path roots drop the workspace with ``files``."""
+
+    def _roots(self, tmp_path, monkeypatch, withheld: str | None):
+        from istota.skill_host_paths import (
+            WITHHELD_SCOPES_VAR,
+            env_host_roots,
+            user_workspace_root,
+        )
+
+        mount = tmp_path / "mount"
+        (mount / "Users" / "alice").mkdir(parents=True)
+        monkeypatch.setenv("ISTOTA_WORKSPACE_PATH", str(mount))
+        monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+        monkeypatch.setenv("ISTOTA_DEFERRED_DIR", str(tmp_path / "deferred"))
+        monkeypatch.setenv("ISTOTA_CONVERSATION_TOKEN", "room123")
+        if withheld is None:
+            monkeypatch.delenv(WITHHELD_SCOPES_VAR, raising=False)
+        else:
+            monkeypatch.setenv(WITHHELD_SCOPES_VAR, withheld)
+        user_dir = (mount / "Users" / "alice").resolve()
+        return user_dir, env_host_roots(), user_workspace_root()
+
+    def test_files_withheld_drops_the_workspace(self, tmp_path, monkeypatch):
+        user_dir, roots, own = self._roots(tmp_path, monkeypatch, "calendar,files,memory")
+        assert user_dir not in roots
+        assert own is None
+        # The channel directory stays: CHANNEL.md is the room's own.
+        assert any(r.name == "room123" for r in roots)
+
+    def test_without_the_marker_the_workspace_is_a_root(self, tmp_path, monkeypatch):
+        user_dir, roots, own = self._roots(tmp_path, monkeypatch, None)
+        assert user_dir in roots
+        assert own == user_dir
+
+    def test_the_marker_reaches_the_proxy_and_not_the_model(self, config):
+        from istota.skill_host_paths import WITHHELD_SCOPES_VAR
+
+        seen = _run(config, _room(config, shared=True))
+        assert "files" in seen["proxy_base_env"][WITHHELD_SCOPES_VAR].split(",")
+        assert WITHHELD_SCOPES_VAR not in seen["model_env"]
+        private = _run(config, _room(config, shared=False))
+        assert WITHHELD_SCOPES_VAR not in private["proxy_base_env"]
 
 
 class TestAPrivateRoomIsUnchanged:
@@ -289,6 +351,7 @@ class TestTheMountPlanPerScope:
     """
 
     CASE_KW = dict(
+        claude_home=True,
         developer_enabled=True,
         repos_dir=True,
         resources=(("Docs", "readwrite"), ("Notes", "read")),
@@ -329,6 +392,7 @@ class TestTheMountPlanPerScope:
         reasons = self._plan(tmp_path, monkeypatch, frozenset())
         assert {
             "nextcloud_user_dir", "user_resource", "developer_repos", "package_cache",
+            "claude_projects",
         } <= reasons
 
     def test_files_withheld_drops_the_workspace_and_resources(
@@ -336,6 +400,8 @@ class TestTheMountPlanPerScope:
     ):
         reasons = self._plan(tmp_path, monkeypatch, frozenset({"files"}))
         assert "nextcloud_user_dir" not in reasons
+        # Every earlier task's CLI session JSONL is under here.
+        assert "claude_projects" not in reasons
         assert "user_resource" not in reasons
         assert {"developer_repos", "package_cache"} <= reasons
 

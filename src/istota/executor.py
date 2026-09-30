@@ -6816,6 +6816,7 @@ def _task_withheld_scopes(
         conversation_token=task.conversation_token,
         user_id=task.user_id,
         skill_index=skill_index,
+        assume_shared=bool(task.is_group_chat),
     )
     if conn is not None:
         withheld = room_scopes.task_withheld_scopes(conn, **kwargs)
@@ -7333,7 +7334,9 @@ def execute_task(
             pass  # Graceful degradation
 
     # Auto-discover calendars for user
-    discovered_calendars = discover_calendars_for_task(task, config)
+    discovered_calendars = (
+        [] if "calendar" in _withheld else discover_calendars_for_task(task, config)
+    )
 
     # Auto-load recent dated memories if enabled
     dated_memories = None
@@ -7468,6 +7471,7 @@ def execute_task(
         # cannot answer is worse than no line.
         shared_credentials=(
             config.security.skill_proxy_enabled
+            and not _withheld
             and secrets_vault.has_shared_credentials(config.db_path, task.user_id)
         ),
     )
