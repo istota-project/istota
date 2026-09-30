@@ -586,9 +586,18 @@ def _names_recipient(config, task, recipient_user_id: str) -> bool:
     return False
 
 
+_QUOTED_SPAN = re.compile(r'"([^"\n]+)"|“([^”\n]+)”')
+
+
 def _quotes_prompt(task, text: str) -> bool:
-    """Whether ``text`` is the member's own words: whole, verbatim, in this
-    task's own prompt, with attachment names cut out as `_names_recipient` does."""
+    """Whether ``text`` is the member's own words, as a unit they wrote.
+
+    The whole prompt, one whole line of it, or one whole double-quoted span,
+    compared after stripping; attachment names cut out first as
+    `_names_recipient` does. Never a substring: a fragment can reverse what
+    was said ("do not tell them X" contains "X"), and a side-room task reads
+    the parent's transcript, so its first call can be shaped by other people.
+    """
     wanted = text.strip()
     if not wanted:
         return False
@@ -597,7 +606,11 @@ def _quotes_prompt(task, text: str) -> bool:
         name = str(path).replace("\\", "/").rsplit("/", 1)[-1]
         if name:
             prompt = prompt.replace(name, " ")
-    return wanted in prompt
+    units = {prompt.strip()}
+    units.update(line.strip() for line in prompt.splitlines())
+    for match in _QUOTED_SPAN.finditer(prompt):
+        units.add((match.group(1) or match.group(2) or "").strip())
+    return wanted in units
 
 
 def _clean_turn(conn, config, task, recipient_user_id: str, *, post_text: str | None = None) -> bool:

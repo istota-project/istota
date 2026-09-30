@@ -169,13 +169,19 @@ def pin_plan(config, task, plan: list) -> list:
             parent = room.side_of
             parent_refs = {parent} | {b.surface_ref for b in db.list_room_bindings(conn, parent)}
             kept = []
+            dropped = False
             for dest in plan:
                 channel = getattr(dest, "channel", None)
                 if channel and (channel in parent_refs or canonical_token(conn, channel) == parent):
                     logger.info("task %s: dropped a delivery into its side room's parent",
                                 getattr(task, "id", "?"))
+                    dropped = True
                     continue
                 kept.append(dest)
+            if dropped and not kept:
+                # What would have gone to the parent goes to the side room.
+                from .transport.routing import Destination
+                kept.append(Destination("web", room.token, "push"))
             return kept
     except Exception as exc:
         logger.warning("side room pin check failed for task %s: %s", getattr(task, "id", "?"), exc)
@@ -352,7 +358,10 @@ def enqueue_whisper(conn, config, *, actor_user_id: str, task_id: int,
                 or not db.is_room_member(conn, parent, actor_user_id)
                 or not is_shared_room(conn, parent, is_group_chat=task.is_group_chat)):
             raise RequestError("not_a_shared_room")
-        side = db.ensure_side_room(conn, parent, actor_user_id)
+        try:
+            side = db.ensure_side_room(conn, parent, actor_user_id)
+        except ValueError:
+            raise RequestError("side_room_unavailable") from None
         row = _store_request(
             conn, actor_user_id=actor_user_id, task_id=task_id, request_key=request_key,
             kind="side_whisper", recipient_user_id=actor_user_id, text=text,
@@ -481,7 +490,8 @@ def _claim(config, request_id: str, fresh: bool) -> dict | None:
                 parent = destination.get("parent") or ""
                 side = db.get_side_room(conn, parent, user)
                 if (side is None or side.token != destination.get("room_token")
-                        or _fingerprint(side.token, parent) != row["binding_fingerprint"]):
+                        or _fingerprint(side.token, parent) != row["binding_fingerprint"]
+                        or db.list_room_members(conn, side.token) != [user]):
                     raise RequestError("destination_changed")
                 if not db.is_room_member(conn, parent, user):
                     raise RequestError("parent_unavailable")

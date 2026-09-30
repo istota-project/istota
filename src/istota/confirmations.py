@@ -186,7 +186,7 @@ def cancel_for_conversation(
 
     held = conn.execute(
         "SELECT id FROM tasks WHERE conversation_token = ? AND user_id = ? "
-        "AND status = 'pending_confirmation'",
+        f"AND status = 'pending_confirmation' AND NOT {db.SIDE_ROUTED_PARK_SQL}",
         (conversation_token, user_id),
     ).fetchall()
     cancelled = db.cancel_pending_confirmations(conn, conversation_token, user_id)

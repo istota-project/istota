@@ -1505,9 +1505,23 @@ _CLAIM_CHANNEL_GATE_SQL = """
                     AND t2.status IN ('locked', 'running', 'pending_confirmation')
                     AND t2.cancel_requested = 0
                     AND t2.id != tasks.id
+                    AND NOT (t2.status = 'pending_confirmation' AND """ + (
+    "EXISTS (SELECT 1 FROM messages sm WHERE sm.delivery_reference "
+    "LIKE 'side-confirmation:' || t2.id || ':%')") + """)
                 )
             )
             """
+
+# A shared-room task parked on a question it asked in its principal's side
+# room (multiplayer D4). Such a park neither holds the room's channel gate
+# (above) nor is cancelled by the principal's next message in the room
+# (`cancel_pending_confirmations`): the room never saw the question, so its
+# conversation is not an answer to it and must not be held behind it. The
+# side-room row `side_rooms.write_confirmation` writes is the record.
+SIDE_ROUTED_PARK_SQL = (
+    "EXISTS (SELECT 1 FROM messages sm WHERE sm.delivery_reference "
+    "LIKE 'side-confirmation:' || tasks.id || ':%')"
+)
 
 
 def _stuck_running_params(heartbeat_stuck_minutes: int, stuck_running_minutes: int) -> tuple:
@@ -1999,21 +2013,16 @@ def cancel_pending_confirmations(
     from .message_relays import close_task_questions
     from .whatsapp_requests import write_transaction
     with write_transaction(conn):
-        held = conn.execute("SELECT id FROM tasks WHERE conversation_token=? AND user_id=? AND status='pending_confirmation'",
-                            (conversation_token, user_id)).fetchall()
+        held = conn.execute(
+            "SELECT id FROM tasks WHERE conversation_token=? AND user_id=? "
+            f"AND status='pending_confirmation' AND NOT {SIDE_ROUTED_PARK_SQL}",
+            (conversation_token, user_id)).fetchall()
         for row in held:
             close_task_questions(conn, row[0])
-        conn.execute(
-            """
-            UPDATE tasks
-            SET status = 'cancelled',
-                updated_at = datetime('now')
-            WHERE conversation_token = ?
-              AND user_id = ?
-              AND status = 'pending_confirmation'
-            """,
-            (conversation_token, user_id),
-        )
+            conn.execute(
+                "UPDATE tasks SET status = 'cancelled', updated_at = datetime('now') "
+                "WHERE id = ? AND status = 'pending_confirmation'", (row[0],),
+            )
         return len(held)
 
 
@@ -4680,6 +4689,9 @@ def ensure_side_room(
         raise ValueError("not_a_member")
     existing = get_side_room(conn, parent_token, user_id)
     if existing is not None:
+        # Fail closed if anything has put a second reader in it.
+        if list_room_members(conn, existing.token) != [user_id]:
+            raise ValueError("side_room_not_private")
         return existing
     token = _new_web_chat_token(user_id)
     name = f"re: {room_display_name(parent, None) or 'room'}"[:80]
@@ -4703,6 +4715,8 @@ def side_room_parent(conn: sqlite3.Connection, token: str) -> Room | None:
     left the parent or whose parent is gone."""
     room = get_room(conn, token)
     if room is None or not room.side_of or not room.side_for_user:
+        return None
+    if list_room_members(conn, token) != [room.side_for_user]:
         return None
     if get_room(conn, room.side_of) is None:
         return None

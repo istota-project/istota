@@ -5623,6 +5623,10 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
         reg = db.get_room(conn, token)
         if reg is None or reg.origin != "web":
             return "not_found", None  # only web-origin rooms promote
+        # A side room's Talk view is its member's own conversation with the
+        # bot; a Talk conversation of its own could gain participants.
+        if reg.side_of:
+            return "not_found", None
         existing = db.get_room_binding(conn, token, "talk")
         name = db.room_display_name(reg, handle)
     if not _config.nextcloud.url:

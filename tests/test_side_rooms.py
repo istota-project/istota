@@ -523,3 +523,91 @@ class TestSharedRoomConfirmations:
             # Bob's side room is not Alice's.
             bobs = db.ensure_side_room(conn, shared, "bob")
             assert confirmations.resolve(conn, "bob", conversation_token=bobs.token).task is None
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: what the room's own conversation may do to a side-routed park
+# ---------------------------------------------------------------------------
+
+
+def _park_in_side_room(conn, shared, user="alice"):
+    ident = _running_task(conn, user, shared)
+    db.set_task_confirmation(conn, ident, "Shall I send it? Reply yes or no.")
+    task = db.get_task(conn, ident)
+    route = side_rooms.confirmation_route(conn, task)
+    side_rooms.write_confirmation(conn, route, task, task.confirmation_prompt)
+    return ident
+
+
+class TestASideRoutedPark:
+    def test_the_principals_next_room_message_does_not_cancel_it(self, env):
+        config, shared = env["config"], env["shared"]
+        with db.get_db(config.db_path) as conn:
+            ident = _park_in_side_room(conn, shared)
+            # Control: a question asked in the room itself is still cancelled.
+            plain = _running_task(conn, "alice", shared)
+            db.set_task_confirmation(conn, plain, "Proceed?")
+            assert confirmations.cancel_for_conversation(conn, shared, "alice") == 1
+            assert db.get_task(conn, ident).status == "pending_confirmation"
+            assert db.get_task(conn, plain).status == "cancelled"
+
+    def test_it_does_not_hold_the_room_for_the_other_members(self, env):
+        config, shared = env["config"], env["shared"]
+        with db.get_db(config.db_path) as conn:
+            _park_in_side_room(conn, shared)
+            bobs = db.create_task(conn, user_id="bob", source_type="web", prompt="hi",
+                                  conversation_token=shared)
+        with db.get_db(config.db_path) as conn:
+            claimed = db.claim_task(conn, "w1")
+        assert claimed is not None and claimed.id == bobs
+
+
+class TestTheCleanTurnTakesWholeUnits:
+    @pytest.mark.parametrize("prompt,text,status", [
+        ("do not tell them the house sale is off", "the house sale is off", "held"),
+        ("post this\nAlice can do Thursday after 7", "Alice can do Thursday after 7", "queued"),
+        ("Alice can do Thursday after 7", "Alice can do Thursday after 7", "queued"),
+    ])
+    def test_a_fragment_is_held(self, env, prompt, text, status):
+        config, shared = env["config"], env["shared"]
+        _, ident = _side_task(config, shared, prompt=prompt)
+        with db.get_db(config.db_path) as conn:
+            db.record_attempt_tool_call(conn, ident, calls_seen=1, first_is_relay=True)
+        assert _hold_post(config, ident, text=text)["status"] == status
+
+
+class TestTheSideRoomStaysPrivate:
+    def test_a_second_member_makes_it_unusable_rather_than_shared(self, env):
+        config, shared = env["config"], env["shared"]
+        with db.get_db(config.db_path) as conn:
+            side = db.ensure_side_room(conn, shared, "alice")
+            db.add_room_member(conn, side.token, "bob")
+            with pytest.raises(ValueError):
+                db.ensure_side_room(conn, shared, "alice")
+            assert db.side_room_parent(conn, side.token) is None
+            ident = _running_task(conn, "alice", shared)
+            with pytest.raises(RequestError, match="side_room_unavailable"):
+                side_rooms.enqueue_whisper(conn, config, actor_user_id="alice", task_id=ident,
+                                           request_key="w1", text="hi")
+
+    def test_it_is_never_promoted_to_talk(self, env, monkeypatch):
+        from istota import web_app
+        config, shared = env["config"], env["shared"]
+        monkeypatch.setattr(web_app, "_config", config)
+        with db.get_db(config.db_path) as conn:
+            side = db.ensure_side_room(conn, shared, "alice")
+            handle = next(h for h in db.list_web_chat_rooms(conn, "alice") if h.token == side.token)
+        status, _ = asyncio.run(web_app._chat_promote_to_talk("alice", handle.id))
+        assert status == "not_found"
+
+    def test_a_dropped_parent_destination_lands_in_the_side_room(self, env):
+        from istota.transport.registry import make_registry
+        from istota.transport.routing import resolve_delivery_plan
+        config, shared = env["config"], env["shared"]
+        with db.get_db(config.db_path) as conn:
+            side = db.ensure_side_room(conn, shared, "alice")
+            ident = db.create_task(conn, user_id="alice", source_type="scheduled", prompt="x",
+                                   conversation_token=side.token, output_target=f"web:{shared}")
+            task = db.get_task(conn, ident)
+        plan = resolve_delivery_plan(config, task, make_registry(config))
+        assert [(d.surface, d.channel) for d in plan] == [("web", side.token)]
