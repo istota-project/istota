@@ -137,6 +137,11 @@ def _strip_frontmatter(text: str) -> str:
     return text[end + 4:].lstrip("\n")
 
 
+def _shared_room_value(raw: object) -> str:
+    """``"safe"`` only when the manifest says exactly that; else ``"private"``."""
+    return "safe" if raw == "safe" else "private"
+
+
 def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
     """Load skill metadata from a directory.
 
@@ -205,6 +210,7 @@ def _load_skill_meta(skill_dir: Path) -> SkillMeta | None:
         exclude_memory=_get_bool("exclude_memory"),
         exclude_persona=_get_bool("exclude_persona"),
         cli=_get_bool("cli"),
+        shared_room=_shared_room_value(_get("shared_room")),
         experimental=_get_bool("experimental"),
         skill_dir=str(skill_dir),
     )
@@ -256,6 +262,7 @@ def _load_legacy_index(skills_dir: Path) -> dict[str, SkillMeta]:
             exclude_memory=meta.get("exclude_memory", False),
             exclude_persona=meta.get("exclude_persona", False),
             cli=meta.get("cli", False),
+            shared_room=_shared_room_value(meta.get("shared_room")),
             experimental=meta.get("experimental", False),
         )
         for name, meta in data.items()
@@ -343,20 +350,30 @@ def capability_disabled_skills(
     return disabled
 
 
-def effective_disabled_skills(config, user_id: str, skill_index: dict[str, SkillMeta]) -> set[str]:
+def effective_disabled_skills(
+    config,
+    user_id: str,
+    skill_index: dict[str, SkillMeta],
+    *,
+    withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
+) -> set[str]:
     """The full disabled set for a task: instance-wide + per-user + capability gate.
 
     Unions ``config.disabled_skills``, the user's per-user ``disabled_skills``,
-    and any skill whose ``requires_capability`` isn't in
-    ``config.available_capabilities()``. This is the single place the executor
-    and the ``skills`` CLI both call so their view of "disabled" can't drift.
-    ``config`` is duck-typed (no import) to avoid a config→loader cycle.
+    any skill whose ``requires_capability`` isn't in
+    ``config.available_capabilities()``, and the skills a shared room withholds
+    (``room_scopes.task_withheld_scopes``; the synthetic scopes name no skill
+    and fall out of the intersection). This is the single place the executor
+    and the ``skills`` CLI both call so their view of "disabled" can't drift;
+    the CLI passes no room yet. ``config`` is duck-typed (no import) to avoid a
+    config→loader cycle.
     """
     disabled = set(config.disabled_skills)
     user_config = config.get_user(user_id)
     if user_config:
         disabled |= set(user_config.disabled_skills)
     disabled |= capability_disabled_skills(skill_index, config.available_capabilities())
+    disabled |= set(withheld_scopes) & set(skill_index)
     return disabled
 
 

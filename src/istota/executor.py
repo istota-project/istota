@@ -4254,8 +4254,17 @@ def sandbox_cache_is_derived(config: Config, user_id: str) -> bool:
     )
 
 
-def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
+def resolve_sandbox_cache_dir(
+    config: Config,
+    user_id: str,
+    *,
+    withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
+) -> Path | None:
     """This user's package-cache directory, or None.
+
+    None as well where a shared room withholds ``developer`` and the cache
+    would be derived: the repos bind is dropped with that scope, and a derived
+    cache bound without it is ISSUE-320's uncovered bind.
 
     One predicate for two decisions — the RW bind in ``build_bwrap_cmd`` and the
     ``UV_CACHE_DIR`` / ``XDG_CACHE_HOME`` group in ``execute_task``. They must
@@ -4351,6 +4360,10 @@ def resolve_sandbox_cache_dir(config: Config, user_id: str) -> Path | None:
     # immediately, so leaving the selection above it opened a hole that had not
     # been there.
     try:
+        if "developer" in withheld_scopes and sandbox_cache_is_derived(
+            config, user_id,
+        ):
+            return None
         # Which shape, and with it the three things that differ: the root the
         # leaf is created under, the leaf's name, and which directory the
         # *operator* is responsible for having created. On the derived branch
@@ -4624,6 +4637,7 @@ def build_bwrap_cmd(
     workspace_dir: Path | None = None,
     *,
     profile: SandboxProfile,
+    withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
 ) -> list[str]:
     """Wrap a command in bubblewrap for per-user filesystem isolation.
 
@@ -4656,6 +4670,7 @@ def build_bwrap_cmd(
         extra_ro_binds=extra_ro_binds,
         authorized_skills=authorized_skills,
         workspace_dir=workspace_dir,
+        withheld_scopes=withheld_scopes,
     )
     return render_bwrap_argv(
         plan, cmd, net_proxy_sock=net_proxy_sock, user_temp_dir=user_temp_dir,
@@ -4693,6 +4708,7 @@ def native_fs_roots(
     user_temp_dir: Path,
     workspace_dir: Path | None = None,
     control_dir: Path | None = None,
+    withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """File-access roots for a native-brain task.
 
@@ -4854,6 +4870,7 @@ def native_fs_roots(
         user_temp_dir,
         profile=SandboxProfile.NATIVE,
         workspace_dir=workspace_dir,
+        withheld_scopes=withheld_scopes,
     )
     return project_fs_roots(plan, control_dir)
 
@@ -6773,6 +6790,55 @@ def _build_module_briefing_prompt(task: db.Task, config: Config) -> str | None:
     return assembled.prompt
 
 
+def _task_withheld_scopes(
+    config: Config,
+    conn: "db.sqlite3.Connection | None",
+    task: db.Task,
+    skill_index: dict,
+) -> frozenset[str]:
+    """What this task's room withholds from it; empty outside a shared room.
+
+    Read once per task and handed to every reach seam, so selection, the
+    proxy's allowlist, the credential and hook env and the sandbox binds all
+    act on one answer. Fails toward withholding: a room whose audience or
+    grants cannot be read is restricted, never opened.
+
+    A database file that does not exist holds no room, so nothing is shared;
+    opening it to ask would create it.
+    """
+    from . import room_scopes
+
+    policy = config.rooms.shared_room_data_policy
+    if policy == room_scopes.POLICY_OFF or not task.conversation_token:
+        return frozenset()
+    kwargs = dict(
+        policy=policy,
+        conversation_token=task.conversation_token,
+        user_id=task.user_id,
+        skill_index=skill_index,
+    )
+    if conn is not None:
+        withheld = room_scopes.task_withheld_scopes(conn, **kwargs)
+    elif not Path(config.db_path).exists():
+        return frozenset()
+    else:
+        try:
+            with db.get_db(config.db_path) as temp_conn:
+                withheld = room_scopes.task_withheld_scopes(temp_conn, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — an unopenable DB restricts
+            logger.warning(
+                "could not open the database to read room grants for task %s, "
+                "withholding every scope: %s", task.id, exc,
+            )
+            withheld = room_scopes.withheld_scopes(skill_index, frozenset())
+    if withheld:
+        logger.info(
+            "shared_room_restriction task_id=%s room=%s withheld=%s",
+            task.id, task.conversation_token, ",".join(sorted(withheld)),
+        )
+    return withheld
+
+
 def execute_task(
     task: db.Task,
     config: Config,
@@ -6978,7 +7044,10 @@ def execute_task(
     # isn't available in this deployment is folded into the disabled set so it
     # drops from both selection and the on-demand menu (no wasted pull /
     # confusing CLI failure). See config.available_capabilities().
-    _disabled = effective_disabled_skills(config, task.user_id, skill_index)
+    _withheld = _task_withheld_scopes(config, conn, task, skill_index)
+    _disabled = effective_disabled_skills(
+        config, task.user_id, skill_index, withheld_scopes=_withheld,
+    )
 
     # Build sticky skills from recent conversation + explicit reply parent
     sticky_skills: set[str] | None = None
@@ -7111,7 +7180,12 @@ def execute_task(
     # refusal as well as the ordinary absence, which degrades to exactly the
     # prompt this task would have had with no overlay at all; `doctor`'s
     # `config.skill_overlays` is what reports the refusal, once, on a cadence.
-    _overlay_dir, _overlay_fd = open_user_skill_overlays(config, task.user_id)
+    # A user's overlays are their memory, so a shared room that withholds it
+    # loads none.
+    if "memory" in _withheld:
+        _overlay_dir, _overlay_fd = None, None
+    else:
+        _overlay_dir, _overlay_fd = open_user_skill_overlays(config, task.user_id)
 
     try:
         skills_doc = load_skills(
@@ -7148,7 +7222,9 @@ def execute_task(
 
     # Compute behavior flags from selected skills
     _selected_metas = [skill_index[n] for n in selected_skills if n in skill_index]
-    _skip_memory = any(m.exclude_memory for m in _selected_metas)
+    _skip_memory = (
+        any(m.exclude_memory for m in _selected_metas) or "memory" in _withheld
+    )
     _skip_persona = any(m.exclude_persona for m in _selected_metas)
 
     # Skills changelog: detect changes for the surfaces that can show one.
@@ -7559,6 +7635,7 @@ def execute_task(
             user_resources=user_resources,
             user_config=user_config,
             discovered_calendars=discovered_calendars,
+            withheld_scopes=_withheld,
         )
         env = _runtime.env
         _proxy_ctx = _runtime.proxy_ctx
@@ -7595,6 +7672,7 @@ def execute_task(
                     authorized_skills=authorized_skills,
                     workspace_dir=workspace_dir,
                     profile=sandbox_profile,
+                    withheld_scopes=_withheld,
                 )
 
             return _wrap
@@ -7736,6 +7814,7 @@ def execute_task(
                 Path(user_temp_dir),
                 workspace_dir,
                 control_dir=control_dir,
+                withheld_scopes=_withheld,
             )
 
         # Resolve aliases (role, provider) to a canonical model ID. Talk-poller

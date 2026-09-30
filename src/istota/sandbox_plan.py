@@ -325,8 +325,17 @@ def build_mount_plan(
     extra_ro_binds: list[Path] | None = None,
     authorized_skills: "frozenset[str] | set[str] | list[str] | None" = None,
     workspace_dir: Path | None = None,
+    withheld_scopes: "frozenset[str] | set[str]" = frozenset(),
 ) -> MountPlan:
     """Every bind, mask and namespace flag this task's sandbox gets, in order.
+
+    ``withheld_scopes`` is what a shared room withholds from this task
+    (``room_scopes``). Without ``files`` the user's workspace and their
+    per-resource mounts are not bound at all, which is what makes the
+    disclosure gate a boundary rather than advice: no skill gate touches a
+    bind. Without ``developer`` the repos subtree goes, and with it the cache
+    derived inside it (``resolve_sandbox_cache_dir``). The exec socket already
+    follows ``authorized_skills``, which the same scope narrowed.
 
     ``profile`` is required and keyword-only — see :class:`SandboxProfile` for
     what it decides and why it has no default. Everything else about the plan is
@@ -664,7 +673,7 @@ def build_mount_plan(
                 "%s/Users; binding no user directory for task %s.",
                 task.user_id, mount, task.id,
             )
-        elif user_dir.exists():
+        elif user_dir.exists() and "files" not in withheld_scopes:
             _rw(user_dir, "nextcloud_user_dir", user_data=True)
         # Talk attachments directory (flat, shared across conversations)
         talk_dir = mount / "Talk"
@@ -761,7 +770,9 @@ def build_mount_plan(
     #
     # `sandbox_cache_is_derived` is the gate for both halves, which is why this
     # is one condition rather than two that could drift apart.
-    cache_dir = executor.resolve_sandbox_cache_dir(config, task.user_id)
+    cache_dir = executor.resolve_sandbox_cache_dir(
+        config, task.user_id, withheld_scopes=withheld_scopes,
+    )
     if cache_dir is not None:
         _rw(
             cache_dir, "package_cache",
@@ -784,7 +795,10 @@ def build_mount_plan(
     # far apart and the coupling is not local; the next person to move that
     # `mkdir` should find this note rather than a comment claiming a check that
     # does something.
-    if is_admin and config.developer.enabled:
+    if (
+        is_admin and config.developer.enabled
+        and "developer" not in withheld_scopes
+    ):
         repos = executor.get_user_repos_dir(config, task.user_id)
         if repos is not None and repos.exists():
             # `user_data`, and safe to realpath in a way the derived cache is
@@ -825,7 +839,7 @@ def build_mount_plan(
             _rw(exec_dir, "devbox_exec_socket")
 
     # --- Per-resource mounts ---
-    if mount:
+    if mount and "files" not in withheld_scopes:
         for r in user_resources:
             if not r.resource_path:
                 continue

@@ -179,8 +179,18 @@ def build_task_runtime(
     user_resources: list,
     user_config: object | None,
     discovered_calendars: list | None = None,
+    withheld_scopes: frozenset[str] = frozenset(),
 ) -> TaskRuntime:
     """Build the model's environment and the per-task proxies for one attempt.
+
+    ``withheld_scopes`` is what a shared room withholds from this task
+    (``room_scopes.task_withheld_scopes``), empty everywhere else. Three of the
+    disclosure gate's reach seams are here, and each is needed because the
+    others leave its route open: hooks and identity vars are resolved over the
+    whole index rather than the authorized set, credential auto-authorization
+    walks the whole index too, and the proxy's allowlist is every CLI skill.
+    All three read ``reach_index``, the index minus withheld skills. The two
+    credential splits keep the full index, since they only remove names.
 
     Raises whatever ``dispatch_setup_env_hooks`` and
     ``resolve_sandbox_cache_dir`` raise, as the inline block did. Nothing here
@@ -305,11 +315,18 @@ def build_task_runtime(
     # skill_index regardless of the argument it's given. Dispatched
     # *before* authorization because a hook-sourced credential is the
     # only auto-auth signal a ``source="setup_env"`` skill has.
-    hook_env = dispatch_setup_env_hooks(selected_skills, skill_index, env_ctx)
-    authorized_skills = derive_authorized_skills(
-        selected_skills, skill_index, env_ctx, hook_env=hook_env,
+    reach_index = {
+        name: meta for name, meta in skill_index.items()
+        if name not in withheld_scopes
+    }
+    hook_env = dispatch_setup_env_hooks(
+        selected_skills, skill_index, env_ctx, withheld=withheld_scopes,
     )
-    skill_env = build_skill_env(authorized_skills, skill_index, env_ctx)
+    authorized_skills = derive_authorized_skills(
+        [s for s in selected_skills if s not in withheld_scopes],
+        reach_index, env_ctx, hook_env=hook_env,
+    )
+    skill_env = build_skill_env(authorized_skills, reach_index, env_ctx)
     # A menu-loaded skill (the model self-selects it at runtime via
     # ``skills show``) is neither eagerly selected nor credential-
     # authorized, so the call above skips it. Its pure-identity vars
@@ -318,7 +335,7 @@ def build_task_runtime(
     # those over the full index so the proxied CLI isn't missing them
     # ("MONEY_USER not set"). Config/secret-derived vars stay gated on
     # ``authorized_skills`` (env minimisation for the untrusted model).
-    for k, v in build_identity_env(skill_index, env_ctx).items():
+    for k, v in build_identity_env(reach_index, env_ctx).items():
         skill_env.setdefault(k, v)
     # Declarative env vars don't override hardcoded ones
     for k, v in skill_env.items():
@@ -387,7 +404,7 @@ def build_task_runtime(
             authorized_skills, skill_index,
         )
         cli_skills = frozenset(
-            name for name, meta in skill_index.items() if meta.cli
+            name for name, meta in reach_index.items() if meta.cli
         )
         logger.info(
             "proxy_authorization task_id=%d selected=%d authorized=%d "
@@ -525,7 +542,9 @@ def build_task_runtime(
     # Gated on effective sandboxing, matching the bind exactly: without
     # bwrap there is no root tmpfs and nothing to move off it.
     if native_fs_confinement_active(config):
-        _cache_dir = resolve_sandbox_cache_dir(config, task.user_id)
+        _cache_dir = resolve_sandbox_cache_dir(
+            config, task.user_id, withheld_scopes=withheld_scopes,
+        )
         if _cache_dir is not None:
             env["UV_CACHE_DIR"] = str(_cache_dir / SANDBOX_CACHE_UV)
             env["XDG_CACHE_HOME"] = str(_cache_dir)
