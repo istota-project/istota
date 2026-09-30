@@ -63,7 +63,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import db as _db
 from . import user_profiles
 from . import web_auth, web_auth_mail, web_shutdown
-from .build_info import build_description
+from .build_info import RUNNING_VERSION, build_description
 from .brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
 from .config import load_config
@@ -1026,8 +1026,12 @@ def _admit_password_request(email: str, ip: str | None, policy: web_auth.Policy)
     return True
 
 
-def _render_form_page(bot_name: str, version: str, headline: str, body: str, mark: str) -> str:
-    """Shared auth card. Body is rendered HTML; scalar callers escape fields."""
+def _render_form_page(bot_name: str, headline: str, body: str, mark: str) -> str:
+    """Shared auth card. Body is rendered HTML; scalar callers escape fields.
+
+    Unauthenticated, so it names no version: an exact version tells a visitor
+    which advisories apply (ISSUE-569). `/admin` carries it instead.
+    """
     name = escape(bot_name)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -1039,12 +1043,12 @@ def _render_form_page(bot_name: str, version: str, headline: str, body: str, mar
         f'<main class="card">{mark}<h1>{name}</h1>'
         f'<p class="tagline">{escape(headline)}</p>{body}</main>'
         f'<footer>Running <a href="{ISTOTA_SITE_URL}" target="_blank" '
-        f'rel="noopener">Istota</a> v{escape(version)}</footer></body></html>'
+        'rel="noopener">Istota</a></footer></body></html>'
     )
 
 
 def _render_login_page(
-    bot_name: str, version: str, mark: str, *, methods: list[str],
+    bot_name: str, mark: str, *, methods: list[str],
     login_csrf: str = "", link_csrf: str = "", error: str | None = None,
     email_prefill: str = "",
 ) -> str:
@@ -1090,31 +1094,27 @@ def _render_login_page(
             'passwordEmail.value = linkEmail.value;});'
             '</script>'
         )
-    return _render_form_page(bot_name, version, "Sign in to continue", body, mark)
+    return _render_form_page(bot_name, "Sign in to continue", body, mark)
 
 
 def _render_login_error_page(
-    bot_name: str, version: str, headline: str, detail: str, mark: str,
+    bot_name: str, headline: str, detail: str, mark: str,
 ) -> str:
     body = (f'<p class="tagline">{escape(detail)}</p>'
             '<a class="btn" href="/istota/login">Try signing in again</a>')
-    return _render_form_page(bot_name, version, headline, body, mark)
+    return _render_form_page(bot_name, headline, body, mark)
 
 
 async def _auth_error(headline: str, detail: str, status_code: int) -> HTMLResponse:
-    from . import __version__
-
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
     return HTMLResponse(
-        _render_login_error_page(_config.bot_name, __version__, headline, detail, mark),
+        _render_login_error_page(_config.bot_name, headline, detail, mark),
         status_code=status_code, headers=_AUTH_PAGE_HEADERS,
     )
 
 
 @auth_router.get("/login")
 async def login(request: Request):
-    from . import __version__
-
     request.session.pop(_POST_LOGIN_KEY, None)
     if request.query_params.get("go"):
         if not _config.web.has_method("nextcloud"):
@@ -1124,7 +1124,7 @@ async def login(request: Request):
         return await _oauth.nextcloud.authorize_redirect(request, _nc_redirect_uri(request))
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
     return HTMLResponse(_render_login_page(
-        _config.bot_name, __version__, mark, methods=_config.web.auth,
+        _config.bot_name, mark, methods=_config.web.auth,
         login_csrf=_csrf_token(request, "login"),
         link_csrf=_csrf_token(request, "login-link-request"),
     ), headers=_AUTH_PAGE_HEADERS)
@@ -1183,11 +1183,9 @@ async def _run_password_work(function, *args, **kwargs):
 
 
 async def _auth_form(headline: str, body: str, status_code: int = 200) -> HTMLResponse:
-    from . import __version__
-
     mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
     return HTMLResponse(
-        _render_form_page(_config.bot_name, __version__, headline, body, mark),
+        _render_form_page(_config.bot_name, headline, body, mark),
         status_code=status_code, headers=_AUTH_PAGE_HEADERS,
     )
 
@@ -1464,8 +1462,6 @@ async def callback(request: Request):
     if _oauth is None or not hasattr(_oauth, "nextcloud"):
         return Response("Auth not configured", status_code=500)
 
-    from . import __version__  # noqa: PLC0415
-
     _bot_name = _config.bot_name if _config else "Istota"
 
     async def _login_error(status: int, headline: str, detail: str) -> HTMLResponse:
@@ -1477,7 +1473,7 @@ async def callback(request: Request):
         )
         return HTMLResponse(
             _render_login_error_page(
-                _bot_name, __version__, headline, detail, mark,
+                _bot_name, headline, detail, mark,
             ),
             status_code=status, headers=_AUTH_PAGE_HEADERS,
         )
@@ -2151,7 +2147,7 @@ def _gather_admin_stats() -> dict:
     sub-aggregator is captured as an error string rather than failing the
     whole request.
     """
-    from . import __version__, db
+    from . import db
 
     # Read the global once. `_reload_config` rebinds it wholesale on SIGHUP, and
     # the subscription section below takes the deployment's own config: whether
@@ -2163,7 +2159,7 @@ def _gather_admin_stats() -> dict:
     now = datetime.now(timezone.utc)
 
     payload: dict = {
-        "system": _admin_system_section(__version__, db_path),
+        "system": _admin_system_section(RUNNING_VERSION, db_path),
         "users": [],
         "scheduler": {"jobs_total": 0, "jobs_active": 0, "jobs_paused": 0, "last_errors": []},
         "modules": {},
