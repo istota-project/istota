@@ -1124,6 +1124,7 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_messages_author(conn)
     # After the author backfill, which is what it reads.
     _migrate_room_participants(conn)
+    _migrate_room_data_grants(conn)
 
     # Encrypt any plaintext Google OAuth tokens at rest. Idempotent --
     # rows already in Fernet form (the new write path) are detected via
@@ -4126,6 +4127,7 @@ def delete_web_chat_room(
     conn.execute("DELETE FROM room_members WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_dismissals WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM room_participants WHERE room_token = ?", (token,))
+    conn.execute("DELETE FROM room_data_grants WHERE room_token = ?", (token,))
     conn.execute("DELETE FROM rooms WHERE token = ?", (token,))
     # Drop every participant's handle for the token, not just the requester's
     # (room_id): a promoted web room can accrue handles for other members, and
@@ -4421,6 +4423,44 @@ def note_member_turn(conn: sqlite3.Connection, room_token: str, user_id: str) ->
     """
     add_room_member(conn, room_token, user_id)
     undismiss_room(conn, room_token, user_id)
+
+
+def add_web_room_member(
+    conn: sqlite3.Connection, room_token: str, user_id: str,
+    *, display_name: str | None = None,
+) -> bool:
+    """Make an istota user a member of a web room by the creator's act; True if new.
+
+    Three writes, because each answers a different reader: the membership row
+    puts the room in their sidebar, clearing their hide tombstone keeps a stale
+    one from hiding it again, and a present `principal` web participant row
+    counts them in the room's audience before they have said anything.
+    """
+    added = not is_room_member(conn, room_token, user_id)
+    add_room_member(conn, room_token, user_id)
+    undismiss_room(conn, room_token, user_id)
+    upsert_room_participant(
+        conn, room_token=room_token, surface="web", surface_ref=user_id,
+        kind="principal", user_id=user_id, display_name=display_name,
+    )
+    return added
+
+
+def drop_web_room_member(
+    conn: sqlite3.Connection, room_token: str, user_id: str,
+) -> None:
+    """Take a user out of a web room for good: membership, presence and handle.
+
+    `remove_room_member` alone is the per-user *hide*, and a hide is undone by
+    the user's own next turn or un-archive — both reached through their
+    `web_chat_rooms` handle. So the handle goes too: with it, a removed member
+    could post once and be re-added by `record_inbound`. Their messages stay.
+    """
+    remove_room_member(conn, room_token, user_id)
+    conn.execute(
+        "DELETE FROM web_chat_rooms WHERE user_id = ? AND token = ?",
+        (user_id, room_token),
+    )
 
 
 PARTICIPANT_KINDS = ("principal", "guest", "agent")
@@ -6942,6 +6982,37 @@ def _migrate_room_participants(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO _migration_state (name) "
         "VALUES ('room_participants_v1')"
     )
+
+
+# Kept equal to schema.sql's copy by tests/test_room_members_api.py.
+_ROOM_DATA_GRANTS_DDL = """
+CREATE TABLE IF NOT EXISTS room_data_grants (
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (room_token, user_id, scope)
+)
+"""
+
+
+def _migrate_room_data_grants(conn: sqlite3.Connection) -> None:
+    """Create `room_data_grants`, empty, and record that it was created empty.
+
+    **No backfill, and the marker is what says so.** Granting every scope to
+    every existing shared room would reopen the disclosure hole the table exists
+    to close, under a name that looks like consent nobody gave. The marker
+    (`room_grants_v1`) records that this database got the table with nothing in
+    it, so a later migration cannot mistake an empty table on an upgraded
+    install for one that predates the decision.
+    """
+    conn.execute(_ROOM_DATA_GRANTS_DDL)
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO _migration_state (name) VALUES ('room_grants_v1')"
+        )
+    except sqlite3.OperationalError:
+        return  # marker table not created yet (very early fresh install)
 
 
 def _migrate_notifications(conn: sqlite3.Connection) -> None:

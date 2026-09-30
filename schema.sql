@@ -1427,6 +1427,23 @@ CREATE TABLE IF NOT EXISTS message_deletions (
     deleted_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- A member's standing consent for one room: when `user_id` is the sender in
+-- `room_token`, this class of their data may be read and its answer may land in
+-- a transcript the other members read. Absence is denial. `scope` is a skill
+-- name or one of the synthetic scopes (`files`, `memory`). A grant is the
+-- member's own and is never written on anyone else's behalf. Created empty and
+-- never backfilled: granting everything to existing rooms would restore the
+-- disclosure hole with no record that anyone chose it. The FK cascade is
+-- decorative (foreign_keys unset); room deletion hand-deletes from here.
+-- Kept equal to `db._ROOM_DATA_GRANTS_DDL` by tests/test_room_members_api.py.
+CREATE TABLE IF NOT EXISTS room_data_grants (
+    room_token TEXT NOT NULL REFERENCES rooms(token) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (room_token, user_id, scope)
+);
+
 -- The speech gate's audit trail: one row per decision about whether the bot
 -- replies to an inbound turn. An operator-facing tuning log, not a second
 -- transcript: `message_id` points at the turn rather than copying its body,

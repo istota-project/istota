@@ -5107,6 +5107,15 @@ def _chat_update_room(
                         # to clear by unarchiving their own handle.
                         if reg is not None and reg.origin != "talk":
                             db.set_room_archived(conn, updated.token, False)
+                elif reg is not None and reg.user_id != username:
+                    # A co-member's archive is their own hide, never the global
+                    # flag that hides the room from its creator too. Membership
+                    # stays: hiding is not leaving, and they are still someone
+                    # an answer here can reach.
+                    if archived:
+                        db.dismiss_room(conn, updated.token, username)
+                    else:
+                        db.undismiss_room(conn, updated.token, username)
                 else:
                     db.set_room_archived(conn, updated.token, bool(archived))
         if updated is None:
@@ -5174,6 +5183,12 @@ def _chat_delete_room(username: str, room_id: int) -> str:
             db.dismiss_room(conn, room.token, username)
             db.update_web_chat_room(conn, room_id, archived=True)
             return "ok"
+        # Every member holds a handle of their own, so owning *this* handle does
+        # not make the room yours. A member who did not create it leaves it;
+        # only the creator destroys what everyone else reads.
+        if reg is not None and reg.user_id != username:
+            db.drop_web_room_member(conn, room.token, username)
+            return "ok"
         db.delete_web_chat_room(conn, room_id, username)
         token = room.token
     # Best-effort: drop the channel's CHANNEL.md directory. Outside the DB
@@ -5185,6 +5200,112 @@ def _chat_delete_room(username: str, room_id: int) -> str:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("chat room delete: CHANNEL.md cleanup failed: %s", exc)
     return "ok"
+
+
+def _chat_member_room(conn, username: str, room_id: int):
+    """``(handle, registry room)`` when ``username`` holds this handle *and* is a
+    member of its room, else None.
+
+    Both, because a handle survives a Talk-backed room's per-user hide; the
+    membership endpoints answer members only, and a 404 for everything else
+    says nothing about whether the room exists.
+    """
+    from . import db
+    handle = db.get_web_chat_room(conn, room_id)
+    if handle is None or handle.user_id != username:
+        return None
+    if not db.is_room_member(conn, handle.token, username):
+        return None
+    reg = db.get_room(conn, handle.token)
+    if reg is None:
+        return None
+    return handle, reg
+
+
+def _member_dict(reg, user_id: str) -> dict:
+    return {
+        "user_id": user_id,
+        "display_name": _display_name_for(user_id),
+        "is_owner": user_id == reg.user_id,
+    }
+
+
+def _chat_list_members(username: str, room_id: int) -> dict | None:
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return None
+        handle, reg = found
+        members = [
+            _member_dict(reg, m) for m in db.list_room_members(conn, handle.token)
+        ]
+        can_manage = reg.user_id == username and not _is_talk_backed(
+            conn, reg, handle.token,
+        )
+    members.sort(key=lambda m: (not m["is_owner"], m["user_id"]))
+    return {"members": members, "can_manage": can_manage}
+
+
+def _chat_add_member(
+    username: str, room_id: int, target: str,
+) -> tuple[int, dict]:
+    """Add ``target`` to a web room. The body is already validated.
+
+    Only the room's creator adds (D3): adding discloses the whole transcript,
+    so it is not delegable. A Talk-bound room takes its membership from Talk,
+    whose poll would undo a write here within a cycle.
+    """
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return 404, {"error": "room not found"}
+        handle, reg = found
+        if _is_talk_backed(conn, reg, handle.token):
+            return 409, {"error": "membership of a Talk room is managed in Talk"}
+        if reg.user_id != username:
+            return 403, {"error": "only the room's creator can add members"}
+        if target not in _config.users:
+            return 400, {"error": "unknown user"}
+        added = db.add_web_room_member(
+            conn, handle.token, target, display_name=_display_name_for(target),
+        )
+        return (201 if added else 200), {"member": _member_dict(reg, target)}
+
+
+def _chat_remove_member(username: str, room_id: int, target: str) -> tuple[int, dict]:
+    """Remove ``target`` from a web room: the creator removes anyone but
+    themselves, a member removes themselves."""
+    from . import db
+    with db.get_db(_config.db_path) as conn:
+        found = _chat_member_room(conn, username, room_id)
+        if found is None:
+            return 404, {"error": "room not found"}
+        handle, reg = found
+        if _is_talk_backed(conn, reg, handle.token):
+            return 409, {"error": "membership of a Talk room is managed in Talk"}
+        if target != username and reg.user_id != username:
+            return 403, {"error": "only the room's creator can remove others"}
+        if not db.is_room_member(conn, handle.token, target):
+            return 404, {"error": "not a member"}
+        # The creator is the only one who can manage the room, so they cannot
+        # leave it with others still in it; deleting the room is the way out.
+        # This also refuses removing the last member.
+        if target == reg.user_id:
+            return 409, {"error": "the room's creator cannot leave it; delete the room instead"}
+        db.drop_web_room_member(conn, handle.token, target)
+    return 204, {}
+
+
+def _chat_users_directory() -> list[dict]:
+    """The deployment's own users, to invite from. A user id and a display name
+    and nothing else: no address, no profile field. Storage-agnostic on
+    purpose — Nextcloud's directory would make membership a Nextcloud feature."""
+    return [
+        {"user_id": user_id, "display_name": _display_name_for(user_id)}
+        for user_id in sorted(_config.users)
+    ]
 
 
 # A room's CHANNEL.md is prompt text, not a document store: it is read into
@@ -7670,6 +7791,67 @@ async def chat_delete_room(
             {"error": "room has a task in progress"}, status_code=409,
         )
     return {"status": "ok"}
+
+
+@api_router.get("/chat/users")
+async def chat_users(user: dict = Depends(_require_api_auth)):
+    return {"users": _chat_users_directory()}
+
+
+@api_router.get("/chat/rooms/{room_id}/members")
+async def chat_room_members(
+    room_id: int,
+    user: dict = Depends(_require_api_auth),
+):
+    result = await asyncio.to_thread(_chat_list_members, user["username"], room_id)
+    if result is None:
+        return JSONResponse({"error": "room not found"}, status_code=404)
+    return result
+
+
+@api_router.post("/chat/rooms/{room_id}/members")
+async def chat_add_room_member(
+    room_id: int,
+    request: Request,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    try:
+        data = await request.json()
+    except ValueError:
+        data = None
+    target = data.get("user_id") if isinstance(data, dict) else None
+    # A real ``true``, not a truthy value: the flag is the member's statement
+    # that they know the whole transcript is disclosed, and the endpoint, not
+    # the dialog that sets it, is the boundary.
+    if (
+        not isinstance(target, str)
+        or not target
+        or data.get("acknowledge_history") is not True
+    ):
+        return JSONResponse(
+            {"error": "user_id and acknowledge_history: true are required"},
+            status_code=400,
+        )
+    status, payload = await asyncio.to_thread(
+        _chat_add_member, user["username"], room_id, target,
+    )
+    return JSONResponse(payload, status_code=status)
+
+
+@api_router.delete("/chat/rooms/{room_id}/members/{member_id}")
+async def chat_remove_room_member(
+    room_id: int,
+    member_id: str,
+    user: dict = Depends(_require_api_auth),
+    _csrf: None = Depends(_verify_origin),
+):
+    status, payload = await asyncio.to_thread(
+        _chat_remove_member, user["username"], room_id, member_id,
+    )
+    if status == 204:
+        return Response(status_code=204)
+    return JSONResponse(payload, status_code=status)
 
 
 @api_router.get("/chat/rooms/{room_id}/memory")

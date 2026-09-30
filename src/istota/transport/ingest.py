@@ -215,7 +215,7 @@ def _ask_gate(
     surface: str,
     user_id: str,
     message_id: int,
-    is_group_chat: bool,
+    is_multi_human: bool,
     addressed_to_bot: bool,
     classified: speech_gate.GateDecision | None,
     author_kind: str = participants.PRINCIPAL,
@@ -225,15 +225,12 @@ def _ask_gate(
     No completer is built here: this runs inside the caller's write
     transaction, and a model call would hold its lock. The classifier rung
     takes ``classified`` — `classify_ahead`'s answer, obtained before the
-    transaction opened — and fails closed without one. "More than one human
-    here" is `participants.is_multi_human`, the predicate `classify_ahead` reads
-    too, so the two cannot disagree about whether a turn reaches that rung.
+    transaction opened — and fails closed without one. ``is_multi_human`` is
+    `participants.is_multi_human`, the predicate `classify_ahead` reads too, so
+    the two cannot disagree about whether a turn reaches that rung.
     """
     decision = speech_gate.should_speak(
-        is_multi_human=participants.is_multi_human(
-            conn, surface=surface, room_token=room_token,
-            is_group_chat=is_group_chat,
-        ),
+        is_multi_human=is_multi_human,
         addressed_to_bot=addressed_to_bot,
         author_is_agent=author_kind == participants.AGENT,
         author_is_guest=author_kind == participants.GUEST,
@@ -729,12 +726,20 @@ def record_inbound(
             author_participant_id=participant_id,
         )
 
-    # 4. Ask the speech gate about a stored turn.
+    # 4. Ask the speech gate about a stored turn. Whether more than one human
+    #    is here is asked once, after the author's participant row is written,
+    #    and is both the gate's first rung and what the task records as
+    #    `is_group_chat`: the surface's own flag alone left a web task in a
+    #    shared room with a direct-conversation prompt, since web never sets it.
+    multi_human = participants.is_multi_human(
+        conn, surface=surface, room_token=transcript_token or room_token,
+        is_group_chat=is_group_chat,
+    )
     if message_id is not None:
         decision = _ask_gate(
             conn, config, room_token=transcript_token, surface=surface,
             user_id=user_id, message_id=message_id,
-            is_group_chat=is_group_chat, addressed_to_bot=addressed_to_bot,
+            is_multi_human=multi_human, addressed_to_bot=addressed_to_bot,
             classified=classified, author_kind=author_kind,
         )
         if not decision.speak:
@@ -753,7 +758,7 @@ def record_inbound(
         user_id=user_id,
         source_type=source_type,
         conversation_token=room_token,
-        is_group_chat=is_group_chat,
+        is_group_chat=multi_human,
         attachments=attachments or None,
         talk_message_id=platform_message_id,
         # Surface-native id → the Talk column; canonical id → its own. The two
