@@ -248,6 +248,16 @@ class TestParser:
         assert cli._installed_version() == "unknown (not installed)"
         assert self._parse(["doctor"], monkeypatch).command == "doctor"
 
+    def test_the_version_carries_the_running_commit(self, monkeypatch):
+        """ISSUE-569: `--version` and `/admin` share one label."""
+        import importlib.metadata
+
+        from istota.build_info import version_label
+
+        monkeypatch.setattr(importlib.metadata, "version", lambda name: "9.8.7")
+
+        assert cli._installed_version() == version_label(version="9.8.7")
+
 
 class TestTheConfigGate:
     """`istota doctor` renders one line, and nothing else, when this run cannot

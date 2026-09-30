@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import db
 from . import user_profiles
+from .build_info import version_label
 from .user_scope import is_scopable_user_id
 from .config import load_config
 from .logging_setup import setup_logging
@@ -47,7 +48,10 @@ from .usage_render import (
 
 
 def _installed_version() -> str:
-    """The installed distribution's version, or a placeholder.
+    """The installed distribution's version with its commit, or a placeholder.
+
+    The commit is appended unless the checkout is exactly on that release's
+    tag, through the same `build_info.version_label` `/admin` reads (ISSUE-569).
 
     `importlib.metadata.version` raises `PackageNotFoundError` when istota is
     importable but not installed — the Linux tier's image, which reaches the
@@ -56,9 +60,10 @@ def _installed_version() -> str:
     parser*, so it took down every command rather than only `--version`.
     """
     try:
-        return importlib.metadata.version("istota")
+        version = importlib.metadata.version("istota")
     except importlib.metadata.PackageNotFoundError:
         return "unknown (not installed)"
+    return version_label(version=version)
 
 
 def cmd_init(args):
