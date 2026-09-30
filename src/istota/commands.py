@@ -2411,7 +2411,8 @@ async def cmd_check(ctx: CommandContext):
 # =============================================================================
 
 _EXPORT_META_RE = re.compile(
-    r"^(?:<!--|#)\s*export:token=([^,]+),last_id=(\d+),updated=([^\s>]+)"
+    r"^(?:<!--|#)\s*export:token=([^,]+),last_id=(\d+)"
+    r"(?:,last_msg_id=(\d+))?,updated=([^\s>]+)"
 )
 
 
@@ -2420,19 +2421,51 @@ def _parse_export_metadata(first_line: str) -> dict | None:
     m = _EXPORT_META_RE.match(first_line.strip())
     if not m:
         return None
-    return {
+    meta = {
         "token": m.group(1),
         "last_id": int(m.group(2)),
-        "updated": m.group(3),
+        "updated": m.group(4),
     }
+    if m.group(3) is not None:
+        meta["last_msg_id"] = int(m.group(3))
+    return meta
 
 
-def _build_export_metadata(token: str, last_id: int, fmt: str) -> str:
-    """Build the metadata header line."""
+def _build_export_metadata(
+    token: str, last_id: int, fmt: str, last_msg_id: int | None = None,
+) -> str:
+    """Build the metadata header line.
+
+    ``last_id`` is the highest task id written, ``last_msg_id`` the highest
+    `messages.id`, present when the history came from the `messages` store.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cursor = f"last_id={last_id}"
+    if last_msg_id is not None:
+        cursor += f",last_msg_id={last_msg_id}"
     if fmt == "markdown":
-        return f"<!-- export:token={token},last_id={last_id},updated={ts} -->"
-    return f"# export:token={token},last_id={last_id},updated={ts}"
+        return f"<!-- export:token={token},{cursor},updated={ts} -->"
+    return f"# export:token={token},{cursor},updated={ts}"
+
+
+def _max_message_id(messages) -> int | None:
+    ids = [m.message_id for m in messages if m.message_id is not None]
+    return max(ids) if ids else None
+
+
+def _turns_after_cursor(messages, meta: dict) -> list:
+    """The turns an incremental export has not written yet.
+
+    The message-id cursor covers answered and unanswered turns alike. A file
+    written before it existed, or history served from the `tasks` fallback,
+    has only the task-id cursor, under which every unanswered turn reads as id
+    0 and is skipped. A file carrying the old header gains the message cursor
+    on its next append, so that gap is one append wide.
+    """
+    last_msg_id = meta.get("last_msg_id")
+    if last_msg_id is not None and all(m.message_id is not None for m in messages):
+        return [m for m in messages if m.message_id > last_msg_id]
+    return [m for m in messages if m.id > meta["last_id"]]
 
 
 # Upper bound on turns pulled for an export. A conversation rarely approaches
@@ -2546,19 +2579,23 @@ async def cmd_export(ctx: CommandContext):
             pass
 
     if existing_meta and existing_meta["token"] == conversation_token:
-        # Incremental export — only turns newer than the last exported task id.
-        since_id = existing_meta["last_id"]
-        new_messages = [m for m in messages if m.id > since_id]
+        # Incremental export — only turns newer than the stored cursor.
+        new_messages = _turns_after_cursor(messages, existing_meta)
         if not new_messages:
             return "No new messages since last export."
 
-        last_id = new_messages[-1].id
+        last_id = max(existing_meta["last_id"], *(m.id for m in new_messages))
+        last_msg_id = _max_message_id(new_messages)
+        if last_msg_id is None:
+            last_msg_id = existing_meta.get("last_msg_id")
         new_content = render(new_messages, bot_name, tz=tz)
 
         existing_content = export_path.read_text()
         # Replace first line (metadata) with the updated one, then append.
         rest = existing_content.split("\n", 1)[1] if "\n" in existing_content else ""
-        new_meta = _build_export_metadata(conversation_token, last_id, fmt)
+        new_meta = _build_export_metadata(
+            conversation_token, last_id, fmt, last_msg_id,
+        )
         export_path.write_text(new_meta + "\n" + rest.rstrip("\n") + "\n" + new_content + "\n")
 
         rel_path = f"/{export_path.relative_to(mount)}"
@@ -2577,7 +2614,9 @@ async def cmd_export(ctx: CommandContext):
     if tz:
         now_str = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
 
-    meta_line = _build_export_metadata(conversation_token, last_id, fmt)
+    meta_line = _build_export_metadata(
+        conversation_token, last_id, fmt, _max_message_id(messages),
+    )
 
     if format_md:
         header_parts = [meta_line, "", f"# {title}", "", f"**Exported:** {now_str}", "", "---"]

@@ -1244,6 +1244,17 @@ def get_db(
         yield conn
 
 
+def find_task_by_talk_message_id(
+    conn: sqlite3.Connection, talk_message_id: int, conversation_token: str | None,
+) -> int | None:
+    """The task already created for this Talk message in this conversation, or None."""
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE talk_message_id = ? AND conversation_token = ?",
+        (talk_message_id, conversation_token),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
 def create_task(
     conn: sqlite3.Connection,
     prompt: str = "",
@@ -1299,17 +1310,16 @@ def create_task(
         )
     # Guard against duplicate Talk messages (race between overlapping poll cycles)
     if talk_message_id is not None:
-        existing = conn.execute(
-            "SELECT id FROM tasks WHERE talk_message_id = ? AND conversation_token = ?",
-            (talk_message_id, conversation_token),
-        ).fetchone()
-        if existing:
+        existing = find_task_by_talk_message_id(
+            conn, talk_message_id, conversation_token,
+        )
+        if existing is not None:
             logger.warning(
                 "Duplicate talk_message_id %d in conversation %s — "
                 "task %d already exists, skipping",
-                talk_message_id, conversation_token, existing[0],
+                talk_message_id, conversation_token, existing,
             )
-            return existing[0]
+            return existing
 
     cursor = conn.execute(
         """
@@ -2325,6 +2335,10 @@ class ConversationMessage:
     # that labels the turn with it asserts the principal said something an
     # external contact said. None means "attribute to `user_id` as usual".
     external_sender: str | None = None
+    # The turn's own `messages.id`, set on the `messages` path only. The one
+    # cursor that orders answered and unanswered turns alike, since `id` is 0
+    # for every unanswered turn.
+    message_id: int | None = None
 
 
 @dataclass
@@ -2712,7 +2726,8 @@ def _conversation_history_from_messages(
     unanswered row has no task to name one, and in a shared room the two differ.
     """
     query = f"""
-        SELECT mu.task_id AS task_id, mu.body AS prompt, ma.body AS result,
+        SELECT mu.id AS message_id, mu.task_id AS task_id, mu.body AS prompt,
+               ma.body AS result,
                COALESCE(t.created_at, mu.created_at) AS created_at,
                t.actions_taken AS actions_taken,
                COALESCE(t.source_type, mu.origin_surface) AS source_type,
@@ -2761,6 +2776,7 @@ def _conversation_history_from_messages(
                 _external_sender_for_row(row, user_email_addresses)
                 if answered else row["author_label"]
             ),
+            message_id=row["message_id"],
         ))
     return history
 
@@ -4784,8 +4800,14 @@ def add_message(
 
 def find_send_by_client_msg_id(
     conn: sqlite3.Connection, room_token: str, client_msg_id: str
-) -> tuple[int, str] | None:
-    """``(task_id, sender)`` for a stored send under this key in this room, or None.
+) -> tuple[int, int | None, str | None] | None:
+    """``(message_id, task_id, sender)`` for a stored send under this key in
+    this room, or None.
+
+    ``task_id`` is None for a turn the room recorded without answering, and for
+    one whose task retention has since deleted; the sender then comes off the
+    row's own ``author_user_id``. Both are still stored turns under this key,
+    and the room-scoped unique index would refuse a second one.
 
     What makes a retry of an accepted-but-unreported send idempotent: the
     client cannot tell a request that never arrived from one whose answer was
@@ -4802,13 +4824,17 @@ def find_send_by_client_msg_id(
     if not client_msg_id:
         return None
     row = conn.execute(
-        "SELECT m.task_id, t.user_id FROM messages m "
-        "JOIN tasks t ON t.id = m.task_id "
+        "SELECT m.id, t.id AS task_id, "
+        "COALESCE(t.user_id, m.author_user_id) AS sender FROM messages m "
+        "LEFT JOIN tasks t ON t.id = m.task_id "
         "WHERE m.room_token = ? AND m.client_msg_id = ? "
         "LIMIT 1",
         (room_token, client_msg_id),
     ).fetchone()
-    return (int(row["task_id"]), row["user_id"]) if row else None
+    if row is None:
+        return None
+    task_id = int(row["task_id"]) if row["task_id"] is not None else None
+    return int(row["id"]), task_id, row["sender"]
 
 
 def find_confirmation_exchange(
@@ -4819,12 +4845,10 @@ def find_confirmation_exchange(
 
     The sibling of :func:`find_send_by_client_msg_id` for the one exchange that
     is *not* a task. `confirmations.record_exchange` writes a `task_id IS NULL`
-    pair, and that inner join drops a NULL — so the send-durability lookup
-    cannot see this row while the `(room_token, client_msg_id)` unique index
-    can. Without a lookup that spans both, a retried "yes" re-resolves from
-    scratch: with a second gate parked in the meantime it approves a question
-    the user never answered, and with none it takes an `IntegrityError` on the
-    index. Both were found in review; the first is an authorization defect.
+    pair, and the answer path needs the ack beside it, which the send lookup
+    does not return. Without it a retried "yes" re-resolves from scratch: with
+    a second gate parked in the meantime it approves a question the user never
+    answered. That was found in review and is an authorization defect.
 
     The ack is the `system` row written immediately after the answer in the
     same transaction, so it is the next system row in the room by id.

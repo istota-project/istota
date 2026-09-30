@@ -19,7 +19,12 @@ from ._types import (
     TransportCapabilities,
 )
 from .email import EmailTransport
-from .ingest import display_attachment_names, ingest_message, record_inbound
+from .ingest import (
+    InboundResult,
+    display_attachment_names,
+    ingest_message,
+    record_inbound,
+)
 from .registry import TransportRegistry, make_registry
 from .routing import (
     Destination,
@@ -44,6 +49,7 @@ __all__ = [
     "TransportRegistry",
     "make_registry",
     "display_attachment_names",
+    "InboundResult",
     "ingest_message",
     "record_inbound",
     "Destination",

@@ -824,6 +824,39 @@ class TestChatMessagesApi:
         assert task.output_target == "room"
         assert task.conversation_token == room["token"]
 
+    async def test_a_turn_the_gate_declines_is_recorded_with_no_stream(
+        self, chat_client, monkeypatch,
+    ):
+        from istota.speech_gate import GateDecision
+
+        monkeypatch.setattr(
+            "istota.transport.ingest.speech_gate.should_speak",
+            lambda **_kw: GateDecision(False, "mode_mention"),
+        )
+        cookies = await _login(chat_client, "alice")
+        room = await self._room(chat_client, cookies)
+        resp = await self._send(
+            chat_client, cookies, room["id"], text="talking to bob", client_msg_id="c1",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "recorded"
+        assert body["task_id"] is None
+        assert "stream_url" not in body
+        import istota.web_app as mod
+        with db.get_db(mod._config.db_path) as c:
+            row = c.execute(
+                "SELECT task_id, body FROM messages WHERE id = ?", (body["message_id"],),
+            ).fetchone()
+            assert c.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert (row["task_id"], row["body"]) == (None, "talking to bob")
+
+        # A retry of that send replays the recorded turn rather than storing it twice.
+        again = await self._send(
+            chat_client, cookies, room["id"], text="talking to bob", client_msg_id="c1",
+        )
+        assert again.json() == body
+
     async def _send(self, client, cookies, room_id: int, **payload):
         return await client.post(
             f"/istota/api/chat/rooms/{room_id}/messages",

@@ -90,48 +90,53 @@ class TestWritePath:
     def test_a_web_turn_gets_the_user_id(self, config):
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "rm", "alice", origin="web")
-            _room, tid = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="web", surface_ref="rm",
                 user_id="alice", text="hello",
             )
+            _room, tid = _inbound.room_token, _inbound.task_id
             assert _author_of(conn, tid) == ("alice", None)
 
     def test_a_talk_turn_gets_the_user_id(self, config):
         with db.get_db(config.db_path) as conn:
-            _room, tid = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="tk",
                 user_id="alice", text="hello",
             )
+            _room, tid = _inbound.room_token, _inbound.task_id
             assert _author_of(conn, tid) == ("alice", None)
 
     def test_an_external_email_turn_gets_a_label_and_no_user_id(self, config):
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "rm", "alice", origin="web")
-            _room, tid = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="email", surface_ref="rm",
                 user_id="alice", text="mail body",
                 sender_address="contact@example.com",
             )
+            _room, tid = _inbound.room_token, _inbound.task_id
             assert _author_of(conn, tid) == (None, "contact@example.com")
 
     def test_an_email_from_the_users_own_address_gets_the_user_id(self, config):
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "rm", "alice", origin="web")
-            _room, tid = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="email", surface_ref="rm",
                 user_id="alice", text="mail body",
                 sender_address="Alice <alice@example.com>",
             )
+            _room, tid = _inbound.room_token, _inbound.task_id
             assert _author_of(conn, tid) == ("alice", None)
 
     def test_a_raw_from_header_never_reaches_the_column(self, config):
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "rm", "alice", origin="web")
-            _room, tid = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="email", surface_ref="rm",
                 user_id="alice", text="mail body",
                 sender_address='"Alice (your boss)" <contact@example.com>',
             )
+            _room, tid = _inbound.room_token, _inbound.task_id
             _uid, label = _author_of(conn, tid)
             assert label == "contact@example.com"
 

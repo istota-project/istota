@@ -168,7 +168,9 @@ class TestGeneratedDefaults:
 # Written by a producer and by no builder, because a builder builds a room and
 # not a turn: `record_inbound` also stores the user's message and creates the
 # task that answers it.
-NOT_THE_ROOM_MODEL = frozenset({"messages", "tasks"})
+# `speech_gate_decisions` is the per-message audit row `record_inbound` writes
+# beside the turn, a record of that message like the other two, not of the room.
+NOT_THE_ROOM_MODEL = frozenset({"messages", "tasks", "speech_gate_decisions"})
 
 # Nothing chooses these, so two runs differ by construction. `applied_at` is
 # `_migration_state`'s, stamped by `db.init_db` on each database in turn — the
@@ -233,10 +235,11 @@ class TestPinnedAgainstTheProducers:
         config = Config()
         config.db_path = produced
         with db.get_db(produced) as conn:
-            token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="cpzpcfx2",
                 user_id="alice", text="hi", channel_name=name,
             )
+            token, task_id = _inbound.room_token, _inbound.task_id
         assert token == "cpzpcfx2" and task_id is not None  # the room branch ran
 
         with db.get_db(built) as conn:

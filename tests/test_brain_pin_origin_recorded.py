@@ -229,10 +229,11 @@ class TestTheTaskCarriesItFromTheRoom:
             db.set_room_model_effort(
                 conn, "room1", "claude-opus-5", None, namespace="anthropic",
             )
-            _token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="room1",
                 user_id="alice", text="hello", source_type="talk",
             )
+            _token, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
         assert task.brain == "native"
         assert task.model == "claude-opus-5"
@@ -251,10 +252,11 @@ class TestTheTaskCarriesItFromTheRoom:
             db.set_room_brain(conn, "room1", "native")
             await cmd_room(_ctx(config, conn, "model smart"))
             chosen = db.get_room(conn, "room1").model
-            _token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="room1",
                 user_id="alice", text="hello", source_type="talk",
             )
+            _token, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
         assert _request_model(
             task, config, make_brain(BrainConfig(kind="claude_code")),
@@ -273,10 +275,11 @@ class TestTheTaskCarriesItFromTheRoom:
                 "UPDATE rooms SET model = ? WHERE token = ?",
                 ("claude-opus-5", "room1"),
             )
-            _token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="room1",
                 user_id="alice", text="hello", source_type="talk",
             )
+            _token, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
         assert task.model_namespace is None
         assert _pin_origin_namespace(task, config) == "openai_compat"
@@ -293,11 +296,12 @@ class TestTheTaskCarriesItFromTheRoom:
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
             db.set_room_brain(conn, "room1", "native")
-            _token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="room1",
                 user_id="alice", text="hello", source_type="talk",
                 model="claude-opus-5", apply_room_default=False,
             )
+            _token, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
         assert task.brain == "native"
         assert task.model_namespace == "anthropic"
@@ -308,10 +312,11 @@ class TestTheTaskCarriesItFromTheRoom:
         config = _config(db_path, tmp_path)
         with db.get_db(db_path) as conn:
             db.register_room(conn, "room1", "alice", origin="talk")
-            _token, task_id = record_inbound(
+            _inbound = record_inbound(
                 conn, config, surface="talk", surface_ref="room1",
                 user_id="alice", text="hello", source_type="talk",
             )
+            _token, task_id = _inbound.room_token, _inbound.task_id
             task = db.get_task(conn, task_id)
         assert task.model is None
         assert task.model_namespace is None

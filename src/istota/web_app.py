@@ -6568,7 +6568,7 @@ def _is_own_replay(conn, token: str, client_msg_id: str, username: str) -> bool:
     from . import db
 
     prior = db.find_send_by_client_msg_id(conn, token, client_msg_id)
-    return prior is not None and prior[1] == username
+    return prior is not None and prior[2] == username
 
 
 def _chat_relay_reply(username: str, token: str, reply_to_msg_id: int) -> bool:
@@ -6595,9 +6595,11 @@ def _chat_create_web_task(
     client_msg_id: str | None = None,
     reply_to_msg_id: int | None = None,
     relay_answer: str | None = None,
-) -> tuple[str, int]:
+) -> tuple[str, int | None]:
     """Rate-limited web-task creation. Returns ``("ok", task_id)``,
-    ``("rate_limited", window_seconds)`` or ``("reply_target_gone", 0)``.
+    ``("recorded", message_id)`` when the speech gate stored the turn without
+    answering it, ``("rate_limited", window_seconds)`` or
+    ``("reply_target_gone", 0)``.
 
     A cited parent is resolved here, inside the same transaction as the create:
     it must be a message in *this* room, and its body — never a client-supplied
@@ -6703,7 +6705,7 @@ def _chat_create_web_task(
         # origin (streamed over SSE) plus a push mirror to a bound Talk room, if
         # any. For a web-only room it resolves to just the web stream (same as
         # the old "web").
-        _room_token, task_id = record_inbound(
+        result = record_inbound(
             conn, _config, surface="web", surface_ref=token, user_id=username,
             text=text, source_type="web", output_target="room", priority=5,
             attachments=attachments or None, model=model, effort=effort,
@@ -6713,7 +6715,10 @@ def _chat_create_web_task(
             reply_to_canonical_id=reply_to_msg_id,
             reply_to_content=reply_to_content,
         )
-    return ("ok", task_id)
+    # A replay of a turn that was recorded unanswered has no task either.
+    if result.task_id is None and result.message_id is not None:
+        return ("recorded", result.message_id)
+    return ("ok", result.task_id)
 
 
 # Fire-and-forget background tasks (web→Talk read pushes). Held in a set so
@@ -8295,6 +8300,10 @@ async def chat_send_message(
             {"error": "the message you replied to is no longer available"},
             status_code=404,
         )
+    if outcome == "recorded":
+        # Stored in the room, and the bot is not answering it: no task, so no
+        # stream to open.
+        return {"task_id": None, "message_id": value, "status": "recorded"}
     task_id = value
     # Post-as-user mirror into a bound Talk room, at send time (bounded ~5s,
     # best-effort). When it succeeds the scheduler suppresses its completion-

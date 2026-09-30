@@ -533,13 +533,13 @@ def create_recipient_task(conn, config, relay, *, surface: str, actor_user_id: s
 
     context = None if outcome == "accepted" else _context(relay, outcome)
     if surface == "web":
-        _, task_id = record_inbound(
+        task_id = record_inbound(
             conn, config, surface="web", surface_ref=channel, user_id=actor_user_id, text=text,
             source_type="web", output_target="room", priority=5, attachments=attachments or None,
             attachment_names=attachment_names or None, client_msg_id=client_msg_id,
             reply_to_canonical_id=reply_to_id, reply_to_content=context,
             model=model, effort=effort, apply_room_default=not model_prefix_used,
-        )
+        ).task_id
     elif surface == "talk":
         task_id = ingest_message(conn, config, IncomingMessage(
             user_id=actor_user_id, text=text, source_type="talk", surface="talk",

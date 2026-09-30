@@ -3,22 +3,24 @@
 `record_inbound` is the single inbound choke point every surface routes
 through: resolve the canonical room token, lazily auto-register an unknown
 room surface, echo-check, store the user message into the canonical `messages`
-store, and create the task. `ingest_message` is a thin adapter over it for the
+store, ask `speech_gate` whether the bot answers it, and create the task only
+when it does. `ingest_message` is a thin adapter over it for the
 `IncomingMessage`-shaped callers (Talk, email); the web POST path calls
 `record_inbound` directly (it never built an `IncomingMessage`).
 
 Surface-specific filtering / short-circuiting (Talk's mention + command +
 confirmation handling, email's untrusted-sender gate) stays inside each
-transport's `poll()`; this just performs the resolve + store + create step.
+transport's `poll()`; this performs the resolve + store + decide + create step.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
-from .. import db
+from .. import db, speech_gate
 from ..surfaces import is_room_member
 from ._types import IncomingMessage
 from .routing import transcript_room
@@ -134,6 +136,104 @@ def workspace_attachment_paths(
     return out if any(out) else None
 
 
+@dataclass(frozen=True)
+class InboundResult:
+    """What `record_inbound` did with one message.
+
+    ``created`` — a task exists and the stored row carries its id.
+    ``recorded`` — the row is stored and the speech gate declined, so no task.
+    ``dropped`` — a known echo of a mirrored message; nothing stored.
+    ``replayed`` — this message was already stored (a client retry or a
+    re-polled duplicate); ``task_id`` is the prior turn's, None when that turn
+    was recorded without an answer.
+
+    ``message_id`` is the stored `role='user'` row, None when the surface keeps
+    no transcript for this turn. ``gate_reason`` is the gate's rung when it
+    declined, for the caller's log only.
+    """
+
+    room_token: str
+    task_id: int | None
+    message_id: int | None
+    outcome: Literal["created", "recorded", "dropped", "replayed"]
+    gate_reason: str | None = None
+
+
+def _prior_turn(
+    conn,
+    *,
+    room_token: str,
+    transcript_token: str,
+    surface: str,
+    room_surface: bool,
+    external_id: str | None,
+    platform_message_id: int | None,
+) -> tuple[int | None, int | None] | None:
+    """``(message_id, task_id)`` of this message's earlier arrival, or None.
+
+    The row is stored before a task exists, so a duplicate poll has to be
+    caught here: `db.create_task`'s own dedup comes too late to stop a second
+    row, and a turn recorded without a task has nothing for it to find. Two
+    probes: the surface-native id on a stored user row (the echo check has
+    already dropped a match from another origin, so a match here is this
+    surface's own), then the task created for this Talk message, for a turn
+    stored before inbound ids were stamped.
+    """
+    if room_surface and external_id is not None:
+        message_id = db.find_message_by_external_id(
+            conn, transcript_token, surface, str(external_id),
+        )
+        if message_id is not None:
+            row = conn.execute(
+                "SELECT task_id FROM messages WHERE id = ? AND role = 'user'",
+                (message_id,),
+            ).fetchone()
+            if row is not None:
+                return message_id, row["task_id"]
+    if platform_message_id is not None:
+        task_id = db.find_task_by_talk_message_id(
+            conn, platform_message_id, room_token,
+        )
+        if task_id is not None:
+            row = conn.execute(
+                "SELECT id FROM messages WHERE room_token = ? AND task_id = ? "
+                "AND role = 'user' LIMIT 1",
+                (transcript_token, task_id),
+            ).fetchone()
+            return (int(row["id"]) if row else None), task_id
+    return None
+
+
+def _ask_gate(
+    conn,
+    config: "Config",
+    *,
+    room_token: str,
+    surface: str,
+    user_id: str,
+    message_id: int,
+    is_group_chat: bool,
+    addressed_to_bot: bool,
+) -> speech_gate.GateDecision:
+    """Whether a stored turn gets a task, with the decision audited.
+
+    No completer is passed yet, so the classifier rung fails closed; at the
+    default ``mode = "mention"`` it is never reached. ``is_group_chat`` is the
+    surface's own answer to "more than one human here" until participants are
+    recorded.
+    """
+    decision = speech_gate.should_speak(
+        is_multi_human=is_group_chat,
+        addressed_to_bot=addressed_to_bot,
+        mode=config.speech_gate.mode,
+    )
+    speech_gate.record_decision(
+        conn, room_token=room_token, surface=surface, user_id=user_id,
+        message_id=message_id, decision=decision,
+    )
+    return decision
+
+
 def _live_pin_namespace(config, conn, room_token: str, source_type: str) -> str | None:
     """The namespace an inline `!model` on this message was resolved in.
 
@@ -222,20 +322,28 @@ def record_inbound(
     # The message's own sender when it isn't `user_id` (email's envelope
     # sender). Raw and untrusted; sanitized here, never by a reader.
     sender_address: str | None = None,
-) -> tuple[str, int | None]:
-    """Resolve → echo-check → store user message → create task.
+    # Whether the surface detected an explicit address to the bot. Every
+    # surface still drops an unaddressed group turn before calling in, so a
+    # turn that reaches here was addressed unless the caller says otherwise.
+    addressed_to_bot: bool = True,
+) -> InboundResult:
+    """Resolve → echo-check → store user message → ask the gate → create task.
 
-    Returns `(room_token, task_id)`. `task_id` is `None` only when the message
-    is dropped as a known echo (forward-looking; structurally impossible for the
-    v1 Talk+web pair, where Talk self-filters bot posts by author and web is
-    never polled inbound). `room_token` is the canonical conversation token the
-    task was created under.
+    The user row is stored first with no task, then `speech_gate` decides
+    whether the turn gets one; on speak the task is created and the row is
+    stamped with its id. Storing before deciding keeps an unanswered turn on
+    the same code path as an answered one. See `InboundResult` for the four
+    outcomes. `room_token` is the canonical conversation token.
+
+    Only a stored turn is gated. A surface that keeps no transcript for this
+    message (email with no room, SMS, WhatsApp) always gets its task, since
+    declining a turn nothing recorded would lose it.
 
     `client_msg_id` is the sender's own identity for this message (web chat
     mints one per send and reuses it on retry). When a stored turn already
-    carries it, that turn's task is returned and nothing new is created — a
-    client that could not tell "never arrived" from "answer lost" gets one turn
-    rather than two.
+    carries it, that turn is returned and nothing new is created — a client
+    that could not tell "never arrived" from "answer lost" gets one turn rather
+    than two.
     """
     source_type = source_type or surface
 
@@ -367,7 +475,7 @@ def record_inbound(
                 "Dropping echo of a mirrored message on %s (room=%s ext=%s)",
                 surface, room_token, external_id,
             )
-            return room_token, None
+            return InboundResult(room_token, None, None, "dropped")
 
         # Per-room model/effort default. It lives on the shared rooms registry,
         # so this single choke point applies it uniformly to every surface
@@ -417,13 +525,15 @@ def record_inbound(
         if client_msg_id:
             prior = db.find_send_by_client_msg_id(conn, room_token, client_msg_id)
             if prior is not None:
-                prior_task, prior_sender = prior
+                prior_message, prior_task, prior_sender = prior
                 if prior_sender == user_id:
                     logger.info(
-                        "Replaying prior task for client_msg_id (room=%s task=%s)",
+                        "Replaying prior turn for client_msg_id (room=%s task=%s)",
                         room_token, prior_task,
                     )
-                    return room_token, prior_task
+                    return InboundResult(
+                        room_token, prior_task, prior_message, "replayed",
+                    )
                 # A co-member of this shared room got there first with the same
                 # key. It is an optimization, not a requirement, so this send
                 # gives it up rather than colliding on the room-scoped unique
@@ -451,7 +561,59 @@ def record_inbound(
             conn, room_token, surface, str(reply_to_message_id),
         )
 
-    # 3. Create the task.
+    stores_row = room_surface or mirror_only
+    if stores_row or platform_message_id is not None:
+        prior = _prior_turn(
+            conn, room_token=room_token, transcript_token=transcript_token,
+            surface=surface, room_surface=room_surface,
+            external_id=external_id, platform_message_id=platform_message_id,
+        )
+        if prior is not None:
+            return InboundResult(room_token, prior[1], prior[0], "replayed")
+
+    # 3. Store the user message into the canonical store — for a room surface,
+    #    or for a mirror-only surface landing in an existing room — before any
+    #    task exists, so a turn nobody answers is recorded all the same.
+    message_id: int | None = None
+    if stores_row:
+        author_user_id, author_label = resolve_author(
+            config, user_id, sender_address,
+        )
+        # Stamp the surface-native message id (Talk's message id) so the
+        # canonical row knows where it exists on that surface: this feeds the
+        # echo ledger, the duplicate-poll probe above and the Talk→web
+        # read-sync cursor cap (`room_max_talk_synced_message_id`).
+        message_id = db.add_message(
+            conn, transcript_token, role="user", body=text,
+            origin_surface=surface, task_id=None,
+            author_user_id=author_user_id,
+            author_label=author_label,
+            external_ids=(
+                {surface: str(external_id)}
+                if external_id is not None
+                else None
+            ),
+            attachments=display_attachment_names(attachments, attachment_names),
+            attachment_paths=workspace_attachment_paths(
+                config, user_id, attachments,
+            ),
+            client_msg_id=client_msg_id,
+            reply_to_message_id=reply_to_canonical_id,
+        )
+
+    # 4. Ask the speech gate about a stored turn.
+    if message_id is not None:
+        decision = _ask_gate(
+            conn, config, room_token=room_token, surface=surface,
+            user_id=user_id, message_id=message_id,
+            is_group_chat=is_group_chat, addressed_to_bot=addressed_to_bot,
+        )
+        if not decision.speak:
+            return InboundResult(
+                room_token, None, message_id, "recorded", decision.rung,
+            )
+
+    # 5. Create the task and stamp the stored row with it.
     task_id = db.create_task(
         conn,
         prompt=text,
@@ -477,55 +639,23 @@ def record_inbound(
         priority=priority,
         queue=queue,
     )
-
-    # 4. Store the user message into the canonical store — for a room surface,
-    #    or for a mirror-only surface landing in an existing room — idempotently:
-    #    Talk dedups a duplicate poll to the same task id, so we must not store a
-    #    second user row for it.
-    if (room_surface or mirror_only) and task_id is not None:
-        already = conn.execute(
-            "SELECT 1 FROM messages WHERE room_token = ? AND task_id = ? "
-            "AND role = 'user' LIMIT 1",
-            (transcript_token, task_id),
-        ).fetchone()
-        if not already:
-            author_user_id, author_label = resolve_author(
-                config, user_id, sender_address,
-            )
-            # Stamp the surface-native message id (Talk's message id) so the
-            # canonical row knows where it exists on that surface: this feeds
-            # both the echo ledger and the Talk→web read-sync cursor cap
-            # (`room_max_talk_synced_message_id`).
-            db.add_message(
-                conn, transcript_token, role="user", body=text,
-                origin_surface=surface, task_id=task_id,
-                author_user_id=author_user_id,
-                author_label=author_label,
-                external_ids=(
-                    {surface: str(external_id)}
-                    if external_id is not None
-                    else None
-                ),
-                attachments=display_attachment_names(attachments, attachment_names),
-                attachment_paths=workspace_attachment_paths(
-                    config, user_id, attachments,
-                ),
-                client_msg_id=client_msg_id,
-                reply_to_message_id=reply_to_canonical_id,
-            )
-
-    return room_token, task_id
+    if message_id is not None:
+        conn.execute(
+            "UPDATE messages SET task_id = ? WHERE id = ?", (task_id, message_id),
+        )
+    return InboundResult(room_token, task_id, message_id, "created")
 
 
 def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
     """Create a task from a normalized inbound message via `record_inbound`.
 
-    Returns the task id, or `None` if the message was dropped as a known echo
-    (only reachable for a room surface — email never echo-drops). On a duplicate
-    Talk message (same `platform_message_id` + `channel_token`) `db.create_task`
-    returns the id of the already-existing task rather than inserting twice.
+    Returns the task id, or `None` when no task exists for the message: a
+    known echo, a turn the speech gate recorded without answering, or a
+    re-poll of such a turn. On a duplicate Talk message (same
+    `platform_message_id` + `channel_token`) the existing task's id comes back
+    rather than a second one.
     """
-    _room_token, task_id = record_inbound(
+    result = record_inbound(
         conn,
         config,
         surface=msg.surface,
@@ -553,4 +683,4 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         mirror_to_room=msg.mirror_to_room,
         sender_address=msg.sender_address,
     )
-    return task_id
+    return result.task_id
