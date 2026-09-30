@@ -134,12 +134,15 @@ class TestTheDismissalArmStaysOutOfTheCore:
 
 
 class TestTheHeuristicsOwnArmsDoNotLeakIntoThePin:
-    """`_usable_as_delivery_default`'s other two exclusions keep a *guess* out of
-    somewhere embarrassing. A pin is not a guess, so a shared core must not carry
-    them — the picker offers both classes marked, and choosing one is deliberate.
+    """`_usable_as_delivery_default`'s machine-owned-channel exclusion keeps a
+    *guess* out of somewhere embarrassing. A pin is not a guess, so the pin does
+    not carry it — the picker offers the class marked, and choosing one is
+    deliberate. A room somebody else reads is the exception, and it is not a
+    matter of taste: a shared room is no destination for personal content at
+    all (multiplayer Stage 15), so a pin cannot choose it either.
     """
 
-    def test_a_pinned_room_somebody_else_reads_is_honoured(self, tmp_path):
+    def test_a_pinned_room_somebody_else_reads_is_not_honoured(self, tmp_path):
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:
             general = db.ensure_default_web_chat_room(conn, "alice")
@@ -149,13 +152,12 @@ class TestTheHeuristicsOwnArmsDoNotLeakIntoThePin:
 
         with db.get_db(config.db_path) as conn:
             channels = db.channel_room_tokens(conn, "alice")
-            # The heuristic refuses it, and the pin overrides the heuristic.
             assert db._usable_as_delivery_default(
                 conn, "alice", "room-shared", channels,
             ) is False
-            assert db.configured_default_room(conn, "alice") == "room-shared"
-            assert db.default_web_room(conn, "alice").token == "room-shared"
-            assert general.token != "room-shared"
+            # A terminal arm: the pin is dead and the heuristic answers.
+            assert db.configured_default_room(conn, "alice") is None
+            assert db.default_web_room(conn, "alice").token == general.token
 
     def test_a_pinned_machine_owned_channel_room_is_honoured(self, tmp_path):
         config = _config(tmp_path)

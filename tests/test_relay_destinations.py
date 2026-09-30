@@ -109,7 +109,10 @@ class TestRoomQualification:
         user_profiles.update_profile(config.db_path, 'bob', default_room=token)
         with db.get_db(config.db_path) as conn:
             db.add_room_member(conn, token, 'alice')
-            assert db.default_web_room(conn, 'bob').token == token
+            # A pin stops answering once the room is shared (multiplayer
+            # Stage 15), so the relay has no private room to fall back to.
+            handle = db.default_web_room(conn, 'bob')
+            assert handle is None or handle.token != token
         with pytest.raises(requests.RequestError, match='recipient_has_no_private_room'):
             resolve(config, 'room')
 

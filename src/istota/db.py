@@ -3757,17 +3757,23 @@ def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | Non
     that view is the right answer rather than falling back.
 
     Two arms: `_live_room` — the core shared with `visible_room` — and any
-    membership. Three of `_usable_as_delivery_default`'s five are dropped, for
-    two different reasons. **Unwise, so deliberately not applied:** a room
-    somebody else reads, and a machine-owned channel room. Those keep a *guess*
-    out of somewhere embarrassing, the picker offers both classes marked, and the
-    whole point of this setting is that the answer is no longer a guess. **A view
-    concern, so checked one level down:** a room the user hid — see `_live_room`
-    for why the dismissal arm sits where it does (ISSUE-479).
+    membership. Two of `_usable_as_delivery_default`'s arms are dropped, for
+    two different reasons. **Unwise, so deliberately not applied:** a
+    machine-owned channel room. That keeps a *guess* out of somewhere
+    embarrassing, the picker offers the class marked, and the whole point of
+    this setting is that the answer is no longer a guess. **A view concern, so
+    checked one level down:** a room the user hid — see `_live_room` for why the
+    dismissal arm sits where it does (ISSUE-479).
 
-    What is left is the room being unusable: gone, archived, or not the user's.
+    What is left is the room being unusable: gone, archived, not the user's, or
+    **read by somebody else** (`room_is_shared`). That last arm was once in the
+    first group, and it moved because a shared room is not a destination for
+    personal content at all (multiplayer Stage 15, SG 10): a pin is a choice
+    about where the user's own deliveries go, and it cannot make that choice for
+    the room's other readers. It is also the arm a pin can trip after it was
+    set, by a second member joining.
 
-    **These three arms are terminal, and that is what separates them from the
+    **These four arms are terminal, and that is what separates them from the
     ones above.** When one fails the pin is dead: the caller falls back to the
     heuristic and the room the user chose is quietly never used again. The
     dismissal and archived-handle arms in `configured_delivery_room`'s web arm
@@ -3797,6 +3803,8 @@ def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | Non
     if _live_room(conn, token) is None:
         return None
     if not is_room_member(conn, token, user_id):
+        return None
+    if room_is_shared(conn, token):
         return None
     return token
 
@@ -3838,7 +3846,7 @@ def configured_delivery_room(
     paragraphs up, and a web-only room refusing a bare `talk` is this setting
     behaving as specified. Nothing repairs those: the writer is web-only and
     mints no `talk` binding, which only the promote button writes (ISSUE-401).
-    Terminal *and* a fault is `configured_default_room`'s three arms beneath,
+    Terminal *and* a fault is `configured_default_room`'s four arms beneath,
     and that is the set the settings page marks — see
     `web_app._ignored_default_room_pin`. Do not read a `None` from here as
     benign on its own; which arm answered decides.
@@ -3965,9 +3973,9 @@ def _usable_as_delivery_default(
 
     - **A room somebody else reads.** A shared Talk room is one other people are
       in, and a personal alert delivered there is delivered in front of them.
-      Tested as "no member but this user" rather than as a count: a handle can
-      outlive membership, so counting would admit a room whose one member is
-      somebody else.
+      Two tests: `room_is_shared`, which also counts a guest in the surface's
+      roster, and "no member but this user", since a handle can outlive
+      membership and a room whose one member is somebody else is not shared.
     - **A channel room.** `log_channel` and `alerts_channel` are machine-owned;
       the entrypoint even posts into `alerts` at boot, so activity alone would
       hand a user's default to whichever the daemon last wrote to.
@@ -3980,6 +3988,8 @@ def _usable_as_delivery_default(
     if visible_room(conn, user_id, token) is None:
         return False
     if is_side_room(conn, token):
+        return False
+    if room_is_shared(conn, token):
         return False
     return not (set(list_room_members(conn, token)) - {user_id})
 

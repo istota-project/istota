@@ -11546,7 +11546,8 @@ def _ignored_default_room_pin(user_id: str, token: str) -> str:
     was written.
 
     - `db.configured_default_room`'s arms — the registry row exists, is not
-      archived, the user is still a member — are **terminal**. When one fails
+      archived, the user is still a member, nobody else reads it — are
+      **terminal**. When one fails
       every reader discards the value, the resolver falls back to the heuristic,
       and the room the user chose is quietly never used again. That is what this
       marks, and it is exactly `configured_default_room` answering `None` for a
@@ -11573,7 +11574,7 @@ def _ignored_default_room_pin(user_id: str, token: str) -> str:
     this user's own profile row — they wrote it, and it is returned to them in
     the same payload — so nothing is disclosed that the caller did not supply.
     That is also what lets the mark cover "no longer a member", which is one of
-    the three terminal arms and the one a membership gate would have hidden.
+    the four terminal arms and the one a membership gate would have hidden.
 
     Best-effort like the neighbour: an unreachable database marks nothing, since
     the mark is an assertion and a failed lookup has established none.
