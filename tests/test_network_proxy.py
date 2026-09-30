@@ -257,6 +257,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sibling:
                     sibling.settimeout(5)
                     sibling.connect(str(proxy_sock))
+                    sibling.sendall(b"CONNECT 127.0.0.1:1 HTTP/1.1\r\n\r\n")
                     assert b"403 Forbidden" in sibling.recv(4096)
                 output, _ = child.communicate("go\n", timeout=10)
                 assert child.returncode == 0
