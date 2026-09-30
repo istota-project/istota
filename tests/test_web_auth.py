@@ -374,3 +374,14 @@ def test_password_change_rechecks_after_hash(db_path, identity, policy, monkeypa
     assert not auth.change_password(db_path, policy, before, PASSWORD, PASSWORD + " changed", ip=None)
     after = auth.get_identity(db_path, "alice")
     assert after is None or after.password_hash == before.password_hash
+
+
+def test_identity_deletion_rolls_back_retained_epoch_and_tokens(db_path, identity):
+    token = auth.issue_token(db_path, "alice", "login", 900)
+    with db.get_db(db_path) as conn:
+        conn.execute("CREATE TRIGGER reject_identity_delete BEFORE DELETE ON web_auth_identities BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+    with pytest.raises(sqlite3.IntegrityError):
+        auth.delete_identity(db_path, "alice")
+    assert auth.get_identity(db_path, "alice") == identity
+    assert auth.get_retired_epoch(db_path, "alice") == 0
+    assert auth.peek_token(db_path, token, "login") is not None

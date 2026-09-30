@@ -260,3 +260,19 @@ def test_database_error_is_operator_failure(config, invoke):
     code, out, err = invoke("list")
     assert code == 1 and "database operation failed" in err
     assert "state=" not in out
+
+
+@pytest.mark.parametrize("purpose", ["enrol", "reset", "login"])
+def test_cli_mail_refuses_changed_recipient_snapshot(config, identity, monkeypatch, purpose):
+    from istota import web_auth_mail
+    from unittest.mock import Mock
+
+    config.email.enabled = True
+    send = Mock(return_value=True)
+    monkeypatch.setattr(web_auth_mail, "send_auth_email", send)
+    web_auth.upsert_identity(config.db_path, "alice", "new@example.com")
+    with pytest.raises(ValueError):
+        cli._auth_issue_link(config, identity, purpose, False)
+    send.assert_not_called()
+    with db.get_db(config.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM web_auth_tokens").fetchone()[0] == 0

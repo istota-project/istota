@@ -1791,6 +1791,12 @@ CREATE TABLE IF NOT EXISTS web_auth_identities (
     last_login_at TEXT
 );
 
+-- Retain session revocation when a removable email identity is deleted.
+CREATE TABLE IF NOT EXISTS web_auth_retired_epochs (
+    user_id TEXT PRIMARY KEY,
+    credential_epoch INTEGER NOT NULL
+);
+
 -- Only digests of random, single-use credentials are stored.
 CREATE TABLE IF NOT EXISTS web_auth_tokens (
     id INTEGER PRIMARY KEY,

@@ -150,16 +150,17 @@ async def test_csrf_failure_is_distinct(client, submitted):
 
 @pytest.mark.parametrize("attached,enabled", [(False, True), (True, True), (False, False)])
 async def test_legacy_cookie_rule(client, configured, attached, enabled):
+    username = "alice" if attached else "bob"
     if not attached:
-        web_auth.delete_identity(configured._config.db_path, "alice")
+        user_profiles.ensure_profile(configured._config.db_path, username)
     if not enabled:
         configured._config.web.auth = ["email"]
-    set_session(client, configured, {"user": {"username": "alice"}})
+    set_session(client, configured, {"user": {"username": username}})
     response = await client.get("/istota/api/me")
     assert response.status_code == (200 if not attached and enabled else 401)
     if response.status_code == 200:
         assert session_value(client)["auth"] == {"method": "nextcloud", "epoch": 0}
-        web_auth.upsert_identity(configured._config.db_path, "alice", "alice@example.com")
+        web_auth.upsert_identity(configured._config.db_path, username, "bob@example.com")
         assert (await client.get("/istota/api/me")).status_code == 401
 
 
@@ -697,3 +698,74 @@ async def test_account_password_database_failure_is_closed(client, configured, m
         headers={"Origin": "https://example.com"})
     assert response.status_code == 503
     assert web_auth.get_identity(configured._config.db_path, "alice") == before
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_removed_identity_never_revives_older_nextcloud_cookie(client, configured, legacy):
+    path = configured._config.db_path
+    user_profiles.ensure_profile(path, "bob")
+    configured._config.users["bob"] = UserConfig()
+    original = {"user": {"username": "bob"}}
+    if not legacy:
+        original["auth"] = {"method": "nextcloud", "epoch": 0}
+    set_session(client, configured, original)
+    assert (await client.get("/istota/api/me")).status_code == 200
+    web_auth.upsert_identity(path, "bob", "bob@example.com")
+    for mutation in (lambda: None, lambda: web_auth.bump_epoch(path, "bob"),
+                     lambda: web_auth.delete_identity(path, "bob")):
+        mutation()
+        set_session(client, configured, original)
+        assert (await client.get("/istota/api/me")).status_code == 401
+    db.init_db(path)
+    set_session(client, configured, original)
+    assert (await client.get("/istota/api/me")).status_code == 401
+    configured._oauth.nextcloud.authorize_access_token = AsyncMock(return_value={"user_id": "bob"})
+    assert (await client.get("/istota/callback")).status_code == 302
+    assert (await client.get("/istota/api/me")).status_code == 200
+    assert session_value(client)["auth"]["epoch"] != 0
+    assert not web_auth.delete_identity(path, "bob")
+    assert (await client.get("/istota/api/me")).status_code == 200
+    web_auth.upsert_identity(path, "bob", "bob@example.com")
+    web_auth.delete_identity(path, "bob")
+    assert (await client.get("/istota/api/me")).status_code == 401
+
+
+@pytest.mark.parametrize("route", ["connect", "callback"])
+@pytest.mark.parametrize("revocation", ["disabled", "epoch", "method"])
+async def test_google_routes_refuse_revoked_session(client, configured, monkeypatch, route, revocation):
+    from starlette.responses import RedirectResponse
+    from unittest.mock import Mock
+
+    assert (await sign_in(client)).status_code == 302
+    google = configured._oauth.google
+    google.authorize_redirect = AsyncMock(return_value=RedirectResponse("https://accounts.example.com"))
+    google.authorize_access_token = AsyncMock(return_value={"access_token": "test-access", "refresh_token": "test-refresh"})
+    monkeypatch.setattr(configured, "_google_requested_scopes", lambda user: ["test-scope"])
+    write = Mock()
+    monkeypatch.setattr(db, "upsert_google_token", write)
+    if revocation == "disabled":
+        web_auth.set_disabled(configured._config.db_path, "alice", True)
+    elif revocation == "epoch":
+        web_auth.bump_epoch(configured._config.db_path, "alice")
+    else:
+        configured._config.web.auth = ["nextcloud"]
+    response = await client.get("/istota/google/" + route)
+    assert response.status_code == 302 and response.headers["location"] == "/istota/login"
+    google.authorize_redirect.assert_not_awaited()
+    google.authorize_access_token.assert_not_awaited()
+    write.assert_not_called()
+
+
+async def test_google_callback_rechecks_after_token_exchange(client, configured, monkeypatch):
+    from unittest.mock import Mock
+
+    assert (await sign_in(client)).status_code == 302
+    async def exchange(request):
+        web_auth.bump_epoch(configured._config.db_path, "alice")
+        return {"access_token": "test-access", "refresh_token": "test-refresh"}
+    configured._oauth.google.authorize_access_token = AsyncMock(side_effect=exchange)
+    write = Mock()
+    monkeypatch.setattr(db, "upsert_google_token", write)
+    response = await client.get("/istota/google/callback")
+    assert response.status_code == 302 and response.headers["location"] == "/istota/login"
+    write.assert_not_called()

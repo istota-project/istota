@@ -1391,7 +1391,9 @@ def _auth_issue_link(config, identity, purpose, print_link):
         "login": (config.web.auth_login_link_ttl_minutes, 60, web_auth_mail.build_login_link_email),
     }
     ttl, multiplier, builder = options[purpose]
-    token = web_auth.issue_token(config.db_path, identity.user_id, purpose, ttl * multiplier)
+    token = web_auth.issue_token(
+        config.db_path, identity.user_id, purpose, ttl * multiplier, expected_identity=identity,
+    )
     route = "login-link" if purpose == "login" else "set-password"
     link = f"{origin}/istota/auth/{route}?token={token}"
     if print_link:

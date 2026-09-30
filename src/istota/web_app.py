@@ -447,6 +447,7 @@ def _session_auth(request: Request) -> dict:
         raise _UnauthorizedException()
     try:
         identity = web_auth.get_identity(_config.db_path, user["username"])
+        epoch = identity.credential_epoch if identity else web_auth.get_retired_epoch(_config.db_path, user["username"])
         if method == "email" and (
             identity is None or user_profiles.get_profile(_config.db_path, user["username"]) is None
         ):
@@ -460,11 +461,11 @@ def _session_auth(request: Request) -> dict:
         raise _UnauthorizedException()
     if not auth.get("method"):
         # A generationless cookie cannot inherit an identity's current epoch.
-        if identity:
+        if epoch != 0:
             raise _UnauthorizedException()
         auth = {"method": "nextcloud", "epoch": 0}
         request.session["auth"] = auth
-    if auth.get("epoch") != (identity.credential_epoch if identity else 0):
+    if auth.get("epoch") != epoch:
         raise _UnauthorizedException()
     request.state.web_auth_identity = identity
     return auth
@@ -1480,6 +1481,9 @@ async def callback(request: Request):
 
     try:
         identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, username)
+        epoch = identity.credential_epoch if identity else await asyncio.to_thread(
+            web_auth.get_retired_epoch, _config.db_path, username,
+        )
     except Exception:
         logger.warning("OAuth session credential lookup failed", exc_info=True)
         return await _login_error(403, "Sign-in failed", "Sign-in could not be completed.")
@@ -1544,7 +1548,7 @@ async def callback(request: Request):
         "username": username,
         "display_name": display_name,
     }
-    request.session["auth"] = {"method": "nextcloud", "epoch": identity.credential_epoch if identity else 0}
+    request.session["auth"] = {"method": "nextcloud", "epoch": epoch}
     return RedirectResponse(url=landing, status_code=302, headers=_AUTH_PAGE_HEADERS)
 
 
@@ -1562,8 +1566,9 @@ async def logout(request: Request):
 @auth_router.get("/google/connect")
 async def google_connect(request: Request):
     """Initiate Google OAuth flow. User must be logged in."""
-    user = _get_session_user(request)
-    if not user:
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
     if not _oauth or not hasattr(_oauth, "google"):
         return Response("Google Workspace not configured", status_code=500)
@@ -1602,8 +1607,9 @@ async def google_connect(request: Request):
 @auth_router.get("/google/callback")
 async def google_callback(request: Request):
     """Handle Google OAuth callback — store tokens in DB."""
-    user = _get_session_user(request)
-    if not user:
+    try:
+        user = await asyncio.to_thread(_require_api_auth, request)
+    except _UnauthorizedException:
         return RedirectResponse(url="/istota/login", status_code=302)
     if not _oauth or not hasattr(_oauth, "google"):
         return Response("Google Workspace not configured", status_code=500)
@@ -1628,10 +1634,17 @@ async def google_callback(request: Request):
     scopes_json = json.dumps(scopes.split()) if isinstance(scopes, str) else json.dumps(scopes)
 
     from . import db
-    with db.get_db(_config.db_path) as conn:
-        db.upsert_google_token(
-            conn, user["username"], access_token, refresh_token, expiry, scopes_json,
-        )
+    try:
+        with db.get_db(_config.db_path) as conn:
+            # Revocation can occur during the provider round trip. Serialize
+            # the final check and write with credential mutations.
+            conn.execute("BEGIN IMMEDIATE")
+            _require_api_auth(request)
+            db.upsert_google_token(
+                conn, user["username"], access_token, refresh_token, expiry, scopes_json,
+            )
+    except _UnauthorizedException:
+        return RedirectResponse(url="/istota/login", status_code=302)
     logger.info("Google account connected for user %s", user["username"])
     return RedirectResponse(url="/istota/settings?google=connected", status_code=302)
 

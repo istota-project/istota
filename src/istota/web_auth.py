@@ -155,6 +155,17 @@ def get_identity(db_path: Path, user_id: str) -> Identity | None:
         return _get_identity(conn, user_id)
 
 
+def _retired_epoch(conn: sqlite3.Connection, user_id: str) -> int:
+    row = conn.execute("SELECT credential_epoch FROM web_auth_retired_epochs WHERE user_id = ?", (user_id,)).fetchone()
+    return row["credential_epoch"] if row else 0
+
+
+def get_retired_epoch(db_path: Path, user_id: str) -> int:
+    """Return the generation retained after identity removal, or zero if never removed."""
+    with get_db(db_path) as conn:
+        return _retired_epoch(conn, user_id)
+
+
 def get_identity_by_email(db_path: Path, email: str) -> Identity | None:
     with get_db(db_path) as conn:
         return _identity(conn.execute("SELECT * FROM web_auth_identities WHERE email = ?", (normalize_email(email),)).fetchone())
@@ -202,7 +213,7 @@ def upsert_identity(
         if identity is None:
             # A fixed epoch would revive old cookies after remove/re-add.
             # Leave half the integer range available for monotonic increments.
-            epoch = secrets.randbelow(2**62 - 1) + 1
+            epoch = max(secrets.randbelow(2**62 - 1) + 1, _retired_epoch(conn, user_id) + 1)
             conn.execute("INSERT INTO web_auth_identities (user_id, email, credential_epoch) VALUES (?, ?, ?)",
                          (user_id, email, epoch))
         elif identity.email != email:
@@ -286,6 +297,12 @@ def delete_identity(db_path: Path, user_id: str, *, protected_admins: set[str] |
         if protected_admins is not None:
             _protect_last_admin(conn, _require_identity(conn, user_id), protected_admins)
         _invalidate_tokens(conn, user_id)
+        identity = _get_identity(conn, user_id)
+        if identity is None:
+            return False
+        epoch = max(identity.credential_epoch, _retired_epoch(conn, user_id)) + 1
+        conn.execute("""INSERT INTO web_auth_retired_epochs (user_id, credential_epoch) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET credential_epoch = excluded.credential_epoch""", (user_id, epoch))
         return conn.execute("DELETE FROM web_auth_identities WHERE user_id = ?", (user_id,)).rowcount > 0
 
 
