@@ -4968,6 +4968,10 @@ def _is_talk_backed(conn, reg, token: str) -> bool:
     return db.get_room_binding(conn, token, "talk") is not None
 
 
+class _RoomSettingsRefused(Exception):
+    """A shared room's setting changed by someone who is not its host (403)."""
+
+
 def _chat_update_room(
     username: str, room_id: int, name: str | None, archived: bool | None,
     model=_UNSET, effort=_UNSET, brain=_UNSET, color=_UNSET,
@@ -5005,11 +5009,18 @@ def _chat_update_room(
     with no model pin survives, because the rule returns early with nothing to
     lose.
     """
-    from . import db
+    from . import db, room_policy
     with db.get_db(_config.db_path) as conn:
         room = db.get_web_chat_room(conn, room_id)
         if room is None or room.user_id != username:
             return None
+        # Name, model, effort and brain are the room's, not this handle's, so
+        # in a shared room they are the host's. Colour and hiding stay per
+        # member. Checked before any write, so a refused body changes nothing.
+        if name is not None or any(v is not _UNSET for v in (model, effort, brain)):
+            refusal = room_policy.settings_refusal(conn, room.token, username)
+            if refusal:
+                raise _RoomSettingsRefused(refusal)
         # `_UNSET` → leave the column alone; `None` (an explicit null or "" in
         # the body) → clear it, which the store spells as the empty string.
         # This is the one field written straight to the handle: `model`,
@@ -5614,6 +5625,7 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
     - `raced` — another promote bound the room while this one was creating its
       conversation. Its ref stands.
     - `not_found` — unknown / not owned / not web-origin / Talk unconfigured.
+    - `refused` — a shared room, and the caller is not its host.
     - `failed` — Nextcloud created no conversation.
     """
     from . import db
@@ -5631,6 +5643,11 @@ async def _chat_promote_to_talk(username: str, room_id: int) -> tuple[str, dict 
         # bot; a Talk conversation of its own could gain participants.
         if reg.side_of:
             return "not_found", None
+        # Binding a Talk conversation changes where every member's room
+        # lives, so in a shared room it is the host's call.
+        from .room_policy import settings_refusal
+        if settings_refusal(conn, token, username):
+            return "refused", None
         existing = db.get_room_binding(conn, token, "talk")
         name = db.room_display_name(reg, handle)
     if not _config.nextcloud.url:
@@ -7747,10 +7764,13 @@ async def chat_update_room(
                 )
             if not _room_model_allowed(model_brain, model):
                 return JSONResponse({"error": "unknown model"}, status_code=400)
-    updated = await asyncio.to_thread(
-        _chat_update_room, user["username"], room_id, name, archived, model, effort,
-        brain, color,
-    )
+    try:
+        updated = await asyncio.to_thread(
+            _chat_update_room, user["username"], room_id, name, archived, model,
+            effort, brain, color,
+        )
+    except _RoomSettingsRefused as refused:
+        return JSONResponse({"error": str(refused)}, status_code=403)
     if updated is None:
         return JSONResponse({"error": "room not found"}, status_code=404)
     # Propagate a rename to the bound Talk conversation, if any (best-effort).
@@ -7787,6 +7807,10 @@ async def chat_promote_room(
     does nothing.
     """
     status, room = await _chat_promote_to_talk(user["username"], room_id)
+    if status == "refused":
+        return JSONResponse(
+            {"error": "only this room's host can open it in Talk"}, status_code=403,
+        )
     if status == "not_found":
         return JSONResponse(
             {"error": "room not found or not eligible for promotion"},
@@ -8020,14 +8044,38 @@ def _chat_set_message_star(username: str, message_id: int, starred: bool) -> boo
 _ACTIVE_TASK_STATUSES = ("pending", "locked", "running", "pending_confirmation")
 
 
+def _message_owner(conn, row) -> str | None:
+    """The member a transcript row belongs to, or None when it is nobody's.
+
+    The author where one is recorded; a participant's user id where the row
+    names a participant (a guest has none); else the owner of the task the row
+    belongs to, which is how the bot's answer is the asker's. A system notice
+    with no task is nobody's.
+    """
+    from . import db
+    if row["author_user_id"]:
+        return row["author_user_id"]
+    if row["author_participant_id"] is not None:
+        found = conn.execute(
+            "SELECT user_id FROM room_participants WHERE id = ?",
+            (row["author_participant_id"],),
+        ).fetchone()
+        return found["user_id"] if found else None
+    if row["task_id"] is not None:
+        task = db.get_task(conn, int(row["task_id"]))
+        return task.user_id if task is not None else None
+    return None
+
+
 def _chat_delete_message(username: str, message_id: int) -> str | dict:
     """Hard-delete one transcript row for ``username``.
 
     Returns ``"not_found"`` (unknown id, or the caller isn't a member of its
     room — deliberately indistinguishable, same as the star endpoint, so the
-    route can't be used to probe foreign message ids), ``"busy"`` when the
-    turn's task is still in flight, or a dict describing what to propagate to
-    Talk.
+    route can't be used to probe foreign message ids), ``"forbidden"`` for
+    another member's row in a shared room (see `_message_owner`), ``"busy"``
+    when the turn's task is still in flight, or a dict describing what to
+    propagate to Talk.
 
     The busy guard mirrors the room delete's: a running turn's assistant row is
     still being written, and deleting it would have the scheduler recreate it
@@ -8042,9 +8090,17 @@ def _chat_delete_message(username: str, message_id: int) -> str | dict:
         if token is None or not db.is_room_member(conn, token, username):
             return "not_found"
         row = conn.execute(
-            "SELECT task_id FROM messages WHERE id = ?", (message_id,)
+            "SELECT task_id, author_user_id, author_participant_id FROM messages "
+            "WHERE id = ?", (message_id,)
         ).fetchone()
         task_id = row["task_id"] if row else None
+        # In a room others read, a member removes their own turns and the
+        # answers to them, and nothing else: deleting another member's words
+        # rewrites the record they share, and the host is no moderator.
+        if row is not None and db.room_is_shared(conn, token) and (
+            _message_owner(conn, row) != username
+        ):
+            return "forbidden"
         if task_id is not None:
             task = db.get_task(conn, int(task_id))
             if task is not None and task.status in _ACTIVE_TASK_STATUSES:
@@ -8329,6 +8385,11 @@ async def chat_delete_message(
     result = await asyncio.to_thread(_chat_delete_message, username, message_id)
     if result == "not_found":
         return JSONResponse({"error": "message not found"}, status_code=404)
+    if result == "forbidden":
+        return JSONResponse(
+            {"error": "only its author can delete a message in a shared room"},
+            status_code=403,
+        )
     if result == "busy":
         return JSONResponse(
             {"error": "message belongs to a task in progress"}, status_code=409,
@@ -8571,9 +8632,12 @@ def _chat_confirm_task(task_id: int, actor_user_id: str | None = None) -> None:
             # transcript-mirror restore all run unconditionally — so a stray
             # confirm (a duplicate click, a running re-run) has to stop here.
             return
-        if task.whatsapp_confirmation_request_id and actor_user_id != task.user_id:
+        # Only the task's owner answers it, admin or not: `!confirm` has no
+        # admin exemption and `confirmations.resolve` refuses another user's
+        # answer, so the route's admin pass must not be a way round both.
+        if actor_user_id != task.user_id:
             from fastapi import HTTPException
-            raise HTTPException(status_code=403, detail="not your relay question")
+            raise HTTPException(status_code=403, detail="not your task")
         # Shared with the Talk poller and `!confirm` so all three restore the
         # transcript mirror the gate withheld (ISSUE-241), and so all three
         # prune the parked attempt's terminal frames the same way (ISSUE-235).
@@ -8962,11 +9026,11 @@ async def chat_discard_draft(
     return {"status": "discarded", "draft_id": draft_id}
 
 
-def _chat_cancel_task(task_id: int) -> None:
+def _chat_cancel_task(task_id: int, actor_user_id: str | None = None) -> None:
     from . import confirmations, db
     with db.get_db(_config.db_path) as conn:
         row = conn.execute(
-            "SELECT worker_pid, status FROM tasks WHERE id = ?", (task_id,)
+            "SELECT worker_pid, status, user_id FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         status = row["status"] if row else None
         if status == "pending_confirmation":
@@ -8974,6 +9038,12 @@ def _chat_cancel_task(task_id: int) -> None:
             # than flagging a worker that will never see the flag. Through the
             # shared verb, so this path records the same `task_logs` row the
             # Talk poller and `!confirm` do.
+            #
+            # The owner's alone, as `!stop` has it: the admin exemption covers
+            # a runaway running task, never discarding somebody's held one.
+            if row["user_id"] != actor_user_id:
+                from fastapi import HTTPException
+                raise HTTPException(status_code=403, detail="not your task")
             task = db.get_task(conn, task_id)
             if task is not None:
                 confirmations.decline(conn, task, by="web")
@@ -9011,7 +9081,7 @@ async def chat_cancel_task(
     _csrf: None = Depends(_verify_origin),
 ):
     await _authorize_task_access(task_id, user)
-    await asyncio.to_thread(_chat_cancel_task, task_id)
+    await asyncio.to_thread(_chat_cancel_task, task_id, user["username"])
     return {"status": "cancelling"}
 
 

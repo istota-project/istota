@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 
 from typing import TYPE_CHECKING
 
-from . import db
+from . import db, room_policy
 from .brain import (
     Brain,
     EFFORT_LEVELS,
@@ -1303,6 +1303,9 @@ async def cmd_brain(ctx: CommandContext):
 
     if not config.is_admin(ctx.user_id):
         return "Only an admin can change this room's brain. `!brain` shows what it runs."
+    refusal = room_policy.settings_refusal(conn, token, ctx.user_id)
+    if refusal:
+        return refusal
 
     # `default` is checked ahead of the allowlist deliberately. Clearing is a
     # narrowing, so it needs no entry — and emptying `[brain] room_selectable`
@@ -1437,6 +1440,11 @@ async def cmd_room(ctx: CommandContext):
         # model figures below were resolved against.
         return _describe_room_default(room.model, room.effort) + "\n" + \
             _describe_room_brain(config, room, ctx.surface)
+
+    if sub in ("model", "effort"):
+        refusal = room_policy.settings_refusal(conn, token, ctx.user_id)
+        if refusal:
+            return refusal
 
     if sub == "model":
         alias = rest.lower()
@@ -2909,6 +2917,10 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
     the room's history fallback, its memory namespace, its sleep cycle. A bare
     ``!retry`` typed in the origin room can reach such a task, since
     ``_resolve_retry_target`` picks the newest failed task for the token.
+
+    ``guest_participant_id`` and ``audience`` go with it (multiplayer D2/D3):
+    the prompt is a guest's fenced words, and without the guest a retry would
+    run them as the host's own turn, at the host's grants.
     """
     return db.create_task(
         conn,
@@ -2919,6 +2931,8 @@ def _create_retry_task(conn, original: "db.Task", prompt: str) -> int:
         parent_task_id=original.id,
         is_group_chat=original.is_group_chat,
         withheld_from_room=original.withheld_from_room,
+        guest_participant_id=original.guest_participant_id,
+        audience=original.audience,
         output_target=original.output_target,
         talk_delivery_token=original.talk_delivery_token,
         model=original.model,

@@ -372,7 +372,10 @@ def resolve(
 
     The ownership check lives here rather than at the call sites. Path C
     already filters by user, so it only ever mattered for A and B — and both
-    are reachable with an id the answerer does not own.
+    are reachable with an id the answerer does not own. A shared room is the
+    case it exists for: `db.get_pending_confirmation` looks a question up by
+    conversation alone, so in a room two members read, B finds one member's
+    held task for the other, and this check is all that stops them answering it.
     """
     task = None
     if talk_response_id:

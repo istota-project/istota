@@ -165,6 +165,30 @@ def claim_host(conn: sqlite3.Connection, room_token: str, user_id: str) -> str:
     return "claimed" if claimed else "held_by_another"
 
 
+def settings_refusal(conn: sqlite3.Connection, room_token: str, user_id: str) -> str | None:
+    """Why ``user_id`` may not change this room's standing settings, or None.
+
+    A room's name, model, effort and brain, and whether it is also a Talk
+    conversation, apply to every member's turn. In a room more than one human
+    reads they are therefore the host's, the same authority `!room guests`
+    takes; in a private room or a side room the one member changes them freely.
+    Per-member choices (a colour, hiding the room) and the room's notes are not
+    settings: every member has those.
+    """
+    room = db.get_room(conn, room_token)
+    if room is None or room.side_of or not db.room_is_shared(conn, room_token):
+        return None
+    host = current_host(conn, ensure_policy(conn, room_token))
+    if host == user_id:
+        return None
+    if host is None:
+        return (
+            "This room has no host, so nobody can change its settings. A member "
+            "claims it with `!room host`."
+        )
+    return f"Only this room's host ({host}) can change its settings."
+
+
 def set_guest_reply(conn: sqlite3.Connection, room_token: str, value: str) -> RoomPolicy:
     if value not in GUEST_REPLY_VALUES:
         raise ValueError(f"guest_reply must be one of {GUEST_REPLY_VALUES}")
