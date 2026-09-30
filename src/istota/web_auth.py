@@ -174,14 +174,30 @@ def _invalidate_tokens(conn: sqlite3.Connection, user_id: str, purpose: str | No
     conn.execute(sql, args)
 
 
-def upsert_identity(db_path: Path, user_id: str, email: str) -> Identity:
+def upsert_identity(
+    db_path: Path, user_id: str, email: str, *, create_profile: bool = False,
+    display_name: str = "", reject_case_collision: bool = False,
+) -> Identity:
     email = normalize_email(email)
     if not email:
         raise ValueError("Email must not be empty")
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if reject_case_collision:
+            for row in conn.execute("SELECT user_id FROM user_profiles UNION SELECT user_id FROM web_auth_identities"):
+                if row["user_id"] != user_id and row["user_id"].casefold() == user_id.casefold():
+                    raise ValueError(f"User ID differs only in case from {row['user_id']}")
+        conflict = conn.execute("SELECT user_id FROM web_auth_identities WHERE email = ? AND user_id != ?",
+                                (email, user_id)).fetchone()
+        if conflict and reject_case_collision:
+            raise ValueError(f"That address is already a login for {conflict['user_id']}")
         if not _has_profile(conn, user_id):
-            raise ValueError("No user profile for this identity")
+            if not create_profile:
+                raise ValueError("No user profile for this identity")
+            if not valid_new_user_id(user_id):
+                raise ValueError("New user IDs must be 1–32 lowercase letters, digits, dots, underscores or hyphens, starting with a letter or digit; they become directory names.")
+            from .user_profiles import UserProfile, insert_profile
+            insert_profile(conn, UserProfile(user_id=user_id, display_name=display_name or user_id))
         identity = _get_identity(conn, user_id)
         if identity is None:
             # A fixed epoch would revive old cookies after remove/re-add.
@@ -196,10 +212,12 @@ def upsert_identity(db_path: Path, user_id: str, email: str) -> Identity:
         return _require_identity(conn, user_id)
 
 
-def _change_credential(db_path: Path, user_id: str, *, password_hash: str | None = None, disabled: bool | None = None) -> int:
+def _change_credential(db_path: Path, user_id: str, *, password_hash: str | None = None, disabled: bool | None = None, protected_admins: set[str] | None = None) -> int:
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
         identity = _require_identity(conn, user_id)
+        if disabled:
+            _protect_last_admin(conn, identity, protected_admins)
         epoch = identity.credential_epoch + 1
         conn.execute("UPDATE web_auth_identities SET password_hash = ?, disabled = ?, credential_epoch = ?, updated_at = ? WHERE user_id = ?",
                      (identity.password_hash if password_hash is None else password_hash,
@@ -245,17 +263,28 @@ def clear_password(db_path: Path, user_id: str) -> int:
     return _change_credential(db_path, user_id, password_hash="")
 
 
-def set_disabled(db_path: Path, user_id: str, disabled: bool) -> int:
-    return _change_credential(db_path, user_id, disabled=disabled)
+def set_disabled(db_path: Path, user_id: str, disabled: bool, *, protected_admins: set[str] | None = None) -> int:
+    return _change_credential(db_path, user_id, disabled=disabled, protected_admins=protected_admins)
 
 
 def bump_epoch(db_path: Path, user_id: str) -> int:
     return _change_credential(db_path, user_id)
 
 
-def delete_identity(db_path: Path, user_id: str) -> bool:
+def _protect_last_admin(conn: sqlite3.Connection, identity: Identity, admins: set[str] | None) -> None:
+    if not admins or identity.disabled or identity.user_id not in admins:
+        return
+    enabled = conn.execute("""SELECT i.user_id FROM web_auth_identities i
+        JOIN user_profiles p ON p.user_id = i.user_id WHERE i.disabled = 0""")
+    if not any(row["user_id"] in admins and row["user_id"] != identity.user_id for row in enabled):
+        raise ValueError("Cannot remove or disable the last enabled admin identity")
+
+
+def delete_identity(db_path: Path, user_id: str, *, protected_admins: set[str] | None = None) -> bool:
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if protected_admins is not None:
+            _protect_last_admin(conn, _require_identity(conn, user_id), protected_admins)
         _invalidate_tokens(conn, user_id)
         return conn.execute("DELETE FROM web_auth_identities WHERE user_id = ?", (user_id,)).rowcount > 0
 
@@ -279,10 +308,14 @@ def _issue_token(conn: sqlite3.Connection, identity: Identity, purpose: str, ttl
     return token
 
 
-def issue_token(db_path: Path, user_id: str, purpose: str, ttl_seconds: int) -> str:
+def issue_token(db_path: Path, user_id: str, purpose: str, ttl_seconds: int, *, expected_identity: Identity | None = None) -> str:
     with get_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        return _issue_token(conn, _require_identity(conn, user_id), purpose, ttl_seconds)
+        identity = _require_identity(conn, user_id)
+        if expected_identity is not None and (identity.email != expected_identity.email
+                or identity.credential_epoch != expected_identity.credential_epoch):
+            raise ValueError("Identity changed before the link was sent. Try again.")
+        return _issue_token(conn, identity, purpose, ttl_seconds)
 
 
 def _live_token(conn: sqlite3.Connection, token: str, purpose: str | None) -> sqlite3.Row | None:

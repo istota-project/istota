@@ -1891,6 +1891,144 @@ async def api_account_password(request: Request):
     return {"signed_out": True}
 
 
+# ---- Admin email identities ----
+
+
+def _admin_identity_view(identity):
+    if identity is None:
+        return None
+    return {"email": identity.email, "disabled": identity.disabled,
+            "last_login_at": identity.last_login_at}
+
+
+@api_router.get("/admin/users")
+async def admin_users(_: dict = Depends(_require_admin)):
+    from .user_profiles import list_profiles
+    config = _config
+    profiles = await asyncio.to_thread(list_profiles, config.db_path)
+    identities = {i.user_id: i for i in await asyncio.to_thread(web_auth.list_identities, config.db_path)}
+    users, orphans = [], []
+    for user_id in sorted(profiles.keys() | identities.keys()):
+        profile = profiles.get(user_id)
+        identity = identities.get(user_id)
+        row = {"user_id": user_id, "display_name": profile.display_name if profile else user_id,
+               "identity": _admin_identity_view(identity), "is_admin": user_id in config.admin_users,
+               "state": "nextcloud_only" if identity is None else "password_set" if identity.password_hash else "passwordless"}
+        (users if profile else orphans).append(row)
+    return {"users": users, "orphans": orphans, "email_enabled": config.web.has_method("email")}
+
+
+async def _admin_auth_write(function, *args, **kwargs):
+    try:
+        return await asyncio.to_thread(function, *args, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        logger.warning("Admin identity update failed")
+        raise HTTPException(status_code=503, detail="Identity could not be updated. Try again later.")
+
+
+async def _admin_send_auth_link(config, user_id: str, purpose: str):
+    if not config.web.has_method("email"):
+        raise HTTPException(status_code=400, detail="Email sign-in is not enabled.")
+    from .user_profiles import get_profile
+    from .web_origin import external_origin
+    try:
+        host, scheme = external_origin(config)
+    except ValueError:
+        raise HTTPException(status_code=500, detail="site.hostname must be configured before sending login links.")
+
+    def send():
+        identity = web_auth.get_identity(config.db_path, user_id)
+        profile = get_profile(config.db_path, user_id)
+        if identity is None:
+            raise ValueError("No email identity for this user")
+        if identity.disabled or profile is None:
+            raise ValueError("An enabled identity and a live profile are required to send a link")
+        policy = web_auth.policy_from_config(config)
+        ttl = {"enrol": policy.enrol_ttl_seconds, "reset": policy.reset_ttl_seconds,
+               "login": policy.login_link_ttl_seconds}[purpose]
+        token = web_auth.issue_token(config.db_path, user_id, purpose, ttl, expected_identity=identity)
+        route = "login-link" if purpose == "login" else "set-password"
+        link = f"{scheme}://{host}/istota/auth/{route}?token={token}"
+        builder = {"enrol": web_auth_mail.build_enrol_email, "reset": web_auth_mail.build_reset_email,
+                   "login": web_auth_mail.build_login_link_email}[purpose]
+        message = builder(config.bot_name, profile.display_name, link, ttl // (60 if purpose == "login" else 3600))
+        try:
+            return web_auth_mail.send_auth_email(config, identity.email, *message)
+        except Exception:
+            return False
+
+    sent = await _admin_auth_write(send)
+    if not sent:
+        logger.warning("Admin auth mail could not be sent user=%s purpose=%s", user_id, purpose)
+        raise HTTPException(status_code=502, detail="The invitation or sign-in link could not be sent. The identity is saved; try sending again.")
+    return {"sent": True}
+
+
+@api_router.post("/admin/users")
+async def admin_create_user(request: Request, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    config = _config
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user request.")
+    if (not isinstance(payload, dict) or not isinstance(payload.get("user_id"), str)
+            or not isinstance(payload.get("email"), str) or not isinstance(payload.get("display_name", ""), str)):
+        raise HTTPException(status_code=400, detail="User ID and email are required.")
+    email = web_auth.normalize_email(payload["email"])
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+", email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    if not config.web.has_method("email"):
+        raise HTTPException(status_code=400, detail="Email sign-in is not enabled.")
+    identity = await _admin_auth_write(
+        web_auth.upsert_identity, config.db_path, payload["user_id"], email,
+        create_profile=True, display_name=payload.get("display_name", ""), reject_case_collision=True,
+    )
+    return await _admin_send_auth_link(config, identity.user_id, "enrol")
+
+
+@api_router.post("/admin/users/{user_id}/invite")
+async def admin_user_invite(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    return await _admin_send_auth_link(_config, user_id, "enrol")
+
+
+@api_router.post("/admin/users/{user_id}/reset")
+async def admin_user_reset(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    return await _admin_send_auth_link(_config, user_id, "reset")
+
+
+@api_router.post("/admin/users/{user_id}/login-link")
+async def admin_user_login_link(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    return await _admin_send_auth_link(_config, user_id, "login")
+
+
+@api_router.post("/admin/users/{user_id}/disable")
+async def admin_user_disable(user_id: str, request: Request, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="A disabled boolean is required.")
+    if not isinstance(payload, dict) or not isinstance(payload.get("disabled"), bool):
+        raise HTTPException(status_code=400, detail="A disabled boolean is required.")
+    await _admin_auth_write(web_auth.set_disabled, _config.db_path, user_id, payload["disabled"],
+                            protected_admins=set(_config.admin_users))
+    return {"updated": True}
+
+
+@api_router.post("/admin/users/{user_id}/logout-all")
+async def admin_user_logout_all(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    await _admin_auth_write(web_auth.bump_epoch, _config.db_path, user_id)
+    return {"updated": True}
+
+
+@api_router.delete("/admin/users/{user_id}")
+async def admin_user_remove(user_id: str, _: dict = Depends(_require_admin), _csrf: None = Depends(_verify_origin)):
+    await _admin_auth_write(web_auth.delete_identity, _config.db_path, user_id,
+                            protected_admins=set(_config.admin_users))
+    return {"removed": True}
+
+
 # ---- Admin dashboard ----
 
 
