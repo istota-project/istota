@@ -126,3 +126,83 @@ def test_a_request_naming_no_user_is_refused_before_it_is_sent(tmp_path, monkeyp
     assert issubclass(BrowserIdentityMissing, ValueError)
     with browser_admission(queue_timeout=0.01):
         pass
+
+
+def _no_config_anywhere(tmp_path, monkeypatch):
+    """Put every `load_config` candidate out of reach but `/etc`, which a
+    developer host does not carry."""
+    monkeypatch.delenv("ISTOTA_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+
+def test_no_database_path_is_refused_and_creates_nothing(tmp_path, monkeypatch):
+    """A cwd-relative lock coordinates with nobody and left ``data/`` behind (#572)."""
+    from istota.browser_admission import BrowserAdmissionUnconfigured, browser_admission
+
+    _no_config_anywhere(tmp_path, monkeypatch)
+    monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+    with pytest.raises(BrowserAdmissionUnconfigured, match="ISTOTA_DB_PATH"):
+        with browser_admission(queue_timeout=0.01):
+            pytest.fail("admitted with no database path")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_an_empty_database_path_is_refused(tmp_path, monkeypatch):
+    from istota.browser_admission import BrowserAdmissionUnconfigured, browser_admission
+
+    _no_config_anywhere(tmp_path, monkeypatch)
+    monkeypatch.setenv("ISTOTA_DB_PATH", "  ")
+    with pytest.raises(BrowserAdmissionUnconfigured):
+        with browser_admission(db_path="", queue_timeout=0.01):
+            pass
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_finviz_does_not_retry_an_unconfigured_admission(tmp_path, monkeypatch):
+    """A missing path is not transient; retrying it only sleeps 15 seconds."""
+    monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    _no_config_anywhere(tmp_path, monkeypatch)
+    monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+    import time
+    from istota.skills.markets import finviz
+
+    slept = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+    assert finviz.fetch_finviz_data(api_url="http://browser", retries=2) is None
+    assert slept == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_loaded_config_names_the_lock_when_the_proxy_withholds_the_path(
+    tmp_path, monkeypatch,
+):
+    """Proxy off: the executor keeps ISTOTA_DB_PATH from the model's env, and
+    the CLI takes the same lock as the daemon through the config file."""
+    from istota.browser_admission import browser_admission
+
+    _no_config_anywhere(tmp_path, monkeypatch)
+    monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+    state = tmp_path / "state"
+    cfg = tmp_path / "istota.toml"
+    cfg.write_text(f'db_path = "{state / "istota.db"}"\n')
+    monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(cfg))
+    with browser_admission(queue_timeout=0.01):
+        pass
+    assert (state / "browser-admission.lock").is_file()
+    assert not (tmp_path / "data").exists()
+
+
+def test_a_relative_db_path_in_the_config_is_refused(tmp_path, monkeypatch):
+    """Relative to the daemon's cwd, which this process cannot know."""
+    from istota.browser_admission import BrowserAdmissionUnconfigured, browser_admission
+
+    _no_config_anywhere(tmp_path, monkeypatch)
+    monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
+    cfg = tmp_path / "istota.toml"
+    cfg.write_text('db_path = "data/istota.db"\n')
+    monkeypatch.setenv("ISTOTA_CONFIG_PATH", str(cfg))
+    with pytest.raises(BrowserAdmissionUnconfigured):
+        with browser_admission(queue_timeout=0.01):
+            pass
+    assert not (tmp_path / "data").exists()

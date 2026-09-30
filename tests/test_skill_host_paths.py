@@ -852,6 +852,11 @@ class TestBrowseScreenshotIsScoped:
     and *then* refused, which a test reading the return value alone cannot see.
     """
 
+    @pytest.fixture(autouse=True)
+    def framework_db(self, tmp_path, monkeypatch):
+        """Where the browser admission lock lives, as the proxy exports it."""
+        monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "db" / "istota.db"))
+
     @pytest.fixture
     def post(self):
         """`httpx.post` answering with a real PNG, and a record of the calls."""
@@ -1024,6 +1029,7 @@ class TestBrowseScreenshotIsScoped:
         with patch("istota.skills.browse.httpx.post", return_value=resp):
             result = self._shot("https://example.com", "-o", str(dest))
         assert result["status"] == "error"
+        assert "not a PNG, JPEG, GIF or WebP" in result["error"]
         assert not dest.exists()
 
 

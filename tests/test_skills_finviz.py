@@ -588,8 +588,11 @@ class TestParsingEdgeCases:
 
 
 @pytest.fixture(autouse=True)
-def browser_identity(monkeypatch):
+def browser_identity(monkeypatch, tmp_path):
+    # The task env a skill CLI runs in: its user, and the framework database
+    # whose directory holds the browser admission lock.
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
+    monkeypatch.setenv("ISTOTA_DB_PATH", str(tmp_path / "db" / "istota.db"))
 
 
 def test_finviz_identity_on_constructed_request(monkeypatch):
