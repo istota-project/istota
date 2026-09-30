@@ -473,6 +473,14 @@ def build_task_runtime(
         # Empty where the user has no vault, which is every user by default;
         # the feature is then absent rather than refused differently.
         vault_credentials = _vault_credentials(config, task.user_id)
+        if config.db_path and Path(config.db_path).is_file():
+            from . import db
+            from .credential_broker.bindings import sync_forge_bindings
+            with db.get_db(config.db_path) as conn:
+                sync_forge_bindings(conn, task.user_id, config.developer, available_names={
+                    "forge." + forge for forge in ("gitlab", "github")
+                    if forge.upper() + "_TOKEN" in credential_env
+                })
         _proxy_ctx = SkillProxy(
             _proxy_sock, credential_env, proxy_base_env,
             timeout=config.security.skill_proxy_timeout,

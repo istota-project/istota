@@ -149,6 +149,16 @@ USER_VAULT_PATH=istota/vault/credentials.kdbx
 
 with `ISTOTA_SCHEDULER_VAULT_SYNC_INTERVAL` for the cadence.
 
+### Credential bindings
+
+A vault entry's HTTPS URL binds all its credential names to that host and port. Add exact `host[:port]` names in the comma-separated custom field `istota_hosts` for other destinations. Wildcards and plain HTTP are refused. Invalid host metadata leaves the entry unbound. Custom fields beginning with `istota_` are reserved metadata and never become credential names.
+
+`istota_headers` sets the comma-separated allowed authentication headers; the default is `Authorization`, `PRIVATE-TOKEN`, `X-API-Key` and `X-Auth-Token`. `Proxy-Authorization` is never allowed. The `istota:reveal` tag records that an entry may be revealed. Reveal enforcement and grants are not active yet; the credential list shows their metadata in preparation for those controls.
+
+`istota-credential list` shows bound hosts, whether an entry is revealable, and its grant status. Configured forge tokens appear as `forge.gitlab` and `forge.github` for tasks already authorized to use them. Their hosts come from the deployment's forge URLs; public GitHub also includes `api.github.com`.
+
+Browser credential fills require a bound HTTPS origin now. An unbound entry or a field on another origin returns `credential_origin_mismatch` before input. Add the correct URL in KeePassXC and let the vault sync before retrying. This requires a rebuilt browser image: older images are refused before receiving any credential action. Credential fills address the checked element through CDP, so navigation cannot redirect a keyboard fill into another page.
+
 ### The passphrase
 
 The passphrase is a per-user secret like any other, stored in the `secrets` table under the `vault` service. It is set once, either from the vault card in Settings, Connected services — **Generate a new passphrase** — or from a host shell:

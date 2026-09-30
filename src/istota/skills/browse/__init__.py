@@ -163,13 +163,13 @@ def _credential_preflight(url):
     try:
         resp = browser_request("get", f"{url}/health", headers=headers, timeout=REQUEST_TIMEOUT)
         data = resp.json()
-        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True:
+        if resp.is_success and isinstance(data, dict) and data.get("per_user_profiles") is True and data.get("credential_origin_check") is True:
             return None
     except (httpx.HTTPError, BrowserQueueTimeout, ValueError):
         pass
     return error_envelope(
-        "Credential fill refused: browser profile isolation was not confirmed. "
-        "Run the full Ansible play to rebuild the browser image with per-user profiles. "
+        "Credential fill refused: browser profile isolation and credential origin checks were not confirmed. "
+        "Run the full Ansible play to rebuild the browser image with credential origin checks. "
         "No interaction actions were sent."
     )
 
@@ -933,7 +933,7 @@ def _fill_credential_action(pair):
             "lookup did not run for this call"
         )
     return {"type": "fill", "selector": pair.label, "value": pair.value.reveal(),
-            "credential": True}
+            "credential": True, "bound_hosts": list(pair.value.bound_hosts)}
 
 
 def _point(spec, flag):

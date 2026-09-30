@@ -112,11 +112,12 @@ class SecretValue:
     needs either.
     """
 
-    __slots__ = ("name", "_value")
+    __slots__ = ("name", "_value", "bound_hosts")
 
-    def __init__(self, name: str, value: str) -> None:
+    def __init__(self, name: str, value: str, bound_hosts=()) -> None:
         self.name = name
         self._value = value
+        self.bound_hosts = tuple(bound_hosts)
 
     def reveal(self) -> str:
         """The plaintext. The one call that hands it over, so it is greppable."""
@@ -218,7 +219,8 @@ def _resolve_name(name: str, operation: str) -> tuple[SecretValue | None, str | 
     if not name:
         return None, f"Empty credential name: {operation} refused."
     try:
-        return SecretValue(name, fetch_credential(name, MODE)), None
+        value, hosts = fetch_credential(name, MODE, binding=True)
+        return SecretValue(name, value, hosts), None
     except ProxyError as exc:
         return None, f"{operation} refused: {exc}"
 

@@ -2471,19 +2471,33 @@ def _selector_action(session, page, action, others=(), owned=()):
     fill whose keystrokes did not arrive as sent.
     """
     action_type = action["type"]
-    if action_type == "fill" and action.get("credential"):
-        # Register before either input path, including partially failed fills.
-        value = action.get("value", "")
-        if value:
-            _credential_values.add(value)
     selector = action.get("selector") or ""
     if selector and action_type == "fill" and action.get("credential"):
-        # Preserve the fill's wait for dynamically inserted controls. Mark
-        # the resolved handle before either input path can write a credential.
         handle = page.wait_for_selector(
             selector, state="visible", timeout=SELECTOR_TIMEOUT_MS,
         )
+        # Read the field's own document, including a selector into a frame.
+        # Filling that handle cannot re-resolve the selector after navigation.
+        frame = handle.owner_frame()
+        try:
+            parsed = urlsplit(frame.url if frame else "")
+            origin, _ = _forget_origin(f"{parsed.scheme}://{parsed.netloc}")
+        except ValueError:
+            origin = ""
+        hosts = action.get("bound_hosts", [])
+        if (not isinstance(hosts, list) or not origin.startswith("https://")
+                or origin[len("https://"):] not in hosts):
+            return {"action": "fill", "selector": selector, "ok": False,
+                    "error": "credential_origin_mismatch"}
+        value = action.get("value", "")
+        if value:
+            _credential_values.add(value)
         handle.evaluate("el => { el.__istotaCredential = true; }")
+        # Keyboard focus can move to another document between checking and
+        # typing. A credential always addresses the checked element via CDP.
+        handle.fill(value, timeout=SELECTOR_TIMEOUT_MS)
+        return {"action": "fill", "selector": selector, "ok": True,
+                "path": "cdp", "path_reason": "credential origin checked"}
     if not selector:
         return {"action": action_type, "ok": False,
                 "error": "selector is required"}
@@ -3003,6 +3017,7 @@ def health():
     data = {
         "status": "degraded" if (not running or wedged or looping) else "ok",
         "per_user_profiles": True,
+        "credential_origin_check": True,
         "browser_connected": bool(instances) and running,
         "cdp_healthy": not wedged,
         "cdp_consecutive_failures": sum(cdp["consecutive_failures"] for cdp in records),

@@ -471,7 +471,7 @@ class TestTheFetchCap:
         }
         health = MagicMock()
         health.is_success = True
-        health.json.return_value = {"status": "ok", "per_user_profiles": True}
+        health.json.return_value = {"status": "ok", "per_user_profiles": True, "credential_origin_check": True}
         with proxy(sock_path, vault_fetch_limit=2), patch.object(browse.httpx, "get", return_value=health):
             with patch.object(browse.httpx, "post", return_value=response) as post:
                 with patch.object(

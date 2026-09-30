@@ -142,6 +142,7 @@ def _connect(db_path: Path) -> Iterator[sqlite3.Connection]:
 
 def upsert_secret(
     db_path: Path, user_id: str, service: str, key: str, value: str,
+    *, binding: dict | None = None,
 ) -> str:
     """Idempotent secret upsert. Returns ``"created"``, ``"updated"``, or ``"noop"``.
 
@@ -164,11 +165,18 @@ def upsert_secret(
         state = "updated"
 
     if state != "noop":
-        set_secret(db_path, user_id, service, key, value)
+        set_secret(db_path, user_id, service, key, value, binding=binding)
+    elif binding is not None:
+        from .credential_broker.bindings import put_binding
+        with _connect(db_path) as conn:
+            put_binding(conn, user_id, key, binding)
     return state
 
 
-def set_secret(db_path: Path, user_id: str, service: str, key: str, value: str) -> None:
+def set_secret(
+    db_path: Path, user_id: str, service: str, key: str, value: str,
+    *, binding: dict | None = None,
+) -> None:
     """Encrypt and upsert a secret.
 
     Empty value deletes the row (UI sends ``""`` to clear). Idempotent.
@@ -192,11 +200,18 @@ def set_secret(db_path: Path, user_id: str, service: str, key: str, value: str) 
             """,
             (user_id, service, key, token),
         )
+        if binding is not None:
+            from .credential_broker.bindings import put_binding
+            put_binding(conn, user_id, key, binding)
 
 
-def get_secret(db_path: Path, user_id: str, service: str, key: str) -> str | None:
+def get_secret(
+    db_path: Path, user_id: str, service: str, key: str,
+    *, binding: bool = False,
+) -> str | dict | None:
     """Decrypt and return a stored secret, or None if missing.
 
+    ``binding=True`` returns the value and bound hosts from one transaction.
     Bumps ``last_accessed_at`` on every successful read so admins can see
     which credentials are actually in use.
     """
@@ -209,6 +224,9 @@ def get_secret(db_path: Path, user_id: str, service: str, key: str) -> str | Non
         return None
 
     with _connect(db_path) as conn:
+        if binding:
+            # Hold a consistent value/binding view through the access-time write.
+            conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT id, encrypted_value FROM secrets "
             "WHERE user_id = ? AND service = ? AND key = ?",
@@ -240,6 +258,10 @@ def get_secret(db_path: Path, user_id: str, service: str, key: str) -> str | Non
             )
         except sqlite3.OperationalError as e:
             logger.debug("skipped last_accessed_at update (locked?): %s", e)
+        if binding:
+            from .credential_broker.bindings import get_binding
+            metadata = get_binding(conn, user_id, key)
+            return {"value": plaintext, "bound_hosts": (metadata or {}).get("hosts", [])}
         return plaintext
 
 
@@ -250,6 +272,9 @@ def delete_secret(db_path: Path, user_id: str, service: str, key: str) -> bool:
             "DELETE FROM secrets WHERE user_id = ? AND service = ? AND key = ?",
             (user_id, service, key),
         )
+        if service == "vault_entries":
+            conn.execute("DELETE FROM credential_bindings WHERE user_id=? AND name=?",
+                         (user_id, key))
         return cur.rowcount > 0
 
 

@@ -1129,6 +1129,18 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     _migrate_google_oauth_encryption(conn)
 
     conn.executescript("""
+        CREATE TABLE IF NOT EXISTS credential_bindings (
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            hosts TEXT NOT NULL,
+            headers TEXT NOT NULL,
+            revealable INTEGER NOT NULL DEFAULT 0,
+            source TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, name)
+        );
+    """)
+    conn.executescript("""
         CREATE TABLE IF NOT EXISTS signup_tags (
             tag TEXT PRIMARY KEY, user_id TEXT NOT NULL, slug TEXT NOT NULL,
             reserved_at TEXT NOT NULL DEFAULT (datetime('now')),

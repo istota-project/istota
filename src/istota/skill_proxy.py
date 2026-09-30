@@ -536,7 +536,28 @@ class SkillProxy:
                 logger.info(
                     "vault_list task_id=%s count=%d", self.task_id, len(names),
                 )
-                self._send_response(conn, {"names": names})
+                reply = {"names": names}
+                if self.config is not None and self.user_id:
+                    from . import db
+                    from .credential_broker.bindings import get_binding
+                    with db.get_db(self.config.db_path) as database:
+                        metadata = {name: get_binding(database, self.user_id, name)
+                                    for name in names}
+                        # Forge names are visible only when this task already
+                        # has access to the corresponding deployment token.
+                        from .credential_broker.bindings import forge_bindings
+                        for name, binding in forge_bindings(self.config.developer).items():
+                            env_name = name.split(".")[1].upper() + "_TOKEN"
+                            if env_name in self.credential_env:
+                                metadata[name] = binding
+                    reply["names"] = sorted(metadata)
+                    reply["credentials"] = [
+                        {"name": name, "bound_hosts": (binding or {}).get("hosts", []),
+                         "revealable": (binding or {}).get("revealable", False),
+                         "grant": "ungranted"}
+                        for name, binding in sorted(metadata.items())
+                    ]
+                self._send_response(conn, reply)
                 return
 
             if req_type == "vault_credential":
@@ -898,7 +919,20 @@ class SkillProxy:
             "vault_credential task_id=%s name=%s mode=%s count=%d",
             self.task_id, label, mode, count,
         )
-        self._send_response(conn, {"value": self.vault_credentials[name]})
+        reply = {"value": self.vault_credentials[name]}
+        if request.get("binding") is True:
+            reply["bound_hosts"] = []
+            if self.config is not None and self.user_id:
+                from . import secrets_store
+                live = secrets_store.get_secret(
+                    self.config.db_path, self.user_id, "vault_entries", name, binding=True,
+                )
+                if live is None:
+                    self._send_response(conn, {"error": "Credential no longer available",
+                                               "reason": "vault_credential_not_present"})
+                    return
+                reply = live
+        self._send_response(conn, reply)
 
     @staticmethod
     def _recv_all(conn: socket.socket) -> str:

@@ -1818,3 +1818,14 @@ CREATE TABLE IF NOT EXISTS web_auth_attempts (
     at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_web_auth_attempts ON web_auth_attempts(kind, key, at);
+
+CREATE TABLE IF NOT EXISTS credential_bindings (
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    hosts TEXT NOT NULL,
+    headers TEXT NOT NULL,
+    revealable INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, name)
+);

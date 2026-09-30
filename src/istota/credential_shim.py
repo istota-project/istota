@@ -210,7 +210,9 @@ def _request(payload: dict, *, timeout: int = SOCKET_TIMEOUT_SECONDS) -> dict:
     return reply
 
 
-def fetch_credential(name: str, mode: str) -> str:
+def fetch_credential(
+    name: str, mode: str, *, binding: bool = False,
+) -> str | tuple[str, list[str]]:
     """One shared credential, by name, under a declared mode.
 
     ``mode`` is a claim rather than a fact — the proxy sees a socket, not a
@@ -225,10 +227,18 @@ def fetch_credential(name: str, mode: str) -> str:
     one client is the point. Raises ``ProxyError``, which is the whole error
     surface either caller has to handle.
     """
-    reply = _request({"type": "vault_credential", "name": name, "mode": mode})
+    request = {"type": "vault_credential", "name": name, "mode": mode}
+    if binding:
+        request["binding"] = True
+    reply = _request(request)
     value = reply.get("value")
     if not isinstance(value, str):
         raise ProxyError(f"no value for {name!r}")
+    if binding:
+        hosts = reply.get("bound_hosts", [])
+        if not isinstance(hosts, list) or not all(isinstance(host, str) for host in hosts):
+            raise ProxyError("the credential proxy answered unparseably")
+        return value, hosts
     return value
 
 
@@ -241,8 +251,15 @@ def _cmd_list() -> int:
     # wrong.
     if not isinstance(names, list):
         raise ProxyError("the credential proxy answered unparseably")
-    for name in names:
-        print(name)
+    credentials = reply.get("credentials")
+    if isinstance(credentials, list):
+        print("NAME\tBOUND HOSTS\tREVEALABLE\tGRANT")
+        for item in credentials:
+            print("\t".join((item["name"], ",".join(item["bound_hosts"]) or "unbound",
+                             "yes" if item["revealable"] else "no", item["grant"])))
+    else:
+        for name in names:
+            print(name)
     return 0
 
 
