@@ -480,12 +480,9 @@ def _get_external_origin() -> tuple[str, str]:
     request headers, which can be forged. Scheme is `http` when hostname is
     a literal localhost / loopback (Docker dev path); otherwise `https`.
     """
-    if not _config or not _config.site.hostname:
-        raise ValueError("site.hostname must be configured when web app is enabled")
-    host = _config.site.hostname
-    bare = host.split(":")[0]
-    scheme = "http" if bare in ("localhost", "127.0.0.1", "::1") else "https"
-    return host, scheme
+    from .web_origin import external_origin
+
+    return external_origin(_config)
 
 
 class _ForbiddenException(Exception):
