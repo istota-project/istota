@@ -85,6 +85,7 @@ def test_server_context_negotiates_only_http11_and_upstream_distrusts_ca(tmp_pat
     authority = ca.load_or_create_ca(tmp_path / "broker")
     env = ca.write_trust_bundle(authority, tmp_path / "task")
     client = ssl.create_default_context(cafile=env["SSL_CERT_FILE"])
+    client.verify_flags |= ssl.VERIFY_X509_STRICT
     client.set_alpn_protocols(["h2", "http/1.1"])
     server = ca.server_context(authority, "api.example.com")
     ci, co, si, so = [ssl.MemoryBIO() for _ in range(4)]
@@ -143,3 +144,11 @@ def test_leaf_rejects_non_host_names(tmp_path, host):
     authority = ca.load_or_create_ca(tmp_path / "broker")
     with pytest.raises(ValueError):
         ca.mint_leaf(authority, host)
+
+
+def test_state_directory_cannot_be_a_users_temp_directory(tmp_path):
+    state = tmp_path.resolve()
+    config = Config(db_path=state / "istota.db", temp_dir=state)
+    # A user named credential-broker would get this whole directory RW.
+    with pytest.raises(ValueError, match="sandbox"):
+        ca.state_directory(config)

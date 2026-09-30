@@ -51,7 +51,10 @@ def state_directory(config) -> Path:
     if not config.db_path:
         raise ValueError("credential broker requires a daemon database directory")
     path = Path(config.db_path).absolute().parent / "credential-broker"
-    if sandbox_bound_reason(config, path):
+    # The temp-root predicate allows direct child *files*. This path is a
+    # directory, so also check its record: a user called credential-broker
+    # would otherwise receive the directory as their writable task temp.
+    if sandbox_bound_reason(config, path) or sandbox_bound_reason(config, path / "ca-key.pem"):
         raise ValueError("credential broker CA state must be outside sandbox binds")
     return path
 
@@ -158,6 +161,9 @@ def mint_leaf(authority: Authority, host: str, *, validity_hours: int = 24,
             .not_valid_before(now - timedelta(minutes=5))
             .not_valid_after(min(now + timedelta(hours=validity_hours), authority.certificate.not_valid_after_utc))
             .add_extension(x509.SubjectAlternativeName([san]), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                authority.private_key.public_key(),
+            ), critical=False)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
             .sign(authority.private_key, hashes.SHA256())
