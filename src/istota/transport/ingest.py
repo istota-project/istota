@@ -465,8 +465,8 @@ def record_inbound(
         #    mirroring: a web-origin row stamped with a Talk id catches the
         #    Talk echo of that mirror even when its referenceId was stripped.
         #    Rows that originated on this very surface are excluded — that's
-        #    a re-polled duplicate, not a mirror, and it must reach
-        #    `create_task`'s dedup (which returns the existing task id).
+        #    a re-polled duplicate, not a mirror, and `_prior_turn` below
+        #    returns it as a replay.
         if external_id is not None and db.message_has_external_id(
             conn, room_token, surface, str(external_id),
             exclude_origin=surface,
@@ -604,7 +604,7 @@ def record_inbound(
     # 4. Ask the speech gate about a stored turn.
     if message_id is not None:
         decision = _ask_gate(
-            conn, config, room_token=room_token, surface=surface,
+            conn, config, room_token=transcript_token, surface=surface,
             user_id=user_id, message_id=message_id,
             is_group_chat=is_group_chat, addressed_to_bot=addressed_to_bot,
         )

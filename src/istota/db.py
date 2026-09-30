@@ -5274,8 +5274,8 @@ def message_has_external_id(
     ``exclude_origin`` skips rows whose `origin_surface` matches: a row that
     originated on the inbound surface itself isn't a mirror echo — it's the
     same message re-polled (inbound Talk ids are stamped at ingest now), and
-    that case must fall through to `create_task`'s duplicate dedup so the
-    caller gets the existing task id instead of an echo drop."""
+    that case must fall through to `record_inbound`'s replay probe so the
+    caller gets the existing turn instead of an echo drop."""
     rows = conn.execute(
         "SELECT origin_surface, external_ids FROM messages "
         "WHERE room_token = ? AND external_ids IS NOT NULL",

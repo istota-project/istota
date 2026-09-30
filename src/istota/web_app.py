@@ -4849,9 +4849,9 @@ def _chat_answer_confirmation(
         # merely wasteful: the first attempt consumed the question, so a second
         # gate parked in between would be the single open one and get approved
         # on a "yes" the user typed at a different question entirely. The
-        # ordinary send path gets this from `_is_own_replay`, which cannot see
-        # this exchange — its lookup inner-joins `tasks` and these rows carry no
-        # task id.
+        # ordinary send path's `_is_own_replay` sees this row but only as a
+        # replayed turn with no task; it cannot return the ack, which is what a
+        # retried answer has to get back.
         prior = db.find_confirmation_exchange(conn, token, client_msg_id)
         if prior is not None:
             user_msg_id, system_msg_id, ack = prior

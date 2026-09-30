@@ -2585,9 +2585,10 @@ async def cmd_export(ctx: CommandContext):
             return "No new messages since last export."
 
         last_id = max(existing_meta["last_id"], *(m.id for m in new_messages))
+        # A batch served from the `tasks` fallback carries no message ids, so
+        # the message cursor is dropped rather than kept stale: carried
+        # forward, the next `messages`-path append would rewrite this batch.
         last_msg_id = _max_message_id(new_messages)
-        if last_msg_id is None:
-            last_msg_id = existing_meta.get("last_msg_id")
         new_content = render(new_messages, bot_name, tz=tz)
 
         existing_content = export_path.read_text()

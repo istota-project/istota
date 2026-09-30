@@ -2590,6 +2590,30 @@ class TestCmdExport:
         assert "No new messages" in again
 
     @pytest.mark.asyncio
+    async def test_an_append_from_the_task_fallback_is_not_rewritten_later(
+        self, make_config,
+    ):
+        config = make_config()
+        export_path = config.workspace_path / "Users" / "alice" / "istota" / "exports" / "conversations" / "room1.md"
+        with db.get_db(config.db_path) as conn:
+            db.register_room(conn, "room1", "alice", origin="talk")
+            _seed_conversation(conn, count=1, start=1)
+            db.backfill_room_messages_from_tasks(conn, "room1")
+            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+        # Unmirrored completed turns put the room on the `tasks` fallback.
+        with db.get_db(config.db_path) as conn:
+            _seed_conversation(conn, count=2, start=2)
+            await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+        # Mirroring them moves it back to the `messages` path.
+        with db.get_db(config.db_path) as conn:
+            db.backfill_room_messages_from_tasks(conn, "room1")
+            result = await cmd_export(_ctx(config, conn, "alice", "room1", ""))
+
+        assert "No new messages" in result
+        content = export_path.read_text()
+        assert [content.count(f"Reply {n}") for n in (1, 2, 3)] == [1, 1, 1]
+
+    @pytest.mark.asyncio
     async def test_incremental_no_new_messages(self, make_config):
         config = make_config()
 
