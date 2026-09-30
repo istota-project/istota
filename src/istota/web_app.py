@@ -57,11 +57,12 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import db as _db
 from . import user_profiles
-from . import web_auth, web_shutdown
+from . import web_auth, web_auth_mail, web_shutdown
 from .build_info import build_description
 from .brain import make_brain
 from .chat_files import ChatFileError, resolve_chat_file
@@ -1083,15 +1084,9 @@ async def login_email(request: Request):
         ip = _client_ip(request)
         policy = web_auth.policy_from_config(_config)
         if _admit_password_request(email, ip, policy):
-            slots = _password_slots
-            await slots.acquire()
-            # Cancelling an HTTP request cannot cancel a running worker thread.
-            # Keep its slot until it finishes, even if its caller disconnects.
-            work = asyncio.create_task(asyncio.to_thread(
+            status, identity = await _run_password_work(
                 web_auth.authenticate, _config.db_path, policy, email, password, ip=ip,
-            ))
-            work.add_done_callback(lambda _: slots.release())
-            status, identity = await asyncio.shield(work)
+            )
     if status == "ok" and identity is not None:
         # authenticate has already checked the live profile atomically with
         # the credential. Never seed one here, even after an operator deletion.
@@ -1107,6 +1102,244 @@ async def login_email(request: Request):
             return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
     await asyncio.sleep(max(0, _LOGIN_FAILURE_SECONDS - (time.monotonic() - started)))
     return await _auth_error("Sign-in failed", "Email or password was not accepted.", 400)
+
+
+async def _run_password_work(function, *args, **kwargs):
+    """Keep a KDF slot until the worker ends, including on client disconnect."""
+    slots = _password_slots
+    await slots.acquire()
+    work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+
+    def finished(task):
+        slots.release()
+        # Retrieve exceptions even if the HTTP caller stopped awaiting it.
+        if not task.cancelled():
+            task.exception()
+
+    work.add_done_callback(finished)
+    return await asyncio.shield(work)
+
+
+async def _auth_form(headline: str, body: str, status_code: int = 200) -> HTMLResponse:
+    from . import __version__
+
+    mark = await asyncio.get_running_loop().run_in_executor(_login_mark_executor, _login_page_mark)
+    return HTMLResponse(
+        _render_form_page(_config.bot_name, __version__, headline, body, mark),
+        status_code=status_code, headers=_AUTH_PAGE_HEADERS,
+    )
+
+
+async def _invalid_auth_link() -> HTMLResponse:
+    return await _auth_error("This link is invalid", "It may have expired or already been used. Request a new link.", 400)
+
+
+async def _peek_auth_link(token: object, *, login: bool = False):
+    if not isinstance(token, str):
+        return None
+    try:
+        record = await asyncio.to_thread(web_auth.peek_token, _config.db_path, token)
+    except Exception:
+        logger.warning("Auth link lookup failed")
+        return None
+    purposes = {"login"} if login else {"enrol", "reset"}
+    return record if record and record.purpose in purposes else None
+
+
+async def _finish_link_sign_in(request: Request, result) -> Response:
+    if result is None:
+        return await _invalid_auth_link()
+    user_id, email, epoch = result
+    try:
+        profile = await asyncio.to_thread(user_profiles.get_profile, _config.db_path, user_id)
+        identity = await asyncio.to_thread(web_auth.get_identity, _config.db_path, user_id)
+    except Exception:
+        logger.warning("Auth link session lookup failed")
+        return await _invalid_auth_link()
+    if (profile is None or identity is None or identity.disabled
+            or identity.email != email or identity.credential_epoch != epoch):
+        return await _invalid_auth_link()
+    request.session.clear()
+    request.session["user"] = {"username": user_id, "display_name": profile.display_name}
+    request.session["auth"] = {"method": "email", "epoch": epoch}
+    return RedirectResponse("/istota/", status_code=302, headers=_AUTH_PAGE_HEADERS)
+
+
+async def _set_password_form(request: Request, token: str, purpose: str, error: str = ""):
+    headline = "Reset your password" if purpose == "reset" else "Set your password"
+    body = f'<p class="form-error">{escape(error)}</p>' if error else ""
+    body += (
+        '<form method="post" action="/istota/auth/set-password">'
+        f'<input type="hidden" name="token" value="{escape(token)}">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "set-password"))}">'
+        '<label for="new-password">New password</label>'
+        '<input id="new-password" type="password" name="password" autocomplete="new-password" required>'
+        '<label for="confirm-password">Confirm password</label>'
+        '<input id="confirm-password" type="password" name="confirm_password" autocomplete="new-password" required>'
+        '<button class="btn" type="submit">Set password and sign in</button></form>'
+    )
+    return await _auth_form(headline, body, 400 if error else 200)
+
+
+@auth_router.get("/auth/set-password")
+async def set_password_page(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    token = request.query_params.get("token", "")
+    record = await _peek_auth_link(token)
+    if record is None:
+        return await _invalid_auth_link()
+    return await _set_password_form(request, token, record.purpose)
+
+
+@auth_router.post("/auth/set-password")
+async def set_password_submit(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    token = form.get("token", "")
+    record = await _peek_auth_link(token)
+    if record is None:
+        return await _invalid_auth_link()
+    if not _check_csrf(request, "set-password", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    password = form.get("password", "")
+    if not isinstance(password, str) or password != form.get("confirm_password"):
+        return await _set_password_form(request, token, record.purpose, "Passwords must match.")
+    policy = web_auth.policy_from_config(_config)
+    error = web_auth.password_policy_error(password, policy, email=record.email, user_id=record.user_id)
+    if error:
+        return await _set_password_form(request, token, record.purpose, error)
+    try:
+        result = await _run_password_work(
+            web_auth.consume_and_set_password, _config.db_path, token, record.purpose, password, policy,
+        )
+    except Exception:
+        logger.warning("Auth link password update failed")
+        return await _invalid_auth_link()
+    return await _finish_link_sign_in(request, result)
+
+
+@auth_router.get("/auth/login-link")
+async def login_link_page(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    token = request.query_params.get("token", "")
+    if await _peek_auth_link(token, login=True) is None:
+        return await _invalid_auth_link()
+    body = (
+        '<form method="post" action="/istota/auth/login-link">'
+        f'<input type="hidden" name="token" value="{escape(token)}">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "login-link"))}">'
+        '<button class="btn" type="submit">Sign in</button></form>'
+    )
+    return await _auth_form("Confirm sign-in", body)
+
+
+@auth_router.post("/auth/login-link")
+async def login_link_submit(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    token = form.get("token", "")
+    if await _peek_auth_link(token, login=True) is None:
+        return await _invalid_auth_link()
+    if not _check_csrf(request, "login-link", form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    try:
+        result = await asyncio.to_thread(web_auth.consume_login_token, _config.db_path, token)
+    except Exception:
+        logger.warning("Auth sign-in link consumption failed")
+        return await _invalid_auth_link()
+    return await _finish_link_sign_in(request, result)
+
+
+_mail_link_pending: set[tuple[str, str]] = set()
+_mail_link_lock = threading.Lock()
+
+
+def _send_requested_auth_link(config, email: str, purpose: str, pending_key: tuple[str, str]):
+    # BackgroundTask runs this synchronous function through anyio's threadpool.
+    # Its finally also runs if the HTTP request is cancelled during delivery.
+    try:
+        from .web_origin import external_origin
+
+        host, scheme = external_origin(config)
+        issued = web_auth.issue_mail_link_if_allowed(
+            config.db_path, web_auth.policy_from_config(config), email, purpose,
+        )
+        if issued is None:
+            return
+        token, identity = issued
+        profile = user_profiles.get_profile(config.db_path, identity.user_id)
+        if profile is None:
+            return
+        path = "login-link" if purpose == "login" else "set-password"
+        link = f"{scheme}://{host}/istota/auth/{path}?token={token}"
+        if purpose == "login":
+            message = web_auth_mail.build_login_link_email(
+                config.bot_name, profile.display_name, link, config.web.auth_login_link_ttl_minutes,
+            )
+        else:
+            message = web_auth_mail.build_reset_email(
+                config.bot_name, profile.display_name, link, config.web.auth_reset_ttl_hours,
+            )
+        web_auth_mail.send_auth_email(config, identity.email, *message)
+    except Exception:
+        # Backend/SMTP exception text may contain the address or the token.
+        logger.warning("Requested auth email could not be sent")
+    finally:
+        with _mail_link_lock:
+            _mail_link_pending.discard(pending_key)
+
+
+async def _request_auth_link(request: Request, purpose: str):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    form = await request.form()
+    csrf_purpose = "reset" if purpose == "reset" else "login-link-request"
+    if not _check_csrf(request, csrf_purpose, form.get("csrf_token")):
+        return await _auth_error("This form expired", "Reload and try again.", 403)
+    response = await _auth_form(
+        "Check your email",
+        '<p class="tagline">If this address can sign in, an email with a link will arrive shortly.</p>'
+        '<a class="btn" href="/istota/login">Back to sign in</a>',
+    )
+    email = form.get("email", "")
+    if isinstance(email, str) and len(email) <= 320:
+        email = web_auth.normalize_email(email)
+        key = (str(_config.db_path), email)
+        # Reserve after the final await, so cancellation during rendering cannot
+        # leave a marker for a background task that was never handed off.
+        with _mail_link_lock:
+            if key not in _mail_link_pending:
+                _mail_link_pending.add(key)
+                response.background = BackgroundTask(_send_requested_auth_link, _config, email, purpose, key)
+    return response
+
+
+@auth_router.get("/auth/reset")
+async def reset_page(request: Request):
+    if not _config.web.has_method("email"):
+        raise HTTPException(status_code=404)
+    body = (
+        '<form method="post" action="/istota/auth/reset">'
+        f'<input type="hidden" name="csrf_token" value="{escape(_csrf_token(request, "reset"))}">'
+        '<label for="reset-email">Email</label>'
+        '<input id="reset-email" type="email" name="email" autocomplete="email" required>'
+        '<button class="btn" type="submit">Send password reset link</button></form>'
+    )
+    return await _auth_form("Reset your password", body)
+
+
+@auth_router.post("/auth/reset")
+async def reset_submit(request: Request):
+    return await _request_auth_link(request, "reset")
+
+
+@auth_router.post("/auth/login-link/request")
+async def login_link_request(request: Request):
+    return await _request_auth_link(request, "login")
 
 
 # Where a completed OAuth round trip may land, keyed rather than stored as a
