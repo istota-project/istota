@@ -35,14 +35,13 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Literal
 
 from . import db
-from .llm_json import find_fenced_block
+from .llm_json import candidate_json_blocks
 from .untrusted import frame_untrusted
 
 logger = logging.getLogger("istota.speech_gate")
@@ -86,6 +85,9 @@ class WindowTurn:
     author: str
     text: str
     is_bot: bool
+    #: Whether the full body ended in a question, read before the cap so a
+    #: long answer ending in an offer still reads as one.
+    asks: bool = False
 
 
 def _flatten(value: object, limit: int) -> str:
@@ -101,6 +103,20 @@ def _flatten(value: object, limit: int) -> str:
     return text
 
 
+def _flatten_body(value: object, limit: int) -> str:
+    """A turn body as one line, capped by keeping its head **and** its tail.
+
+    The end of a message is where the question or the offer is, so a cap that
+    kept only the head would cut exactly the part the classifier needs.
+    """
+    text = _flatten(value, 0)
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head = (limit + 1) // 2
+    tail = limit - head
+    return f"{text[:head].rstrip()} … {text[len(text) - tail:].lstrip()}"
+
+
 def window_turns(
     messages: Iterable[db.Message], *, bot_name: str, max_message_chars: int,
 ) -> list[WindowTurn]:
@@ -114,16 +130,20 @@ def window_turns(
     turns: list[WindowTurn] = []
     for msg in messages:
         if msg.role == "assistant":
+            # Qualified, so a participant whose name matches the bot's cannot
+            # produce a line that reads as the bot's own.
+            name = _flatten(bot_name, 60) or "bot"
             turns.append(WindowTurn(
-                author=_flatten(bot_name, 60) or "bot",
-                text=_flatten(msg.body, max_message_chars),
+                author=f"{name} (assistant)",
+                text=_flatten_body(msg.body, max_message_chars),
                 is_bot=True,
+                asks=_flatten(msg.body, 0).endswith("?"),
             ))
         elif msg.role == "user":
             author = msg.author_label or msg.author_user_id or "someone"
             turns.append(WindowTurn(
                 author=_flatten(author, 60) or "someone",
-                text=_flatten(msg.body, max_message_chars),
+                text=_flatten_body(msg.body, max_message_chars),
                 is_bot=False,
             ))
     return turns
@@ -162,7 +182,7 @@ def build_window(turns: list[WindowTurn], *, bot_name: str) -> str:
     """
     name = _flatten(bot_name, 60) or "the assistant"
     last_bot = next((t for t in reversed(turns) if t.is_bot), None)
-    asked = "yes" if last_bot is not None and last_bot.text.rstrip().endswith("?") else "no"
+    asked = "yes" if last_bot is not None and last_bot.asks else "no"
     lines = "\n".join(f"{t.author}: {t.text}" for t in turns)
     return (
         f"You decide whether an assistant named {name} should reply to the "
@@ -186,27 +206,12 @@ class ClassifierVerdict:
     reason: str | None
 
 
-def parse_decision(raw: str | None) -> ClassifierVerdict | None:
-    """Parse ``{"speak": bool, "reason": str}``, or None on anything else.
+#: How many ``{`` positions the fallback scan will try to decode from. Bounds
+#: the work on output with many openers and no valid object.
+_MAX_OBJECT_STARTS = 32
 
-    Same shape as ``context._parse_relevant_ids``: a fenced block, else the
-    first ``{...}``. ``speak`` must be a real ``bool`` — ``"yes"`` or ``1`` is a
-    parse failure, not a truthy answer.
-    """
-    if not raw or not isinstance(raw, str):
-        return None
-    output = raw.strip()
-    fenced = find_fenced_block(output)
-    if fenced:
-        output = fenced
-    else:
-        match = re.search(r"\{.*\}", output, re.DOTALL)
-        if match:
-            output = match.group(0)
-    try:
-        data = json.loads(output)
-    except (json.JSONDecodeError, ValueError):
-        return None
+
+def _verdict_from(data: object) -> ClassifierVerdict | None:
     if not isinstance(data, dict):
         return None
     speak = data.get("speak")
@@ -215,6 +220,42 @@ def parse_decision(raw: str | None) -> ClassifierVerdict | None:
     reason = data.get("reason")
     reason_text = _flatten(reason, MAX_REASON_CHARS) if isinstance(reason, str) else ""
     return ClassifierVerdict(speak=speak, reason=reason_text or None)
+
+
+def parse_decision(raw: str | None) -> ClassifierVerdict | None:
+    """Parse ``{"speak": bool, "reason": str}``, or None on anything else.
+
+    Candidates come from ``llm_json.candidate_json_blocks`` first (fenced
+    blocks, the whole text, the widest bracket spans). Where a stray brace in
+    prose makes every one of those invalid, the object is decoded from each of
+    the first few ``{`` positions instead. The first dict whose ``speak`` is a
+    real ``bool`` wins — ``"yes"`` or ``1`` is a parse failure, not a truthy
+    answer.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    for candidate in candidate_json_blocks(text):
+        try:
+            verdict = _verdict_from(json.loads(candidate.text))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if verdict is not None:
+            return verdict
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    tried = 0
+    while start != -1 and tried < _MAX_OBJECT_STARTS:
+        tried += 1
+        try:
+            data, _end = decoder.raw_decode(text, start)
+        except (json.JSONDecodeError, ValueError):
+            data = None
+        verdict = _verdict_from(data)
+        if verdict is not None:
+            return verdict
+        start = text.find("{", start + 1)
+    return None
 
 
 def _normalize_mode(mode: object) -> str | None:
