@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from . import credential_shim
+from .skill_host_paths import memory_dir_parts
 from .user_scope import is_within, scoped_user_dir
 
 if TYPE_CHECKING:
@@ -193,29 +194,89 @@ class SandboxProfile(str, Enum):
     NATIVE = "native"
 
 
-def memory_masks(config: Config, user_dir: Path) -> list[Path]:
-    """The directories of a user's workspace that hold the ``memory`` scope.
+def memory_masks(
+    config: Config, user_dir: Path, mounts: "tuple[Mount, ...] | list[Mount]" = (),
+) -> list[Path]:
+    """The in-namespace paths that hold the user's ``memory`` scope, to mask.
 
-    ``memories/`` (dated memories), and under the bot directory ``config/``
-    (``USER.md`` and the per-skill overlays beside the user's other bot
-    config) and ``playbooks/``. Only directories that exist and are not
-    symlinks: a mask needs a mountpoint, and bwrap would create a missing one
-    on the host inside the read-write workspace bind.
+    ``memories/``, and under the bot directory ``config/`` (``USER.md`` and the
+    per-skill overlays) and ``playbooks/`` — `skill_host_paths.memory_dir_parts`,
+    the list the host-path refusal reads too. Every one of them is masked
+    whatever state it is in, because each state the old test skipped was a way
+    past the mask for a task with ``files`` granted:
 
-    Residual, stated rather than closed: a directory that does not exist yet
-    is unmasked, so a task with ``files`` granted can create one there (a
-    playbook that later private tasks recall), and a symlinked one is left
-    unmasked and reachable through its target.
+    - **Absent**: created now, by the daemon, one component at a time through
+      ``O_NOFOLLOW`` directory descriptors, so nothing is created through a
+      symlink. Unmasked, the task could create it and write a playbook or a
+      dated memory that later private tasks recall.
+    - **A symlink** (at the directory or at a parent): the mask goes on the
+      directory it resolves to, at that directory's in-namespace path, when it
+      lies under something the sandbox binds (``mounts``, which always
+      includes the workspace). A target the sandbox does not bind is not
+      reachable from inside it and needs no mask.
+
+    A path whose target is not a directory holds no memory and gets nothing.
+    Never raises; a component that cannot be opened or created is skipped and
+    logged, the one residual.
     """
-    bot = user_dir / config.bot_dir_name
-    out = []
-    for path in (user_dir / "memories", bot / "config", bot / "playbooks"):
-        try:
-            if path.is_dir() and not path.is_symlink():
-                out.append(path)
-        except OSError:
+    bound: list[tuple[Path, Path]] = [(user_dir, Path(os.path.realpath(user_dir)))]
+    for mount in mounts:
+        if mount.mode in ("ro", "rw") and mount.source is not None:
+            written = mount.dest or mount.source
+            bound.append((written, Path(os.path.realpath(mount.source))))
+    out: list[Path] = []
+    for parts in memory_dir_parts(config.bot_dir_name):
+        target = _memory_dir(user_dir, parts)
+        if target is None:
             continue
-    return out
+        if target == user_dir.joinpath(*parts):
+            out.append(target)
+            continue
+        for written, real in bound:
+            if is_within(target, real):
+                out.append(written / target.relative_to(real))
+                break
+    return list(dict.fromkeys(out))
+
+
+def _memory_dir(user_dir: Path, parts: tuple[str, ...]) -> Path | None:
+    """``user_dir/parts`` as a directory to mask, made if absent, or the real
+    directory a symlink on the way names. None where there is none."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        fd = os.open(user_dir, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        for name in parts:
+            try:
+                next_fd = os.open(name, flags, dir_fd=fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(name, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(name, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return user_dir.joinpath(*parts)
+    except OSError:
+        # A symlink (ELOOP) or a non-directory (ENOTDIR) on the way, or a
+        # component that could not be made. Where it resolves is what the
+        # namespace shows, so that is what is masked.
+        resolved = Path(os.path.realpath(user_dir.joinpath(*parts)))
+        try:
+            if resolved.is_dir():
+                return resolved
+        except OSError:
+            pass
+        logger.warning(
+            "sandbox_plan: memory directory %s is neither a directory nor a "
+            "link to one; not masked", "/".join(parts),
+        )
+        return None
+    finally:
+        os.close(fd)
 
 
 def plan_masks(config: Config, protected: list[Path]) -> tuple[list[Path], list[Path]]:
@@ -954,7 +1015,7 @@ def build_mount_plan(
     # `files` without `memory`: the workspace is bound, and the memory inside
     # it is masked, so the two scopes are granted independently.
     if user_dir is not None and "files" not in withheld_scopes and "memory" in withheld_scopes:
-        masks.extend(memory_masks(config, user_dir))
+        masks.extend(memory_masks(config, user_dir, mounts))
 
     return MountPlan(
         mounts=tuple(mounts),

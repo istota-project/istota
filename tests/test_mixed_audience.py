@@ -392,6 +392,38 @@ class TestFilesWithoutMemory:
         for d in dirs:
             assert d in masks
 
+    def test_an_absent_memory_directory_is_made_and_masked(self, config):
+        """Unmasked, a files-granted task could create `playbooks/` and write a
+        playbook that later private tasks recall (Stage 13's residual)."""
+        base = (config.workspace_path / "Users" / "alice").resolve()
+        base.mkdir(parents=True, exist_ok=True)
+        seen = _run(config, _room(config, shared=True, grants=("files",)))
+        masks = _masks(seen["argv"])
+        for d in (base / "memories", base / config.bot_dir_name / "config",
+                  base / config.bot_dir_name / "playbooks"):
+            assert d.is_dir() and not d.is_symlink()
+            assert str(d) in masks
+
+    def test_a_symlinked_memory_directory_masks_what_it_names(self, config):
+        base = (config.workspace_path / "Users" / "alice").resolve()
+        (base / "notes" / "kept").mkdir(parents=True)
+        (base / "memories").symlink_to(base / "notes" / "kept")
+        seen = _run(config, _room(config, shared=True, grants=("files",)))
+        masks = _masks(seen["argv"])
+        assert str(base / "notes" / "kept") in masks
+
+    def test_a_symlinked_parent_creates_nothing_through_it(self, config, tmp_path):
+        """A link at the bot directory to somewhere the sandbox does not bind:
+        nothing is made on the far side, and nothing there needs a mask."""
+        base = (config.workspace_path / "Users" / "alice").resolve()
+        base.mkdir(parents=True, exist_ok=True)
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (base / config.bot_dir_name).symlink_to(outside)
+        seen = _run(config, _room(config, shared=True, grants=("files",)))
+        assert list(outside.iterdir()) == []
+        assert not [m for m in _masks(seen["argv"]) if m.startswith(str(outside.resolve()))]
+
     def test_control_both_granted_masks_nothing_of_the_workspace(self, config):
         dirs = self._memory_dirs(config)
         seen = _run(config, _room(config, shared=True, grants=("files", "memory")))
