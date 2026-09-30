@@ -2976,8 +2976,13 @@ def _record_retry_user_turn(
                 conn, token, role="user", body=original.prompt,
                 origin_surface=surface, task_id=task_id,
                 # The retry re-asks the original question, so it is the original
-                # asker's turn — not the reader's, in a shared room.
-                author_user_id=original.user_id,
+                # asker's turn — not the reader's, in a shared room. A guest's
+                # turn is the guest's, never the host's the task runs as.
+                author_user_id=(
+                    None if original.guest_participant_id is not None
+                    else original.user_id
+                ),
+                author_participant_id=original.guest_participant_id,
             )
     except Exception:
         logger.debug("retry transcript user-row write failed", exc_info=True)

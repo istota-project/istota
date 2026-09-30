@@ -185,6 +185,12 @@ class TestTaskCommandsInASharedRoom:
             assert new.id != task_id and new.parent_task_id == task_id
             assert new.guest_participant_id == guest
             assert new.audience == "mixed"
+            row = conn.execute(
+                "SELECT author_user_id, author_participant_id FROM messages "
+                "WHERE task_id = ? AND role = 'user'", (new.id,),
+            ).fetchone()
+            assert row is not None
+            assert (row[0], row[1]) == (None, guest)
 
 
 # ---------------------------------------------------------------------------

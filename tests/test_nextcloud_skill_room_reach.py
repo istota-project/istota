@@ -123,6 +123,15 @@ class TestWritesIntoAConversation:
         out, _code, talk = _run(capsys, ["talk", "rename", "grp", "--name", "Mine now"])
         assert out["reason"] == "shared_room" and talk.writes == []
 
+    def test_create_post_invite_cannot_widen_an_audience(self, capsys):
+        """The roster is judged as it stands, so the invite is what has to be
+        refused: otherwise a private conversation is filled, then opened."""
+        out, _code, talk = _run(capsys, ["talk", "send", "dm-alice", "USER.md says"])
+        out, _code, talk = _run(capsys, ["talk", "invite", "dm-alice", "bob"])
+        assert out["reason"] == "shared_room"
+        out, _code, _ = _run(capsys, ["talk", "create", "--name", "x", "--invite", "bob"])
+        assert out["reason"] == "shared_room"
+
     def test_an_unreadable_roster_refuses(self, capsys):
         out, _code, talk = _run(capsys, ["talk", "send", "dm-bob", "hi"],
                                 talk=FakeTalk(fail=True))
@@ -141,6 +150,7 @@ class TestTheWebdavVerbs:
             for path in ("/Users/alice/istota/config/USER.md",
                          "/Users/alice/memories/2026-09-30.md",
                          "memories/../memories/x.md",
+                         "//Users/alice/memories/x.md",
                          "/Users/alice/istota/playbooks"):
                 out, code, _ = _run(capsys, ["files", "stat", path])
                 assert code == 1 and "memory" in out["error"], path

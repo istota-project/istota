@@ -99,6 +99,9 @@ def _scoped(config: Config, path: str, *, whole_tree: bool = False) -> str:
     """
     user_id = _caller()
     scoped = resolve_scoped_path(path, user_id, is_admin=config.is_admin(user_id))
+    # POSIX keeps a leading `//`, which an admin's unconfined path can carry
+    # past a prefix comparison and the remote-path join then strips.
+    scoped = "/" + scoped.lstrip("/")
     _refuse_withheld_path(scoped, user_id, whole_tree=whole_tree)
     return scoped
 
@@ -703,7 +706,30 @@ def _registry_room_named(name: str) -> dict | None:
     }
 
 
+def _invite_refusal(uids) -> dict | None:
+    """From a task, no one but the caller is added to a conversation.
+
+    The roster check judges a conversation as it is, so create, post, then
+    invite would put anything the task read in front of whoever it invited.
+    Adding people is the user's act, in Talk; a task never widens an audience.
+    """
+    if not os.environ.get("ISTOTA_TASK_ID", "").strip():
+        return None
+    caller = _caller()
+    others = [uid for uid in uids or [] if uid != caller]
+    if not others:
+        return None
+    return error_envelope(
+        "a task cannot add people to a conversation; ask the user to invite "
+        f"{', '.join(others)} in Talk",
+        reason="shared_room",
+    )
+
+
 def cmd_talk_create(args):
+    refusal = _invite_refusal(args.invite)
+    if refusal is not None:
+        return refusal
     existing = None if args.force else _registry_room_named(args.name)
     if existing is not None:
         # The remedy has to be something the reader can act on. `talk create`
@@ -759,7 +785,7 @@ def cmd_talk_describe(args):
 
 
 def cmd_talk_invite(args):
-    refusal = _audience_refusal(args.token, own_room=False)
+    refusal = _invite_refusal([args.uid]) or _audience_refusal(args.token, own_room=False)
     if refusal is not None:
         return refusal
     _talk_run(lambda c: c.add_participant(args.token, args.uid, source=args.source))

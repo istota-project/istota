@@ -424,6 +424,16 @@ class TestFilesWithoutMemory:
         assert list(outside.iterdir()) == []
         assert not [m for m in _masks(seen["argv"]) if m.startswith(str(outside.resolve()))]
 
+    @pytest.mark.parametrize("target", [".", "/usr"])
+    def test_a_link_to_the_workspace_or_a_system_path_masks_neither(self, config, target):
+        base = (config.workspace_path / "Users" / "alice").resolve()
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "memories").symlink_to(target)
+        seen = _run(config, _room(config, shared=True, grants=("files",)))
+        masks = _masks(seen["argv"])
+        assert str(base) not in masks and "/usr" not in masks
+        assert str(base / "memories") not in masks
+
     def test_control_both_granted_masks_nothing_of_the_workspace(self, config):
         dirs = self._memory_dirs(config)
         seen = _run(config, _room(config, shared=True, grants=("files", "memory")))

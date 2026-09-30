@@ -194,9 +194,7 @@ class SandboxProfile(str, Enum):
     NATIVE = "native"
 
 
-def memory_masks(
-    config: Config, user_dir: Path, mounts: "tuple[Mount, ...] | list[Mount]" = (),
-) -> list[Path]:
+def memory_masks(config: Config, user_dir: Path) -> list[Path]:
     """The in-namespace paths that hold the user's ``memory`` scope, to mask.
 
     ``memories/``, and under the bot directory ``config/`` (``USER.md`` and the
@@ -210,20 +208,16 @@ def memory_masks(
       symlink. Unmasked, the task could create it and write a playbook or a
       dated memory that later private tasks recall.
     - **A symlink** (at the directory or at a parent): the mask goes on the
-      directory it resolves to, at that directory's in-namespace path, when it
-      lies under something the sandbox binds (``mounts``, which always
-      includes the workspace). A target the sandbox does not bind is not
-      reachable from inside it and needs no mask.
+      directory it resolves to when that lies strictly below the workspace,
+      at its in-namespace path. A target outside the workspace is logged and
+      left alone rather than masked, since a mask there could cover the whole
+      bind or a system path the task needs.
 
     A path whose target is not a directory holds no memory and gets nothing.
     Never raises; a component that cannot be opened or created is skipped and
     logged, the one residual.
     """
-    bound: list[tuple[Path, Path]] = [(user_dir, Path(os.path.realpath(user_dir)))]
-    for mount in mounts:
-        if mount.mode in ("ro", "rw") and mount.source is not None:
-            written = mount.dest or mount.source
-            bound.append((written, Path(os.path.realpath(mount.source))))
+    real_root = Path(os.path.realpath(user_dir))
     out: list[Path] = []
     for parts in memory_dir_parts(config.bot_dir_name):
         target = _memory_dir(user_dir, parts)
@@ -232,10 +226,16 @@ def memory_masks(
         if target == user_dir.joinpath(*parts):
             out.append(target)
             continue
-        for written, real in bound:
-            if is_within(target, real):
-                out.append(written / target.relative_to(real))
-                break
+        # Strictly below the workspace, never the workspace itself or anything
+        # outside it: a link to `.` or to `/usr` must not become a mask over
+        # the whole bind or a system path.
+        if target != real_root and is_within(target, real_root):
+            out.append(user_dir / target.relative_to(real_root))
+        else:
+            logger.warning(
+                "sandbox_plan: memory directory %s links outside the workspace; "
+                "not masked", "/".join(parts),
+            )
     return list(dict.fromkeys(out))
 
 
@@ -1015,7 +1015,7 @@ def build_mount_plan(
     # `files` without `memory`: the workspace is bound, and the memory inside
     # it is masked, so the two scopes are granted independently.
     if user_dir is not None and "files" not in withheld_scopes and "memory" in withheld_scopes:
-        masks.extend(memory_masks(config, user_dir, mounts))
+        masks.extend(memory_masks(config, user_dir))
 
     return MountPlan(
         mounts=tuple(mounts),
