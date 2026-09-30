@@ -5990,17 +5990,6 @@ def room_identity_line(
 _ROOM_CARD_MAX_MEMBERS = 12
 
 
-@dataclass(frozen=True)
-class RoomCard:
-    """The room card's header text, and whose persona the task speaks with.
-
-    ``text`` is empty and ``persona_user_id`` None for every task outside a
-    shared room, which is what leaves every private-room prompt unchanged.
-    """
-    text: str = ""
-    persona_user_id: str | None = None
-
-
 def room_card(
     config: Config,
     task: "db.Task",
@@ -6009,7 +5998,7 @@ def room_card(
     withheld_scopes: "frozenset[str] | set[str] | None",
     room_cli_available: bool,
     persona_loaded: bool = True,
-) -> RoomCard:
+) -> str:
     """The room card (multiplayer D7): who reads this room and whom the bot serves.
 
     Built from tables, never from the model: the room's members and guests, its
@@ -6024,8 +6013,12 @@ def room_card(
     standing instruction — the reason `room_identity_line` leaves the room's
     name out. A guest's chosen name reaches the model in the request, fenced.
 
-    Persona is the host's in a room with more than one member (D13), and the
-    card says so. ``withheld_scopes`` None means the caller did not compute
+    The persona in use is the principal's, and the card names whose (D13 as
+    amended): the host's on the host's own turns and on a guest's, which run
+    as the host, and each other member's own on theirs. A member's PERSONA.md
+    is writable from that member's own sandbox, so the host's in another
+    principal's system half would let one user steer a task that runs with
+    another's identity and credentials. ``withheld_scopes`` None means the caller did not compute
     them, and the card then says nothing about scopes rather than guess.
 
     Opens its own connection when handed none, never on a database path that
@@ -6034,7 +6027,7 @@ def room_card(
     """
     guest_turn = task.guest_participant_id is not None
     if not task.conversation_token:
-        return RoomCard()
+        return ""
     try:
         from . import room_policy
         from .side_rooms import canonical_token
@@ -6069,7 +6062,7 @@ def room_card(
     )
     if readers is None:
         # A guest's turn is told what it is even when the room cannot be read.
-        return RoomCard(text=f"\n{emissary}" if guest_turn else "")
+        return f"\n{emissary}" if guest_turn else ""
 
     host = _header_scalar(readers.host) if readers.host else None
     names = [_header_scalar(m) for m in readers.members[:_ROOM_CARD_MAX_MEMBERS]]
@@ -6084,27 +6077,19 @@ def room_card(
     who = f" — {'; '.join(parts)}" if parts else ""
     lines = [f"Shared room: everything you post here is read by everyone in it{who}."]
 
-    persona_host = (
-        readers.host
-        if readers.host and len(readers.members) > 1 and persona_loaded
-        else None
-    )
-    # The persona clause is said only where it is news: when the host is the
-    # principal, the persona in use is already theirs.
     if guest_turn:
         lines.append(emissary)
     elif host == principal:
         lines.append(f"You are acting for '{principal}', this room's host.")
     elif host:
-        lines.append(
-            f"You are acting for '{principal}'. This room's host is '{host}'"
-            + (", and your persona here is theirs." if persona_host else ".")
-        )
+        lines.append(f"You are acting for '{principal}'. This room's host is '{host}'.")
     elif readers.members:
         lines.append(f"You are acting for '{principal}'. This room has no host.")
     else:
         # Not registered yet: there is no host to have lost (D14).
         lines.append(f"You are acting for '{principal}'.")
+    if persona_loaded:
+        lines.append(f"The persona in use is that of '{principal}'.")
 
     if withheld_scopes is not None:
         scopes = ", ".join(_header_scalar(s) for s in sorted(withheld_scopes))
@@ -6138,10 +6123,7 @@ def room_card(
                 "only as your reply."
             )
     lines.append("Room notes (CHANNEL.md) are read by everyone in this room.")
-    return RoomCard(
-        text="".join(f"\n{line}" for line in lines),
-        persona_user_id=persona_host,
-    )
+    return "".join(f"\n{line}" for line in lines)
 
 
 def build_rules_section(
@@ -6478,8 +6460,8 @@ def build_prompt(
     if emissaries and not skip_persona:
         emissaries_section = f"\n\n{emissaries}\n"
 
-    # The room card (multiplayer D7), read first because it names whose
-    # persona a shared room speaks with (D13).
+    # The room card (multiplayer D7). The persona below is always the task
+    # principal's (D13 as amended), which the card names.
     card = room_card(
         config, task, conn,
         withheld_scopes=withheld_scopes,
@@ -6489,7 +6471,7 @@ def build_prompt(
 
     persona_section = ""
     if not skip_persona:
-        persona = load_persona(config, user_id=card.persona_user_id or task.user_id)
+        persona = load_persona(config, user_id=task.user_id)
         if persona:
             persona_section = f"\n\n{persona}\n"
 
@@ -6894,7 +6876,7 @@ Today's date: {user_date_str}
 User timezone: {user_tz_str}
 Current UTC: {utc_now_str}
 Current task ID: {task.id}
-Conversation token: {display_token}{room_line}{side_room_line}{card.text}
+Conversation token: {display_token}{room_line}{side_room_line}{card}
 Source: {display_source}
 Output target: {display_output_target}{per_user_email_line}
 {db_path_line}

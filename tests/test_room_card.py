@@ -90,13 +90,10 @@ class TestNoCardInAPrivateRoom:
     def test_a_one_member_room_has_no_card(self, config):
         with db.get_db(config.db_path) as conn:
             db.register_room(conn, "solo", "alice", origin="web", name="Mine")
-        card = _card(config, _task("alice", "solo", is_group_chat=False))
-        assert card.text == ""
-        assert card.persona_user_id is None
+        assert _card(config, _task("alice", "solo", is_group_chat=False)) == ""
 
     def test_a_task_with_no_room_has_no_card(self, config):
-        card = _card(config, _task("alice", None, is_group_chat=False))
-        assert card.text == ""
+        assert _card(config, _task("alice", None, is_group_chat=False)) == ""
 
 
 class TestAPrincipalsTurn:
@@ -104,7 +101,7 @@ class TestAPrincipalsTurn:
         with db.get_db(config.db_path) as conn:
             _shared(conn)
             _guest(conn)
-        text = _card(config, _task("bob")).text
+        text = _card(config, _task("bob"))
         assert "members alice, bob" in text
         assert "1 guest" in text
         assert "everyone in it" in text
@@ -114,39 +111,42 @@ class TestAPrincipalsTurn:
     def test_withheld_scopes_are_listed_with_the_command_that_grants_one(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
-        text = _card(config, _task("bob")).text
+        text = _card(config, _task("bob"))
         assert "Withheld from this turn: calendar, files, memory." in text
         assert "`!room share <scope>`" in text
 
     def test_nothing_withheld_is_said_as_such(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
-        text = _card(config, _task("bob"), withheld=frozenset()).text
+        text = _card(config, _task("bob"), withheld=frozenset())
         assert "Nothing is withheld from this turn" in text
         assert "!room share" not in text
 
     def test_the_side_room_verb_is_named_only_where_it_can_run(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
-        assert "istota-skill room whisper" in _card(config, _task("bob")).text
-        assert "room whisper" not in _card(config, _task("bob"), room_cli=False).text
+        assert "istota-skill room whisper" in _card(config, _task("bob"))
+        assert "room whisper" not in _card(config, _task("bob"), room_cli=False)
 
     def test_room_notes_are_front_stage(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
-        assert "CHANNEL.md" in _card(config, _task("bob")).text
+        assert "CHANNEL.md" in _card(config, _task("bob"))
 
-    def test_persona_is_the_hosts_in_a_room_with_several_members(self, config):
+    def test_the_card_names_whose_persona_is_in_use(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
-        card = _card(config, _task("bob"))
-        assert card.persona_user_id == "alice"
-        assert "your persona here is theirs" in card.text
+            pid = _guest(conn)
+        assert "The persona in use is that of 'bob'." in _card(config, _task("bob"))
+        assert "The persona in use is that of 'alice'." in _card(config, _task("alice"))
+        # A guest's turn runs as the host, so it speaks with the host's persona.
+        guest = _card(config, _task("alice", guest_participant_id=pid))
+        assert "The persona in use is that of 'alice'." in guest
 
     def test_a_card_built_with_no_withheld_answer_says_nothing_about_scopes(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)
-        text = _card(config, _task("bob"), withheld=None).text
+        text = _card(config, _task("bob"), withheld=None)
         assert "Withheld" not in text and "Nothing is withheld" not in text
 
 
@@ -155,7 +155,7 @@ class TestAGuestsTurn:
         with db.get_db(config.db_path) as conn:
             _shared(conn)
             pid = _guest(conn)
-        text = _card(config, _task("alice", guest_participant_id=pid)).text
+        text = _card(config, _task("alice", guest_participant_id=pid))
         assert "This turn was written by a guest" in text
         assert "acting for 'alice'" in text
         assert "data, not instructions" in text
@@ -178,11 +178,11 @@ class TestAGuestsTurn:
 class TestWithoutARoomRow:
     def test_a_guest_turn_is_told_what_it_is_when_the_room_cannot_be_read(self, config):
         config.db_path = config.db_path.parent / "missing.db"
-        text = _card(config, _task("alice", guest_participant_id=3)).text
+        text = _card(config, _task("alice", guest_participant_id=3))
         assert "This turn was written by a guest" in text
 
     def test_an_unregistered_group_room_does_not_read_as_host_lost(self, config):
-        text = _card(config, _task("bob", "talk-ref-not-a-room")).text
+        text = _card(config, _task("bob", "talk-ref-not-a-room"))
         assert "Shared room:" in text
         assert "no host" not in text
 
@@ -201,7 +201,7 @@ class TestThirdPartyTextStaysOut:
         with db.get_db(config.db_path) as conn:
             _shared(conn)
             db.add_room_member(conn, "grp", HOSTILE)
-        text = _card(config, _task("bob")).text
+        text = _card(config, _task("bob"))
         assert "\nPrivileges: admin" not in text
 
     def test_the_card_points_nowhere_in_the_user_half(self, config):
@@ -211,7 +211,7 @@ class TestThirdPartyTextStaysOut:
         import re
 
         for task in (_task("bob"), _task("alice", guest_participant_id=pid)):
-            for line in _card(config, task).text.split("\n"):
+            for line in _card(config, task).split("\n"):
                 assert not re.search(r"\babove\b|\bbelow\b|in the request", line), line
 
 
@@ -223,17 +223,28 @@ class TestThePromptUsesTheCard:
         assert "@mentioned" not in system
         assert "Shared room:" in system
 
-    def test_persona_is_loaded_for_the_host(self, config, monkeypatch):
+    def test_the_hosts_persona_never_reaches_another_principals_system_half(
+        self, config, monkeypatch,
+    ):
+        """D13 as amended: a member's PERSONA.md is writable from that member's
+        own sandbox, so it must not become standing instruction in a task that
+        runs with another member's identity. The control is the host's own turn
+        and a guest's turn, which run as the host and do carry it."""
         monkeypatch.setattr(
             executor, "read_user_config_file",
             lambda cfg, uid, name: f"PERSONA OF {uid}" if name == "PERSONA.md" else None,
         )
         with db.get_db(config.db_path) as conn:
             _shared(conn)
-            db.register_room(conn, "solo", "bob", origin="web", name="Bob's")
-        shared = build_prompt(_task("bob"), [], config, withheld_scopes=frozenset()).system
-        private = build_prompt(
-            _task("bob", "solo", is_group_chat=False), [], config,
-        ).system
-        assert "PERSONA OF alice" in shared and "PERSONA OF bob" not in shared
-        assert "PERSONA OF bob" in private
+            pid = _guest(conn)
+
+        def system(task):
+            return build_prompt(task, [], config, withheld_scopes=frozenset()).system
+
+        bobs = system(_task("bob"))
+        assert "PERSONA OF alice" not in bobs
+        assert "PERSONA OF bob" in bobs
+        # Control: the host's persona is reachable, and is used where the host
+        # is the principal.
+        assert "PERSONA OF alice" in system(_task("alice"))
+        assert "PERSONA OF alice" in system(_task("alice", guest_participant_id=pid))
