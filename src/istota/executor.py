@@ -7269,36 +7269,29 @@ def _task_withheld_scopes(
     """
     from . import room_scopes
 
+    policy = config.rooms.shared_room_data_policy
     if task.guest_participant_id is not None:
-        # Emissary mode (multiplayer D2): a guest's turn runs as the host at
-        # room-safe reach, whatever the host granted and whatever the disclosure
-        # policy says. A grant is consent to disclose when the host asks, and
-        # `off` switches the grant gate, not who a guest may speak for.
-        withheld = room_scopes.withheld_scopes(skill_index, frozenset())
+        # Emissary mode (multiplayer D2); `room_scopes.withheld_for_task`
+        # answers it from the row alone, so no database is needed.
+        withheld = room_scopes.withheld_for_task(
+            None, task, policy=policy, skill_index=skill_index)
         logger.info(
             "emissary_mode task_id=%s room=%s withheld=%s",
             task.id, task.conversation_token, ",".join(sorted(withheld)),
         )
         return withheld
-    policy = config.rooms.shared_room_data_policy
     if policy == room_scopes.POLICY_OFF or not task.conversation_token:
         return frozenset()
-    kwargs = dict(
-        policy=policy,
-        conversation_token=task.conversation_token,
-        user_id=task.user_id,
-        skill_index=skill_index,
-        assume_shared=bool(task.is_group_chat),
-        assume_mixed=task.audience == "mixed",
-    )
     if conn is not None:
-        withheld = room_scopes.task_withheld_scopes(conn, **kwargs)
+        withheld = room_scopes.withheld_for_task(
+            conn, task, policy=policy, skill_index=skill_index)
     elif not Path(config.db_path).exists():
         return frozenset()
     else:
         try:
             with db.get_db(config.db_path) as temp_conn:
-                withheld = room_scopes.task_withheld_scopes(temp_conn, **kwargs)
+                withheld = room_scopes.withheld_for_task(
+                    temp_conn, task, policy=policy, skill_index=skill_index)
         except Exception as exc:  # noqa: BLE001 — an unopenable DB restricts
             logger.warning(
                 "could not open the database to read room grants for task %s, "

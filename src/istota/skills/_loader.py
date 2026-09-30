@@ -365,8 +365,8 @@ def effective_disabled_skills(
     (``room_scopes.task_withheld_scopes``; the synthetic scopes name no skill
     and fall out of the intersection). This is the single place the executor
     and the ``skills`` CLI both call so their view of "disabled" can't drift;
-    the CLI passes no room yet. ``config`` is duck-typed (no import) to avoid a
-    config→loader cycle.
+    the CLI passes its task's (`skills.skills._room_withheld`). ``config`` is
+    duck-typed (no import) to avoid a config→loader cycle.
     """
     disabled = set(config.disabled_skills)
     user_config = config.get_user(user_id)

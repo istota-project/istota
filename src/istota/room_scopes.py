@@ -161,3 +161,35 @@ def task_withheld_scopes(
     if not shared:
         return frozenset()
     return withheld_scopes(skill_index, granted_scopes(conn, room_token, user_id))
+
+
+def withheld_for_task(
+    conn: sqlite3.Connection | None,
+    task: "db.Task",
+    *,
+    policy: str,
+    skill_index: Mapping[str, object],
+) -> frozenset[str]:
+    """What one task may not reach, from its own row. The one derivation the
+    executor's reach seams and the `skills` CLI's guard both read.
+
+    A guest's turn (emissary mode, multiplayer D2) withholds every scope,
+    whatever the host granted and whatever the disclosure policy says: a grant
+    is consent to disclose when the host asks, and ``off`` switches the grant
+    gate, not who a guest may speak for. Otherwise the room's answer for the
+    task's own user, conversation, group flag and stored audience, which needs
+    ``conn``; a guest's turn is answered from the row and reads none.
+    """
+    if task.guest_participant_id is not None:
+        return withheld_scopes(skill_index, frozenset())
+    if policy == POLICY_OFF or not task.conversation_token:
+        return frozenset()
+    return task_withheld_scopes(
+        conn,
+        policy=policy,
+        conversation_token=task.conversation_token,
+        user_id=task.user_id,
+        skill_index=skill_index,
+        assume_shared=bool(task.is_group_chat),
+        assume_mixed=task.audience == "mixed",
+    )
