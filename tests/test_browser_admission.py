@@ -164,11 +164,13 @@ def test_finviz_does_not_retry_an_unconfigured_admission(tmp_path, monkeypatch):
     monkeypatch.setenv("ISTOTA_USER_ID", "alice")
     _no_config_anywhere(tmp_path, monkeypatch)
     monkeypatch.delenv("ISTOTA_DB_PATH", raising=False)
-    import time
     from istota.skills.markets import finviz
+    from tests.support.sleep_spy import sleep_spy
 
-    slept = []
-    monkeypatch.setattr(time, "sleep", slept.append)
+    # finviz imports time inside the function, so the stdlib module is the
+    # only handle; sleep_spy still bounds the patch to this thread.
+    import time
+    slept = sleep_spy(monkeypatch, time)
     assert finviz.fetch_finviz_data(api_url="http://browser", retries=2) is None
     assert slept == []
     assert list(tmp_path.iterdir()) == []
