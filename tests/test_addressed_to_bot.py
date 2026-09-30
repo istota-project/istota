@@ -102,6 +102,7 @@ class TestWebAddressing:
         "ask nova about lunch",
         "novaon is a planet",
         "@novaon hi",
+        "@nova-ops is down",
         "mail@nova.example hi",
         "",
     ])

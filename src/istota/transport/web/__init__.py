@@ -52,7 +52,7 @@ def addressed_to_bot_in_text(text: str, bot_names: Iterable[str]) -> bool:
         if not name:
             continue
         escaped = re.escape(name)
-        pattern = rf"(?<![\w@])@{escaped}(?![\w])|^\s*{escaped}(?![\w])"
+        pattern = rf"(?<![\w@])@{escaped}(?![\w-])|^\s*{escaped}(?![\w])"
         if re.search(pattern, text or "", re.IGNORECASE):
             return True
     return False
