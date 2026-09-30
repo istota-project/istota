@@ -1546,6 +1546,10 @@ def _room_share(config, conn, room, user_id: str, sub: str, arg: str) -> str:
             "`!room share <scope>` grants one, `!room unshare <scope>` takes it "
             "back, `!room share all|none` does every one."
         )
+    if sub == "unshare" and arg in ("", "all"):
+        if not arg:
+            return "Usage: `!room unshare <scope>`, or `!room unshare all`."
+        arg, sub = "none", "share"
     if sub == "share" and arg == "none":
         room_scopes.revoke_scopes(conn, room.token, user_id)
         return "Nothing of yours is shared in this room now."

@@ -71,6 +71,14 @@ class TestGranting:
             _run(config, conn, "bob", "!room unshare calendar")
             assert _grants(conn, "bob") == frozenset()
 
+    def test_unshare_all_and_a_bare_unshare(self, config):
+        with db.get_db(config.db_path) as conn:
+            _shared(conn)
+            _run(config, conn, "bob", "!room share all")
+            assert "Usage" in _run(config, conn, "bob", "!room unshare")
+            _run(config, conn, "bob", "!room unshare all")
+            assert _grants(conn, "bob") == frozenset()
+
     def test_all_and_none(self, config):
         with db.get_db(config.db_path) as conn:
             _shared(conn)

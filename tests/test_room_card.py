@@ -175,6 +175,18 @@ class TestAGuestsTurn:
         assert "guest" in first
 
 
+class TestWithoutARoomRow:
+    def test_a_guest_turn_is_told_what_it_is_when_the_room_cannot_be_read(self, config):
+        config.db_path = config.db_path.parent / "missing.db"
+        text = _card(config, _task("alice", guest_participant_id=3)).text
+        assert "This turn was written by a guest" in text
+
+    def test_an_unregistered_group_room_does_not_read_as_host_lost(self, config):
+        text = _card(config, _task("bob", "talk-ref-not-a-room")).text
+        assert "Shared room:" in text
+        assert "no host" not in text
+
+
 class TestThirdPartyTextStaysOut:
     def test_a_guest_display_name_never_reaches_the_system_half(self, config):
         with db.get_db(config.db_path) as conn:
