@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Literal, Sequence
 
 from .. import db, speech_gate
 from ..surfaces import is_room_member
-from ._types import IncomingMessage
+from . import participants
+from ._types import IncomingMessage, ParticipantRef
 from .routing import transcript_room
 
 if TYPE_CHECKING:
@@ -142,7 +143,9 @@ class InboundResult:
 
     ``created`` — a task exists and the stored row carries its id.
     ``recorded`` — the row is stored and the speech gate declined, so no task.
-    ``dropped`` — a known echo of a mirrored message; nothing stored.
+    ``dropped`` — nothing stored: a known echo of a mirrored message, or a
+    non-user author in a room nobody has registered (there is no room, and no
+    istota user to register it for).
     ``replayed`` — this message was already stored (a client retry or a
     re-polled duplicate); ``task_id`` is the prior turn's, None when that turn
     was recorded without an answer.
@@ -215,19 +218,25 @@ def _ask_gate(
     is_group_chat: bool,
     addressed_to_bot: bool,
     classified: speech_gate.GateDecision | None,
+    author_kind: str = participants.PRINCIPAL,
 ) -> speech_gate.GateDecision:
     """Whether a stored turn gets a task, with the decision audited.
 
     No completer is built here: this runs inside the caller's write
     transaction, and a model call would hold its lock. The classifier rung
     takes ``classified`` — `classify_ahead`'s answer, obtained before the
-    transaction opened — and fails closed without one. ``is_group_chat`` is the
-    surface's own answer to "more than one human here" until participants are
-    recorded.
+    transaction opened — and fails closed without one. "More than one human
+    here" is `participants.is_multi_human`, the predicate `classify_ahead` reads
+    too, so the two cannot disagree about whether a turn reaches that rung.
     """
     decision = speech_gate.should_speak(
-        is_multi_human=is_group_chat,
+        is_multi_human=participants.is_multi_human(
+            conn, surface=surface, room_token=room_token,
+            is_group_chat=is_group_chat,
+        ),
         addressed_to_bot=addressed_to_bot,
+        author_is_agent=author_kind == participants.AGENT,
+        author_is_guest=author_kind == participants.GUEST,
         mode=config.speech_gate.mode,
         classified=classified,
         model=config.speech_gate.model,
@@ -260,9 +269,10 @@ def classify_ahead(
     connection of its own, closed before the model is asked.
 
     None when the classifier rung cannot be reached — any mode but
-    ``classifier``, a turn addressed to the bot, a room with one human, or a
-    surface that does not own its rooms — so the default mode costs one string
-    comparison. ``earlier`` is the ``(user_id, text)`` of turns ahead of this
+    ``classifier``, a turn addressed to the bot, a surface that does not own
+    its rooms, or a room `participants.is_multi_human` says holds one human
+    (the predicate `record_inbound`'s gate reads) — so the default mode costs
+    one string comparison. ``earlier`` is the ``(user_id, text)`` of turns ahead of this
     one in the same unrecorded batch, oldest first; they belong in the window
     and are not stored yet. Never raises: a failure is a failed decision, which
     the gate reads as "do not speak".
@@ -270,7 +280,7 @@ def classify_ahead(
     gate = config.speech_gate
     if speech_gate.normalize_mode(gate.mode) != "classifier":
         return None
-    if addressed_to_bot or not is_group_chat or not is_room_member(surface):
+    if addressed_to_bot or not is_room_member(surface):
         return None
     source_type = source_type or surface
     try:
@@ -280,6 +290,11 @@ def classify_ahead(
             room_token = (
                 db.resolve_room_token(conn, surface, surface_ref) or surface_ref
             )
+            if not participants.is_multi_human(
+                conn, surface=surface, room_token=room_token,
+                is_group_chat=is_group_chat,
+            ):
+                return None
             room = db.get_room(conn, room_token)
             pending = []
             for author_id, body in [*earlier, (user_id, text)]:
@@ -405,6 +420,11 @@ def record_inbound(
     # caller ran before opening its transaction. Read only on the gate's
     # classifier rung; without it that rung fails closed.
     classified: speech_gate.GateDecision | None = None,
+    # Who wrote the turn, when it is not `user_id` speaking for themselves: a
+    # guest or a bot in a room. A ref with no user id is recorded and never
+    # creates a task; `user_id` is then empty and feeds only the audit row.
+    # None means `user_id` wrote it.
+    author: ParticipantRef | None = None,
 ) -> InboundResult:
     """Resolve → echo-check → store user message → ask the gate → create task.
 
@@ -437,6 +457,12 @@ def record_inbound(
     # `is_room_view` answers separately for the one site where the two can
     # diverge (the scheduler's confirmation mirror gate).
     room_surface = is_room_member(surface) and bool(room_token)
+    # A turn with an istota user behind it. Only such a turn can register a
+    # room, join or un-hide one, or create a task; anyone else is recorded into
+    # a room that already exists, or not at all.
+    user_author = author is None or bool(author.user_id)
+    if not user_author and not room_surface:
+        return InboundResult(room_token, None, None, "dropped")
 
     # A non-room surface whose exchange belongs in a room (ISSUE-136): an email
     # threaded back into the web/Talk room it came from, or — since ISSUE-247 —
@@ -513,6 +539,12 @@ def record_inbound(
         # web room created elsewhere). First writer wins on origin + name.
         existing = db.get_room(conn, room_token)
         if existing is None:
+            if not user_author:
+                logger.info(
+                    "Not recording a %s turn by a non-user in unregistered room %s",
+                    surface, room_token,
+                )
+                return InboundResult(room_token, None, None, "dropped")
             db.register_room(
                 conn, room_token, user_id, origin=surface, name=channel_name,
             )
@@ -529,16 +561,12 @@ def record_inbound(
                 # though they're still members (ISSUE-134).
                 db.set_room_archived(conn, room_token, False)
         db.add_room_binding(conn, room_token, surface, surface_ref)
-        # Every sender is a member, so a shared (multi-human) Talk room surfaces
-        # in each participant's web room list — not just the first one who
-        # registered it (ISSUE-134). Idempotent; covers the already-registered
-        # path where register_room above didn't run.
-        db.add_room_member(conn, room_token, user_id)
-        # Re-engagement un-hides: the sender posting in a room they'd previously
-        # hidden clears their hide tombstone so it resurfaces in their web list.
-        # Only the sender's own tombstone — another participant's hide is left
-        # intact.
-        db.undismiss_room(conn, room_token, user_id)
+        # Every istota sender is a member, so a shared Talk room surfaces in
+        # each participant's web room list (ISSUE-134), and their own next
+        # message un-hides a room they hid. A guest is neither: membership is
+        # what makes an istota user a principal.
+        if user_author:
+            db.note_member_turn(conn, room_token, user_id)
 
         # 2. Echo check (loop-prevention ledger) — armed by post-as-user
         #    mirroring: a web-origin row stamped with a Talk id catches the
@@ -654,10 +682,29 @@ def record_inbound(
     #    or for a mirror-only surface landing in an existing room — before any
     #    task exists, so a turn nobody answers is recorded all the same.
     message_id: int | None = None
+    author_kind = participants.PRINCIPAL
     if stores_row:
-        author_user_id, author_label = resolve_author(
-            config, user_id, sender_address,
-        )
+        # The author as a room participant, on a surface that owns rooms. Email
+        # joins a room's transcript without joining the room, and its reply goes
+        # back by mail, so its sender is not one of the room's participants.
+        participant_id: int | None = None
+        if room_surface:
+            ref = author or ParticipantRef(
+                surface=surface, surface_ref=user_id, user_id=user_id,
+            )
+            author_kind = participants.classify(conn, config, room_token, ref)
+            if ref.surface_ref:
+                participant_id = db.upsert_room_participant(
+                    conn, room_token=room_token, surface=surface,
+                    surface_ref=ref.surface_ref, kind=author_kind,
+                    user_id=ref.user_id, display_name=ref.display_name,
+                )
+        if user_author:
+            author_user_id, author_label = resolve_author(
+                config, user_id, sender_address,
+            )
+        else:
+            author_user_id, author_label = None, participants.guest_label(author)
         # Stamp the surface-native message id (Talk's message id) so the
         # canonical row knows where it exists on that surface: this feeds the
         # echo ledger, the duplicate-poll probe above and the Talk→web
@@ -673,11 +720,13 @@ def record_inbound(
                 else None
             ),
             attachments=display_attachment_names(attachments, attachment_names),
-            attachment_paths=workspace_attachment_paths(
-                config, user_id, attachments,
+            attachment_paths=(
+                workspace_attachment_paths(config, user_id, attachments)
+                if user_author else None
             ),
             client_msg_id=client_msg_id,
             reply_to_message_id=reply_to_canonical_id,
+            author_participant_id=participant_id,
         )
 
     # 4. Ask the speech gate about a stored turn.
@@ -686,12 +735,16 @@ def record_inbound(
             conn, config, room_token=transcript_token, surface=surface,
             user_id=user_id, message_id=message_id,
             is_group_chat=is_group_chat, addressed_to_bot=addressed_to_bot,
-            classified=classified,
+            classified=classified, author_kind=author_kind,
         )
         if not decision.speak:
             return InboundResult(
                 room_token, None, message_id, "recorded", decision.rung,
             )
+    # The gate's author rungs already decline every such turn. Restated so that
+    # no future rung order can create a task with no istota user behind it.
+    if not user_author:
+        return InboundResult(room_token, None, message_id, "recorded")
 
     # 5. Create the task and stamp the stored row with it.
     task_id = db.create_task(
@@ -764,5 +817,6 @@ def ingest_message(conn, config: "Config", msg: IncomingMessage) -> int | None:
         sender_address=msg.sender_address,
         addressed_to_bot=msg.addressed_to_bot,
         classified=msg.classified,
+        author=msg.author,
     )
     return result.task_id

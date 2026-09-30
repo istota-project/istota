@@ -30,6 +30,26 @@ if TYPE_CHECKING:
 WEBMIRROR_REF_PREFIX = "istota:webmirror:"
 
 
+@dataclass(frozen=True)
+class ParticipantRef:
+    """Who wrote an inbound turn, as the surface identifies them.
+
+    Identity only; whether they are a principal, a guest or an agent is decided
+    in core (`transport.participants.classify`), because the answer depends on
+    room membership, which no surface knows. ``user_id`` is set only when the
+    surface resolved the sender to an istota user. ``is_bot`` is the surface's
+    own report of a bot actor (a Talk ``bots`` actor); the bot itself is
+    recognised in core whatever the surface says. ``display_name`` is raw
+    surface text and is sanitized before it reaches a label.
+    """
+
+    surface: str
+    surface_ref: str
+    user_id: str | None = None
+    display_name: str | None = None
+    is_bot: bool = False
+
+
 @dataclass
 class IncomingMessage:
     """A surface-normalized inbound message, ready to become a task.
@@ -66,6 +86,12 @@ class IncomingMessage:
     # before the caller opened its write transaction. None means not asked;
     # read only when the gate reaches its classifier rung.
     classified: "GateDecision | None" = None
+    # Who wrote the turn, when that is not simply ``user_id`` speaking for
+    # themselves: a guest or a bot in a Talk room. None means ``user_id`` is the
+    # author, which is every surface's answer for its own users. A ref with no
+    # ``user_id`` is recorded and never creates a task, and ``user_id`` above is
+    # then empty.
+    author: ParticipantRef | None = None
     output_target: str | None = None  # "talk"|"email"|"ntfy"|comma list|None
     model: str | None = None          # !model override (canonical id)
     effort: str | None = None

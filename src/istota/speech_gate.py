@@ -50,6 +50,9 @@ GateMode = Literal["off", "mention", "classifier"]
 MODES: tuple[str, ...] = ("off", "mention", "classifier")
 
 RUNG_AGENT_AUTHOR = "agent_author"
+# A guest (a human who is not a member) never gets a task until principal
+# resolution decides whose authority it would carry (multiplayer Stage 11).
+RUNG_GUEST_AUTHOR = "guest_author"
 RUNG_NOT_MULTI_HUMAN = "not_multi_human"
 RUNG_ADDRESSED = "addressed"
 RUNG_MODE_OFF = "mode_off"
@@ -290,6 +293,7 @@ def should_speak(
     addressed_to_bot: bool,
     mode: str,
     author_is_agent: bool = False,
+    author_is_guest: bool = False,
     window: str | None = None,
     completer: Completer | None = None,
     model: str | None = None,
@@ -297,8 +301,10 @@ def should_speak(
 ) -> GateDecision:
     """Walk the ladder. Never raises.
 
-    ``author_is_agent`` is rung 0 and nothing sets it yet; the participant
-    classification that produces it arrives with ``room_participants``.
+    ``author_is_agent`` is rung 0 and ``author_is_guest`` the rung after it,
+    both from `transport.participants.classify`. Both record and never speak,
+    whatever else holds: an agent turn is the loop D9 guards, and a guest's turn
+    has no principal to act for yet.
     ``window`` is the prompt :func:`build_window` produced and is only read on
     the classifier rung, so a caller on any other mode need not build one.
 
@@ -310,6 +316,8 @@ def should_speak(
     try:
         if author_is_agent:
             return GateDecision(False, RUNG_AGENT_AUTHOR)
+        if author_is_guest:
+            return GateDecision(False, RUNG_GUEST_AUTHOR)
         if not is_multi_human:
             return GateDecision(True, RUNG_NOT_MULTI_HUMAN)
         if addressed_to_bot:

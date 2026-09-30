@@ -16,8 +16,10 @@ from ... import confirmations, db, speech_gate
 from ...async_runtime import get_talk_client
 from ...config import Config
 from ...talk import TalkClient, clean_message_content
-from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage
+from .._types import WEBMIRROR_REF_PREFIX, IncomingMessage, ParticipantRef
 from ..ingest import classify_ahead, ingest_message
+from ..participants import classify as classify_participant
+from ..participants import guest_label
 from ._db_lock import DB_BUSY_TIMEOUT_MS, loop_db_lock, talk_db
 
 logger = logging.getLogger("istota.transport.talk.inbound")
@@ -1413,18 +1415,84 @@ async def poll_talk_conversations(config: Config) -> list[int]:
     )
 
 
-def _is_configured_user_turn(msg: dict, config: Config) -> bool:
-    """Whether a Talk message was written by a configured istota user.
+def _is_own_post(msg: dict, config: Config) -> bool:
+    """The bot's own message, or one with no author at all.
 
-    The bot's own messages, guest and bot actors, and senders outside
-    ``config.users`` are all refused.
+    Never recorded: every post of ours is already in the transcript as the
+    assistant row it was delivered from, so recording its echo would store the
+    answer a second time as a user turn.
     """
     actor_id = msg.get("actorId", "")
-    if actor_id == config.talk.bot_username:
-        return False
-    if msg.get("actorType", "") != "users":
-        return False
-    return actor_id in config.users
+    return not actor_id or actor_id == config.talk.bot_username
+
+
+def _talk_ref(actor_type: str, actor_id: str) -> str:
+    """A Talk actor as a participant ref: the bare id for a Nextcloud user,
+    ``<actorType>/<id>`` for anything else, since ids are unique per type only.
+    A missing type reads as a user, as `_istota_members_for_conversation` has it.
+    """
+    actor_type = actor_type or "users"
+    return actor_id if actor_type == "users" else f"{actor_type}/{actor_id}"
+
+
+def _talk_author(
+    actor_type: str, actor_id: str, display_name: str | None, config: Config,
+) -> ParticipantRef:
+    """A Talk actor as a participant. Only a ``users`` actor in ``config.users``
+    resolves to an istota user; a guest, a federated or bridged sender, a
+    Nextcloud user istota does not serve, and a bot all carry no user id."""
+    actor_type = actor_type or "users"
+    user_id = actor_id if actor_type == "users" and actor_id in config.users else None
+    return ParticipantRef(
+        surface="talk", surface_ref=_talk_ref(actor_type, actor_id),
+        user_id=user_id, display_name=display_name or None,
+        is_bot=actor_type == "bots",
+    )
+
+
+def _message_author(msg: dict, config: Config) -> ParticipantRef:
+    """`_talk_author` for a chat message, whose type field is never defaulted:
+    a message with no ``actorType`` is not a configured user's."""
+    return _talk_author(
+        msg.get("actorType") or "unknown", msg.get("actorId", ""),
+        msg.get("actorDisplayName"), config,
+    )
+
+
+def _sync_talk_roster(
+    conn, config: Config, conversation_token: str, roster: list[dict],
+) -> None:
+    """Record a group room's live roster as its Talk participants.
+
+    Everyone on the roster is upserted as present, classified as any author
+    would be, and every Talk participant not on it is marked as having left —
+    which is what keeps `db.room_is_shared` about who is here now rather than
+    who ever spoke. Called only with a roster that was actually fetched: an
+    empty list means the fetch failed or the room is a DM, never that everyone
+    left. The bot itself is not recorded.
+    """
+    room_token = db.resolve_room_token(conn, "talk", conversation_token) or conversation_token
+    if db.get_room(conn, room_token) is None:
+        return
+    present: list[str] = []
+    for entry in roster:
+        actor_id = entry.get("actorId") or ""
+        if not actor_id or actor_id == config.talk.bot_username:
+            continue
+        ref = _talk_author(
+            entry.get("actorType") or "users", actor_id, entry.get("displayName"),
+            config,
+        )
+        db.upsert_room_participant(
+            conn, room_token=room_token, surface="talk",
+            surface_ref=ref.surface_ref,
+            kind=classify_participant(conn, config, room_token, ref),
+            user_id=ref.user_id, display_name=ref.display_name,
+        )
+        present.append(ref.surface_ref)
+    db.sync_room_roster(
+        conn, room_token=room_token, surface="talk", present=present,
+    )
 
 
 #: How many classifier calls one batch runs at once.
@@ -1444,9 +1512,10 @@ async def _classify_batch_ahead(
 
     Runs before ``_process_poll_results`` opens its transaction, so no model
     call holds the write lock. Empty unless ``[speech_gate] mode`` is
-    ``classifier``. Only an unmentioned turn in a multi-user room can reach the
-    classifier rung, so only those are asked; each sees the turns ahead of it in
-    the batch, which are not stored yet. A turn this pass did not answer is
+    ``classifier``. Only an unmentioned istota user's turn can reach the
+    classifier rung, so only those are submitted, and `classify_ahead` drops
+    the ones in a room holding one human; each sees the turns ahead of it in
+    the batch, guests' included, which are not stored yet. A turn this pass did not answer is
     decided in the transaction without one, which fails closed.
 
     The calls run concurrently, a few at a time, under one deadline for the
@@ -1472,7 +1541,7 @@ async def _classify_batch_ahead(
                 WEBMIRROR_REF_PREFIX
             ):
                 continue
-            if not _is_configured_user_turn(msg, config):
+            if _is_own_post(msg, config):
                 continue
             content = clean_message_content(
                 msg, bot_username=config.talk.bot_username,
@@ -1480,7 +1549,13 @@ async def _classify_batch_ahead(
             if not content and not extract_attachments(msg):
                 continue
             text = content or "Process the attached file(s)"
-            actor_id = msg.get("actorId", "")
+            author = _message_author(msg, config)
+            if author.user_id is None:
+                # A guest's or a bot's turn is never classified (it cannot
+                # speak), but it is part of the conversation the window shows.
+                earlier.append((guest_label(author), text))
+                continue
+            actor_id = author.user_id
             message_id = msg.get("id")
             if message_id and not is_bot_mentioned(msg, config.talk.bot_username):
                 if participants is None:
@@ -1488,13 +1563,16 @@ async def _classify_batch_ahead(
                         client, conversation_token,
                         conv_types.get(conversation_token, 1),
                     )
-                if _is_multi_user(participants):
-                    jobs.append(((conversation_token, message_id), dict(
-                        surface="talk", surface_ref=conversation_token,
-                        user_id=actor_id, text=text, is_group_chat=True,
-                        addressed_to_bot=False, source_type="talk",
-                        earlier=tuple(earlier),
-                    )))
+                # Asked whatever the roster says: `classify_ahead` reads the
+                # same multi-human predicate the gate does and answers None for
+                # a room holding one human.
+                jobs.append(((conversation_token, message_id), dict(
+                    surface="talk", surface_ref=conversation_token,
+                    user_id=actor_id, text=text,
+                    is_group_chat=_is_multi_user(participants),
+                    addressed_to_bot=False, source_type="talk",
+                    earlier=tuple(earlier),
+                )))
             earlier.append((actor_id, text))
     if not jobs:
         return {}
@@ -1563,6 +1641,8 @@ async def _process_poll_results(
         conn = stack.enter_context(
             db.get_db(config.db_path, busy_timeout_ms=DB_BUSY_TIMEOUT_MS),
         )
+        # One roster sync per room per batch; the roster is cached anyway.
+        synced_rosters: set[str] = set()
         for conversation_token, messages in results:
             if not messages:
                 continue
@@ -1613,15 +1693,24 @@ async def _process_poll_results(
                     )
                     continue
 
-                # Not the bot's own message, not a guest or bot actor, and a
-                # configured user; anyone else is skipped silently.
-                if not _is_configured_user_turn(msg, config):
+                # The bot's own post is already the assistant row it came from.
+                if _is_own_post(msg, config):
                     continue
+
+                # Everyone else is recorded; `config.users` decides authority,
+                # not recording. A guest, a bot, or a Nextcloud user istota does
+                # not serve reaches the ingest as a participant with no user id,
+                # is stored, and acts on nothing.
+                author = _message_author(msg, config)
+                is_user = author.user_id is not None
 
                 conv_type = conv_types.get(conversation_token, 1)
                 participants = await _await_in_txn(
                     hold, _get_participants(client, conversation_token, conv_type),
                 )
+                if participants and conversation_token not in synced_rosters:
+                    synced_rosters.add(conversation_token)
+                    _sync_talk_roster(conn, config, conversation_token, participants)
                 is_multi_user = _is_multi_user(participants)
                 addressed = is_bot_mentioned(msg, config.talk.bot_username)
                 # An unmentioned turn in a group room is recorded and nothing
@@ -1630,8 +1719,20 @@ async def _process_poll_results(
                 # that can act on the room — `!model` usage, `!command`, a relay
                 # or confirmation answer, the channel-gate notice, cancelling a
                 # parked confirmation — stays behind the mention, as it was when
-                # these turns were dropped here.
-                engaged = addressed or not is_multi_user
+                # these turns were dropped here, and behind an istota user.
+                engaged = is_user and (addressed or not is_multi_user)
+
+                # An istota user speaking re-joins and un-hides the room, here
+                # rather than only in `record_inbound`, because a `!command`, a
+                # confirmation answer and a `!model` usage reply are consumed
+                # below without reaching it.
+                if is_user:
+                    room_token = (
+                        db.resolve_room_token(conn, "talk", conversation_token)
+                        or conversation_token
+                    )
+                    if db.get_room(conn, room_token) is not None:
+                        db.note_member_turn(conn, room_token, actor_id)
 
                 content = clean_message_content(
                     msg, bot_username=config.talk.bot_username,
@@ -1823,7 +1924,8 @@ async def _process_poll_results(
                 # transaction as the poll-state advance above — see the
                 # docstring's atomicity note.
                 task_id = ingest_message(conn, config, IncomingMessage(
-                    user_id=actor_id,
+                    user_id=actor_id if is_user else "",
+                    author=None if is_user else author,
                     text=prompt,
                     source_type="talk",
                     surface="talk",

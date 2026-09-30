@@ -170,7 +170,11 @@ class TestGeneratedDefaults:
 # task that answers it.
 # `speech_gate_decisions` is the per-message audit row `record_inbound` writes
 # beside the turn, a record of that message like the other two, not of the room.
-NOT_THE_ROOM_MODEL = frozenset({"messages", "tasks", "speech_gate_decisions"})
+# `room_participants` is the turn's author (multiplayer D1): a room with no turn
+# in it has none, which is what a builder builds.
+NOT_THE_ROOM_MODEL = frozenset({
+    "messages", "tasks", "speech_gate_decisions", "room_participants",
+})
 
 # Nothing chooses these, so two runs differ by construction. `applied_at` is
 # `_migration_state`'s, stamped by `db.init_db` on each database in turn — the

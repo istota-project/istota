@@ -15,6 +15,7 @@ from ._types import (
     WEBMIRROR_REF_PREFIX,
     DeliveryOptions,
     IncomingMessage,
+    ParticipantRef,
     Transport,
     TransportCapabilities,
 )
@@ -44,6 +45,7 @@ from .web import WebTransport
 __all__ = [
     "WEBMIRROR_REF_PREFIX",
     "IncomingMessage",
+    "ParticipantRef",
     "Transport",
     "TransportCapabilities",
     "DeliveryOptions",

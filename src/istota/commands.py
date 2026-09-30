@@ -2498,7 +2498,11 @@ def _format_history_markdown(
         ts = _format_db_timestamp(m.created_at, tz)
         if m.prompt and m.prompt.strip():
             lines.append("")
-            lines.append(f"**{m.user_id or 'User'}** — {ts}")
+            # External sender first, as `context._speaker_label` has it: a room
+            # guest's or a correspondent's turn carries no user of its own, and
+            # the row's user would otherwise name the account it reached.
+            speaker = getattr(m, "external_sender", None) or m.user_id or "User"
+            lines.append(f"**{speaker}** — {ts}")
             lines.append(m.prompt.strip())
         if m.result and m.result.strip():
             lines.append("")

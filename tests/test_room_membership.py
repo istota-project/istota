@@ -167,6 +167,9 @@ class TestSharedTalkRoomVisibleToAllMembers:
                 text="hi",
                 source_type="talk",
                 channel_name="#team",
+                # Two members make the room shared (multiplayer Stage 7), so
+                # only a turn addressed to the bot gets a task in it.
+                addressed_to_bot=True,
             )
             room_token, task_id = _inbound.room_token, _inbound.task_id
             assert room_token == "r77"
