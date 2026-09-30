@@ -86,6 +86,25 @@ async def test_login_choices(client, configured, methods):
     assert page.headers["referrer-policy"] == "no-referrer"
 
 
+async def test_email_login_groups_password_and_link_as_alternatives(client):
+    from bs4 import BeautifulSoup
+
+    page = await client.get("/istota/login")
+    html = BeautifulSoup(page.text, "html.parser")
+    choices = html.find("fieldset", attrs={"class": "email-login"})
+    assert choices is not None
+    assert choices.legend.text == "Sign in with email"
+    password = choices.find("input", id="email-password")
+    link = choices.find("input", id="email-link")
+    assert password["type"] == link["type"] == "radio"
+    assert password["name"] == link["name"]
+    assert password.has_attr("checked") and not link.has_attr("checked")
+    assert choices.select_one(".password-panel form")["action"] == "/istota/login/email"
+    assert choices.select_one(".link-panel form")["action"] == "/istota/auth/login-link/request"
+    assert choices.select_one('.password-panel a[href="/istota/auth/reset"]')
+    assert csrf(page) != csrf(page, "/istota/auth/login-link/request")
+
+
 async def test_email_login_uses_live_profile_and_rotates_session(client, configured):
     configured._config.users = {"bob": UserConfig()}
     set_session(client, configured, {"planted": "old"})

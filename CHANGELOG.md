@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Sign-in now shows one email method at a time, with a choice between password and email link. Switching methods keeps the entered address, and password recovery sits beside the password label.
+
 - Ansible deployments now enable email login alongside Nextcloud login by default. Users still need a configured email login identity to sign in by email.
 
 - Ansible deployments that use the tmux brain now expect Claude CLI 2.1.280. The version check warns if the installed CLI differs.

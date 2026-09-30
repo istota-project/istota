@@ -690,7 +690,7 @@ body {
 .card {
   width: 100%;
   max-width: 22rem;
-  padding: 2.25rem 1.75rem 1.75rem;
+  padding: 1.75rem 1.5rem 1.5rem;
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);
   border-radius: 1rem;
@@ -701,9 +701,9 @@ body {
    badge chrome — and light theme inverts it to near-black rather than shipping
    a second asset. Mirrors .app-nav .app-name .sigil in app.css. */
 .mark {
-  height: 4.5rem;
+  height: 3.25rem;
   width: auto;
-  margin: 0 auto 1.25rem;
+  margin: 0 auto 1rem;
   display: block;
 }
 :root[data-theme='light'] .mark { filter: invert(1); }
@@ -719,7 +719,7 @@ h1 {
   letter-spacing: -0.01em;
 }
 .tagline {
-  margin: 0.4rem 0 1.75rem;
+  margin: 0.4rem 0 1.25rem;
   font-size: 0.85rem;
   color: var(--text-muted);
 }
@@ -732,18 +732,20 @@ h1 {
   padding: 0.7rem 1rem;
   border-radius: 0.6rem;
   border: 1px solid var(--border-default);
+  font-family: inherit;
   font-size: 0.9rem;
+  line-height: 1.4;
   font-weight: 500;
   text-decoration: none;
   color: var(--text-primary);
   background: var(--surface-raised);
   transition: border-color 0.15s, background 0.15s, transform 0.15s;
 }
-a.btn:hover {
+.btn:hover {
   border-color: var(--accent-amber);
   transform: translateY(-1px);
 }
-a.btn:focus-visible {
+.btn:focus-visible, input:focus-visible, .recovery:focus-visible {
   outline: 2px solid var(--accent-amber);
   outline-offset: 2px;
 }
@@ -771,7 +773,7 @@ a.btn:focus-visible {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  margin: 1rem 0 0.25rem;
+  margin: 1.25rem 0;
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -788,7 +790,48 @@ label { font-size: 0.85rem; color: var(--text-muted); }
 input { box-sizing: border-box; width: 100%; padding: 0.7rem; font: inherit;
   font-size: 16px; color: var(--text-primary); background: var(--surface-base);
   border: 1px solid var(--border-default); border-radius: 0.4rem; }
-button.btn { width: 100%; cursor: pointer; font: inherit; }
+button.btn { cursor: pointer; }
+.btn-primary { background: var(--text-primary); color: var(--surface-base); }
+.email-login {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.email-choice {
+  padding: 0.65rem 0.5rem;
+  border-bottom: 2px solid var(--border-default);
+  cursor: pointer;
+}
+.email-login > input:checked + label {
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+.email-login > input:focus-visible + label {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+.email-panel { display: none; grid-column: 1 / -1; padding-top: 1.25rem; }
+#email-password:checked ~ .password-panel,
+#email-link:checked ~ .link-panel { display: block; }
+.form-field { display: grid; gap: 0.4rem; }
+.password-label { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+.recovery { color: var(--text-muted); font-size: 0.75rem; text-decoration: none; }
+.recovery:hover { color: var(--text-primary); text-decoration: underline; }
+.form-help { margin: 0; color: var(--text-muted); font-size: 0.8rem; line-height: 1.5; }
 .form-error { color: var(--text-primary); }
 footer {
   font-size: 0.72rem;
@@ -802,7 +845,7 @@ footer a {
 footer a:hover { color: var(--accent-amber); border-bottom-color: var(--accent-amber); }
 @media (prefers-reduced-motion: reduce) {
   .btn { transition: none; }
-  a.btn:hover { transform: none; }
+  .btn:hover { transform: none; }
 }
 """
 
@@ -1013,21 +1056,39 @@ def _render_login_page(
         if "nextcloud" in methods:
             body += '<div class="divider">or</div>'
         body += (
+            '<fieldset class="email-login"><legend class="visually-hidden">Sign in with email</legend>'
+            '<input class="visually-hidden" type="radio" name="email-method" id="email-password" checked>'
+            '<label class="email-choice" for="email-password">Password</label>'
+            '<input class="visually-hidden" type="radio" name="email-method" id="email-link">'
+            '<label class="email-choice" for="email-link">Email link</label>'
+            '<div class="email-panel password-panel">'
             '<form method="post" action="/istota/login/email">'
             f'<input type="hidden" name="csrf_token" value="{escape(login_csrf)}">'
-            '<label for="login-email">Email</label>'
+            '<div class="form-field"><label for="login-email">Email</label>'
             f'<input id="login-email" type="email" name="email" value="{escape(email_prefill)}" '
-            'autocomplete="username" required>'
-            '<label for="login-password">Password</label>'
+            'autocomplete="username" required></div>'
+            '<div class="form-field"><div class="password-label"><label for="login-password">Password</label>'
+            '<a class="recovery" href="/istota/auth/reset">Forgot password?</a></div>'
             '<input id="login-password" type="password" name="password" '
-            'autocomplete="current-password" required>'
-            '<button class="btn" type="submit">Log in with email</button></form>'
-            '<a href="/istota/auth/reset">Forgot your password?</a>'
+            'autocomplete="current-password" required></div>'
+            '<button class="btn btn-primary" type="submit">Log in</button></form></div>'
+            '<div class="email-panel link-panel">'
             '<form method="post" action="/istota/auth/login-link/request">'
             f'<input type="hidden" name="csrf_token" value="{escape(link_csrf)}">'
-            '<label for="link-email">Email for a sign-in link</label>'
-            '<input id="link-email" type="email" name="email" autocomplete="email" required>'
-            f'<button class="btn" type="submit">{_MAIL_ICON}Send me a sign-in link</button></form>'
+            '<div class="form-field"><label for="link-email">Email</label>'
+            f'<input id="link-email" type="email" name="email" value="{escape(email_prefill)}" '
+            'autocomplete="email" aria-describedby="link-help" required></div>'
+            '<p class="form-help" id="link-help">We’ll email you a one-time sign-in link. No password needed.</p>'
+            f'<button class="btn btn-primary" type="submit">{_MAIL_ICON}Send sign-in link</button>'
+            '</form></div></fieldset>'
+            '<script>'
+            'const passwordEmail = document.getElementById("login-email");'
+            'const linkEmail = document.getElementById("link-email");'
+            'document.getElementById("email-link").addEventListener("change", () => {'
+            'linkEmail.value = passwordEmail.value;});'
+            'document.getElementById("email-password").addEventListener("change", () => {'
+            'passwordEmail.value = linkEmail.value;});'
+            '</script>'
         )
     return _render_form_page(bot_name, version, "Sign in to continue", body, mark)
 
