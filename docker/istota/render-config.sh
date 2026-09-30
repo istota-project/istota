@@ -655,6 +655,9 @@ max_message_chars = ${ISTOTA_SPEECH_GATE_MAX_MESSAGE_CHARS:-400}
 timeout_seconds = ${ISTOTA_SPEECH_GATE_TIMEOUT_SECONDS:-8.0}
 decision_retention_days = ${ISTOTA_SPEECH_GATE_DECISION_RETENTION_DAYS:-30}
 
+[rooms]
+shared_room_data_policy = "${ISTOTA_ROOMS_SHARED_ROOM_DATA_POLICY:-restrict}"
+
 [logging]
 level = "${ISTOTA_LOGGING_LEVEL:-INFO}"
 output = "${ISTOTA_LOGGING_OUTPUT:-console}"

@@ -306,6 +306,19 @@ class SpeechGateConfig:
 
 
 @dataclass
+class RoomsConfig:
+    """What a task in a room more than one human reads may reach.
+
+    Read by ``room_scopes.task_withheld_scopes``. ``"restrict"`` withholds every
+    scope the sender has not granted in that room; ``"off"`` gives a shared-room
+    task everything a private one gets. Any other value restricts, since a typo
+    must not reopen the disclosure the default closes.
+    """
+
+    shared_room_data_policy: str = "restrict"
+
+
+@dataclass
 class SchedulerConfig:
     # 5, not 2, because 5 is what every deployment actually runs: the Ansible
     # template, the Docker render, `config.example.toml` and `istota setup` all
@@ -2029,6 +2042,7 @@ class Config:
     whatsapp: WhatsAppConfig = field(default_factory=WhatsAppConfig)
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     speech_gate: SpeechGateConfig = field(default_factory=SpeechGateConfig)
+    rooms: RoomsConfig = field(default_factory=RoomsConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     devbox: DevboxConfig = field(default_factory=DevboxConfig)
