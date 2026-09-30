@@ -172,7 +172,16 @@ reconcile_min_dwell_sec: int = 60
 
 ### `WebConfig` (`[web]`) — auth mode + token retention
 ```
-auth: str = "nextcloud"            # "nextcloud" | "none"; env ISTOTA_WEB_AUTH; unknown → warning + "nextcloud"
+auth: list[str] = ["nextcloud"]    # nextcloud | email | none (exclusive); env ISTOTA_WEB_AUTH
+auth_enrol_ttl_hours: int = 168
+auth_reset_ttl_hours: int = 1
+auth_login_link_ttl_minutes: int = 15
+auth_min_password_length: int = 12
+auth_throttle_window_seconds: int = 900
+auth_throttle_max_email: int = 10
+auth_throttle_max_ip: int = 30
+trusted_proxy_hops: int = 0
+auth_mail_link_max_email: int = 3
 port: int = 8766
 token_storage: str = "ephemeral"   # "ephemeral" | "encrypted"; anything else → warning + ephemeral
 max_avatar_kb: int = 4096          # profile-picture upload cap; header + running total; 0 = uploads off
@@ -197,13 +206,10 @@ is one response header, so a Nextcloud that does not send it imports nothing and
 `doctor`'s `web.avatar_import` says so — the job records what the last tick saw
 in `shared_kv`, because that check opens no socket. Inert on a local storage
 backend. Ansible: `istota_web_avatar_import_from_nextcloud`.
-`auth = "none"` is the local single-user no-auth mode: `web_app._require_api_auth`
-early-returns the fixed local user (`Config.local_user_id`), `_user_is_web_admin`
-is True for that user, `_verify_origin` no-ops, and `_resolve_session_secret`
-generates a random per-process key instead of crashing import. `serve` refuses to
-bind no-auth to a non-loopback host (`web_app.assert_no_auth_bind_safe`). Default
-`"nextcloud"` = unchanged server behaviour. See AGENTS.md "Local single-user
-install".
+`normalize_auth_methods` accepts a list, a bare string or comma-separated names, drops unknown methods with a warning and makes `none` exclusive. Empty input preserves the Nextcloud default. `WebConfig.__post_init__`, the config hook and the environment override use that one normalizer; readers use `has_method`. Email can run alongside Nextcloud. Link TTLs and password/send budgets are config-only; `trusted_proxy_hops = 0` skips the IP dimension for proxied requests.
+
+`auth = ["none"]` is the local single-user mode: `_require_api_auth` returns the local admin and `_verify_origin` no-ops. Only `istota serve` can authorize startup through its in-process loopback marker after checking the actual bind. Direct uvicorn, Docker and Ansible refuse it, even on loopback; a SIGHUP attempting the same bypass retains the previous config. Never put a public proxy in front of the no-auth launcher. `web_session_secret.resolve` shares the environment, config and local/dev fallback order between the web process and doctor. Authenticated deployments require a persistent secret.
+
 `"encrypted"` retains the login's user-scoped Nextcloud OAuth pair in the
 `web_user_tokens` framework table, encrypted with the **web-only**
 `ISTOTA_WEB_TOKEN_KEY` env var (≥32 chars; distinct scrypt salt from the
@@ -281,7 +287,7 @@ Explicit CalDAV override. When any field is set it overrides the value the
 derive from `[nextcloud]` — so a local install can point calendar at an external
 CalDAV server (Radicale, Fastmail, Google) with no Nextcloud. All-blank (default)
 = NC derivation, so server deployments are unchanged. Related: `Config.is_standalone`
-(blank `nextcloud.url` + `web.auth == "none"`) and `Config.local_user_id` (the
+(blank `nextcloud.url` + `web.auth == ["none"]`) and `Config.local_user_id` (the
 sole configured user, for no-auth mode).
 
 ### `SiteConfig`
@@ -1046,10 +1052,10 @@ The framework `istota.db` and the four per-user module DBs (feeds/health/locatio
 
 A second, first-class deployment shape alongside the server/Ansible/Docker one: a slimmed-down local install a single person runs on their own machine (spec in `Specs/Done/local-single-user-install.md`, docs in `docs/getting-started/local-install.md`). No Nextcloud, no server, no bwrap, no auth. Mostly config — the `has_workspace=True` branch is already plain POSIX I/O, so pointing `workspace_path` at a local dir (default `~/.istota`) lights up the whole workspace layout on local disk; `talk.enabled=false` drops Talk; sandbox/proxies are independently guarded and no-op cleanly. The genuinely new code:
 
-- **No-auth web mode** — `[web] auth = "nextcloud" | "none"` (default `"nextcloud"`; env `ISTOTA_WEB_AUTH`). In `"none"` mode `web_app._require_api_auth` early-returns a fixed local-user dict (the single configured user, `Config.local_user_id`), `_user_is_web_admin` is True for that user, and `_verify_origin` is a no-op — all gated on `_no_auth_mode()`, an in-function flag check (not `dependency_overrides`) so it survives SIGHUP reloads. `_resolve_session_secret` generates a random per-process key in no-auth mode instead of crashing import. **Loopback guard**: `assert_no_auth_bind_safe(auth, host)` refuses to serve no-auth on a non-loopback bind (structural, not just documented). The frontend never redirects to `/login` because `/api/me` always 200s.
+- **No-auth web mode** — `[web] auth = ["none"]` is exclusive, local-only and accepted only by `istota serve` after checking its loopback bind and setting the in-process marker. Direct uvicorn and public proxy deployments refuse it; unsafe SIGHUP changes retain the prior config. The default is `["nextcloud"]`; email can be enabled alone or beside Nextcloud. See `WebConfig` above.
 - **`istota serve`** (`serve.py` + `cli.cmd_serve`) — combined launcher: runs `scheduler.run_daemon(config, install_signal_handlers=False, ready_event=…)` on a worker thread (signal handlers are main-thread-only) and uvicorn on the main thread in one process, so web-chat `source_type="web"` tasks flow through the normal worker pool. `scheduler.request_shutdown()` sets the shared `_shutdown_requested` flag; `run_daemon` now clears it at start, sets `ready_event` before the loop, and raises `_DaemonAlreadyRunning` (instead of `return`) on flock contention so `serve` reports "already running" (the standalone `main()` catches it → clean exit). `bootstrap_checks` fails with a "run `istota setup` first" error when the DB/user is missing. `serve` sources `~/.config/istota/istota.env` (non-clobbering) before config load and sets `ISTOTA_CONFIG_PATH` so the web app's own `load_config()` (in its lifespan) sees a `-c` path. The daemon lock path is the module constant `scheduler.DAEMON_LOCK_PATH` (overridable in tests).
 - **`istota setup`** (`setup_wizard.py` + `cli.cmd_setup`) — interactive first-run wizard: workspace, brain detection (`shutil.which("claude")` → offer the subscription backend, else collect an OpenAI-compatible base_url/model/key), user identity, port, and a grouped module-enablement block (location → money → email). Money is on by default (server parity); opting out writes `disabled_modules` to both the TOML block and the profile row (the row is what `is_module_enabled` reads first). Writes `~/.config/istota/config.toml` + a `0600` sibling `istota.env`, inits the DB, upserts the user profile, seeds the workspace via the shared `storage.ensure_workspace_for_user`. Idempotent; `--force` overwrites, `--yes` non-interactive (`--no-money` opts out of money in a `--yes` run). The wizard's renderers are pure functions and I/O is injected (`input_fn`/`which_fn`) for testing.
-- **Standalone admin notice** — `Config.is_standalone` (blank `nextcloud.url` + `web.auth == "none"`) drives a `runtime: {mode, caveats}` block on `GET /api/admin/stats` (`web_app._admin_runtime_section`); caveats are **derived from what's actually disabled** (security caveat always present in standalone), and the SvelteKit admin page renders a collapsible banner when `runtime.mode == "standalone"`.
+- **Standalone admin notice** — `Config.is_standalone` (blank `nextcloud.url` + `web.auth == ["none"]`) drives a `runtime: {mode, caveats}` block on `GET /api/admin/stats` (`web_app._admin_runtime_section`); caveats are **derived from what's actually disabled** (security caveat always present in standalone), and the SvelteKit admin page renders a collapsible banner when `runtime.mode == "standalone"`.
 - **CalDAV decoupling** — new optional `[caldav] url/username/password` override the NC-derived `caldav_*` properties, so a local user can point calendar at any external CalDAV server; off unless configured.
 - **Packaging** — `local` extras = web+feeds+calendar+email+markets (`install.sh --standalone` installs `istota[local,money,location]`, adding those two modules' deps on top); the release build (`scripts/build-web-static.sh`) copies `web/build` → `src/istota/web_static` (gitignored, `artifacts`-forced into the wheel), and `web_app._pick_static_dir` falls back to the packaged dir when the repo-relative `web/build` is absent. `schema.sql` lives at the repo root (outside the package dir) but `db.init_db` needs it at runtime, so it is `force-include`d into the wheel as `istota/schema.sql`; `db._resolve_schema_path()` prefers that packaged copy and falls back to the source-tree `<repo>/schema.sql`, so a non-editable `uv tool install` works with no checkout.
 - **Bare-port redirect** — the whole UI lives under `/istota` (the base is baked into the SvelteKit build and, on the server, nginx routes `/istota/` → web). A standalone/direct-uvicorn run has no nginx, so `web_app._root_redirect` (`@app.get("/")`) 307-redirects `/` → `/istota/` and `serve` prints the bare-port URL. On the server nginx owns `/` (→ Nextcloud), so this app-level handler is only reached on direct access.

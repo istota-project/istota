@@ -740,6 +740,7 @@ reconcile_min_dwell_sec = {{ istota_location_reconcile_min_dwell_sec }}
 {% if istota_web_enabled %}
 
 [web]
+auth = {{ istota_web_auth | to_json }}
 enabled = true
 port = {{ istota_web_port }}
 oauth2_provider = "{{ istota_web_oauth2_provider | istota_toml_escape }}"

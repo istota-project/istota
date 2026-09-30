@@ -1683,7 +1683,7 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # hostname = "istota.example.com"
 
 # ============================================================================
-# Authenticated Web Interface (Nextcloud built-in OAuth2)
+# Authenticated web interface (Nextcloud or native email login)
 # ============================================================================
 # Login-protected web UI backed by Nextcloud's built-in OAuth2 provider
 # (no extra NC apps required). Register an OAuth 2.0 client in
@@ -1695,12 +1695,24 @@ db_backup_interval = 86400          # seconds between snapshots (daily)
 # enabled = false
 # port = 8766
 #
-# How the web UI authenticates. "nextcloud" (the default) uses the OAuth2 flow
-# below. "none" bypasses authentication entirely: every request is the single
-# configured local user, who is always admin. That is the single-user local
-# install's shape, and the web app refuses to start with it on anything but a
-# loopback bind. Overridable by ISTOTA_WEB_AUTH.
-# auth = "nextcloud"                               # "nextcloud" | "none"
+# Login methods: nextcloud, email, or both. Bare strings remain accepted.
+# Migrate with ["nextcloud", "email"], attach identities with istota auth add,
+# then select ["email"] after every user has an identity. Passwords are optional;
+# email sign-in links work without them when SMTP is configured.
+# ["none"] is exclusive and only supported by istota serve on loopback.
+# Direct uvicorn, Docker and Ansible refuse none, even on a loopback backend.
+# Never put a public proxy in front of the local no-auth launcher.
+# ISTOTA_WEB_AUTH accepts comma-separated method names and overrides this value.
+# auth = ["nextcloud"]
+# auth_enrol_ttl_hours = 168
+# auth_reset_ttl_hours = 1
+# auth_login_link_ttl_minutes = 15
+# auth_min_password_length = 12
+# auth_throttle_window_seconds = 900
+# auth_throttle_max_email = 10
+# auth_throttle_max_ip = 30
+# auth_mail_link_max_email = 3
+# trusted_proxy_hops = 0  # Set only when the backend is restricted to trusted proxies.
 # oauth2_provider = "https://cloud.example.com"   # public NC URL the browser hits
 # oauth2_client_id = "istota-web"
 # oauth2_client_secret = ""                        # or ISTOTA_WEB_OAUTH2_CLIENT_SECRET env var

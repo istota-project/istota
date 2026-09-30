@@ -75,6 +75,7 @@ src/istota/
 ├── host_pressure.py      # Host memory instrumentation: PSI/meminfo/tmpfs, shmem attribution → maintenance.md
 ├── webhook_receiver.py   # FastAPI: Overland GPS, etc.
 ├── garmin_routes.py      # Module-agnostic Garmin auth router (/api/garmin/*), shared by Health + Location
+├── web_auth.py           # Native email identities, scrypt passwords, one-use links and session epochs
 ├── web_app.py            # Authenticated web UI (Nextcloud OAuth2 + admin dashboard)
 ├── web_shutdown.py       # Whether the web process is stopping, where the three SSE generators can see it → leaf-modules.md
 ├── web_router_stubs.py   # The auth/CSRF stubs and the user-context factory every module router shares → leaf-modules.md
@@ -198,6 +199,7 @@ Full posture, with the reasoning and the shape-by-shape caveats, in `.claude/rul
 
 - **Sandbox** (`bwrap`): per-user filesystem isolation. Linux + bubblewrap is the only supported deployment. The shipped Docker stack grants neither `seccomp:unconfined` nor `systempaths=unconfined`, so it runs every task unsandboxed.
 - **The native brain's tools are in the sandbox too**, one namespace per task attempt: `NativeBrain` spawns `istota.tool_server` through `build_bwrap_cmd(..., profile=NATIVE)` over an inherited socketpair, and the six core tools run in there. `executor.native_fs_roots` is still enforced and is the only confinement on the unsandboxed shapes.
+- **Native web credentials**: password hashes and token digests live in the framework DB, bound into no sandbox. Email identities are separate from inbound email routing addresses.
 - **No databases in the sandbox**: `build_bwrap_cmd` ends by masking `db_path.parent` and `module_db_root()` with an empty read-only tmpfs, after every other mount. Nothing binds the framework DB for anyone, and `sandbox_ro_paths` defaults to `[]`. Reads and writes go through skill CLIs that run host-side and scope by `ISTOTA_USER_ID`; the masks are defence in depth behind that.
 - **Session logs are unbound** and a transcript holds the assembled prompt: `{db_path.parent}/logs/{user_id}/` is bound at no path and is in no `native_fs_roots` root. That is an absence rather than a guard, so keep `sandbox_ro_paths` narrow and add no `user_resources` row naming it. A task reads its own finished transcripts through `istota-skill tasks transcript`.
 - **One admin's repositories are not in another's sandbox**: `developer.repos_dir` is a root of per-user subtrees and `build_bwrap_cmd` binds `{repos_dir}/{user_id}`, never the root. The package cache is derived inside that subtree, gated on the repos bind's own condition.

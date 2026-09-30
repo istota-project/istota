@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The web UI supports email and password login or one-time email sign-in links, alongside Nextcloud login or on its own. Admins can invite users and manage login access; operators can print recovery links when mail is unavailable. Changing a password signs out every existing session.
+
 - You can ask another user of your installation a question, and their explicit reply comes back unchanged to the private conversation you asked from. The question reaches them in their default room (web chat, and Talk when the room is bound), on WhatsApp or by SMS; they can pick where in Settings, and their choice outranks yours. It also waits in their notification inbox until it is answered. They answer by replying to it, quoting it on WhatsApp or sending `!relay reply`, and nothing else they say is shared. You approve each question's exact wording first, unless the message you sent named the recipient and asking was the first thing the task did. No permission is needed beforehand, and `!relay block` stops questions from a particular user; blocked or uncertain answers stay readable through `!relay show` for 30 days.
 
 - A running task can send a separate message to your own WhatsApp while keeping its final reply in the original conversation. Queued messages have a delivery status, and retrying the same request does not send it twice.
@@ -157,6 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A Docker build of the web UI no longer prints `/bin/sh: git: not found` twice. That stage carries no git and has no repository in its context, so the version stamp was already falling back to `unknown`; what reached the log was the shell's own error, which reads as a build failure. The same two lines appeared in any `npm run build` run outside a checkout.
 
 ### Security
+
+- Deployments behind the shipped public proxies now refuse no-auth mode at startup, including loopback web backends. No-auth is supported only by the direct local launcher on loopback. Email login token URLs are excluded from the shipped proxy and web server access logs.
 
 - Browser logins and site storage are isolated per user and persist across tasks and restarts. The operator console opens the selected user's browser; a login completed there no longer reaches other users. Credential fills refuse an older shared-profile browser until its image is rebuilt and deployed.
 - The skill proxy now serves only processes from its own task. Without bubblewrap (macOS, or a container whose sandbox probe fails) every task shares one uid, so one task could connect to another's socket and use that user's credentials and vault entries. **Upgrade note:** a command backgrounded past the end of its shell loses proxy access, and `istota doctor --only security.proxy_peer_check` warns on an unsandboxed multi-user host, where isolation between tasks stays best-effort.

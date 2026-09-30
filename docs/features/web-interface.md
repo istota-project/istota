@@ -1,16 +1,53 @@
 # Web interface
 
-SvelteKit frontend with FastAPI backend, authenticated against Nextcloud's built-in OAuth2 provider.
+SvelteKit frontend with FastAPI backend. Sign in with Nextcloud, an email address and password, or a one-time email link, according to the deployment's enabled methods.
 
-The web UI is per-user: each authenticated user sees only the features they have configured (feeds, money, location, etc.). Any user with a Nextcloud account and an entry in istota's `config.users` (or a row in the `user_profiles` table) can log in.
+The web UI is per-user: each authenticated user sees only the features they have configured (feeds, money, location, etc.). Nextcloud login requires a configured user. Email login requires a live user profile and an enabled email identity, read from the database on each login.
 
 ## Prerequisites
 
-- A Nextcloud instance (the same one istota connects to for Talk and files)
+- A Nextcloud instance for Nextcloud login, or operator-created email identities for email login
 - An nginx reverse proxy (or equivalent) fronting the istota web service
 - Node.js 20+ for building the SvelteKit frontend
 
 No extra Nextcloud apps are required — istota uses NC's built-in OAuth 2.0 provider.
+
+## Email login
+
+Set `[web] auth = ["email"]` or `["nextcloud", "email"]`, provide a persistent session signing secret, and set `[site] hostname` to the public hostname. `ISTOTA_WEB_AUTH=email` or `nextcloud,email` overrides the config. Nextcloud remains the default regardless of the storage backend. Use HTTPS outside localhost.
+
+Bootstrap the first administrator from the deployment shell, against the deployment's config and database:
+
+```bash
+istota init
+istota user ensure alice --display-name Alice --email alice@example.com
+istota auth add alice --email alice@example.com --print-link
+```
+
+Add `alice` to `/etc/istota/admins` before inviting more users. An empty allowlist grants every user task-admin privileges for historical compatibility, while the web admin pane requires an explicit entry. Doctor fails this combination when multiple email identities exist. The printed enrolment link opens a password form and signs the user in on submission. Set a password for the first administrator so mail failure cannot prevent login. `istota auth set-password alice` prompts privately; `--password-stdin` reads one line for automation. There is no password argument on the command line.
+
+The login page has password and email-link forms whenever email is enabled. A sign-in email contains a single-use link, valid for 15 minutes by default. Opening it only shows a confirmation form; pressing Sign in consumes it. Enrolment and reset links instead set a password and sign in on submission, with default lifetimes of seven days and one hour. Anonymous reset and sign-in requests share a send budget and return the same confirmation for unknown, disabled and throttled addresses. Passwordless identities can sign in through mail; they are not incomplete accounts.
+
+| Operator command | Effect |
+|---|---|
+| `istota auth list` | Profiles and identities, password and disabled flags, last login, orphan status |
+| `istota auth add alice --email alice@example.com` | Attach email to an existing profile; add `--create-user` to create one |
+| `istota auth invite alice --send` | Send an enrolment link |
+| `istota auth reset alice --print-link` | Print a password-reset link when mail is unavailable |
+| `istota auth login-link alice --print-link` | Print a one-time sign-in link without setting a password |
+| `istota auth disable alice` / `enable alice` | Change login availability and revoke existing sessions |
+| `istota auth logout-all alice` | Revoke every session for an identity |
+| `istota auth remove alice` | Remove login identity and invalidate its links; preserve profile and user data |
+
+All three link commands accept `--send` or `--print-link`; omitted means send. `auth add` has `--send-invite` and `--print-link`. Successful commands end with `state=created`, `state=updated` or `state=unchanged`; list always reports unchanged, and issued links and credential operations report updated. Identity changes are separate from inbound routing addresses.
+
+The admin Users pane can attach email to an existing profile, create a profile, send links, disable login and remove an identity. It refuses disabling or removing the last enabled administrator identity, even with Nextcloud also enabled. The operator CLI remains the recovery authority and can override that protection. Disable blocks both email and Nextcloud login for that identity. Removing an identity blocks email login and revokes its sessions, but leaves Nextcloud login possible if that method is enabled. Nextcloud-only profiles have no per-user revoke or disable control until an email identity is attached. New users can sign in immediately; their background work starts after the scheduler reloads or restarts.
+
+Settings has a Security card for email sessions. Password users supply their current password to change it; the change signs out every tab and device, including the caller. Passwordless users see a set-password link. Attaching an identity, changing its email or password, disabling it, and signing out everywhere revoke the user's existing sessions, including Nextcloud sessions. Epochs start with a random generation and then increase, so deleting and recreating an identity cannot revive old cookies. Database read errors fail closed. Removing an authentication method rejects sessions minted by that method. Active streams repeat the checks and close after revocation.
+
+Run `istota doctor --only web.auth` for method source, hostname, mail configuration, identity counts, admin allowlist, proxy IP throttle and session-secret checks. Mail configuration checks do not send a probe. The IP verification budget is inactive for proxied requests until `web.trusted_proxy_hops` is configured; only enable it when the backend cannot be reached around those proxies.
+
+The shipped proxies suppress access logs for `/istota/auth/set-password` and `/istota/auth/login-link`; both web launchers disable uvicorn access logs. An outer proxy must do the same or omit query strings, since the token grants access. Authentication pages are not cached and send no referrer. `["none"]` is reserved for the direct `istota serve` loopback launcher without a public reverse proxy; Docker, Ansible and direct uvicorn refuse it.
 
 ## Nextcloud OAuth2 setup
 
@@ -35,6 +72,7 @@ In your `config.toml` (or via Ansible vars):
 [web]
 enabled = true
 port = 8766
+auth = ["nextcloud"]
 oauth2_provider = "https://cloud.example.com"
 oauth2_client_id = "your-client-id-from-step-1"
 oauth2_client_secret = ""    # or set ISTOTA_WEB_OAUTH2_CLIENT_SECRET env var
@@ -81,9 +119,27 @@ The Ansible role handles this automatically when `istota_web_enabled` is set and
 
 The web app listens on `127.0.0.1:{port}` and should not be exposed directly. Put it behind nginx (or your preferred reverse proxy).
 
-The Ansible role generates an nginx config automatically. The relevant block:
+The Ansible role generates an nginx config automatically. The general location is below. Email login also requires the two exact token locations so query strings never enter access logs:
 
 ```nginx
+location = /istota/auth/set-password {
+    access_log off;
+    proxy_pass http://127.0.0.1:8766;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location = /istota/auth/login-link {
+    access_log off;
+    proxy_pass http://127.0.0.1:8766;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
 location /istota/ {
     proxy_pass http://127.0.0.1:8766/istota/;
     proxy_set_header Host $http_host;
@@ -98,7 +154,7 @@ TLS is required — session cookies are set with `secure=true` and the registere
 ### 5. Run
 
 ```bash
-uvicorn istota.web_app:app --host 127.0.0.1 --port 8766
+uvicorn istota.web_app:app --no-access-log --host 127.0.0.1 --port 8766
 ```
 
 The Ansible role installs this as the `istota-web` systemd service:
@@ -109,16 +165,16 @@ systemctl status istota-web
 journalctl -u istota-web -f
 ```
 
-## How authentication works
+## How Nextcloud authentication works
 
 1. User visits `https://{hostname}/istota/` and is redirected to `/istota/login`
 2. Istota redirects to Nextcloud's OAuth 2.0 authorization endpoint (`{oauth2_provider}/index.php/apps/oauth2/authorize`)
 3. User authenticates with their Nextcloud credentials (or is already logged in)
 4. Nextcloud redirects back to `/istota/callback` with an authorization code
 5. Istota exchanges the code for an access token; NC inlines `user_id` in the token response, so identity is known without a second round-trip
-6. The access token is dropped immediately — only the username + display_name are kept in the session
+6. Token retention follows `web.token_storage`: ephemeral discards it; encrypted retains it with the web-only token key. The cookie carries the user and authentication method/epoch.
 7. If the username exists in `config.users` (or auto-seeds a `user_profiles` row), a signed session cookie is set (7-day expiry)
-8. Subsequent requests use the session cookie — no re-authentication until expiry or logout
+8. Subsequent requests validate the session method and any attached email identity, including its disabled state and credential epoch
 
 If the token response doesn't include `user_id` (older NC versions or custom auth backends), istota falls back to fetching identity from the OCS userinfo endpoint with the bearer token before discarding it.
 
@@ -170,7 +226,15 @@ A **Browsers** page lists each live browser instance (user, slot, idle time) and
 
 | Route | Purpose |
 |---|---|
-| `/istota/login` | OAuth2 redirect |
+| `/istota/login` | Enabled login methods, password and email-link forms |
+| `/istota/login/email` | Password sign-in (POST) |
+| `/istota/auth/login-link/request` | Request a sign-in link (POST) |
+| `/istota/auth/login-link` | Confirm a one-time sign-in link (GET/POST) |
+| `/istota/auth/reset` | Request a password-reset link (GET/POST) |
+| `/istota/auth/set-password` | Enrolment or reset form (GET/POST) |
+| `/istota/api/account/password` | Change password and end every session (POST) |
+| `/istota/api/admin/users` | List or create profiles and email identities |
+| `/istota/api/admin/users/{user_id}` | Remove an email identity (DELETE); action suffixes: invite, login-link, reset, disable, logout-all (POST) |
 | `/istota/callback` | Token exchange + identity resolution |
 | `/istota/logout` | Session clear |
 | `/istota/api/me` | User info + features |

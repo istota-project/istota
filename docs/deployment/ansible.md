@@ -324,3 +324,9 @@ When adding new fields to the config system:
 2. Update `config/config.example.toml`
 3. Update `deploy/ansible/defaults/main.yml`
 4. Update `deploy/ansible/templates/config.toml.j2`
+
+## Signing in without Nextcloud
+
+Set `istota_web_auth: ["email"]`, configure `istota_hostname`, vault a persistent `istota_web_secret_key`, and configure SMTP for password resets and email sign-in links. The role defaults to `["nextcloud"]`. Use `["nextcloud", "email"]` while attaching identities to existing users, then select `["email"]` when every user can sign in that way. See [email login setup](../features/web-interface.md#email-login) for bootstrap and recovery commands.
+
+The direct uvicorn unit refuses `["none"]` even though it binds loopback: nginx publishes that backend. No-auth is supported only by `istota serve` on loopback, without a public proxy. The role excludes both email token paths from nginx access logs and disables uvicorn access logs. Apply the same exclusion to any outer proxy.
