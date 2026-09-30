@@ -35,10 +35,16 @@
 </script>
 
 {#if auth?.method === 'email'}
-  <SettingsCard title="Security">
-    <p>Login email: <strong>{auth.email}</strong></p>
+  <SettingsCard
+    title="Security"
+    description={auth.can_change_password
+      ? 'Changing your password signs you out of every session, including this tab.'
+      : 'You sign in with an email link. To set a password, request a reset link using your login email below.'}
+  >
+    <SettingsField label="Login email">
+      <Input type="email" value={auth.email ?? ''} autocomplete="username" readonly />
+    </SettingsField>
     {#if auth.can_change_password}
-      <p>Changing your password signs you out of every session, including this tab.</p>
       <form onsubmit={submit} class="password-form">
         <SettingsField label="Current password">
           <Input
@@ -68,18 +74,20 @@
           />
         </SettingsField>
         {#if error}<p class="banner error" role="alert">{error}</p>{/if}
-        <div>
-          <Button type="submit" variant="primary" loading={busy} loadingLabel="Changing password…"
-            >Change password</Button
+        <div class="actions">
+          <Button
+            type="submit"
+            variant="primary"
+            size="sm"
+            loading={busy}
+            loadingLabel="Changing password…">Change password</Button
           >
         </div>
       </form>
     {:else}
-      <p>
-        You sign in with an email link. To set a password, request a reset link using your login
-        email above.
-      </p>
-      <Button href="{base}/auth/reset" variant="secondary">Set a password</Button>
+      <div class="actions">
+        <Button href="{base}/auth/reset" variant="secondary" size="sm">Set a password</Button>
+      </div>
     {/if}
   </SettingsCard>
 {/if}
@@ -89,5 +97,11 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
   }
 </style>
