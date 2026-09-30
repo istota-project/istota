@@ -164,9 +164,10 @@ def test_task_retention_explicitly_removes_snapshots(database):
 
 
 def test_forge_uses_live_config_on_every_check(database):
-    from istota.config import DeveloperConfig
+    from istota.config import Config, DeveloperConfig
     from istota.credential_broker.bindings import sync_forge_bindings
-    developer = DeveloperConfig(github_token="fixture-token")
+    developer = DeveloperConfig(enabled=True, github_token="fixture-token")
+    config = Config(developer=developer)
     with db.get_db(database) as conn:
         sync_forge_bindings(conn, "alice", developer)
         grants.put_grant(conn, "alice", "forge.github")
@@ -174,9 +175,9 @@ def test_forge_uses_live_config_on_every_check(database):
     with db.get_db(database) as conn:
         grants.ensure_credential_grants(conn, identifier, "alice")
         args = (conn, identifier, "alice", "forge.github", "api.github.com", "GET", "authorization")
-        assert grants.check_credential_grant(*args, developer=developer) is None
+        assert grants.check_credential_grant(*args, config=config) is None
         developer.github_token = ""
-        assert grants.check_credential_grant(*args, developer=developer) == "credential_not_bound"
+        assert grants.check_credential_grant(*args, config=config) == "credential_not_bound"
 
 
 def test_deleted_credential_cannot_inherit_a_previous_grant(database):
@@ -202,3 +203,23 @@ def test_room_deletion_removes_task_snapshot(database):
         grants.ensure_credential_grants(conn, identifier, "alice")
         assert db.delete_web_chat_room(conn, room.id, "alice")
         assert conn.execute("SELECT count(*) FROM credential_task_grants").fetchone()[0] == 0
+
+
+def test_live_forge_check_rechecks_admin_and_enabled(database):
+    from istota.config import Config, DeveloperConfig
+    from istota.credential_broker.bindings import sync_forge_bindings
+    config = Config(developer=DeveloperConfig(enabled=True, github_token="fixture-token"),
+                    admin_users={"alice"})
+    with db.get_db(database) as conn:
+        sync_forge_bindings(conn, "alice", config.developer)
+        grants.put_grant(conn, "alice", "forge.github")
+        identifier = task(conn)
+    with db.get_db(database) as conn:
+        grants.ensure_credential_grants(conn, identifier, "alice")
+        args = (conn, identifier, "alice", "forge.github", "api.github.com", "GET", "authorization")
+        assert grants.check_credential_grant(*args, config=config) is None
+        config.admin_users = {"bob"}
+        assert grants.check_credential_grant(*args, config=config) == "credential_not_granted"
+        config.admin_users = {"alice"}
+        config.developer.enabled = False
+        assert grants.check_credential_grant(*args, config=config) == "credential_not_granted"

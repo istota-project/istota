@@ -74,3 +74,23 @@ async def test_rooms_and_forge_identity_are_checked(signed_client, config):  # n
     for payload in [{"methods": ["CONNECT"]}, {"allow_scheduled": "false"}, {"user_id": "bob"}]:
         response = await signed_client.put(base + "/portal", json=payload, headers={"Origin": "https://example.com"})
         assert response.status_code == 400
+
+
+async def test_deleted_room_can_be_removed_from_grant(signed_client, config):  # noqa: F811 -- imported fixture
+    base = "/istota/api/settings/credentials"
+    origin = {"Origin": "https://example.com"}
+    with db.get_db(config.db_path) as conn:
+        kept = db.create_web_chat_room(conn, "alice", "Personal")
+        removed = db.create_web_chat_room(conn, "alice", "Old room")
+    response = await signed_client.put(base + "/portal", headers=origin,
+                                      json={"scope_mode": "rooms", "rooms": [kept.token, removed.token]})
+    assert response.status_code == 200
+    with db.get_db(config.db_path) as conn:
+        db.delete_web_chat_room(conn, removed.id, "alice")
+    data = (await signed_client.get(base)).json()
+    assert data["rooms"] == [{"token": kept.token, "name": "Personal"}]
+    assert removed.token in data["credentials"][0]["grant"]["rooms"]
+    response = await signed_client.put(base + "/portal", headers=origin,
+                                      json={"scope_mode": "rooms", "rooms": [kept.token], "methods": ["GET"]})
+    assert response.status_code == 200
+    assert response.json()["grant"]["rooms"] == [kept.token]

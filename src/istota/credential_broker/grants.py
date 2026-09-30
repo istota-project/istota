@@ -131,7 +131,7 @@ def ensure_credential_grants(conn, task_id, user_id):
         (task_id, user_id))}
 
 
-def check_credential_grant(conn, task_id, user_id, name, host, method, header, *, developer=None):
+def check_credential_grant(conn, task_id, user_id, name, host, method, header, *, config=None):
     """Return a refusal reason, or None. Read live policy and binding on every use."""
     if not conn.in_transaction:
         conn.execute("BEGIN")
@@ -147,7 +147,9 @@ def check_credential_grant(conn, task_id, user_id, name, host, method, header, *
         return "credential_not_granted"
     binding = get_binding(conn, user_id, name)
     if binding and binding["source"] == "config":
-        binding = forge_bindings(developer).get(name) if developer is not None else None
+        if config is None or not config.developer.enabled or not config.is_admin(user_id):
+            return "credential_not_granted"
+        binding = forge_bindings(config.developer).get(name)
     elif binding and not conn.execute(
             "SELECT 1 FROM secrets WHERE user_id=? AND service='vault_entries' AND key=?",
             (user_id, name)).fetchone():

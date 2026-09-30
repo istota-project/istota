@@ -21,6 +21,7 @@
   let rooms: string[] = $state([]);
   let methods: string[] = $state([]);
   let scheduled = $state(false);
+  let omittedRooms = $state(false);
   let confirmExisting = $state(false);
   const defaultMethods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH'];
   const allMethods = [...defaultMethods, 'DELETE', 'OPTIONS'];
@@ -41,7 +42,9 @@
     const grant = data?.credentials.find((c) => c.name === name)?.grant;
     editing = name;
     scope = grant?.scope_mode ?? 'all';
-    rooms = [...(grant?.rooms ?? [])];
+    const availableRooms = new Set(data?.rooms.map((room) => room.token));
+    rooms = (grant?.rooms ?? []).filter((room) => availableRooms.has(room));
+    omittedRooms = rooms.length !== (grant?.rooms.length ?? 0);
     methods = [...(grant?.methods ?? defaultMethods)];
     scheduled = grant?.allow_scheduled ?? false;
     error = '';
@@ -133,6 +136,9 @@
         ]}
       />
     </label>
+    {#if omittedRooms}<p class="hint">
+        Unavailable rooms have been removed from this selection.
+      </p>{/if}
     {#if scope === 'rooms'}
       {#each data?.rooms ?? [] as room}
         <label><input type="checkbox" bind:group={rooms} value={room.token} /> {room.name}</label>

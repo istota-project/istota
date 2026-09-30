@@ -80,3 +80,39 @@ it('requires confirmation for grant-existing and keeps a failed save visible', a
     expect(screen.getByRole('dialog').textContent).toContain('Could not save policy'),
   );
 });
+
+it('drops unavailable room selections so a grant can still be narrowed', async () => {
+  vi.mocked(getCredentialGrants).mockResolvedValue({
+    credentials: [
+      {
+        name: 'portal',
+        source: 'vault',
+        hosts: ['portal.example'],
+        headers: ['authorization'],
+        revealable: false,
+        grant: {
+          scope_mode: 'rooms',
+          rooms: ['live-room', 'deleted-room'],
+          methods: ['GET'],
+          allow_scheduled: false,
+        },
+      },
+    ],
+    rooms: [{ token: 'live-room', name: 'Personal' }],
+    grant_existing_available: false,
+    sandboxed: true,
+  });
+  vi.mocked(saveCredentialGrant).mockResolvedValue({ ok: true });
+  render(CredentialGrantsCard);
+  await screen.findByText('portal.example');
+  await fireEvent.click(screen.getByRole('button', { name: 'Edit grant for portal' }));
+  await fireEvent.click(screen.getByRole('button', { name: 'Save grant' }));
+  await waitFor(() =>
+    expect(saveCredentialGrant).toHaveBeenCalledWith('portal', {
+      scope_mode: 'rooms',
+      rooms: ['live-room'],
+      methods: ['GET'],
+      allow_scheduled: false,
+    }),
+  );
+});
