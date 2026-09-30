@@ -261,6 +261,19 @@ class TestNotificationsRefuseASharedRoom:
         assert any(shared in r.getMessage() and "alert" in r.getMessage()
                    for r in caplog.records)
 
+    def test_a_notice_about_a_turn_in_the_room_goes_back_to_it(self, tmp_path, sends):
+        """The scheduler's "your task was cancelled" notice answers a turn
+        asked in that room, so it is the conversational exemption; the same
+        notice with no task room is refused."""
+        config = _config(tmp_path)
+        with db.get_db(config.db_path) as conn:
+            shared = _shared_talk_room(conn)
+        assert not notifications.send_notification(
+            config, "alice", "cancelled", conversation_token=shared)
+        assert notifications.send_notification(
+            config, "alice", "cancelled", conversation_token=shared, task_room=shared)
+        assert sends["talk"] == [shared]
+
     def test_a_private_alerts_channel_still_gets_it(self, tmp_path, sends):
         config = _config(tmp_path)
         with db.get_db(config.db_path) as conn:

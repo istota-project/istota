@@ -673,6 +673,7 @@ def _dispatch(
     tags: str | None = None,
     reference_id: str | None = None,
     purpose: str = "notification",
+    task_room: str | None = None,
 ) -> tuple[bool, int | None]:
     """Deliver ``message`` to every resolved destination.
 
@@ -686,6 +687,8 @@ def _dispatch(
     than one human reads (`routing.refuse_shared_rooms`). A bare ``talk`` leg
     is resolved to its room first so the refusal sees where it lands; a bare
     ``web`` leg needs no check, because its resolver never picks a shared room.
+    ``task_room`` is the one exemption: a notice about a turn asked in that
+    room goes back to it, as a conversational reply would.
     """
     from dataclasses import replace
 
@@ -702,6 +705,7 @@ def _dispatch(
             for d in dests
         ],
         purpose=purpose,
+        conversation_token=task_room,
     )
     sent = False
     talk_message_id: int | None = None
@@ -797,6 +801,7 @@ def send_notification(
     priority: int | None = None,
     tags: str | None = None,
     reference_id: str | None = None,
+    task_room: str | None = None,
 ) -> bool:
     """Send a notification via an explicit surface or the user's routing table.
 
@@ -813,6 +818,9 @@ def send_notification(
         conversation_token: Talk room override for any *bare* talk destination
             (``talk`` with no explicit ``:token``); an explicit ``talk:<token>``
             in the descriptor (or a routed channel) keeps its own channel.
+        task_room: the room a task this notice is about was asked in. A room
+            more than one human reads is refused for every notification except
+            this one (`routing.refuse_shared_rooms`).
     """
     from .transport import parse_output_target
 
@@ -828,6 +836,7 @@ def send_notification(
         conversation_token=conversation_token,
         title=title, priority=priority, tags=tags, reference_id=reference_id,
         purpose=purpose or "notification",
+        task_room=task_room,
     )
 
     if not sent:

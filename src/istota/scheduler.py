@@ -7223,7 +7223,12 @@ def run_cleanup_checks(config: Config) -> None:
     # 4d. And about the ancient pending tasks that were just auto-failed.
     for user_id, message, token in ancient_notices:
         try:
-            send_notification(config, user_id, message, conversation_token=token)
+            # The notice is about the user's own turn in that room, so it may
+            # go back there even when the room is shared.
+            send_notification(
+                config, user_id, message,
+                conversation_token=token, task_room=token,
+            )
         except Exception as e:
             logger.error(f"Failed to notify user about failed task: {e}")
 

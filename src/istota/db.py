@@ -3748,7 +3748,8 @@ def default_web_room(
 
 def configured_default_room(conn: sqlite3.Connection, user_id: str) -> str | None:
     """The canonical token of ``user_id``'s configured default room, or None
-    when unset, deleted, archived, or no longer theirs (ISSUE-477).
+    when unset, deleted, archived, no longer theirs, or read by somebody else
+    (ISSUE-477, multiplayer Stage 15).
 
     Surface-agnostic, and the raw read of the column. `configured_delivery_room`
     is the surface-aware wrapper and the one the two resolvers call; this half
